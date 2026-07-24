@@ -50,14 +50,17 @@ class CrossAgentMemoryIsolationCertificationTests(unittest.IsolatedAsyncioTestCa
             self.addCleanup(patcher.stop)
 
     def test_agent_b_cannot_read_agent_a_private_workspace_memory(self) -> None:
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- HEARTBEAT.md (still a per-install root context
+        # file) exercises the same cross-agent isolation path.
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "HEARTBEAT.md",
             "AGENT_A_PRIVATE_PROFILE_DO_NOT_LEAK",
             workspace_id="default",
             agent_install_id="install-a",
         )
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "HEARTBEAT.md",
             "Agent B profile.",
             workspace_id="default",
             agent_install_id="install-b",
@@ -111,8 +114,10 @@ class CrossAgentMemoryIsolationCertificationTests(unittest.IsolatedAsyncioTestCa
     async def test_deployed_customer_memory_does_not_load_sage_or_direct_private_memory(self) -> None:
         sage_secret = "SAGE_DIRECT_PRIVATE_MEMORY_DO_NOT_LEAK"
         specialist_secret = "SPECIALIST_PRIVATE_MEMORY_DO_NOT_LEAK"
+        # 2026-07-23 root-taxonomy removal: SOUL.md is no longer a root
+        # context file -- HEARTBEAT.md exercises the same isolation path.
         workspace_context.write_workspace_context_file(
-            "SOUL.md",
+            "HEARTBEAT.md",
             "Sage private identity.",
             workspace_id="default",
             agent_install_id="install-sage",

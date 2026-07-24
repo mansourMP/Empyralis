@@ -1,14 +1,27 @@
 """Tests for the group/mention/reply gate on personal-channel gateway
 inbound handlers.
 
-Fix: agents must stay SILENT in a GROUP chat unless actually addressed
-(@mentioned, or replying to a message Sage itself sent) — mirroring
-WhatsApp's existing, working pattern. Before this fix, Telegram
-(_handle_telegram_gateway_channel_inbound) and the local-bridge channels
-(_handle_local_bridge_gateway_channel_inbound — Signal/iMessage/WeChat) had
-NO such gate: every message in every group the linked account belonged to
-triggered a full agent turn and reply (the "family group bug"). DMs and
-owner self-chat are never affected — the gate applies to groups only.
+UPDATED 2026-07-23 (group_policy build): this gate is no longer a hardcoded
+inline check — it's now personal_channels_service._enforce_group_policy,
+which delegates its mention-addressing decision to the ONE shared
+mention_gating_service.resolve_inbound_mention_decision resolver. As part of
+that build, THE DEFAULT CHANGED: requireMention now defaults OFF (Ruling A,
+"see-and-decide" — still in force per docs/OpenClaw.md's GROUP/MENTION
+GATING section and personal_channels_service.py's own DEFAULT_REQUIRE_MENTION
+comment), so an UNADDRESSED group message now reaches the model by default —
+the agent decides for itself whether to reply (via [SILENT]), rather than
+being hard-blocked before ever seeing it. The two tests below that used to
+assert the opposite (2026-07-18's 0fe9ada19 hard gate, built to fix a real
+"family group" spam incident) are UPDATED to match, and
+test_personal_channels_group_policy.py adds dedicated coverage proving an
+owner can still configure requireMention=True per agent+channel to restore
+the exact old hard-gate behavior byte-for-byte — this is an owner-pullable
+lever now, not the default everyone is stuck with.
+
+Everything else in this file (explicit @mention, reply-to-Sage, group
+context threading, DM/self-chat pass-through, dmPolicy independence) is
+UNCHANGED and still describes real, current behavior — only the "nothing
+addressed at all" default flipped.
 
 This is a SEPARATE, earlier gate than dmPolicy (_enforce_dm_policy — see
 test_personal_channels_dm_policy.py): the group gate decides WHETHER a
@@ -89,20 +102,33 @@ class TelegramGroupGateTests(unittest.IsolatedAsyncioTestCase):
             linked_user_id=sender_jid,
         )
 
-    async def test_unaddressed_group_message_is_ignored_and_never_dispatched(self) -> None:
+    async def test_unaddressed_group_message_is_seen_by_default_see_and_decide(self) -> None:
+        """THE default flip (2026-07-23): with group_policy/requireMention
+        left unconfigured (DEFAULT_REQUIRE_MENTION=False), an unaddressed
+        group message is NO LONGER hard-blocked here — it reaches the model
+        (build_telegram_personal_reply is called with is_group=True), which
+        is then free to reply or emit [SILENT] by its own judgment (Ruling
+        A). This replaces the pre-2026-07-23 test of the same shape, which
+        asserted the opposite under the old hardcoded gate — see
+        test_personal_channels_group_policy.py for the dedicated
+        requireMention=True test proving the old behavior is still
+        available as an explicit owner opt-in, byte-for-byte."""
         with (
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
                 return_value=_ALLOW_DISPATCH_DECISION,
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply"
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(side_effect=AssertionError("must not dispatch for an unaddressed group message")),
-                create=True,
+                "server_modules.personal_channels_service._enforce_dm_policy",
+                new=AsyncMock(return_value={
+                    "allowed": True, "mode": "open", "sender_id": "111222",
+                    "is_owner": False, "system_reply": None, "config_changed": False,
+                }),
             ),
+            patch(
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
+                return_value={"text": "[SILENT]", "source": "sage"},
+            ) as build_reply_mock,
         ):
             result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
                 gateway_id="gw-group-1",
@@ -123,17 +149,10 @@ class TelegramGroupGateTests(unittest.IsolatedAsyncioTestCase):
                     },
                 },
             )
-        build_reply_mock.assert_not_called()
-        self.assertTrue(result.get("ignored"))
-        self.assertEqual(result.get("reason"), "group_no_mention")
-
-        # This really is an EARLY return (before agent_id resolution / the
-        # repository is even touched, mirroring the from_me check right
-        # above it) — no inbound row should have been recorded.
-        existing = personal_channels_repository.get_telegram_state(
-            "gw-group-1", channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY, agent_id="",
-        )
-        self.assertIsNone(existing)
+        build_reply_mock.assert_called_once()
+        call_kwargs = build_reply_mock.call_args.kwargs
+        self.assertTrue(call_kwargs.get("is_group"))
+        self.assertNotEqual(result.get("reason"), "group_no_mention")
 
     async def test_mentioned_group_message_from_the_owner_is_dispatched(self) -> None:
         self._link_owner("111222")
@@ -390,7 +409,15 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
         self.db_patcher.stop()
         self.tmpdir.cleanup()
 
-    async def test_unaddressed_group_message_is_ignored_before_dm_policy_even_runs(self) -> None:
+    async def test_unaddressed_group_message_now_reaches_dm_policy_by_default(self) -> None:
+        """UPDATED 2026-07-23 (see file docstring): with requireMention
+        defaulting OFF, an unaddressed group message is no longer blocked
+        BY THE GROUP GATE — it now reaches dmPolicy exactly like a mentioned
+        one does (test_mentioned_group_message_still_reaches_and_is_blocked_by_dm_policy
+        right below), which for local-bridge channels blocks every sender
+        unconditionally today (a separate, pre-existing gap — real
+        dmPolicy, unmocked, needs no Rust control-plane call for this
+        specific agent_id="" fallback path)."""
         with (
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
@@ -422,11 +449,12 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
                 provider="signal_local_bridge",
                 label="Signal",
             )
-        self.assertTrue(result.get("ignored"))
-        self.assertEqual(result.get("reason"), "group_no_mention")
-        # Distinguish from dmPolicy's OWN block shape (no "policy" key here
-        # — this really is the earlier, separate gate returning first).
-        self.assertNotIn("policy", result)
+        # Blocked by dmPolicy now (real, unmocked owner_only fallback), NOT
+        # by the group gate — proving the group gate itself let it through.
+        self.assertTrue(result.get("blocked"))
+        self.assertNotEqual(result.get("reason"), "group_no_mention")
+        self.assertIn("policy", result)
+        self.assertEqual(result["policy"].get("mode"), "owner_only")
 
     async def test_mentioned_group_message_still_reaches_and_is_blocked_by_dm_policy(self) -> None:
         """Local-bridge channels have no owner-identity resolution at all

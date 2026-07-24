@@ -292,16 +292,18 @@ def _continuous_work_budget_allows_more(
 ) -> bool:
     """The actual ceiling on continuous work: the SAME token-budget primitives
     the proactive preflight already uses (sage_agent_runtime_service.py's
-    B2 pre-flight check, ~line 4956-5049 — estimate_tokens +
-    COMPACTION_RESERVE_TOKENS against resolve_context_window), applied here
-    as the per-iteration continuation gate instead of a once-per-turn
-    preflight. Once the turn's own accumulated context (system prompt +
-    everything exchanged so far) would leave no room under the model's real
-    context window, the loop stops extending past max_iterations exactly as
-    if the plan were finished — the model never gets a call that's likely to
-    overflow anyway, and the existing reactive-overflow-retry path
-    (sage_agent_runtime_service.py ~line 5089-5233) remains the backstop for
-    whatever this estimate misses on the call that does go out.
+    B2 pre-flight check, ~line 4956-5049 — estimate_tokens against
+    effective_compaction_threshold/resolve_context_window — BUG 5's
+    per-model formula, not a flat COMPACTION_RESERVE_TOKENS add-then-
+    compare), applied here as the per-iteration continuation gate instead
+    of a once-per-turn preflight. Once the turn's own accumulated context
+    (system prompt + everything exchanged so far) would leave no room
+    under the model's real context window, the loop stops extending past
+    max_iterations exactly as if the plan were finished — the model never
+    gets a call that's likely to overflow anyway, and the existing
+    reactive-overflow-retry path (sage_agent_runtime_service.py
+    ~line 5089-5233) remains the backstop for whatever this estimate
+    misses on the call that does go out.
     """
     try:
         window = compaction_service.resolve_context_window(provider, model)
@@ -309,11 +311,11 @@ def _continuous_work_budget_allows_more(
         for message in conversation_messages or []:
             if isinstance(message, dict):
                 text_parts.append(str(message.get("content") or ""))
-        estimated = (
-            compaction_service.estimate_tokens("".join(text_parts))
-            + compaction_service.COMPACTION_RESERVE_TOKENS
+        estimated = compaction_service.estimate_tokens("".join(text_parts))
+        threshold = compaction_service.effective_compaction_threshold(
+            window, provider=provider, model=model,
         )
-        return estimated <= window
+        return estimated <= threshold
     except Exception:
         # Fail closed: any error estimating the budget must not be allowed to
         # extend the loop past the pre-existing max_iterations cap.
@@ -350,6 +352,7 @@ def _compact_conversation_messages_in_place(
     thread_id: str,
     provider: Optional[str],
     model: Optional[str],
+    trace_context: Optional[Any] = None,
 ) -> bool:
     """Summarize the older portion of ``conversation_messages`` and replace it
     with a compaction summary, keeping the most recent turns raw. Mutates the
@@ -381,16 +384,71 @@ def _compact_conversation_messages_in_place(
     or any failure — always fails safe, never raises, never leaves the
     caller worse off than before the call).
     """
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
     try:
         window = compaction_service.resolve_context_window(provider, model)
-        cut_idx = compaction_service.find_cut_point(conversation_messages, context_window=window)
+
+        # BUG 5 policy: small windows never get an LLM summary — structural
+        # truncation only (drop oldest turns / prune tool results, no model
+        # call, nothing persisted).
+        if compaction_service.should_use_structural_truncation(window):
+            truncated = compaction_service.structural_truncate(
+                conversation_messages, context_window=window,
+            )
+            if len(truncated) >= len(conversation_messages):
+                return False
+            _log.info(
+                "direct_chat: structural truncation used instead of an LLM "
+                "summary for thread=%s — window %d tokens is at/below the "
+                "small-window threshold; dropped %d of %d messages",
+                thread_id, window, len(conversation_messages) - len(truncated), len(conversation_messages),
+            )
+            conversation_messages[:] = truncated
+            return True
+
+        # BUG 2 fix: find_cut_point's normal ~15%-of-window keep-recent
+        # budget can exceed this ENTIRE conversation_messages list for a
+        # short conversation, always returning cut_idx=0 regardless of how
+        # far over threshold the turn actually is. find_cut_point_with_
+        # fallback retries with a much smaller forced floor instead of
+        # silently doing nothing — and if even that finds nothing cuttable,
+        # this logs why instead of returning False silently indistinguishable
+        # from "nothing needed compacting" (this docstring's own prior
+        # framing of that case).
+        cut_idx, forced = compaction_service.find_cut_point_with_fallback(
+            conversation_messages, context_window=window,
+        )
         if cut_idx <= 0:
-            # Nothing old enough to be worth summarizing — either everything
-            # already fits inside the "keep recent" allowance, or find_cut_
-            # point found no split point at all.
+            _log.warning(
+                "direct_chat: cannot compact thread=%s — even the forced "
+                "keep-recent floor found nothing cuttable in %d messages "
+                "(window=%d); proceeding uncompacted",
+                thread_id, len(conversation_messages), window,
+            )
             return False
+        if forced:
+            _log.warning(
+                "direct_chat: thread=%s used the FORCED keep-recent floor "
+                "(normal budget exceeded the entire %d-message list)",
+                thread_id, len(conversation_messages),
+            )
         turns_to_summarize = conversation_messages[:cut_idx]
         kept_turns = conversation_messages[cut_idx:]
+
+        # BUG 3b fix: thread the prior compaction summary through so
+        # chaining doesn't lose everything before the last compaction.
+        previous_summary = ""
+        try:
+            previous_summary = run_async_tool_call(
+                compaction_service.load_previous_summary(
+                    workspace_id=workspace_id, tenant_id="default", thread_id=thread_id,
+                )
+            )
+        except Exception:
+            previous_summary = ""
+
         summary = run_async_tool_call(
             compaction_service.compact_turns(
                 turns=turns_to_summarize,
@@ -404,6 +462,21 @@ def _compact_conversation_messages_in_place(
                 # mismatched tenant_id here can never break this turn.
                 tenant_id="default",
                 thread_id=thread_id,
+                previous_summary=previous_summary,
+                # Thread the turn's own provider/model through (already
+                # resolved by both callers below via actual_provider/
+                # actual_model, and already used two lines above for
+                # resolve_context_window) so compaction summarizes on the
+                # model this turn is actually running on instead of falling
+                # through to compact_turns' silent platform-wide "deepseek"
+                # default.
+                provider=provider,
+                model=model,
+                # So a silent no-op (unset/unreachable provider key) surfaces
+                # as a real "compaction.skipped" trace event on this turn's
+                # own trace, not just the server-side WARNING log compact_
+                # turns now always emits for that case.
+                trace_context=trace_context,
             )
         )
         if not summary:
@@ -421,14 +494,16 @@ def _estimated_context_tokens(
     current_prompt: str,
     conversation_messages: List[Dict[str, Any]],
 ) -> int:
+    """Raw token estimate — NO reserve baked in (BUG 5: the old version
+    added a flat COMPACTION_RESERVE_TOKENS here and compared the result
+    directly against the raw context window at the call site; callers now
+    compare this against compaction_service.effective_compaction_threshold
+    instead, which applies the real per-model formula)."""
     text_parts = [str(system_prompt or ""), str(current_prompt or "")]
     for message in conversation_messages or []:
         if isinstance(message, dict):
             text_parts.append(str(message.get("content") or ""))
-    return (
-        compaction_service.estimate_tokens("".join(text_parts))
-        + compaction_service.COMPACTION_RESERVE_TOKENS
-    )
+    return compaction_service.estimate_tokens("".join(text_parts))
 
 
 def _tool_result_context_is_local_private(provider: Any, credentials: Any) -> bool:
@@ -875,6 +950,41 @@ def _finish_trace(trace_context: Optional[Any], *, outcome: str, final_message_i
     )
 
 
+def _persist_assigned_task_plan(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    plan: List[Dict[str, Any]],
+) -> None:
+    """Tier C's persist side (docs/design/tasks-to-agents-research.md Section
+    4.4): when this turn was working an assigned task (task_id present in
+    turn/trace metadata -- see the current_plan seed near the top of
+    stream_provider_backed_direct_chat), write update_plan's current_plan
+    back onto the task row at turn end, so it survives past this turn/run
+    instead of dying with it the way an ordinary (no task in play) turn's
+    plan still does. Called once per outcome branch, right alongside
+    _finish_trace -- every terminal path of the turn, not just the success
+    one, since the plan reflects whatever state it was actually left in.
+    A no-op when task_id/tenant_id is blank (every ordinary turn) and
+    best-effort otherwise: a persistence failure must never fail the turn."""
+    if not task_id or not tenant_id:
+        return
+    try:
+        from server_modules import project_tasks_service
+
+        run_async_tool_call(
+            project_tasks_service.set_task_plan(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                task_id=task_id,
+                plan=plan,
+            )
+        )
+    except Exception:
+        pass
+
+
 def _public_generation_error_code(llm_error: str) -> str:
     detail = str(llm_error or "").strip()
     if detail.startswith("max_tool_iterations_reached:"):
@@ -1210,6 +1320,41 @@ def stream_provider_backed_direct_chat(
     # round, never a standing bypass.
     _plan_completion_needs_wrapup_round = False
 
+    # Tier C "plans as durable artifacts" (docs/design/tasks-to-agents-
+    # research.md Section 4.4): when this turn was woken to work an assigned
+    # task -- task_id present in turn/trace metadata, stamped by
+    # runtime_heartbeat_service.build_heartbeat_turn_request for a
+    # task_assigned wakeup (bounded_scheduler_service.
+    # schedule_task_assigned_wakeup) -- seed current_plan from that task's
+    # own persisted plan instead of starting empty, so the checklist
+    # survives the wakeup -> turn -> wakeup gap. A no-op (current_plan stays
+    # [], _assigned_task_id stays "") for every ordinary turn -- every turn
+    # that never carries a task_id here -- so existing per-turn behavior is
+    # unchanged. _assigned_task_id/_assigned_task_tenant_id are also read at
+    # turn end (see _persist_assigned_task_plan calls below) to persist the
+    # plan back onto the task row.
+    _turn_metadata_for_task = {
+        **_turn_metadata_from_session(session_ctx),
+        **(metadata if isinstance(metadata, dict) else {}),
+    }
+    _assigned_task_id = str(_turn_metadata_for_task.get("task_id") or "").strip()
+    _assigned_task_tenant_id = str(_turn_metadata_for_task.get("tenant_id") or "").strip()
+    if _assigned_task_id and _assigned_task_tenant_id:
+        try:
+            from server_modules import project_tasks_service
+
+            _seeded_plan = run_async_tool_call(
+                project_tasks_service.get_task_plan(
+                    tenant_id=_assigned_task_tenant_id,
+                    workspace_id=normalized_workspace_id,
+                    task_id=_assigned_task_id,
+                )
+            )
+            if isinstance(_seeded_plan, list) and _seeded_plan:
+                current_plan = _seeded_plan
+        except Exception:
+            pass
+
     # --- Attachment context injection ---
     attachment_context = ""
     _attachments = []
@@ -1365,6 +1510,12 @@ def stream_provider_backed_direct_chat(
         )
         if trace_completed is not None:
             yield trace_completed
+        _persist_assigned_task_plan(
+            tenant_id=_assigned_task_tenant_id,
+            workspace_id=normalized_workspace_id,
+            task_id=_assigned_task_id,
+            plan=current_plan,
+        )
         _finish_trace(trace_context, outcome="success", final_message_id=assistant_message_id)
         yield {
             "type": "final",
@@ -1473,30 +1624,36 @@ def stream_provider_backed_direct_chat(
         # loop starts — tool results accumulate into conversation_messages as
         # the loop runs, so a turn that started well under budget can still
         # grow past it mid-loop. Reuses the exact same estimate-tokens-vs-
-        # window primitives _continuous_work_budget_allows_more already uses
-        # above (compaction_service.estimate_tokens/COMPACTION_RESERVE_TOKENS/
-        # resolve_context_window) — no new estimation logic, just acting on
-        # the estimate instead of only gating a loop extension with it. Off
+        # threshold primitives _continuous_work_budget_allows_more already
+        # uses above (compaction_service.estimate_tokens/
+        # effective_compaction_threshold/resolve_context_window — BUG 5's
+        # per-model formula) — no new estimation logic, just acting on the
+        # estimate instead of only gating a loop extension with it. Off
         # (_primary_compaction_enabled() == False) or nothing over budget:
         # falls through unchanged.
         if _primary_compaction_enabled():
+            _proactive_provider = str(actual_provider or context.get("provider") or "").strip() or None
+            _proactive_model = str(actual_model or "").strip() or None
             _proactive_estimated = _estimated_context_tokens(
                 system_prompt=system_prompt,
                 current_prompt=current_prompt,
                 conversation_messages=conversation_messages,
             )
             _proactive_window = compaction_service.resolve_context_window(
-                str(actual_provider or context.get("provider") or "").strip() or None,
-                str(actual_model or "").strip() or None,
+                _proactive_provider, _proactive_model,
             )
-            if _proactive_estimated > _proactive_window:
-                print(f"[DG_PROACTIVE_COMPACTION] iteration={_loop_iteration} estimated={_proactive_estimated} window={_proactive_window} — compacting", flush=True)
+            _proactive_threshold = compaction_service.effective_compaction_threshold(
+                _proactive_window, provider=_proactive_provider, model=_proactive_model,
+            )
+            if _proactive_estimated > _proactive_threshold:
+                print(f"[DG_PROACTIVE_COMPACTION] iteration={_loop_iteration} estimated={_proactive_estimated} threshold={_proactive_threshold} window={_proactive_window} — compacting", flush=True)
                 _compact_conversation_messages_in_place(
                     conversation_messages=conversation_messages,
                     workspace_id=normalized_workspace_id,
                     thread_id=normalized_thread_id,
-                    provider=str(actual_provider or context.get("provider") or "").strip() or None,
-                    model=str(actual_model or "").strip() or None,
+                    provider=_proactive_provider,
+                    model=_proactive_model,
+                    trace_context=trace_context,
                 )
 
         messages = conversation_messages or []
@@ -1613,6 +1770,12 @@ def stream_provider_backed_direct_chat(
                         )
                         if trace_failed is not None:
                             yield trace_failed
+                        _persist_assigned_task_plan(
+                            tenant_id=_assigned_task_tenant_id,
+                            workspace_id=normalized_workspace_id,
+                            task_id=_assigned_task_id,
+                            plan=current_plan,
+                        )
                         _finish_trace(trace_context, outcome="partial", final_message_id=None)
                         yield {
                             "type": "final",
@@ -1708,6 +1871,12 @@ def stream_provider_backed_direct_chat(
                         )
                         if trace_completed is not None:
                             yield trace_completed
+                        _persist_assigned_task_plan(
+                            tenant_id=_assigned_task_tenant_id,
+                            workspace_id=normalized_workspace_id,
+                            task_id=_assigned_task_id,
+                            plan=current_plan,
+                        )
                         _finish_trace(trace_context, outcome="needs_input", final_message_id=None)
                         yield {
                             "type": "final",
@@ -2188,20 +2357,25 @@ def stream_provider_backed_direct_chat(
                                 step_id=step_id,
                                 status="done",
                             )
+                            # Same 4,000-char bound for every provider, codex_cli included —
+                            # codex_cli tool results (shell/file/apply_patch output routed
+                            # through direct_tool_followup_message) have no structural reason
+                            # to be longer than any other provider's tool result, so this
+                            # re-uses the exact cap/format below rather than re-injecting raw.
+                            _tool_content = tool_result_for_context
+                            if len(_tool_content) > 4000:
+                                _tool_content = _tool_content[:3800] + f"\n...[truncated {len(_tool_content) - 3800} chars]"
                             if effective_iteration_provider == "codex_cli":
                                 conversation_messages.append(
                                     {
                                         "role": "user",
                                         "content": services.direct_tool_followup_message(
                                             str(tool_call.get("name") or f"{connector_id}__{action_id}"),
-                                            tool_result_for_context,
+                                            _tool_content,
                                         ),
                                     }
                                 )
                             else:
-                                _tool_content = tool_result_for_context
-                                if len(_tool_content) > 4000:
-                                    _tool_content = _tool_content[:3800] + f"\n...[truncated {len(_tool_content) - 3800} chars]"
                                 conversation_messages.append(
                                     {
                                         "role": "tool",
@@ -2322,6 +2496,12 @@ def stream_provider_backed_direct_chat(
                         )
                         if trace_failed is not None:
                             yield trace_failed
+                        _persist_assigned_task_plan(
+                            tenant_id=_assigned_task_tenant_id,
+                            workspace_id=normalized_workspace_id,
+                            task_id=_assigned_task_id,
+                            plan=current_plan,
+                        )
                         _finish_trace(trace_context, outcome="partial", final_message_id=None)
                         yield {
                             "type": "final",
@@ -2473,6 +2653,12 @@ def stream_provider_backed_direct_chat(
                 )
                 if trace_completed is not None:
                     yield trace_completed
+                _persist_assigned_task_plan(
+                    tenant_id=_assigned_task_tenant_id,
+                    workspace_id=normalized_workspace_id,
+                    task_id=_assigned_task_id,
+                    plan=current_plan,
+                )
                 _finish_trace(trace_context, outcome="success", final_message_id=assistant_message_id)
                 effective_provider = str(actual_provider or context.get("provider") or "").strip() or None
                 effective_model = str(actual_model or "").strip() or None
@@ -2612,6 +2798,7 @@ def stream_provider_backed_direct_chat(
                         thread_id=normalized_thread_id,
                         provider=str(actual_provider or context.get("provider") or "").strip() or None,
                         model=str(actual_model or "").strip() or None,
+                        trace_context=trace_context,
                     )
                     if _retry_compacted:
                         llm_error = ""
@@ -2745,6 +2932,12 @@ def stream_provider_backed_direct_chat(
             "type": "final",
             "payload": _mask_platform_paid_final_payload(final_response_payload, platform_paid_identity),
         }
+        _persist_assigned_task_plan(
+            tenant_id=_assigned_task_tenant_id,
+            workspace_id=normalized_workspace_id,
+            task_id=_assigned_task_id,
+            plan=current_plan,
+        )
         _finish_trace(trace_context, outcome="success", final_message_id=assistant_message_id)
         try:
             services.persist_direct_chat_memory_best_effort(
@@ -2823,6 +3016,12 @@ def stream_provider_backed_direct_chat(
     )
     if trace_failed is not None:
         yield trace_failed
+    _persist_assigned_task_plan(
+        tenant_id=_assigned_task_tenant_id,
+        workspace_id=normalized_workspace_id,
+        task_id=_assigned_task_id,
+        plan=current_plan,
+    )
     _finish_trace(trace_context, outcome="partial", final_message_id=None)
     platform_paid_identity = _platform_paid_ai_identity(
         availability_payload=availability_payload,

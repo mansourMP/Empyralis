@@ -223,6 +223,61 @@ class ProviderProfilesTests(unittest.TestCase):
         self.assertAlmostEqual(float(cost or 0.0), 0.42, places=6)
 
 
+class GrokBuildCursorCliProviderCatalogTests(unittest.TestCase):
+    """xAI Grok Build / Cursor CLI addition (2026-07-24) — the two new
+    cli_subscription provider entries resolve correctly through the same
+    catalog claude_code_cli/openai-codex use, and stay hidden from the
+    workspace-facing (BYOK) catalog the same way claude_code_cli already is."""
+
+    def test_xai_grok_cli_entry_resolves_and_aliases_to_xai(self) -> None:
+        entry = provider_profiles.provider_catalog_entry("xai_grok_cli")
+        self.assertTrue(entry, "xai_grok_cli must resolve to a real catalog entry")
+        self.assertEqual(entry.get("alias_for"), "xai")
+        self.assertTrue(entry.get("hidden"))
+        self.assertEqual(entry.get("default_auth_mode"), "local_cli")
+        self.assertIn("local_cli", {m["id"] for m in entry.get("auth_modes", [])})
+
+    def test_cursor_cli_entry_resolves_hidden_with_no_alias(self) -> None:
+        entry = provider_profiles.provider_catalog_entry("cursor_cli")
+        self.assertTrue(entry, "cursor_cli must resolve to a real catalog entry")
+        self.assertTrue(entry.get("hidden"))
+        # Cursor CLI is a multi-vendor pass-through, not one vendor's model
+        # family — unlike claude_code_cli/xai_grok_cli, it has no alias_for.
+        self.assertNotIn("alias_for", entry)
+        self.assertEqual(entry.get("default_auth_mode"), "local_cli")
+
+    def test_both_new_providers_are_hidden_from_the_workspace_facing_catalog(self) -> None:
+        # Same treatment as claude_code_cli: cli_subscription providers never
+        # appear in the general BYOK/workspace provider catalog — they are
+        # resolved directly by the Fleet gateway rail instead (fleet_tools.py
+        # / sage_agent_runtime_service.py), never through provider_profiles'
+        # credential-resolution machinery.
+        self.assertNotIn("xai_grok_cli", provider_profiles.WORKSPACE_USER_FACING_AI_PROVIDERS)
+        self.assertNotIn("cursor_cli", provider_profiles.WORKSPACE_USER_FACING_AI_PROVIDERS)
+        self.assertNotIn("claude_code_cli", provider_profiles.WORKSPACE_USER_FACING_AI_PROVIDERS)
+
+    def test_normalize_auth_mode_resolves_local_cli_for_both_new_providers(self) -> None:
+        self.assertEqual(provider_profiles.normalize_auth_mode("xai_grok_cli"), "local_cli")
+        self.assertEqual(provider_profiles.normalize_auth_mode("cursor_cli"), "local_cli")
+
+    def test_resolve_provider_adapter_fails_loudly_for_the_new_provider_ids_directly(self) -> None:
+        # These two ids are consumed ONLY through the Fleet cli_subscription
+        # rail (which never calls resolve_provider_adapter at all — see
+        # sage_agent_runtime_service.py's cli_subscription dispatch branch).
+        # No GrokBuildCLIAdapter/CursorCLIAdapter was built (that would be a
+        # DIFFERENT feature — Sage's own local-CLI direct-chat path, out of
+        # scope for the Fleet gateway rail this addition wires). Confirm that
+        # if anything ever DOES call this directly, it fails loudly with a
+        # clear "Unsupported provider" error — never silently returns a
+        # no-op adapter or crashes with an unrelated exception.
+        with self.assertRaises(RuntimeError) as ctx:
+            provider_profiles.resolve_provider_adapter("xai_grok_cli")
+        self.assertIn("unsupported provider", str(ctx.exception).lower())
+        with self.assertRaises(RuntimeError) as ctx2:
+            provider_profiles.resolve_provider_adapter("cursor_cli")
+        self.assertIn("unsupported provider", str(ctx2.exception).lower())
+
+
 class ProviderCatalogProjectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_catalog_projection_exposes_deepseek_governance_notes(self) -> None:
         runtime_truth = {

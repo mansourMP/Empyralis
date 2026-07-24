@@ -68,6 +68,79 @@ def _normalize_projection_text(text: str) -> str:
     return normalized.strip(" -:;,.")
 
 
+def derive_trust_tier(source: Dict[str, Any] | None) -> str:
+    """Classify a fact's provenance into one of four trust tiers, derived
+    from the same normalized source shape `format_source_marker` consumes
+    (InboundEnvelope.to_metadata() / inbound_attribution_recovery.build_
+    attribution's keys, or a stored `memory_entries` row -- both accepted
+    via `_normalize_source`).
+
+    Tiers (per the founder's decision -- owner direct instruction / verified
+    -owner-other-surface collapse into a single "owner" tier since both are
+    is_owner=True at this layer; non-owner sender / agent inference remain
+    distinct, and "unverified" covers the tri-state None-with-real-sender
+    case the industry research found no reference implementation for):
+
+      "owner"            -- source_is_owner is True.
+      "non_owner_sender"  -- a named/identified sender, confirmed NOT the
+                             owner (source_is_owner is False). The brother-
+                             message-the-agent scenario lands here.
+      "unverified"        -- real sender/platform info recorded, but
+                             ownership could not be confirmed either way
+                             (source_is_owner is None with other fields set).
+      "agent_inferred"    -- no source recorded at all (every field empty/
+                             None) -- the agent's own inference, a tool
+                             output, or a legacy pre-attribution row. Never
+                             gated by the write filter below: this is the
+                             same "no source passed" shape every call site
+                             used before attribution existed, and must keep
+                             behaving exactly as it did then.
+    """
+    normalized = _normalize_source(source)
+    is_owner = normalized["source_is_owner"]
+    if is_owner is True:
+        return "owner"
+    # Matches format_source_marker's own "do we have anyone/anything to
+    # attribute to" check exactly (platform/sender_name/sender_id) --
+    # source_surface alone (e.g. "group" with no platform/sender set) is not
+    # enough for either function to treat this as real attribution.
+    has_sender_info = any(
+        str(normalized.get(field_name) or "").strip()
+        for field_name in ("source_platform", "source_sender_id", "source_sender_name")
+    )
+    if is_owner is False:
+        return "non_owner_sender"
+    if is_owner is None and has_sender_info:
+        return "unverified"
+    return "agent_inferred"
+
+
+def requires_attribution_reason(source: Dict[str, Any] | None) -> bool:
+    """Write-filter predicate: does saving THIS content require the agent to
+    supply explicit reasoning (an `attribution_reason`) before it persists?
+
+    True for any real, non-owner-confirmed attribution ("non_owner_sender"
+    or "unverified") -- this is the founder's write filter: a non-owner's
+    (or unconfirmed) statement can still be saved, but never silently, and
+    never without the agent stating why it's worth remembering. False for
+    "owner" (no filter needed) and for "agent_inferred" (no source was
+    recorded at all -- every pre-attribution call site behaves exactly as
+    it always has; this predicate must never retroactively gate a caller
+    that never had a `source` concept to begin with)."""
+    return derive_trust_tier(source) in ("non_owner_sender", "unverified")
+
+
+_SOURCE_MARKER_RE = re.compile(r"^\[[^\]]{1,160}\]\s*")
+
+
+def strip_source_marker(text: str) -> str:
+    """Strip a leading format_source_marker()-style "[who via where — status] "
+    prefix off stored text, e.g. before duplicate/similarity comparison, so
+    the marker itself (which varies per-sender) never masks or distorts a
+    comparison between the underlying facts."""
+    return _SOURCE_MARKER_RE.sub("", str(text or ""), count=1)
+
+
 def format_source_marker(source: Dict[str, Any] | None) -> str:
     """Visible "[name via X in a group — not owner] " prefix for a fact whose
     source is NOT the verified owner. Never fabricates a marker for an
@@ -309,6 +382,13 @@ _MEMORY_ENTRIES_SOURCE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("source_sender_id", "TEXT"),
     ("source_sender_name", "TEXT"),
     ("source_is_owner", "INTEGER"),
+    # Decision B (update-don't-duplicate + audit trail): the agent's own
+    # stated reason for persisting non-owner-attributed content, required
+    # by requires_attribution_reason() at write time for any non-"owner"
+    # tier. Nullable/additive, same idempotent-ALTER-TABLE migration as the
+    # five columns above -- a legacy row (or an owner-sourced/agent-inferred
+    # row, neither of which requires a reason) simply has NULL here.
+    ("attribution_reason", "TEXT"),
 )
 
 
@@ -366,6 +446,10 @@ def _row_to_entry(row: "sqlite3.Row") -> Dict[str, Any]:
             entry[column_name] = _source_is_owner_from_sqlite(raw) if column_name == "source_is_owner" else raw
         else:
             entry[column_name] = None
+    # Computed, not stored: fully derivable from the five source_* columns
+    # above, so there is nothing to migrate/backfill -- every legacy row
+    # (all source_* NULL) resolves to "agent_inferred" automatically.
+    entry["trust_tier"] = derive_trust_tier(entry)
     return entry
 
 
@@ -387,6 +471,39 @@ def _connect_memory_db(workspace_id: str, agent_install_id: str | None = None):
             """
         )
         _ensure_memory_entries_source_columns(connection)
+        # Decision B (update-don't-duplicate, paired with a provenance audit
+        # trail): memory_entries itself stays a clean UPSERT-by-key (one row
+        # per key, no duplicate/contradicting rows to rank at query time --
+        # the founder's chosen stance over Mem0's ADD-only). This sibling
+        # table is the audit trail half of that decision: every create/
+        # update is appended here BEFORE the overwrite happens, so "what did
+        # this fact used to say, who said the new version, and why was it
+        # accepted" is always reconstructable even though the current-state
+        # row only ever holds the latest content. Same idempotent-DDL
+        # convention as memory_entries itself -- no separate migration file,
+        # this *is* the migration, run on every connection open.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_entries_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL,
+                change_kind TEXT NOT NULL,
+                old_content TEXT,
+                new_content TEXT NOT NULL,
+                changed_at REAL NOT NULL,
+                source_platform TEXT,
+                source_surface TEXT,
+                source_sender_id TEXT,
+                source_sender_name TEXT,
+                source_is_owner INTEGER,
+                attribution_reason TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_entries_history_key "
+            "ON memory_entries_history(key, changed_at DESC)"
+        )
         yield connection
     finally:
         connection.close()
@@ -431,12 +548,19 @@ def _list_memory_entries(workspace_id: str, agent_install_id: str | None = None)
             """
             SELECT key, content, created_at, updated_at,
                    source_platform, source_surface, source_sender_id,
-                   source_sender_name, source_is_owner
+                   source_sender_name, source_is_owner, attribution_reason
             FROM memory_entries
             ORDER BY updated_at DESC, key ASC
             """
         ).fetchall()
     return [_row_to_entry(row) for row in rows]
+
+
+class MemoryAttributionRequiredError(ValueError):
+    """Raised by _save_memory when content is attributed to a non-owner (or
+    unverified) sender and no `attribution_reason` was supplied. An explicit
+    error, never a silent save and never a pending/approval state -- the
+    caller (ultimately the model's own tool call) must retry with a reason."""
 
 
 def _save_memory(
@@ -447,6 +571,7 @@ def _save_memory(
     sync_memory_md: bool = True,
     agent_install_id: str | None = None,
     source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
 ) -> None:
     """Persist one structured memory fact.
 
@@ -455,22 +580,49 @@ def _save_memory(
     equivalent, see inbound_attribution_recovery.build_attribution). Absent
     (None, the default) writes a row identical to pre-attribution behavior:
     every source_* column stays NULL, same as a legacy row.
+
+    `attribution_reason` is the agent's own stated reason for saving THIS
+    content -- required (raises MemoryAttributionRequiredError otherwise)
+    whenever requires_attribution_reason(source) is True, i.e. the content
+    is attributed to a named non-owner sender or an unverified sender. Never
+    required when `source` is absent/owner-attributed, so no pre-existing
+    caller that never passed either parameter is affected.
+
+    Write policy: update-don't-duplicate (Decision B) -- a re-save of the
+    same `key` overwrites `content` in place rather than keeping both
+    versions; memory_entries_history (below) is the audit trail that makes
+    that overwrite forensically reconstructable.
     """
     normalized_key = str(key or "").strip()
     normalized_content = str(content or "").strip()
     if not normalized_key or not normalized_content:
         return
+    if requires_attribution_reason(source) and not str(attribution_reason or "").strip():
+        tier = derive_trust_tier(source)
+        raise MemoryAttributionRequiredError(
+            f"Cannot save memory key '{normalized_key}': content attributed to a "
+            f"{tier.replace('_', ' ')} requires an explicit attribution_reason "
+            "explaining why it is worth remembering. This was NOT saved -- retry "
+            "with attribution_reason set."
+        )
     now_ts = time.time()
     normalized_source = _normalize_source(source)
+    normalized_reason = str(attribution_reason or "").strip() or None
     with _connect_memory_db(workspace_id, agent_install_id=agent_install_id) as connection:
+        existing_row = connection.execute(
+            "SELECT content FROM memory_entries WHERE key = ?",
+            (normalized_key,),
+        ).fetchone()
+        change_kind = "updated" if existing_row is not None else "created"
+        old_content = str(existing_row["content"]) if existing_row is not None else None
         connection.execute(
             """
             INSERT INTO memory_entries (
                 key, content, created_at, updated_at,
                 source_platform, source_surface, source_sender_id,
-                source_sender_name, source_is_owner
+                source_sender_name, source_is_owner, attribution_reason
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 content = excluded.content,
                 updated_at = excluded.updated_at,
@@ -482,7 +634,8 @@ def _save_memory(
                 source_surface = COALESCE(excluded.source_surface, source_surface),
                 source_sender_id = COALESCE(excluded.source_sender_id, source_sender_id),
                 source_sender_name = COALESCE(excluded.source_sender_name, source_sender_name),
-                source_is_owner = COALESCE(excluded.source_is_owner, source_is_owner)
+                source_is_owner = COALESCE(excluded.source_is_owner, source_is_owner),
+                attribution_reason = COALESCE(excluded.attribution_reason, attribution_reason)
             """,
             (
                 normalized_key,
@@ -494,14 +647,86 @@ def _save_memory(
                 normalized_source["source_sender_id"],
                 normalized_source["source_sender_name"],
                 _source_is_owner_to_sqlite(normalized_source["source_is_owner"]),
+                normalized_reason,
             ),
         )
+        if old_content != normalized_content:
+            connection.execute(
+                """
+                INSERT INTO memory_entries_history (
+                    key, change_kind, old_content, new_content, changed_at,
+                    source_platform, source_surface, source_sender_id,
+                    source_sender_name, source_is_owner, attribution_reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_key,
+                    change_kind,
+                    old_content,
+                    normalized_content,
+                    now_ts,
+                    normalized_source["source_platform"],
+                    normalized_source["source_surface"],
+                    normalized_source["source_sender_id"],
+                    normalized_source["source_sender_name"],
+                    _source_is_owner_to_sqlite(normalized_source["source_is_owner"]),
+                    normalized_reason,
+                ),
+            )
         connection.commit()
     if sync_memory_md:
         try:
             _export_memory_md(workspace_id, agent_install_id=agent_install_id)
         except Exception:
             pass
+
+
+def _list_memory_entry_history(
+    workspace_id: str,
+    key: str,
+    *,
+    agent_install_id: str | None = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Decision B's audit trail, read back: every create/update recorded for
+    `key`, newest first -- old_content/new_content plus whatever attribution
+    (source_* + attribution_reason) was recorded for that specific change."""
+    normalized_key = str(key or "").strip()
+    if not normalized_key:
+        return []
+    safe_limit = max(1, min(int(limit or 50), 500))
+    with _connect_memory_db(workspace_id, agent_install_id=agent_install_id) as connection:
+        rows = connection.execute(
+            """
+            SELECT key, change_kind, old_content, new_content, changed_at,
+                   source_platform, source_surface, source_sender_id,
+                   source_sender_name, source_is_owner, attribution_reason
+            FROM memory_entries_history
+            WHERE key = ?
+            ORDER BY changed_at DESC, id DESC
+            LIMIT ?
+            """,
+            (normalized_key, safe_limit),
+        ).fetchall()
+    history: List[Dict[str, Any]] = []
+    for row in rows:
+        history.append(
+            {
+                "key": str(row["key"] or ""),
+                "change_kind": str(row["change_kind"] or ""),
+                "old_content": row["old_content"],
+                "new_content": str(row["new_content"] or ""),
+                "changed_at": float(row["changed_at"] or 0.0),
+                "source_platform": row["source_platform"],
+                "source_surface": row["source_surface"],
+                "source_sender_id": row["source_sender_id"],
+                "source_sender_name": row["source_sender_name"],
+                "source_is_owner": _source_is_owner_from_sqlite(row["source_is_owner"]),
+                "attribution_reason": row["attribution_reason"],
+            }
+        )
+    return history
 
 
 def _get_memory(workspace_id: str, agent_install_id: str | None = None) -> str:
@@ -779,10 +1004,51 @@ def _search_memory_notebook(
     *,
     max_results: int = 5,
     agent_install_id: str | None = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
+    """Linear scan + token-overlap scoring over every `.md` file under the
+    agent's notebook dir.
+
+    Returns a self-describing envelope, never a bare list -- a bare
+    `{"results": []}` is structurally identical whether nothing was searched
+    (empty/missing query), everything was searched and genuinely has no
+    match, or some files silently failed to read, and a weak tool-calling
+    model cannot tell those apart from the shape alone. See
+    docs/design/memory-retrieval-reliability.md, hallucination vectors 1-2.
+
+    Response shape (the historical bare-list callers read `["results"]`,
+    which keeps its original item shape and ordering -- only the envelope
+    around it is new):
+      results: [{"path","start_line","end_line","score","snippet"}, ...]
+      files_searched: int -- files actually opened and scanned (excludes
+        both candidates that failed to read AND, for an empty/missing
+        query, everything -- nothing is opened in that case)
+      errors: [{"path": str, "reason": str}, ...] -- candidate files that
+        exist but could not be read; NEVER silently dropped from the caller's
+        view (fix for vector 2 -- these used to `continue` with zero trace)
+      status: "matches_found" | "no_matches" | "not_searched" | "incomplete"
+        -- "no_matches" means every candidate file was actually read and
+        scored, so absence is a confirmed fact, not a guess; "not_searched"
+        means no query was given, so nothing happened at all; "incomplete"
+        means some candidate file(s) could not be read, so a claim of
+        "nothing is saved on this" would not be trustworthy yet.
+      message: str -- model-facing explanation of exactly what happened and,
+        where relevant, what to do next (retry with a query, try different
+        terms, or don't conclude anything from an incomplete view).
+    """
     normalized_query = re.sub(r"\s+", " ", str(query or "").strip()).lower()
     if not normalized_query:
-        return []
+        return {
+            "results": [],
+            "files_searched": 0,
+            "errors": [],
+            "status": "not_searched",
+            "message": (
+                "memory_search was called with no query, so nothing was "
+                "searched. This is not a confirmed-empty result -- it means "
+                "the search never ran. Call memory_search again with a "
+                "specific, non-empty query."
+            ),
+        }
     query_tokens = [
         token
         for token in re.split(r"[^a-z0-9]+", normalized_query)
@@ -790,7 +1056,9 @@ def _search_memory_notebook(
     ]
     docs = _memory_notebook_documents(workspace_id, agent_install_id=agent_install_id)
     results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
     seen: set[tuple[str, int]] = set()
+    files_searched = 0
 
     for item in docs:
         rel_path = str(item.get("path") or "").strip()
@@ -799,8 +1067,14 @@ def _search_memory_notebook(
             continue
         try:
             lines = abs_path.read_text(encoding="utf-8").splitlines()
-        except Exception:
+        except Exception as exc:
+            # FIX for vector 2: a file that exists and might contain the
+            # answer but can't be read must never look identical to a file
+            # that never existed -- record it, don't swallow it.
+            reason = f"{type(exc).__name__}: {exc}"
+            errors.append({"path": rel_path, "reason": reason[:200]})
             continue
+        files_searched += 1
         for index, line in enumerate(lines):
             compact_line = re.sub(r"\s+", " ", str(line or "").strip()).lower()
             if not compact_line:
@@ -836,7 +1110,43 @@ def _search_memory_notebook(
             int(item.get("start_line") or 0),
         )
     )
-    return results[: max(1, min(int(max_results or 5), 20))]
+    results = results[: max(1, min(int(max_results or 5), 20))]
+
+    if results:
+        status = "matches_found"
+        message = f"Found {len(results)} match(es) across {files_searched} searched file(s)."
+        if errors:
+            message += (
+                f" {len(errors)} file(s) could not be read and were NOT searched -- "
+                "see 'errors'. There may be additional matches in those files that "
+                "this result does not include."
+            )
+    elif errors:
+        status = "incomplete"
+        message = (
+            f"Searched {files_searched} file(s) and found no matches, but "
+            f"{len(errors)} file(s) could not be read (see 'errors') and were NOT "
+            "searched. Do not conclude that nothing is saved on this topic -- that "
+            "would not be true, it would be unverified. Retry the search, or try "
+            "memory_get on the file(s) listed in 'errors' directly."
+        )
+    else:
+        status = "no_matches"
+        message = (
+            f"Searched {files_searched} memory file(s) and found no matches for "
+            "this query. This is a confirmed result, not a failed search -- every "
+            "file that exists was checked. Try broader or different search terms "
+            "before concluding nothing is saved, or state plainly that nothing is "
+            "saved on this topic."
+        )
+
+    return {
+        "results": results,
+        "files_searched": files_searched,
+        "errors": errors,
+        "status": status,
+        "message": message,
+    }
 
 
 def _get_memory_notebook_excerpt(

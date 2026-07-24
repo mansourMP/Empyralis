@@ -104,6 +104,53 @@ class AgentTraceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(append_event.await_args.kwargs["event_type"], "trace.started")
         self.assertEqual(append_event.await_args.kwargs["payload"], {"input_mode": "text"})
 
+    async def test_assistant_message_completed_dedupes_stored_text_only(self) -> None:
+        # docs/design/audit-storage-lifecycle.md: assistant.message.completed's
+        # full reply text is already in agent_turns.content (written by
+        # thread_service.record_assistant_turn in the same turn) — the
+        # persisted trace-event row must not store it a second time, but the
+        # envelope handed back to the caller (used for the live in-request
+        # response stream) must keep the full text untouched.
+        context = agent_trace_service.TraceContext(
+            trace_id="trace_1",
+            workspace_id="ws-1",
+            tenant_id="tenant-1",
+            thread_id="thread-1",
+            run_id="run-1",
+            root_agent_id="sage",
+        )
+        with patch(
+            "server_modules.agent_trace_service.control_plane_repository.append_agent_trace_event",
+            new=AsyncMock(return_value=_event_row()),
+        ) as append_event, patch(
+            "server_modules.agent_trace_service._publish_live_event",
+            new=AsyncMock(return_value=None),
+        ):
+            envelope = await agent_trace_service.emit_with_envelope(
+                context,
+                "assistant.message.completed",
+                {
+                    "message_id": "msg-1",
+                    "text": "This is the full assistant reply text.",
+                    "citation_refs": ["cite-1"],
+                    "artifact_ids": ["artifact-1"],
+                },
+                persisted=True,
+            )
+
+        append_event.assert_awaited_once()
+        stored_payload = append_event.await_args.kwargs["payload"]
+        self.assertEqual(stored_payload["text"], "")
+        self.assertEqual(stored_payload["text_ref"], "agent_turns.content")
+        self.assertGreater(stored_payload["text_bytes_deduped"], 0)
+        # Non-text fields are untouched in the stored row.
+        self.assertEqual(stored_payload["message_id"], "msg-1")
+        self.assertEqual(stored_payload["citation_refs"], ["cite-1"])
+        self.assertEqual(stored_payload["artifact_ids"], ["artifact-1"])
+        # The in-memory envelope returned to the caller keeps the full text —
+        # this is what the live response stream (not the DB row) consumes.
+        self.assertEqual(envelope["data"]["text"], "This is the full assistant reply text.")
+
     async def test_emit_non_persisted_event_does_not_write_repository_row(self) -> None:
         context = agent_trace_service.TraceContext(
             trace_id="trace_1",

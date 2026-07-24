@@ -59,10 +59,10 @@ function buildSageProfilePayload(step = 0) {
     storage_policy: {
       authority: 'structured_profile_cloud_canonical',
     },
+    // 2026-07-23: USER.md/IDENTITY.md/SOUL.md were removed from the root-file
+    // taxonomy; onboarding now projects into memory/files/profile.md instead.
     projections: {
-      'USER.md': '# User Profile\n',
-      'IDENTITY.md': '# Identity\n',
-      'SOUL.md': '# Empyralis\n',
+      'memory/files/profile.md': '# Owner Profile\n',
       'HEARTBEAT.md': '# Heartbeat\n',
     },
     updated_at: new Date().toISOString(),

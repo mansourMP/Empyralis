@@ -268,5 +268,85 @@ class CliSetupServiceEventsTests(unittest.TestCase):
         self.assertEqual(items, [])
 
 
+class CliSetupServiceGrokBuildCursorTests(unittest.IsolatedAsyncioTestCase):
+    """xAI Grok Build / Cursor CLI addition (2026-07-24) — provider entries
+    resolve correctly through the SAME cli_setup rail claude_code/codex use,
+    with their own distinct platform-voice messages."""
+
+    def setUp(self) -> None:
+        global cli_setup_service
+        cli_setup_service = importlib.import_module("server_modules.cli_setup_service")
+
+    def test_supported_runtimes_include_both_new_clis(self) -> None:
+        self.assertIn("grok_build", cli_setup_service._SUPPORTED_RUNTIMES)
+        self.assertIn("cursor_cli", cli_setup_service._SUPPORTED_RUNTIMES)
+
+    def test_login_methods_populated_for_both_new_runtimes(self) -> None:
+        grok_methods = {m["key"] for m in cli_setup_service.LOGIN_METHODS["grok_build"]}
+        cursor_methods = {m["key"] for m in cli_setup_service.LOGIN_METHODS["cursor_cli"]}
+        self.assertEqual(grok_methods, {"device_auth"})
+        self.assertEqual(cursor_methods, {"login"})
+        # No api_key login-session method for either — see cli-login-
+        # session.ts's grok_build/cursor_cli comments for why (XAI_API_KEY /
+        # CURSOR_API_KEY are env-var fallbacks, not persisting subcommands).
+        self.assertNotIn("api_key", grok_methods)
+        self.assertNotIn("api_key", cursor_methods)
+
+    def test_maps_not_installed_per_runtime_for_grok_and_cursor(self) -> None:
+        grok_message = cli_setup_service._friendly_cli_setup_error("not_installed", login=True, runtime="grok_build")
+        cursor_message = cli_setup_service._friendly_cli_setup_error("not_installed", login=True, runtime="cursor_cli")
+        self.assertIn("grok build", grok_message.lower())
+        self.assertIn("cursor", cursor_message.lower())
+        # Never collapse into the claude_code/codex fallback message.
+        self.assertNotIn("claude code", grok_message.lower())
+        self.assertNotIn("codex", cursor_message.lower())
+
+    def test_maps_crash_per_runtime_and_action_for_grok_and_cursor(self) -> None:
+        install_grok = cli_setup_service._friendly_cli_setup_error("crash", login=False, runtime="grok_build")
+        install_cursor = cli_setup_service._friendly_cli_setup_error("crash", login=False, runtime="cursor_cli")
+        login_grok = cli_setup_service._friendly_cli_setup_error("crash", login=True, runtime="grok_build")
+        login_cursor = cli_setup_service._friendly_cli_setup_error("crash", login=True, runtime="cursor_cli")
+        self.assertIn("installing grok build", install_grok.lower())
+        self.assertIn("installing cursor cli", install_cursor.lower())
+        self.assertIn("grok build sign-in", login_grok.lower())
+        self.assertIn("cursor cli sign-in", login_cursor.lower())
+
+    def test_maps_dependency_missing_distinctly_from_npm_missing(self) -> None:
+        message = cli_setup_service._friendly_cli_setup_error(
+            "Grok Build install failed on this Gateway (dependency_missing): curl was not found on PATH.",
+            login=False,
+            runtime="grok_build",
+        )
+        self.assertIn("curl", message.lower())
+
+    async def test_install_cli_runtime_dispatches_grok_build(self) -> None:
+        dispatch_mock = AsyncMock(return_value={"result": {"installed": True}})
+        with patch.object(cli_setup_service.gateway_execution_service, "execute_tool_via_gateway", dispatch_mock):
+            result = await cli_setup_service.install_cli_runtime(
+                gateway_id="gw-1", workspace_id="ws-1", runtime="grok_build", run_id="run-1",
+            )
+        self.assertTrue(result["result"]["installed"])
+        kwargs = dispatch_mock.await_args.kwargs
+        self.assertEqual(kwargs["arguments"], {"runtime": "grok_build"})
+
+    async def test_start_cli_login_dispatches_cursor_cli(self) -> None:
+        dispatch_mock = AsyncMock(return_value={"result": {"run_id": "run-2", "status": "started", "method": "login"}})
+        with patch.object(cli_setup_service.gateway_execution_service, "execute_tool_via_gateway", dispatch_mock):
+            result = await cli_setup_service.start_cli_login(
+                gateway_id="gw-1", workspace_id="ws-1", runtime="cursor_cli", run_id="run-2",
+            )
+        self.assertEqual(result["result"]["status"], "started")
+        kwargs = dispatch_mock.await_args.kwargs
+        self.assertEqual(kwargs["arguments"], {"runtime": "cursor_cli"})
+
+    async def test_install_still_rejects_a_genuinely_unsupported_runtime(self) -> None:
+        with patch.object(cli_setup_service.gateway_execution_service, "execute_tool_via_gateway", AsyncMock()) as dispatch_mock:
+            with self.assertRaises(cli_setup_service.CliSetupError):
+                await cli_setup_service.install_cli_runtime(
+                    gateway_id="gw-1", workspace_id="ws-1", runtime="gemini_cli", run_id="run-1",
+                )
+        dispatch_mock.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

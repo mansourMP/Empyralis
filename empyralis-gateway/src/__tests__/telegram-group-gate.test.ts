@@ -9,12 +9,25 @@ import { GatewayStateDb } from "../state/db";
 import { mapTelegramInboundMessage } from "../channels/telegram/message-mapper";
 import { TELEGRAM_PERSONAL_CHANNEL_KEY, TELEGRAM_PERSONAL_PROVIDER } from "../channels/telegram/session-store";
 
-// FIX (the "family group bug"): Telegram previously had NO group/mention
-// gate at all — handleInboundMessage only checked from_me, so EVERY message
-// in EVERY group the linked account belongs to triggered a full agent turn
-// and reply. This mirrors WhatsApp's existing, working pattern: in a group,
-// stay silent unless @mentioned or replying to a message Sage sent. A DM
-// (or the eventual self-chat case) must always pass regardless.
+// FIX (the "family group bug", 2026-07-18): Telegram previously had NO
+// group/mention gate at all — handleInboundMessage only checked from_me, so
+// EVERY message in EVERY group the linked account belongs to triggered a
+// full agent turn and reply. This mirrored WhatsApp's existing gate at the
+// time: in a group, stay silent unless @mentioned or replying to a message
+// Sage sent.
+//
+// UPDATED 2026-07-23 (group_policy build): the shouldSkip DECISION moved
+// out of this runtime entirely — see the "Group gate: REMOVED as a
+// gateway-side DECISION" comment in handleInboundMessage below. This
+// runtime's job now is ONLY to compute the raw mention FACTS
+// (isMentioned/isReplyToSage) correctly and always forward them; the ONE
+// shared resolver (personal_channels_service.py's mention_gating_service)
+// decides shouldSkip server-side. The tests below that used to assert "an
+// unaddressed/misdirected-reply group message never reaches the debouncer"
+// are updated to assert the opposite — it's admitted with the correct
+// facts attached — since that decision no longer lives here. Every other
+// test in this file (explicit @mention, real reply-to-Sage, DM/self-chat
+// pass-through, mapper-level fact threading) is unchanged.
 
 function buildMockAdapter() {
   const sentMessages: Array<{ remoteJid: string; text: string; replyTo?: string }> = [];
@@ -83,7 +96,7 @@ async function withRuntime(
   }
 }
 
-test("Telegram group gate: an unaddressed group message never reaches the debouncer or gets published", async () => {
+test("Telegram group gate (2026-07-23): an unaddressed group message is still admitted and published — the shouldSkip decision moved server-side", async () => {
   await withRuntime(async ({ runtime, inbound }) => {
     await (runtime as any).handleInboundMessage({
       externalMessageId: "in-group-1",
@@ -93,10 +106,14 @@ test("Telegram group gate: an unaddressed group message never reaches the deboun
       isGroup: true,
       isMentioned: false,
     });
-    // The gate short-circuits handleInboundMessage BEFORE the debouncer's
-    // admit() is ever called — no timing/flush needed to prove this.
-    assert.equal((runtime as any).inboundDebouncer.pendingCount(), 0, "an unaddressed group message must never be admitted to the debouncer");
-    assert.equal(inbound.length, 0, "an unaddressed group message must never be published");
+    assert.equal((runtime as any).inboundDebouncer.pendingCount(), 1, "an unaddressed group message must still be admitted to the debouncer — this runtime no longer decides shouldSkip");
+    (runtime as any).inboundDebouncer.flushAll();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(inbound.length, 1, "an unaddressed group message must still be published, with is_mentioned=false so the backend resolver can decide");
+    const message = inbound[0].message as Record<string, unknown>;
+    assert.equal(message.is_group, true);
+    assert.equal(message.is_mentioned, false);
+    assert.equal(message.is_reply_to_sage, false);
   });
 });
 
@@ -160,7 +177,7 @@ test("Telegram group gate: replying to a message Sage sent is admitted and publi
   });
 });
 
-test("Telegram group gate: replying to a DIFFERENT message (not one Sage sent) in a group is still gated", async () => {
+test("Telegram group gate (2026-07-23): replying to a DIFFERENT message (not one Sage sent) in a group still resolves is_reply_to_sage=false and is still admitted", async () => {
   await withRuntime(async ({ runtime, inbound }) => {
     await (runtime as any).handleInboundMessage({
       externalMessageId: "in-group-4",
@@ -172,8 +189,15 @@ test("Telegram group gate: replying to a DIFFERENT message (not one Sage sent) i
       // Replies to SOME message, but not one this runtime ever sent.
       replyToExternalMessageId: "someone-elses-message-id",
     });
-    assert.equal((runtime as any).inboundDebouncer.pendingCount(), 0);
-    assert.equal(inbound.length, 0);
+    // The FACT is still computed correctly (is_reply_to_sage=false — this
+    // is not Sage's own message) even though admission itself no longer
+    // depends on it.
+    assert.equal((runtime as any).inboundDebouncer.pendingCount(), 1);
+    (runtime as any).inboundDebouncer.flushAll();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(inbound.length, 1);
+    const message = inbound[0].message as Record<string, unknown>;
+    assert.equal(message.is_reply_to_sage, false);
   });
 });
 

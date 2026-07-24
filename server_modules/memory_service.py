@@ -16,10 +16,13 @@ from fastapi import HTTPException
 from server_modules import agent_memory as _workspace_memory_store
 from server_modules import memory_summary_service
 from server_modules import rust_runtime_kernel_client
+from server_modules import secret_redaction_service
 from server_modules import workspace_context_memory_adapter
 from server_modules.telemetry import get_tracer, set_span_attributes
 from server_modules.workspace_context import (
     ALLOWED_CONTEXT_FILENAMES,
+    USER_MEMORY_FILE_RE,
+    delete_workspace_context_file,
     read_workspace_context_file,
     read_workspace_context_files,
     normalize_workspace_context_filename,
@@ -53,7 +56,17 @@ _DAILY_NOTE_TEMPORARY_HINTS = re.compile(
     r"ignore this|wip|draft only|just testing|random thought"
     r")\b"
 )
-_SAFE_CONSOLIDATION_TARGET_FILES = {"MEMORY.md", "GOALS.md", "PROCEDURES.md", "REFLECTION.md"}
+# Founder ruling (2026-07-23, final): GOALS.md is removed from the root-file
+# taxonomy -- daily-note consolidation now routes goal/milestone content into
+# a MEMORY.md-indexed topic file (memory/files/goals.md) instead, same as any
+# other topic file. See the index-upsert step inside
+# consolidate_daily_memory_notes's merge loop below, which keeps MEMORY.md's
+# "## Topic files" section in sync every time this target is written -- a
+# plain write_workspace_context_file call (like the other three targets get)
+# would silently orphan the file with no index entry pointing to it.
+_GOALS_TOPIC_FILE = "memory/files/goals.md"
+_GOALS_TOPIC_FILE_DESCRIPTION = "Consolidated goal/milestone/roadmap notes auto-merged from daily logs."
+_SAFE_CONSOLIDATION_TARGET_FILES = {"MEMORY.md", _GOALS_TOPIC_FILE, "PROCEDURES.md", "REFLECTION.md"}
 _SAFE_CONSOLIDATION_DEFAULT_TARGET = "MEMORY.md"
 _MEMORY_DEFAULT_ACTOR = "system"
 
@@ -73,6 +86,18 @@ def _redact_daily_note_payload(value: str) -> str:
     text = str(value or "")
     for pattern in _DAILY_MEMORY_SECRET_PATTERNS:
         text = pattern.sub("[redacted-secret]", text)
+    # MAN-53 follow-up: layer the shared, codebase-wide redactor (the same
+    # secret_redaction_service.redact_text already wired into
+    # memory_write_file/update_memory_context_file below, and previously
+    # proven at agent_memory_tools.py's per-agent memory_write) on top of
+    # the three narrow local patterns above -- a daily note now gets the
+    # same breadth of protection (JWTs, AWS/GitHub/Slack/Stripe-style
+    # tokens, private keys, card numbers, phone numbers, unrecognized
+    # high-entropy secrets) as every other native memory write, not just
+    # the sk-/api_key=/Bearer trio the local patterns alone caught. Applying
+    # it here (idempotent on text the local patterns already touched) is
+    # reuse, not a second implementation.
+    text = secret_redaction_service.redact_text(text)
     return text.strip()
 
 
@@ -128,8 +153,30 @@ def _daily_entry_body(value: str) -> str:
     return line
 
 
+_DAILY_NOTE_TIMESTAMP_PREFIX_RE = re.compile(r"^(- \[[^\]]+\]\s*)(.*)$", re.DOTALL)
+
+
+def _insert_daily_note_marker(entry: str, marker: str) -> str:
+    """Splice a format_source_marker()-style attribution prefix into a
+    built daily-note line, right after the "- [HH:MM:SS UTC] " timestamp
+    and before the fact text -- same visible-attribution contract as
+    memory_write_file's MEMORY.md append path, applied to daily notes."""
+    if not marker:
+        return entry
+    match = _DAILY_NOTE_TIMESTAMP_PREFIX_RE.match(str(entry or ""))
+    if not match:
+        return f"{marker}{entry}"
+    prefix, body = match.group(1), match.group(2)
+    return f"{prefix}{marker}{body}"
+
+
 def _normalize_daily_similarity_text(value: str) -> str:
-    lowered = str(value or "").strip().lower()
+    # Strip any leading format_source_marker()-style attribution prefix
+    # first -- two different senders stating the same fact (or the same
+    # sender restating it) must compare on the underlying content, not on
+    # marker text that varies by who/where.
+    unmarked = _workspace_memory_store.strip_source_marker(value)
+    lowered = str(unmarked or "").strip().lower()
     cleaned = re.sub(r"[^a-z0-9\s]+", " ", lowered)
     return " ".join(cleaned.split())
 
@@ -179,7 +226,7 @@ def _classify_daily_note_usefulness(value: str) -> tuple[bool, str]:
 def _safe_consolidation_target_for_text(value: str) -> str:
     normalized = str(value or "").strip().lower()
     if re.search(r"\b(goal|goals|milestone|roadmap|plan|target|objective|next step)\b", normalized):
-        return "GOALS.md"
+        return _GOALS_TOPIC_FILE
     if re.search(r"\b(procedure|process|workflow|runbook|steps|how to|playbook|operating)\b", normalized):
         return "PROCEDURES.md"
     if re.search(r"\b(reflection|lesson|learned|mistake|improve|retrospective|insight)\b", normalized):
@@ -556,12 +603,19 @@ def save_memory(
     sync_memory_md: bool = True,
     agent_install_id: str | None = None,
     source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
 ) -> None:
     """`source` is an optional attribution snapshot (platform/surface/sender_id/
     sender_name/sender_is_owner -- InboundEnvelope.to_metadata()'s shape, or
     inbound_attribution_recovery.build_attribution's recovered equivalent).
     None (the default) preserves prior behavior byte-for-byte: an unattributed
-    row, same as every row written before this parameter existed."""
+    row, same as every row written before this parameter existed.
+
+    `attribution_reason` is the agent's own stated reason for saving this
+    content -- required whenever `source` resolves to a non-owner or
+    unverified trust tier (agent_memory.requires_attribution_reason); raises
+    agent_memory.MemoryAttributionRequiredError otherwise. Never required
+    when `source` is absent or owner-attributed."""
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     _enforce_memory_state_decision(
         operation="upsert_workspace_memory",
@@ -579,6 +633,26 @@ def save_memory(
         sync_memory_md=sync_memory_md,
         agent_install_id=str(agent_install_id or "").strip() or None,
         source=source,
+        attribution_reason=attribution_reason,
+    )
+
+
+def list_memory_entry_history(
+    workspace_id: str,
+    key: str,
+    *,
+    agent_install_id: str | None = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Decision B's audit trail for the structured key/value memory store --
+    every create/update recorded for `key` (update-don't-duplicate means the
+    live row only ever holds the latest content; this is what changed and
+    why for a given entry over time)."""
+    return _workspace_memory_store._list_memory_entry_history(
+        _normalize_workspace_id(workspace_id),
+        key,
+        agent_install_id=str(agent_install_id or "").strip() or None,
+        limit=limit,
     )
 
 
@@ -696,15 +770,78 @@ def update_memory_context_file(
     reason: str = "memory_update",
     run_id: str | None = None,
     audit_metadata: Optional[Dict[str, Any]] = None,
+    source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
+    description: str | None = None,
 ) -> Dict[str, Any]:
+    """`source`/`attribution_reason`: same write-filter contract as
+    memory_write_file -- required whenever `source` resolves to a non-owner
+    or unverified trust tier. This is a whole-file replace (the agent is
+    expected to compose the complete revised content itself, unlike the
+    single-line append path), so no marker is auto-spliced into `content`;
+    the filter plus the audit-trail metadata below are the protection here.
+
+    When `normalized_filename == "MEMORY.md"` and `reason` is not
+    "memory_tree_write" (the owner's own manual Memory-tab editor,
+    agent_memory_tree_service.write_file), this path is also subject to the
+    same 200-line/25KB index cap memory_write_file enforces -- otherwise a
+    model-driven memory_update call could silently replace MEMORY.md with
+    content of unbounded size, bypassing the cap entirely.
+
+    `description`: same requirement + auto-index-upsert contract as
+    memory_write_file -- required whenever the target is a memory/files/**.md
+    topic file, unless reason=="memory_tree_write" (optional there).
+
+    Secret redaction (MAN-53): same treatment as memory_write_file -- `content`
+    is run through secret_redaction_service.redact_text before the cap check
+    or anything touches disk, since this whole-file-replace path shares the
+    same write_workspace_context_file chokepoint and was an equally live gap.
+    The returned dict's `redacted` flag reports whether anything changed."""
+    _require_attribution_reason_or_raise(
+        source=source,
+        attribution_reason=attribution_reason,
+        what=f"update memory file '{filename}'",
+    )
+    _raw_content_for_redaction = str(content or "")
+    content = secret_redaction_service.redact_text(_raw_content_for_redaction)
+    _content_was_redacted = content != _raw_content_for_redaction
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or "").strip() or None
     normalized_filename = normalize_workspace_context_filename(filename)
+    normalized_reason = str(reason or "").strip()
+    if normalized_filename == "MEMORY.md" and normalized_reason != "memory_tree_write":
+        _reject_over_index_cap(str(content or ""))
+
+    _is_topic_file = bool(USER_MEMORY_FILE_RE.fullmatch(normalized_filename))
+    _topic_description: str | None = None
+    if _is_topic_file:
+        if normalized_reason == "memory_tree_write":
+            cleaned = _clean_topic_file_description(description)
+            _topic_description = cleaned or None
+        else:
+            _topic_description = _require_topic_file_description_or_raise(normalized_filename, description)
+
     old_content = read_workspace_context_file(
         normalized_filename,
         workspace_id=normalized_workspace_id,
         agent_install_id=normalized_agent_install_id,
     )
+
+    # Pre-validate the topic-file index sync BEFORE writing anything -- see
+    # memory_write_file's identical guard for why (never a partial success).
+    _pending_index_content: str | None = None
+    _current_index_content: str = ""
+    if _topic_description:
+        _current_index_content = read_workspace_context_file(
+            "MEMORY.md",
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _pending_index_content = _upsert_topic_index_content(
+            _current_index_content, normalized_filename, _topic_description,
+        )
+        _reject_over_index_cap(_pending_index_content)
+
     _enforce_memory_state_decision(
         operation="update_workspace_context_file",
         workspace_id=normalized_workspace_id,
@@ -722,6 +859,9 @@ def update_memory_context_file(
         workspace_id=normalized_workspace_id,
         agent_install_id=normalized_agent_install_id,
     )
+    merged_metadata: Dict[str, Any] = dict(audit_metadata or {})
+    merged_metadata.setdefault("source", _workspace_memory_store._normalize_source(source) if source else None)
+    merged_metadata.setdefault("attribution_reason", str(attribution_reason or "").strip() or None)
     version_record = _append_memory_file_version_record(
         normalized_workspace_id,
         agent_install_id=normalized_agent_install_id,
@@ -731,8 +871,39 @@ def update_memory_context_file(
         new_content=str(saved.get("content") or ""),
         reason=reason,
         run_id=run_id,
-        metadata=audit_metadata,
+        metadata=merged_metadata,
     )
+
+    if _pending_index_content is not None:
+        _enforce_memory_state_decision(
+            operation="update_workspace_context_file",
+            workspace_id=normalized_workspace_id,
+            actor_id=actor,
+            payload={
+                "filename": "MEMORY.md",
+                "content": _pending_index_content,
+                "agent_install_id": normalized_agent_install_id,
+                "run_id": run_id,
+            },
+        )
+        index_saved = write_workspace_context_file(
+            "MEMORY.md",
+            _pending_index_content,
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _append_memory_file_version_record(
+            normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+            actor=actor,
+            filename="MEMORY.md",
+            old_content=_current_index_content,
+            new_content=str(index_saved.get("content") or ""),
+            reason="memory_topic_index_sync",
+            run_id=run_id,
+            metadata={"topic_file": normalized_filename, "description": _topic_description},
+        )
+
     return {
         "workspace_id": normalized_workspace_id,
         "agent_install_id": normalized_agent_install_id,
@@ -741,6 +912,7 @@ def update_memory_context_file(
         "old_hash": version_record.get("old_hash"),
         "new_hash": version_record.get("new_hash"),
         "version_id": version_record.get("version_id"),
+        "redacted": _content_was_redacted,
     }
 
 
@@ -753,24 +925,42 @@ def memory_read_file(
 ) -> Dict[str, Any]:
     """Read a memory file on demand. Used by Sage when MEMORY.md is not in bootstrap context.
 
-    Returns {file, content, chars} so Sage can consume the file contents.
+    Returns {file, content, chars, is_default, exists} so Sage can consume
+    the file contents. `exists` (additive -- every prior field is unchanged)
+    is the ground truth on whether this path is a real file on disk; check
+    it before trusting `is_default`, which structurally cannot distinguish
+    "this memory/files/**.md path was never created" from "it was created
+    and is curated-but-empty" -- both read as `is_default: False` today (see
+    workspace_context.workspace_context_file_exists's docstring). A
+    hallucinated or mistyped topic-file path now comes back as
+    `{content: "", is_default: False, exists: False}` instead of silently
+    looking like real, empty, curated content.
     """
     from server_modules.workspace_context import (
         read_workspace_context_file,
         normalize_workspace_context_filename,
         is_default_context_content,
+        workspace_context_file_exists,
     )
     normalized_filename = normalize_workspace_context_filename(filename)
+    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    normalized_agent_install_id = str(agent_install_id or '').strip() or None
+    file_exists = workspace_context_file_exists(
+        normalized_filename,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
+    )
     content = read_workspace_context_file(
         normalized_filename,
-        workspace_id=_normalize_workspace_id(workspace_id),
-        agent_install_id=str(agent_install_id or '').strip() or None,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
     )
     return {
         'file': normalized_filename,
         'content': str(content or ''),
         'chars': len(str(content or '')),
         'is_default': is_default_context_content(normalized_filename, str(content or '')),
+        'exists': file_exists,
     }
 
 
@@ -788,14 +978,30 @@ def memory_read_file(
 # curated rewrite) or to mode=="replace" (a deliberate whole-file rewrite, e.g.
 # after consolidation, is exempt by construction).
 _MEMORY_MD_LIVE_APPEND_REASON = "memory_write"
-# On-disk soft cap for MEMORY.md -- comfortably above what actually gets
-# injected per turn (ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT=4_800 in
-# sage_instruction_compiler_service.py) so ordinary use never hits it, but
-# tight enough that an agent that never curates gets stopped and told to,
-# rather than silently growing into an unusable wall of text or (the
-# audit's flagged failure mode) getting silently truncated on read with no
-# warning.
-MEMORY_MD_SELF_CURATION_CAP_CHARS = 8_000
+# Founder decision (context-engineering-plan.md item 7): adopt Claude Code's
+# own published MEMORY.md discipline exactly -- "the first 200 lines, or the
+# first 25KB, whichever comes first" -- rather than an Empyralis-invented
+# number. Whichever threshold a write would cross first triggers the same
+# explicit "shorten this" error; nothing past either limit is ever silently
+# dropped, here or on read (this file only owns the write side -- see
+# MEMORY_MD_SELF_CURATION_CAP_CHARS's docstring below for the read-side note).
+MEMORY_MD_INDEX_MAX_LINES = 200
+MEMORY_MD_INDEX_MAX_BYTES = 25_000
+# Backward-compatible alias -- kept so existing callers/tests that reference
+# MEMORY_MD_SELF_CURATION_CAP_CHARS by name (it predates the exact-numbers
+# decision, when this was an Empyralis-invented 8,000-char placeholder) keep
+# working unchanged; the *value* now matches the 25KB figure above.
+#
+# NOTE ON SCOPE: this constant governs the WRITE-time guard in
+# memory_write_file/update_memory_context_file only. The audit's other named
+# failure mode -- sage_instruction_compiler_service.py silently truncating
+# MEMORY.md on *read* against the shared ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT
+# (4,800 chars, shared across every root file, not a dedicated MEMORY.md
+# allowance) -- is NOT fixed here. That file was locked for concurrent edits
+# at the time this was built; carving MEMORY.md its own dedicated 200-line/
+# 25KB read-time allowance, separate from the other root files' shared
+# budget, is the follow-up work item.
+MEMORY_MD_SELF_CURATION_CAP_CHARS = MEMORY_MD_INDEX_MAX_BYTES
 
 
 def _reject_multi_paragraph_memory_write(content: str) -> None:
@@ -814,6 +1020,214 @@ def _reject_multi_paragraph_memory_write(content: str) -> None:
         )
 
 
+def _reject_over_index_cap(final_content: str) -> None:
+    """The 200-line/25KB index cap, whichever hits first -- an explicit
+    error, never a silent truncation (that failure mode is exactly what this
+    replaces: Claude Code's own docs describe the pre-error version of this
+    as 'everything past the limit is dropped on the next load')."""
+    byte_count = len(final_content.encode("utf-8"))
+    line_count = final_content.count("\n") + (1 if final_content and not final_content.endswith("\n") else 0)
+    if byte_count <= MEMORY_MD_INDEX_MAX_BYTES and line_count <= MEMORY_MD_INDEX_MAX_LINES:
+        return
+    raise ValueError(
+        f"MEMORY.md has grown past its {MEMORY_MD_INDEX_MAX_LINES}-line / "
+        f"{MEMORY_MD_INDEX_MAX_BYTES}-char self-curation cap "
+        f"(now {line_count} lines, {byte_count} chars). This write was NOT saved. "
+        "MEMORY.md must stay a compact index -- consolidate or move older/less-active "
+        "facts to a memory/*.md topic file (memory_stage_consolidation, or memory_write "
+        "with a memory/*.md path) before writing more."
+    )
+
+
+def _require_attribution_reason_or_raise(
+    *,
+    source: Dict[str, Any] | None,
+    attribution_reason: str | None,
+    what: str,
+) -> None:
+    """Write filter (context-engineering-plan.md item 6): content attributed
+    to a named non-owner sender, or a sender whose ownership could not be
+    verified, may still be saved -- but never without the agent stating WHY.
+    An explicit error, never a silent save and never a pending/approval
+    state. No-op when `source` is absent or owner-attributed, so every
+    caller that predates attribution stays byte-for-byte unaffected."""
+    if not _workspace_memory_store.requires_attribution_reason(source):
+        return
+    if str(attribution_reason or "").strip():
+        return
+    tier = _workspace_memory_store.derive_trust_tier(source)
+    raise ValueError(
+        f"Cannot {what}: content attributed to a {tier.replace('_', ' ')} requires an "
+        "explicit attribution_reason explaining why it is worth saving. This was NOT "
+        "saved -- retry with attribution_reason set."
+    )
+
+
+# ── Auto-maintained topic-file index (founder ruling, 2026-07-23) ──────────
+# The founder's intended flow: "the agent creates a file, names it, and
+# mentions it inside MEMORY.md so a future session can find it." Rather than
+# trust the agent to remember that second step on its own -- and inevitably
+# drift -- the topic-file write chokepoint (memory_write_file /
+# update_memory_context_file, whenever the target is a memory/files/**.md
+# topic file) does it FOR the agent: every create/update REQUIRES a short
+# description and un-driftably upserts that file's one-line index entry
+# (path + description) into MEMORY.md in the same call. A future session
+# reading MEMORY.md always sees an accurate map -- the index can never
+# disagree with what's actually on disk. Deleting a topic file
+# (memory_delete_topic_file) removes its line the same way.
+#
+# Exempt: reason=="memory_tree_write" (the owner's own manual Memory-tab
+# editor, agent_memory_tree_service.write_file) -- same precedent as the
+# size cap in memory_write_file below. A description is optional there; the
+# index is still kept in sync opportunistically when one is supplied, but
+# nothing is required of the owner's own manual edits.
+#
+# The existing MEMORY_MD_INDEX_MAX_LINES/_MAX_BYTES cap applies to the
+# upserted result exactly like any other MEMORY.md write: computed and
+# checked BEFORE anything is saved, so a topic-file write can never
+# partially succeed (file saved, index silently left stale, or vice versa)
+# -- an overflow fails the whole write with the same consolidate-first
+# error the index cap always raises.
+_TOPIC_FILE_INDEX_HEADING = "## Topic files"
+_TOPIC_INDEX_LINE_RE = re.compile(
+    r"^- (?P<path>(?:memory/files/)?[A-Za-z0-9][A-Za-z0-9._/-]*\.md) — (?P<description>.+)$"
+)
+_TOPIC_FILE_DESCRIPTION_MAX_CHARS = 200
+
+
+def _topic_file_friendly_path(normalized_filename: str) -> str:
+    """memory/files/customers/acme.md -> customers/acme.md (matches the
+    friendly form agent_memory_tree_service already presents topic paths in)."""
+    prefix = "memory/files/"
+    text = str(normalized_filename or "")
+    return text[len(prefix):] if text.startswith(prefix) else text
+
+
+def _require_topic_file_description_or_raise(normalized_filename: str, description: str | None) -> str:
+    cleaned = " ".join(str(description or "").split()).strip()
+    if not cleaned:
+        raise ValueError(
+            f"Cannot write memory topic file '{normalized_filename}' without a description. "
+            "Pass a short description (what this file is about, e.g. 'Acme account: contract "
+            "terms, contacts, open issues') so MEMORY.md's index can name it for a future "
+            "session to find -- this was NOT saved."
+        )
+    return cleaned[:_TOPIC_FILE_DESCRIPTION_MAX_CHARS]
+
+
+def _clean_topic_file_description(description: str | None) -> str:
+    return " ".join(str(description or "").split()).strip()[:_TOPIC_FILE_DESCRIPTION_MAX_CHARS]
+
+
+def _build_topic_index_line(normalized_filename: str, description: str) -> str:
+    return f"- {_topic_file_friendly_path(normalized_filename)} — {description}"
+
+
+def _upsert_topic_index_content(memory_md_content: str, normalized_filename: str, description: str) -> str:
+    """Pure function: returns MEMORY.md's text with `normalized_filename`'s
+    one-line index entry created or refreshed -- never mutates in place.
+    Callers validate the result against the index cap before writing it
+    anywhere (see the module docstring above this section)."""
+    friendly = _topic_file_friendly_path(normalized_filename)
+    new_line = _build_topic_index_line(normalized_filename, description)
+    lines = str(memory_md_content or "").splitlines()
+    for idx, line in enumerate(lines):
+        match = _TOPIC_INDEX_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        if _topic_file_friendly_path(match.group("path")) == friendly:
+            lines[idx] = new_line
+            return "\n".join(lines).strip() + "\n"
+    # Not present yet -- append under the Topic files heading, creating the
+    # heading the first time this workspace ever earns a topic file.
+    if _TOPIC_FILE_INDEX_HEADING in lines:
+        insert_at = lines.index(_TOPIC_FILE_INDEX_HEADING) + 1
+        while insert_at < len(lines) and lines[insert_at].strip() and not lines[insert_at].startswith("#"):
+            insert_at += 1
+        lines.insert(insert_at, new_line)
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(_TOPIC_FILE_INDEX_HEADING)
+        lines.append(new_line)
+    return "\n".join(lines).strip() + "\n"
+
+
+def _remove_topic_index_content(memory_md_content: str, normalized_filename: str) -> str:
+    """Pure function: returns MEMORY.md's text with `normalized_filename`'s
+    index line removed (no-op if it was never listed)."""
+    friendly = _topic_file_friendly_path(normalized_filename)
+    lines = str(memory_md_content or "").splitlines()
+    out: List[str] = []
+    for line in lines:
+        match = _TOPIC_INDEX_LINE_RE.match(line.strip())
+        if match and _topic_file_friendly_path(match.group("path")) == friendly:
+            continue
+        out.append(line)
+    return "\n".join(out).strip() + "\n"
+
+
+def memory_delete_topic_file(
+    workspace_id: str,
+    filename: str,
+    *,
+    agent_install_id: str | None = None,
+    actor: str = _MEMORY_DEFAULT_ACTOR,
+    run_id: str | None = None,
+) -> bool:
+    """Delete a memory/files/**.md topic file and remove its one-line entry
+    from MEMORY.md's auto-maintained index in the same call -- the index
+    must never claim a topic file exists that has actually been deleted.
+    Returns True if a file was actually deleted (matches
+    workspace_context.delete_workspace_context_file's contract)."""
+    normalized_filename = normalize_workspace_context_filename(filename)
+    if not USER_MEMORY_FILE_RE.fullmatch(normalized_filename):
+        raise ValueError(f"Only memory topic files (memory/files/**) may be deleted this way, not: {normalized_filename}")
+    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    normalized_agent_install_id = str(agent_install_id or "").strip() or None
+    deleted = delete_workspace_context_file(
+        normalized_filename,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
+    )
+    current_index_content = read_workspace_context_file(
+        "MEMORY.md",
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
+    )
+    new_index_content = _remove_topic_index_content(current_index_content, normalized_filename)
+    if new_index_content.strip() != str(current_index_content or "").strip():
+        _enforce_memory_state_decision(
+            operation="update_workspace_context_file",
+            workspace_id=normalized_workspace_id,
+            actor_id=actor,
+            payload={
+                "filename": "MEMORY.md",
+                "content": new_index_content,
+                "agent_install_id": normalized_agent_install_id,
+                "run_id": run_id,
+            },
+        )
+        saved = write_workspace_context_file(
+            "MEMORY.md",
+            new_index_content,
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _append_memory_file_version_record(
+            normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+            actor=actor,
+            filename="MEMORY.md",
+            old_content=current_index_content,
+            new_content=str(saved.get("content") or ""),
+            reason="memory_topic_index_sync",
+            run_id=run_id,
+            metadata={"topic_file": normalized_filename, "removed": True},
+        )
+    return deleted
+
+
 def memory_write_file(
     workspace_id: str,
     filename: str,
@@ -825,12 +1239,14 @@ def memory_write_file(
     reason: str = 'memory_write',
     run_id: str | None = None,
     source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
+    description: str | None = None,
 ) -> Dict[str, Any]:
     """Write to a memory file. Used by Sage to update MEMORY.md (append new facts)
-    or edit bootstrap files (SOUL.md, AGENTS.md, TOOLS.md, IDENTITY.md) via replace.
+    or a memory/files/*.md topic file via replace.
 
     mode='append': adds content to end of file (for MEMORY.md facts)
-    mode='replace': overwrites entire file (for bootstrap file edits)
+    mode='replace': overwrites entire file (for topic-file edits)
 
     `source`: optional attribution snapshot for THIS write (InboundEnvelope.
     to_metadata() shape, or inbound_attribution_recovery.build_attribution's
@@ -841,19 +1257,58 @@ def memory_write_file(
     silently stored as an unmarked owner-level fact. None (the default, or
     an owner source) leaves the line exactly as clean as before this
     parameter existed.
+
+    `attribution_reason`: required (raises ValueError otherwise) whenever
+    `source` resolves to a non-owner or unverified trust tier -- the write
+    filter half of the same decision. Never required for an owner source or
+    no source at all.
+
+    `description`: required (raises ValueError otherwise) whenever the
+    target is a memory/files/**.md TOPIC file, unless reason=="memory_tree_write"
+    (the owner's own manual Memory-tab editor, where it's optional). When
+    provided, MEMORY.md's auto-maintained topic-file index is created or
+    refreshed with this file's one-line entry in the SAME call -- see the
+    "Auto-maintained topic-file index" section above _require_attribution_reason_or_raise.
+
+    Secret redaction (MAN-53): `content` is run through the same
+    secret_redaction_service.redact_text already proven at
+    agent_memory_tools.py's per-agent memory_write BEFORE any provenance
+    marker is spliced in, any cap is checked, or anything touches disk --
+    this was the verified gap: the native memory_write tool (this function,
+    reached via direct_chat_operator_binding_service.parse_tool_name ->
+    skills_service.py's ("memory","write") dispatch) had zero redaction
+    before this fix, while the parallel per-agent skill path already had
+    it. The returned dict's `redacted` flag is True whenever the incoming
+    content actually changed under the redactor, so the calling tool layer
+    can tell the model (and the model can tell the user) a secret was
+    removed -- never silent.
     """
-    from server_modules.workspace_context import (
-        read_workspace_context_file,
-        write_workspace_context_file,
-        normalize_workspace_context_filename,
+    _require_attribution_reason_or_raise(
+        source=source,
+        attribution_reason=attribution_reason,
+        what=f"write to memory file '{filename}'",
     )
+    _raw_content_for_redaction = str(content or '')
+    content = secret_redaction_service.redact_text(_raw_content_for_redaction)
+    _content_was_redacted = content != _raw_content_for_redaction
+    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    normalized_agent_install_id = str(agent_install_id or '').strip() or None
     normalized_filename = normalize_workspace_context_filename(filename)
     normalized_mode = str(mode or 'replace').strip().lower() or 'replace'
+    normalized_reason = str(reason or '').strip()
     _is_live_memory_md_append = (
         normalized_filename == "MEMORY.md"
         and normalized_mode == 'append'
-        and str(reason or '').strip() == _MEMORY_MD_LIVE_APPEND_REASON
+        and normalized_reason == _MEMORY_MD_LIVE_APPEND_REASON
     )
+    _is_topic_file = bool(USER_MEMORY_FILE_RE.fullmatch(normalized_filename))
+    _topic_description: str | None = None
+    if _is_topic_file:
+        if normalized_reason == "memory_tree_write":
+            cleaned = _clean_topic_file_description(description)
+            _topic_description = cleaned or None
+        else:
+            _topic_description = _require_topic_file_description_or_raise(normalized_filename, description)
 
     if normalized_mode == 'append':
         stamped_content = str(content or '').strip()
@@ -864,54 +1319,105 @@ def memory_write_file(
                 stamped_content = f"{marker}{stamped_content}"
         existing = read_workspace_context_file(
             normalized_filename,
-            workspace_id=_normalize_workspace_id(workspace_id),
-            agent_install_id=str(agent_install_id or '').strip() or None,
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
         )
         combined = str(existing or '').rstrip() + '\n' + stamped_content
         final_content = combined.strip()
-        if _is_live_memory_md_append and len(final_content.encode('utf-8')) > MEMORY_MD_SELF_CURATION_CAP_CHARS:
-            raise ValueError(
-                f"MEMORY.md has grown past its {MEMORY_MD_SELF_CURATION_CAP_CHARS}-char "
-                "self-curation cap. This fact was NOT saved. MEMORY.md must stay a "
-                "compact index -- consolidate or move older/less-active facts to a "
-                "memory/*.md topic file (memory_stage_consolidation, or memory_write "
-                "with a memory/*.md path) before appending more."
-            )
+        if _is_live_memory_md_append:
+            _reject_over_index_cap(final_content)
     else:
         final_content = str(content or '')
+        if normalized_filename == "MEMORY.md" and normalized_reason != "memory_tree_write":
+            # Whole-file replace of MEMORY.md via this path (as opposed to
+            # the owner's manual memory_tree_write editor) must not be a
+            # backdoor around the same index cap the append path enforces.
+            _reject_over_index_cap(final_content)
+
+    # Pre-validate the topic-file index sync BEFORE writing anything, so
+    # this call can never partially succeed (topic file saved, index left
+    # stale, or vice versa). An index-cap overflow fails the WHOLE write.
+    _pending_index_content: str | None = None
+    _current_index_content: str = ""
+    if _topic_description:
+        _current_index_content = read_workspace_context_file(
+            "MEMORY.md",
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _pending_index_content = _upsert_topic_index_content(
+            _current_index_content, normalized_filename, _topic_description,
+        )
+        _reject_over_index_cap(_pending_index_content)
 
     _enforce_memory_state_decision(
         operation='update_workspace_context_file',
-        workspace_id=_normalize_workspace_id(workspace_id),
+        workspace_id=normalized_workspace_id,
         actor_id=actor,
         payload={
             'filename': normalized_filename,
             'content': final_content,
-            'agent_install_id': str(agent_install_id or '').strip() or None,
+            'agent_install_id': normalized_agent_install_id,
             'run_id': run_id,
         },
     )
     saved = write_workspace_context_file(
         normalized_filename,
         final_content,
-        workspace_id=_normalize_workspace_id(workspace_id),
-        agent_install_id=str(agent_install_id or '').strip() or None,
+        workspace_id=normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
     )
     _append_memory_file_version_record(
-        _normalize_workspace_id(workspace_id),
-        agent_install_id=str(agent_install_id or '').strip() or None,
+        normalized_workspace_id,
+        agent_install_id=normalized_agent_install_id,
         actor=actor,
         filename=normalized_filename,
         old_content='',
         new_content=str(saved.get('content') or ''),
         reason=reason,
         run_id=run_id,
-        metadata={'mode': normalized_mode},
+        metadata={
+            'mode': normalized_mode,
+            'source': _workspace_memory_store._normalize_source(source) if source else None,
+            'attribution_reason': str(attribution_reason or '').strip() or None,
+        },
     )
+
+    if _pending_index_content is not None:
+        _enforce_memory_state_decision(
+            operation='update_workspace_context_file',
+            workspace_id=normalized_workspace_id,
+            actor_id=actor,
+            payload={
+                'filename': 'MEMORY.md',
+                'content': _pending_index_content,
+                'agent_install_id': normalized_agent_install_id,
+                'run_id': run_id,
+            },
+        )
+        index_saved = write_workspace_context_file(
+            'MEMORY.md',
+            _pending_index_content,
+            workspace_id=normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+        )
+        _append_memory_file_version_record(
+            normalized_workspace_id,
+            agent_install_id=normalized_agent_install_id,
+            actor=actor,
+            filename='MEMORY.md',
+            old_content=_current_index_content,
+            new_content=str(index_saved.get('content') or ''),
+            reason='memory_topic_index_sync',
+            run_id=run_id,
+            metadata={'topic_file': normalized_filename, 'description': _topic_description},
+        )
+
     return {
         'file': saved.get('filename'),
         'chars_written': len(str(saved.get('content', ''))),
         'mode': normalized_mode,
+        'redacted': _content_was_redacted,
     }
 
 def memory_append_daily_note(
@@ -921,7 +1427,30 @@ def memory_append_daily_note(
     agent_install_id: str | None = None,
     actor: str = _MEMORY_DEFAULT_ACTOR,
     run_id: str | None = None,
+    source: Dict[str, Any] | None = None,
+    attribution_reason: str | None = None,
 ) -> Dict[str, Any]:
+    """`source`/`attribution_reason`: same attribution contract as
+    memory_write_file -- a non-owner/unverified source gets a visible
+    "[who via where — status] " prefix spliced into the persisted daily-note
+    line (see _insert_daily_note_marker), and requires attribution_reason or
+    the write is refused with an explicit error. None (the default) leaves
+    behavior exactly as it was before these parameters existed.
+
+    Secret redaction (MAN-53): `note` already passes through
+    _build_daily_note_entry -> _redact_daily_note_payload, which now layers
+    the shared secret_redaction_service.redact_text on top of its own
+    narrower patterns (see that function). The `redacted` flag returned
+    below reports whether the raw incoming note actually changed under that
+    redactor, independent of the noise-stripping/timestamp formatting the
+    entry-building pipeline also does."""
+    _require_attribution_reason_or_raise(
+        source=source,
+        attribution_reason=attribution_reason,
+        what="append a daily memory note",
+    )
+    _raw_note_for_redaction = str(note or "")
+    _content_was_redacted = secret_redaction_service.redact_text(_raw_note_for_redaction) != _raw_note_for_redaction
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or "").strip() or None
     note_date = str(_append_note_now() or "").strip()
@@ -929,7 +1458,8 @@ def memory_append_daily_note(
     if note_date != expected_today:
         raise ValueError("Daily memory note writes are restricted to today's UTC note file.")
     filename = f"memory/{note_date}.md"
-    entry = _build_daily_note_entry(note)
+    marker = _workspace_memory_store.format_source_marker(source)
+    entry = _insert_daily_note_marker(_build_daily_note_entry(note), marker)
     existing = read_workspace_context_file(
         filename,
         workspace_id=normalized_workspace_id,
@@ -960,6 +1490,7 @@ def memory_append_daily_note(
                 "duplicate_of": body,
                 "duplicate_similarity": round(similarity, 3),
                 "usefulness": usefulness_reason,
+                "redacted": _content_was_redacted,
             }
     payload = f"{entry}\n"
     if str(existing or "").strip():
@@ -990,7 +1521,11 @@ def memory_append_daily_note(
         new_content=str(saved.get("content") or ""),
         reason="memory_append_daily_note",
         run_id=run_id,
-        metadata={"usefulness": usefulness_reason},
+        metadata={
+            "usefulness": usefulness_reason,
+            "source": _workspace_memory_store._normalize_source(source) if source else None,
+            "attribution_reason": str(attribution_reason or "").strip() or None,
+        },
     )
     return {
         "workspace_id": normalized_workspace_id,
@@ -1002,6 +1537,7 @@ def memory_append_daily_note(
         "old_hash": version_record.get("old_hash"),
         "new_hash": version_record.get("new_hash"),
         "version_id": version_record.get("version_id"),
+        "redacted": _content_was_redacted,
     }
 
 
@@ -1113,6 +1649,13 @@ def apply_memory_consolidation_staging(
     actor: str = _MEMORY_DEFAULT_ACTOR,
     run_id: str | None = None,
 ) -> Dict[str, Any]:
+    """Secret redaction (MAN-53): unlike memory_write_file/update_memory_context_file,
+    this path never routes through either of them -- it calls
+    write_workspace_context_file directly per merged_files entry. Each
+    file's content is run through secret_redaction_service.redact_text
+    before that write, same as the other native memory-writing seams. The
+    returned dict's `redacted` flag is True if ANY merged file's content
+    was changed by the redactor."""
     normalized_workspace_id = _normalize_workspace_id(workspace_id)
     normalized_agent_install_id = str(agent_install_id or "").strip() or None
     if not (bool(user_approved) or bool(policy_allows)):
@@ -1131,6 +1674,13 @@ def apply_memory_consolidation_staging(
         raise ValueError("Consolidation merge requires at least one root file update.")
     applied_files: List[str] = []
     versions: List[Dict[str, Any]] = []
+    # MAN-53 follow-up: this is a second, DIRECT-to-write_workspace_context_file
+    # seam (unlike memory_write_file/update_memory_context_file, it never routes
+    # through either of those) that lands model-composed root-file content --
+    # merged_files is caller-supplied at call time, not necessarily derived from
+    # already-redacted stored content -- so it gets the same redact-before-disk
+    # treatment, independently, right here.
+    _any_file_redacted = False
     for filename, content in merged_files.items():
         normalized = normalize_workspace_context_filename(str(filename or "").strip())
         if normalized not in ALLOWED_CONTEXT_FILENAMES:
@@ -1140,9 +1690,13 @@ def apply_memory_consolidation_staging(
             workspace_id=normalized_workspace_id,
             agent_install_id=normalized_agent_install_id,
         )
+        _raw_merge_content = str(content or "")
+        redacted_content = secret_redaction_service.redact_text(_raw_merge_content)
+        if redacted_content != _raw_merge_content:
+            _any_file_redacted = True
         write_workspace_context_file(
             normalized,
-            str(content or ""),
+            redacted_content,
             workspace_id=normalized_workspace_id,
             agent_install_id=normalized_agent_install_id,
         )
@@ -1152,7 +1706,7 @@ def apply_memory_consolidation_staging(
             actor=actor,
             filename=normalized,
             old_content=old_content,
-            new_content=str(content or ""),
+            new_content=redacted_content,
             reason="memory_apply_consolidation",
             run_id=run_id,
             metadata={"staging_filename": normalized_staging_filename},
@@ -1174,6 +1728,7 @@ def apply_memory_consolidation_staging(
         "approved": bool(user_approved),
         "policy_allowed": bool(policy_allows),
         "versions": versions,
+        "redacted": _any_file_redacted,
     }
 
 
@@ -1342,6 +1897,45 @@ def consolidate_daily_memory_notes(
                 "version_id": version_record.get("version_id"),
             }
         )
+
+        # Topic-file consolidation targets (memory/files/goals.md, migrated
+        # off GOALS.md by the 2026-07-23 root-taxonomy removal) must get
+        # their MEMORY.md index line upserted the same way every other
+        # topic-file write does -- otherwise the index silently stops
+        # matching what's actually on disk, breaking pull-on-demand
+        # discovery (see the founder ruling above _SAFE_CONSOLIDATION_
+        # TARGET_FILES). _upsert_topic_index_content replaces the line in
+        # place on every subsequent consolidation run, so this never grows
+        # unbounded -- one index line total for this target, ever.
+        if USER_MEMORY_FILE_RE.fullmatch(target_file):
+            _index_content = read_workspace_context_file(
+                "MEMORY.md",
+                workspace_id=normalized_workspace_id,
+                agent_install_id=normalized_agent_install_id,
+            )
+            _new_index_content = _upsert_topic_index_content(
+                _index_content,
+                target_file,
+                _GOALS_TOPIC_FILE_DESCRIPTION if target_file == _GOALS_TOPIC_FILE else "Consolidated daily-note content.",
+            )
+            if _new_index_content.strip() != str(_index_content or "").strip():
+                write_workspace_context_file(
+                    "MEMORY.md",
+                    _new_index_content,
+                    workspace_id=normalized_workspace_id,
+                    agent_install_id=normalized_agent_install_id,
+                )
+                _append_memory_file_version_record(
+                    normalized_workspace_id,
+                    agent_install_id=normalized_agent_install_id,
+                    actor=actor,
+                    filename="MEMORY.md",
+                    old_content=_index_content,
+                    new_content=_new_index_content,
+                    reason="memory_topic_index_sync",
+                    run_id=run_id,
+                    metadata={"topic_file": target_file, "proposal_id": proposal_id},
+                )
 
     compacted_daily_notes: List[str] = []
     compacted_versions: List[Dict[str, Any]] = []

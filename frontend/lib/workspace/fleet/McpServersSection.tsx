@@ -135,6 +135,10 @@ function uniqueServerId(base: string, existingIds: Set<string>): string {
 }
 
 function statusText(server: McpServerRecord): string {
+  // Backend flips status="reauth_required" when a live 401 + failed token
+  // refresh proves the grant is dead (mcp_registry_service auth-durability
+  // seam); it auto-resets to "ok" when a new credential is attached.
+  if ((server as { status?: string }).status === "reauth_required") return "Reconnect needed — sign-in expired";
   if (!server.enabled) return "Disabled";
   if (server.tool_count === 0) return server.last_synced_at ? "No tools discovered" : "Pending discovery";
   const approved = server.tools.filter((t) => t.approved).length;

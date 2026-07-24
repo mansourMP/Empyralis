@@ -13,7 +13,7 @@ Memory, Channels, and Connectors exist in two places, deliberately:
   workspace-wide. Shows the resource across all agents, unfiltered by which
   agent you were just looking at.
 - **Agent detail modal** (click any card in `/w/[id]/fleet`, including
-  Sage) — the same resource scoped to one agent. Channels and Connectors
+  the owner-facing agent) — the same resource scoped to one agent. Channels and Connectors
   are real platform-icon grids backed by live data (see below). Memory and
   Tools are wired to real per-agent APIs. Overview, Chat, and Model are
   real too.

@@ -26,6 +26,6 @@ When that session produces its output at `docs/handoff/PLATFORM-MAP.md`, start a
 
 ## Companion documents an engineer should also read
 
-- `docs/PLATFORM.md` — current architecture doc (the baseline)
+- `docs/PLATFORM-MAP.md` — current architecture doc (the baseline; this directory's own `01-graphify-platform-map.md` prompt is what originally produced it)
 - Linear documents (linked from both prompts) — product shape, principles, decisions
 - Memory files in `.claude/projects/-Users-mansur-empyralis/memory/` — platform vision, strategy, verified status

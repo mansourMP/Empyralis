@@ -293,6 +293,7 @@ def _build_personal_channel_envelope(
     is_owner: bool,
     is_group: bool,
     chat_label: Optional[str],
+    was_addressed: Optional[bool] = None,
 ) -> InboundEnvelope:
     """Construct the canonical InboundEnvelope (inbound_envelope.py) for a
     personal-channel turn, entirely from signals this bridge ALREADY
@@ -306,15 +307,24 @@ def _build_personal_channel_envelope(
     Surface derivation, specific to the PERSONAL-channel family (the
     owner's own connected account, never a bot with separate customer
     contacts):
-      - is_group=True -> GROUP. addressed=True here is not a guess: every
-        group message that reaches this function already passed the
+      - is_group=True -> GROUP. addressed=was_addressed, the caller-resolved
+        REAL fact (personal_channels_service._enforce_group_policy's own
+        result — an explicit mention or reply-to-agent), never a blanket
+        True.
+        UPDATED 2026-07-23 (group_policy build): before this build,
+        addressed=True here WAS a safe hardcode — every group message that
+        reached this function had already passed a hard, non-configurable
         mention/reply-to-Sage gate in personal_channels_service's inbound
-        handlers (_handle_whatsapp_gateway_channel_inbound,
-        _handle_telegram_gateway_channel_inbound,
-        _handle_local_bridge_gateway_channel_inbound all
-        `return {"ignored": ..., "reason": "group_no_mention"}` before ever
-        calling this code path), so "the agent was addressed" is an
-        already-enforced fact by the time we get here, not an inference.
+        handlers (`return {"ignored": ..., "reason": "group_no_mention"}`
+        before ever calling this code path), so "the agent was addressed"
+        was an already-enforced fact, not an inference. That invariant no
+        longer holds: requireMention now defaults OFF (Ruling A, "see-and-
+        decide"), so an unaddressed group message routinely reaches this
+        function too — was_addressed must be the caller's REAL, honest
+        fact so the model's own judgment (Ruling A's actual mechanism,
+        rendered via inbound_envelope.render_envelope_header's "you were
+        not addressed — observe..." branch) has accurate group context to
+        decide from, not a false "you were addressed directly" claim.
         Telegram broadcast-channel posts never reach this far either —
         runtime.ts's isBroadcastTelegramChat() hard-drops them gateway-side
         before sender resolution even runs (see the inbound-attribution
@@ -368,7 +378,7 @@ def _build_personal_channel_envelope(
     resolved_sender_id = str(sender_id or "").strip() or str(remote_jid or "").strip()
     if is_group:
         surface = SurfaceKind.GROUP
-        addressed: Optional[bool] = True
+        addressed: Optional[bool] = was_addressed
         chat = EnvelopeChat(id=str(remote_jid or "").strip(), title=str(chat_label or "").strip())
     else:
         surface = SurfaceKind.OWNER_SELF_CHAT if envelope_is_owner is True else SurfaceKind.DM
@@ -578,6 +588,7 @@ async def _build_unified_sage_personal_reply_async(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    was_addressed: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Route personal channel messages through the unified Sage turn adapter.
@@ -638,6 +649,18 @@ async def _build_unified_sage_personal_reply_async(
     treated as untrusted, attacker-influenceable text (sanitized +
     truncated before storage, see _sanitize_channel_label). None when
     unavailable; the mirror entry then falls back to fallback_label alone.
+
+    was_addressed: the REAL, caller-resolved "was this group message
+    actually addressed" fact (personal_channels_service._enforce_group_policy's
+    own result — an explicit mention or reply-to-agent) — feeds ONLY the
+    canonical InboundEnvelope's `addressed` field (see
+    _build_personal_channel_envelope's docstring). None for a non-group
+    turn (not applicable) or when the caller hasn't resolved a real fact
+    (renders as "unverified" in the header, never as a false "you were
+    addressed directly" claim). Defaults to None deliberately — unlike
+    is_owner/is_group, there is no safe non-None default here: with
+    requireMention OFF by default, a group turn reaching this function no
+    longer implies it was addressed.
     """
     # The CLEAN raw message — never wrapped, never provenance-prefixed.
     # This is what agent_conversation_memory persists below, regardless of
@@ -698,6 +721,7 @@ async def _build_unified_sage_personal_reply_async(
         is_owner=is_owner,
         is_group=is_group,
         chat_label=chat_label,
+        was_addressed=was_addressed,
     )
 
     # ── Durable per-agent conversation memory (agent_conversation_memory) ──
@@ -891,6 +915,7 @@ def _build_unified_sage_personal_reply(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    was_addressed: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     import asyncio
     import threading
@@ -914,6 +939,7 @@ def _build_unified_sage_personal_reply(
                 is_owner=is_owner,
                 is_group=is_group,
                 chat_label=chat_label,
+                was_addressed=was_addressed,
             )
         )
 
@@ -937,6 +963,7 @@ def _build_unified_sage_personal_reply(
                     is_owner=is_owner,
                     is_group=is_group,
                     chat_label=chat_label,
+                    was_addressed=was_addressed,
                 )
             )
         except Exception as exc:
@@ -962,6 +989,7 @@ async def build_whatsapp_personal_reply_async(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    was_addressed: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -977,6 +1005,7 @@ async def build_whatsapp_personal_reply_async(
             is_owner=is_owner,
             is_group=is_group,
             chat_label=chat_label,
+            was_addressed=was_addressed,
         )
         return unified
     except Exception as _exc:
@@ -1003,6 +1032,7 @@ async def build_telegram_personal_reply_async(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    was_addressed: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -1018,6 +1048,7 @@ async def build_telegram_personal_reply_async(
             is_owner=is_owner,
             is_group=is_group,
             chat_label=chat_label,
+            was_addressed=was_addressed,
         )
         return unified
     except Exception as _exc:
@@ -1044,6 +1075,7 @@ async def build_discord_personal_reply_async(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    was_addressed: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a Sage reply for a Discord personal DM.
 
@@ -1058,6 +1090,10 @@ async def build_discord_personal_reply_async(
     the other build_*_personal_reply_async functions and so a future caller
     that DOES resolve Discord owner identity can thread it through with no
     further changes to this function.
+
+    was_addressed: no live caller resolves this for Discord yet either
+    (no group_policy/mention-gating equivalent wired up for Discord) — see
+    build_whatsapp_personal_reply's docstring for the contract once one is.
     """
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -1073,6 +1109,7 @@ async def build_discord_personal_reply_async(
             is_owner=is_owner,
             is_group=is_group,
             chat_label=chat_label,
+            was_addressed=was_addressed,
         )
         return unified
     except Exception as _exc:
@@ -1098,6 +1135,7 @@ async def build_personal_channel_reply_async(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    was_addressed: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -1114,6 +1152,7 @@ async def build_personal_channel_reply_async(
             is_owner=is_owner,
             is_group=is_group,
             chat_label=chat_label,
+            was_addressed=was_addressed,
         )
         return unified
     except Exception as _exc:
@@ -1139,6 +1178,7 @@ def build_whatsapp_personal_reply(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    was_addressed: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a WhatsApp personal DM — as the specialist agent_id
     names (see _execute_channel_turn_with_envelope), or as Sage when
@@ -1164,6 +1204,12 @@ def build_whatsapp_personal_reply(
     is_group / chat_label: caller-resolved group signal + human-readable
     chat/group label — see _build_unified_sage_personal_reply_async's
     docstring for the owner-unified-memory contract they feed.
+
+    was_addressed: caller-resolved (personal_channels_service._enforce_group_policy's
+    own "was_addressed" result) real "was this group message actually
+    addressed" fact — see _build_personal_channel_envelope's docstring for
+    why this must never be a blanket True. None for a non-group turn
+    (not applicable).
     """
     unified = _build_unified_sage_personal_reply(
         surface_channel="whatsapp_personal",
@@ -1180,6 +1226,7 @@ def build_whatsapp_personal_reply(
         is_owner=is_owner,
         is_group=is_group,
         chat_label=chat_label,
+        was_addressed=was_addressed,
     )
     if unified is not None:
         return unified
@@ -1212,10 +1259,11 @@ def build_telegram_personal_reply(
     is_owner: bool = False,
     is_group: bool = False,
     chat_label: Optional[str] = None,
+    was_addressed: Optional[bool] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a reply for a Telegram personal DM — see build_whatsapp_personal_reply's
-    docstring for the agent_id, sender_id, is_owner, is_group and chat_label
-    contracts."""
+    docstring for the agent_id, sender_id, is_owner, is_group, chat_label
+    and was_addressed contracts."""
     unified = _build_unified_sage_personal_reply(
         surface_channel="telegram_personal",
         workspace_id=workspace_id,
@@ -1231,6 +1279,7 @@ def build_telegram_personal_reply(
         is_owner=is_owner,
         is_group=is_group,
         chat_label=chat_label,
+        was_addressed=was_addressed,
     )
     if unified is not None:
         return unified

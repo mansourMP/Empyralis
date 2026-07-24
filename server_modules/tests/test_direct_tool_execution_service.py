@@ -46,7 +46,7 @@ def _callbacks() -> service.DirectToolExecutionCallbacks:
             "agent_install_id": agent_install_id,
             "version_id": kwargs.get("version_id") or "version-1",
         },
-        memory_append_daily_note=lambda workspace_id, note, agent_install_id=None, actor=None, run_id=None: {
+        memory_append_daily_note=lambda workspace_id, note, agent_install_id=None, actor=None, run_id=None, **kwargs: {
             "workspace_id": workspace_id,
             "filename": "memory/2026-05-11.md",
             "appended_entry": f"- [00:00:00 UTC] {note}",

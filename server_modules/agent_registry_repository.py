@@ -6,6 +6,7 @@ import re
 import hashlib
 import hmac
 import secrets
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,13 @@ from typing import Any, Dict, List, Optional
 from server_modules import control_plane_repository, run_state_repository
 
 LOGGER = logging.getLogger(__name__)
+
+# Serializes the SQLite (local/dev) read-merge-write fallback for
+# update_workspace_agent_install -- same read-then-write shape as the
+# Postgres path (see docs/design/audit-silent-failures.md C1/S1), guarded
+# here with a plain lock instead of SELECT...FOR UPDATE since the local
+# fallback has no transaction/row-lock primitive of its own.
+_LOCAL_AGENT_INSTALL_LOCK = threading.Lock()
 
 
 CAPTAIN_AGENT_KIND = "master"
@@ -2228,45 +2236,53 @@ def _update_workspace_agent_install_local(
     tool_toggles: Optional[Dict[str, Any]] = None,
     hardware_access: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """SQLite fallback for update_workspace_agent_install."""
+    """SQLite fallback for update_workspace_agent_install.
+
+    Holds ``_LOCAL_AGENT_INSTALL_LOCK`` across the read-merge-write so two
+    concurrent callers (e.g. two threads, or a future to_thread/executor
+    caller) can't both read the same pre-image and race their writes -- the
+    same lost-update shape the Postgres path guards with
+    ``SELECT ... FOR UPDATE`` (docs/design/audit-silent-failures.md C1/S1).
+    """
     import json as _json
     from server_modules.control_plane_repository import _connect_local_control_plane_db
 
     try:
-        with _connect_local_control_plane_db() as connection:
-            existing_row = connection.execute(
-                "SELECT * FROM workspace_agent_installs WHERE id = ? AND tenant_id = ? AND workspace_id = ? LIMIT 1",
-                (str(install_id or "").strip(), str(tenant_id or "").strip(), str(workspace_id or "").strip()),
-            ).fetchone()
-            if existing_row is None:
-                return None
-            existing = dict(existing_row)
-            next_metadata = {**_json.loads(str(existing.get("metadata") or "{}")), **dict(metadata or {})}
-            next_label = str(label or "").strip() or str(existing.get("label") or "").strip()
-            next_enabled = 1 if enabled is True else (0 if enabled is False else int(existing.get("enabled") or 1))
-            next_status = str(status or "").strip() or str(existing.get("status") or "active").strip()
-            next_tool_toggles = {**_json.loads(str(existing.get("tool_toggles") or "{}")), **dict(tool_toggles or {})}
-            next_hardware_access = str(hardware_access or "").strip() or str(existing.get("hardware_access") or "none").strip() or "none"
-            connection.execute(
-                """UPDATE workspace_agent_installs
-                   SET label = ?, metadata = ?, enabled = ?, status = ?, tool_toggles = ?, hardware_access = ?, updated_at = ?
-                   WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
-                (
-                    next_label,
-                    _json.dumps(next_metadata),
-                    next_enabled,
-                    next_status,
-                    _json.dumps(next_tool_toggles),
-                    next_hardware_access,
-                    datetime.now(timezone.utc).isoformat(),
-                    str(install_id or "").strip(),
-                    str(tenant_id or "").strip(),
-                    str(workspace_id or "").strip(),
-                ),
+        with _LOCAL_AGENT_INSTALL_LOCK:
+            with _connect_local_control_plane_db() as connection:
+                existing_row = connection.execute(
+                    "SELECT * FROM workspace_agent_installs WHERE id = ? AND tenant_id = ? AND workspace_id = ? LIMIT 1",
+                    (str(install_id or "").strip(), str(tenant_id or "").strip(), str(workspace_id or "").strip()),
+                ).fetchone()
+                if existing_row is None:
+                    return None
+                existing = dict(existing_row)
+                next_metadata = {**_json.loads(str(existing.get("metadata") or "{}")), **dict(metadata or {})}
+                next_label = str(label or "").strip() or str(existing.get("label") or "").strip()
+                next_enabled = 1 if enabled is True else (0 if enabled is False else int(existing.get("enabled") or 1))
+                next_status = str(status or "").strip() or str(existing.get("status") or "active").strip()
+                next_tool_toggles = {**_json.loads(str(existing.get("tool_toggles") or "{}")), **dict(tool_toggles or {})}
+                next_hardware_access = str(hardware_access or "").strip() or str(existing.get("hardware_access") or "none").strip() or "none"
+                connection.execute(
+                    """UPDATE workspace_agent_installs
+                       SET label = ?, metadata = ?, enabled = ?, status = ?, tool_toggles = ?, hardware_access = ?, updated_at = ?
+                       WHERE id = ? AND tenant_id = ? AND workspace_id = ?""",
+                    (
+                        next_label,
+                        _json.dumps(next_metadata),
+                        next_enabled,
+                        next_status,
+                        _json.dumps(next_tool_toggles),
+                        next_hardware_access,
+                        datetime.now(timezone.utc).isoformat(),
+                        str(install_id or "").strip(),
+                        str(tenant_id or "").strip(),
+                        str(workspace_id or "").strip(),
+                    ),
+                )
+            return _get_workspace_agent_install_bundle_local(
+                install_id, tenant_id=tenant_id, workspace_id=workspace_id,
             )
-        return _get_workspace_agent_install_bundle_local(
-            install_id, tenant_id=tenant_id, workspace_id=workspace_id,
-        )
     except Exception:
         LOGGER.exception(
             "SQLite fallback update_workspace_agent_install failed (install_id=%s).",
@@ -2545,14 +2561,42 @@ async def update_workspace_agent_install(
     metadata: Optional[Dict[str, Any]] = None,
     hardware_access: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    existing = await get_workspace_agent_install_bundle(
+    """THE single shared read-merge-write helper for
+    ``workspace_agent_installs`` -- every caller that patches ``metadata``,
+    ``tool_toggles``, ``policy_context_overrides``, or ``connector_bindings``
+    (fleet_tools.py, agent_registry_api.py, hosted_bot_provisioning_service.py,
+    personal_channels_service.py, blackbox_runtime_support.py) goes through
+    this one function; there is no second ad hoc read-merge-write path to
+    this table. Do not add one -- extend the merge logic here instead.
+
+    Concurrency (docs/design/audit-silent-failures.md C1/S1): this used to
+    read the row, merge the patch into it in Python, then blindly
+    ``UPDATE`` the whole column back -- two concurrent callers (e.g. two
+    fleet-tool calls patching the same agent's metadata at once) would both
+    read the same pre-image, both compute a merge locally, and whichever
+    write committed last would silently discard the other's patch, with no
+    error on either side. The Postgres path below now holds
+    ``SELECT ... FOR UPDATE`` on the target row for the duration of the
+    read-merge-write, inside one transaction (same pattern already used by
+    ``debit_workspace_credit_balance_for_hosted_usage_atomic`` in
+    control_plane_repository.py) -- a second concurrent caller blocks on the
+    row lock and re-reads the first caller's committed row before computing
+    its own merge, instead of both starting from the same stale snapshot.
+    """
+    probe = await get_workspace_agent_install_bundle(
         install_id,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
     )
-    if not isinstance(existing, dict):
+    if not isinstance(probe, dict):
         return None
-    agent_kind = str(_dict_json(existing.get("agent_definition")).get("agent_kind") or "").strip().lower() or SPECIALIST_AGENT_KIND
+    # agent_kind/definition name come from the joined agent_definitions row,
+    # which this function never mutates -- safe to read once, outside the
+    # lock below (no race window: nothing else can change them concurrently
+    # with this call).
+    agent_kind = str(_dict_json(probe.get("agent_definition")).get("agent_kind") or "").strip().lower() or SPECIALIST_AGENT_KIND
+    definition_name = str(_dict_json(probe.get("agent_definition")).get("name") or "").strip()
+
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return _update_workspace_agent_install_local(
@@ -2566,53 +2610,82 @@ async def update_workspace_agent_install(
             tool_toggles=tool_toggles,
             hardware_access=hardware_access,
         )
-    next_tool_toggles = {**_dict_json(existing.get("tool_toggles")), **_dict_json(tool_toggles)}
-    next_policy = {**_dict_json(existing.get("policy_context_overrides")), **_dict_json(policy_context_overrides)}
-    next_metadata = {**_dict_json(existing.get("metadata")), **_dict_json(metadata)}
-    next_label = _normalize_token(label) or _normalize_token(existing.get("label")) or _normalize_token(_dict_json(existing.get("agent_definition")).get("name"))
-    normalized_metadata = normalize_install_contract_metadata(
-        install_id=str(install_id or "").strip() or None,
-        label=next_label,
-        agent_kind=agent_kind,
-        metadata=next_metadata,
-    )
-    await control_plane_repository.rls_execute(
-        pool,
-        """
-        UPDATE workspace_agent_installs
-        SET
-            label = $4,
-            runtime_profile_id = $5,
-            root_folder_uri = $6,
-            tool_toggles = $7::jsonb,
-            folder_grants = $8::jsonb,
-            connector_bindings = $9::jsonb,
-            memory_scope_overrides = $10::jsonb,
-            policy_context_overrides = $11::jsonb,
-            enabled = $12,
-            status = $13,
-            metadata = $14::jsonb,
-            hardware_access = $15,
-            updated_at = NOW()
-        WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
-        """,
-        str(install_id or "").strip(),
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
-        next_label,
-        _normalize_token(runtime_profile_id) if runtime_profile_id is not None else _normalize_token(existing.get("runtime_profile_id")),
-        _normalize_token(root_folder_uri) if root_folder_uri is not None else _normalize_token(existing.get("root_folder_uri")),
-        _to_json(next_tool_toggles, default={}),
-        _to_json(folder_grants if folder_grants is not None else existing.get("folder_grants"), default=[]),
-        _to_json(connector_bindings if connector_bindings is not None else existing.get("connector_bindings"), default={}),
-        _to_json(memory_scope_overrides if memory_scope_overrides is not None else existing.get("memory_scope_overrides"), default={}),
-        _to_json(next_policy, default={}),
-        bool(enabled) if enabled is not None else bool(existing.get("enabled", True)),
-        _normalize_token(status) or str(existing.get("status") or "active").strip() or "active",
-        _to_json(normalized_metadata, default={}),
-        _normalize_token(hardware_access) or str(existing.get("hardware_access") or "none").strip() or "none",
-        tenant_id=tenant_id, workspace_id=workspace_id,
-    )
+
+    clean_install_id = str(install_id or "").strip()
+    clean_tenant_id = str(tenant_id or "").strip()
+    clean_workspace_id = str(workspace_id or "").strip()
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await control_plane_repository.apply_connection_scope(
+                connection, tenant_id=tenant_id, workspace_id=workspace_id,
+            )
+            locked_row = await connection.fetchrow(
+                """
+                SELECT tool_toggles, folder_grants, connector_bindings, memory_scope_overrides,
+                       policy_context_overrides, metadata, label, runtime_profile_id, root_folder_uri,
+                       enabled, status, hardware_access
+                FROM workspace_agent_installs
+                WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
+                FOR UPDATE
+                """,
+                clean_install_id, clean_tenant_id, clean_workspace_id,
+            )
+            if locked_row is None:
+                return None
+            existing = dict(locked_row)
+            existing_tool_toggles = _dict_json(existing.get("tool_toggles"))
+            existing_policy = _dict_json(existing.get("policy_context_overrides"))
+            existing_metadata = _dict_json(existing.get("metadata"))
+            existing_folder_grants = _list_json(existing.get("folder_grants"))
+            existing_connector_bindings = _dict_json(existing.get("connector_bindings"))
+            existing_memory_scope_overrides = _dict_json(existing.get("memory_scope_overrides"))
+
+            next_tool_toggles = {**existing_tool_toggles, **_dict_json(tool_toggles)}
+            next_policy = {**existing_policy, **_dict_json(policy_context_overrides)}
+            next_metadata = {**existing_metadata, **_dict_json(metadata)}
+            next_label = _normalize_token(label) or _normalize_token(existing.get("label")) or _normalize_token(definition_name)
+            normalized_metadata = normalize_install_contract_metadata(
+                install_id=clean_install_id or None,
+                label=next_label,
+                agent_kind=agent_kind,
+                metadata=next_metadata,
+            )
+            await connection.execute(
+                """
+                UPDATE workspace_agent_installs
+                SET
+                    label = $4,
+                    runtime_profile_id = $5,
+                    root_folder_uri = $6,
+                    tool_toggles = $7::jsonb,
+                    folder_grants = $8::jsonb,
+                    connector_bindings = $9::jsonb,
+                    memory_scope_overrides = $10::jsonb,
+                    policy_context_overrides = $11::jsonb,
+                    enabled = $12,
+                    status = $13,
+                    metadata = $14::jsonb,
+                    hardware_access = $15,
+                    updated_at = NOW()
+                WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
+                """,
+                clean_install_id,
+                clean_tenant_id,
+                clean_workspace_id,
+                next_label,
+                _normalize_token(runtime_profile_id) if runtime_profile_id is not None else _normalize_token(existing.get("runtime_profile_id")),
+                _normalize_token(root_folder_uri) if root_folder_uri is not None else _normalize_token(existing.get("root_folder_uri")),
+                _to_json(next_tool_toggles, default={}),
+                _to_json(folder_grants if folder_grants is not None else existing_folder_grants, default=[]),
+                _to_json(connector_bindings if connector_bindings is not None else existing_connector_bindings, default={}),
+                _to_json(memory_scope_overrides if memory_scope_overrides is not None else existing_memory_scope_overrides, default={}),
+                _to_json(next_policy, default={}),
+                bool(enabled) if enabled is not None else bool(existing.get("enabled", True)),
+                _normalize_token(status) or str(existing.get("status") or "active").strip() or "active",
+                _to_json(normalized_metadata, default={}),
+                _normalize_token(hardware_access) or str(existing.get("hardware_access") or "none").strip() or "none",
+            )
     return await get_workspace_agent_install_bundle(
         install_id,
         tenant_id=tenant_id,

@@ -8,78 +8,19 @@ from fastapi import Depends, HTTPException, File, UploadFile
 
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
 from server_modules.runtime_common import require_member_api_key, require_viewer_api_key
-from server_modules.schemas import SageContextFileUpdateRequest
-from server_modules.workspace_context import (
-    read_workspace_context_files,
-    write_workspace_context_file,
-    workspace_attachments_dir,
-)
+from server_modules.workspace_context import workspace_attachments_dir
 
 
 def register_sage_context_file_routes(app) -> None:
-    @app.get("/api/sage-context-files", dependencies=[Depends(require_viewer_api_key)])
-    async def list_workspace_sage_context_files(
-        workspace_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        current_user=Depends(require_viewer_api_key),
-    ):
-        """List SOUL.md/MEMORY.md/GOALS.md/etc. When agent_id is passed, scopes
-        to that agent's own context directory (fleet agent modal's Memory tab)
-        instead of the workspace root (legacy workspace-wide Memory pane)."""
-        resolved_workspace_id = enforce_workspace_access(
-            current_user,
-            workspace_id,
-            minimum_role="viewer",
-        )
-        tenant_id = workspace_tenant_id(current_user, resolved_workspace_id)
-        files = read_workspace_context_files(
-            workspace_id=resolved_workspace_id,
-            agent_install_id=agent_id,
-        )
-        return {
-            "ok": True,
-            "workspace_id": resolved_workspace_id,
-            "tenant_id": tenant_id,
-            "agent_id": agent_id,
-            "files": [
-                {
-                    "filename": filename,
-                    "content": str(content or ""),
-                }
-                for filename, content in files.items()
-            ],
-        }
-
-    @app.patch("/api/sage-context-files/{filename}", dependencies=[Depends(require_member_api_key)])
-    async def update_workspace_sage_context_file(
-        filename: str,
-        body: SageContextFileUpdateRequest,
-        current_user=Depends(require_member_api_key),
-    ):
-        resolved_workspace_id = enforce_workspace_access(
-            current_user,
-            body.workspace_id,
-            minimum_role="member",
-        )
-        tenant_id = workspace_tenant_id(current_user, resolved_workspace_id)
-        try:
-            saved = write_workspace_context_file(
-                filename,
-                body.content,
-                workspace_id=resolved_workspace_id,
-                agent_install_id=body.agent_id,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {
-            "ok": True,
-            "workspace_id": resolved_workspace_id,
-            "tenant_id": tenant_id,
-            "agent_id": body.agent_id,
-            "filename": saved["filename"],
-            "content": saved["content"],
-        }
-
+    # Founder ruling (2026-07-23, final): the two SOUL.md/MEMORY.md/GOALS.md/
+    # etc. "context file" routes that used to live here (GET
+    # /api/sage-context-files, PATCH /api/sage-context-files/{filename}) are
+    # removed -- confirmed zero frontend callers (workstation-client.ts's
+    # listSageContextFiles/updateSageContextFile wrappers, removed in the
+    # same change, had no call sites anywhere in frontend/). The
+    # /api/sage-chat/attachments routes below are unrelated (chat file
+    # uploads, still live -- workstation-client.ts:1215 calls them) and stay
+    # registered through this same function under its original name.
     @app.post("/api/sage-chat/attachments", dependencies=[Depends(require_member_api_key)])
     async def upload_sage_chat_attachment(
         workspace_id: str,

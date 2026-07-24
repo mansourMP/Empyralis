@@ -1,7 +1,9 @@
 import asyncio
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from server_modules import sage_skills_api
@@ -23,38 +25,66 @@ class _FakeApp:
 
 
 class SageSkillsApiTests(unittest.TestCase):
-    def test_get_route_normalizes_curated_skill_states_and_reasons(self) -> None:
+    """Catalog unification (docs/design/audit-skills.md §3 item 3): the
+    hardcoded _CURATED_SKILL_PACK (1Password/Apple Notes/Apple Reminders/
+    tmux — zero execution implementation anywhere) is gone. Both
+    /api/sage-skills and /api/sage-capabilities now source every skill from
+    skill_registry.list_skill_definitions, the same catalog skill_invoke
+    dispatches against. Patching server_modules.skill_registry.
+    list_installed_skills (not sage_skills_api.list_installed_skills, which
+    no longer exists in this module) controls the filesystem-scanned half of
+    that catalog; the ~20 real _BUILT_IN_SKILLS entries are always present
+    alongside it, so assertions below are existence-based rather than
+    fixed-index."""
+
+    def test_no_hardcoded_curated_pack_remains(self) -> None:
+        self.assertFalse(hasattr(sage_skills_api, "_CURATED_SKILL_PACK"))
+        self.assertFalse(hasattr(sage_skills_api, "CuratedSkillDefinition"))
+
+    def test_get_route_normalizes_installed_skill_states_and_reasons(self) -> None:
         fake_server = types.ModuleType("server")
         fake_server.Depends = lambda dependency: dependency
         fake_server.require_api_key = object()
 
         previous_server = sys.modules.get("server")
         sys.modules["server"] = fake_server
+        temp_dir = tempfile.TemporaryDirectory()
         try:
+            # A real path is needed here (not just an inline "skill_body"
+            # string) because skill_registry.SkillDefinition only carries a
+            # `path`, not the body text itself — sage_skills_api re-reads
+            # SKILL.md from disk for the Level-2 detail view
+            # (_skill_definition_body), same as it does for the 6 real
+            # bundled skills this task authored.
+            skill_dir = Path(temp_dir.name) / "vault-helper"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            (skill_dir / "SKILL.md").write_text(
+                "# Vault Helper\n\napi_key=sk-test-secret-value\nUse vault items safely.",
+                encoding="utf-8",
+            )
+            (skill_dir / "README.md").write_text("Vault helper skill package.", encoding="utf-8")
+
             app = _FakeApp()
             sage_skills_api.register_sage_skills_routes(app)
             route = app.routes[("GET", "/api/sage-skills")]
             with (
                 patch("server_modules.sage_skills_api.enforce_workspace_access", return_value="workspace-1"),
                 patch("server_modules.sage_skills_api.workspace_tenant_id", return_value="tenant-1"),
-                patch("server_modules.sage_skills_api.current_device_os_label", return_value="macOS"),
                 patch(
-                    "server_modules.sage_skills_api.list_installed_skills",
+                    "server_modules.skill_registry.list_installed_skills",
                     return_value=[
                         {
-                            "id": "1password",
-                            "name": "1Password",
+                            "id": "vault-helper",
+                            "name": "Vault Helper",
                             "enabled": True,
                             "available": True,
                             "description": "Use vault items.",
-                            "tools": ["vault.search"],
-                            "skill_body": "# 1Password\n\napi_key=sk-test-secret-value\nUse vault items safely.",
-                            "readme": "1Password skill package.",
-                            "runtime_metadata": {"action_class": "read", "requires_approval": False},
+                            "path": str(skill_dir),
+                            "runtime_metadata": {"action_class": "read", "requires_approval": False, "execution_adapter": "handler"},
                         },
                         {
-                            "id": "tmux",
-                            "name": "tmux",
+                            "id": "tmux-clone",
+                            "name": "tmux-clone",
                             "enabled": True,
                             "available": False,
                             "missing_bins": ["tmux"],
@@ -64,44 +94,68 @@ class SageSkillsApiTests(unittest.TestCase):
                                 "Missing runtime dependencies: tmux",
                                 "Missing environment variables: TMUX_SOCKET",
                             ],
-                            "runtime_metadata": {"action_class": "local_write", "requires_approval": True},
+                            "runtime_metadata": {"action_class": "read", "requires_approval": True, "execution_adapter": "handler"},
                         },
                         {
                             "id": "custom-helper",
                             "name": "Custom Helper",
                             "enabled": False,
                             "available": True,
-                            "runtime_metadata": {"action_class": "read", "requires_approval": False},
+                            "runtime_metadata": {"action_class": "read", "requires_approval": False, "execution_adapter": "handler"},
                         },
                     ],
                 ),
             ):
                 payload = asyncio.run(route(workspace_id="workspace-1", current_user={"user_id": "user-1"}))
-            self.assertEqual(payload["summary"]["ready_count"], 1)
-            self.assertEqual(payload["summary"]["needs_setup_count"], 3)
-            self.assertEqual(payload["summary"]["unsupported_count"], 0)
-            self.assertEqual(payload["summary"]["disabled_count"], 1)
-            self.assertEqual(payload["curated_pack"][0]["name"], "1Password")
-            self.assertEqual(payload["curated_pack"][1]["name"], "Apple Notes")
-            self.assertEqual(payload["curated_pack"][2]["name"], "Apple Reminders")
-            self.assertEqual(payload["curated_pack"][3]["name"], "tmux")
-            self.assertEqual(payload["curated_pack"][0]["status"], "ready")
-            self.assertTrue(payload["curated_pack"][0]["active_now"])
+
+            self.assertNotIn("curated_pack", payload)
+            by_id = {item["id"]: item for item in payload["items"]}
+
+            # A skill that has zero execution wiring anywhere (the old
+            # curated pack's entire membership) must never appear again.
+            self.assertNotIn("1password", by_id)
+            self.assertNotIn("tmux", by_id)
+
+            self.assertEqual(by_id["vault-helper"]["status"], "ready")
+            self.assertTrue(by_id["vault-helper"]["active_now"])
             self.assertEqual(
-                payload["curated_pack"][0]["skill_body"],
-                "# 1Password\n\napi_key=[redacted-secret]\nUse vault items safely.",
+                by_id["vault-helper"]["skill_body"],
+                "# Vault Helper\n\napi_key=[redacted-secret]\nUse vault items safely.",
             )
-            self.assertEqual(payload["curated_pack"][0]["readme"], "1Password skill package.")
-            self.assertEqual(payload["curated_pack"][1]["status"], "needs_setup")
-            self.assertEqual(payload["curated_pack"][3]["status"], "needs_setup")
+            self.assertEqual(by_id["vault-helper"]["readme"], "Vault helper skill package.")
+
+            self.assertEqual(by_id["tmux-clone"]["status"], "needs_setup")
+            # Rough edge, disclosed honestly: skill_registry.SkillDefinition
+            # has no supported_os field, so per-OS detail computed by
+            # installed_skills.list_installed_skills (missing_bins etc.) is
+            # preserved via unavailable_reason text below, but the
+            # structured supported_os list itself does not survive the
+            # SkillDefinition round-trip — it is always [] for
+            # catalog-sourced items now, unlike the pre-unification payload.
+            self.assertEqual(by_id["tmux-clone"]["supported_os"], [])
             self.assertEqual(
-                payload["curated_pack"][3]["reason"],
+                by_id["tmux-clone"]["reason"],
                 "Missing runtime dependencies: tmux; Missing environment variables: TMUX_SOCKET",
             )
-            self.assertEqual(payload["curated_pack"][3]["supported_os"], ["macos"])
-            self.assertIn("Install: tmux.", payload["curated_pack"][3]["setup_requirement"])
-            self.assertEqual(payload["items"][-1]["status"], "disabled_policy")
+            self.assertIn("Missing runtime dependencies: tmux", by_id["tmux-clone"]["setup_requirement"])
+
+            # A disabled skill is still LISTED (with an honest status), not
+            # silently dropped — this is the Tools/Skills tab, not the live
+            # model manifest (that filtering happens one layer up, in
+            # build_model_capability_manifest).
+            self.assertEqual(by_id["custom-helper"]["status"], "disabled_policy")
+
+            # The hardcoded _BUILT_IN_SKILLS entries (memory-manager,
+            # code-runner, ...) are always part of the merged catalog
+            # regardless of what the mocked filesystem scan above returns —
+            # the real filesystem-backed versions (with skills/<id>/SKILL.md
+            # bodies) are covered by test_skill_catalog_unification.py's
+            # unpatched-filesystem tests instead of here.
+            for skill_id in ("memory-manager", "code-runner", "file-manager", "telegram-bot", "vision-monitor"):
+                self.assertIn(skill_id, by_id, f"expected {skill_id} in the unified skill catalog")
+                self.assertEqual(by_id[skill_id]["status"], "ready")
         finally:
+            temp_dir.cleanup()
             if previous_server is None:
                 sys.modules.pop("server", None)
             else:
@@ -121,9 +175,8 @@ class SageSkillsApiTests(unittest.TestCase):
             with (
                 patch("server_modules.sage_skills_api.enforce_workspace_access", return_value="workspace-1"),
                 patch("server_modules.sage_skills_api.workspace_tenant_id", return_value="tenant-1"),
-                patch("server_modules.sage_skills_api.current_device_os_label", return_value="macOS"),
                 patch(
-                    "server_modules.sage_skills_api.list_installed_skills",
+                    "server_modules.skill_registry.list_installed_skills",
                     return_value=[
                         {
                             "id": "custom-helper",
@@ -131,11 +184,11 @@ class SageSkillsApiTests(unittest.TestCase):
                             "enabled": True,
                             "available": True,
                             "description": "Read custom workspace data.",
-                            "tools": ["custom.read"],
                             "runtime_metadata": {
                                 "action_class": "read",
                                 "requires_approval": False,
                                 "execution_mode": "cloud",
+                                "execution_adapter": "handler",
                             },
                         },
                     ],
@@ -171,12 +224,27 @@ class SageSkillsApiTests(unittest.TestCase):
 
             items = payload["items"]
             self.assertTrue(any(item["type"] == "memory" and item["tool_id"] == "memory_search" for item in items))
+            # Every skill capability record — including this custom one —
+            # now points at the single real skill_invoke dispatcher, not a
+            # per-skill tool name, and the skill_id the model must pass is
+            # spelled out in the description.
             self.assertTrue(
                 any(
                     item["type"] == "skill"
                     and item["skill_id"] == "custom-helper"
-                    and item["tool_id"] == "custom.read"
+                    and item["tool_id"] == "skill_invoke"
                     and item["status"] == "ready"
+                    and 'skill_id="custom-helper"' in item["description"]
+                    for item in items
+                )
+            )
+            # A real bundled skill from this task's unified catalog is in
+            # the same combined payload.
+            self.assertTrue(
+                any(
+                    item["type"] == "skill"
+                    and item["skill_id"] == "memory-manager"
+                    and item["tool_id"] == "skill_invoke"
                     for item in items
                 )
             )

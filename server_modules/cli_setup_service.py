@@ -11,8 +11,18 @@ CLI_LOGIN_START_CAPABILITY = "cli.login.start"
 CLI_LOGIN_INPUT_CAPABILITY = "cli.login.input"
 CLI_LOGIN_OUTPUT_MESSAGE_TYPE = "cli.login.output"
 
-_SUPPORTED_RUNTIMES = ("claude_code", "codex")
+_SUPPORTED_RUNTIMES = ("claude_code", "codex", "grok_build", "cursor_cli")
 _GATEWAY_EVENTS_PAGE_SIZE = 500
+
+# Human label per runtime — every error/message helper below reads off this
+# instead of a hardcoded claude_code/codex ternary, so adding a runtime is
+# one entry here, not N call sites.
+_RUNTIME_LABEL: Dict[str, str] = {
+    "claude_code": "Claude Code",
+    "codex": "Codex",
+    "grok_build": "Grok Build",
+    "cursor_cli": "Cursor CLI",
+}
 
 # BYO-brain: which auth methods each runtime advertises to the UI. First
 # entry is the default a call to /cli/login/start with no method gets, AND
@@ -78,6 +88,49 @@ LOGIN_METHODS: Dict[str, List[Dict[str, Any]]] = {
             "input_kind": "api_key",
         },
     ],
+    # xAI Grok Build — docs.x.ai/build, verified live 2026-07-24. `grok login
+    # --device-auth` (alias `--device-code`) is the only method: it's a real,
+    # documented device-authorization grant (prints a URL + code, polls until
+    # confirmed) — same reliability class as Codex's device_auth. There is no
+    # api_key login-session method here: XAI_API_KEY is documented as an
+    # env-var fallback the CLI reads at each invocation, not something a
+    # `grok login`-style subcommand reads from stdin and persists — see
+    # empyralis-gateway/src/llm/cli-login-session.ts's grok_build comment for
+    # the full reasoning (same shape as why `claude setup-token` isn't wired
+    # as a login-session method either).
+    "grok_build": [
+        {
+            "key": "device_auth",
+            "label": "Your SuperGrok / X Premium+ subscription (device code)",
+            "description": (
+                "Uses your SuperGrok/X Premium+ plan quota. Sign in on any browser — device-code "
+                "flow, works reliably on a headless box."
+            ),
+            "input_kind": None,
+        },
+    ],
+    # Cursor CLI — cursor.com/docs/cli, verified live 2026-07-24. `agent login`
+    # (spawned with NO_OPEN_BROWSER=1 so it prints the URL instead of trying
+    # to open a browser on the headless Gateway) is the only method. Real,
+    # documented caveat, not a hidden risk: Cursor's own community forum has
+    # reports of this flow failing to complete over SSH/headless connections
+    # — its docs don't disclose the underlying OAuth mechanism the way
+    # Codex's/Grok's device-authorization grant is disclosed. If it fails or
+    # times out, that surfaces as a real, loud sign-in failure (never
+    # silently). No api_key login-session method here either, for the same
+    # reason as Grok Build above — CURSOR_API_KEY is an env-var fallback with
+    # no persisting stdin subcommand.
+    "cursor_cli": [
+        {
+            "key": "login",
+            "label": "Your Cursor subscription (Pro / Pro+ / Ultra)",
+            "description": (
+                "Uses your Cursor plan quota. Sign in on any browser. If this doesn't complete over "
+                "a remote connection, set CURSOR_API_KEY directly in this Gateway's own environment instead."
+            ),
+            "input_kind": None,
+        },
+    ],
 }
 
 
@@ -85,6 +138,7 @@ _VALID_INPUT_KINDS_BY_METHOD = {
     "device_auth": None,
     "claudeai": None,
     "console": None,
+    "login": None,
     "api_key": "api_key",
     "access_token": "access_token",
 }
@@ -105,7 +159,8 @@ def _normalize_runtime(runtime: str) -> str:
     normalized = str(runtime or "").strip().lower()
     if normalized not in _SUPPORTED_RUNTIMES:
         raise CliSetupError(
-            f"Heads up: '{runtime}' is not a supported cli_setup runtime. Use claude_code or codex.",
+            f"Heads up: '{runtime}' is not a supported cli_setup runtime. "
+            f"Use one of: {', '.join(_SUPPORTED_RUNTIMES)}.",
             status_code=400,
         )
     return normalized
@@ -122,6 +177,32 @@ def _status_code_for_reason(reason: str) -> int:
     return 400
 
 
+# Runtime-keyed lookups for the three failure families below that need a
+# distinct PlatformEvent per runtime — one row per runtime here, not a growing
+# is_codex-style boolean ternary. Falls back to the claude_code event for an
+# unrecognized runtime (never raises here; _normalize_runtime already rejects
+# anything outside _SUPPORTED_RUNTIMES before this function is ever reached
+# with a bogus value in production use).
+_LOGIN_NOT_INSTALLED_EVENT_BY_RUNTIME = {
+    "claude_code": _pe.CLI_SETUP_CLAUDE_LOGIN_NOT_INSTALLED,
+    "codex": _pe.CLI_SETUP_CODEX_LOGIN_NOT_INSTALLED,
+    "grok_build": _pe.CLI_SETUP_GROK_BUILD_LOGIN_NOT_INSTALLED,
+    "cursor_cli": _pe.CLI_SETUP_CURSOR_LOGIN_NOT_INSTALLED,
+}
+_INSTALL_FAILED_EVENT_BY_RUNTIME = {
+    "claude_code": _pe.CLI_SETUP_CLAUDE_INSTALL_FAILED,
+    "codex": _pe.CLI_SETUP_CODEX_INSTALL_FAILED,
+    "grok_build": _pe.CLI_SETUP_GROK_BUILD_INSTALL_FAILED,
+    "cursor_cli": _pe.CLI_SETUP_CURSOR_INSTALL_FAILED,
+}
+_LOGIN_FAILED_EVENT_BY_RUNTIME = {
+    "claude_code": _pe.CLI_SETUP_CLAUDE_LOGIN_FAILED,
+    "codex": _pe.CLI_SETUP_CODEX_LOGIN_FAILED,
+    "grok_build": _pe.CLI_SETUP_GROK_BUILD_LOGIN_FAILED,
+    "cursor_cli": _pe.CLI_SETUP_CURSOR_LOGIN_FAILED,
+}
+
+
 def _friendly_cli_setup_error(reason: str, *, login: bool, runtime: str) -> str:
     """Map a raw dispatch/readiness reason (or a wrapped Gateway-side
     CliInstallError/CliLoginError message) to a platform-voice message, one
@@ -129,7 +210,7 @@ def _friendly_cli_setup_error(reason: str, *, login: bool, runtime: str) -> str:
     _friendly_cli_subscription_error's shape for the cli_setup (install /
     sign-in) action family."""
     r = str(reason or "").strip().lower()
-    is_codex = str(runtime or "").strip().lower() == "codex"
+    normalized_runtime = str(runtime or "").strip().lower()
 
     if (
         "registration_missing" in r or "registration_inactive" in r
@@ -142,21 +223,23 @@ def _friendly_cli_setup_error(reason: str, *, login: bool, runtime: str) -> str:
         return _say(_pe.CLI_SETUP_GATEWAY_OFFLINE)
     if "npm_missing" in r:
         return _say(_pe.CLI_SETUP_INSTALL_NPM_MISSING)
+    if "dependency_missing" in r:
+        return _say(_pe.CLI_SETUP_INSTALL_DEPENDENCY_MISSING)
     if "permission_denied" in r:
         return _say(_pe.CLI_SETUP_INSTALL_PERMISSION_DENIED)
     if "network_error" in r:
         return _say(_pe.CLI_SETUP_INSTALL_NETWORK_ERROR)
     if "not_installed" in r:
-        return _say(_pe.CLI_SETUP_CODEX_LOGIN_NOT_INSTALLED if is_codex else _pe.CLI_SETUP_CLAUDE_LOGIN_NOT_INSTALLED)
+        return _say(_LOGIN_NOT_INSTALLED_EVENT_BY_RUNTIME.get(normalized_runtime, _pe.CLI_SETUP_CLAUDE_LOGIN_NOT_INSTALLED))
     if "cancelled" in r:
         return _say(_pe.CLI_SETUP_LOGIN_CANCELLED)
     if "timeout" in r or "timed out" in r:
         return _say(_pe.CLI_SETUP_LOGIN_TIMEOUT if login else _pe.CLI_SETUP_INSTALL_TIMEOUT)
     if "crash" in r or "exited unexpectedly" in r or "gateway tool invocation failed" in r:
         if login:
-            return _say(_pe.CLI_SETUP_CODEX_LOGIN_FAILED if is_codex else _pe.CLI_SETUP_CLAUDE_LOGIN_FAILED)
-        return _say(_pe.CLI_SETUP_CODEX_INSTALL_FAILED if is_codex else _pe.CLI_SETUP_CLAUDE_INSTALL_FAILED)
-    label = "Codex" if is_codex else "Claude Code"
+            return _say(_LOGIN_FAILED_EVENT_BY_RUNTIME.get(normalized_runtime, _pe.CLI_SETUP_CLAUDE_LOGIN_FAILED))
+        return _say(_INSTALL_FAILED_EVENT_BY_RUNTIME.get(normalized_runtime, _pe.CLI_SETUP_CLAUDE_INSTALL_FAILED))
+    label = _RUNTIME_LABEL.get(normalized_runtime, runtime or "this runtime")
     action_label = "sign-in" if login else "install"
     return f"Heads up: {label} {action_label} failed on the bound Gateway ({reason})."
 

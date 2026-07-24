@@ -256,6 +256,7 @@ class TestAgentMemoryAttributionMigration(unittest.TestCase):
             agent_install_id="agent-1", sync_memory_md=False,
             source={"platform": "telegram_personal", "surface": "group",
                     "sender_id": "aruzhan-1", "sender_name": "Aruzhan", "sender_is_owner": False},
+            attribution_reason="Aruzhan stated a food preference directly; worth remembering for future meal planning.",
         )
         entries = {e["key"]: e for e in self.m._list_memory_entries("ws-1", agent_install_id="agent-1")}
 
@@ -284,6 +285,7 @@ class TestAgentMemoryAttributionMigration(unittest.TestCase):
             agent_install_id="agent-1", sync_memory_md=False,
             source={"platform": "imessage_personal", "surface": "dm",
                     "sender_id": "x", "sender_name": "Casey", "sender_is_owner": None},
+            attribution_reason="Casey stated a UI preference; ownership unverified on this surface.",
         )
         [entry] = self.m._list_memory_entries("ws-1", agent_install_id="agent-1")
         marker = self.m.format_source_marker(entry)
@@ -297,6 +299,7 @@ class TestAgentMemoryAttributionMigration(unittest.TestCase):
             "ws-1", "fact-x", "v1",
             agent_install_id="agent-1", sync_memory_md=False,
             source={"platform": "slack", "sender_id": "u1", "sender_name": "Dana", "sender_is_owner": False},
+            attribution_reason="Dana stated this directly in Slack.",
         )
         self.m._save_memory("ws-1", "fact-x", "v2", agent_install_id="agent-1", sync_memory_md=False)
         [entry] = self.m._list_memory_entries("ws-1", agent_install_id="agent-1")
@@ -310,6 +313,7 @@ class TestAgentMemoryAttributionMigration(unittest.TestCase):
             agent_install_id="agent-1", sync_memory_md=False,
             source={"platform": "whatsapp_personal", "surface": "dm",
                     "sender_id": "s1", "sender_name": "Priya", "sender_is_owner": False},
+            attribution_reason="Priya stated a communication-style preference directly.",
         )
         entries = self.m._list_memory_entries("ws-1", agent_install_id="agent-1")
         projection = self.m._build_memory_md_projection(entries)
@@ -380,6 +384,7 @@ class TestMemoryWriteFileIndexDiscipline(unittest.TestCase):
             "ws-1", "MEMORY.md", "dislikes mushrooms", mode="append", reason="memory_write",
             source={"platform": "telegram_personal", "surface": "group",
                     "sender_id": "123", "sender_name": "Aruzhan", "sender_is_owner": False},
+            attribution_reason="Aruzhan stated a food preference directly in the group.",
         )
         content = workspace_context.read_workspace_context_file("MEMORY.md", workspace_id="ws-1")
         assert "Aruzhan" in content

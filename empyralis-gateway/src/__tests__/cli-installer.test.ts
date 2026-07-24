@@ -139,6 +139,99 @@ test("codex install uses the codex package and binary", async () => {
   assert.equal(result.package, "@openai/codex");
 });
 
+// ---- Script-installed runtimes (Grok Build / Cursor CLI) ------------------
+// Neither ships an npm package — each is installed via its own vendor-hosted
+// shell script, verified live 2026-07-24 against docs.x.ai/build (Grok
+// Build's getting-started guide) and cursor.com/install (Cursor's install
+// script, fetched and inspected directly). These tests cover the DIFFERENT
+// install mechanism, not just a different package name.
+
+test("grok_build install: spawns `sh -c \"curl -fsSL https://x.ai/cli/install.sh | bash\"`, confirms `grok` lands on PATH, no npm involved", async () => {
+  const installChild = makeFakeChild();
+  let capturedCommand = "";
+  let capturedArgs: string[] = [];
+  const promise = installCliSubscriptionRuntime(
+    { runtime: "grok_build", timeoutMs: 5_000 },
+    {
+      spawnImpl: (command, args) => {
+        capturedCommand = command;
+        capturedArgs = args;
+        return installChild.child;
+      },
+      commandExists: commandExistsAlways(),
+      env: { PATH: "/usr/bin" },
+    },
+  );
+  installChild.emitClose(0);
+  const result = await promise;
+  assert.equal(capturedCommand, "/usr/bin/sh");
+  assert.deepEqual(capturedArgs, ["-c", "curl -fsSL https://x.ai/cli/install.sh | bash"]);
+  assert.equal(result.installed, true);
+  assert.equal(result.runtime, "grok_build");
+  assert.equal(result.package, "https://x.ai/cli/install.sh");
+});
+
+test("cursor_cli install: spawns `sh -c \"curl https://cursor.com/install -fsS | bash\"`, confirms `cursor-agent` lands on PATH", async () => {
+  const installChild = makeFakeChild();
+  let capturedArgs: string[] = [];
+  const promise = installCliSubscriptionRuntime(
+    { runtime: "cursor_cli", timeoutMs: 5_000 },
+    {
+      spawnImpl: (_command, args) => {
+        capturedArgs = args;
+        return installChild.child;
+      },
+      commandExists: commandExistsAlways(),
+      env: { PATH: "/usr/bin" },
+    },
+  );
+  installChild.emitClose(0);
+  const result = await promise;
+  assert.deepEqual(capturedArgs, ["-c", "curl -fsSL https://cursor.com/install | bash"]);
+  assert.equal(result.installed, true);
+  assert.equal(result.runtime, "cursor_cli");
+});
+
+test("grok_build/cursor_cli: throws dependency_missing (not npm_missing) before spawning anything when curl is not on PATH", async () => {
+  let spawned = false;
+  const promise = installCliSubscriptionRuntime(
+    { runtime: "grok_build", timeoutMs: 5_000 },
+    {
+      spawnImpl: () => {
+        spawned = true;
+        throw new Error("should not be called");
+      },
+      commandExists: commandExistsAlways({ curl: null }),
+      env: { PATH: "/usr/bin" },
+    },
+  );
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliInstallError);
+    assert.equal(err.kind, "dependency_missing");
+    return true;
+  });
+  assert.equal(spawned, false, "must not spawn when the curl/sh preflight already fails");
+});
+
+test("grok_build/cursor_cli: exit 0 but binary still missing from PATH is reported honestly, not silently accepted", async () => {
+  const installChild = makeFakeChild();
+  const promise = installCliSubscriptionRuntime(
+    { runtime: "cursor_cli", timeoutMs: 5_000 },
+    {
+      spawnImpl: () => installChild.child,
+      // "cursor-agent" never resolves, even after a reported-successful install.
+      commandExists: commandExistsAlways({ "cursor-agent": null }),
+      env: { PATH: "/usr/bin" },
+    },
+  );
+  installChild.emitClose(0);
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliInstallError);
+    assert.equal(err.kind, "crash");
+    return true;
+  });
+});
+
 test("classifies EACCES stderr as permission_denied, not a generic crash", async () => {
   const installChild = makeFakeChild();
   const promise = installCliSubscriptionRuntime(

@@ -1,0 +1,282 @@
+"""External-agent roster — Step 2 of "Mentions + identity for platform AND
+external agents" (see mcp_server.py's module docstring for the full picture).
+
+THE IDENTITY RULE this module exists to enforce: identity is minted by the
+PLATFORM at the connection boundary. Brains never have identity.
+
+- A **platform agent**'s identity is its ``workspace_agent_installs.id``
+  (existing, unrelated to this module).
+- An **external agent** — a Codex/Claude Code session the user runs OUTSIDE
+  the platform, connected through our MCP server at ``/mcp`` — has no such
+  row. Its identity is minted the moment its MCP bearer key is created
+  (``mcp_server_auth.create_workspace_mcp_api_key``), via
+  ``register_external_agent`` below. The bearer key's SHA-256 hash IS its
+  authentication of identity: ``key_hash`` is UNIQUE and is exactly the hash
+  ``mcp_server_auth.resolve_workspace_from_api_key`` already computes on every
+  call, so identity resolution never needs a second auth path.
+
+Storage: a dedicated small table (``mcp_external_agent_roster``, see
+``migrations/add_mcp_external_agent_roster.sql`` for the full "why not
+vault_credentials + agent_connector_bindings" justification). No RLS —
+scoped like ``projects``/``project_tasks``: every query here filters by
+(tenant_id, workspace_id) explicitly.
+
+``list_unified_roster`` is the ONE interface a future @-mention resolver
+reads — it merges this table (``kind="external"``) with
+``workspace_agent_installs`` (``kind="platform"``) so the model/UI is always
+choosing from one closed roster, never free-typing an ID, regardless of
+which kind of agent it's addressing.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any, Dict, List, Optional
+
+from server_modules import control_plane_repository
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _new_external_agent_id() -> str:
+    return f"ext_agent_{uuid.uuid4().hex[:16]}"
+
+
+def _row_to_roster_entry(row: Any) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    r = dict(row)
+    return {
+        "id": str(r.get("id") or "").strip(),
+        "kind": "external",
+        "tenant_id": str(r.get("tenant_id") or "").strip() or None,
+        "workspace_id": str(r.get("workspace_id") or "").strip() or None,
+        "display_name": str(r.get("display_name") or "").strip(),
+        "mcp_key_id": str(r.get("mcp_key_id") or "").strip() or None,
+        "revoked": bool(r.get("revoked", False)),
+        "created_at": str(r.get("created_at") or "") or None,
+        "updated_at": str(r.get("updated_at") or "") or None,
+    }
+
+
+async def _existing_roster_names(*, tenant_id: str, workspace_id: str) -> List[str]:
+    """Names already taken in this workspace, across BOTH kinds — a platform
+    agent labelled "Atlas" and an external agent auto-named "Atlas" would be
+    ambiguous the moment a mention resolver has to pick one, so collision
+    checking spans the whole roster, not just this table (mirrors
+    fleet_tools.py's own within-workspace collision check for platform
+    agents, extended to the union)."""
+    names: List[str] = []
+    try:
+        from server_modules import agent_registry_repository as installs_repo
+
+        platform_rows = await installs_repo.list_workspace_agent_installs(
+            tenant_id=tenant_id, workspace_id=workspace_id, include_master=True,
+        )
+        names.extend(str(i.get("label") or "") for i in (platform_rows or []))
+    except Exception:
+        LOGGER.debug("Could not load platform installs for roster-name collision check", exc_info=True)
+
+    try:
+        external_rows = await list_workspace_external_agents(
+            tenant_id=tenant_id, workspace_id=workspace_id, include_revoked=True,
+        )
+        names.extend(str(e.get("display_name") or "") for e in external_rows)
+    except Exception:
+        LOGGER.debug("Could not load external roster for name collision check", exc_info=True)
+
+    return names
+
+
+async def register_external_agent(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    key_hash: str,
+    mcp_key_id: str = "",
+    display_name: str = "",
+) -> Dict[str, Any]:
+    """Mint (or idempotently return) the roster entry for a bearer key.
+
+    Called at TWO points, both required for the identity rule to hold without
+    a silent gap:
+    1. ``mcp_server_auth.create_workspace_mcp_api_key`` — the normal path, at
+       key-mint time.
+    2. ``mcp_server_auth.resolve_workspace_from_api_key`` — a lazy, idempotent
+       backfill for any key that predates this feature or whose mint-time
+       insert failed (e.g. Postgres was briefly unreachable). Idempotent via
+       ``ON CONFLICT (key_hash) DO NOTHING`` + a follow-up read, so a race
+       between two concurrent backfills can never create two identities for
+       the same key.
+
+    Returns ``{ok: False, error}`` (never raises) when Postgres is
+    unavailable — key creation itself must never fail because the roster
+    write failed; the caller decides how loudly to surface that.
+    """
+    tenant = str(tenant_id or "").strip()
+    ws = str(workspace_id or "").strip()
+    hashed = str(key_hash or "").strip()
+    if not tenant or not ws:
+        return {"ok": False, "error": "tenant_id and workspace_id are required to register an external agent."}
+    if not hashed:
+        return {"ok": False, "error": "key_hash is required to register an external agent."}
+
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return {"ok": False, "error": "Postgres is required to mint an external-agent roster entry."}
+
+    name = str(display_name or "").strip()
+    if not name:
+        from server_modules import agent_name_pool
+
+        existing_names = await _existing_roster_names(tenant_id=tenant, workspace_id=ws)
+        name = agent_name_pool.assign_agent_name(existing_names)
+
+    new_id = _new_external_agent_id()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO mcp_external_agent_roster (id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (key_hash) DO NOTHING
+        RETURNING id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
+        """,
+        new_id,
+        tenant,
+        ws,
+        name,
+        hashed,
+        str(mcp_key_id or "").strip() or None,
+    )
+    if row is None:
+        # Conflict — another writer already registered this key_hash (mint
+        # + backfill race, or a re-registration attempt). Return the
+        # existing row rather than a second identity.
+        row = await pool.fetchrow(
+            """
+            SELECT id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
+            FROM mcp_external_agent_roster
+            WHERE key_hash = $1
+            """,
+            hashed,
+        )
+    entry = _row_to_roster_entry(row)
+    if entry is None:
+        return {"ok": False, "error": "Roster insert returned no row and no existing row was found."}
+    return {"ok": True, **entry}
+
+
+async def get_external_agent_by_key_hash(*, key_hash: str) -> Optional[Dict[str, Any]]:
+    """Look up the roster entry for a bearer key's hash — the read side of
+    the identity rule, called on every MCP request that resolves a bearer
+    key (see mcp_server_auth.resolve_workspace_from_api_key)."""
+    hashed = str(key_hash or "").strip()
+    if not hashed:
+        return None
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return None
+    row = await pool.fetchrow(
+        """
+        SELECT id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
+        FROM mcp_external_agent_roster
+        WHERE key_hash = $1
+        """,
+        hashed,
+    )
+    return _row_to_roster_entry(row)
+
+
+async def set_external_agent_revoked(*, key_hash: str, revoked: bool = True) -> None:
+    """Mirror a bearer key's revoke/un-revoke into the roster row (best
+    effort — the actual authorization check lives in mcp_api_keys.json;
+    this only keeps the roster's "who's currently active" listing honest).
+    Never raises: called from revoke_workspace_mcp_api_key, which must not
+    fail because this side-channel failed."""
+    hashed = str(key_hash or "").strip()
+    if not hashed:
+        return
+    try:
+        pool = await control_plane_repository.ensure_control_plane_schema()
+        if pool is None:
+            return
+        await pool.execute(
+            "UPDATE mcp_external_agent_roster SET revoked = $2, updated_at = NOW() WHERE key_hash = $1",
+            hashed,
+            bool(revoked),
+        )
+    except Exception:
+        LOGGER.warning("Failed to mirror MCP key revoke into external-agent roster", exc_info=True)
+
+
+async def list_workspace_external_agents(
+    *, tenant_id: str, workspace_id: str, include_revoked: bool = False,
+) -> List[Dict[str, Any]]:
+    """List external-agent roster rows for a workspace — the ``kind="external"``
+    half of ``list_unified_roster``."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return []
+    tenant = str(tenant_id or "").strip()
+    ws = str(workspace_id or "").strip()
+    if include_revoked:
+        rows = await pool.fetch(
+            """
+            SELECT id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
+            FROM mcp_external_agent_roster
+            WHERE tenant_id = $1 AND workspace_id = $2
+            ORDER BY created_at ASC
+            """,
+            tenant, ws,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
+            FROM mcp_external_agent_roster
+            WHERE tenant_id = $1 AND workspace_id = $2 AND revoked = FALSE
+            ORDER BY created_at ASC
+            """,
+            tenant, ws,
+        )
+    return [e for e in (_row_to_roster_entry(r) for r in rows) if e]
+
+
+async def list_unified_roster(*, tenant_id: str, workspace_id: str) -> List[Dict[str, Any]]:
+    """THE one roster view: every addressable agent in the workspace, platform
+    and external, each tagged ``kind``. A future @-mention resolver reads
+    this — and only this — function; it must never need to know that
+    platform and external identities live in two different tables.
+    """
+    tenant = str(tenant_id or "").strip()
+    ws = str(workspace_id or "").strip()
+    unified: List[Dict[str, Any]] = []
+
+    try:
+        from server_modules import agent_registry_repository as installs_repo
+
+        platform_rows = await installs_repo.list_workspace_agent_installs(
+            tenant_id=tenant, workspace_id=ws, include_master=True,
+        )
+        for install in platform_rows or []:
+            unified.append({
+                "id": str(install.get("id") or "").strip(),
+                "kind": "platform",
+                "display_name": str(install.get("label") or "").strip(),
+                "enabled": bool(install.get("enabled", True)),
+                "status": str(install.get("status") or ""),
+            })
+    except Exception:
+        LOGGER.warning("Failed to list platform installs for unified roster", exc_info=True)
+
+    external_rows = await list_workspace_external_agents(tenant_id=tenant, workspace_id=ws, include_revoked=False)
+    for entry in external_rows:
+        unified.append({
+            "id": entry["id"],
+            "kind": "external",
+            "display_name": entry["display_name"],
+            "enabled": not entry["revoked"],
+            "status": "revoked" if entry["revoked"] else "active",
+        })
+
+    return unified

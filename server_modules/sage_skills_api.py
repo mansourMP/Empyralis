@@ -1,70 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from fastapi import Depends
 
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
 from server_modules import mcp_registry_service
+from server_modules import skill_registry
 from server_modules import skills_service
-from server_modules.installed_skills import (
-    current_device_os_label,
-    list_installed_skills,
-    normalize_skill_id,
-    skill_availability_state,
-)
+from server_modules.installed_skills import skill_availability_state
 from server_modules.secret_redaction_service import redact_text
-
-
-@dataclass(frozen=True)
-class CuratedSkillDefinition:
-    id: str
-    name: str
-    description: str
-    supported_os: tuple[str, ...]
-    what_it_does: str
-    setup_requirement: str
-    aliases: tuple[str, ...] = ()
-
-
-_CURATED_SKILL_PACK: tuple[CuratedSkillDefinition, ...] = (
-    CuratedSkillDefinition(
-        id="1password",
-        name="1Password",
-        description="Use vault items and saved credentials without pasting secrets into chat.",
-        supported_os=("macos",),
-        what_it_does="Look up vault items, retrieve credentials, and keep secret handling on the paired computer.",
-        setup_requirement="Install and unlock 1Password on this Mac, then enable the 1Password skill for Sage through Gateway.",
-        aliases=("onepassword", "1-password"),
-    ),
-    CuratedSkillDefinition(
-        id="apple-notes",
-        name="Apple Notes",
-        description="Read and organize personal notes from Apple Notes on the paired Mac.",
-        supported_os=("macos",),
-        what_it_does="Read note content, organize personal knowledge, and use Apple Notes as a trusted local reference surface.",
-        setup_requirement="Use a paired Mac with Apple Notes available through Gateway, then enable the Apple Notes skill.",
-        aliases=("notes", "apple_notes"),
-    ),
-    CuratedSkillDefinition(
-        id="apple-reminders",
-        name="Apple Reminders",
-        description="Review and manage reminders from Apple Reminders on the paired Mac.",
-        supported_os=("macos",),
-        what_it_does="Read reminder lists, keep recurring responsibilities current, and update personal tasks through Apple Reminders.",
-        setup_requirement="Use a paired Mac with Apple Reminders available through Gateway, then enable the Apple Reminders skill.",
-        aliases=("reminders", "apple_reminders"),
-    ),
-    CuratedSkillDefinition(
-        id="tmux",
-        name="tmux",
-        description="Inspect and manage terminal sessions without losing long-running local work.",
-        supported_os=("macos", "linux"),
-        what_it_does="Attach to persistent shell sessions, keep long-running commands alive, and resume local terminal work safely.",
-        setup_requirement="Install tmux on this computer and expose the required local runtime access before Sage can use persistent terminal sessions.",
-    ),
-)
 
 
 def _coerce_text(value: Any) -> str:
@@ -112,22 +57,7 @@ def _skill_reason(item: Dict[str, Any]) -> str | None:
     return None
 
 
-def _current_device_supports(supported_os: tuple[str, ...] | list[str]) -> bool:
-    normalized = {str(token or "").strip().lower() for token in supported_os if str(token or "").strip()}
-    if not normalized:
-        return True
-    runtime_os = current_device_os_label().strip().lower()
-    aliases = {runtime_os}
-    if runtime_os == "macos":
-        aliases.update({"mac", "osx", "darwin"})
-    elif runtime_os == "linux":
-        aliases.update({"unix"})
-    elif runtime_os == "windows":
-        aliases.update({"win", "win32"})
-    return bool(normalized.intersection(aliases))
-
-
-def _skill_setup_requirement(item: Dict[str, Any], curated: CuratedSkillDefinition | None) -> str | None:
+def _skill_setup_requirement(item: Dict[str, Any]) -> str | None:
     if not bool(item.get("enabled")):
         return "Enable this skill for the workspace before Sage can use it."
     missing_bins = [
@@ -154,30 +84,29 @@ def _skill_setup_requirement(item: Dict[str, Any], curated: CuratedSkillDefiniti
         setup_bits.append(f"Install Python packages: {', '.join(missing_packages)}")
     if setup_bits:
         return ". ".join(setup_bits) + "."
-    if curated is not None:
-        return curated.setup_requirement
+    # skill_registry.SkillDefinition flattens missing_bins/missing_env_vars/
+    # missing_python_packages into a single unavailable_reason string rather
+    # than preserving them as structured lists (a real, disclosed gap from
+    # the pre-unification payload — see docs/design/audit-skills.md §3 item
+    # 3's catalog-reconciliation note). Fall back to that flattened reason
+    # so a catalog-sourced item still gets SOME actionable setup text
+    # instead of silently going blank.
+    if not bool(item.get("available", True)):
+        reasons = [_coerce_text(token) for token in list(item.get("availability_reasons") or []) if _coerce_text(token)]
+        if reasons:
+            return "; ".join(reasons)
     return None
 
 
-def _curated_skill_index(item: Dict[str, Any]) -> dict[str, Dict[str, Any]]:
-    aliases = {
-        normalize_skill_id(item.get("id")),
-        normalize_skill_id(item.get("name")),
-    }
-    return {token: item for token in aliases if token}
-
-
-def _skill_payload(item: Dict[str, Any], curated: CuratedSkillDefinition | None = None) -> Dict[str, Any]:
+def _skill_payload(item: Dict[str, Any]) -> Dict[str, Any]:
     status = _skill_status(item)
     supported_os = [token for token in list(item.get("supported_os") or []) if _coerce_text(token)]
-    if curated is not None and not supported_os:
-        supported_os = list(curated.supported_os)
-    description = _coerce_text(item.get("description")) or (curated.description if curated is not None else "")
-    what_it_does = _coerce_text(item.get("what_it_does")) or (curated.what_it_does if curated is not None else description)
+    description = _coerce_text(item.get("description"))
+    what_it_does = _coerce_text(item.get("what_it_does")) or description
     runtime_metadata = item.get("runtime_metadata") if isinstance(item.get("runtime_metadata"), dict) else {}
     return {
-        "id": _coerce_text(item.get("id")) or (curated.id if curated is not None else ""),
-        "name": _coerce_text(item.get("name")) or (curated.name if curated is not None else "Skill"),
+        "id": _coerce_text(item.get("id")),
+        "name": _coerce_text(item.get("name")) or "Skill",
         "description": description or None,
         "what_it_does": what_it_does or None,
         "enabled": bool(item.get("enabled")),
@@ -186,8 +115,8 @@ def _skill_payload(item: Dict[str, Any], curated: CuratedSkillDefinition | None 
         "status": status,
         "status_label": _status_label(status),
         "reason": _skill_reason(item),
-        "setup_requirement": _skill_setup_requirement(item, curated),
-        "source": _coerce_text(item.get("source")) or ("curated_pack" if curated is not None else None),
+        "setup_requirement": _skill_setup_requirement(item),
+        "source": _coerce_text(item.get("source")) or None,
         "required_bins": [token for token in list(item.get("required_bins") or []) if _coerce_text(token)],
         "missing_bins": [token for token in list(item.get("missing_bins") or []) if _coerce_text(token)],
         "required_env_vars": [token for token in list(item.get("required_env_vars") or []) if _coerce_text(token)],
@@ -206,8 +135,14 @@ def _skill_payload(item: Dict[str, Any], curated: CuratedSkillDefinition | None 
         "allowed_runtime_modes": [
             token for token in list(runtime_metadata.get("allowed_runtime_modes") or []) if _coerce_text(token)
         ],
-        "curated": curated is not None,
-        "curated_rank": _CURATED_SKILL_PACK.index(curated) if curated is not None else None,
+        # curated/curated_rank are gone with the hardcoded curated pack
+        # (docs/design/audit-skills.md §2.2.C — 1Password/Apple Notes/Apple
+        # Reminders/tmux had zero execution implementation anywhere and were
+        # never distinguishable from a real skill in this payload). Every
+        # item here now comes from skill_registry.list_skill_definitions,
+        # the same catalog skill_invoke dispatches against.
+        "curated": False,
+        "curated_rank": None,
     }
 
 
@@ -286,46 +221,46 @@ def _builtin_capability_records() -> list[Dict[str, Any]]:
 
 
 def _skill_capability_records(skill_items: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    """One capability record per catalog skill, all pointing at the single
+    real Level-2 tool (skill_invoke) rather than a per-skill tool name.
+
+    Before this, a skill with no explicit `tools:` list (true of nearly
+    every entry — the curated pack, and every skill_registry SkillDefinition
+    that isn't backed by its own bespoke LLM tool) got `tool_id=None` here,
+    which sage_instruction_compiler_service.build_model_capability_manifest
+    silently drops (`if not tool_id: continue`) — so those skills could
+    NEVER reach the live "## Callable Tools" prompt text, independent of
+    which catalog fed this function. Routing every record through
+    skill_invoke fixes that: every skill_id is now a real, callable
+    (`tool_id`, `skill_id`) pair, and the description spells out the exact
+    skill_id argument the model needs to pass.
+    """
     records: list[Dict[str, Any]] = []
     for skill in skill_items:
         skill_id = _coerce_text(skill.get("id"))
-        tools = [token for token in list(skill.get("tools") or []) if _coerce_text(token)]
+        if not skill_id:
+            continue
         status = _coerce_text(skill.get("status")) or "needs_setup"
         setup_action = "open_skills" if status != "ready" else None
-        if not tools:
-            records.append(
-                _capability_record(
-                    capability_id=f"skill:{skill_id or _coerce_text(skill.get('name'))}",
-                    label=_coerce_text(skill.get("name")) or "Skill",
-                    description=_coerce_text(skill.get("description")),
-                    source=_coerce_text(skill.get("source")) or "skill",
-                    capability_type="skill",
-                    status=status,
-                    skill_id=skill_id or None,
-                    action_class=_coerce_text(skill.get("action_class")) or None,
-                    requires_approval=bool(skill.get("requires_approval")),
-                    runtime_requirement=_coerce_text(skill.get("execution_mode")) or None,
-                    setup_action=setup_action,
-                )
+        base_description = _coerce_text(skill.get("description")) or _coerce_text(skill.get("what_it_does"))
+        invoke_hint = f'Call skill_invoke with skill_id="{skill_id}" to run it.'
+        description = f"{base_description} {invoke_hint}".strip() if base_description else invoke_hint
+        records.append(
+            _capability_record(
+                capability_id=f"skill:{skill_id}",
+                label=_coerce_text(skill.get("name")) or skill_id,
+                description=description,
+                source=_coerce_text(skill.get("source")) or "skill",
+                capability_type="skill",
+                status=status,
+                tool_id="skill_invoke",
+                skill_id=skill_id,
+                action_class=_coerce_text(skill.get("action_class")) or None,
+                requires_approval=bool(skill.get("requires_approval")),
+                runtime_requirement=_coerce_text(skill.get("execution_mode")) or None,
+                setup_action=setup_action,
             )
-            continue
-        for tool_name in tools:
-            records.append(
-                _capability_record(
-                    capability_id=f"skill:{skill_id}:{tool_name}",
-                    label=f"{_coerce_text(skill.get('name')) or 'Skill'}: {tool_name}",
-                    description=_coerce_text(skill.get("description")),
-                    source=_coerce_text(skill.get("source")) or "skill",
-                    capability_type="skill",
-                    status=status,
-                    tool_id=tool_name,
-                    skill_id=skill_id or None,
-                    action_class=_coerce_text(skill.get("action_class")) or None,
-                    requires_approval=bool(skill.get("requires_approval")),
-                    runtime_requirement=_coerce_text(skill.get("execution_mode")) or None,
-                    setup_action=setup_action,
-                )
-            )
+        )
     return records
 
 
@@ -415,48 +350,107 @@ def build_sage_capabilities_payload(*, workspace_id: str, tenant_id: str) -> Dic
     }
 
 
+def _skill_definition_body(definition: "skill_registry.SkillDefinition") -> str | None:
+    """Level-2 content for a filesystem-backed skill (Tools-tab detail view
+    only — never fed into the Level-1 manifest text). None for a purely
+    hardcoded SkillDefinition with no on-disk SKILL.md (e.g. email-access,
+    calendar-access, the fleet-management skills)."""
+    if not definition.path:
+        return None
+    try:
+        from pathlib import Path as _Path
+
+        skill_md = _Path(definition.path) / "SKILL.md"
+        if skill_md.exists():
+            return skill_md.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return None
+
+
+def _skill_definition_readme(definition: "skill_registry.SkillDefinition", body: str | None) -> str | None:
+    """A dedicated README.md if the skill directory has one; otherwise the
+    same SKILL.md body used for skill_body (matching installed_skills.
+    list_installed_skills' own README-or-SKILL.md fallback)."""
+    if definition.path:
+        try:
+            from pathlib import Path as _Path
+
+            readme_md = _Path(definition.path) / "README.md"
+            if readme_md.exists():
+                return readme_md.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    return body
+
+
+def _skill_definition_to_item(definition: "skill_registry.SkillDefinition") -> Dict[str, Any]:
+    """Adapt a skill_registry.SkillDefinition (the unified catalog — merges
+    the built-in skills, the filesystem-scanned installed_skills.py roots,
+    and workspace MCP skill entries, see skill_registry._skill_registry_map)
+    into the dict shape _skill_payload already knows how to render. This is
+    the seam docs/design/audit-skills.md §3 item 3 calls for: the Tools tab
+    (this payload) and the model's live "## Callable Tools" manifest
+    (_skill_capability_records, below) now both read the SAME catalog
+    skill_invoke dispatches against — no more silently-different lists."""
+    availability_reasons: list[str] = []
+    if not definition.available:
+        availability_reasons.append(
+            _coerce_text(definition.unavailable_reason)
+            or f"{definition.label} is not available in this environment."
+        )
+    body = _skill_definition_body(definition)
+    return {
+        "id": definition.id,
+        "name": definition.label,
+        "description": definition.description,
+        "enabled": bool(definition.enabled),
+        "available": bool(definition.available),
+        "supported_os": [],
+        "availability_reasons": availability_reasons,
+        "source": definition.source,
+        "tools": [],
+        "slash_commands": [],
+        "required_bins": [],
+        "missing_bins": [],
+        "required_env_vars": [],
+        "missing_env_vars": [],
+        "required_python_packages": [],
+        "missing_python_packages": [],
+        "runtime_metadata": {
+            "skill_class": definition.skill_class,
+            "permission_label": definition.permission_label,
+            "execution_mode": definition.execution_mode,
+            "action_class": definition.action_class,
+            "connector_scopes": list(definition.connector_scopes),
+            "trigger_terms": list(definition.trigger_terms),
+            "allowed_runtime_modes": list(definition.allowed_runtime_modes),
+            "requires_approval": bool(definition.requires_approval),
+            "execution_adapter": definition.execution_adapter or "",
+        },
+        "skill_body": body,
+        "readme": _skill_definition_readme(definition, body),
+    }
+
+
 def _build_sage_skills_payload(*, workspace_id: str, tenant_id: str) -> Dict[str, Any]:
-    installed = list_installed_skills(workspace_id=workspace_id)
-    installed_index: dict[str, Dict[str, Any]] = {}
-    consumed_ids: set[str] = set()
-    for item in installed:
-        installed_index.update(_curated_skill_index(item))
-
-    items = []
-    for curated in _CURATED_SKILL_PACK:
-        matched = None
-        for token in (curated.id, *curated.aliases):
-            normalized = normalize_skill_id(token)
-            if normalized and normalized in installed_index:
-                matched = installed_index[normalized]
-                break
-        if matched is None:
-            matched = {
-                "id": curated.id,
-                "name": curated.name,
-                "description": curated.description,
-                "enabled": True,
-                "available": False,
-                "supported_os": list(curated.supported_os),
-                "availability_reasons": [] if _current_device_supports(curated.supported_os) else [f"Only available on: {', '.join(curated.supported_os)}"],
-                "source": "curated_pack",
-                "runtime_metadata": {},
-            }
-        else:
-            consumed_ids.add(_coerce_text(matched.get("id")))
-        items.append(_skill_payload(matched, curated))
-
-    remainder = [
-        _skill_payload(item)
-        for item in installed
-        if _coerce_text(item.get("id")) not in consumed_ids
-    ]
-    remainder.sort(key=lambda item: (item.get("name") or "").lower())
-    items.extend(remainder)
+    # include_disabled=True: this feeds the human-facing Tools/Skills tab (and,
+    # via build_sage_capabilities_payload below, the live model manifest) —
+    # a disabled or not-yet-available skill still needs to be LISTED with an
+    # honest status/reason so the owner can enable or fix it, matching this
+    # payload's pre-unification behavior. skill_registry.list_skill_definitions
+    # defaults to include_disabled=False because ITS default caller
+    # (execute_skill's dispatch path, via get_skill_definition) must never
+    # silently resolve a disabled skill — that safety property is unaffected
+    # here since disabled/unavailable items are filtered back out downstream,
+    # in build_model_capability_manifest's status allow-list (only "ready"/
+    # "approval_required" reach the live prompt).
+    definitions = skill_registry.list_skill_definitions(workspace_id=workspace_id, include_disabled=True)
+    items = [_skill_payload(_skill_definition_to_item(definition)) for definition in definitions]
+    items.sort(key=lambda item: (item.get("name") or "").lower())
     return {
         "workspace_id": workspace_id,
         "tenant_id": tenant_id,
-        "curated_pack": [item for item in items if item.get("curated")],
         "items": items,
         "summary": {
             "total_count": len(items),

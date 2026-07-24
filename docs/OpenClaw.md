@@ -9,6 +9,8 @@ GitHub: https://github.com/openclaw/openclaw
 License: MIT
 Runtime: Node.js ≥22.19
 
+> **Terminology note (2026-07-23):** "Sage" is legacy Empyralis product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). Everywhere below this doc says "Sage" (in Empyralis-side comparisons — OpenClaw's own naming is unaffected), read: the owner-facing agent. `SageLauncher.tsx` and other `sage_*`/`Sage*` code identifiers are legacy code artifacts only, not a live product concept. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 ---
 STEP 8 — SESSION / THREAD MANAGEMENT
 

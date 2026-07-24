@@ -1,5 +1,7 @@
 # Gap Analysis: Personal-Account Channels — OpenClaw vs Empyralis
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers (e.g. `"sage-main"`, `sage_agent_runtime_service.py`) are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 READ-ONLY comparison. No code changed. Snapshot as of 2026-07-21, branch `fix/hardware-detail-width`.
 Every claim below is file:line-cited from BOTH codebases — OpenClaw at `/Users/mansur/openclaw` (read-only reference, MIT), Empyralis at `/Users/mansur/empyralis`. Builds on `docs/OpenClaw.md`'s existing Signal/iMessage/mention-gating research (cited inline where reused) and `docs/design/reliability-audit-2-channels.md`'s channel-infrastructure inventory (also cited inline) rather than re-deriving them.
 

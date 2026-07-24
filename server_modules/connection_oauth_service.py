@@ -3518,6 +3518,104 @@ async def connect_app_via_oauth_to_mcp(
     }
 
 
+def _perform_oauth_refresh(credential_id: str, credential: Dict[str, Any]) -> Dict[str, Any]:
+    """Shared refresh core (the ONE token-refresh implementation) used by
+    both:
+      - refresh_oauth_token_if_needed() below — expiry-gated, best-effort,
+        silent, called opportunistically on every vault credential read
+        (vault_helpers.resolve_vault_credential).
+      - refresh_oauth_token_now() below — unconditional, used by
+        mcp_registry_service's MCP Phase D auth-failure retry path
+        (docs/design/mcp-applications-plan.md) when a live 401/invalid_token
+        means the token is bad *right now*, regardless of what the expiry
+        heuristic thinks.
+
+    Never raises — every failure mode is reported via the returned dict so
+    callers can distinguish "nothing to do" from "this needs the workspace
+    owner to reconnect":
+      {"ok": True,  "credential": <refreshed credential dict>}
+      {"ok": False, "reason": "<short machine-readable code>", "detail": "<str>"}
+    """
+    normalized_id = str(credential_id or "").strip()
+    refresh_token = str(credential.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return {
+            "ok": False,
+            "reason": "no_refresh_token",
+            "detail": "Credential has no refresh_token on file; it cannot be auto-refreshed.",
+        }
+
+    provider = str(credential.get("provider") or credential.get("oauth_provider") or "").strip().lower()
+    if not provider:
+        _log.warning("oauth refresh: credential %s has no provider info", normalized_id)
+        return {"ok": False, "reason": "unknown_provider", "detail": "Credential has no provider info."}
+
+    config = OAUTH_PROVIDER_CONFIGS.get(provider)
+    if config is None:
+        _log.warning("oauth refresh: no OAuth config for provider %s", provider)
+        return {"ok": False, "reason": "unconfigured_provider", "detail": f"No OAuth config for provider '{provider}'."}
+
+    # _resolve_oauth_client_for_refresh (not ensure_oauth_configured) so a
+    # credential obtained through Higgsfield's dynamic-client-registration
+    # path can still be refreshed — see that function's docstring.
+    # Identical to ensure_oauth_configured for every other provider.
+    try:
+        client_id, client_secret = _resolve_oauth_client_for_refresh(provider)
+    except Exception as exc:
+        _log.warning("oauth refresh: provider %s OAuth not configured: %s", provider, exc)
+        return {"ok": False, "reason": "oauth_not_configured", "detail": f"{provider} OAuth client is not configured: {exc}"}
+
+    try:
+        token_url = _provider_url(provider, config.token_url)
+        body: Dict[str, Any] = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        headers: Dict[str, str] = {}
+        if config.token_auth == "basic":
+            headers["Authorization"] = _oauth_basic_header(client_id, client_secret)
+            body.pop("client_id", None)
+            body.pop("client_secret", None)
+
+        if config.token_request_format == "json":
+            token_response = _post_json(token_url, body, headers=headers)
+        else:
+            token_response = _post_form_json(token_url, body, headers=headers)
+
+        new_access_token = str(token_response.get("access_token") or "").strip()
+        if not new_access_token:
+            _log.warning("oauth refresh: no access_token in refresh response for %s", provider)
+            return {
+                "ok": False,
+                "reason": "no_access_token_in_response",
+                "detail": f"Provider '{provider}' refresh response had no access_token.",
+            }
+
+        refreshed = dict(credential)
+        refreshed["access_token"] = new_access_token
+        now = int(time.time())
+        new_expires_in = int(token_response.get("expires_in") or 0)
+        if new_expires_in > 0:
+            refreshed["access_token_expires_at"] = now + new_expires_in
+        new_refresh_token = str(token_response.get("refresh_token") or "").strip()
+        if new_refresh_token:
+            refreshed["refresh_token"] = new_refresh_token
+
+        # Persist updated credential back to vault (Phase 3C: single-row
+        # UPDATE of just this credential's ciphertext — no whole-file rewrite).
+        from server_modules.vault_store import _openssl_encrypt, update_credential_secret
+
+        plain = json.dumps(refreshed, separators=(",", ":"))
+        update_credential_secret(normalized_id, encrypted_secret=_openssl_encrypt(plain))
+        _log.info("oauth refresh: refreshed token for credential %s (provider %s)", normalized_id, provider)
+        return {"ok": True, "credential": refreshed}
+    except Exception as exc:
+        _log.warning("oauth refresh: refresh failed for credential %s (provider %s): %s", normalized_id, provider, exc)
+        return {"ok": False, "reason": "refresh_request_failed", "detail": str(exc)}
+
+
 def refresh_oauth_token_if_needed(credential_id: str) -> Dict[str, Any]:
     """Check and refresh an OAuth credential if it is expired or about to expire.
 
@@ -3529,11 +3627,12 @@ def refresh_oauth_token_if_needed(credential_id: str) -> Dict[str, Any]:
     If the credential has no ``expires_at`` / ``access_token_expires_at`` or no
     ``refresh_token``, it is returned as-is.
 
-    Returns the (possibly refreshed) credential dict.
+    Returns the (possibly refreshed) credential dict. Failures are logged and
+    swallowed (best-effort, silent) — see refresh_oauth_token_now() for the
+    forced variant that reports success/failure explicitly.
     """
-    import json as _json
     import time as _time
-    from server_modules.vault_store import _openssl_decrypt, _openssl_encrypt, load_vault, update_credential_secret
+    from server_modules.vault_store import _openssl_decrypt, load_vault
     from server_modules.vault_helpers import resolve_vault_credential
 
     normalized_id = str(credential_id or "").strip()
@@ -3561,74 +3660,105 @@ def refresh_oauth_token_if_needed(credential_id: str) -> Dict[str, Any]:
     if expires_at > now + five_minutes:
         return credential
 
-    refresh_token = str(credential.get("refresh_token") or "").strip()
-    if not refresh_token:
-        return credential
-
-    # Step 3: Determine the provider from credential metadata
-    provider = str(credential.get("provider") or credential.get("oauth_provider") or "").strip().lower()
-    if not provider:
-        _log.warning("refresh_oauth_token_if_needed: credential %s has no provider info", normalized_id)
-        return credential
-
-    config = OAUTH_PROVIDER_CONFIGS.get(provider)
-    if config is None:
-        _log.warning("refresh_oauth_token_if_needed: no OAuth config for provider %s", provider)
-        return credential
-
-    # Step 4: Call the provider's token refresh endpoint
-    client_id, client_secret = "", ""
-    try:
-        # _resolve_oauth_client_for_refresh (not ensure_oauth_configured) so a
-        # credential obtained through Higgsfield's dynamic-client-registration
-        # path can still be refreshed — see that function's docstring.
-        # Identical to ensure_oauth_configured for every other provider.
-        client_id, client_secret = _resolve_oauth_client_for_refresh(provider)
-    except Exception:
-        _log.warning("refresh_oauth_token_if_needed: provider %s OAuth not configured", provider)
-        return credential
-
-    try:
-        token_url = _provider_url(provider, config.token_url)
-        body: Dict[str, Any] = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }
-        headers: Dict[str, str] = {}
-        if config.token_auth == "basic":
-            headers["Authorization"] = _oauth_basic_header(client_id, client_secret)
-            body.pop("client_id", None)
-            body.pop("client_secret", None)
-
-        if config.token_request_format == "json":
-            token_response = _post_json(token_url, body, headers=headers)
-        else:
-            token_response = _post_form_json(token_url, body, headers=headers)
-
-        new_access_token = str(token_response.get("access_token") or "").strip()
-        if not new_access_token:
-            _log.warning("refresh_oauth_token_if_needed: no access_token in refresh response for %s", provider)
-            return credential
-
-        credential["access_token"] = new_access_token
-        new_expires_in = int(token_response.get("expires_in") or 0)
-        if new_expires_in > 0:
-            credential["access_token_expires_at"] = now + new_expires_in
-        new_refresh_token = str(token_response.get("refresh_token") or "").strip()
-        if new_refresh_token:
-            credential["refresh_token"] = new_refresh_token
-
-        # Step 5: Persist updated credential back to vault (Phase 3C: single-row
-        # UPDATE of just this credential's ciphertext — no whole-file rewrite).
-        plain = _json.dumps(credential, separators=(",", ":"))
-        update_credential_secret(normalized_id, encrypted_secret=_openssl_encrypt(plain))
-        _log.info("refresh_oauth_token_if_needed: refreshed token for credential %s (provider %s)", normalized_id, provider)
-    except Exception as exc:
-        _log.warning("refresh_oauth_token_if_needed: refresh failed for credential %s: %s", normalized_id, exc)
-
+    outcome = _perform_oauth_refresh(normalized_id, credential)
+    if outcome.get("ok"):
+        return outcome["credential"]
     return credential
+
+
+def refresh_oauth_token_now(credential_id: str) -> Dict[str, Any]:
+    """Force an immediate OAuth token refresh attempt, bypassing the
+    expiry-window gate in refresh_oauth_token_if_needed() above.
+
+    Used by mcp_registry_service's auth-failure retry path (MCP Phase D,
+    docs/design/mcp-applications-plan.md): when an MCP tool call fails with
+    a 401/invalid_token shape, the server just told us the credential is bad
+    *right now* — there is no reason to wait for the 5-minute expiry
+    heuristic to agree, and every second waited is a second the agent is
+    stuck. Reuses the exact same refresh core (_perform_oauth_refresh) as
+    the opportunistic path above; this is not a second implementation.
+
+    Never raises — every failure mode (no credential, no refresh_token,
+    unconfigured provider, provider rejected the refresh_token, ...) is
+    reported via the returned dict so callers can build an honest message
+    for both the agent and the workspace owner:
+      {"ok": True,  "credential": <refreshed credential dict>}
+      {"ok": False, "reason": "<short machine-readable code>", "detail": "<str>"}
+    """
+    from server_modules.vault_store import _openssl_decrypt, load_vault
+    from server_modules.vault_helpers import resolve_vault_credential
+
+    normalized_id = str(credential_id or "").strip()
+    if not normalized_id:
+        return {"ok": False, "reason": "no_credential_id", "detail": "No credential id was provided."}
+
+    try:
+        credential = resolve_vault_credential(load_vault, _openssl_decrypt, normalized_id)
+    except Exception as exc:
+        return {"ok": False, "reason": "credential_not_found", "detail": str(exc)}
+
+    if not isinstance(credential, dict) or not credential:
+        return {"ok": False, "reason": "credential_not_found", "detail": "Credential payload is empty."}
+
+    return _perform_oauth_refresh(normalized_id, credential)
+
+
+# §1.5 (Multiplayer Projects plan): account_label defaults to "default"
+# (connectors_actions.store_agent_connector_credential) and this OAuth
+# completion handler never set it to anything else, so every OAuth-connected
+# account rendered as "default" — the one signal that would let a human
+# notice a §1.2/§1.3 cross-account mixup before damage was blank. Fix reuses
+# the SAME profile_probe endpoint "Test connection" already calls
+# (OAuthProviderConfig.profile_probe / connector_validators.
+# validate_oauth_bearer_connector) via the same runtime_common.
+# http_json_request every other provider-probe call in this codebase uses —
+# no second HTTP client, no second validation implementation.
+_ACCOUNT_IDENTITY_PROFILE_FIELDS: tuple[str, ...] = (
+    "email", "emailAddress", "mail", "userPrincipalName", "user_email",
+    "login", "username", "name",
+)
+
+
+def _probe_oauth_account_identity(normalized_provider: str, credentials: Dict[str, Any]) -> str:
+    """Best-effort: hit the provider's profile_probe with the freshly
+    exchanged access token and pull out a human-recognizable account
+    identity (an email address where the provider's userinfo shape offers
+    one, else a login/username) to store as account_label.
+
+    This is a visibility improvement, not a security gate — on ANY failure
+    (no profile_probe on file, no access token, network error, non-2xx
+    status, an MCP-DCR-scoped token the classic REST endpoint rejects, an
+    unrecognized profile shape) this returns "" and the caller falls back to
+    "default", exactly today's behavior. Never raises.
+    """
+    provider_config = OAUTH_PROVIDER_CONFIGS.get(str(normalized_provider or "").strip().lower())
+    profile_probe = provider_config.profile_probe if provider_config else None
+    if not profile_probe:
+        return ""
+    access_token = str(
+        credentials.get("access_token")
+        or credentials.get("oauth_access_token")
+        or credentials.get("token")
+        or ""
+    ).strip()
+    if not access_token:
+        return ""
+    try:
+        from server_modules.runtime_common import http_json_request
+        response = http_json_request(profile_probe, headers={"Authorization": f"Bearer {access_token}"})
+    except Exception:
+        return ""
+    status = int((response or {}).get("status") or 0)
+    if status < 200 or status >= 300:
+        return ""
+    profile = (response or {}).get("json")
+    if not isinstance(profile, dict):
+        return ""
+    for field in _ACCOUNT_IDENTITY_PROFILE_FIELDS:
+        value = str(profile.get(field) or "").strip()
+        if value:
+            return value[:160]
+    return ""
 
 
 async def complete_oauth_callback(
@@ -3694,6 +3824,9 @@ async def complete_oauth_callback(
         if agent_install_id:
             from server_modules import control_plane_repository
             tenant_id = await control_plane_repository.resolve_tenant_id_for_workspace(workspace_id, default="default")
+            # §1.5: probe the real account identity so this connection doesn't
+            # render as an anonymous "default" — see _probe_oauth_account_identity.
+            account_label = _probe_oauth_account_identity(normalized_provider, credentials) or "default"
             result = await connectors_actions.store_agent_connector_credential(
                 workspace_id=workspace_id,
                 agent_install_id=agent_install_id,
@@ -3701,6 +3834,7 @@ async def complete_oauth_callback(
                 provider=vault_connector,
                 label=_connector_label(normalized_provider),
                 credentials=credentials,
+                account_label=account_label,
                 metadata={
                     "source": "connection_oauth",
                     "oauth_provider": normalized_provider,
@@ -3754,14 +3888,27 @@ async def _register_mcp_servers_for_provider(
     Called after OAuth credential storage.  Failures are logged, never
     raised — MCP registration is best-effort and must not block the
     OAuth flow.
+
+    §1.3 containment (Multiplayer Projects plan): mcp_registry_service now
+    refuses (McpServerCredentialCollisionError) rather than silently
+    overwriting a server row's credential when a DIFFERENT agent's account
+    would take over one another agent already owns. That refusal must NOT
+    be swallowed into the same generic warning log as an ordinary failure —
+    the whole point is that a human can see it — so it is caught separately
+    and surfaced under "collisions" in the returned payload (which flows
+    into complete_oauth_callback's response as `mcp.collisions`). The OAuth
+    connect itself still succeeds: the credential + binding belong to the
+    connecting agent and are unaffected; only the MCP tool registration for
+    that specific server_id is withheld.
     """
     from server_modules import mcp_registry_service
 
     server_entries = APP_MCP_SERVER_MAP.get(normalized_provider)
     if not server_entries:
-        return {"registered": 0, "servers": []}
+        return {"registered": 0, "servers": [], "collisions": []}
 
     registered: list[Dict[str, Any]] = []
+    collisions: list[Dict[str, Any]] = []
     for entry in server_entries:
         server_id = str(entry.get("server_id") or "").strip()
         endpoint = entry.get("endpoint")
@@ -3782,10 +3929,16 @@ async def _register_mcp_servers_for_provider(
                 "server_id": server.get("id"),
                 "tool_count": len(server.get("tools") or []),
             })
+        except mcp_registry_service.McpServerCredentialCollisionError as exc:
+            _log.warning(
+                "MCP auto-register REFUSED for %s/%s (cross-account collision): %s",
+                normalized_provider, server_id, exc,
+            )
+            collisions.append({"server_id": server_id, "detail": str(exc)})
         except Exception as exc:
             _log.warning(
                 "MCP auto-register failed for %s/%s: %s",
                 normalized_provider, server_id, exc,
             )
 
-    return {"registered": len(registered), "servers": registered}
+    return {"registered": len(registered), "servers": registered, "collisions": collisions}

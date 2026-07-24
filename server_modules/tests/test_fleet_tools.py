@@ -700,6 +700,58 @@ class RecommendedModelConfigForGatewayTests(unittest.TestCase):
         self.assertEqual(result["runtime"], "claude_code")
         self.assertEqual(result["provider"], "claude_code_cli")
 
+    def test_grok_build_or_cursor_cli_ready_alone_is_recommended(self):
+        # xAI Grok Build / Cursor CLI addition (2026-07-24) — provider
+        # entries resolve correctly through the SAME reuse-recommendation
+        # loop claude_code/codex already use.
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {"grok_build": {"installed": True, "authenticated": True}}},
+            ),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertEqual(result, {
+            "mode": "cli_subscription",
+            "provider": "xai_grok_cli",
+            "runtime": "grok_build",
+            "gateway_binding": "gateway-1",
+        })
+
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {"cursor_cli": {"installed": True, "authenticated": True}}},
+            ),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertEqual(result, {
+            "mode": "cli_subscription",
+            "provider": "cursor_cli",
+            "runtime": "cursor_cli",
+            "gateway_binding": "gateway-1",
+        })
+
+    def test_claude_code_still_preferred_over_all_three_others_when_every_runtime_is_ready(self):
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={
+                    "llm_runtimes": {
+                        "claude_code": {"installed": True, "authenticated": True},
+                        "codex": {"installed": True, "authenticated": True},
+                        "grok_build": {"installed": True, "authenticated": True},
+                        "cursor_cli": {"installed": True, "authenticated": True},
+                    },
+                },
+            ),
+        ):
+            result = fleet_tools.recommended_model_config_for_gateway("gateway-1", workspace_id="ws-1")
+        self.assertEqual(result["runtime"], "claude_code")
+
     def test_installed_but_not_authenticated_is_not_recommended(self):
         """Installed-but-signed-out must not be recommended — reusing it
         would fail the very first turn, the opposite of "no re-login"."""
@@ -865,6 +917,10 @@ class FleetConfigureAgentRecommendationTests(unittest.TestCase):
                 "server_modules.agent_registry_repository.update_workspace_agent_install",
                 new=AsyncMock(return_value=self._bundle()),
             ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[{"id": "agent-x", "label": "Old Name"}]),
+            ),
             patch.object(fleet_tools, "recommended_model_config_for_gateway", new=exploding),
         ):
             result = _run(
@@ -877,6 +933,237 @@ class FleetConfigureAgentRecommendationTests(unittest.TestCase):
             )
         self.assertTrue(result["ok"])
         self.assertNotIn("recommended_model_config", result)
+
+
+class FleetConfigureAgentCliSubscriptionSaveTimeHonestyTests(unittest.TestCase):
+    """fleet_configure_agent's save-time honesty check (§ "the CLI itself
+    must be installed AND authenticated on that Gateway"): rejects saving a
+    cli_subscription binding to an uninstalled/unauthenticated CLI at SAVE
+    time, not turn time. xAI Grok Build / Cursor CLI addition (2026-07-24):
+    this gate used to only cover {"claude_code", "codex"} — a grok_build/
+    cursor_cli binding would have silently SKIPPED this check entirely and
+    saved cleanly even when the CLI was never installed, only failing much
+    later at the first real turn. This class is the regression guard for
+    that specific gap."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    @staticmethod
+    def _registration(**overrides):
+        base = {"gateway_id": "gateway-1", "workspace_id": "ws-1", "status": "active", "device_trust_state": "trusted"}
+        base.update(overrides)
+        return base
+
+    def _configure(self, model_config, *, llm_runtimes):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": llm_runtimes, "display_name": "Test Box"},
+            ),
+        ):
+            return _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"model_config": {**model_config, "gateway_binding": "gateway-1"}},
+                )
+            )
+
+    def test_grok_build_not_installed_is_rejected_at_save_time_not_silently_accepted(self):
+        result = self._configure(
+            {"mode": "cli_subscription", "runtime": "grok_build"},
+            llm_runtimes={"grok_build": {"installed": False, "authenticated": False}},
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Grok Build", result["error"])
+        self.assertIn("isn't installed", result["error"])
+
+    def test_grok_build_installed_but_not_signed_in_is_rejected_at_save_time(self):
+        result = self._configure(
+            {"mode": "cli_subscription", "runtime": "grok_build"},
+            llm_runtimes={"grok_build": {"installed": True, "authenticated": False}},
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Grok Build", result["error"])
+        self.assertIn("isn't signed in", result["error"])
+
+    def test_cursor_cli_not_installed_is_rejected_at_save_time(self):
+        result = self._configure(
+            {"mode": "cli_subscription", "runtime": "cursor_cli"},
+            llm_runtimes={"cursor_cli": {"installed": False, "authenticated": False}},
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Cursor CLI", result["error"])
+        self.assertIn("isn't installed", result["error"])
+
+    def test_grok_build_ready_saves_cleanly(self):
+        result = self._configure(
+            {"mode": "cli_subscription", "runtime": "grok_build"},
+            llm_runtimes={"grok_build": {"installed": True, "authenticated": True}},
+        )
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_cursor_cli_ready_saves_cleanly(self):
+        result = self._configure(
+            {"mode": "cli_subscription", "runtime": "cursor_cli"},
+            llm_runtimes={"cursor_cli": {"installed": True, "authenticated": True}},
+        )
+        self.assertTrue(result["ok"], result.get("error"))
+
+
+class FleetConfigureAgentRenameCollisionTests(unittest.TestCase):
+    """STEP 5 (agent-identity plan): fleet_create_agent's auto-naming path
+    was already collision-checked against every existing label in the
+    workspace, but the manual rename path (this display_name PATCH) did zero
+    checking and wrote straight to the label column. Two agents could end up
+    sharing a name with nothing to catch it -- ambiguous for a human AND for
+    the closed-roster mention autocomplete. These tests hold the rename path
+    to the same bar as auto-naming."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    def test_renaming_to_an_existing_label_is_rejected(self):
+        exploding_update = AsyncMock(side_effect=AssertionError("must not persist a colliding rename"))
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=exploding_update,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[
+                    {"id": "agent-x", "label": "Atlas"},
+                    {"id": "agent-y", "label": "Nova"},
+                ]),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "Nova"},
+                )
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("already the name of another agent", result["error"])
+        exploding_update.assert_not_called()
+
+    def test_collision_check_is_case_insensitive(self):
+        exploding_update = AsyncMock(side_effect=AssertionError("must not persist a colliding rename"))
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=exploding_update,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[
+                    {"id": "agent-x", "label": "Atlas"},
+                    {"id": "agent-y", "label": "Nova"},
+                ]),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "nOVA"},
+                )
+            )
+        self.assertFalse(result["ok"])
+        exploding_update.assert_not_called()
+
+    def test_renaming_to_its_own_current_name_is_not_a_collision(self):
+        update_mock = AsyncMock(return_value=self._bundle())
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=update_mock,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[
+                    {"id": "agent-x", "label": "Atlas"},
+                    {"id": "agent-y", "label": "Nova"},
+                ]),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "Atlas"},
+                )
+            )
+        self.assertTrue(result["ok"])
+        update_mock.assert_called_once()
+
+    def test_renaming_to_a_free_name_succeeds(self):
+        update_mock = AsyncMock(return_value=self._bundle())
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=update_mock,
+            ),
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=[
+                    {"id": "agent-x", "label": "Atlas"},
+                    {"id": "agent-y", "label": "Nova"},
+                ]),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"display_name": "Ember"},
+                )
+            )
+        self.assertTrue(result["ok"])
+        update_mock.assert_called_once_with(
+            "agent-x",
+            tenant_id="system",
+            workspace_id="ws-1",
+            label="Ember",
+            metadata={},
+            tool_toggles=None,
+            hardware_access=None,
+        )
 
 
 class FleetListAgentsHardwareStatusIntegrationTests(unittest.TestCase):
@@ -1287,6 +1574,25 @@ class FleetConfigureAgentReasoningEffortValidationTests(unittest.TestCase):
         result = self._configure({"mode": "cli_subscription", "reasoning_effort": "off"})
         self.assertFalse(result["ok"])
         self.assertIn("claude_code", result["error"])
+
+    def test_cli_subscription_grok_build_accepts_none(self):
+        """"none" is Grok Build's own canonical vocabulary entry (distinct
+        from codex's "off") — verified live against docs.x.ai/build."""
+        result = self._configure({"mode": "cli_subscription", "runtime": "grok_build", "reasoning_effort": "none"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_cli_subscription_grok_build_rejects_off(self):
+        """"off" is codex's vocabulary, not grok_build's."""
+        result = self._configure({"mode": "cli_subscription", "runtime": "grok_build", "reasoning_effort": "off"})
+        self.assertFalse(result["ok"])
+        self.assertIn("reasoning_effort", result["error"])
+
+    def test_cli_subscription_cursor_cli_rejects_any_reasoning_effort(self):
+        """Cursor CLI has no reasoning-effort flag documented at all — same
+        empty-set treatment as "local" (Ollama)."""
+        result = self._configure({"mode": "cli_subscription", "runtime": "cursor_cli", "reasoning_effort": "low"})
+        self.assertFalse(result["ok"])
+        self.assertIn("reasoning_effort", result["error"])
 
     def test_local_mode_rejects_any_reasoning_effort(self):
         """Ollama has no CLI reasoning-effort control today — same boundary

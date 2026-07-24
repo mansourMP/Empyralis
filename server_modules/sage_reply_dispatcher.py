@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from server_modules.channel_transport import ChannelTransport
 from server_modules.inbound_envelope import InboundEnvelope
@@ -206,6 +206,26 @@ async def dispatch_sage_reply(
     # to execute_sage_turn() unchanged (that chokepoint treats None exactly
     # like a legacy pre-envelope caller — see its own docstring).
     envelope: Optional[InboundEnvelope] = None,
+    # Durable per-agent conversation recall (agent_conversation_memory) —
+    # the caller loads this BEFORE invoking dispatch_sage_reply (e.g. via
+    # agent_conversation_memory.load_recent_turns) and hands it here so it
+    # reaches execute_sage_turn's own channel_prior_messages parameter,
+    # which the runtime trusts over the (dead-under-SQLite-fallback, see
+    # agent_conversation_memory.py's module doc) control-plane thread store.
+    # None = unwired caller, byte-for-byte unchanged behavior.
+    channel_prior_messages: Optional[List[dict]] = None,
+    # When set, this exchange (the inbound user turn, and the assistant
+    # reply/media summary if one was actually sent) is persisted to
+    # agent_conversation_memory once the turn completes — the write-side
+    # half of the same durability fix, mirroring
+    # personal_channel_sage_bridge_service.py's own append_turn call sites
+    # (including tagging the inbound turn with envelope.to_metadata() when
+    # an envelope is present, never the assistant's own reply — see that
+    # module's docstring for why). Shape: {"workspace_id", "agent_id",
+    # "conversation_key"}; "conversation_key" empty or dict None = no write
+    # (unchanged behavior). Best-effort — a memory write failure is logged,
+    # never allowed to affect what was already delivered to the channel.
+    conversation_memory: Optional[Dict[str, str]] = None,
 ) -> bool:
     """Execute a full Sage turn and deliver the reply via transport.
 
@@ -327,6 +347,7 @@ async def dispatch_sage_reply(
                 thread_id=thread_id,
                 specialist_context=specialist_context,
                 envelope=envelope,
+                channel_prior_messages=channel_prior_messages,
             )
         finally:
             if transport.supports_typing_indicator:
@@ -343,6 +364,7 @@ async def dispatch_sage_reply(
     # the failure is logged and surfaced on the dashboard/activity feed.
     reply = str(result.message or "").strip() if result else ""
     channel_safe_reply = filter_channel_outbound_reply(reply) if reply else None
+    media = list(getattr(result, "media", None) or []) if result else []
 
     from server_modules import durability_signal
 
@@ -400,6 +422,41 @@ async def dispatch_sage_reply(
             summary="Reply generated but could not be delivered after bounded retries.",
         )
 
+    # ── Durable per-agent conversation memory (agent_conversation_memory) ──
+    # Opt-in write-side counterpart to channel_prior_messages above. Mirrors
+    # personal_channel_sage_bridge_service.py's own write sites: the inbound
+    # user turn is always recorded (tagged with the envelope's metadata when
+    # one was supplied — never the assistant's own reply, which isn't
+    # "said by" the channel's sender), the assistant turn only when a real
+    # reply or outbound media was actually produced. Best-effort: a failure
+    # here must never affect a reply that already reached the channel.
+    if conversation_memory:
+        _mem_key = str(conversation_memory.get("conversation_key") or "").strip()
+        if _mem_key:
+            try:
+                from server_modules import agent_conversation_memory
+
+                _mem_ws = str(conversation_memory.get("workspace_id") or workspace_id or "default").strip() or "default"
+                _mem_agent = str(conversation_memory.get("agent_id") or "").strip()
+                agent_conversation_memory.append_turn(
+                    workspace_id=_mem_ws, agent_id=_mem_agent,
+                    conversation_key=_mem_key, role="user", content=message,
+                    metadata=envelope.to_metadata() if envelope is not None else None,
+                )
+                if channel_safe_reply or media:
+                    _assistant_content = channel_safe_reply or (
+                        "[sent " + ", ".join(sorted({str(item.get("kind") or "file") for item in media})) + "]"
+                    )
+                    agent_conversation_memory.append_turn(
+                        workspace_id=_mem_ws, agent_id=_mem_agent,
+                        conversation_key=_mem_key, role="assistant", content=_assistant_content,
+                    )
+            except Exception:
+                _logger.warning(
+                    "dispatch_sage_reply: conversation memory write failed (workspace=%s channel=%s)",
+                    workspace_id, channel_origin, exc_info=True,
+                )
+
     return sent_any
 
 
@@ -416,6 +473,8 @@ async def dispatch_sage_reply_safe(
     reply_to_id: Optional[str] = None,
     specialist_context: Any = None,
     envelope: Optional[InboundEnvelope] = None,
+    channel_prior_messages: Optional[List[dict]] = None,
+    conversation_memory: Optional[Dict[str, str]] = None,
 ) -> bool:
     """Like dispatch_sage_reply() but catches ALL exceptions.
 
@@ -442,6 +501,8 @@ async def dispatch_sage_reply_safe(
             reply_to_id=reply_to_id,
             specialist_context=specialist_context,
             envelope=envelope,
+            channel_prior_messages=channel_prior_messages,
+            conversation_memory=conversation_memory,
         )
     except Exception as exc:
         _logger.exception(

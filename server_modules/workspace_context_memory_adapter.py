@@ -7,14 +7,19 @@ from server_modules import workspace_context
 from server_modules.conversation_memory_policy import MemoryPolicyProfile
 from server_modules.workspace_context import read_workspace_context_files
 
+# Founder ruling (2026-07-23, final): SOUL.md/USER.md/IDENTITY.md/GOALS.md/
+# TOOLS.md/AGENTS.md are removed from the root-file taxonomy entirely (see
+# workspace_context.py's ALLOWED_CONTEXT_FILENAMES and
+# docs/design/root-taxonomy-removal-scope.md) -- dropped from this order so
+# the direct-chat/BYO-model and deployed-fleet-agent surfaces this adapter
+# serves stop injecting them, matching sage_instruction_compiler_service.py's
+# equivalent change for the Sage-native surface. (SELF_MODEL.md/LIFE_STORY.md
+# below are a separate, pre-existing issue -- dead names that were never in
+# workspace_context.ALLOWED_CONTEXT_FILENAMES even before this change, so any
+# write to them was always silently remapped into memory/files/ -- out of
+# scope for this removal.)
 _ROOT_CONTEXT_FILE_ORDER = (
-    "SOUL.md",
-    "USER.md",
-    "IDENTITY.md",
-    "GOALS.md",
     "PROCEDURES.md",
-    "TOOLS.md",
-    "AGENTS.md",
     "REFLECTION.md",
     "MEMORY.md",
     "HEARTBEAT.md",

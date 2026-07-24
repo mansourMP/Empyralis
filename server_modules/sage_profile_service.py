@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-from server_modules import rust_runtime_kernel_client, workspace_context
+from server_modules import memory_service, rust_runtime_kernel_client, workspace_context
 
 
 SAGE_PROFILE_BOOTSTRAP_QUESTIONS: tuple[Dict[str, str], ...] = (
@@ -43,11 +43,23 @@ SAGE_PROFILE_BOOTSTRAP_QUESTIONS: tuple[Dict[str, str], ...] = (
     },
 )
 
+# Founder ruling (2026-07-23, final): USER.md/IDENTITY.md/SOUL.md are removed
+# from the root-file taxonomy. Onboarding's projection of the durable bits of
+# the profile (preferred name, role/focus, communication style, standing
+# rules) now targets a MEMORY.md-indexed topic file instead -- routed through
+# memory_service.update_memory_context_file so it gets the exact same caps
+# (200-line/25KB per topic file, 200-line/25KB MEMORY.md index cap) and
+# auto-index-upsert every other topic file gets, rather than a bespoke write
+# path for onboarding data. HEARTBEAT.md is untouched: it's a runtime log,
+# never part of the SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS taxonomy in spirit,
+# and out of scope for this removal.
 SAGE_PROFILE_PROJECTED_FILES: tuple[str, ...] = (
-    "USER.md",
-    "IDENTITY.md",
-    "SOUL.md",
     "HEARTBEAT.md",
+)
+SAGE_PROFILE_MEMORY_TOPIC_FILE = "memory/files/profile.md"
+SAGE_PROFILE_MEMORY_TOPIC_DESCRIPTION = (
+    "Owner profile: preferred name, role/focus, communication style, and "
+    "standing rules captured during Sage setup."
 )
 
 
@@ -242,36 +254,25 @@ def _has_profile_content(profile: Dict[str, Any]) -> bool:
     )
 
 
-def _project_user_md(profile: Dict[str, Any]) -> str:
+def _project_profile_topic_file(profile: Dict[str, Any]) -> str:
+    """Replaces the old separate USER.md/IDENTITY.md/SOUL.md projections
+    with one MEMORY.md-indexed topic file (see SAGE_PROFILE_MEMORY_TOPIC_FILE
+    above) -- same durable facts (preferred name, role/focus, communication
+    style, standing rules), one file instead of three root files."""
     name = _coerce_text(profile.get("user_name")) or "Not set yet."
-    return (
-        "# User Profile\n\n"
-        f"- Preferred name: {name}\n"
-    )
-
-
-def _project_identity_md(profile: Dict[str, Any]) -> str:
     summary = _coerce_text(profile.get("identity_summary")) or "Not set yet."
-    return (
-        "# Identity\n\n"
-        f"- Role and focus: {summary}\n"
-    )
-
-
-def _project_soul_md(profile: Dict[str, Any]) -> str:
     style = _coerce_text(profile.get("communication_style")) or "Keep replies clear, useful, and calm."
     rules = _normalize_rules(profile.get("standing_rules"))
     lines = [
-        "# Empyralis",
+        "# Owner Profile",
         "",
-        "Empyralis is a calm mobile-first AI product.",
-        "Its job is to help the user through one personal assistant named Sage.",
+        f"- Preferred name: {name}",
+        f"- Role and focus: {summary}",
+        f"- Communication style: {style}",
         "",
-        "## Personal communication style",
+        "## Standing rules",
         "",
-        f"- {style}",
     ]
-    lines.extend(["", "## Standing rules", ""])
     if rules:
         lines.extend(f"- {rule}" for rule in rules)
     else:
@@ -295,43 +296,96 @@ def _project_heartbeat_md(profile: Dict[str, Any]) -> str:
 def projected_context_files(profile: Dict[str, Any]) -> Dict[str, str]:
     normalized = _normalize_profile(profile)
     return {
-        "USER.md": _project_user_md(normalized),
-        "IDENTITY.md": _project_identity_md(normalized),
-        "SOUL.md": _project_soul_md(normalized),
         "HEARTBEAT.md": _project_heartbeat_md(normalized),
+        SAGE_PROFILE_MEMORY_TOPIC_FILE: _project_profile_topic_file(normalized),
     }
+
+
+def _progressive_profile_states(profile: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every profile snapshot `profile` could have passed through on its way
+    here, answered in SAGE_PROFILE_BOOTSTRAP_QUESTIONS order (empty, then one
+    field added at a time). The profile topic file aggregates four fields
+    (user_name, identity_summary, communication_style, standing_rules) that
+    the bootstrap wizard fills in one at a time across separate calls --
+    unlike the old one-field-per-file design (USER.md/IDENTITY.md/SOUL.md),
+    a naive "does this match the fully-empty projection" check would treat
+    the file as "manually edited" (and stop syncing it) the moment the
+    SECOND question gets answered, since its content no longer matches the
+    all-empty state. Comparing against every point along the natural
+    progression instead lets the wizard keep updating the file through every
+    question while still refusing to clobber a genuinely foreign (manually
+    edited) file."""
+    normalized = _normalize_profile(profile)
+    states: List[Dict[str, Any]] = [dict(_default_state()["profile"])]
+    running = dict(states[0])
+    for question in SAGE_PROFILE_BOOTSTRAP_QUESTIONS:
+        field = question["field"]
+        running = dict(running)
+        running[field] = normalized.get(field)
+        states.append(running)
+    return states
 
 
 def sync_profile_context_files(*, workspace_id: str, profile: Dict[str, Any]) -> Dict[str, str]:
     projections = projected_context_files(profile)
     empty_profile_projections = projected_context_files(_default_state()["profile"])
+    progressive_topic_projections = {
+        str(_project_profile_topic_file(state) or "").strip()
+        for state in _progressive_profile_states(profile)
+    }
+
+    # HEARTBEAT.md: unchanged direct workspace-context write. Out of scope
+    # for the root-taxonomy removal (see SAGE_PROFILE_PROJECTED_FILES above).
+    heartbeat_content = projections["HEARTBEAT.md"]
     existing_files = workspace_context.read_workspace_context_files(workspace_id=workspace_id)
-    for filename, content in projections.items():
-        existing_content = str(existing_files.get(filename) or "")
-        default_content = str(workspace_context.DEFAULT_CONTEXT_FILE_CONTENTS.get(filename) or "")
-        empty_projection_content = str(empty_profile_projections.get(filename) or "")
-        is_replaceable_projection = existing_content.strip() in {
-            "",
-            default_content.strip(),
-            empty_projection_content.strip(),
-        }
-        if not is_replaceable_projection:
-            continue
+    existing_heartbeat = str(existing_files.get("HEARTBEAT.md") or "")
+    default_heartbeat = str(workspace_context.DEFAULT_CONTEXT_FILE_CONTENTS.get("HEARTBEAT.md") or "")
+    empty_heartbeat_projection = str(empty_profile_projections.get("HEARTBEAT.md") or "")
+    if existing_heartbeat.strip() in {"", default_heartbeat.strip(), empty_heartbeat_projection.strip()}:
         _enforce_sage_profile_state_decision(
             operation="update_workspace_context_file",
             state_class="workspace_context_files",
             workspace_id=workspace_id,
             actor_user_id=None,
             payload={
-                "filename": filename,
-                "content": content,
+                "filename": "HEARTBEAT.md",
+                "content": heartbeat_content,
                 "source": "sage_profile_projection",
             },
         )
         workspace_context.write_workspace_context_file(
-            filename,
-            content,
+            "HEARTBEAT.md",
+            heartbeat_content,
             workspace_id=workspace_id,
+        )
+
+    # Profile topic file (migrated off USER.md/IDENTITY.md/SOUL.md, 2026-07-23
+    # root-taxonomy removal): routed through memory_service's existing
+    # topic-file write path (caps + auto-index-upsert), never a bespoke
+    # write path for onboarding data.
+    profile_topic_content = projections[SAGE_PROFILE_MEMORY_TOPIC_FILE]
+    existing_topic_content = workspace_context.read_workspace_context_file(
+        SAGE_PROFILE_MEMORY_TOPIC_FILE,
+        workspace_id=workspace_id,
+    )
+    if existing_topic_content.strip() == "" or existing_topic_content.strip() in progressive_topic_projections:
+        _enforce_sage_profile_state_decision(
+            operation="update_workspace_context_file",
+            state_class="workspace_context_files",
+            workspace_id=workspace_id,
+            actor_user_id=None,
+            payload={
+                "filename": SAGE_PROFILE_MEMORY_TOPIC_FILE,
+                "content": profile_topic_content,
+                "source": "sage_profile_projection",
+            },
+        )
+        memory_service.update_memory_context_file(
+            workspace_id,
+            SAGE_PROFILE_MEMORY_TOPIC_FILE,
+            profile_topic_content,
+            reason="sage_profile_projection",
+            description=SAGE_PROFILE_MEMORY_TOPIC_DESCRIPTION,
         )
     return projections
 

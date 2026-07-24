@@ -354,6 +354,48 @@ async def route_inbound_channel_message(
         )
         effective_message = f"{context_prefix}{message_text}" if context_prefix else message_text
 
+        # ── Thread-id resolution (docs/design/audit-history-memory.md gap
+        # #4 — "the sage-main collapse"): without this, every Studio-
+        # connector sender/room on a given channel_origin shares the SAME
+        # SQL thread (execute_sage_turn's own frozen fallback: a resolved
+        # specialist keys per (agent, sender) already via
+        # agent_sender_thread_id, but the common "no specialist bound, runs
+        # as Sage" case falls through to get_active_thread's single
+        # workspace+channel-type pointer, which defaults to the literal
+        # "sage-main" for every channel that never set an override — no
+        # channel does). Reuses agent_sender_thread_id's exact
+        # deterministic (agent, key) pattern the WeChat fix
+        # (wechat_official_service.py) already established for the same
+        # bug, generalized here for every Studio connector that supplies a
+        # canonical envelope: a turn whose envelope names a ROOM
+        # (envelope.chat.id — a Slack channel, a Discord guild channel, a
+        # GitHub repository) keys per ROOM, since every participant in that
+        # room already shares its context by design (same as a group
+        # chat); a turn with no room (a DM, or any surface that never sets
+        # chat.id) keys per SENDER (envelope.sender.id) instead, so two
+        # different senders on the same channel type never interleave.
+        # room-over-sender (not surface-over-sender) is the actual signal:
+        # GitHub's envelope below is surface=API (not GROUP/
+        # BROADCAST_CHANNEL — a webhook has no "member" concept) but still
+        # wants per-repo, not per-actor, scoping — chat.id presence is what
+        # the target model (docs/design/audit-history-memory.md §2.2) means
+        # by "room", independent of which surface enum enclosed it. Gated
+        # on `envelope is not None` so an envelope-less caller (WhatsApp/
+        # Telegram ingress, the direct /agent-registry/channels/inbound API
+        # route — neither constructs one today) keeps its EXACT
+        # pre-existing behavior, unchanged: empty string here means
+        # execute_sage_turn's own (frozen, untouched) thread-resolution
+        # fallback runs exactly as before.
+        resolved_thread_id = ""
+        if envelope is not None:
+            _thread_agent_token = resolved_agent_id or "sage"
+            _room_or_sender = str(envelope.chat.id or "").strip() or str(envelope.sender.id or "").strip()
+            if not _room_or_sender:
+                _room_or_sender = str(actor_id or "").strip() or str(session_key or "").strip()
+            if _room_or_sender:
+                from server_modules.sage_command_dispatcher import agent_sender_thread_id
+                resolved_thread_id = agent_sender_thread_id(_thread_agent_token, _room_or_sender)
+
         try:
             from server_modules.sage_turn_adapter import execute_sage_turn
 
@@ -368,6 +410,7 @@ async def route_inbound_channel_message(
                 request_id=message_id or run_id,
                 specialist_context=specialist_context,
                 envelope=envelope,
+                thread_id=resolved_thread_id,
             )
 
             reply_text = str(sage_result.message or "")

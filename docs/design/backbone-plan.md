@@ -1,5 +1,7 @@
 # The Agent Backbone — where we are vs. the best, and the build order
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 The agent's core operating layer: how it manages its context window, its skills, its
 tools, whether it can work **continuously** through a task, spawn **sub-agents**, compact
 its own context, and **improve itself**. This is what separates a real agent (Claude Code,

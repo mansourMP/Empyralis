@@ -269,6 +269,20 @@ async def telegram_webhook(request: Request) -> dict:
         )
         return {"ok": True}
 
+    # ── Durable per-agent conversation memory (agent_conversation_memory) ──
+    # Same fix as sage_telegram_hosted_service._process_update (the polling
+    # path) — see its comment for the durability rationale. This webhook
+    # handler is a separate code path over the same paired-chat state, so it
+    # needs the same read-before/write-after wiring independently.
+    from server_modules import agent_conversation_memory
+    _mem_key = f"telegram_hosted:{chat_id}"
+    try:
+        _mem_prior = agent_conversation_memory.load_recent_turns(
+            workspace_id=workspace_id, agent_id="", conversation_key=_mem_key,
+        )
+    except Exception:
+        _mem_prior = []
+
     # ── Route through shared-core reply dispatcher ──
     # This ONE call owns: typing, execute_sage_turn, error classification,
     # [SILENT] suppression, message splitting, guaranteed fallback.
@@ -286,6 +300,10 @@ async def telegram_webhook(request: Request) -> dict:
         sender_name=str(parsed.get("from_first_name", "")).strip(),
         reply_to_id=str(parsed.get("message_id") or ""),
         envelope=_envelope,
+        channel_prior_messages=_mem_prior,
+        conversation_memory={
+            "workspace_id": workspace_id, "agent_id": "", "conversation_key": _mem_key,
+        },
     )
 
     if not delivered:
@@ -413,6 +431,17 @@ async def dev_poll_once() -> dict:
             processed += 1
             continue
 
+        # ── Durable per-agent conversation memory — same fix as the two
+        # live paths above (webhook / background polling). ──
+        from server_modules import agent_conversation_memory
+        _dev_mem_key = f"telegram_hosted:{chat_id}"
+        try:
+            _dev_mem_prior = agent_conversation_memory.load_recent_turns(
+                workspace_id=workspace_id, agent_id="", conversation_key=_dev_mem_key,
+            )
+        except Exception:
+            _dev_mem_prior = []
+
         # ── Route through shared-core reply dispatcher ──
         from server_modules.sage_reply_dispatcher import dispatch_sage_reply_safe
 
@@ -426,6 +455,10 @@ async def dev_poll_once() -> dict:
             sender_name=str(parsed.get("from_first_name", "")).strip(),
             reply_to_id=str(parsed.get("message_id") or ""),
             envelope=_dev_envelope,
+            channel_prior_messages=_dev_mem_prior,
+            conversation_memory={
+                "workspace_id": workspace_id, "agent_id": "", "conversation_key": _dev_mem_key,
+            },
         )
         processed += 1
     return {"ok": True, "updates_processed": processed}

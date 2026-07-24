@@ -29,11 +29,17 @@ class WorkspaceContextFilesTests(unittest.TestCase):
                 )
 
     def test_profile_projection_sync_does_not_overwrite_manual_file_edits(self) -> None:
+        # 2026-07-23 root-taxonomy removal: onboarding no longer projects
+        # into IDENTITY.md (removed from ALLOWED_CONTEXT_FILENAMES entirely)
+        # -- it projects into the memory/files/profile.md topic file
+        # instead (sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE). The
+        # same "never clobber a manual edit" guarantee is asserted against
+        # that new target.
         with tempfile.TemporaryDirectory() as tempdir:
             with patch("server_modules.workspace_context._WORKSPACE_DIR", Path(tempdir)):
-                manual_content = "# IDENTITY\n\n- Manually edited file text.\n"
+                manual_content = "# Owner Profile\n\n- Manually edited file text.\n"
                 workspace_context.write_workspace_context_file(
-                    "IDENTITY.md",
+                    sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE,
                     manual_content,
                     workspace_id="workspace-1",
                 )
@@ -47,7 +53,7 @@ class WorkspaceContextFilesTests(unittest.TestCase):
 
                 self.assertEqual(
                     workspace_context.read_workspace_context_file(
-                        "IDENTITY.md",
+                        sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE,
                         workspace_id="workspace-1",
                     ),
                     manual_content,
@@ -80,8 +86,11 @@ class WorkspaceContextFilesTests(unittest.TestCase):
                 self.assertIn(dream_filename, files)
                 self.assertEqual(files[note_filename], note_content)
                 self.assertEqual(files[dream_filename], dream_content)
-                self.assertIn("SOUL.md", files)
+                self.assertIn("MEMORY.md", files)
                 self.assertIn("REFLECTION.md", files)
+                # 2026-07-23 root-taxonomy removal: SOUL.md is no longer
+                # auto-created for a fresh workspace.
+                self.assertNotIn("SOUL.md", files)
 
     def test_user_memory_files_round_trip_and_are_listed(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -188,7 +197,7 @@ class WorkspaceContextFilesTests(unittest.TestCase):
                         workspace_id=workspace_id,
                     )
 
-    def test_user_memory_file_quota_rejects_more_than_twenty_files(self) -> None:
+    def test_user_memory_file_quota_rejects_more_than_max_count_files(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             with patch("server_modules.workspace_context._WORKSPACE_DIR", Path(tempdir)):
                 workspace_id = "workspace-1"

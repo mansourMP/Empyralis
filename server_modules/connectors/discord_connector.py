@@ -1209,11 +1209,25 @@ async def _handle_dm_via_gateway(message: Any) -> None:
             sender=EnvelopeSender(id=_author_id, display_name=_author_name, is_owner=True),
         )
 
+        # ── FIX: per-sender thread scoping (was thread_id="sage-main" for
+        # EVERY paired Discord user — same bug class as pre-fix WeChat: two
+        # different owners who each /pair-ed their own Discord DM to their
+        # own workspace would still collapse into the identical literal
+        # "sage-main" SQL thread if they happened to land in the same
+        # workspace, and even within one workspace this is the ONLY DM path
+        # (no specialist_context here — Discord DM always runs as Sage/
+        # master), so agent_sender_thread_id's usual "only when a specialist
+        # is bound" gate would otherwise skip it entirely. Mirrors
+        # wechat_official_service.handle_inbound_callback's identical fix:
+        # deterministic, no DB lookup, keyed per (agent-or-sage, sender).
+        from server_modules.sage_command_dispatcher import agent_sender_thread_id
+        _thread_id = agent_sender_thread_id("sage", _author_id)
+
         from server_modules.sage_command_dispatcher import dispatch_command as _dc
         _cmd_reply = await _dc(
             command=_text,
             workspace_id=_workspace_id,
-            thread_id="sage-main",
+            thread_id=_thread_id,
             channel_origin="discord_personal",
             sender_id=_author_id or None,
         )
@@ -1228,7 +1242,7 @@ async def _handle_dm_via_gateway(message: Any) -> None:
                 channel_origin="discord_personal",
                 channel_sender_id=_author_id,
                 channel_sender_name=_author_name or None,
-                thread_id="sage-main",
+                thread_id=_thread_id,
                 envelope=_dm_envelope,
             )
             _raw = str(_result.message or "").strip()

@@ -1,5 +1,7 @@
 # Memory + Context Delivery: How Claude Code Does It, How Empyralis Does It, and How to Close the Gap
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers (e.g. `"sage-main"`, `sage_agent_runtime_service.py`) are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 Status: design doc, not yet built. No production code was changed to produce this.
 Scope: how an agent's durable memory (facts across sessions) and per-turn context (system prompt + history + tools) get assembled and delivered to the model. Goal stated by the founder: make Empyralis agents work "exactly like Claude Code's memory system" — a dense `MEMORY.md` index loaded every turn, individual memory files created/read on demand, links between files.
 

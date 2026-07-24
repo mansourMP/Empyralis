@@ -45,7 +45,16 @@ class SkillsServiceTests(unittest.TestCase):
             llm_task=lambda *args, **kwargs: {"ok": True},
             web_search=lambda query: [],
             web_fetch=lambda url: f"Fetched {url}",
-            search_memory_notebook=lambda workspace_id, query, max_results=5, agent_install_id=None: [{"path": "MEMORY.md", "query": query, "max_results": max_results, "agent_install_id": agent_install_id}],
+            # Mirrors the real search_memory_notebook envelope (results +
+            # files_searched/status/message/errors) so the model can tell a
+            # confirmed-empty search from one that never ran.
+            search_memory_notebook=lambda workspace_id, query, max_results=5, agent_install_id=None: {
+                "results": [{"path": "MEMORY.md", "query": query, "max_results": max_results, "agent_install_id": agent_install_id}],
+                "files_searched": 1,
+                "errors": [],
+                "status": "matches_found",
+                "message": "Searched 1 memory file(s).",
+            },
             get_memory_notebook_excerpt=lambda workspace_id, rel_path, from_line=None, line_count=None, agent_install_id=None: {
                 "path": rel_path,
                 "from_line": from_line,
@@ -59,7 +68,7 @@ class SkillsServiceTests(unittest.TestCase):
                 "agent_install_id": agent_install_id,
                 "version_id": kwargs.get("version_id") or "version-1",
             },
-            memory_append_daily_note=lambda workspace_id, note, agent_install_id=None, actor=None, run_id=None: {
+            memory_append_daily_note=lambda workspace_id, note, agent_install_id=None, actor=None, run_id=None, **kwargs: {
                 "workspace_id": workspace_id,
                 "filename": "memory/2026-05-11.md",
                 "appended_entry": f"- [00:00:00 UTC] {note}",
@@ -520,7 +529,7 @@ class SkillsServiceTests(unittest.TestCase):
         callbacks = direct_tool_execution_service.DirectToolExecutionCallbacks(
             **{
                 **callbacks.__dict__,
-                "memory_append_daily_note": lambda workspace_id, note, agent_install_id=None, actor=None, run_id=None: {
+                "memory_append_daily_note": lambda workspace_id, note, agent_install_id=None, actor=None, run_id=None, **kwargs: {
                     "workspace_id": workspace_id,
                     "filename": "memory/2026-05-11.md",
                     "saved": False,

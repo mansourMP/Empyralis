@@ -651,6 +651,7 @@ async def execute_hardware_action(
     cost_metadata: Optional[Dict[str, Any]] = None,
     agent_scope: str = "studio_agent",
     file_mount_grants: Optional[List[Dict[str, Any]]] = None,
+    agent_install_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     args = _dict(arguments)
     target_ids = _runtime_target_ids(runtime_target)
@@ -854,6 +855,7 @@ async def execute_hardware_action(
         runtime_target=canonical_target_id,
         agent_scope=agent_scope,
         file_mount_grants=file_mount_grants,
+        agent_install_id=agent_install_id,
     )
 
 

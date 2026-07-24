@@ -188,6 +188,46 @@ test("llm.generate (codex): dispatches via cliRunner, folds system prompt into t
   assert.equal(result.model, "default");
 });
 
+test("llm.generate (grok_build): dispatches via cliRunner, keeps system prompt separate (grok_build has its own --rules flag)", async () => {
+  const capture: CliCapture = {};
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      Object.assign(capture, params);
+      return { text: "hello from grok", usage: { input_tokens: 5, output_tokens: 2 } };
+    },
+  });
+  const result = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({ runtime: "grok_build", model: "grok-build", system: "Be terse.", prompt: "hi" }),
+  );
+  assert.equal(capture.runtime, "grok_build");
+  assert.equal(capture.systemPrompt, "Be terse.", "grok_build must keep systemPrompt separate — cli-runner.ts forwards it via --rules");
+  assert.equal(capture.prompt, "hi");
+  assert.equal(result.text, "hello from grok");
+  assert.equal(result.source, "gateway_grok_build");
+});
+
+test("llm.generate (cursor_cli): folds system prompt into the prompt body (no system-prompt flag is documented for cursor-agent)", async () => {
+  const capture: CliCapture = {};
+  const runtime = new GatewayLLMRuntime({
+    cliRunner: async (params) => {
+      Object.assign(capture, params);
+      return { text: "hello from cursor", usage: { input_tokens: 0, output_tokens: 0 } };
+    },
+  });
+  const result = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({ runtime: "cursor_cli", model: "auto", system: "Be terse.", prompt: "hi" }),
+  );
+  assert.equal(capture.runtime, "cursor_cli");
+  // Unlike grok_build/claude_code, cursor_cli has no system-prompt-equivalent
+  // CLI flag — the system content must be folded inline into the prompt
+  // body instead of silently dropped (this is the exact bug this test
+  // guards against).
+  assert.equal(capture.systemPrompt, "");
+  assert.equal(capture.prompt, "Be terse.\n\nhi");
+  assert.equal(result.text, "hello from cursor");
+  assert.equal(result.source, "gateway_cursor_cli");
+});
+
 // ── Reasoning effort (Phase 1: reasoning-effort control) — the backend's
 // _dispatch_cli_subscription_gateway_brain sends this as
 // arguments.reasoning_effort; this Gateway handler must forward it into

@@ -10,20 +10,63 @@ from server_modules import rust_runtime_kernel_client
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WORKSPACE_DIR = _REPO_ROOT / ".orion-stack" / "workspace"
 
+# Founder ruling (2026-07-23, final): the SOUL.md/IDENTITY.md/USER.md/
+# GOALS.md/AGENTS.md/TOOLS.md root-file taxonomy is removed ENTIRELY. It was
+# killed as a product surface ~1.5 months before this ruling, but the
+# machinery that auto-created, injected, and let the model write to all six
+# kept running unchanged until this change (see
+# docs/design/root-taxonomy-removal-scope.md for the full audit). Replacement
+# model: the compiled system prompt is always in the window (static
+# persona/operating-rule copy lives there now, not in SOUL.md/AGENTS.md/
+# TOOLS.md), and MEMORY.md is the index-first memory -- durable per-user facts
+# (name, role, communication style, standing rules -- what USER.md/
+# IDENTITY.md/SOUL.md held) live in a MEMORY.md-indexed topic file
+# (memory/files/profile.md, see sage_profile_service.py), and goal notes
+# (what GOALS.md held) live in memory/files/goals.md the same way.
+#
+# Existing workspaces that had a live turn before this ruling still have all
+# ten old files on disk with real content -- NEVER deleted (delete_
+# workspace_context_file already refuses to remove any root file, unchanged
+# below). They are simply no longer auto-created for new workspaces, no
+# longer injected into any prompt, and no longer writable through the normal
+# validated path (see the LEGACY_TAXONOMY_FILENAMES guard in
+# _validate_context_path below). read_legacy_root_file() is the one
+# sanctioned way to still read that old orphaned content directly off disk,
+# for the few call sites (bounded_scheduler_service.py, unified_memory_
+# service.py) that need best-effort backward compatibility with pre-migration
+# workspaces.
 ALLOWED_CONTEXT_FILENAMES = (
-    # Bootstrap: loaded every turn in the system prompt.
-    # The agent must know who the user is, their goals, and their
-    # preferences before every reply.
+    # HEARTBEAT.md: a real, live, system-written run log (runtime_heartbeat_
+    # service.py), read by the scheduler as owner-tier config. Never part of
+    # the SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS taxonomy in spirit -- closer
+    # to a system log than to customer-editable persona/identity data -- so
+    # it is out of scope for this removal.
+    "HEARTBEAT.md",
+    # MEMORY.md: the one file guaranteed to be injected every turn -- the
+    # index. Everything else is pulled on demand via memory_search/memory_get.
+    "MEMORY.md",
+    # PROCEDURES.md / REFLECTION.md: daily-note auto-consolidation targets:
+    # already NOT in the always-loaded set, and REFLECTION.md's own scaffold
+    # text already documents the pull-on-demand-only intent.
+    "PROCEDURES.md",
+    "REFLECTION.md",
+)
+
+# The six removed root-taxonomy filenames (founder ruling above). Kept as a
+# named set -- NOT part of ALLOWED_CONTEXT_FILENAMES -- so
+# read_legacy_root_file() can validate against exactly these names: a
+# read-only escape hatch for orphaned pre-migration content, never a general
+# path-validation bypass. `_validate_context_path` below explicitly rejects
+# any of these names outright rather than letting its own bare-filename ->
+# memory/files/<name> remap heuristic silently reroute them into a
+# confusingly-named new topic file.
+LEGACY_TAXONOMY_FILENAMES = (
     "SOUL.md",
     "AGENTS.md",
     "TOOLS.md",
     "IDENTITY.md",
-    "HEARTBEAT.md",
     "USER.md",
     "GOALS.md",
-    "MEMORY.md",
-    "PROCEDURES.md",
-    "REFLECTION.md",
 )
 
 # All core memory files are now loaded every turn.
@@ -35,7 +78,77 @@ MAX_CONTEXT_FILE_BYTES = 64_000
 MAX_CONTEXT_SCOPE_BYTES = 512_000
 MAX_CONTEXT_DAILY_NOTES = 365
 MAX_CONTEXT_DREAM_STAGING_NOTES = 10
-MAX_CONTEXT_USER_MEMORY_FILES = 20
+# Founder ruling (2026-07-23, memory-file architecture): the NUMBER of memory
+# topic files (memory/files/**) is hard capped -- "a reasonable amount, not
+# hundreds." The founder is NOT settled on the exact number (40 is the
+# orchestrator's chosen default, pending real-usage data) -- what IS decided
+# is that a hard cap exists and lives in exactly this one named constant, so
+# the number can change later without hunting for it. Change this constant to
+# change the cap everywhere it's enforced (write_workspace_context_file,
+# below); do not hardcode 40 elsewhere (including tests -- assert against
+# this constant, not the literal). At the cap, creating a NEW topic file is
+# rejected with an explicit error telling the agent to consolidate into an
+# existing file instead; updating any of the existing files is always
+# allowed. MAX_CONTEXT_USER_MEMORY_FILES is kept as a byte-for-byte alias --
+# it predates this ruling (was a fixed 20) -- so any existing caller/test
+# that references it by its original name still works, now against the
+# current value.
+#
+# PLACEMENT-AWARE (founder ruling, same day, updated): this generous default
+# is for HARDWARE-BACKED agents (paired computer/VPS -- memory will
+# eventually live on their own box). CLOUD-ONLY agents (no hardware,
+# platform-hosted memory -- e.g. a Telegram-only Q&A agent) get a smaller
+# cap instead -- see MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY below.
+#
+# Selecting between the two per-write requires knowing the CALLING agent's
+# placement/hardware binding (RuntimeProfileModel.runtime_class /
+# placement_mode, reached via agent_registry_repository, keyed off
+# agent_install_id -> workspace_agent_installs.runtime_profile_id ->
+# runtime_profiles). That is a SQLAlchemy+Postgres-backed, async lookup --
+# a heavy dependency this chokepoint does not otherwise have, and one this
+# module deliberately stays free of (it's a synchronous, filesystem-only
+# primitive used from many sync call sites and tests with no DB configured
+# at all -- sqlalchemy isn't even installed in every environment this runs
+# in; see test_control_plane_agent_registry.py's collection error).
+#
+# TODO(placement wiring): rather than import that dependency chain here,
+# write_workspace_context_file takes an explicit `topic_file_max_count`
+# override (below) instead. Whichever caller CAN cleanly resolve placement
+# without dragging that chain into a hot synchronous path (e.g.
+# skills_service.py's tool dispatch, if/when agent placement is already
+# resolved and sitting in session_metadata by the time it gets there) should
+# resolve it there and pass MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY through
+# for a confirmed cloud-only install. Until that wiring lands, every caller
+# that doesn't pass an override gets MEMORY_TOPIC_FILE_MAX_COUNT (the
+# generous, hardware-backed default) -- unchanged behavior from before this
+# ruling, and the safe direction to default in (never silently OVER-capping
+# a hardware-backed agent that just hasn't been wired up yet).
+MEMORY_TOPIC_FILE_MAX_COUNT = 40
+# Founder ruling (2026-07-23, revised same day): raised from 5 to 10 -- 10
+# files x 25KB (MEMORY_TOPIC_FILE_MAX_BYTES, below) is ~250KB per agent at
+# the absolute worst case, negligible storage, while giving cloud-only
+# agents real working room instead of running out of topic-file slots
+# almost immediately. The per-file caps (200 lines / 25KB) are unchanged --
+# this only moves how many files a cloud-only agent may have, matching the
+# same Claude-Code-derived discipline (MEMORY_TOPIC_FILE_MAX_LINES /
+# _MAX_BYTES below) already proven at the single-file level. Hardware-backed
+# stays at 40 (unchanged).
+MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY = 20
+MAX_CONTEXT_USER_MEMORY_FILES = MEMORY_TOPIC_FILE_MAX_COUNT
+# Same founder ruling: every memory topic file gets the SAME per-file cap as
+# MEMORY.md's own index cap (memory_service.MEMORY_MD_INDEX_MAX_LINES /
+# _MAX_BYTES -- 200 lines / 25KB, whichever hits first), enforced at write
+# time with an explicit reject-and-explain error -- never a silent
+# truncation. Defined here rather than imported from memory_service (which
+# imports this module, so importing back would be circular) -- the two are
+# kept at the same numeric values by this comment, not by shared code, since
+# they protect two different file classes (the index vs. its topic files)
+# through two different call paths that both bottom out at
+# write_workspace_context_file, the one chokepoint every topic-file write
+# (memory_write_file, update_memory_context_file, and any future caller)
+# already funnels through.
+MEMORY_TOPIC_FILE_MAX_LINES = 200
+MEMORY_TOPIC_FILE_MAX_BYTES = 25_000
 DREAM_STAGING_TTL_DAYS = 7
 
 _DATE_SEGMENT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -47,6 +160,13 @@ USER_MEMORY_FILE_RE = re.compile(
     r"^memory/files/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*\.md$"
 )
 
+# NOTE: the SOUL.md/AGENTS.md/TOOLS.md/IDENTITY.md/USER.md/GOALS.md entries
+# below are RETAINED even though those six names are no longer in
+# ALLOWED_CONTEXT_FILENAMES (see the founder-ruling comment above) -- kept
+# only so is_default_context_content() can still correctly classify legacy,
+# pre-migration file content read via read_legacy_root_file() as
+# "still the untouched scaffold" vs. "the owner actually wrote real content
+# here." No live code path writes these scaffolds to disk anymore.
 DEFAULT_CONTEXT_FILE_CONTENTS: Dict[str, str] = {
     "SOUL.md": (
         "---\n"
@@ -267,6 +387,24 @@ def _validate_context_path(filename: str) -> str:
     if ".." in segments or any(part == "." for part in segments):
         raise ValueError(f"Path traversal is not allowed: {normalized}")
 
+    # Founder ruling (2026-07-23): the six removed root-taxonomy filenames
+    # must fail loudly, not fall through to the bare-filename remap below.
+    # Without this explicit guard, "SOUL.md" (no longer in
+    # ALLOWED_CONTEXT_FILENAMES) would silently satisfy the remap heuristic
+    # just below and get quietly rerouted to a brand-new
+    # "memory/files/SOUL.md" topic file -- a confusing, easy-to-miss surprise
+    # for any caller (model tool call, internal code) still using the old
+    # name. An explicit, named error is the same "never silent" discipline
+    # every other guard in this module already follows.
+    if normalized in LEGACY_TAXONOMY_FILENAMES:
+        raise ValueError(
+            f"Unsupported context filename: {normalized} (the SOUL/IDENTITY/USER/GOALS/"
+            "AGENTS/TOOLS root-file taxonomy was removed 2026-07-23; use MEMORY.md or a "
+            "memory/files/*.md topic file instead. Pre-migration content at this legacy "
+            "path, if any, is still readable via workspace_context.read_legacy_root_file, "
+            "but is never auto-created or written here anymore.)"
+        )
+
     # Phase 6: friendly topic paths (e.g. "customers/acme.md", "notes.md") map into
     # the agent's memory/files tree. Known root files and existing memory/ paths are
     # left unchanged. Traversal is already rejected above, so this can only ever
@@ -446,14 +584,26 @@ def _count_existing_dream_notes(root: Path) -> int:
 
 
 def _count_existing_user_memory_files(root: Path) -> int:
+    """Count existing memory topic files toward MEMORY_TOPIC_FILE_MAX_COUNT.
+    Must walk both flat files (memory/files/foo.md) AND the one-level-deep
+    category files USER_MEMORY_FILE_RE itself allows (memory/files/customers/
+    acme.md) -- a shallow files_dir.iterdir() only sees the top level and
+    silently does not count anything filed under a category subdirectory,
+    which would let an agent create unlimited categorized topic files past
+    the cap. rglob walks every depth; the regex fullmatch below still
+    excludes anything deeper than one level (or otherwise malformed), same
+    as it always did."""
     files_dir = root / "memory" / "files"
     if not files_dir.exists() or not files_dir.is_dir():
         return 0
     count = 0
-    for path in sorted(files_dir.iterdir(), key=lambda item: item.name):
+    for path in sorted(files_dir.rglob("*.md"), key=lambda item: str(item)):
         if not path.is_file():
             continue
-        rel = f"memory/files/{path.name}"
+        try:
+            rel = f"memory/files/{path.relative_to(files_dir).as_posix()}"
+        except ValueError:
+            continue
         if USER_MEMORY_FILE_RE.fullmatch(rel):
             count += 1
     return count
@@ -532,6 +682,68 @@ def read_workspace_context_file(
         return ""
 
 
+def read_legacy_root_file(
+    filename: str,
+    *,
+    workspace_id: str | None = None,
+    agent_install_id: str | None = None,
+) -> str:
+    """Read one of the six removed root-taxonomy files (see
+    LEGACY_TAXONOMY_FILENAMES) directly off disk, bypassing
+    normalize_workspace_context_filename entirely -- these names are
+    deliberately rejected there now (see _validate_context_path). This is a
+    one-way, read-only escape hatch for pre-migration workspaces that wrote
+    real content to e.g. USER.md before the 2026-07-23 root-taxonomy removal;
+    it never creates the file and is not a general path-validation bypass
+    (restricted to exactly LEGACY_TAXONOMY_FILENAMES).
+
+    Returns "" if the file was never created on this workspace/agent (a
+    workspace created after the removal will always get "" here -- correct,
+    since nothing writes these filenames anymore)."""
+    normalized = str(filename or "").strip()
+    if normalized not in LEGACY_TAXONOMY_FILENAMES:
+        raise ValueError(f"Not a legacy root-taxonomy filename: {normalized}")
+    root = agent_workspace_context_dir(workspace_id=workspace_id, agent_install_id=agent_install_id)
+    path = root / normalized
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def workspace_context_file_exists(
+    filename: str,
+    *,
+    workspace_id: str | None = None,
+    agent_install_id: str | None = None,
+) -> bool:
+    """True when ``filename`` resolves to a file that actually exists on
+    disk. This is the fix for the `memory_read` false-negative: for any
+    ``memory/files/**.md`` topic-file path (or a daily/dream note),
+    ``is_default_context_content`` structurally cannot answer "does this
+    file exist" -- it only ever compares byte-for-byte against a seeded
+    scaffold, and no scaffold exists for topic files, so it always returns
+    False for them. That reads as "this is real, curated content" even when
+    the path was never created at all -- the opposite of the truth. Call
+    this FIRST and report both fields; don't infer existence from
+    `is_default`.
+
+    Root files in ALLOWED_CONTEXT_FILENAMES always report True: they are
+    auto-seeded with default scaffold content on first read/write
+    (`ensure_workspace_context_files`), so "does not exist" is never a real
+    state for them -- only "still has default content" is, which
+    `is_default_context_content` already answers correctly.
+    """
+    normalized = normalize_workspace_context_filename(filename)
+    if normalized in ALLOWED_CONTEXT_FILENAMES:
+        return True
+    root = agent_workspace_context_dir(workspace_id=workspace_id, agent_install_id=agent_install_id)
+    path = _resolve_context_file_path(root, normalized)
+    return path.exists()
+
+
 def delete_workspace_context_file(
     filename: str,
     *,
@@ -561,23 +773,59 @@ def write_workspace_context_file(
     *,
     workspace_id: str | None = None,
     agent_install_id: str | None = None,
+    topic_file_max_count: int | None = None,
 ) -> Dict[str, str]:
+    """`topic_file_max_count`: override for the memory-topic-file count cap
+    (see MEMORY_TOPIC_FILE_MAX_COUNT / MEMORY_TOPIC_FILE_MAX_COUNT_CLOUD_ONLY
+    above for the placement-aware split and why this is a plain parameter
+    rather than something resolved in here). None (the default) applies
+    MEMORY_TOPIC_FILE_MAX_COUNT -- unchanged behavior for every caller that
+    doesn't know the calling agent's placement."""
     normalized = normalize_workspace_context_filename(filename)
     root = agent_workspace_context_dir(workspace_id=workspace_id, agent_install_id=agent_install_id)
     _prune_expired_dream_notes(root)
     path = _resolve_context_file_path(root, normalized)
+    is_topic_file = bool(USER_MEMORY_FILE_RE.fullmatch(normalized))
+    _topic_file_count_cap = (
+        int(topic_file_max_count) if topic_file_max_count is not None else MEMORY_TOPIC_FILE_MAX_COUNT
+    )
     if DAILY_NOTE_RE.fullmatch(normalized):
         if not path.exists() and _count_existing_daily_notes(root) >= MAX_CONTEXT_DAILY_NOTES:
             raise ValueError("Daily note storage exceeds file quota.")
     if DREAMS_NOTE_RE.fullmatch(normalized):
         if not path.exists() and _count_existing_dream_notes(root) >= MAX_CONTEXT_DREAM_STAGING_NOTES:
             raise ValueError("Dream staging storage exceeds file quota.")
-    if USER_MEMORY_FILE_RE.fullmatch(normalized):
-        if not path.exists() and _count_existing_user_memory_files(root) >= MAX_CONTEXT_USER_MEMORY_FILES:
-            raise ValueError("Memory file storage exceeds file quota.")
+    if is_topic_file:
+        # Founder ruling: the count cap only ever blocks CREATING a new
+        # (N+1-th) topic file -- updating any of the files that already exist
+        # is always allowed, so curating what's already there can never trip
+        # this check.
+        if not path.exists() and _count_existing_user_memory_files(root) >= _topic_file_count_cap:
+            raise ValueError(
+                f"Cannot create memory topic file '{normalized}': this workspace already has "
+                f"{_topic_file_count_cap} memory topic files (memory/files/**), the maximum "
+                "allowed. This was NOT saved -- consolidate this content into an existing topic "
+                "file instead of creating a new one."
+            )
 
     payload = str(content or "")
     encoded = payload.encode("utf-8")
+
+    if is_topic_file:
+        # Founder ruling: every memory topic file gets the SAME per-file cap
+        # as MEMORY.md's own index cap -- 200 lines / 25KB, whichever hits
+        # first -- applied on every write (create or update), never silently
+        # truncated.
+        line_count = payload.count("\n") + (1 if payload and not payload.endswith("\n") else 0)
+        byte_count = len(encoded)
+        if byte_count > MEMORY_TOPIC_FILE_MAX_BYTES or line_count > MEMORY_TOPIC_FILE_MAX_LINES:
+            raise ValueError(
+                f"Memory topic file '{normalized}' would exceed its {MEMORY_TOPIC_FILE_MAX_LINES}-line / "
+                f"{MEMORY_TOPIC_FILE_MAX_BYTES}-byte cap (would be {line_count} lines, {byte_count} bytes). "
+                "This write was NOT saved -- shorten this file, split it into a separate "
+                "memory/files/*.md topic file, or consolidate it into another existing topic file."
+            )
+
     if len(encoded) > MAX_CONTEXT_FILE_BYTES:
         raise ValueError("Context file content exceeds per-file quota.")
 

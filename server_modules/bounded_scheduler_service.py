@@ -14,6 +14,23 @@ DEFAULT_QUIET_HOURS_START = 23
 DEFAULT_QUIET_HOURS_END = 7
 DEFAULT_MAX_EVENT_TRIGGERS_PER_HOUR = 4
 DEFAULT_MAX_SELF_PROPOSED_PER_HOUR = 2
+# STEP 6 (agent-identity plan) / numeric backstops on multi-agent chains:
+# every framework studied (OpenAI max_turns, Claude Code subagent depth/
+# concurrency caps, AutoGen termination conditions, CrewAI iteration/RPM
+# limits) backstops agent reasoning with a hard numeric ceiling, never
+# reasoning alone -- see docs/design/multi-agent-coordination-research.md.
+# task_assigned wakeups (schedule_task_assigned_wakeup, below) are the one
+# per-task wake path that is live today; the wake-on-mention trigger lands
+# a future wave and will reuse the exact same per-task counter and error
+# shape rather than inventing its own. This constant is the ceiling for
+# BOTH: a single task_id can generate at most this many wake requests in a
+# rolling 24h window, regardless of how many distinct triggers (assignment,
+# future mentions, retries) fire it. Deliberately looser than the
+# workspace-wide hourly caps above it (4/hr event-triggers, 2/hr
+# self-proposed) -- this exists to stop ONE task from looping/re-triggering
+# itself into an unbounded wake storm, not to replace those broader caps.
+# Tunable via EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY without a code change.
+DEFAULT_MAX_WAKES_PER_TASK_PER_DAY = 24
 DEFAULT_MAX_RUNTIME_SECONDS = 20
 DEFAULT_MINIMUM_BATTERY_PERCENT = 20
 DEFAULT_WAKE_BATCH_LIMIT = 5
@@ -632,6 +649,107 @@ async def maybe_schedule_event_trigger(
     return record
 
 
+async def schedule_task_assigned_wakeup(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    task_id: str,
+    title: str,
+    description: str = "",
+    triggered_by: str = "owner",
+) -> Dict[str, Any]:
+    """docs/design/tasks-to-agents-research.md Section 4.6 step 3: a new
+    trigger reason ("task_assigned"), not a new execution engine. Called by
+    project_tasks_service.assign_task (the ONE code path shared by the
+    assignment API and a future @-mention resolver) whenever a task's
+    assignee_agent_id is set. Reuses maybe_schedule_event_trigger's exact
+    persist shape above (_persist_wakeup) -- same claim_due_wake_requests /
+    finalize_wake_requests machinery picks this row up on the next scan,
+    same as every other wake request kind.
+
+    payload carries `agent_id` (the same field list_wake_requests_for_agent/
+    cancel_wake_request already filter on) plus `task_id`/`task_title`/
+    `task_description`, so runtime_heartbeat_service.build_heartbeat_turn_
+    request can thread task_id into the resulting turn's trace metadata --
+    that's the seam direct_chat_generation_service reads at turn start/end
+    to seed and persist update_plan's current_plan per-task (Section 4.4).
+
+    Near-immediate, not instant: still runs through the same quiet-hours/
+    battery/network device-state gate every other trigger kind respects
+    (_apply_policy_to_due_at) -- an assignment made at 3am does not wake a
+    quiet-hours-respecting device early just because a human clicked
+    "assign". No approval gate here (unlike propose_self_wakeup's privileged-
+    runtime branch): assigning a task is itself the explicit human action,
+    matching the hard constraint that this feature adds no approval system
+    beyond what the scheduler already has natively."""
+    resolved_agent_id = str(agent_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+    resolved_title = str(title or "").strip()
+    if not resolved_agent_id or not resolved_task_id or not resolved_title:
+        raise SchedulerPolicyError(
+            "agent_id, task_id, and title are required to schedule a task-assigned wakeup."
+        )
+    # STEP 6 numeric backstop: a single task_id may not generate more than
+    # max_wakes_per_task_per_day() wake requests in a rolling 24h window --
+    # loud and explicit (SchedulerPolicyError), never a silent clamp/drop.
+    # This is the enforcement point the future wake-on-mention trigger reuses
+    # rather than inventing its own per-task cap; task_assigned is simply the
+    # first live trigger kind that can fire repeatedly for the same task_id
+    # (re-assignment, re-triggering) today.
+    _daily_wake_cap = max_wakes_per_task_per_day()
+    _recent_task_wake_count = await control_plane_repository.count_agent_scheduler_wake_requests_since(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        since=_utc_now() - timedelta(hours=24),
+        task_id=resolved_task_id,
+    )
+    if _recent_task_wake_count >= _daily_wake_cap:
+        raise SchedulerPolicyError(
+            f"Task {resolved_task_id} has already reached its wake ceiling of "
+            f"{_daily_wake_cap} wake requests in the last 24 hours. Wait for the "
+            "window to roll over, or reduce how often this task re-triggers, "
+            "before requesting another wakeup."
+        )
+    workspace, master_install, policy = await _load_scheduler_scope(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    due_at, due_reason = _apply_policy_to_due_at(
+        due_at=_utc_now(),
+        policy=policy,
+        device_state=_device_state({}, workspace, master_install),
+    )
+    metadata: Dict[str, Any] = {"agent_id": resolved_agent_id, "task_id": resolved_task_id}
+    if due_reason:
+        metadata["policy_delay_reason"] = due_reason
+    record = await _persist_wakeup(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        master_install=master_install,
+        trigger_kind="task_assigned",
+        source="project_tasks",
+        requested_by=str(triggered_by or "owner").strip().lower() or "owner",
+        reason="task_assigned",
+        summary=f"Task assigned: {resolved_title}",
+        payload={
+            "agent_id": resolved_agent_id,
+            "task_id": resolved_task_id,
+            "task_title": resolved_title,
+            "task_description": str(description or "").strip(),
+        },
+        policy=policy,
+        due_at=due_at,
+        approval_required=False,
+        status="pending",
+        denial_reason=None,
+        metadata=metadata,
+    )
+    if due_at <= _utc_now() + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
+        _trigger_ambient_monitor(workspace_id)
+    return record
+
+
 async def propose_self_wakeup(
     *,
     tenant_id: str,
@@ -752,6 +870,13 @@ def wake_request_scan_enabled() -> bool:
 
 def wake_request_scan_poll_seconds() -> int:
     return max(5, config_int("EMPYRALIS_WAKE_SCAN_POLL_SECONDS", DEFAULT_WAKE_SCAN_POLL_SECONDS))
+
+
+def max_wakes_per_task_per_day() -> int:
+    """The numeric backstop for STEP 6 -- see DEFAULT_MAX_WAKES_PER_TASK_PER_DAY
+    above. Env-overridable, floored at 1 so a misconfigured 0/negative value
+    can never mean "unlimited"."""
+    return max(1, config_int("EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY", DEFAULT_MAX_WAKES_PER_TASK_PER_DAY))
 
 
 def _run_sync(coro: Any) -> Any:
@@ -1110,10 +1235,24 @@ async def build_wakeup_execution_bundle(
         limit=8,
         unseen_only=False,
     )
+    # Founder ruling (2026-07-23, final): USER.md is removed from the
+    # root-file taxonomy -- onboarding now projects the owner profile into
+    # the memory/files/profile.md topic file instead (see
+    # sage_profile_service.SAGE_PROFILE_MEMORY_TOPIC_FILE). Read that first;
+    # fall back to the raw legacy USER.md file for workspaces that had real
+    # content written before this migration (never auto-created or written
+    # to anymore, but never deleted either -- see workspace_context.
+    # read_legacy_root_file), so the scheduler keeps working for both new
+    # and pre-migration workspaces.
     user_preferences = workspace_context.read_workspace_context_file(
-        "USER.md",
+        "memory/files/profile.md",
         workspace_id=workspace_id,
     ).strip()
+    if not user_preferences:
+        user_preferences = workspace_context.read_legacy_root_file(
+            "USER.md",
+            workspace_id=workspace_id,
+        ).strip()
     workspace_meta = _coerce_dict(_coerce_dict(workspace).get("metadata"))
     master_meta = _coerce_dict(_coerce_dict(master_install).get("metadata"))
     goals = list(workspace_meta.get("goals") or master_meta.get("goals") or master_meta.get("scheduler_goals") or [])

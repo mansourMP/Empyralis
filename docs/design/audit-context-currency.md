@@ -1,5 +1,7 @@
 # Audit: Context-Window Management & Compaction Currency
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). This document's body does not use "Sage" as prose; every `sage_*`/`sage_chat` occurrence below is a literal code identifier or surface name — an accurate code citation, not live product concept language.
+
 Report-only. No code changed. Verified against `/Users/mansur/empyralis` on branch
 `main`, 2026-07-22. Builds on and re-verifies (does not repeat) two prior docs —
 read those first for material not re-derived here:

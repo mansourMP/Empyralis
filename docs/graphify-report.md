@@ -1116,11 +1116,11 @@
 - `Current Tasks` --references--> `server.py - Composition Root`  [INFERRED]
   docs/tasks/current.md → server_modules/server.py
 - `direct_chat_generation_service.py - LLM Generation Loop` --references--> `Anthropic Provider`  [INFERRED]
-  server_modules/direct_chat_generation_service.py → docs/PLATFORM.md
+  server_modules/direct_chat_generation_service.py → docs/PLATFORM-MAP.md
 - `direct_chat_generation_service.py - LLM Generation Loop` --references--> `DeepSeek Provider`  [INFERRED]
-  server_modules/direct_chat_generation_service.py → docs/PLATFORM.md
+  server_modules/direct_chat_generation_service.py → docs/PLATFORM-MAP.md
 - `direct_chat_generation_service.py - LLM Generation Loop` --references--> `Google Gemini Provider`  [INFERRED]
-  server_modules/direct_chat_generation_service.py → docs/PLATFORM.md
+  server_modules/direct_chat_generation_service.py → docs/PLATFORM-MAP.md
 
 ## Import Cycles
 - 1-file cycle: `empyralis-supervisor/src/capabilities/clipboard.rs -> empyralis-supervisor/src/capabilities/clipboard.rs`

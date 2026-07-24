@@ -19,9 +19,8 @@ The platform is live at empyralis.ai (VPS at 165.227.25.201). It has real code, 
 ## Context — read these before you start
 
 ### Codebase map
-1. `docs/PLATFORM.md` — the current architecture document. Read Section 0 (current reality vs target) FIRST. It explains the two-backend situation.
-2. If it exists, `docs/handoff/PLATFORM-MAP.md` — the exhaustive platform map produced by the graphify mapping prompt. This is your primary technical reference.
-3. `docs/graphify-report.md` — auto-generated knowledge graph: 27,967 nodes, 71,974 edges, 1,127 communities. Import cycles, god objects, isolated nodes.
+1. `docs/PLATFORM-MAP.md` — the current architecture document, produced by the graphify mapping prompt (`01-graphify-platform-map.md`) in this same directory and kept updated in place since. This is your primary technical reference.
+2. `docs/graphify-report.md` — auto-generated knowledge graph: 27,967 nodes, 71,974 edges, 1,127 communities. Import cycles, god objects, isolated nodes.
 
 ### Product shape and decisions (fetch these from Linear using MCP tools)
 4. [PLATFORM OVERVIEW](https://linear.app/mansurao/document/platform-overview-empyralis-one-agent-one-service-many-configurations-86a18989075a) — the settled target shape. Phases, non-negotiables, tier split.
@@ -151,7 +150,7 @@ Questions to answer:
 - MCP connectors — what's the blast radius if a connector's OAuth token leaks?
 - Shell access (hardware tier) — what confinement exists? The Rust supervisor was supposed to handle this but it's uncompiled.
 - Multi-tenancy — can User A access User B's workspace, memory, or credentials? What enforces the boundary?
-- The platform has 75 known violations catalogued in PLATFORM.md (31 "I"/"my" string leaks, 20 "your"/"you've" leaks, 10 channel-logic-bleeding-into-control-plane, 6 gateway-logic-misplaced, 8 structural). Which of these are actual security concerns vs just code-quality issues?
+- The platform has 75 known violations catalogued in `docs/PLATFORM-MAP.md` Part 7 (31 "I"/"my" string leaks, 20 "your"/"you've" leaks, 10 channel-logic-bleeding-into-control-plane, 6 gateway-logic-misplaced, 8 structural). Which of these are actual security concerns vs just code-quality issues?
 
 ### Concern 10: The path forward — "what am I supposed to do?"
 

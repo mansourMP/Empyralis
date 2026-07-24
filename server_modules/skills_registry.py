@@ -613,6 +613,123 @@ def publish_marketplace_skill(skill_name: str, output_path: Optional[str] = None
     }
 
 
+def author_pending_skill(
+    *,
+    name: str,
+    description: str,
+    body: str,
+    author: str = "agent",
+    skill_class: str = "business",
+    action_class: str = "read",
+    execution_mode: str = "manual",
+    connector_scopes: Optional[List[str]] = None,
+    trigger_terms: Optional[List[str]] = None,
+    requires_approval: bool = False,
+) -> Dict[str, Any]:
+    """The skill_write tool's backend: an agent authors a new skill from a
+    name/description/body, human-reviewed before it is ever live.
+
+    Reuses install_marketplace_skill's already-complete, already-scanned
+    pipeline (skill_scanner.scan_skill_dir runs exactly as it does for the
+    admin marketplace-install routes in routes_health.py — nothing about the
+    security gate is weakened for agent-authored content) rather than a
+    bespoke write path. The one behavioral difference from a normal
+    marketplace install: immediately after install_marketplace_skill
+    auto-enables the skill (its existing, unrelated-to-us behavior), this
+    function overwrites that back to disabled + a pending_owner_review
+    marker. That is the entire self-authoring safety story — the skill is
+    written to disk and scanned for real, but list_skill_definitions /
+    list_installed_skills (both keyed off this same "enabled" flag) will not
+    surface it as available, and skill_invoke will report it disabled,
+    until a human flips it back on. Mirrors Anthropic's documented "Claude
+    proposes a Skill, a human reviews it" pattern (backbone-anthropic.md /
+    docs/design/audit-skills.md §1.4) rather than silent autonomous
+    activation.
+    """
+    skill_id = normalize_skill_id(name)
+    if not skill_id:
+        raise ValueError("A valid skill name is required.")
+    clean_description = str(description or "").strip()
+    if not clean_description:
+        raise ValueError("A skill description is required.")
+    clean_body = str(body or "").strip()
+    if not clean_body:
+        raise ValueError("A skill body (the procedure) is required.")
+    normalized_skill_class = str(skill_class or "business").strip().lower()
+    if normalized_skill_class not in {"business", "specialist_local", "system"}:
+        normalized_skill_class = "business"
+    normalized_action_class = str(action_class or "read").strip().lower()
+    if normalized_action_class not in {"read", "write", "execute"}:
+        normalized_action_class = "read"
+    scopes = _list_from_any(connector_scopes)
+    triggers = _list_from_any(trigger_terms)
+    clean_author = str(author or "agent").strip() or "agent"
+
+    # SKILL.md frontmatter, matching agentskills.io's two required fields
+    # (name, description) plus this repo's own runtime-metadata extensions —
+    # parsed at install time by this module's own _legacy_manifest_from_dir /
+    # _parse_frontmatter (a hand-rolled parser distinct from
+    # installed_skills._parse_skill_frontmatter's real-YAML one, hence the
+    # plain "key: value" / "  - item" shape below rather than arbitrary YAML).
+    frontmatter_lines = [
+        "---",
+        f"name: {skill_id}",
+        f"description: {clean_description}",
+        f"author: {clean_author}",
+        f"skill_class: {normalized_skill_class}",
+        f"execution_mode: {str(execution_mode or 'manual').strip() or 'manual'}",
+        f"action_class: {normalized_action_class}",
+        f"requires_approval: {'true' if requires_approval else 'false'}",
+    ]
+    if scopes:
+        frontmatter_lines.append("connector_scopes:")
+        frontmatter_lines.extend(f"  - {scope}" for scope in scopes)
+    if triggers:
+        frontmatter_lines.append("trigger_terms:")
+        frontmatter_lines.extend(f"  - {term}" for term in triggers)
+    frontmatter_lines.append("---")
+    skill_md_content = "\n".join(frontmatter_lines) + "\n\n" + clean_body + "\n"
+
+    with tempfile.TemporaryDirectory(prefix="empyralis-skill-author-") as temp_dir_raw:
+        temp_root = Path(temp_dir_raw)
+        source_dir = temp_root / skill_id
+        source_dir.mkdir(parents=True, exist_ok=True)
+        (source_dir / "SKILL.md").write_text(skill_md_content, encoding="utf-8")
+        zip_path = temp_root / f"{skill_id}.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(source_dir / "SKILL.md", arcname=f"{skill_id}/SKILL.md")
+        # install_marketplace_skill runs the real scanner (scan_skill_dir)
+        # and raises RuntimeError on a blocked/critical finding, or a
+        # ValueError on a malformed manifest — both propagate to the
+        # skill_write tool caller unchanged, so a rejected skill produces an
+        # honest tool-call error rather than a silently-swallowed no-op.
+        install_result = install_marketplace_skill(zip_path=str(zip_path), allow_unsafe=False)
+
+    installed_id = str((install_result.get("item") or {}).get("id") or skill_id)
+    pending_patch = {
+        "enabled": False,
+        "review_status": "pending_owner_review",
+        "authored_by": clean_author,
+        "authored_at": _utc_now_iso(),
+    }
+    upsert_installed_skill_registry_entry(installed_id, pending_patch)
+    final_item = get_marketplace_skill(installed_id)["item"]
+    return {
+        "ok": True,
+        "skill_id": installed_id,
+        "status": "pending_owner_review",
+        "enabled": False,
+        "path": final_item.get("installed_path"),
+        "message": (
+            f"Skill '{installed_id}' was authored and passed the security scan, but is "
+            "DISABLED pending the workspace owner's review. It will not appear in the "
+            "skill catalog or be callable via skill_invoke until the owner reviews and "
+            "enables it."
+        ),
+        "item": final_item,
+    }
+
+
 def ensure_registry_seeded() -> None:
     if MARKETPLACE_REGISTRY_FILE.exists():
         return

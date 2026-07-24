@@ -267,10 +267,16 @@ test("isBroadcastTelegramChat: an unresolved/undefined chat entity is NOT a broa
 
 // ---------------------------------------------------------------------------
 // Full pipeline: a realistic GramJS-shaped event, through handleInboundMessage
-// (via the SAME harness telegram-group-gate.test.ts uses), proving an
-// unaddressed family message never reaches the debouncer/publish step end to
-// end from the derived mapping, not from a hand-fed is_group/is_mentioned
-// boolean.
+// (via the SAME harness telegram-group-gate.test.ts uses), proving the
+// derived is_group/is_mentioned/is_reply_to_sage mapping is correct end to
+// end from a realistic event shape, not from a hand-fed boolean.
+//
+// UPDATED 2026-07-23 (group_policy build): the shouldSkip DECISION for an
+// unaddressed family message moved server-side (see telegram-group-gate.
+// test.ts's file comment) — this runtime now always admits/publishes,
+// carrying the correctly-derived facts for the backend's shared resolver to
+// decide from. The two "never reaches the debouncer" tests below are
+// updated to prove admission + correct fact derivation instead.
 // ---------------------------------------------------------------------------
 
 function buildMockAdapter() {
@@ -320,7 +326,7 @@ async function withRuntime(
   }
 }
 
-test("End to end: an unaddressed family-group message, mapped from a realistic GramJS event, never reaches the debouncer or gets published", async () => {
+test("End to end: an unaddressed family-group message, mapped from a realistic GramJS event, is admitted/published with is_mentioned=false for the backend resolver to decide", async () => {
   await withRuntime(async ({ runtime, inbound }) => {
     const derived = deriveTelegramInboundFields({
       isPrivate: false,
@@ -346,15 +352,23 @@ test("End to end: an unaddressed family-group message, mapped from a realistic G
       replyToExternalMessageId: derived.replyToExternalMessageId,
       chatTitle: derived.chatTitle,
     });
-    assert.equal((runtime as any).inboundDebouncer.pendingCount(), 0, "an unaddressed family-group message must never be admitted");
-    assert.equal(inbound.length, 0, "an unaddressed family-group message must never be published / reach the agent");
+    assert.equal((runtime as any).inboundDebouncer.pendingCount(), 1, "an unaddressed family-group message must still be admitted — this runtime no longer decides shouldSkip");
+    (runtime as any).inboundDebouncer.flushAll();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(inbound.length, 1, "must still be published, carrying is_mentioned=false, so the backend's shared resolver can decide");
+    const message = inbound[0].message as Record<string, unknown>;
+    assert.equal(message.is_group, true);
+    assert.equal(message.is_mentioned, false);
   });
 });
 
-test("End to end: the SAME family message, but with a plain reply-to-owner shape (mentioned=true, no entities), STILL never reaches the debouncer", () => {
+test("End to end: the SAME family message, but with a plain reply-to-owner shape (mentioned=true, no entities), resolves is_mentioned=false and is still admitted", () => {
   return withRuntime(async ({ runtime, inbound }) => {
     // Exactly what used to break: Telegram sets mentioned=true because this
     // replies to the OWNER's own earlier message in the group.
+    // hasExplicitTelegramMention correctly reads this as NOT a mention (no
+    // entities referencing self) — that fact-derivation fix is unchanged by
+    // the 2026-07-23 group_policy build; only WHO ACTS on the fact moved.
     const derived = deriveTelegramInboundFields({
       isPrivate: false,
       chat: { id: "-100555777", title: "Family" },
@@ -380,8 +394,12 @@ test("End to end: the SAME family message, but with a plain reply-to-owner shape
       replyToExternalMessageId: derived.replyToExternalMessageId,
       chatTitle: derived.chatTitle,
     });
-    assert.equal((runtime as any).inboundDebouncer.pendingCount(), 0);
-    assert.equal(inbound.length, 0);
+    assert.equal((runtime as any).inboundDebouncer.pendingCount(), 1);
+    (runtime as any).inboundDebouncer.flushAll();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(inbound.length, 1);
+    const message = inbound[0].message as Record<string, unknown>;
+    assert.equal(message.is_mentioned, false, "the raw Telegram mentioned=true bit must still never be trusted directly");
   });
 });
 

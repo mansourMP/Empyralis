@@ -514,7 +514,7 @@ async def _dispatch_memory_tool(
         # Extract path from goal — look for a filename or path mention
         path = _extract_memory_path(goal)
         if not path:
-            return {"ok": False, "error": "No path specified. Usage: memory_read with a filename like SOUL.md or memory/notes.md"}
+            return {"ok": False, "error": "No path specified. Usage: memory_read with a filename like notes.md or memory/notes.md"}
         return await _mem.memory_read(
             workspace_id=workspace_id,
             agent_install_id=agent_install_id,
@@ -548,12 +548,12 @@ def _extract_memory_path(goal: str) -> str:
     import re
     text = str(goal or "")
 
-    # Quoted path: "SOUL.md" or 'memory/notes.md'
+    # Quoted path: "notes.md" or 'memory/notes.md'
     m = re.search(r"""["']([^"']+\.[a-z]{1,10})["']""", text)
     if m:
         return m.group(1).strip()
 
-    # Bare .md filename: SOUL.md, memory/notes.md
+    # Bare .md filename: notes.md, memory/notes.md
     m = re.search(r"(\S+\.md)\b", text)
     if m:
         return m.group(1).strip()

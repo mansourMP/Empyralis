@@ -1520,6 +1520,24 @@ async def _process_update(update: dict) -> bool:
         await send_message_safe(chat_id, cmd_reply, reply_to_message_id=parsed.get("message_id"))
         return True
 
+    # ── Durable per-agent conversation memory (agent_conversation_memory) ──
+    # The SQL thread store (thread_id="sage-main" above) is dead under the
+    # SQLite-fallback deployment path (agent_conversation_memory.py's own
+    # module doc; docs/design/audit-history-memory.md Part 1A) — this is the
+    # durable read+write source for Telegram-hosted's history instead.
+    # Keyed per PAIRED CHAT (one paired chat = one workspace, so this stays
+    # a single continuous thread per pairing — see the envelope's own
+    # "owner implicit in the pairing" note above), agent_id="" (Sage/master —
+    # hosted Telegram has no specialist-agent binding concept).
+    from server_modules import agent_conversation_memory
+    _mem_key = f"telegram_hosted:{chat_id}"
+    try:
+        _mem_prior = agent_conversation_memory.load_recent_turns(
+            workspace_id=workspace_id, agent_id="", conversation_key=_mem_key,
+        )
+    except Exception:
+        _mem_prior = []
+
     # ── Route through shared-core reply dispatcher ──
     # This ONE call owns: typing, execute_sage_turn, error classification,
     # [SILENT] suppression, message splitting, guaranteed fallback.
@@ -1535,6 +1553,10 @@ async def _process_update(update: dict) -> bool:
         sender_name=str(parsed.get("from_first_name", "")).strip(),
         reply_to_id=msg_id,
         envelope=envelope,
+        channel_prior_messages=_mem_prior,
+        conversation_memory={
+            "workspace_id": workspace_id, "agent_id": "", "conversation_key": _mem_key,
+        },
     )
 
 

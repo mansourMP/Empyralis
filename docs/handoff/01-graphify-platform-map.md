@@ -6,7 +6,7 @@ This prompt is for a Claude Code session. You are mapping the ENTIRE Empyralis p
 
 Read these files before doing anything else:
 
-1. `docs/PLATFORM.md` — the current architecture map and file index (what's deployed). Pay special attention to Section 0 (current reality vs target architecture) and Section 7 (architecture decisions — why things were built this way). This is your baseline.
+1. `docs/PLATFORM-MAP.md` — the current architecture map and file index (what's deployed; this file is what this very prompt originally produced — subsequent sessions have kept it updated in place rather than regenerating it from scratch). This is your baseline.
 
 2. `docs/graphify-report.md` — the auto-generated knowledge graph report from the last `graphify update .` run. Has node/edge/community counts, god object rankings, import cycles, isolated nodes, thin communities, low-cohesion communities, and inferred edges. This is your raw data.
 
@@ -37,7 +37,7 @@ A COMPLETE platform map. This is not a summary. This is exhaustive. The document
 
 ### Part 1: Architecture Diagram (text-based)
 
-Reproduce and update the ASCII architecture diagram from `docs/PLATFORM.md` Section 1. Verify it against the current state of the code (not against what PLATFORM.md claimed three days ago). If anything changed, fix it. Include:
+Reproduce and update the ASCII architecture diagram from `docs/PLATFORM-MAP.md` Part 1. Verify it against the current state of the code (not against what the doc claimed days ago). If anything changed, fix it. Include:
 
 - Consumer surfaces (channels — all of them, not just the 3 that work)
 - Control plane (the real files, not the ideal ones)
@@ -149,7 +149,7 @@ For every connector (the ~38 in the platform, including the 30 verified ones fro
 
 ### Part 7: Violations — The Full Catalog
 
-Reproduce the 75 violations from `docs/PLATFORM.md` Section 5. Then add any NEW ones you find during your audit. Categories:
+Reproduce the 75 violations from `docs/PLATFORM-MAP.md` Part 7. Then add any NEW ones you find during your audit. Categories:
 
 - "I"/"my" strings (platform impersonating agent — pigeon theory violation)
 - "Your"/"you've" strings (same)

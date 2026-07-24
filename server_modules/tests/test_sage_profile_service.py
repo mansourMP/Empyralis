@@ -35,9 +35,18 @@ class SageProfileServiceTests(unittest.TestCase):
                 self.assertTrue(payload["bootstrap"]["complete"])
                 self.assertEqual(payload["profile"]["standing_rules"], ["Never send external messages without approval."])
                 self.assertTrue((root / "sage_profile.json").exists())
-                self.assertIn("Preferred name: Mansur", (root / "USER.md").read_text(encoding="utf-8"))
-                self.assertIn("lead product and engineering", (root / "IDENTITY.md").read_text(encoding="utf-8"))
-                self.assertIn("Be direct, concise", (root / "SOUL.md").read_text(encoding="utf-8"))
+                # 2026-07-23 root-taxonomy removal: USER.md/IDENTITY.md/SOUL.md
+                # are no longer projection targets -- the same durable facts
+                # (preferred name, role/focus, communication style) now land
+                # in one memory/files/profile.md topic file instead. HEARTBEAT.md
+                # is unchanged (out of scope for the removal).
+                profile_topic_content = (root / "memory" / "files" / "profile.md").read_text(encoding="utf-8")
+                self.assertIn("Preferred name: Mansur", profile_topic_content)
+                self.assertIn("lead product and engineering", profile_topic_content)
+                self.assertIn("Be direct, concise", profile_topic_content)
+                self.assertFalse((root / "USER.md").exists())
+                self.assertFalse((root / "IDENTITY.md").exists())
+                self.assertFalse((root / "SOUL.md").exists())
                 self.assertIn("Keep my inbox triaged every morning.", (root / "HEARTBEAT.md").read_text(encoding="utf-8"))
 
     def test_upsert_profile_normalizes_standing_rules_text(self) -> None:

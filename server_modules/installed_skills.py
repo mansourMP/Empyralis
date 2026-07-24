@@ -730,7 +730,20 @@ def list_installed_skills(*, workspace_id: Optional[str] = None) -> List[Dict[st
             )
             description = str(manifest.get("description") or frontmatter.get("description") or "").strip()
             runtime_config = _runtime_skill_config(skill_id)
-            enabled_default = True if has_skill_json else source == "bundled"
+            # A skill directory that exists on disk with a valid SKILL.md/
+            # skill.json (has_skill_md/has_skill_json already gated this
+            # loop iteration above) and passes the security scan below is,
+            # by construction, real and dischargeable — skill_registry.
+            # execute_skill's fallback loads the raw SKILL.md body for any
+            # skill with no executor/handler/mcp adapter
+            # (docs/design/audit-skills.md §3 item 3: "one unified catalog").
+            # Default every source (workspace/global/bundled) to enabled so
+            # the catalog doesn't silently special-case format/location;
+            # explicit opt-out (frontmatter `enabled: false`, config.yaml,
+            # or a registry entry — see skills_registry.author_pending_skill,
+            # which deliberately overwrites this back to False for
+            # agent-authored skills pending owner review) still wins below.
+            enabled_default = True
             enabled_fallback = _bool_from_any(
                 runtime_config.get("enabled"),
                 _bool_from_any(config.get("enabled"), _bool_from_any(frontmatter.get("enabled"), enabled_default)),

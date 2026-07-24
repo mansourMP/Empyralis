@@ -69,7 +69,10 @@ class PersonalChannelEnvelopeConstructionTests(unittest.TestCase):
 
     def test_group_message_from_non_owner_is_group_surface(self) -> None:
         """(b) group message from a non-owner -> GROUP + is_owner False +
-        chat title."""
+        chat title. was_addressed=True here is the CALLER's real, resolved
+        fact (personal_channels_service._enforce_group_policy's own result
+        — see that function's docstring) — explicitly passed, not a
+        hardcode this function makes on its own (see the next test)."""
         envelope = bridge._build_personal_channel_envelope(
             surface_channel="telegram_personal",
             remote_jid="-100555777",
@@ -78,16 +81,52 @@ class PersonalChannelEnvelopeConstructionTests(unittest.TestCase):
             is_owner=False,
             is_group=True,
             chat_label="Family",
+            was_addressed=True,
         )
         self.assertEqual(envelope.surface, SurfaceKind.GROUP)
         self.assertIs(envelope.sender.is_owner, False)
         self.assertEqual(envelope.sender.display_name, "Aunt Nadia")
         self.assertEqual(envelope.chat.title, "Family")
         self.assertEqual(envelope.chat.id, "-100555777")
-        # Every group message reaching this function already passed the
-        # mention/reply-to-Sage gate upstream in personal_channels_service —
-        # "addressed" is an already-enforced fact here, not a guess.
         self.assertTrue(envelope.addressed)
+
+    def test_group_message_addressed_is_the_callers_honest_fact_not_a_hardcode(self) -> None:
+        """UPDATED 2026-07-23 (group_policy build): addressed used to be
+        hardcoded True for every group message — safe ONLY because every
+        group message that reached this function had already passed a
+        hard, non-configurable mention/reply-to-Sage gate upstream (see
+        _build_personal_channel_envelope's own docstring for the full
+        history). That invariant no longer holds: requireMention now
+        defaults OFF, so an unaddressed group message routinely reaches
+        this function too. addressed must now be exactly whatever the
+        caller passes as was_addressed — False when the caller resolved
+        "not addressed", and None (not a false True) when the caller
+        didn't resolve/pass a real fact at all, so the model is never told
+        "you were addressed directly" for a message that was not."""
+        not_addressed = bridge._build_personal_channel_envelope(
+            surface_channel="telegram_personal",
+            remote_jid="-100555777",
+            sender_id="aunt-nadia-id",
+            push_name="Aunt Nadia",
+            is_owner=False,
+            is_group=True,
+            chat_label="Family",
+            was_addressed=False,
+        )
+        self.assertIs(not_addressed.addressed, False)
+
+        unresolved = bridge._build_personal_channel_envelope(
+            surface_channel="telegram_personal",
+            remote_jid="-100555777",
+            sender_id="aunt-nadia-id",
+            push_name="Aunt Nadia",
+            is_owner=False,
+            is_group=True,
+            chat_label="Family",
+            # was_addressed intentionally omitted — must default to None,
+            # never True.
+        )
+        self.assertIsNone(unresolved.addressed)
 
     def test_owner_posting_inside_a_group_is_still_group_not_self_chat(self) -> None:
         """The owner being a member of a group must never collapse the

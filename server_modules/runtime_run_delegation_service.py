@@ -37,6 +37,15 @@ def _enforce_delegation_child_decision(
     parent_snapshot: dict[str, Any],
     child_payload: dict[str, Any],
 ) -> dict[str, Any]:
+    # §1.4 cleanup: this used to hardcode 999999 as the fallback
+    # max_workflow_turn_depth, which made the real Rust gate
+    # (empyralis-runtime-kernel/src/run_routing.rs) a no-op for delegation --
+    # 999999 turns is not a depth cap, it's "never trigger." Reuse the
+    # governed default that already exists for the exact same concept
+    # (run_service.assert_workflow_turn_depth_allowed) instead of another
+    # made-up literal.
+    from server_modules import run_service as _rs_workflow_depth_default
+
     parent_context, parent_metadata, workspace_id, _tenant_id = _parent_scope(parent_snapshot)
     rust_payload = {
         "operation": "delegation_child",
@@ -67,7 +76,7 @@ def _enforce_delegation_child_decision(
         "max_workflow_turn_depth": int(
             child_payload.get("max_workflow_turn_depth")
             or parent_metadata.get("max_workflow_turn_depth")
-            or 999999
+            or _rs_workflow_depth_default.MAX_WORKFLOW_TURN_DEPTH_DEFAULT
         ),
     }
     try:
@@ -747,7 +756,7 @@ def retry_failed_delegation_runs(
     refresh_parent_delegation_state: Callable[[str], Any],
 ) -> dict[str, Any]:
     request_payload.validate_fields()
-    parent_snapshot, _parent_metadata, _parent_role = _orchestrator_parent(
+    parent_snapshot, parent_metadata, _parent_role = _orchestrator_parent(
         parent_run_id,
         current_user=current_user,
         lookup_run_snapshot=lookup_run_snapshot,
@@ -755,6 +764,18 @@ def retry_failed_delegation_runs(
         normalize_agent_role=normalize_agent_role,
         invalid_detail="Retry delegation is only available from orchestrator-owned runs.",
     )
+    # §1.4 cleanup: retry_failed_delegation_runs creates child runs the exact
+    # same way delegate_run_children/auto_delegate_run_children do (same
+    # execute_system_run_start_request_via_turn_runtime call below) but never
+    # called assert_subagent_spawn_allowed, unlike those two real creation
+    # paths -- so a depth-2+ orchestrator that delegate_run_children would
+    # refuse outright could still re-spawn blocked children through the retry
+    # path. Close that gap here too, same depth cap, same loud error shape.
+    from server_modules import run_service as _rs_depth3
+    try:
+        _rs_depth3.assert_subagent_spawn_allowed(parent_metadata)
+    except _rs_depth3.SubagentDepthError as _depth_err3:
+        raise HTTPException(status_code=403, detail=str(_depth_err3))
     _, child_runs = find_run_relationships(parent_run_id, parent_snapshot)
     if not child_runs:
         raise HTTPException(status_code=400, detail="This orchestrator run does not have delegated child runs.")

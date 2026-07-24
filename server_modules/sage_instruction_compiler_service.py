@@ -7,54 +7,125 @@ from typing import Any, Mapping, Sequence
 from server_modules.channel_adapter import ChannelOrigin
 
 from server_modules import sage_skills_api
+from server_modules import tool_registry_service
 from server_modules import workspace_context
 from server_modules import workspace_context_memory_adapter
 
+# Founder ruling (2026-07-23, final): SOUL.md/IDENTITY.md/USER.md/GOALS.md/
+# AGENTS.md/TOOLS.md are removed from the root-file taxonomy entirely (see
+# workspace_context.py's ALLOWED_CONTEXT_FILENAMES and
+# docs/design/root-taxonomy-removal-scope.md). MEMORY.md is now the only
+# "official" root memory file: static persona/operating-rule copy that used
+# to live in SOUL.md/AGENTS.md/TOOLS.md belongs in the always-in-window
+# kernel/system prompt instead (see _kernel_prompt below); durable per-user
+# facts that used to live in USER.md/IDENTITY.md/GOALS.md now live in
+# MEMORY.md-indexed topic files (memory/files/profile.md,
+# memory/files/goals.md) pulled on demand via memory_search/memory_get, the
+# same as any other topic file.
 OFFICIAL_ROOT_MEMORY_FILES: tuple[str, ...] = (
-    "SOUL.md",
-    "IDENTITY.md",
-    "USER.md",
-    "AGENTS.md",
-    "TOOLS.md",
     "MEMORY.md",
-    "GOALS.md",
 )
 LEGACY_ROOT_MEMORY_FILES: tuple[str, ...] = (
     "HEARTBEAT.md",
 )
 ROOT_MEMORY_BRIEF_PRIORITY: tuple[str, ...] = (
-    "SOUL.md",
-    "IDENTITY.md",
-    "USER.md",
-    "GOALS.md",
-    "AGENTS.md",
-    "TOOLS.md",
     "MEMORY.md",
 )
-# The agent's always-loaded operating instructions and profile — the
-# Claude-Code `CLAUDE.md`-equivalent tier. Everything in OFFICIAL_ROOT_MEMORY_FILES
-# except MEMORY.md belongs here: persona (SOUL.md), surface identity
-# (IDENTITY.md), who the user is (USER.md), what they're working toward
-# (GOALS.md), operating rules (AGENTS.md), and tool notes (TOOLS.md).
-# Unlike MEMORY.md (a capped index backed by memory_search/memory_get for
-# on-demand detail), these files are injected in full every turn — dropping
-# them silently regresses the agent to running without its own operating
-# instructions. See docs/design/memory-context-design.md finding #1 / C5.
+# The agent's always-loaded operating instructions tier -- now empty: with
+# the six taxonomy files removed, nothing is left in ROOT_MEMORY_BRIEF_PRIORITY
+# besides MEMORY.md itself (excluded by construction below, since MEMORY.md
+# gets its own dedicated index-only treatment, not full-file injection). Kept
+# as a named tuple (rather than deleted outright) so build_root_memory_brief_
+# sections' loop over it needs no special-casing if a future always-loaded
+# instruction file is ever reintroduced.
 ALWAYS_LOAD_INSTRUCTION_FILES: tuple[str, ...] = tuple(
     filename for filename in ROOT_MEMORY_BRIEF_PRIORITY if filename != "MEMORY.md"
 )
 ROOT_MEMORY_SECTION_CHAR_LIMIT = 12_000
 ROOT_MEMORY_TOTAL_CHAR_LIMIT = 48_000
-ROOT_MEMORY_BRIEF_SECTION_CHAR_LIMIT = 900
-ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT = 4_800
+# docs/design/context-engineering-plan.md item 7 (read side): MEMORY.md used
+# to compete with SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS for a shared
+# 4,800-char "brief" pool (the now-removed ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT)
+# — on any workspace where those six files were even modestly populated,
+# MEMORY.md's remaining share went to zero and the whole index silently
+# vanished from context (verified empirically while building this fix: six
+# ~1KB root files alone already exhausted the pool). The write side
+# (memory_service.MEMORY_MD_INDEX_MAX_LINES/_BYTES, same plan item) already
+# guarantees MEMORY.md itself never exceeds 200 lines / 25KB — Claude Code's
+# own published discipline, adopted verbatim by founder decision. This gives
+# MEMORY.md a matching, DEDICATED read-time allowance, decoupled from the
+# other six files' consumption, so an index the agent curated to fit that
+# write-time cap loads WHOLE, never silently truncated by an unrelated
+# budget. Imported from memory_service so the two sides can't drift apart;
+# falls back to the same 25,000-char number if that import ever fails.
+try:
+    from server_modules.memory_service import MEMORY_MD_SELF_CURATION_CAP_CHARS as _MEMORY_MD_WRITE_CAP_CHARS
+except Exception:
+    _MEMORY_MD_WRITE_CAP_CHARS = 25_000
+MEMORY_MD_LOAD_CHAR_LIMIT = int(_MEMORY_MD_WRITE_CAP_CHARS) or 25_000
 SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT = 12_000
 SAGE_RETRIEVED_MEMORY_CHAR_LIMIT = 3_000
 SAGE_PROFILE_CONTEXT_CHAR_LIMIT = 1_500
 SAGE_HEARTBEAT_CONTEXT_CHAR_LIMIT = 900
+# docs/design/context-engineering-plan.md item 10: the specialist branch
+# (sage_agent_runtime_service.py) has no compiler budget of its own at all —
+# unlike the master path, nothing there ever clipped the assembled prompt
+# against SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT. Give the specialist's
+# newly-added capability manifest (previously omitted entirely) an explicit
+# ceiling of its own rather than leaving it unbounded like every other piece
+# of that branch's prompt.
+SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT = 3_000
+# docs/design/audit-context-anatomy.md fix #2: _normalize_recent_messages
+# previously only capped each of the last 16 messages at 4,000 chars with no
+# ceiling on the block as a whole — 16 genuinely long turns is ~64,000 chars
+# (~16,000 tokens), several times SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT
+# (12,000 chars/~3,000 tokens, the entire system prompt's own hard cap just
+# below). Set to the same order of magnitude as that total so history can
+# never dwarf everything else in the window; truncated oldest-first (see
+# _normalize_recent_messages) so the most recent turns stay intact.
+SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT = 12_000
 CAPABILITY_MANIFEST_MAX_ITEMS = 16
-CAPABILITY_DESCRIPTION_CHAR_LIMIT = 140
+# Skills share this budget with the (larger) builtin-tool list, which lists
+# first in build_sage_capabilities_payload. Verified empirically while
+# wiring the unified skill catalog (docs/design/audit-skills.md §3 item 3):
+# ~36 builtin tool records alone already exhaust CAPABILITY_MANIFEST_MAX_ITEMS,
+# so skills would be silently crowded out of the rendered prompt text 100%
+# of the time regardless of catalog correctness. This reserves a small slice
+# so the skill catalog is never fully starved — a narrower, non-dynamic
+# version of the cap-sizing follow-up audit item 6 calls for; that broader
+# "scale with context window like Claude Code" redesign is still open.
+CAPABILITY_MANIFEST_SKILL_RESERVED_ITEMS = 6
+# docs/design/context-engineering-plan.md item 4: this limit now applies ONLY
+# to manifest-only capabilities (named skills, and connector/MCP/other tools
+# not yet natively schema'd this turn) — the slots where the manifest prose
+# is the ONLY channel the model has. It used to also truncate tools that
+# already have a full, native function schema in the same request (see
+# _has_native_schema_this_turn / MODEL_HIDDEN_LEGACY_TOOLS below), which was
+# pure duplication (audit-context-anatomy.md §3, §7.3) that starved the
+# slots with no other channel. Raised from 140 -> 220 chars: empirically
+# covers the large majority of real skill/tool descriptions in full
+# (measured against the live builtin+skill catalog while building this fix
+# — most cluster 90-260 chars) while still bounding the handful of outliers
+# (e.g. send_image, skill_write) and leaving headroom, inside the same
+# shared SAGE_SYSTEM_CONTEXT_CHAR_BUDGET_DEFAULT total, for
+# MEMORY_MD_LOAD_CHAR_LIMIT below (item 7, read side — see that constant's
+# docstring). 320 was measured and tried first; 220 was chosen instead once
+# item 7's read-side fix was added to this same wave, to keep a realistic
+# rich-workspace turn from consistently maxing out the shared budget.
+CAPABILITY_DESCRIPTION_CHAR_LIMIT = 220
 MEMORY_MANIFEST_LIMIT = 60
 MODEL_HIDDEN_LEGACY_TOOLS = {"memory_update"}
+# Tools with a real, native function schema on this turn's `tools=` payload
+# (see tool_registry_service.ALWAYS_ON_TOOL_NAMES and
+# sage_agent_runtime_service._direct_tool_bundle's unconditional fleet__*
+# addition on the master path) need no prose re-description in the manifest
+# text below — the model already has their full name/description/parameters
+# from the real schema. A specialist's capability_manifest never contains
+# fleet__* tools by the time it reaches this module (filtered upstream via
+# _specialist_tool_allowed, sage_agent_runtime_service.py's specialist
+# branch), so treating any "fleet__"-prefixed tool_id as native is accurate
+# for whichever caller (master or specialist) passed the manifest in.
+_NATIVE_SCHEMA_TOOL_NAMES = frozenset(tool_registry_service.ALWAYS_ON_TOOL_NAMES)
 
 
 @dataclass(frozen=True)
@@ -154,80 +225,16 @@ def _append_file_section(
     return len(clipped), truncated
 
 
-def build_root_memory_sections(context_files: Mapping[str, Any] | None) -> tuple[list[str], dict[str, Any]]:
-    payload = dict(context_files or {})
-    sections: list[str] = []
-    consumed_paths: set[str] = set()
-    total_chars = 0
-    truncated = False
-    included_official: list[str] = []
-    included_legacy: list[str] = []
-    included_extra: list[str] = []
-
-    def append_named(filename: str, *, legacy: bool = False, extra: bool = False) -> None:
-        nonlocal total_chars, truncated
-        content = _meaningful_context_file_content(filename, payload.get(filename))
-        if not content or total_chars >= ROOT_MEMORY_TOTAL_CHAR_LIMIT:
-            return
-        consumed, was_truncated = _append_file_section(
-            sections=sections,
-            filename=filename,
-            content=content,
-            title_prefix="Legacy/Extra Context File: " if legacy or extra else "",
-            remaining_budget=ROOT_MEMORY_TOTAL_CHAR_LIMIT - total_chars,
-        )
-        if consumed <= 0:
-            return
-        total_chars += consumed
-        truncated = truncated or was_truncated
-        consumed_paths.add(filename)
-        if legacy:
-            included_legacy.append(filename)
-        elif extra:
-            included_extra.append(filename)
-        else:
-            included_official.append(filename)
-
-    for filename in OFFICIAL_ROOT_MEMORY_FILES:
-        append_named(filename)
-
-    for filename in LEGACY_ROOT_MEMORY_FILES:
-        append_named(filename, legacy=True)
-
-    for filename in sorted(_coerce_text(key) for key in payload.keys()):
-        if not filename or filename in consumed_paths or "/" in filename:
-            continue
-        append_named(filename, extra=True)
-
-    memory_paths = [
-        filename
-        for filename in sorted(_coerce_text(key) for key in payload.keys())
-        if filename
-        and filename not in consumed_paths
-        and filename.startswith("memory/")
-        and not filename.startswith("memory/.dreams/")
-        and _meaningful_context_file_content(filename, payload.get(filename))
-    ]
-    if memory_paths:
-        shown_paths = memory_paths[:MEMORY_MANIFEST_LIMIT]
-        manifest_lines = [
-            "Additional workspace memory files exist. Use memory_search and memory_get when the user's request needs them."
-        ]
-        manifest_lines.extend(f"- {path}" for path in shown_paths)
-        if len(memory_paths) > len(shown_paths):
-            manifest_lines.append(f"- ... {len(memory_paths) - len(shown_paths)} more memory file(s)")
-        sections.append("### Available Memory Files\n" + "\n".join(manifest_lines))
-
-    return sections, {
-        "included_root_files": [*included_official, *included_legacy, *included_extra],
-        "included_official_root_files": included_official,
-        "legacy_context_files": included_legacy,
-        "extra_context_files": included_extra,
-        "available_memory_file_count": len(memory_paths),
-        "context_truncated": truncated,
-        "root_memory_chars": total_chars,
-    }
-
+# build_root_memory_sections (the pre-Phase-N full-file-injection predecessor
+# of build_root_memory_brief_sections below) was deleted 2026-07-23 as part
+# of the root-taxonomy removal: it had zero callers anywhere in this
+# codebase (confirmed by repo-wide grep, and independently already flagged as
+# dead in docs/design/memory-context-design.md's C4 item before this
+# change), and it existed only to full-inject OFFICIAL_ROOT_MEMORY_FILES /
+# LEGACY_ROOT_MEMORY_FILES -- constants this change repoints away from the
+# six removed taxonomy filenames. Rather than keep a confirmed-dead function
+# referencing a taxonomy that no longer exists, it's removed outright;
+# build_root_memory_brief_sections is the one live path.
 
 
 # Phase 0.2: Per-session context cache — avoid rebuilding context every turn
@@ -270,13 +277,15 @@ def build_root_memory_brief_sections(context_files: Mapping[str, Any] | None) ->
     truncated = False
 
     # ── Always-loaded instruction tier ──────────────────────────────────
-    # SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS are the agent's operating
-    # instructions, not on-demand memory — inject them in full every turn,
-    # bounded by the same per-file/total caps the (now-dead) full-file path
-    # used, so one runaway file can't blow the prompt budget. This is the
-    # fix for the Pipeline B content blackout (design doc finding #1 / C5):
-    # previously only MEMORY.md was ever injected here and these six files
-    # were tracked as "consumed" but never surfaced anywhere.
+    # Historical note: this loop used to full-inject SOUL/IDENTITY/USER/
+    # GOALS/AGENTS/TOOLS every turn (the fix for the Pipeline B content
+    # blackout, design doc finding #1 / C5). All six were removed from the
+    # root-file taxonomy 2026-07-23 (see ALWAYS_LOAD_INSTRUCTION_FILES's own
+    # docstring above) -- static persona/operating-rule copy moved to the
+    # always-in-window kernel prompt, durable per-user facts moved to
+    # MEMORY.md-indexed topic files. ALWAYS_LOAD_INSTRUCTION_FILES is empty
+    # now, so this loop is a no-op; kept (rather than deleted) so a future
+    # always-loaded instruction file needs no new plumbing here.
     for filename in ALWAYS_LOAD_INSTRUCTION_FILES:
         content = _meaningful_context_file_content(filename, payload.get(filename))
         if not content or total_source_chars >= ROOT_MEMORY_TOTAL_CHAR_LIMIT:
@@ -297,15 +306,18 @@ def build_root_memory_brief_sections(context_files: Mapping[str, Any] | None) ->
 
     # ── MEMORY.md: index only, capped + backed by memory_search/memory_get ──
     # This is the one file that keeps the Phase N (Stage 5) index-only
-    # treatment — correct and intentional, not part of the regression.
+    # treatment — correct and intentional, not part of the regression. Its
+    # own dedicated MEMORY_MD_LOAD_CHAR_LIMIT (matching the write-side 200-
+    # line/25KB cap) is used here instead of competing with the six
+    # always-load files above for a shared pool — see that constant's
+    # docstring for why (item 7, read side).
     mem_content = _meaningful_context_file_content("MEMORY.md", payload.get("MEMORY.md"))
     if mem_content:
         consumed_paths.add("MEMORY.md")
         total_source_chars += len(mem_content)
-        remaining = ROOT_MEMORY_BRIEF_TOTAL_CHAR_LIMIT - total_brief_chars
         clipped, was_truncated = _clip_text(
             mem_content,
-            min(ROOT_MEMORY_BRIEF_SECTION_CHAR_LIMIT, remaining),
+            MEMORY_MD_LOAD_CHAR_LIMIT,
             "content truncated due to length limit",
         )
         sanitized = workspace_context_memory_adapter.strip_red_facts_from_external_context(clipped)
@@ -412,6 +424,21 @@ def build_model_capability_manifest(capability_payload: Mapping[str, Any] | None
     return manifest
 
 
+def _has_native_schema_this_turn(tool_id: str) -> bool:
+    """True when ``tool_id`` already has a real, callable function schema in
+    this turn's native ``tools=`` payload — meaning re-describing it in the
+    manifest's prose is pure duplication (docs/design/context-engineering-plan.md
+    item 4; audit-context-anatomy.md §3, §7.3). A native tool still gets a
+    full manifest line, not the name-only collapse, when it carries
+    safety-relevant metadata the native JSON schema can't express — see the
+    ``carries_unexpressed_flags`` check at the call site below."""
+    if not tool_id:
+        return False
+    if tool_id in _NATIVE_SCHEMA_TOOL_NAMES:
+        return True
+    return tool_id.startswith("fleet__")
+
+
 def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) -> str:
     if not capability_manifest:
         return ""
@@ -419,7 +446,44 @@ def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) 
         "## Callable Tools",
         "Only these tools are callable in this turn. Do not mention or invent unavailable tools.",
     ]
-    shown_items = list(capability_manifest)[:CAPABILITY_MANIFEST_MAX_ITEMS]
+    all_items = list(capability_manifest)
+    skill_items = [item for item in all_items if _coerce_text(item.get("type")) == "skill"]
+    other_items = [item for item in all_items if _coerce_text(item.get("type")) != "skill"]
+
+    # Dedup pass (item 4): a tool already native this turn needs no prose
+    # description here unless it carries approval/runtime metadata the
+    # native schema itself can't express. Everything else in `other_items`
+    # is manifest-only — skills and not-yet-pulled connector/MCP actions
+    # have NO other channel to the model until skill_invoke/query_tool_registry
+    # actually pulls them, so they keep the full (now un-truncated) treatment.
+    native_only_tool_ids: list[str] = []
+    manifest_only_other: list[Mapping[str, Any]] = []
+    for item in other_items:
+        tool_id = _coerce_text(item.get("tool"))
+        carries_unexpressed_flags = bool(item.get("approval_required")) or (
+            _coerce_text(item.get("runtime_requirement")) not in ("", "cloud")
+        )
+        if _has_native_schema_this_turn(tool_id) and not carries_unexpressed_flags:
+            native_only_tool_ids.append(tool_id)
+        else:
+            manifest_only_other.append(item)
+
+    # Within the reserved skill slice, workspace/global/bundled-filesystem
+    # skills (source != "built_in") outrank the ~20 hardcoded
+    # skill_registry._BUILT_IN_SKILLS entries (stable sort keeps each
+    # group's incoming — alphabetical — order otherwise). Those built-ins
+    # mostly duplicate capabilities already visible elsewhere in this same
+    # manifest as concrete native tools (browser, memory, code execution,
+    # ...); an operator-installed or agent-authored custom skill is the one
+    # actually worth spending the small reserved Level-1 budget on, and a
+    # blind alphabetical cut was starving every custom skill whose id
+    # happened to sort after the ~20 built-ins' labels.
+    skill_items = sorted(skill_items, key=lambda item: _coerce_text(item.get("source")) == "built_in")
+    skill_budget = min(len(skill_items), CAPABILITY_MANIFEST_SKILL_RESERVED_ITEMS, CAPABILITY_MANIFEST_MAX_ITEMS)
+    other_budget = CAPABILITY_MANIFEST_MAX_ITEMS - skill_budget
+    shown_other = manifest_only_other[:other_budget]
+    shown_skills = skill_items[:skill_budget]
+    shown_items = shown_other + shown_skills
     for item in shown_items:
         label = _coerce_text(item.get("label")) or _coerce_text(item.get("tool"))
         tool = _coerce_text(item.get("tool"))
@@ -431,16 +495,62 @@ def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) 
         approval = "approval required" if item.get("approval_required") else "no approval required"
         runtime = _coerce_text(item.get("runtime_requirement")) or "cloud"
         lines.append(f"- {tool}: {label}. {description} ({runtime}; {approval}).")
-    omitted = len(capability_manifest) - len(shown_items)
+    if native_only_tool_ids:
+        lines.append(
+            "- Also callable now, already fully described in your own tool schemas "
+            "(no separate entry needed here): " + ", ".join(native_only_tool_ids) + "."
+        )
+    omitted = len(manifest_only_other) + len(skill_items) - len(shown_items)
     if omitted > 0:
         lines.append(f"- ... {omitted} more callable tool(s); use the capability panel or memory tools for details.")
     return "\n".join(lines)
+
+
+def render_capability_manifest_text(
+    capability_manifest: Sequence[Mapping[str, Any]],
+    *,
+    char_limit: int | None = None,
+) -> str:
+    """Public entry point for the "## Callable Tools" manifest text, for
+    callers outside this module. Added for docs/design/context-engineering-
+    plan.md item 10: sage_agent_runtime_service's specialist branch used to
+    omit the capability manifest entirely (audit-system-prompt-doctrine.md
+    §2b, §4.1&5) — it now calls this with a capability_manifest already
+    filtered down to what that specific specialist install can call (see
+    _specialist_tool_allowed there), getting the same dedup/un-truncation
+    treatment (item 4) the master path gets, scoped correctly instead of
+    unscoped. ``char_limit`` (see SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT)
+    gives that branch a budget cap of its own — the master path is capped by
+    the shared system-context budget already; the specialist branch has no
+    such budget at all, so this function must enforce its own."""
+    text = _capability_manifest_text(capability_manifest)
+    if char_limit is None or not text:
+        return text
+    clipped, _truncated = _clip_text(text, char_limit, "capability manifest truncated")
+    return clipped
 
 
 def _platform_paid_ai_source(*, billing_source: str | None = None, ai_tier: str | None = None) -> bool:
     billing_token = _coerce_text(billing_source).lower()
     tier_token = _coerce_text(ai_tier).lower().replace("-", "_")
     return billing_token == "empyralis_credits" or tier_token in {"light", "pro", "max"}
+
+
+# docs/design/context-engineering-plan.md item 9: the doctrine audit's #1
+# finding was a zero-hit grep for any first-priority phrasing anywhere in the
+# compiled prompt (audit-system-prompt-doctrine.md §3 row 1, §4.4). This is
+# that statement — it must render FIRST, before the scene-setting sentence
+# and before the memory rule, on every path (see _kernel_prompt below).
+# Adapted from agent-service-doctrine-research.md §B4's identity/priority
+# template to what Empyralis actually is: a service that works the owner's
+# standing goals and in-the-moment requests autonomously, choosing its own
+# tools — never an approval workflow (owner law: no approval language here).
+_FIRST_PRIORITY_STATEMENT = (
+    "Your job: work the user's standing goals and whatever they ask, end to end. Decide "
+    "for yourself which of your tools, skills, memory, and connected apps a task needs — "
+    "the user will not name one for you. Verify results before reporting them, and keep "
+    "going until the work is actually done, not merely attempted."
+)
 
 
 def _kernel_prompt(
@@ -450,18 +560,30 @@ def _kernel_prompt(
     billing_source: str | None = None,
     ai_tier: str | None = None,
 ) -> str:
+    # Why-first (item 9): the durability reason now leads the memory rule
+    # instead of being buried after the mechanical recipe
+    # (audit-system-prompt-doctrine.md §3 "Memory (master)" row, §5.5) — the
+    # model should know WHY it's silently calling a tool before it's told
+    # HOW. (Stale-comment fix, 2026-07-23: this used to describe a
+    # SOUL/IDENTITY/USER/GOALS/AGENTS/TOOLS/MEMORY.md taxonomy header that
+    # commit 57ee98d82 already deleted from the actual rendered prompt text
+    # -- the header is just "## Memory" now, and that whole six-file
+    # taxonomy is removed entirely as of this change. Nothing below this
+    # comment changed; only the stale description of what used to be here.)
+    # This rule stays focused on one thing: why memory exists and when to
+    # reach for it.
     memory_rule = (
-        "\n\nCRITICAL — Durable Memory Rule:\n"
+        "\n\nMemory — why first: everything the user tells you is gone once this session "
+        "ends unless a memory tool actually runs — that's the only reason the steps below "
+        "exist.\n"
         "\n"
         "## When to WRITE (autonomous fact capture)\n"
-        "After every user message, silently check: did the user share anything you should remember?\n"
-        "Facts to capture include: name, location, job, company, role, preferences (favorites,\n"
-        "likes, dislikes), goals, projects, deadlines, decisions, contact info, accounts, tools.\n"
-        "If yes, call memory_write with path='MEMORY.md' and mode='append' to save each fact.\n"
-        "Do this SILENTLY — do NOT say \"I'll save that\" or \"let me remember that.\" Just call\n"
-        "the tool without announcing it, then continue the conversation naturally.\n"
-        "A text reply saying \"I'll remember that\" does NOT persist anything — only an actual\n"
-        "memory_write tool call saves data across sessions.\n"
+        "After every user message, silently check: did they share something durable and "
+        "reusable — identity, preferences, goals, projects, deadlines, decisions, accounts, "
+        "tools — not a one-off detail? If yes, call memory_write with path='MEMORY.md' and "
+        "mode='append'. Do this SILENTLY: never say \"I'll remember that\" in place of the "
+        "tool call, and never announce the call either — just make it, then continue "
+        "naturally. A text reply alone persists nothing.\n"
         "\n"
         "## When to READ (mandatory memory lookup)\n"
         "When the user asks a vague recall question (\"what do you know about me\", \"what were we\n"
@@ -469,17 +591,12 @@ def _kernel_prompt(
         "you MUST call memory_search or memory_read FIRST — before composing your answer.\n"
         "Never say \"I don't have any information\" without actually checking memory first.\n"
         "If memory is empty after checking, say \"I don't have anything saved yet\" — not \"I don't\n"
-        "remember\" or \"we haven't discussed that.\"\n"
+        "remember.\"\n"
         "\n"
         "## Format for MEMORY.md\n"
         "Write one fact per line: \"- key: value\" or \"- category: fact\". Examples:\n"
         "- name: Mansur\n"
-        "- preference: favorite colour is forest green\n"
-        "- project: Q3 marketing plan for Acme account\n"
-        "- vehicle: Tesla Model S\n"
-        "\n"
-        "These rules ensure facts survive across conversations. Without memory_write calls,\n"
-        "everything the user tells you is lost when the session ends."
+        "- project: Q3 marketing plan for Acme account"
     )
     # Deliberately no blanket "computer capabilities" claim here — whether a
     # personal computer is actually paired and online varies per workspace
@@ -488,11 +605,13 @@ def _kernel_prompt(
     # to every turn's system_prompt, right below the callable-tools list.
     if _platform_paid_ai_source(billing_source=billing_source, ai_tier=ai_tier):
         return (
+            _FIRST_PRIORITY_STATEMENT + "\n\n"
             "You are operating inside Empyralis, an environment connecting the user with AI, tools, files, memory, and apps. "
             "The active AI source is Empyralis AI. "
             "Workspace identity and role files may be available through tools or workspace context when relevant."
         ) + memory_rule
     return (
+        _FIRST_PRIORITY_STATEMENT + "\n\n"
         "You are operating inside Empyralis, an environment connecting the user with this AI model, tools, files, memory, and apps. "
         "Workspace identity and role files may be available through tools or workspace context when relevant."
     ) + memory_rule
@@ -558,6 +677,42 @@ def _normalize_recent_messages(
     value: Sequence[Mapping[str, Any]] | None,
     current_channel: str = "",
 ) -> list[dict[str, str]]:
+    # BUG 4 fix (compaction summary was write-only): a `role ==
+    # "compaction_summary"` entry used to fall straight through the
+    # `role not in {"user", "assistant"}` filter below and vanish —
+    # confirmed by running this exact function with one in the input. A
+    # summary an earlier turn paid an LLM call to produce would then never
+    # reach a single subsequent ordinary turn. Scanned across the WHOLE
+    # input (not just the last-16 slice below) because a compaction_summary
+    # row can be older than the 16 most recent raw turns and still be the
+    # only durable memory of everything before it.
+    #
+    # Kept as role="user" (never "system") once extracted: every
+    # downstream cloud-provider transport this list eventually reaches
+    # (scripts/orion_local_worker_llm.py's _normalize_prior_messages,
+    # allowed_roles={"user", assistant_role}) silently drops a "system"-
+    # role prior_messages entry — "user" is the only role guaranteed to
+    # survive every transport. Tagged unambiguously as an automated note,
+    # not the user's own words.
+    summary_entry: dict[str, str] | None = None
+    for item in list(value or []):
+        if not isinstance(item, Mapping):
+            continue
+        if _coerce_text(item.get("role")).lower() != "compaction_summary":
+            continue
+        _summary_content = _coerce_text(item.get("content"))
+        if _summary_content:
+            summary_entry = {
+                "role": "user",
+                "content": (
+                    "[Automated note — compacted summary of earlier "
+                    "conversation, not something the user actually said]:\n"
+                    + _summary_content
+                )[:4000],
+            }
+        # Keep scanning — a later compaction_summary row (if more than one
+        # somehow made it into `value`) should win as the most current one.
+
     normalized: list[dict[str, str]] = []
     for item in list(value or [])[-16:]:
         if not isinstance(item, Mapping):
@@ -578,6 +733,20 @@ def _normalize_recent_messages(
         if msg_channel and current_channel and msg_channel != current_channel:
             content = f"[via {msg_channel}] {content}"
         normalized.append({"role": role, "content": content[:4000]})
+    # Aggregate budget on top of the per-message cap above (SAGE_RECENT_
+    # HISTORY_TOTAL_CHAR_LIMIT, see its definition for why) — drop the
+    # oldest messages first until the whole block fits, always keeping at
+    # least the single most recent message. Applied BEFORE the summary is
+    # prepended (below) so the summary itself is never the thing this loop
+    # discards to make room — it is the one thing here that summarizes
+    # everything the budget squeeze is dropping.
+    total_chars = sum(len(m["content"]) for m in normalized)
+    while total_chars > SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT and len(normalized) > 1:
+        dropped = normalized.pop(0)
+        total_chars -= len(dropped["content"])
+
+    if summary_entry is not None:
+        normalized.insert(0, summary_entry)
     return normalized
 
 
@@ -668,8 +837,12 @@ def build_sage_instruction_bundle(
     if root_sections:
         append_section(
             "root_memory_brief",
-            "## Customer Root Memory\n"
-            "These customer-editable files are Sage's durable personal behavior layer. Kernel rules override them. Use memory_search and memory_get for full file detail.\n\n"
+            "## Memory\n"
+            "MEMORY.md is your memory index: one line per memory file with a short description of what "
+            "that file holds. It is loaded at session start so you can see what you know WITHOUT loading "
+            "everything. When the task needs knowledge you don't have in context, reason about which "
+            "indexed file covers it and pull that file (memory_search / memory_get) — then reason from "
+            "its contents yourself. Kernel rules override memory content.\n\n"
             + "\n\n".join(root_sections),
         )
     if _coerce_text(profile_context):

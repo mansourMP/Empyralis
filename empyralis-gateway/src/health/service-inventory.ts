@@ -14,6 +14,8 @@ import {
   desktopPermissionForCapability,
   setLlmRuntimeClaudeCodeReady,
   setLlmRuntimeCodexReady,
+  setLlmRuntimeCursorReady,
+  setLlmRuntimeGrokBuildReady,
   setLlmRuntimeOllamaReady,
   setShellSandboxDockerReady,
   type CapabilityPermissionStatus,
@@ -638,6 +640,141 @@ async function probeClaudeCli(
   }, checkedAt);
 }
 
+// Grok Build's own credential-storage location, per docs.x.ai/build's
+// authentication guide (crates/codegen/xai-grok-pager/docs/user-guide/
+// 02-authentication.md, fetched live 2026-07-24): "Grok stores credentials
+// in ~/.grok/auth.json and reuses them across sessions." Not overridable by
+// an env var the way Claude's CLAUDE_CONFIG_DIR is (no such var is
+// documented for Grok), so there is exactly one path to check.
+function grokAuthFileCandidate(env: NodeJS.ProcessEnv): string {
+  return path.join(homeDir(env), ".grok", "auth.json");
+}
+
+async function probeGrokBuildCli(
+  checkedAt: string,
+  env: NodeJS.ProcessEnv,
+  commandExists: (command: string) => string | null,
+  runCommand: (command: string, args: string[], timeoutMs: number) => Promise<CommandResult>,
+): Promise<PassiveServiceInventoryItem> {
+  const candidates = [String(env.GROK_CLI_PATH || "").trim(), "grok"].filter(Boolean);
+  const command = candidates.map(commandExists).find(Boolean) || null;
+  if (!command) {
+    return makeItem({
+      id: "grok_cli",
+      label: "Grok Build CLI",
+      kind: "developer_tool",
+      status: "missing",
+      detected: false,
+      check: "grok --version",
+      summary: "Grok Build CLI was not found on PATH.",
+      metadata: { installed: false, authenticated: false },
+    }, checkedAt);
+  }
+  const result = await runCommand(command, ["--version"], DEFAULT_COMMAND_TIMEOUT_MS);
+  const installed = true;
+  // XAI_API_KEY is Grok's own documented env-var fallback, always usable
+  // headlessly with zero login-session dependency — checked first, same
+  // precedence Grok's own auth-resolution order gives it relative to a
+  // stored session token being ABSENT. auth.json existence is the signal for
+  // a completed `grok login`/`grok login --device-auth` session (background-
+  // refreshed by the CLI itself; see cli-login-session.ts's grok_build
+  // comment for what happens when that refresh fails).
+  const authenticated = detectAuthPresence([grokAuthFileCandidate(env)], ["XAI_API_KEY"], env);
+  return makeItem({
+    id: "grok_cli",
+    label: "Grok Build CLI",
+    kind: "developer_tool",
+    status: installed ? (authenticated ? "ready" : "degraded") : "degraded",
+    detected: true,
+    check: "grok --version",
+    summary: installed
+      ? (authenticated
+          ? truncate(result.stdout || "Grok Build CLI is installed and signed in.")
+          : "Grok Build CLI is installed but not signed in (run `grok login --device-auth`).")
+      : truncate(result.stderr || result.stdout || `grok --version exited with ${result.exitCode}.`),
+    metadata: { path: command, exit_code: result.exitCode, installed, authenticated, timed_out: Boolean(result.timedOut) },
+  }, checkedAt);
+}
+
+// Cursor CLI's authenticated-status check, UNLIKE the other three CLIs
+// above, is deliberately NOT a credential-file existence check. Cursor's own
+// docs (cursor.com/docs/cli/reference/authentication, fetched live
+// 2026-07-24) confirm credentials are "stored locally" and checkable via
+// `agent status` / `agent status --format json`, but do NOT publish the
+// exact file path or on-disk shape the way Claude Code (Keychain / ~/.claude/
+// .credentials.json), Codex (~/.codex/auth.json), and Grok Build (~/.grok/
+// auth.json) all do. Guessing an unpublished path risks the exact silent
+// failure this rail exists to prevent (a probe that always reads "false" —
+// or worse, always "true" — against a path that was never real). So this
+// probe instead: (1) trusts CURSOR_API_KEY the same documented way the other
+// three trust their own API-key env vars, and (2) otherwise runs `cursor-
+// agent status` and looks for its own documented not-authenticated wording,
+// never parsing an unconfirmed JSON schema. This is a best-effort UI-hint
+// signal, same caveat already established for probeClaudeCli's macOS
+// Keychain branch: the REAL, authoritative check is cli-runner.ts's
+// parseCursorOutput classifying the actual turn-time failure text (verified
+// live: "Error: Authentication required. Please run 'agent login' first, or
+// set CURSOR_API_KEY environment variable.") — if this passive probe is ever
+// wrong, that turn-time check still fails loudly with a correct "not signed
+// in" message; it does not fail silently.
+const CURSOR_STATUS_NOT_AUTHENTICATED_MARKERS = [
+  "not authenticated", "not logged in", "authentication required", "please run 'agent login'",
+  "please run \"agent login\"", "no active session",
+];
+
+async function probeCursorCli(
+  checkedAt: string,
+  env: NodeJS.ProcessEnv,
+  commandExists: (command: string) => string | null,
+  runCommand: (command: string, args: string[], timeoutMs: number) => Promise<CommandResult>,
+): Promise<PassiveServiceInventoryItem> {
+  // Cursor's own install script (cursor.com/install, inspected directly
+  // 2026-07-24) symlinks BOTH `cursor-agent` (legacy) and `agent` (its new
+  // primary name) to the same binary — `cursor-agent` is checked first since
+  // it's unambiguous, `agent` is a plausible but genuinely generic PATH name.
+  const candidates = [String(env.CURSOR_CLI_PATH || "").trim(), "cursor-agent", "agent"].filter(Boolean);
+  const command = candidates.map(commandExists).find(Boolean) || null;
+  if (!command) {
+    return makeItem({
+      id: "cursor_cli",
+      label: "Cursor CLI",
+      kind: "developer_tool",
+      status: "missing",
+      detected: false,
+      check: "cursor-agent --version",
+      summary: "Cursor CLI was not found on PATH.",
+      metadata: { installed: false, authenticated: false },
+    }, checkedAt);
+  }
+  const result = await runCommand(command, ["--version"], DEFAULT_COMMAND_TIMEOUT_MS);
+  const installed = true;
+  let authenticated = String(env.CURSOR_API_KEY ?? "").trim().length > 0;
+  if (!authenticated) {
+    const statusResult = await runCommand(command, ["status"], DEFAULT_COMMAND_TIMEOUT_MS);
+    const statusText = `${statusResult.stdout}\n${statusResult.stderr}`.toLowerCase();
+    const looksUnauthenticated = CURSOR_STATUS_NOT_AUTHENTICATED_MARKERS.some((marker) => statusText.includes(marker));
+    // exitCode 0 with no unauthenticated marker is the best signal available
+    // without an officially-published status schema to parse — see this
+    // function's doc comment for why this is a deliberately best-effort UI
+    // hint, not the turn-gating source of truth.
+    authenticated = statusResult.exitCode === 0 && !looksUnauthenticated;
+  }
+  return makeItem({
+    id: "cursor_cli",
+    label: "Cursor CLI",
+    kind: "developer_tool",
+    status: installed ? (authenticated ? "ready" : "degraded") : "degraded",
+    detected: true,
+    check: "cursor-agent --version",
+    summary: installed
+      ? (authenticated
+          ? truncate(result.stdout || "Cursor CLI is installed and signed in.")
+          : "Cursor CLI is installed but not signed in (run `cursor-agent login`).")
+      : truncate(result.stderr || result.stdout || `cursor-agent --version exited with ${result.exitCode}.`),
+    metadata: { path: command, exit_code: result.exitCode, installed, authenticated, timed_out: Boolean(result.timedOut) },
+  }, checkedAt);
+}
+
 function macDisplayNames(payload: string): string[] {
   try {
     const parsed = JSON.parse(payload) as { SPDisplaysDataType?: unknown };
@@ -730,6 +867,8 @@ export async function collectPassiveInventorySnapshot(
     probeOllama(checkedAt, httpGetJson),
     probeCodexCli(checkedAt, env, commandExists, runCommand),
     probeClaudeCli(checkedAt, env, platform, commandExists, runCommand),
+    probeGrokBuildCli(checkedAt, env, commandExists, runCommand),
+    probeCursorCli(checkedAt, env, commandExists, runCommand),
     probeGpu(checkedAt, platform, commandExists, runCommand),
   ]);
   // Feed the just-computed Docker probe result into the shell_sandbox
@@ -753,6 +892,12 @@ export async function collectPassiveInventorySnapshot(
   setLlmRuntimeClaudeCodeReady(claudeCliItem?.status === "ready");
   const codexCliItem = serviceInventory.find((item) => item.id === "codex_cli");
   setLlmRuntimeCodexReady(codexCliItem?.status === "ready");
+  // xAI Grok Build / Cursor CLI addition — same "installed AND authenticated"
+  // gate as the two above.
+  const grokCliItem = serviceInventory.find((item) => item.id === "grok_cli");
+  setLlmRuntimeGrokBuildReady(grokCliItem?.status === "ready");
+  const cursorCliItem = serviceInventory.find((item) => item.id === "cursor_cli");
+  setLlmRuntimeCursorReady(cursorCliItem?.status === "ready");
   if (typeof options.localRunnerReady === "boolean") {
     serviceInventory.unshift(buildLocalRunnerInventoryItem(options.localRunnerReady, checkedAt));
   }

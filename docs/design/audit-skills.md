@@ -1,5 +1,7 @@
 # Audit: the Skills pillar — official spec vs. Empyralis's live state
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). This document's body does not use "Sage" as prose; the remaining `sage_*`/`"sage-skills"`/`"sage-capabilities"` occurrences below are all literal code identifiers, endpoint paths, or telemetry token names — accurate code citations, not live product concept language.
+
 Status: report-only audit, verified against live Anthropic docs and the `main`
 branch of this repo on **2026-07-22** (later in the day than
 `backbone-anthropic.md`/`backbone-empyralis.md`/`backbone-plan.md`, which were

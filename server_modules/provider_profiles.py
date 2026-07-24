@@ -536,6 +536,45 @@ PROVIDER_CATALOG = {
         "hidden": True,
         "provider_scopes": ["sage_personal", "local_only", "hidden"],
     },
+    "xai_grok_cli": {
+        "label": "Grok Build (Subscription)",
+        "auth": ["local_subscription"],
+        "auth_modes": [
+            {"id": "local_cli", "label": "SuperGrok / X Premium+ Subscription", "secret_required": False},
+        ],
+        "default_auth_mode": "local_cli",
+        "default_model": "grok-build",
+        "alias_for": "xai",
+        "hidden": True,
+        "provider_scopes": ["sage_personal", "local_only", "hidden"],
+        "note": (
+            "xAI Grok Build CLI, running on the owner's own hardware under their own SuperGrok/X "
+            "Premium+ subscription login. Empyralis never holds this credential — see cli_subscription "
+            "mode's own docs."
+        ),
+    },
+    "cursor_cli": {
+        "label": "Cursor CLI (Subscription)",
+        "auth": ["local_subscription"],
+        "auth_modes": [
+            {"id": "local_cli", "label": "Cursor Subscription", "secret_required": False},
+        ],
+        "default_auth_mode": "local_cli",
+        # Cursor CLI is a multi-vendor pass-through (Claude/GPT/Gemini/Grok
+        # plus Cursor's own in-house models), NOT a single model family the
+        # way claude_code_cli/xai_grok_cli alias to one — its own docs
+        # confirm the model list "changes frequently" with no fixed catalog
+        # published (verified 2026-07-24). Freeform, no alias_for.
+        "default_model": "",
+        "models": [],
+        "hidden": True,
+        "provider_scopes": ["sage_personal", "local_only", "hidden"],
+        "note": (
+            "Cursor CLI (cursor-agent), running on the owner's own hardware under their own Cursor "
+            "Pro/Pro+/Ultra subscription login. Empyralis never holds this credential — see "
+            "cli_subscription mode's own docs."
+        ),
+    },
     "gemini": {
         "label": "Google Gemini",
         "auth": ["api_key", "gemini_cli_oauth"],

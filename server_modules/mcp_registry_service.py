@@ -248,6 +248,111 @@ def save_mcp_server_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# §1.3 containment (docs: Multiplayer Projects plan) — the registry key below
+# is (workspace_id, server_id) with server_id a STATIC per-provider slug from
+# APP_MCP_SERVER_MAP (e.g. "google-gmail" — see connection_oauth_service.py).
+# It carries no account/credential discriminator, so a second agent
+# connecting its OWN account of the same provider in the same workspace
+# would silently overwrite the row every agent's tool calls resolve through
+# (_resolve_mcp_credential below reads only this one row per server_id) —
+# every other agent's next MCP tool call would silently start hitting a
+# DIFFERENT mailbox, with no error and nothing the owner would see in time.
+#
+# Making the key itself account-aware is the real fix, but it ripples into
+# mcp_skill_id()/mcp_tool_name() (which embed server_id into every skill id
+# and model-facing tool name), the tool-listing/approval UI, and the
+# specialist/primary tool-injection paths in sage_agent_runtime_service.py —
+# too invasive to land safely in one pass without a migration. The
+# containment below is the smallest correct fix instead: refuse the upsert
+# loudly (McpServerCredentialCollisionError) instead of silently swapping
+# whose credential the row resolves to. Existing single-account and
+# workspace-shared setups (no agent_install_id anywhere in play) are
+# byte-for-byte unaffected — see _assert_no_cross_agent_credential_collision.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def credential_owner_agent_install_id(credential_id: Any) -> Optional[str]:
+    """Best-effort: the agent_install_id a vault credential row is scoped to
+    (via vault_helpers.credential_agent_scope), or None if the credential is
+    workspace-shared (no agent_install_id set) or no longer resolvable (e.g.
+    deleted -- treated as "no current owner" so a stale registry slot can
+    still be reclaimed). Never raises. Deferred imports mirror
+    _resolve_mcp_credential's pattern below (vault_store/vault_helpers are
+    heavier modules this file only needs for this one lookup)."""
+    normalized_id = str(credential_id or "").strip()
+    if not normalized_id:
+        return None
+    try:
+        from server_modules.vault_store import get_credential
+        from server_modules.vault_helpers import credential_agent_scope
+        entry = get_credential(normalized_id)
+    except Exception:
+        return None
+    if not isinstance(entry, dict):
+        return None
+    return credential_agent_scope(entry) or None
+
+
+class McpServerCredentialCollisionError(RuntimeError):
+    """Raised instead of silently overwriting an MCP server registry row's
+    credential_id when the incoming credential is owned by a DIFFERENT agent
+    than whichever agent the existing row's credential belongs to. See the
+    module banner above for the full rationale."""
+
+    def __init__(self, server_id: str, workspace_id: str, existing_owner: Optional[str], new_owner: Optional[str]) -> None:
+        self.server_id = server_id
+        self.workspace_id = workspace_id
+        self.existing_owner = existing_owner
+        self.new_owner = new_owner
+        detail = (
+            f"MCP server '{server_id}' in workspace '{workspace_id}' is already connected "
+            f"under a different account (owned by agent '{existing_owner}'). Connecting "
+            f"agent '{new_owner or 'unassigned'}' would silently redirect every agent's "
+            f"tool calls for this provider to a different account, so this connection was "
+            f"refused rather than applied. Disconnect the existing connection first if you "
+            f"intend to replace it."
+        )
+        super().__init__(detail)
+
+
+def _assert_no_cross_agent_credential_collision(
+    *,
+    existing: Optional[Dict[str, Any]],
+    new_credential_id: Any,
+    workspace_id: str,
+    server_id: str,
+) -> None:
+    """Fires ONLY when there is an existing row with a credential_id, a NEW
+    credential_id is being set that differs from it, AND the existing
+    credential is scoped to one specific agent while the incoming credential
+    belongs to a different agent (or is unscoped) -- see
+    McpServerCredentialCollisionError / the module banner above.
+
+    Deliberately permissive in every other case, to keep this migration-safe:
+      - No existing row, or credential_id isn't being touched -> no-op.
+      - Existing row's credential is workspace-shared/unassigned (today's
+        single-account default) -> still silently overwritable, unchanged.
+      - Same agent reconnecting / re-authing its own account -> allowed.
+    """
+    new_id = str(new_credential_id or "").strip()
+    if not new_id or not isinstance(existing, dict):
+        return  # nothing being set, or no prior row to collide with
+    existing_id = str(existing.get("credential_id") or "").strip()
+    if not existing_id or existing_id == new_id:
+        return  # first assignment to this slot, or re-saving the same credential
+
+    existing_owner = credential_owner_agent_install_id(existing_id)
+    if not existing_owner:
+        return  # existing row is workspace-shared, or its credential is gone -- reclaimable
+
+    new_owner = credential_owner_agent_install_id(new_id)
+    if new_owner == existing_owner:
+        return  # same agent reconnecting / re-authing its own account
+
+    raise McpServerCredentialCollisionError(server_id, workspace_id, existing_owner, new_owner)
+
+
 def _workspace_bucket(workspace_id: str, registry: Dict[str, Any]) -> Dict[str, Any]:
     workspaces = registry.get("workspaces") if isinstance(registry.get("workspaces"), dict) else {}
     bucket = workspaces.get(workspace_id)
@@ -446,6 +551,341 @@ def _is_transient_mcp_error(exc: BaseException) -> bool:
     return False
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase D — auth durability for unattended agents
+# (docs/design/mcp-applications-plan.md, Phase D). An agent may run for hours
+# or days unattended; if a connected MCP server's OAuth token expires and the
+# owner is never told, the agent just silently starts failing that tool.
+# This section: (1) detects the 401/invalid_token shape, (2) attempts exactly
+# one refresh + retry through the EXISTING oauth refresh machinery
+# (connection_oauth_service — no second refresh implementation), and
+# (3) on refresh failure, marks the server "reauth_required" in the registry
+# and alerts the workspace owner exactly once (never silently retries
+# forever), while giving the agent a short, honest error it can act on.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class McpReauthRequiredError(RuntimeError):
+    """Raised internally when an MCP auth failure survives the one-shot
+    refresh+retry — the workspace owner must reconnect the server. Carries a
+    short machine-readable *reason* code and a human *detail* string so the
+    caller can mark registry status and build the owner alert without
+    re-deriving context from the original transport exception."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        self.reason = str(reason or "refresh_failed")
+        self.detail = str(detail or "Token refresh failed.")
+        super().__init__(self.detail)
+
+
+def _iter_exception_chain(exc: BaseException):
+    """Yield *exc* and everything reachable from it via __cause__,
+    __context__, and (Python 3.11+) ExceptionGroup.exceptions. The mcp SDK's
+    streamable_http transport runs inside anyio task groups, which wrap the
+    underlying httpx.HTTPStatusError in a BaseExceptionGroup rather than
+    letting it propagate directly — a plain isinstance() check on the
+    top-level exception misses it."""
+    seen: set[int] = set()
+    stack: List[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        sub_exceptions = getattr(current, "exceptions", None)
+        if isinstance(sub_exceptions, (list, tuple)):
+            stack.extend(item for item in sub_exceptions if isinstance(item, BaseException))
+        if isinstance(current.__cause__, BaseException):
+            stack.append(current.__cause__)
+        if isinstance(current.__context__, BaseException) and current.__context__ is not current.__cause__:
+            stack.append(current.__context__)
+
+
+_MCP_AUTH_HTTP_STATUS_CODES = frozenset({401, 403})
+# 401 is the MCP-mandated shape for an invalid/expired bearer token
+# (mcp/server/auth/middleware/bearer_auth.py: 401 + WWW-Authenticate:
+# Bearer error="invalid_token", per RFC 6750). 403 covers insufficient_scope
+# servers send for the same "reconnect with the right grant" outcome.
+_MCP_AUTH_MESSAGE_TOKENS = ("invalid_token", "unauthorized", "insufficient_scope", " 401 ")
+
+
+def _is_mcp_auth_error(exc: BaseException) -> bool:
+    """True if *exc* (or anything in its cause/context/sub-exception chain,
+    see _iter_exception_chain) is the auth-failure shape the MCP SDK/HTTP
+    layer actually raises for an expired or revoked OAuth token."""
+    for candidate in _iter_exception_chain(exc):
+        if isinstance(candidate, httpx.HTTPStatusError):
+            status = getattr(candidate.response, "status_code", 0)
+            if status in _MCP_AUTH_HTTP_STATUS_CODES:
+                return True
+        message = f" {candidate!s} ".lower()
+        if any(token in message for token in _MCP_AUTH_MESSAGE_TOKENS):
+            return True
+    return False
+
+
+async def _retry_mcp_call_after_auth_refresh_async(
+    *,
+    server: Dict[str, Any],
+    tool_name: str,
+    arguments: Dict[str, Any],
+    original_exc: BaseException,
+    client_session_cls: Any = ClientSession,
+    streamable_http_client_fn: Any = streamable_http_client,
+    call_timeout_seconds: float = 60.0,
+) -> Any:
+    """Called after the first MCP tool-call attempt failed with an auth
+    error (_is_mcp_auth_error). Attempts exactly one token refresh through
+    the EXISTING oauth refresh machinery (connection_oauth_service.
+    refresh_oauth_token_now — the forced variant of the same
+    refresh_oauth_token_if_needed() codepath _resolve_mcp_credential already
+    calls opportunistically) and retries the call exactly once with the
+    refreshed credential.
+
+    Returns the successful result. Raises McpReauthRequiredError — never a
+    bare exception — if refresh failed or the retried call still auth-fails,
+    so the caller can distinguish "needs owner reconnect" from an ordinary
+    transient error.
+    """
+    credential_id = str(server.get("credential_id") or "").strip()
+    if not credential_id:
+        raise McpReauthRequiredError(
+            "no_credential",
+            "This server has no OAuth credential on file to refresh.",
+        ) from original_exc
+
+    from server_modules.connection_oauth_service import refresh_oauth_token_now
+
+    outcome = refresh_oauth_token_now(credential_id)
+    if not outcome.get("ok"):
+        raise McpReauthRequiredError(
+            str(outcome.get("reason") or "refresh_failed"),
+            str(outcome.get("detail") or "Token refresh failed."),
+        ) from original_exc
+
+    refreshed_credential = outcome.get("credential") if isinstance(outcome.get("credential"), dict) else None
+    retry_http_client = _build_mcp_http_client(refreshed_credential)
+    try:
+        return await _call_streamable_http_tool_async(
+            endpoint=str(server.get("endpoint") or "").strip(),
+            tool_name=tool_name,
+            arguments=arguments,
+            http_client=retry_http_client,
+            client_session_cls=client_session_cls,
+            streamable_http_client_fn=streamable_http_client_fn,
+            call_timeout_seconds=call_timeout_seconds,
+        )
+    except Exception as retry_exc:
+        if _is_mcp_auth_error(retry_exc):
+            raise McpReauthRequiredError(
+                "refresh_did_not_fix_auth",
+                "Token refresh succeeded but the retried call still failed authentication.",
+            ) from retry_exc
+        raise
+
+
+def _mark_mcp_server_reauth_required(
+    *,
+    workspace_id: str,
+    server: Dict[str, Any],
+    reason: str,
+    detail: str,
+) -> None:
+    """Flip the server's registry-recorded status to "reauth_required" (with
+    a timestamp) so the Settings -> MCP servers UI's derived status can
+    surface it. Goes through the same upsert_workspace_mcp_server() choke
+    point approve_mcp_tool()/deny_mcp_tool() already use for single-field
+    server mutations (discover_tools=False — this never makes a network
+    call), so status persists consistently with every other field. Never
+    raises — this is a best-effort side effect of a failure path."""
+    normalized_workspace_id = str(workspace_id or "").strip()
+    server_id = _normalize_server_id(server.get("id"))
+    if not normalized_workspace_id or not server_id:
+        return
+    try:
+        upsert_workspace_mcp_server(
+            workspace_id=normalized_workspace_id,
+            server_id=server_id,
+            label=server.get("label"),
+            transport=server.get("transport"),
+            endpoint=server.get("endpoint"),
+            enabled=server.get("enabled", True),
+            tools=server.get("tools"),
+            metadata=server.get("metadata"),
+            discover_tools=False,
+            credential_id=server.get("credential_id"),
+            status="reauth_required",
+            status_detail=f"{reason}: {detail}" if reason else detail,
+        )
+    except Exception:
+        _log.warning("Failed to mark MCP server %s as reauth_required", server_id, exc_info=True)
+
+
+async def _alert_owner_mcp_reauth_required_async(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    server: Dict[str, Any],
+    tool_name: str,
+    reauth_exc: McpReauthRequiredError,
+    run_id: Optional[str],
+    thread_id: Optional[str],
+    agent_id: Optional[str],
+) -> RuntimeError:
+    """Side effects for an unrecoverable MCP auth failure (Phase D). Marks
+    the server reauth_required in the registry, alerts the workspace owner
+    exactly once through the existing notification path — the same pairing
+    deployed_agent_cost_cap_service.py uses for its "owner must act" alerts:
+    outbox_service.emit_notification_event() (deployed_agent_cost_cap_
+    service.py:212, feeds the push/inbox notification feed via
+    notification_service.build_notification_from_outbox_event's "notification"
+    branch) plus activity_ledger_service.append_activity_event(review_
+    required=True) (deployed_agent_cost_cap_service.py:331-359, the durable
+    audit-reference record) — and returns (does NOT raise) the short, honest
+    RuntimeError the caller should propagate to the agent."""
+    server_id = _normalize_server_id(server.get("id"))
+    server_label = str(server.get("label") or server_id).strip() or server_id
+
+    _mark_mcp_server_reauth_required(
+        workspace_id=workspace_id,
+        server=server,
+        reason=reauth_exc.reason,
+        detail=reauth_exc.detail,
+    )
+
+    try:
+        from server_modules import outbox_service
+
+        outbox_service.emit_notification_event(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            action="mcp_server_reauth_required",
+            text=(
+                f"{server_label} needs to be reconnected. Its connection expired and "
+                "could not refresh automatically — reconnect it to keep this agent's tools working."
+            ),
+            run_id=run_id,
+            metadata={
+                "title": "Reconnect required",
+                "priority": "high",
+                "server_id": server_id,
+                "server_label": server_label,
+                "tool_name": tool_name,
+                "reason": reauth_exc.reason,
+                "path": f"/w/{workspace_id}/settings",
+            },
+        )
+    except Exception:
+        _log.warning("mcp reauth alert: emit_notification_event failed for server %s", server_id, exc_info=True)
+
+    try:
+        from server_modules import activity_ledger_service
+
+        await activity_ledger_service.append_activity_event(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            actor_type="system",
+            actor_id=f"mcp:{server_id}",
+            event_class="blocked_action",
+            detail_level="audit_reference",
+            action="mcp_reauth_required",
+            run_id=run_id,
+            thread_id=thread_id,
+            title=f"Reconnect required: {server_label}",
+            summary=(
+                f"MCP server '{server_label}' auth refresh failed ({reauth_exc.reason}) "
+                f"while calling '{tool_name}'. The workspace owner must reconnect it."
+            ),
+            status="blocked",
+            review_required=True,
+            metadata={
+                "connector_id": f"mcp:{server_id}",
+                "server_id": server_id,
+                "tool_name": tool_name,
+                "reason": reauth_exc.reason,
+                "detail": reauth_exc.detail,
+                "agent_id": agent_id,
+            },
+        )
+    except Exception:
+        _log.warning("mcp reauth alert: append_activity_event failed for server %s", server_id, exc_info=True)
+
+    return RuntimeError(f"{server_label} needs the owner to reconnect it — they've been notified.")
+
+
+async def _invoke_mcp_tool_with_auth_recovery_async(
+    *,
+    server: Dict[str, Any],
+    workspace_id: str,
+    tenant_id: str,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    http_client: Any,
+    client_session_cls: Any = ClientSession,
+    streamable_http_client_fn: Any = streamable_http_client,
+    run_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Any:
+    """The Phase D auth-durability seam. Every invoke_workspace_mcp_* entry
+    point (sync and async) calls this instead of _call_streamable_http_tool_
+    async() directly:
+      1. First attempt uses *http_client* (already built from the credential
+         the caller resolved).
+      2. On a 401/invalid_token-shaped failure (_is_mcp_auth_error), force a
+         token refresh through the EXISTING oauth refresh machinery and
+         retry once with the refreshed credential
+         (_retry_mcp_call_after_auth_refresh_async). If that retry succeeds,
+         this returns the result normally — the agent never notices.
+      3. If refresh fails (revoked/expired grant, no credential on file,
+         etc.) or the retry itself still auth-fails: mark the server
+         reauth_required, alert the workspace owner once, and raise a short,
+         honest RuntimeError naming the server (never a bare transport
+         error) so the agent can adapt instead of retrying blindly.
+    Non-auth errors are re-raised completely untouched by step 2's check —
+    this function only ever intercepts the auth-error shape; every other
+    failure (timeout, 5xx, malformed args, ...) behaves exactly as before.
+
+    Sync callers run this via asyncio.run(...) exactly like they already run
+    _call_streamable_http_tool_async(...) — no separate sync implementation
+    of the recovery logic exists.
+    """
+    try:
+        return await _call_streamable_http_tool_async(
+            endpoint=str(server.get("endpoint") or "").strip(),
+            tool_name=tool_name,
+            arguments=arguments,
+            http_client=http_client,
+            client_session_cls=client_session_cls,
+            streamable_http_client_fn=streamable_http_client_fn,
+        )
+    except Exception as exc:
+        if not _is_mcp_auth_error(exc):
+            raise
+        try:
+            return await _retry_mcp_call_after_auth_refresh_async(
+                server=server,
+                tool_name=tool_name,
+                arguments=arguments,
+                original_exc=exc,
+                client_session_cls=client_session_cls,
+                streamable_http_client_fn=streamable_http_client_fn,
+            )
+        except McpReauthRequiredError as reauth_exc:
+            honest_exc = await _alert_owner_mcp_reauth_required_async(
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
+                server=server,
+                tool_name=tool_name,
+                reauth_exc=reauth_exc,
+                run_id=run_id,
+                thread_id=thread_id,
+                agent_id=agent_id,
+            )
+            raise honest_exc from reauth_exc
+
+
 async def _list_tools_streamable_http_async(
     *,
     endpoint: str,
@@ -585,6 +1025,8 @@ def _normalize_server_payload(
     metadata: Any,
     existing: Optional[Dict[str, Any]] = None,
     credential_id: Any = None,
+    status: Any = None,
+    status_detail: Any = None,
 ) -> Dict[str, Any]:
     normalized_server_id = _normalize_server_id(server_id)
     if not normalized_server_id:
@@ -600,6 +1042,27 @@ def _normalize_server_payload(
             normalized_tools.append(_normalize_tool_payload(raw_tool, server_id=normalized_server_id))
     current = dict(existing) if isinstance(existing, dict) else {}
     normalized_credential_id = str(credential_id or "").strip() or None if credential_id is not None else current.get("credential_id")
+    # Phase D (auth durability, docs/design/mcp-applications-plan.md):
+    # `status` is an explicit-set sentinel just like `credential_id` above —
+    # None means "don't touch it". _mark_mcp_server_reauth_required() passes
+    # status="reauth_required" explicitly. Absent that, a *changed*
+    # credential_id (initial connect, or the owner reconnecting after a
+    # reauth_required alert) gets a clean "ok" slate — the next call
+    # re-flags it if it's still broken. Every other save (enable/disable
+    # toggle, tool approve/deny, plain re-save) leaves status untouched.
+    credential_id_changed = credential_id is not None and normalized_credential_id != current.get("credential_id")
+    if status is not None:
+        normalized_status = str(status).strip().lower() or "ok"
+        normalized_status_detail = str(status_detail or "").strip() or None
+        status_updated_at = _utc_now_iso()
+    elif credential_id_changed:
+        normalized_status = "ok"
+        normalized_status_detail = None
+        status_updated_at = _utc_now_iso()
+    else:
+        normalized_status = str(current.get("status") or "ok").strip().lower() or "ok"
+        normalized_status_detail = current.get("status_detail")
+        status_updated_at = current.get("status_updated_at")
     return {
         "id": normalized_server_id,
         "label": str(label or normalized_server_id).strip()[:160] or normalized_server_id,
@@ -608,6 +1071,9 @@ def _normalize_server_payload(
         "enabled": bool(enabled if enabled is not None else current.get("enabled", True)),
         "advanced_only": True,
         "credential_id": normalized_credential_id,
+        "status": normalized_status,
+        "status_detail": normalized_status_detail,
+        "status_updated_at": status_updated_at,
         "tools": normalized_tools or (current.get("tools") if isinstance(current.get("tools"), list) else []),
         "metadata": dict(metadata) if isinstance(metadata, dict) else {},
         "last_synced_at": current.get("last_synced_at"),
@@ -663,6 +1129,8 @@ def upsert_workspace_mcp_server(
     metadata: Any = None,
     discover_tools: bool = False,
     credential_id: Any = None,
+    status: Any = None,
+    status_detail: Any = None,
 ) -> Dict[str, Any]:
     normalized_workspace_id = str(workspace_id or "").strip()
     if not normalized_workspace_id:
@@ -672,6 +1140,13 @@ def upsert_workspace_mcp_server(
     servers = bucket.get("servers") if isinstance(bucket.get("servers"), dict) else {}
     normalized_server_id = _normalize_server_id(server_id)
     existing = servers.get(normalized_server_id) if isinstance(servers.get(normalized_server_id), dict) else None
+
+    _assert_no_cross_agent_credential_collision(
+        existing=existing,
+        new_credential_id=credential_id,
+        workspace_id=normalized_workspace_id,
+        server_id=normalized_server_id,
+    )
 
     _validate_mcp_endpoint(str(endpoint or "").strip())
 
@@ -685,6 +1160,8 @@ def upsert_workspace_mcp_server(
         metadata=metadata,
         existing=existing,
         credential_id=credential_id,
+        status=status,
+        status_detail=status_detail,
     )
     if discover_tools:
         existing_approvals = {
@@ -730,6 +1207,8 @@ async def upsert_workspace_mcp_server_async(
     metadata: Any = None,
     discover_tools: bool = False,
     credential_id: Any = None,
+    status: Any = None,
+    status_detail: Any = None,
 ) -> Dict[str, Any]:
     normalized_workspace_id = str(workspace_id or "").strip()
     if not normalized_workspace_id:
@@ -739,6 +1218,13 @@ async def upsert_workspace_mcp_server_async(
     servers = bucket.get("servers") if isinstance(bucket.get("servers"), dict) else {}
     normalized_server_id = _normalize_server_id(server_id)
     existing = servers.get(normalized_server_id) if isinstance(servers.get(normalized_server_id), dict) else None
+
+    _assert_no_cross_agent_credential_collision(
+        existing=existing,
+        new_credential_id=credential_id,
+        workspace_id=normalized_workspace_id,
+        server_id=normalized_server_id,
+    )
 
     _validate_mcp_endpoint(str(endpoint or "").strip())
 
@@ -752,6 +1238,8 @@ async def upsert_workspace_mcp_server_async(
         metadata=metadata,
         existing=existing,
         credential_id=credential_id,
+        status=status,
+        status_detail=status_detail,
     )
     if discover_tools:
         existing_approvals = {
@@ -1192,13 +1680,18 @@ async def invoke_workspace_mcp_tool_async(
     }
     await agent_action_metering_service.record_started(**common_event)
     try:
-        result = await _call_streamable_http_tool_async(
-            endpoint=str(server.get("endpoint") or "").strip(),
+        result = await _invoke_mcp_tool_with_auth_recovery_async(
+            server=server,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
             tool_name=normalized_tool_name,
             arguments=validated_arguments,
             http_client=mcp_http_client,
             client_session_cls=client_session_cls,
             streamable_http_client_fn=streamable_http_client_fn,
+            run_id=run_id,
+            thread_id=thread_id,
+            agent_id=agent_id,
         )
     except Exception as exc:
         await agent_action_metering_service.record_failed(
@@ -1363,13 +1856,18 @@ def invoke_workspace_mcp_tool(
     agent_action_metering_service.record_started_sync(**common_event)
     try:
         result = asyncio.run(
-            _call_streamable_http_tool_async(
-                endpoint=str(server.get("endpoint") or "").strip(),
+            _invoke_mcp_tool_with_auth_recovery_async(
+                server=server,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
                 tool_name=normalized_tool_name,
                 arguments=validated_arguments,
                 http_client=mcp_http_client,
                 client_session_cls=client_session_cls,
                 streamable_http_client_fn=streamable_http_client_fn,
+                run_id=run_id,
+                thread_id=thread_id,
+                agent_id=agent_id,
             )
         )
     except Exception as exc:
@@ -1789,13 +2287,18 @@ def invoke_workspace_mcp_skill(
     agent_action_metering_service.record_started_sync(**common_event)
     try:
         result = asyncio.run(
-            _call_streamable_http_tool_async(
-                endpoint=str(server.get("endpoint") or "").strip(),
+            _invoke_mcp_tool_with_auth_recovery_async(
+                server=server,
+                workspace_id=workspace_id,
+                tenant_id=tenant_id,
                 tool_name=parsed["tool_name"],
                 arguments=arguments,
                 http_client=mcp_http_client,
                 client_session_cls=client_session_cls,
                 streamable_http_client_fn=streamable_http_client_fn,
+                run_id=run_id,
+                thread_id=thread_id,
+                agent_id=agent_id,
             )
         )
     except Exception as exc:
@@ -1951,13 +2454,18 @@ async def invoke_workspace_mcp_skill_async(
     }
     await agent_action_metering_service.record_started(**common_event)
     try:
-        result = await _call_streamable_http_tool_async(
-            endpoint=str(server.get("endpoint") or "").strip(),
+        result = await _invoke_mcp_tool_with_auth_recovery_async(
+            server=server,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
             tool_name=parsed["tool_name"],
             arguments=arguments,
             http_client=mcp_http_client,
             client_session_cls=client_session_cls,
             streamable_http_client_fn=streamable_http_client_fn,
+            run_id=run_id,
+            thread_id=thread_id,
+            agent_id=agent_id,
         )
     except Exception as exc:
         await agent_action_metering_service.record_failed(

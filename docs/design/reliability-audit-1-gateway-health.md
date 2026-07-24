@@ -1,5 +1,7 @@
 # Reliability Audit 1: Gateway Health — Empyralis vs OpenClaw
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 Read-only factual audit. No recommendations, no fix design. Every claim is cited `file:line`. Empyralis paths are relative to `/Users/mansur/empyralis/`; OpenClaw paths are relative to `/Users/mansur/openclaw/` (reference-only checkout).
 
 Spot-checked directly by the auditing agent (not just sub-agent-reported): `empyralis-gateway/src/cloud/ws-client.ts:460-490`, `empyralis-gateway/src/cloud/reconnect.ts:1-105`, `openclaw/src/infra/backoff.ts:1-26`, `openclaw/src/flows/doctor-health.ts:1-30`, `openclaw/src/infra/supervisor-markers.ts:1-25`. All matched the sub-agent findings below.

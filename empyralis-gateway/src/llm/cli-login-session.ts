@@ -56,16 +56,17 @@ import { resolveCommandPath } from "../shell/user-install-dirs";
 // LOGIN_METHODS, one row in LOGIN_COMMAND, one description string on the
 // frontend.
 
-export type CliLoginRuntime = "claude_code" | "codex";
+export type CliLoginRuntime = "claude_code" | "codex" | "grok_build" | "cursor_cli";
 
 /** The auth flow the caller picked. Not every combination is valid — see
  *  LOGIN_COMMAND for which (runtime, method) pairs are populated. */
 export type CliLoginMethod =
-  | "device_auth"     // OAuth device-authorization grant — Codex's default
+  | "device_auth"     // OAuth device-authorization grant — Codex's default, also Grok Build's
   | "api_key"         // Read a raw API key from cli.login.input
   | "access_token"    // Read a pre-obtained access token from cli.login.input
   | "claudeai"        // Claude subscription (Pro/Max/Team) — Claude Code's default, mirrors Codex's device_auth
-  | "console";        // Anthropic Console (API billing)
+  | "console"         // Anthropic Console (API billing)
+  | "login";          // Browser OAuth, URL-only — Cursor CLI's `agent login`
 
 export type CliLoginFailureKind = "not_installed" | "timeout" | "crash" | "cancelled" | "unsupported_method";
 
@@ -121,6 +122,12 @@ interface LoginCommandSpec {
    *  and waits for exit. The UI shouldn't wait for a URL event before
    *  offering the input field for these methods. */
   urlLess?: boolean;
+  /** Extra env vars merged on TOP of the session's own env for this one
+   *  spawn only — e.g. cursor_cli's `login` method sets NO_OPEN_BROWSER=1 so
+   *  `agent login` prints the sign-in URL instead of trying to `xdg-open` a
+   *  browser that doesn't exist on a headless Gateway (verified against
+   *  cursor.com/docs/cli/reference/authentication, 2026-07-24). */
+  extraEnv?: Record<string, string>;
 }
 
 /** Every valid (runtime, method) combination. The key is `${runtime}:${method}`.
@@ -199,6 +206,59 @@ const LOGIN_COMMAND: Record<string, LoginCommandSpec> = {
     stdinSecret: true,
     urlLess: true,
   },
+  // Grok Build (xAI) — docs.x.ai/build, verified live 2026-07-24 against
+  // crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md.
+  //
+  // device_auth (default, and the ONLY method wired here): `grok login
+  // --device-auth` (alias `--device-code`) "prints a URL and code to the
+  // terminal... Grok polls until the login is confirmed" — same shape as
+  // Codex's device_auth above, so it reuses the same follow-up-code capture
+  // (see URL_CODE_FOLLOWUP_RUNTIMES below). Completing it durably writes
+  // ~/.grok/auth.json, which auto-refreshes in the background and prompts
+  // re-sign-in only when a refresh genuinely fails.
+  //
+  // Why there is no grok_build:api_key login-session method. Grok's docs
+  // document XAI_API_KEY as an env-var FALLBACK the CLI reads at each
+  // invocation when no session token is active — there is no `grok login
+  // --with-api-key`-style subcommand that reads a key from stdin and
+  // PERSISTS it to auth.json the way Codex's `login --with-api-key` and
+  // Claude's `auth login --console` (stdin) do. Spawning something that
+  // doesn't exist and pretending it persisted a credential would be exactly
+  // the silent-failure this rail is built to prevent (see the `claude
+  // setup-token` explanation above for the identical reasoning). An operator
+  // who wants XAI_API_KEY sets it directly in the Gateway process's own
+  // environment (systemd env / shell profile) — the same "owner-run,
+  // owner-pasted-into-their-own-environment" path already used for Claude's
+  // long-lived token.
+  "grok_build:device_auth": {
+    binaryEnvVar: "GROK_CLI_PATH",
+    defaultBinary: "grok",
+    args: ["login", "--device-auth"],
+  },
+  // Cursor CLI — cursor.com/docs/cli/reference/authentication, verified live
+  // 2026-07-24.
+  //
+  // login (the only method wired here): `agent login` opens a browser by
+  // default; setting NO_OPEN_BROWSER=1 (via extraEnv below) makes it print
+  // the sign-in URL instead, which this session captures the same
+  // URL-only way as claude_code's `console`/`claudeai` methods. NOTE — a
+  // real, documented reliability caveat, not a hidden risk: Cursor's own
+  // community forum has reports of `cursor-agent`/`agent login` failing to
+  // complete over SSH/headless connections (the OAuth exchange this prints
+  // a URL for isn't a pure device-code grant the way Codex's/Grok's is, and
+  // Cursor's docs don't disclose the underlying mechanism). If this session
+  // times out or the CLI reports a failure, that is a real, correctly
+  // surfaced failure — not this module silently swallowing one — see
+  // CLI_SETUP_CURSOR_LOGIN_FAILED. The one alternative Cursor documents
+  // (CURSOR_API_KEY) is, like Grok's XAI_API_KEY, an env-var fallback with
+  // no persisting stdin subcommand — same "set it in the Gateway's own
+  // environment" guidance applies, not a login-session method here.
+  "cursor_cli:login": {
+    binaryEnvVar: "CURSOR_CLI_PATH",
+    defaultBinary: "cursor-agent",
+    args: ["login"],
+    extraEnv: { NO_OPEN_BROWSER: "1" },
+  },
 };
 
 /** Which methods each runtime supports, in display order. The frontend
@@ -207,6 +267,18 @@ const LOGIN_COMMAND: Record<string, LoginCommandSpec> = {
 export const LOGIN_METHODS: Record<CliLoginRuntime, CliLoginMethod[]> = {
   codex: ["device_auth", "api_key", "access_token"],
   claude_code: ["claudeai", "console", "api_key"],
+  grok_build: ["device_auth"],
+  cursor_cli: ["login"],
+};
+
+/** Human label for each runtime — used in every error message below instead
+ *  of a hardcoded claude_code/codex ternary, so adding a runtime here is the
+ *  only place that needs to change. */
+export const RUNTIME_LABEL: Record<CliLoginRuntime, string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  grok_build: "Grok Build",
+  cursor_cli: "Cursor CLI",
 };
 
 /** Look up (runtime, method) with sensible per-runtime defaults if method is
@@ -219,7 +291,7 @@ function resolveLoginCommand(runtime: CliLoginRuntime, method?: CliLoginMethod):
   if (!spec) {
     throw new CliLoginError(
       "unsupported_method",
-      `Auth method "${resolvedMethod}" is not supported for ${runtime === "claude_code" ? "Claude Code" : "Codex"}.`,
+      `Auth method "${resolvedMethod}" is not supported for ${RUNTIME_LABEL[runtime]}.`,
     );
   }
   return { method: resolvedMethod, spec };
@@ -258,6 +330,17 @@ const ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[a-zA-Z]/g;
 // banner line. Scoped to runtime === "codex" only, same as
 // awaitingCodexCodeValue — see extractSafeLines' doc comment for why.
 const DEVICE_CODE_SHAPE_PATTERN = /^[A-Z0-9]{3,8}(?:-[A-Z0-9]{3,8}){1,3}$/i;
+
+// Runtimes whose device-code flow prints a bare code with no reliable
+// preceding "enter this code" sentence to key off — Codex (confirmed live,
+// see DEVICE_CODE_SHAPE_PATTERN's own comment) and Grok Build (`grok login
+// --device-auth`, docs.x.ai/build: "prints a URL and code to the terminal",
+// the same URL-then-bare-code shape, not independently captured live in
+// this environment but documented identically to Codex's). Claude Code's
+// paste-BACK prompt and Cursor's plain URL-only OAuth flow are both
+// deliberately excluded — see extractSafeLines' doc comment for why
+// applying this indiscriminately would risk mis-capturing an unrelated line.
+const URL_CODE_FOLLOWUP_RUNTIMES: ReadonlySet<CliLoginRuntime> = new Set(["codex", "grok_build"]);
 
 /** Minimal structural subset of node:child_process's ChildProcess — same
  *  spirit as cli-runner.ts's CliChildProcessLike, extended with a writable
@@ -400,12 +483,12 @@ function extractSafeLines(
     }
     if (CODE_PROMPT_PATTERN.test(line)) {
       out.push({ kind: "code_prompt", text: line.slice(0, 300) });
-      if (runtime === "codex") {
+      if (URL_CODE_FOLLOWUP_RUNTIMES.has(runtime)) {
         state.awaitingCodexCodeValue = true;
       }
       continue;
     }
-    if (runtime === "codex" && DEVICE_CODE_SHAPE_PATTERN.test(line)) {
+    if (URL_CODE_FOLLOWUP_RUNTIMES.has(runtime) && DEVICE_CODE_SHAPE_PATTERN.test(line)) {
       out.push({ kind: "code_prompt", text: line.slice(0, 300) });
       continue;
     }
@@ -497,12 +580,15 @@ export class CliLoginSessionManager {
     if (!resolved) {
       throw new CliLoginError(
         "not_installed",
-        `"${binary}" was not found on PATH. Install ${params.runtime === "claude_code" ? "Claude Code" : "Codex"} first.`,
+        `"${binary}" was not found on PATH. Install ${RUNTIME_LABEL[params.runtime]} first.`,
       );
     }
     const { command, args } = resolveLineBufferedSpawn(resolved, spec.args, this.env, this.commandExists);
+    // extraEnv (cursor_cli's NO_OPEN_BROWSER=1 today) is merged on TOP of the
+    // session's own env for this spawn only — see LoginCommandSpec.extraEnv.
+    const spawnEnv = spec.extraEnv ? { ...this.env, ...spec.extraEnv } : this.env;
     const child = this.spawnImpl(command, args, {
-      env: this.env,
+      env: spawnEnv,
       // Piped, not ignored: this is the one property that makes a login
       // session different from every other spawn in this Gateway — Claude's
       // paste-back case needs to write to this process after it starts, and

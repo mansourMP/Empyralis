@@ -153,10 +153,67 @@ test("codex: parses turn.completed + the preceding agent_message into {text, usa
   assert.deepEqual(result.usage, { input_tokens: 17155, output_tokens: 6 });
 });
 
+test("grok_build: parses the single --output-format json object into {text, usage}", async () => {
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(baseParams({ runtime: "grok_build" }), {
+    spawnImpl: spawnImplReturning(fake),
+  });
+  fake.emitStdout(
+    `${JSON.stringify({
+      text: "hello from grok",
+      stopReason: "EndTurn",
+      sessionId: "abc123",
+      requestId: "xyz789",
+      usage: { input_tokens: 12, output_tokens: 4 },
+    })}\n`,
+  );
+  fake.emitClose(0, null);
+  const result = await promise;
+  assert.equal(result.text, "hello from grok");
+  assert.deepEqual(result.usage, { input_tokens: 12, output_tokens: 4 });
+});
+
+test("grok_build: a {type:'error', message} object with no exit-0 result classifies as crash", async () => {
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(baseParams({ runtime: "grok_build" }), {
+    spawnImpl: spawnImplReturning(fake),
+  });
+  fake.emitStdout(`${JSON.stringify({ type: "error", message: "Couldn't start session: bad model" })}\n`);
+  fake.emitClose(1, null);
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliRunError);
+    assert.equal((err as CliRunError).kind, "crash");
+    return true;
+  });
+});
+
+test("cursor_cli: parses the {type:'result', is_error:false, result} object into {text, usage:{0,0}} (no token fields documented)", async () => {
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(baseParams({ runtime: "cursor_cli" }), {
+    spawnImpl: spawnImplReturning(fake),
+  });
+  fake.emitStdout(
+    `${JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      duration_ms: 1234,
+      duration_api_ms: 1000,
+      result: "hello from cursor",
+      session_id: "abc123",
+      request_id: "xyz789",
+    })}\n`,
+  );
+  fake.emitClose(0, null);
+  const result = await promise;
+  assert.equal(result.text, "hello from cursor");
+  assert.deepEqual(result.usage, { input_tokens: 0, output_tokens: 0 });
+});
+
 // ---- Not installed ------------------------------------------------------
 
-test("binary not found (ENOENT) classifies as not_installed for either runtime", async () => {
-  for (const runtime of ["claude_code", "codex"] as const) {
+test("binary not found (ENOENT) classifies as not_installed for every runtime", async () => {
+  for (const runtime of ["claude_code", "codex", "grok_build", "cursor_cli"] as const) {
     const fake = makeFakeChild();
     const promise = runCliSubscription(baseParams({ runtime }), { spawnImpl: spawnImplReturning(fake) });
     const enoent = Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }) as NodeJS.ErrnoException;
@@ -224,6 +281,46 @@ test("codex: a 401 Unauthorized turn.failed classifies as not_authenticated (aft
   };
   const { spawnImpl } = scriptedSpawnImpl([unauthorizedScript, unauthorizedScript]);
   const promise = runCliSubscription(baseParams({ runtime: "codex" }), { spawnImpl, delayImpl: noDelay });
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliRunError);
+    assert.equal((err as CliRunError).kind, "not_authenticated");
+    return true;
+  });
+});
+
+// The two tests below (plus the claude_code/codex ones above) are the
+// gateway-side half of "an expired credential
+// produces a visible reconnect state, never a silent failure or a fallback
+// to another provider": each CLI's own real not-signed-in wording classifies
+// as CliRunError.kind === "not_authenticated", which runtime.ts's
+// cliErrorMessage() turns into "<Runtime> on this Gateway is not signed in
+// (...)" and sage_agent_runtime_service.py's _friendly_cli_subscription_error
+// turns into the CLI_SUBSCRIPTION_*_NOT_AUTHENTICATED PlatformEvent — an
+// explicit, loud "reconnect needed" message, never a silent no-op and never a
+// switch to a different runtime (runCliSubscription only ever retries the
+// SAME runtime it was asked to run — see its own module doc comment).
+
+test("grok_build: 'Authentication failed. Invalid or expired API key.' classifies as not_authenticated (after the one bounded recovery re-spawn also fails identically)", async () => {
+  const expiredScript = (fake: FakeChild) => {
+    fake.emitStderr("Authentication failed. Invalid or expired API key.\n");
+    fake.emitClose(1, null);
+  };
+  const { spawnImpl } = scriptedSpawnImpl([expiredScript, expiredScript]);
+  const promise = runCliSubscription(baseParams({ runtime: "grok_build" }), { spawnImpl, delayImpl: noDelay });
+  await assert.rejects(promise, (err: unknown) => {
+    assert.ok(err instanceof CliRunError);
+    assert.equal((err as CliRunError).kind, "not_authenticated");
+    return true;
+  });
+});
+
+test("cursor_cli: the confirmed real unauthenticated wording ('Error: Authentication required. Please run \\'agent login\\' ...') classifies as not_authenticated — this is cursor-agent's PRIMARY failure shape (no parsable JSON result at all, just stderr + a non-zero exit)", async () => {
+  const expiredScript = (fake: FakeChild) => {
+    fake.emitStderr("Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.\n");
+    fake.emitClose(1, null);
+  };
+  const { spawnImpl } = scriptedSpawnImpl([expiredScript, expiredScript]);
+  const promise = runCliSubscription(baseParams({ runtime: "cursor_cli" }), { spawnImpl, delayImpl: noDelay });
   await assert.rejects(promise, (err: unknown) => {
     assert.ok(err instanceof CliRunError);
     assert.equal((err as CliRunError).kind, "not_authenticated");
@@ -377,6 +474,76 @@ test("codex argv: exec, --json, --skip-git-repo-check, --sandbox read-only", asy
   assert.deepEqual(captured.args, ["exec", "say hi", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--model", "o4"]);
 });
 
+test("grok_build argv: -p, --output-format json", async () => {
+  const captured: { command: string; args: string[] } = { command: "", args: [] };
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(baseParams({ runtime: "grok_build", prompt: "say hi", model: "grok-build" }), {
+    spawnImpl: (command, args) => {
+      captured.command = command;
+      captured.args = args;
+      return fake.child;
+    },
+  });
+  fake.emitStdout(`${JSON.stringify({ text: "hi", usage: { input_tokens: 1, output_tokens: 1 } })}\n`);
+  fake.emitClose(0, null);
+  await promise;
+  assert.equal(captured.command, "grok");
+  assert.deepEqual(captured.args, ["-p", "say hi", "--output-format", "json", "--model", "grok-build"]);
+});
+
+test("grok_build argv: systemPrompt appends --rules <TEXT> (Grok Build's own system-prompt-equivalent flag)", async () => {
+  const captured: { args: string[] } = { args: [] };
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(
+    baseParams({ runtime: "grok_build", prompt: "hi", systemPrompt: "be terse" }),
+    {
+      spawnImpl: (_command, args) => {
+        captured.args = args;
+        return fake.child;
+      },
+    },
+  );
+  fake.emitStdout(`${JSON.stringify({ text: "ok", usage: {} })}\n`);
+  fake.emitClose(0, null);
+  await promise;
+  assert.deepEqual(captured.args, ["-p", "hi", "--output-format", "json", "--rules", "be terse"]);
+});
+
+test("cursor_cli argv: -p, --output-format json", async () => {
+  const captured: { command: string; args: string[] } = { command: "", args: [] };
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(baseParams({ runtime: "cursor_cli", prompt: "say hi", model: "auto" }), {
+    spawnImpl: (command, args) => {
+      captured.command = command;
+      captured.args = args;
+      return fake.child;
+    },
+  });
+  fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "hi" })}\n`);
+  fake.emitClose(0, null);
+  await promise;
+  assert.equal(captured.command, "cursor-agent");
+  assert.deepEqual(captured.args, ["-p", "say hi", "--output-format", "json", "--model", "auto"]);
+});
+
+test("cursor_cli argv: reasoningEffort is NEVER appended (no such flag is documented for cursor-agent)", async () => {
+  const captured: { args: string[] } = { args: [] };
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(
+    baseParams({ runtime: "cursor_cli", prompt: "hi", reasoningEffort: "high" }),
+    {
+      spawnImpl: (_command, args) => {
+        captured.args = args;
+        return fake.child;
+      },
+    },
+  );
+  fake.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "ok" })}\n`);
+  fake.emitClose(0, null);
+  await promise;
+  assert.deepEqual(captured.args, ["-p", "hi", "--output-format", "json"]);
+});
+
 // ---- Reasoning effort (Phase 1: reasoning-effort control) ----------------
 // Two DIFFERENT flags/enums, verified live against each CLI's own --help —
 // never flattened to one shared shape.
@@ -424,6 +591,24 @@ test("codex argv: reasoningEffort appends -c model_reasoning_effort=<level>", as
   ]);
 });
 
+test("grok_build argv: reasoningEffort appends --reasoning-effort <level>", async () => {
+  const captured: { args: string[] } = { args: [] };
+  const fake = makeFakeChild();
+  const promise = runCliSubscription(
+    baseParams({ runtime: "grok_build", prompt: "hi", reasoningEffort: "xhigh" }),
+    {
+      spawnImpl: (_command, args) => {
+        captured.args = args;
+        return fake.child;
+      },
+    },
+  );
+  fake.emitStdout(`${JSON.stringify({ text: "ok", usage: {} })}\n`);
+  fake.emitClose(0, null);
+  await promise;
+  assert.deepEqual(captured.args, ["-p", "hi", "--output-format", "json", "--reasoning-effort", "xhigh"]);
+});
+
 test("reasoningEffort unset: neither runtime appends any effort flag (CLI's own default applies)", async () => {
   for (const runtime of ["claude_code", "codex"] as const) {
     const captured: { args: string[] } = { args: [] };
@@ -466,6 +651,36 @@ test("CLAUDE_CLI_PATH / CODEX_CLI_PATH env overrides pick a different binary", a
   fake.emitClose(0, null);
   await promise;
   assert.equal(capturedCommand, "/opt/custom/codex");
+});
+
+test("GROK_CLI_PATH / CURSOR_CLI_PATH env overrides pick a different binary", async () => {
+  const fake = makeFakeChild();
+  let capturedCommand = "";
+  const promise = runCliSubscription(baseParams({ runtime: "grok_build" }), {
+    spawnImpl: (command) => {
+      capturedCommand = command;
+      return fake.child;
+    },
+    env: { ...process.env, GROK_CLI_PATH: "/opt/custom/grok" },
+  });
+  fake.emitStdout(`${JSON.stringify({ text: "hi", usage: {} })}\n`);
+  fake.emitClose(0, null);
+  await promise;
+  assert.equal(capturedCommand, "/opt/custom/grok");
+
+  const fake2 = makeFakeChild();
+  let capturedCommand2 = "";
+  const promise2 = runCliSubscription(baseParams({ runtime: "cursor_cli" }), {
+    spawnImpl: (command) => {
+      capturedCommand2 = command;
+      return fake2.child;
+    },
+    env: { ...process.env, CURSOR_CLI_PATH: "/opt/custom/cursor-agent" },
+  });
+  fake2.emitStdout(`${JSON.stringify({ type: "result", is_error: false, result: "hi" })}\n`);
+  fake2.emitClose(0, null);
+  await promise2;
+  assert.equal(capturedCommand2, "/opt/custom/cursor-agent");
 });
 
 // ---- Reliability: retry policy (rate_limited / overloaded / transient) ---

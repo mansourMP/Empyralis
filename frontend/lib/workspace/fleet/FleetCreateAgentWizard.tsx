@@ -14,6 +14,8 @@ import {
   modelsForProvider,
   defaultModelForProvider,
   runtimeForProvider,
+  normalizeCliRuntime,
+  type CliSubscriptionRuntime,
 } from "./fleet-provider-constants";
 import { useFleetAgentChannels, type FleetAgent } from "./fleet-data";
 import { GatewayBoxPicker, RUNTIME_LABELS } from "./gateway-box-picker";
@@ -143,9 +145,10 @@ export function FleetCreateAgentWizard({
   // config — computed server-side off the SAME llm_runtimes signal the box
   // picker already reads, see fleet_tools.recommended_model_config_for_
   // gateway) whenever a real gateway got bound. Non-null only when that box
-  // already has an authenticated Claude Code or Codex CLI ready to reuse.
+  // already has an authenticated subscription CLI (Claude Code, Codex, Grok
+  // Build, or Cursor CLI) ready to reuse.
   const [recommendedModelConfig, setRecommendedModelConfig] = useState<{
-    mode: string; provider: string; runtime: "claude_code" | "codex"; gateway_binding: string;
+    mode: string; provider: string; runtime: CliSubscriptionRuntime; gateway_binding: string;
   } | null>(null);
 
   // Step 1 — Placement (+ purpose preset, sent in the same create call)
@@ -621,7 +624,7 @@ export function FleetCreateAgentWizard({
                   <>
                     <button type="button" className={`fleet-wizard-option${providerMode === "subscription" ? " is-selected" : ""}`} onClick={() => setProviderMode("subscription")}>
                       <span className="fleet-wizard-option-label">Your subscription {recommendedModelConfig && <span className="fleet-wizard-option-tag">Recommended</span>}</span>
-                      <span className="fleet-wizard-option-body">Route through your Claude Code or Codex plan. Needs the Gateway.</span>
+                      <span className="fleet-wizard-option-body">Route through your Claude Code, Codex, Grok Build, or Cursor plan. Needs the Gateway.</span>
                     </button>
                     <button type="button" className={`fleet-wizard-option${providerMode === "local" ? " is-selected" : ""}`} onClick={() => setProviderMode("local")}>
                       <span className="fleet-wizard-option-label">Run locally</span>
@@ -669,7 +672,7 @@ export function FleetCreateAgentWizard({
                     workspaceId={workspaceId}
                     value={gatewayBinding}
                     onChange={setGatewayBinding}
-                    requireRuntime={runtimeForProvider(subscriptionProvider) === "codex" ? "codex" : "claude_code"}
+                    requireRuntime={normalizeCliRuntime(runtimeForProvider(subscriptionProvider))}
                   />
                 </div>
               )}

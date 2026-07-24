@@ -115,6 +115,16 @@ def _require_notification_channel_id(value: Any) -> str:
     return token
 
 
+def _require_invite_role(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    if token not in auth_module.RBAC_ROLE_ORDER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"role must be one of: {', '.join(sorted(auth_module.RBAC_ROLE_ORDER))}.",
+        )
+    return token
+
+
 def _control_plane_actor_id(current_user: Any, user: Optional[Dict[str, Any]] = None) -> str:
     record = user if isinstance(user, dict) else {}
     if not record:
@@ -291,6 +301,15 @@ class WorkspaceAiRouteDefaultUpdateRequest(BaseModel):
     model: Optional[str] = None
     model_preset: Optional[str] = None
     modelPreset: Optional[str] = None
+
+
+class WorkspaceInviteCreateRequest(BaseModel):
+    email: str
+    role: str = "member"
+
+
+class WorkspaceInviteAcceptRequest(BaseModel):
+    token: str
 
 
 @router.get("/workspaces")
@@ -874,4 +893,167 @@ async def upsert_workspace_identity_link(
         identity_links=current_links,
     )
     return IdentityLinksResponse(identity_links=current_links)
+
+
+# ── Members & Invites (Multiplayer Projects Phase 1) ─────────────────────────
+# Invite-link only -- the platform has no outbound email sender anywhere, so
+# create_workspace_invite mints a signed, expiring token and returns it for
+# the owner to copy/share however they like. "Project member" == "workspace
+# member" for now; there is no per-project ACL table yet.
+
+@router.post("/workspaces/{workspace_id}/invites")
+async def create_workspace_invite_route(
+    workspace_id: str,
+    body: WorkspaceInviteCreateRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+):
+    auth_module.validate_csrf(request)
+    resolved_workspace_id = auth_module.enforce_workspace_access(
+        current_user,
+        workspace_id,
+        minimum_role="owner",
+    )
+    clean_email = str(body.email or "").strip().lower()
+    if not clean_email or "@" not in clean_email:
+        raise HTTPException(status_code=400, detail="A valid email is required.")
+    requested_role = _require_invite_role(body.role)
+
+    user = auth_module.get_authenticated_user_record(current_user)
+    inviter_role = auth_module.normalize_rbac_role(
+        auth_module.workspace_role(current_user, resolved_workspace_id),
+        default="owner",
+    )
+    if auth_module.RBAC_ROLE_ORDER[requested_role] > auth_module.RBAC_ROLE_ORDER[inviter_role]:
+        raise HTTPException(status_code=403, detail="Cannot invite a role above your own.")
+
+    tenant_id = _control_plane_tenant_id(current_user, resolved_workspace_id, user)
+    try:
+        invite = await control_plane_repository.create_workspace_invite(
+            workspace_id=resolved_workspace_id,
+            tenant_id=tenant_id,
+            email=clean_email,
+            role=requested_role,
+            invited_by_user_id=_control_plane_actor_id(current_user, user),
+            invited_by_role=inviter_role,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not isinstance(invite, dict) or not invite.get("token"):
+        raise HTTPException(status_code=500, detail="Invite could not be created.")
+    return {
+        "invite": {
+            "id": invite.get("id"),
+            "workspace_id": invite.get("workspace_id"),
+            "email": invite.get("email"),
+            "role": invite.get("role"),
+            "status": invite.get("status"),
+            "created_at": invite.get("created_at"),
+        },
+        "token": invite.get("token"),
+        "expires_at": invite.get("expires_at"),
+    }
+
+
+@router.get("/workspaces/{workspace_id}/invites")
+async def list_workspace_pending_invites_route(
+    workspace_id: str,
+    current_user=Depends(get_current_user),
+):
+    resolved_workspace_id = auth_module.enforce_workspace_access(
+        current_user,
+        workspace_id,
+        minimum_role="viewer",
+    )
+    items = await control_plane_repository.list_pending_workspace_invites(resolved_workspace_id)
+    return {
+        "items": [
+            {
+                "id": item.get("id"),
+                "workspace_id": item.get("workspace_id"),
+                "email": item.get("email"),
+                "role": item.get("role"),
+                "status": item.get("status"),
+                "invited_by_user_id": item.get("invited_by_user_id"),
+                "created_at": item.get("created_at"),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
+    }
+
+
+@router.get("/workspaces/{workspace_id}/members")
+async def list_workspace_members_route(
+    workspace_id: str,
+    current_user=Depends(get_current_user),
+):
+    resolved_workspace_id = auth_module.enforce_workspace_access(
+        current_user,
+        workspace_id,
+        minimum_role="viewer",
+    )
+    items = await control_plane_repository.list_workspace_members(resolved_workspace_id)
+    return {
+        "items": [
+            {
+                "user_id": item.get("user_id"),
+                "email": item.get("email"),
+                "display_name": item.get("display_name"),
+                "role": item.get("role"),
+                "joined_at": item.get("joined_at"),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
+    }
+
+
+@router.post("/workspaces/invites/accept")
+async def accept_workspace_invite_route(
+    body: WorkspaceInviteAcceptRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+):
+    """Accept a workspace invite link. Any authenticated user may call this --
+    there is no workspace-role gate (the caller isn't a member of the target
+    workspace yet, by definition). The token must verify (signature + not
+    expired), the underlying invite row must still be 'pending', and the
+    caller's authenticated email must match the invite's email exactly.
+    """
+    auth_module.validate_csrf(request)
+    user = auth_module.get_authenticated_user_record(current_user)
+    user_id = str(user.get("id") or "").strip()
+    user_email = str(user.get("email") or "").strip().lower()
+    if not user_id or not user_email:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    try:
+        claims = control_plane_repository.verify_workspace_invite_token(body.token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    invite_id = str(claims.get("invite_id") or "").strip()
+    invite = await control_plane_repository.get_workspace_member_invite(invite_id)
+    if not isinstance(invite, dict) or str(invite.get("status") or "").strip() != "pending":
+        raise HTTPException(status_code=404, detail="Invite is no longer valid.")
+
+    invite_workspace_id = str(invite.get("workspace_id") or "").strip()
+    invite_email = str(invite.get("email") or "").strip().lower()
+    if invite_workspace_id != str(claims.get("workspace_id") or "").strip():
+        raise HTTPException(status_code=400, detail="Invite token does not match the invite record.")
+    if invite_email != user_email:
+        raise HTTPException(status_code=403, detail="This invite was issued to a different email address.")
+
+    invite_role = auth_module.normalize_rbac_role(invite.get("role"), default="viewer")
+    auth_module.upsert_workspace_membership(user_id, invite_workspace_id, invite_role)
+    accepted = await control_plane_repository.accept_workspace_invite(
+        invite_id=invite_id,
+        accepted_by_user_id=user_id,
+    )
+    return {
+        "workspace_id": invite_workspace_id,
+        "role": invite_role,
+        "status": str((accepted or {}).get("status") or "accepted"),
+    }
 

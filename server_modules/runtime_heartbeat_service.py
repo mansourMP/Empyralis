@@ -20,6 +20,28 @@ def _resolve_sync(value: Any) -> Any:
         loop.close()
 
 
+def _wake_request_payload(item: Any) -> dict[str, Any]:
+    """A claimed wake request read straight back from the DB carries
+    `payload` as a raw JSON string when no jsonb codec is registered on that
+    connection (see bounded_scheduler_service.cancel_wake_request's own
+    comment on this exact footgun) -- handle both shapes rather than assume
+    one."""
+    if not isinstance(item, dict):
+        return {}
+    payload = item.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str) and payload.strip():
+        import json as _json
+
+        try:
+            parsed = _json.loads(payload)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _resolve_heartbeat_scope(
     *,
     metadata: dict[str, Any],
@@ -76,6 +98,29 @@ def build_heartbeat_turn_request(
             for item in wake_requests
             if isinstance(item, dict) and str(item.get("id") or "").strip()
         ]
+        # docs/design/tasks-to-agents-research.md Section 4.4: a
+        # task_assigned wake request (bounded_scheduler_service.
+        # schedule_task_assigned_wakeup) carries task_id/task_title/
+        # task_description in its payload -- thread it into merged_metadata
+        # (-> context_hints["metadata"] below -> session_ctx, read by
+        # direct_chat_generation_service._turn_metadata_from_session) so the
+        # resulting turn's trace metadata carries the task id. This is the
+        # ONLY seam that makes "task id in trace metadata" true; without it
+        # the wake request would be indistinguishable from any other. At
+        # most one task per heartbeat tick's tier group in practice (one
+        # wakeup per assignment), so the first one found wins -- never
+        # silently blended across multiple tasks.
+        for item in wake_requests:
+            if not isinstance(item, dict) or str(item.get("trigger_kind") or "").strip() != "task_assigned":
+                continue
+            task_payload = _wake_request_payload(item)
+            task_id = str(task_payload.get("task_id") or "").strip()
+            if not task_id:
+                continue
+            merged_metadata["task_id"] = task_id
+            merged_metadata["assigned_task_title"] = str(task_payload.get("task_title") or "").strip()
+            merged_metadata["assigned_task_description"] = str(task_payload.get("task_description") or "").strip()
+            break
     if recent_changes:
         merged_metadata["context_event_ids"] = [
             str(item.get("id") or "").strip()
@@ -107,6 +152,16 @@ def build_heartbeat_turn_request(
                 wake_lines.append(f"- [{trigger_kind}] {summary}")
         if wake_lines:
             sections.append("Wake reasons:\n" + "\n".join(wake_lines))
+    if merged_metadata.get("task_id"):
+        # The seed prompt this wakeup exists for (Section 4.6 step 3): the
+        # assigned task's title + description, verbatim, so the agent has
+        # the actual work in front of it -- not just the one-line "Task
+        # assigned: <title>" summary already folded into wake_lines above.
+        task_lines = [f"Title: {merged_metadata.get('assigned_task_title') or '(untitled)'}"]
+        task_description = str(merged_metadata.get("assigned_task_description") or "").strip()
+        if task_description:
+            task_lines.append(f"Description: {task_description}")
+        sections.append("Assigned task:\n" + "\n".join(task_lines))
     if recent_changes:
         change_lines = []
         for item in recent_changes:

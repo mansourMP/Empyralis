@@ -30,8 +30,11 @@ class UnifiedMemoryServiceTests(unittest.TestCase):
         self.addCleanup(self._transcript_patch.stop)
 
     def test_build_sage_memory_payload_exposes_layers_boundaries_and_retrieval(self) -> None:
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- the owner profile now lives in the
+        # memory/files/profile.md topic file instead.
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "memory/files/profile.md",
             "# User Profile\n\n- Prefers concise daily summaries.\n- Works late nights.\n",
             workspace_id="default",
         )
@@ -143,8 +146,11 @@ class UnifiedMemoryServiceTests(unittest.TestCase):
         self.assertFalse(payload["state_layer_model"]["artifacts_history"]["raw_private_memory_embeds_allowed"])
 
     def test_build_specialist_memory_payload_exposes_published_shared_board_without_private_leakage(self) -> None:
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- the owner profile now lives in the
+        # memory/files/profile.md topic file instead.
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "memory/files/profile.md",
             "# User Profile\n\n- Owner private profile.\n",
             workspace_id="default",
         )
@@ -186,13 +192,16 @@ class UnifiedMemoryServiceTests(unittest.TestCase):
         self.assertFalse(payload["state_layer_model"]["artifacts_history"]["raw_private_memory_embeds_allowed"])
 
     def test_build_specialist_memory_payload_keeps_owner_profile_hidden_by_default(self) -> None:
+        # 2026-07-23 root-taxonomy removal: USER.md is no longer a root
+        # context file -- the owner profile now lives in the
+        # memory/files/profile.md topic file instead.
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "memory/files/profile.md",
             "# User Profile\n\n- Owner private profile.\n",
             workspace_id="default",
         )
         workspace_context.write_workspace_context_file(
-            "USER.md",
+            "memory/files/profile.md",
             "# Install Profile\n\n- Research specialist only.\n",
             workspace_id="default",
             agent_install_id="install-research",

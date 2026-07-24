@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+from server_modules import compaction_service
 from server_modules import sage_agent_runtime_service
 from server_modules.specialist_runtime_context import SpecialistRuntimeContext
 
@@ -1714,6 +1715,66 @@ class CliSubscriptionGatewayBrainTests(unittest.TestCase):
         self.assertEqual(usage_kwargs["mode"], "cli_subscription")
         self.assertTrue(usage_kwargs["metadata"]["tokens_known"])
 
+    def test_grok_build_happy_path_dispatches_and_ledgers_like_claude_code_codex(self):
+        # xAI Grok Build / Cursor CLI addition (2026-07-24) — provider
+        # entries resolve correctly through the SAME dispatch path, with no
+        # separate code path or special-casing needed.
+        response = {
+            "result": {"text": "hello from grok", "model": "grok-build", "usage": {"input_tokens": 9, "output_tokens": 3}},
+        }
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {"grok_build": {"installed": True, "authenticated": True}}},
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=AsyncMock(return_value=response)),
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()) as mock_ledger,
+            patch("server_modules.usage_events_repository.record_usage_event", new=AsyncMock()) as mock_usage,
+        ):
+            reply, usage, model = _run(
+                sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                    workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                    gateway_binding="gateway-1", runtime="grok_build", model="grok-build",
+                    system_prompt="Be terse.", user_message="hi",
+                )
+            )
+        self.assertEqual(reply, "hello from grok")
+        self.assertEqual(usage, {"input_tokens": 9, "output_tokens": 3})
+        completed_calls = [c for c in mock_ledger.await_args_list if c.kwargs.get("action") == "gateway_brain_turn"]
+        self.assertEqual(len(completed_calls), 1)
+        self.assertEqual(completed_calls[0].kwargs["metadata"]["runtime"], "grok_build")
+        usage_kwargs = mock_usage.await_args.kwargs
+        self.assertEqual(usage_kwargs["provider"], "grok_build")
+        self.assertIsNone(usage_kwargs["usd_cost"], "never a fabricated $0.00 known cost for a subscription runtime")
+
+    def test_cursor_cli_not_authenticated_fails_loudly_never_falls_back_to_another_runtime(self):
+        # This is the "reconnect needed, never a silent failure or fallback"
+        # test at the dispatch layer: an unauthenticated cursor_cli binding
+        # must raise a clear error naming cursor_cli specifically — it must
+        # NEVER silently substitute claude_code/codex/platform_credits.
+        with (
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {"cursor_cli": {"installed": True, "authenticated": False}}},
+            ),
+            patch("server_modules.gateway_execution_service.execute_tool_via_gateway", new=AsyncMock()) as mock_execute,
+            patch("server_modules.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.usage_events_repository.record_usage_event", new=AsyncMock()),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(
+                    sage_agent_runtime_service._dispatch_cli_subscription_gateway_brain(
+                        workspace_id="ws-1", tenant_id="t-1", agent_id="agent-1",
+                        gateway_binding="gateway-1", runtime="cursor_cli", model="auto",
+                        system_prompt="", user_message="hi",
+                    )
+                )
+            mock_execute.assert_not_awaited()
+        self.assertIn("Cursor CLI", str(ctx.exception))
+        self.assertIn("Heads up:", str(ctx.exception))
+
     def test_reasoning_effort_reaches_the_gateway_arguments_when_set(self):
         """Phase 1 (reasoning-effort control): the value reaches the
         Gateway's llm.generate arguments dict as "reasoning_effort" --
@@ -2045,6 +2106,56 @@ class CliSubscriptionReadinessReasonTests(unittest.TestCase):
             reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="codex")
         self.assertEqual(reason, "")
 
+    def test_grok_build_not_installed(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"grok_build": {"installed": False, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="grok_build")
+        self.assertEqual(reason, "grok_build_not_installed")
+
+    def test_grok_build_installed_but_not_authenticated_is_the_expired_credential_reconnect_case(self):
+        # This is the core "an expired credential produces a visible
+        # reconnect state" signal: installed=True (the binary is there,
+        # auth.json exists or existed) but authenticated=False (the CLI's own
+        # background refresh already failed — see cli-login-session.ts's
+        # grok_build comment). Never confused with "not_installed", never a
+        # silent pass-through.
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"grok_build": {"installed": True, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="grok_build")
+        self.assertEqual(reason, "grok_build_not_authenticated")
+
+    def test_cursor_cli_not_installed_and_not_authenticated(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"cursor_cli": {"installed": False, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="cursor_cli")
+        self.assertEqual(reason, "cursor_cli_not_installed")
+
+        with patch(
+            "server_modules.gateway_registry_service.gateway_registration_public_payload",
+            return_value={"llm_runtimes": {"cursor_cli": {"installed": True, "authenticated": False}}},
+        ):
+            reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime="cursor_cli")
+        self.assertEqual(reason, "cursor_cli_not_authenticated")
+
+    def test_grok_build_and_cursor_cli_ready(self):
+        reg = {"status": "active", "workspace_id": "ws-1", "gateway_id": "gw-1"}
+        for runtime in ("grok_build", "cursor_cli"):
+            with patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={"llm_runtimes": {runtime: {"installed": True, "authenticated": True}}},
+            ):
+                reason = sage_agent_runtime_service._cli_subscription_readiness_reason(reg, workspace_id="ws-1", runtime=runtime)
+            self.assertEqual(reason, "", f"{runtime} should read ready when installed+authenticated")
+
 
 class FriendlyCliSubscriptionErrorTests(unittest.TestCase):
     """Every G5 condition gets its own distinct, platform-voiced
@@ -2090,6 +2201,54 @@ class FriendlyCliSubscriptionErrorTests(unittest.TestCase):
         message = sage_agent_runtime_service._friendly_cli_subscription_error("some_never_seen_reason", runtime="claude_code")
         self.assertIn("Heads up:", message)
         self.assertIn("some_never_seen_reason", message)
+
+    def test_grok_build_and_cursor_cli_get_their_own_distinct_not_installed_and_not_authenticated_messages(self):
+        # xAI Grok Build / Cursor CLI addition (2026-07-24) — same G5
+        # guarantee as claude_code/codex: every distinct failure mode for the
+        # two new runtimes gets its own honest message, never collapsed into
+        # the claude_code/codex fallback.
+        grok_not_installed = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "grok_build_not_installed", runtime="grok_build",
+        )
+        cursor_not_installed = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "cursor_cli_not_installed", runtime="cursor_cli",
+        )
+        grok_not_authenticated = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "grok_build_not_authenticated", runtime="grok_build",
+        )
+        cursor_not_authenticated = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "cursor_cli_not_authenticated", runtime="cursor_cli",
+        )
+        self.assertIn("Grok Build", grok_not_installed)
+        self.assertIn("x.ai/cli/install.sh", grok_not_installed)
+        self.assertIn("Cursor CLI", cursor_not_installed)
+        self.assertIn("cursor.com/install", cursor_not_installed)
+        self.assertIn("Grok Build", grok_not_authenticated)
+        self.assertIn("grok login --device-auth", grok_not_authenticated)
+        self.assertIn("Cursor CLI", cursor_not_authenticated)
+        self.assertIn("cursor-agent login", cursor_not_authenticated)
+        # This IS the "expired credential produces a visible reconnect state"
+        # test at the platform-voice layer: every one of these four messages
+        # is a distinct, non-empty, explicit "Heads up: ..." string — never a
+        # silent no-op and never a fallback to claude_code/codex's wording.
+        messages = {grok_not_installed, cursor_not_installed, grok_not_authenticated, cursor_not_authenticated}
+        self.assertEqual(len(messages), 4)
+        for message in messages:
+            self.assertIn("Heads up:", message)
+
+    def test_unsupported_runtime_message_lists_all_four_valid_runtimes(self):
+        message = sage_agent_runtime_service._friendly_cli_subscription_error(
+            "unsupported cli_subscription runtime: gemini_cli", runtime="gemini_cli",
+        )
+        self.assertIn("Heads up:", message)
+        for runtime in ("claude_code", "codex", "grok_build", "cursor_cli"):
+            self.assertIn(runtime, message)
+
+    def test_valid_cli_subscription_runtimes_includes_all_four(self):
+        self.assertEqual(
+            sage_agent_runtime_service._VALID_CLI_SUBSCRIPTION_RUNTIMES,
+            {"claude_code", "codex", "grok_build", "cursor_cli"},
+        )
 
 
 class SageAgentRuntimeSpecialistProviderResolutionTests(unittest.TestCase):
@@ -2642,6 +2801,473 @@ class SageAgentRuntimeSpecialistMemoryLoadTests(unittest.TestCase):
 
         system_prompt = mock_stream.call_args.kwargs["system_prompt"]
         self.assertNotIn("## Your memory", system_prompt)
+
+
+class SageAgentRuntimeSpecialistCapabilityManifestTests(unittest.TestCase):
+    """docs/design/context-engineering-plan.md item 10 (doctrine rewrite part
+    2): a specialist's turn used to include NO capability manifest at all —
+    the audit's sharpest doctrine gap and a plausible root cause of the
+    founder's mid-task hallucination complaint. This proves the fix: a
+    specialist now gets a "## Callable Tools" manifest, scoped to what THAT
+    install can actually call via the SAME per-install tool scoping the
+    native tool list already uses (_specialist_tool_allowed) — never an
+    unscoped copy of the workspace-wide manifest."""
+
+    @staticmethod
+    def _spec(agent_install_id="agent-a", **overrides):
+        base = dict(
+            agent_install_id=agent_install_id,
+            agent_label="Research Agent",
+            agent_kind="specialist",
+            persona="You are a research specialist.",
+        )
+        base.update(overrides)
+        return SpecialistRuntimeContext(**base)
+
+    @staticmethod
+    def _run_chat(*, specialist_context, capability_items, toolset):
+        mock_agent_provider = AsyncMock(
+            return_value=("anthropic", {"api_key": "sk-agent-own-key"}, "byok_api")
+        )
+        mock_workspace_provider = AsyncMock(
+            return_value=("deepseek", {"api_key": "sk-workspace-default"})
+        )
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files",
+                return_value={},
+            ),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=mock_workspace_provider),
+            patch("server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider", new=mock_agent_provider),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_instruction_compiler_service.sage_skills_api.build_sage_capabilities_payload",
+                return_value={"items": capability_items},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_specialist_toolset",
+                new=AsyncMock(return_value=toolset),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=specialist_context,
+            ))
+        return mock_stream
+
+    def test_specialist_now_receives_a_capability_manifest_at_all(self):
+        """Before item 10, this header never appeared anywhere in a
+        specialist's system prompt, regardless of what was bound."""
+        capability_items = [
+            {"tool_id": "web__search", "label": "Web search", "description": "Search the web.", "status": "ready", "type": "tool"},
+        ]
+        toolset = {
+            "core": {"task_complete", "query_tool_registry", "update_plan", "web__search"},
+            "connectors": set(), "tools": set(), "raw_tool_toggles": {},
+            "mandate_audience_tools": [], "capability_providers": frozenset(),
+        }
+        mock_stream = self._run_chat(
+            specialist_context=self._spec(), capability_items=capability_items, toolset=toolset,
+        )
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertIn("## Callable Tools", system_prompt)
+
+    def test_specialist_manifest_is_scoped_not_the_full_workspace_list(self):
+        capability_items = [
+            {"tool_id": "web__search", "label": "Web search", "description": "Search the web.", "status": "ready", "type": "tool"},
+            # Operator-only fleet tool: never in a specialist's core/tools/connectors.
+            {"tool_id": "fleet__create_agent", "label": "Create Agent", "description": "Create a new specialist agent in the workspace.", "status": "ready", "type": "tool"},
+            # Capability-gated (image_generation); no resolved provider for this agent.
+            {"tool_id": "generate_image", "label": "Generate image", "description": "Generate one or more images from a prompt and save them locally.", "status": "ready", "type": "tool"},
+            # A workspace-authored skill this specialist IS bound to (skill_invoke enabled).
+            {"tool_id": "skill_invoke", "label": "acme-quote-builder", "description": "Builds a customer quote from the workspace price list. Call skill_invoke with skill_id=\"acme-quote-builder\" to run it.", "status": "ready", "type": "skill", "source": "workspace"},
+        ]
+        toolset = {
+            "core": {"task_complete", "query_tool_registry", "update_plan", "web__search", "web__fetch", "memory_write", "memory_read", "memory_search", "memory_get", "memory_append_daily_note", "hardware__action"},
+            "connectors": set(),  # "fleet" NOT bound
+            "tools": {"skill_invoke"},  # explicitly enabled for this install
+            "raw_tool_toggles": {},
+            "mandate_audience_tools": [],
+            "capability_providers": frozenset(),  # image_generation NOT resolved
+        }
+        mock_stream = self._run_chat(
+            specialist_context=self._spec(), capability_items=capability_items, toolset=toolset,
+        )
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+
+        self.assertIn("## Callable Tools", system_prompt)
+        # Allowed + native (item 4 dedup): name-only mention, not a full
+        # re-described line, but still present so the model knows it's live.
+        self.assertIn("web__search", system_prompt)
+        # Never bound for this specialist — must not leak into its manifest.
+        self.assertNotIn("fleet__create_agent", system_prompt)
+        self.assertNotIn("generate_image", system_prompt)
+        # Allowed + manifest-only (no native schema): full description line,
+        # un-truncated (item 4) since this is skill_invoke's only channel.
+        self.assertIn("acme-quote-builder", system_prompt)
+        self.assertIn("Builds a customer quote from the workspace price list", system_prompt)
+
+    def test_specialist_with_no_bound_tools_gets_no_manifest_leak(self):
+        """An install bound to nothing beyond bare core tools must not see
+        anything it can't call — the manifest degrades to native-only (or
+        nothing) rather than ever showing an unscoped workspace-wide list."""
+        capability_items = [
+            {"tool_id": "fleet__list_agents", "label": "List Agents", "description": "List all agents in the workspace.", "status": "ready", "type": "tool"},
+            {"tool_id": "skill_invoke", "label": "some-other-skill", "description": "Some other workspace skill.", "status": "ready", "type": "skill", "source": "workspace"},
+        ]
+        toolset = {
+            "core": {"task_complete", "query_tool_registry", "update_plan"},
+            "connectors": set(), "tools": set(), "raw_tool_toggles": {},
+            "mandate_audience_tools": [], "capability_providers": frozenset(),
+        }
+        mock_stream = self._run_chat(
+            specialist_context=self._spec(), capability_items=capability_items, toolset=toolset,
+        )
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertNotIn("fleet__list_agents", system_prompt)
+        self.assertNotIn("some-other-skill", system_prompt)
+
+
+# ── 2026-07-24 compaction end-to-end fix pass: BUG 1 (placement + swallow),
+# BUG 5 (falsy-zero max_context_tokens), BUG 6 (model downgrade) ───────────
+
+class PostTurnAutoCompactionPlacementTests(unittest.TestCase):
+    """BUG 1 root cause: _schedule_post_turn_auto_compaction (the extracted
+    B1 background-compaction dispatch) used to be defined ONLY after the
+    action-loop-success `if action_result is not None: ... return {...}`
+    block — a branch _run_sage_action_loop_v3's own call site comment says
+    "always runs" and which returns non-None for every turn except total
+    failure. Live-repro-confirmed: instrumentation on the old inline block
+    never fired on a normal tool-using turn. This proves the fix: the call
+    now fires from BOTH of handle_sage_chat's exit points."""
+
+    def _run_with_mocked_schedule(self, *, stream_events):
+        schedule_mock = MagicMock()
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test"})),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch.object(sage_agent_runtime_service, "_schedule_post_turn_auto_compaction", new=schedule_mock),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            result = _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+            ))
+        return result, schedule_mock
+
+    def test_fires_on_the_action_loop_success_path_not_just_the_fallback(self):
+        # A normal tool-using turn: the action loop produces a real reply.
+        # This is the "always runs" common case the old inline B1 block was
+        # structurally unreachable from.
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Here you go.", "actions": [], "error": None},
+        }]
+        result, schedule_mock = self._run_with_mocked_schedule(stream_events=stream_events)
+
+        self.assertEqual(result["message"], "Here you go.")
+        schedule_mock.assert_called_once()
+        call_kwargs = schedule_mock.call_args.kwargs
+        self.assertEqual(call_kwargs["workspace_id"], "ws-1")
+        self.assertEqual(call_kwargs["provider"], "deepseek")
+
+
+class PostTurnAutoCompactionExceptionLoggingTests(unittest.TestCase):
+    """BUG 1's second root cause: the old inline background job wrapped its
+    entire body in `except Exception: pass` with zero logging. Any failure
+    on the rare turns that DID reach it was invisible. Now logged with full
+    context AND recorded as a durable security-audit event."""
+
+    def test_failure_inside_the_background_job_is_logged_not_swallowed(self):
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event",
+            ) as mock_audit,
+            self.assertLogs("server_modules.sage_agent_runtime_service", level="ERROR") as log_ctx,
+        ):
+            _run(sage_agent_runtime_service._run_post_turn_auto_compaction(
+                workspace_id="ws-1", tenant_id="default", thread_id="sage-main",
+                provider="deepseek", model="deepseek-chat",
+                ctx_policy_max=0, ctx_policy_action="compact",
+                session_id="sess-1", trace_id="trace-1",
+            ))
+
+        self.assertTrue(any("FAILED" in m for m in log_ctx.output))
+        self.assertTrue(any("boom" in m for m in log_ctx.output))
+        mock_audit.assert_called_once()
+        self.assertEqual(mock_audit.call_args.kwargs["action"], "compaction.background_job_failed")
+        self.assertEqual(mock_audit.call_args.kwargs["status"], "failure")
+
+    def test_failed_schedule_itself_is_logged(self):
+        # If even scheduling the fire-and-forget task blows up (e.g.
+        # asyncio.ensure_future itself raising), that must be logged too —
+        # not just failures inside the task body. _run_post_turn_auto_
+        # compaction is mocked to a plain MagicMock (not AsyncMock) so
+        # calling it here doesn't create a real coroutine object that would
+        # otherwise be left dangling (unawaited, uncancelled) once
+        # ensure_future raises before ever consuming it.
+        with (
+            patch.object(
+                sage_agent_runtime_service, "_run_post_turn_auto_compaction", new=MagicMock(),
+            ),
+            patch("asyncio.ensure_future", side_effect=RuntimeError("no loop")),
+            self.assertLogs("server_modules.sage_agent_runtime_service", level="ERROR") as log_ctx,
+        ):
+            sage_agent_runtime_service._schedule_post_turn_auto_compaction(
+                workspace_id="ws-1", tenant_id="default", thread_id="sage-main",
+                provider="deepseek", model="deepseek-chat",
+                ctx_policy_max=0, ctx_policy_action="compact",
+                session_id="sess-1", trace_id="trace-1",
+            )
+        self.assertTrue(any("failed to SCHEDULE" in m for m in log_ctx.output))
+
+
+class ContextPolicyFalsyZeroTests(unittest.TestCase):
+    """BUG 5 falsy-zero: capability_presets.PRESET_STANDARD and
+    PRESET_OPERATOR (the two most common agent presets) both set
+    `context_policy: {"max_context_tokens": 0, ...}  # 0 = use model
+    default`. The old `.get("max_context_tokens") or _DEFAULT_CTX_POLICY_
+    MAX` silently coerced that explicit 0 into the 128K safety default,
+    clamping every Standard/Operator-preset agent to 128K regardless of its
+    real model window."""
+
+    def test_explicit_zero_max_context_tokens_is_not_promoted_to_the_128k_default(self):
+        spec = SpecialistRuntimeContext(
+            agent_install_id="agent-1",
+            agent_label="Standard Agent",
+            agent_kind="specialist",
+            persona="You are a helpful agent.",
+            provider="anthropic",
+            model="claude-opus-4-8",
+            context_policy={"max_context_tokens": 0, "on_context_full": "compact"},
+        )
+        schedule_mock = MagicMock()
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply.", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider",
+                new=AsyncMock(return_value=("anthropic", {"api_key": "sk-agent-key"}, "platform_credits")),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                return_value=("anthropic", {"api_key": "sk-agent-key"}),
+            ),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch.object(sage_agent_runtime_service, "_schedule_post_turn_auto_compaction", new=schedule_mock),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=spec,
+            ))
+
+        schedule_mock.assert_called_once()
+        # The fix: ctx_policy_max must be exactly 0 (an explicit "no
+        # per-install clamp — trust the model's real window"), never
+        # silently promoted to compaction_service.DEFAULT_CONTEXT_WINDOW
+        # (128000).
+        self.assertEqual(schedule_mock.call_args.kwargs["ctx_policy_max"], 0)
+        self.assertNotEqual(
+            schedule_mock.call_args.kwargs["ctx_policy_max"],
+            compaction_service.DEFAULT_CONTEXT_WINDOW,
+        )
+
+    def test_unset_context_policy_still_falls_back_to_the_safety_default(self):
+        # No context_policy at all (the field defaults to {}) must still
+        # land on the 128K safety default — only an EXPLICIT 0 is special.
+        spec = SpecialistRuntimeContext(
+            agent_install_id="agent-2",
+            agent_label="Bare Agent",
+            agent_kind="specialist",
+            persona="You are a helpful agent.",
+            provider="anthropic",
+            model="claude-opus-4-8",
+        )
+        schedule_mock = MagicMock()
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply.", "actions": [], "error": None},
+        }]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider",
+                new=AsyncMock(return_value=("anthropic", {"api_key": "sk-agent-key"}, "platform_credits")),
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                return_value=("anthropic", {"api_key": "sk-agent-key"}),
+            ),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+            patch.object(sage_agent_runtime_service, "_schedule_post_turn_auto_compaction", new=schedule_mock),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=spec,
+            ))
+
+        schedule_mock.assert_called_once()
+        self.assertEqual(
+            schedule_mock.call_args.kwargs["ctx_policy_max"],
+            compaction_service.DEFAULT_CONTEXT_WINDOW,
+        )
+
+
+class ModelDowngradeFiresPreflightTests(unittest.TestCase):
+    """BUG 6 (the founder's explicit question): if a conversation at ~800k
+    tokens switches from a 1M-window model to a 200k-window model, the
+    threshold must be recomputed against the NEW model BEFORE the next
+    request is built — sending 800k tokens to a 200k-window model
+    hard-errors rather than degrading gracefully."""
+
+    @staticmethod
+    def _big_prior_messages(total_tokens: int) -> list[dict]:
+        # Many turns approximating the given total token count (estimate_
+        # tokens is chars // 4) — spread across enough separate messages
+        # that find_cut_point_with_fallback has real turns to cut between
+        # (a single giant message can't be split at all, which is BUG 2's
+        # own "nothing cuttable" case, not what this test is after).
+        per_message_tokens = 5_000
+        count = max(1, total_tokens // per_message_tokens)
+        return [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": "x" * (per_message_tokens * 4)}
+            for i in range(count)
+        ]
+
+    def test_no_compaction_needed_on_the_original_1m_window_model(self):
+        prior = self._big_prior_messages(700_000)
+        with patch.object(
+            sage_agent_runtime_service, "_run_memory_flush_before_compaction",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "server_modules.compaction_service.compact_turns", new=AsyncMock(),
+        ) as compact_mock:
+            result = _run(sage_agent_runtime_service._action_loop_context_budget_preflight(
+                workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                # Real 1M-window model.
+                provider="anthropic", model="claude-opus-4-8",
+                system_prompt="sys", user_message="hi",
+                prior_messages=prior, channel_prior_messages=None,
+                ctx_policy_max=0, ctx_policy_action="compact",
+                used_context=[],
+            ))
+        self.assertIs(result, prior)
+        compact_mock.assert_not_called()
+
+    def test_same_history_fires_compaction_before_dispatch_after_downgrade(self):
+        # SAME prior_messages, but the thread's model has switched (mid-
+        # conversation) to a 200k-window model — resolve_context_window
+        # must reflect THIS call's model, not anything cached from when
+        # the conversation started on the 1M model.
+        prior = self._big_prior_messages(700_000)
+        with patch.object(
+            sage_agent_runtime_service, "_run_memory_flush_before_compaction",
+            new=AsyncMock(return_value=True),
+        ), patch(
+            "server_modules.compaction_service.compact_turns",
+            new=AsyncMock(return_value="Summary of the downgrade-triggered compaction."),
+        ) as compact_mock:
+            result = _run(sage_agent_runtime_service._action_loop_context_budget_preflight(
+                workspace_id="ws-1", tenant_id="default", thread_id="thread-1",
+                # Real 200k-window model — a downgrade from claude-opus-4-8.
+                provider="anthropic", model="claude-haiku-4-5-20251001",
+                system_prompt="sys", user_message="hi",
+                prior_messages=prior, channel_prior_messages=None,
+                ctx_policy_max=0, ctx_policy_action="compact",
+                used_context=[],
+            ))
+        # Compaction fired BEFORE any dispatch — this function's entire
+        # purpose is to run ahead of _run_sage_action_loop_v3.
+        compact_mock.assert_called_once()
+        self.assertIsInstance(result, list)
+        self.assertTrue(
+            any("Summary of the downgrade-triggered compaction." in str(m.get("content") or "") for m in result)
+        )
 
 
 if __name__ == "__main__":

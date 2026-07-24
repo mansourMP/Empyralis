@@ -1,5 +1,7 @@
 # Consolidated Gap Map — OpenClaw vs Empyralis + Claude-Code-parity build order
 
+> **Terminology note (2026-07-23):** "Sage" is legacy product terminology — the founder ruled the concept removed from the product; the platform has only agents (owner-facing, customer-facing serving the owner, and AskAI). `sage_*` code/variable/string identifiers are legacy code artifacts only, not a live product concept. Anywhere this document's prose says "Sage" or "master," read: the owner-facing agent. This is a lighter-touch terminology note, not a full rewrite — the body below is unchanged and may still use "Sage" throughout.
+
 **Purpose:** the single prioritized build order synthesized from the five per-area gap
 reports and the memory/context design doc. Every item is traceable to a source doc
 (with its own file:line citations on both codebases). This file is the decision surface;

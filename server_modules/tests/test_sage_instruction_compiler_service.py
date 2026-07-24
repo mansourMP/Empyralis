@@ -56,16 +56,27 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertLess(len(bundle.system_prompt.split()), 100)
 
     def test_root_memory_brief_preserves_files_without_full_dump(self) -> None:
-        long_tail = "x" * 5000 + " SHOULD_NOT_APPEAR"
+        # A realistic-sized MEMORY.md (well under the write-side 200-line/
+        # 25KB cap, docs/design/context-engineering-plan.md item 7) must
+        # load in full now — see test_memory_md_gets_its_own_dedicated_load_
+        # budget below for the "genuinely oversized still truncates" and
+        # "not silently zeroed by the other six root files" regressions.
+        #
+        # 2026-07-23 root-taxonomy removal: SOUL.md/GOALS.md are no longer
+        # "official" always-load root files — MEMORY.md is the only one
+        # left (see OFFICIAL_ROOT_MEMORY_FILES). This test previously
+        # asserted their special ordering; that ordering no longer exists
+        # by design, so the payload no longer includes them at all here —
+        # CUSTOM.md alone exercises the "extra" (unrecognized filename)
+        # bucket this test is also checking.
+        memory_note = "- Long-term preference: " + ("durable detail. " * 30)
         bundle = compiler.build_sage_instruction_bundle(
             workspace_id="ws-1",
             message="use my memory",
             provider="deepseek",
             model="deepseek-chat",
             root_context_files={
-                "MEMORY.md": "# Memory\n\n- Long-term preference.\n" + long_tail,
-                "GOALS.md": "# Goals\n\n- Ship Sage.",
-                "SOUL.md": "# Soul\n\n- Be direct.",
+                "MEMORY.md": "# Memory\n\n" + memory_note,
                 "HEARTBEAT.md": "# Heartbeat\n\n- Legacy state.",
                 "CUSTOM.md": "# Custom\n\n- Extra context.",
                 "memory/files/research.md": "# Research\n\nCursor comparison notes.",
@@ -74,26 +85,77 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         )
 
         text = bundle.system_prompt
-        self.assertLess(text.index("### SOUL.md"), text.index("### GOALS.md"))
-        self.assertLess(text.index("### GOALS.md"), text.index("### MEMORY.md"))
         self.assertIn("### Root Memory Index", text)
         self.assertIn("HEARTBEAT.md", text)
         self.assertIn("CUSTOM.md", text)
         self.assertIn("memory/files/research.md", text)
-        self.assertNotIn("SHOULD_NOT_APPEAR", text)
+        # The fix itself: a MEMORY.md well under the write-side cap loads
+        # WHOLE, not silently cut — no truncation marker anywhere near it.
+        self.assertIn(memory_note.strip(), text)
+        self.assertNotIn("content truncated due to length limit", text)
         self.assertFalse(bundle.diagnostics["full_root_memory_included"])
-        self.assertGreater(bundle.diagnostics["root_memory_source_chars"], bundle.diagnostics["root_memory_brief_chars"])
-        self.assertEqual(bundle.diagnostics["included_official_root_files"], ["SOUL.md", "GOALS.md", "MEMORY.md"])
+        self.assertEqual(bundle.diagnostics["included_official_root_files"], ["MEMORY.md"])
         self.assertEqual(bundle.diagnostics["legacy_context_files"], ["HEARTBEAT.md"])
         self.assertEqual(bundle.diagnostics["extra_context_files"], ["CUSTOM.md"])
         self.assertEqual(bundle.diagnostics["available_memory_file_count"], 1)
 
-    def test_sage_chat_always_loads_instruction_files_every_turn(self) -> None:
-        # Regression test for docs/design/memory-context-design.md finding #1:
-        # on the sage_chat surface, SOUL.md/AGENTS.md/TOOLS.md/USER.md/IDENTITY.md
-        # used to vanish from context entirely — only MEMORY.md was injected,
-        # and the agent ran the primary path with none of its own operating
-        # instructions. These must always be injected in full every turn.
+    def test_memory_md_gets_its_own_dedicated_load_budget(self) -> None:
+        # docs/design/context-engineering-plan.md item 7 (read side): before
+        # this fix, MEMORY.md competed with SOUL/IDENTITY/USER/GOALS/AGENTS/
+        # TOOLS for one shared 4,800-char pool and went silently missing
+        # entirely once those six were even modestly populated — regardless
+        # of how small MEMORY.md itself was. Six ~1KB root files (a
+        # realistic persona/identity/goals size, nowhere near either file's
+        # own generous per-file cap) already reproduced total silence on a
+        # clean HEAD checkout of this exact scenario.
+        root_files = {
+            name: f"# {name}\n" + ("durable operating detail. " * 60)
+            for name in ("SOUL.md", "IDENTITY.md", "USER.md", "GOALS.md", "AGENTS.md", "TOOLS.md")
+        }
+        root_files["MEMORY.md"] = "# Memory\n" + "\n".join(
+            f"- fact {i}: something durable and worth remembering" for i in range(60)
+        )
+        sections, diagnostics = compiler.build_root_memory_brief_sections(root_files)
+        joined = "\n\n".join(sections)
+
+        self.assertIn("### MEMORY.md (Agent Memory Index)", joined)
+        self.assertIn("fact 0:", joined)
+        self.assertIn("fact 59:", joined)
+        self.assertIn("MEMORY.md", diagnostics["included_official_root_files"])
+
+        # The cap is dedicated, not gone: content genuinely beyond the
+        # write-side allowance (MEMORY_MD_LOAD_CHAR_LIMIT) still truncates,
+        # independent of how big the other six files are.
+        oversized = dict(root_files)
+        oversized["MEMORY.md"] = "# Memory\n" + ("x" * (compiler.MEMORY_MD_LOAD_CHAR_LIMIT + 5_000))
+        oversized_sections, _ = compiler.build_root_memory_brief_sections(oversized)
+        oversized_joined = "\n\n".join(oversized_sections)
+        memory_section = next(s for s in oversized_sections if s.startswith("### MEMORY.md"))
+        self.assertIn("content truncated due to length limit", memory_section)
+        self.assertLessEqual(len(memory_section), compiler.MEMORY_MD_LOAD_CHAR_LIMIT + 200)
+
+        # A MEMORY.md right at the write-side cap loads WHOLE — Claude
+        # Code's own discipline: a curated-under-cap index is never
+        # silently truncated at load.
+        at_cap = dict(root_files)
+        at_cap["MEMORY.md"] = "# Memory\n" + ("- fact: durable detail\n" * 1)[: compiler.MEMORY_MD_LOAD_CHAR_LIMIT - 500]
+        at_cap_sections, _ = compiler.build_root_memory_brief_sections(at_cap)
+        at_cap_memory_section = next(s for s in at_cap_sections if s.startswith("### MEMORY.md"))
+        self.assertNotIn("content truncated due to length limit", at_cap_memory_section)
+
+    def test_sage_chat_no_longer_loads_removed_taxonomy_files_every_turn(self) -> None:
+        # Founder ruling (2026-07-23, final): SOUL.md/IDENTITY.md/USER.md/
+        # GOALS.md/AGENTS.md/TOOLS.md are removed from the root-file
+        # taxonomy entirely. This test used to be the regression proof that
+        # all six were always injected in full every turn (docs/design/
+        # memory-context-design.md finding #1) — that behavior is now
+        # deliberately gone: none of the six get full-text injection
+        # anymore, even if a value for one of their old filenames still
+        # shows up in root_context_files (e.g. a stale in-memory read of an
+        # orphaned pre-migration file) — it's treated as ordinary
+        # unrecognized "extra" content, listed by filename only in the Root
+        # Memory Index manifest, never injected verbatim. MEMORY.md keeps
+        # its index-only treatment; topic files stay on-demand only.
         bundle = compiler.build_sage_instruction_bundle(
             workspace_id="ws-1",
             message="hello",
@@ -113,7 +175,8 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         )
 
         system_prompt = bundle.system_prompt
-        # All six always-load instruction files' content is present verbatim.
+        # None of the six removed taxonomy files' content is injected
+        # verbatim anymore.
         for marker in (
             "SOUL_MARKER",
             "IDENTITY_MARKER",
@@ -122,19 +185,20 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
             "TOOLS_MARKER",
             "GOALS_MARKER",
         ):
-            self.assertIn(marker, system_prompt)
+            self.assertNotIn(marker, system_prompt)
+        # Their filenames are still listed (discoverable via memory_search/
+        # memory_get) under the "Legacy/extra root files" manifest section.
+        for filename in ("SOUL.md", "IDENTITY.md", "USER.md", "AGENTS.md", "TOOLS.md", "GOALS.md"):
+            self.assertIn(filename, system_prompt)
         # MEMORY.md keeps its index-only treatment: content is still injected
-        # (capped), unlike the always-load tier's uncapped-per-call injection.
+        # (capped), unlike the old always-load tier's uncapped-per-call injection.
         self.assertIn("MEMORY_MARKER", system_prompt)
         # Topic files under memory/files/** stay on-demand: never injected in
         # full, only listed by path for memory_search/memory_get to fetch.
         self.assertNotIn("TOPIC_FILE_MARKER", system_prompt)
         self.assertIn("memory/files/customers/acme.md", system_prompt)
 
-        self.assertEqual(
-            bundle.diagnostics["included_official_root_files"],
-            ["SOUL.md", "IDENTITY.md", "USER.md", "GOALS.md", "AGENTS.md", "TOOLS.md", "MEMORY.md"],
-        )
+        self.assertEqual(bundle.diagnostics["included_official_root_files"], ["MEMORY.md"])
 
     def test_capability_manifest_only_includes_currently_callable_tools(self) -> None:
         bundle = compiler.build_sage_instruction_bundle(
@@ -297,6 +361,113 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         ])
         self.assertEqual(bundle.messages[-1], {"role": "user", "content": "what were we discussing?"})
         self.assertEqual(bundle.diagnostics["recent_messages_included"], 2)
+
+    def test_recent_message_history_has_aggregate_char_budget(self) -> None:
+        # docs/design/audit-context-anatomy.md fix #2: the last 16 messages
+        # each capped at 4,000 chars, with no aggregate ceiling, is a ~64,000
+        # char (~16,000 token) worst case. Sixteen full-length messages here
+        # must be squeezed down to SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT,
+        # dropping the OLDEST ones first and keeping the most recent intact.
+        recent = [
+            {
+                "role": "user" if i % 2 == 0 else "assistant",
+                "content": f"msg{i:02d}-".ljust(4000, "x"),
+            }
+            for i in range(16)
+        ]
+
+        bundle = compiler.build_sage_instruction_bundle(
+            workspace_id="ws-1",
+            message="continue where we left off",
+            provider="deepseek",
+            model="deepseek-chat",
+            recent_messages=recent,
+            capability_payload={"items": []},
+        )
+
+        total_chars = sum(len(m["content"]) for m in bundle.prior_messages)
+        self.assertLessEqual(total_chars, compiler.SAGE_RECENT_HISTORY_TOTAL_CHAR_LIMIT)
+        self.assertGreater(len(bundle.prior_messages), 0)
+        # The most recent message (msg15) must survive; the oldest (msg00)
+        # must be the one dropped, not silently truncated mid-content.
+        self.assertTrue(bundle.prior_messages[-1]["content"].startswith("msg15-"))
+        surviving_content = "".join(m["content"] for m in bundle.prior_messages)
+        self.assertNotIn("msg00-", surviving_content)
+
+
+class NormalizeRecentMessagesCompactionSummaryTests(unittest.TestCase):
+    """BUG 4 (compaction end-to-end fix pass, 2026-07-24): a
+    role="compaction_summary" turn used to fall straight through the
+    `role not in {"user", "assistant"}` filter and vanish — confirmed by
+    running this exact function with one in the input. A summary an
+    earlier turn paid an LLM call to produce would then never reach a
+    single subsequent ordinary turn."""
+
+    def test_compaction_summary_is_surfaced_not_dropped(self) -> None:
+        recent = [
+            {"role": "user", "content": "old message 1"},
+            {"role": "assistant", "content": "old reply 1"},
+            {"role": "compaction_summary", "content": "Summary of everything before."},
+            {"role": "user", "content": "new message"},
+            {"role": "assistant", "content": "new reply"},
+        ]
+        out = compiler._normalize_recent_messages(recent, current_channel="chat")
+        self.assertTrue(
+            any("Summary of everything before." in m["content"] for m in out),
+            f"summary missing from {out!r}",
+        )
+
+    def test_compaction_summary_never_uses_system_role(self) -> None:
+        # Every downstream cloud-provider transport this list eventually
+        # reaches (scripts/orion_local_worker_llm.py's _normalize_prior_
+        # messages, allowed_roles={"user", assistant_role}) silently drops
+        # a "system"-role prior_messages entry.
+        recent = [
+            {"role": "compaction_summary", "content": "Summary text."},
+            {"role": "user", "content": "hi"},
+        ]
+        out = compiler._normalize_recent_messages(recent)
+        self.assertFalse(any(m["role"] == "system" for m in out))
+        summary_entries = [m for m in out if "Summary text." in m["content"]]
+        self.assertEqual(len(summary_entries), 1)
+        self.assertEqual(summary_entries[0]["role"], "user")
+
+    def test_summary_survives_even_when_older_than_the_last_16_messages(self) -> None:
+        # A compaction_summary row can legitimately be older than the last
+        # 16 raw turns and still be the only durable memory of everything
+        # before it — must not be sliced away by the [-16:] windowing that
+        # applies to ordinary user/assistant turns.
+        recent = [{"role": "compaction_summary", "content": "Old but important summary."}]
+        recent += [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"}
+            for i in range(20)
+        ]
+        out = compiler._normalize_recent_messages(recent)
+        self.assertTrue(any("Old but important summary." in m["content"] for m in out))
+
+    def test_summary_is_never_the_thing_dropped_by_the_char_budget_squeeze(self) -> None:
+        # The aggregate char-budget squeeze (SAGE_RECENT_HISTORY_TOTAL_CHAR_
+        # LIMIT) drops the OLDEST normal messages first — the summary must
+        # never be sacrificed to that squeeze itself (it's inserted AFTER
+        # the squeeze runs).
+        recent = [{"role": "compaction_summary", "content": "Important summary."}]
+        recent += [
+            {"role": "user", "content": "x" * 2000} for _ in range(20)
+        ]
+        out = compiler._normalize_recent_messages(recent)
+        total_chars = sum(len(m["content"]) for m in out)
+        self.assertTrue(any("Important summary." in m["content"] for m in out))
+
+    def test_no_summary_present_behaves_exactly_as_before(self) -> None:
+        recent = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        out = compiler._normalize_recent_messages(recent)
+        self.assertEqual(out, [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
 
 
 if __name__ == "__main__":

@@ -790,7 +790,16 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "Write or append content to a file in the agent's memory directory. "
                 "Use path='MEMORY.md' to save to the main memory file. "
                 "Use mode='append' to add to existing content, or mode='overwrite' to replace. "
-                "MUST call this tool to persist facts — text replies alone do not save anything."
+                "MUST call this tool to persist facts — text replies alone do not save anything. "
+                "If this fact came from someone other than your owner (or you could not verify "
+                "they are the owner), you MUST also set attribution_reason explaining why it's "
+                "worth remembering — the saved line will be visibly marked as non-owner-sourced "
+                "and is never treated as owner-grade fact. "
+                "Writing to a memory/files/*.md topic file (a file for one topic that has earned "
+                "its own file, e.g. memory/files/customers/acme.md) REQUIRES description — a short "
+                "summary of what the file is about. It is used to create or refresh that file's "
+                "one-line entry in MEMORY.md's index automatically, so a future session can find "
+                "it; MEMORY.md itself never needs manual upkeep for this."
             ),
             parameters={
                 "type": "object",
@@ -798,6 +807,23 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "path": {"type": "string", "description": "File path within memory directory (e.g., 'MEMORY.md')."},
                     "content": {"type": "string", "description": "Text content to write or append."},
                     "mode": {"type": "string", "enum": ["append", "overwrite"], "description": "Write mode: 'append' (default) or 'overwrite'."},
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Required only when path is a memory/files/*.md topic file: a short "
+                            "description of what this file is about (e.g. 'Acme account: contract "
+                            "terms, contacts, open issues'). Auto-upserted as that file's one-line "
+                            "entry in MEMORY.md's index. Not used, and not required, for other files."
+                        ),
+                    },
+                    "attribution_reason": {
+                        "type": "string",
+                        "description": (
+                            "Required only when this fact came from a non-owner or unverified "
+                            "sender: a short explanation of why it's worth saving. Omit entirely "
+                            "for facts the owner told you directly."
+                        ),
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -846,13 +872,30 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             description=(
                 "Update one workspace memory context file. Use only when the user explicitly asks Sage to "
                 "remember, correct, or update durable memory. Read the current file first with memory_get, then "
-                "write the complete revised file content."
+                "write the complete revised file content. If any of the content you're incorporating came from "
+                "someone other than your owner (or an unverified sender), you MUST also set attribution_reason. "
+                "If filename is a memory/files/*.md topic file, description is REQUIRED — see memory_write."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "Allowed context filename such as MEMORY.md, USER.md, IDENTITY.md, SOUL.md, GOALS.md, PROCEDURES.md, or REFLECTION.md."},
+                    "filename": {"type": "string", "description": "Allowed context filename such as MEMORY.md, PROCEDURES.md, REFLECTION.md, or a memory/files/*.md topic file."},
                     "content": {"type": "string", "description": "Complete revised Markdown content for the file."},
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Required only when filename is a memory/files/*.md topic file: a short "
+                            "description of what this file is about, auto-upserted into MEMORY.md's "
+                            "index as that file's one-line entry."
+                        ),
+                    },
+                    "attribution_reason": {
+                        "type": "string",
+                        "description": (
+                            "Required only when incorporating a non-owner or unverified sender's "
+                            "content into this file: a short explanation of why it's worth keeping."
+                        ),
+                    },
                 },
                 "required": ["filename", "content"],
             },
@@ -865,12 +908,12 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             action_id="stage_edit",
             description=(
                 "Stage a proposed root memory file edit under memory/.dreams/. Use when the user asks to "
-                "change durable behavior, identity, goals, procedures, tools, agents, or reflection files."
+                "change durable behavior, procedures, or reflection files."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "filename": {"type": "string", "description": "Root context filename such as IDENTITY.md, GOALS.md, PROCEDURES.md, TOOLS.md, AGENTS.md, REFLECTION.md, or MEMORY.md."},
+                    "filename": {"type": "string", "description": "Root context filename such as MEMORY.md, PROCEDURES.md, or REFLECTION.md."},
                     "content": {"type": "string", "description": "Complete proposed Markdown content for the target file."},
                     "reason": {"type": "string", "description": "Short reason for staging this memory edit."},
                     "source_refs": {
@@ -913,12 +956,21 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "Append one durable note to today's daily memory file only. "
                 "Use for stable facts, decisions, preferences, or project context. "
                 "A usefulness gate and dedupe filter are enforced. Do not include secrets, "
-                "full chat transcripts, or temporary noise."
+                "full chat transcripts, or temporary noise. If this note came from someone "
+                "other than your owner (or you could not verify they are the owner), you MUST "
+                "also set attribution_reason — the saved note will be visibly marked."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "note": {"type": "string", "description": "Durable note text to append to today's daily memory note file."},
+                    "attribution_reason": {
+                        "type": "string",
+                        "description": (
+                            "Required only when this note came from a non-owner or unverified "
+                            "sender: a short explanation of why it's worth saving."
+                        ),
+                    },
                 },
                 "required": ["note"],
             },
@@ -956,9 +1008,10 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="memory",
             action_id="consolidate_daily_notes",
             description=(
-                "Read daily memory notes and produce safe consolidation proposals for curated root files "
-                "(MEMORY.md, GOALS.md, PROCEDURES.md, REFLECTION.md). Can apply merge only when explicitly approved "
-                "or policy allows; supports optional post-merge compaction with audit metadata."
+                "Read daily memory notes and produce safe consolidation proposals for curated targets "
+                "(MEMORY.md, PROCEDURES.md, REFLECTION.md, or the memory/files/goals.md topic file). Can apply "
+                "merge only when explicitly approved or policy allows; supports optional post-merge compaction "
+                "with audit metadata."
             ),
             parameters={
                 "type": "object",
@@ -1399,7 +1452,14 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             label="Message Agent",
             connector_id="fleet",
             action_id="message_agent",
-            description="Enqueue a message for another agent to process on its next turn.",
+            description=(
+                "Not implemented -- always returns ok: false. Agent-to-agent "
+                "messaging has no delivery path yet (nothing ever reads it "
+                "back); calling this only gets you an explicit error telling "
+                "you to create/assign a task to the target agent instead. "
+                "Do not call this tool to hand off work -- use fleet tasks "
+                "or ask the owner."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -1410,7 +1470,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             },
             risk_level="moderate",
             audience_safe=False,
-            audience_note="Operator-only: messages another agent. Owner/operator access.",
+            audience_note="Operator-only: not implemented, always fails (see description).",
         ),
         ToolDescriptor(
             tool_name="fleet__schedule_task",
@@ -1441,6 +1501,112 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             # platform by default.
             audience_safe=False,
             audience_note="Operator-only: schedules future work for an agent. Owner/operator access.",
+        ),
+        # ── Skills: Level-2 progressive disclosure (docs/design/audit-skills.md §3.4) ──
+        # The unified skill catalog (skill_registry.list_skill_definitions,
+        # rendered into the system prompt as name+description-only entries by
+        # sage_skills_api._skill_capability_records) is Level 1. This tool is
+        # the single Level-2 entry point every one of those entries points
+        # at: the model never gets a per-skill tool, it gets one dispatcher
+        # that loads/executes the named skill on demand — mirroring Claude
+        # Code's "cat SKILL.md when the description matches" mechanic, just
+        # implemented as a tool call instead of a filesystem read.
+        ToolDescriptor(
+            tool_name="skill_invoke",
+            label="Invoke skill",
+            connector_id="skill",
+            action_id="invoke",
+            description=(
+                "Run a registered skill by id — the Level-2 step after the skill catalog's "
+                "name+description listing (see the Callable Tools section for available "
+                "skill_id values, e.g. 'memory-manager', 'code-runner', 'file-manager', "
+                "'telegram-bot', 'vision-monitor', 'inventory-tool'). Loads that skill's full "
+                "procedure and executes it; for a documentation-only skill with no live "
+                "executor, returns its instructions as context instead of a fabricated result."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "skill_id": {
+                        "type": "string",
+                        "description": (
+                            "The id of the skill to run, exactly as shown in the skill "
+                            "catalog listing (e.g. 'memory-manager', 'code-runner')."
+                        ),
+                    },
+                    "args": {
+                        "anyOf": [{"type": "string"}, {"type": "object"}],
+                        "description": (
+                            "Optional arguments for the skill: either a free-text goal string "
+                            "describing what to do, or an object with a 'goal' key. Omit for "
+                            "skills that don't need input (e.g. a memory snapshot)."
+                        ),
+                    },
+                },
+                "required": ["skill_id"],
+            },
+            risk_level="high",
+            audience_safe=False,
+            audience_note="Blocked: skills can read/write files, run shell commands, or message people. Owner-only.",
+        ),
+        ToolDescriptor(
+            tool_name="skill_write",
+            label="Author skill",
+            connector_id="skill",
+            action_id="write",
+            description=(
+                "Author or update a workspace skill from a name, description, and Markdown "
+                "procedure body. Use when the user asks you to save a repeated procedure as a "
+                "reusable skill, or to codify a pattern you just used. The skill is security-"
+                "scanned and installed for real, but starts DISABLED, pending the workspace "
+                "owner's review — it will not appear in the skill catalog or be callable via "
+                "skill_invoke until the owner reviews and enables it. Do not tell the user the "
+                "skill is 'ready' or 'active' — say it is saved and awaiting their review."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Human-readable skill name; becomes the skill id (lowercased, hyphenated).",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Third-person description of what the skill does and when to use "
+                            "it. This is the only text shown to the agent before the skill is "
+                            "invoked (Level 1) — be specific."
+                        ),
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "The Markdown procedure body: what this skill does, the numbered "
+                            "steps to follow when it's invoked, when NOT to use it, and any "
+                            "safety notes."
+                        ),
+                    },
+                    "skill_class": {
+                        "type": "string",
+                        "enum": ["business", "specialist_local"],
+                        "description": "Defaults to 'business'. Use 'specialist_local' for a skill scoped to one specialist agent.",
+                    },
+                    "connector_scopes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional connector ids this skill touches (e.g. 'crm', 'email').",
+                    },
+                    "trigger_terms": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional trigger phrases that suggest this skill applies.",
+                    },
+                },
+                "required": ["name", "description", "body"],
+            },
+            risk_level="medium",
+            audience_safe=False,
+            audience_note="Blocked: authors persistent workspace skill files. Owner-only.",
         ),
     ]
 
@@ -2842,6 +3008,24 @@ def _agent_scope_from_direct_tool_context(session_ctx: Dict[str, Any] | None) ->
     return "studio_agent"
 
 
+def _agent_install_id_from_direct_tool_context(session_ctx: Dict[str, Any] | None) -> str:
+    """Resolves the CALLING agent's install id from verified session
+    identity — the same resolution every memory__* tool dispatch in this
+    file already uses (see e.g. the agent_install_id= kwargs throughout the
+    memory tool handlers below). Reads session_ctx directly rather than
+    _direct_tool_session_metadata, which does not carry agent_install_id/
+    active_agent_install_id at all. Used to scope the Gateway file/shell
+    connector's on-box mount to the calling agent — see
+    _execute_direct_tool_via_gateway_async's file/shell dispatch and
+    docs/design/memory-placement-scope.md's "gateway seam" isolation gap."""
+    session_payload = session_ctx if isinstance(session_ctx, dict) else {}
+    return str(
+        session_payload.get("agent_install_id")
+        or session_payload.get("active_agent_install_id")
+        or ""
+    ).strip()
+
+
 def _tenant_id_from_direct_tool_context(session_ctx: Dict[str, Any] | None) -> str:
     session_payload = session_ctx if isinstance(session_ctx, dict) else {}
     agent_turn_request = session_payload.get("agent_turn_request") if isinstance(session_payload.get("agent_turn_request"), dict) else {}
@@ -3101,6 +3285,7 @@ def _execute_direct_tool_via_gateway(
     request_id: str = "",
     session_ctx: Dict[str, Any] | None = None,
     require_approval: Optional[bool] = None,
+    agent_install_id: Optional[str] = None,
     callbacks: Any,
 ) -> Dict[str, Any]:
     from server_modules import hardware_action_broker_service
@@ -3123,6 +3308,7 @@ def _execute_direct_tool_via_gateway(
             request_id=request_id,
             trace_context=trace_context,
             require_approval=require_approval,
+            agent_install_id=agent_install_id,
         )
     )
     payload = dict(response) if isinstance(response, dict) else {"result": response}
@@ -3158,6 +3344,7 @@ async def _execute_direct_tool_via_gateway_async(
     request_id: str = "",
     session_ctx: Dict[str, Any] | None = None,
     require_approval: Optional[bool] = None,
+    agent_install_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Async version of _execute_direct_tool_via_gateway.
 
@@ -3184,6 +3371,7 @@ async def _execute_direct_tool_via_gateway_async(
         request_id=request_id,
         trace_context=trace_context,
         require_approval=require_approval,
+        agent_install_id=agent_install_id,
     )
     payload = dict(response) if isinstance(response, dict) else {"result": response}
     if isinstance(payload.get("execution"), dict):
@@ -4174,6 +4362,38 @@ async def execute_single_direct_tool_call_async(
             metadata = _direct_tool_session_metadata(session_ctx)
             tenant_id = _tenant_id_from_direct_tool_context(session_ctx)
             trace_context = session_payload.get("trace_context")
+            # SECURITY: filesystem.read_write and shell.execute on the
+            # Gateway share one on-box directory per (mount, workspace_id) —
+            # see docs/design/memory-placement-scope.md's "gateway seam"
+            # section and PLATFORM-MAP.md Part 27.8 (the identical leak
+            # class, for connector credentials). gateway_adapter now folds
+            # the CALLING agent's own identity into that mount server-side
+            # (never from anything the model/caller supplied, and never read
+            # from the tool call's own `arguments` — only from verified
+            # session_ctx) so two SPECIALIST agent installs sharing a
+            # workspace + Gateway box can't reach each other's files through
+            # this connector.
+            #
+            # Deliberately NOT a hard fail-closed gate on empty identity,
+            # unlike commit 8cc8d69dd's skill_invoke-routed memory
+            # executors: verified (sage_agent_runtime_service.py's
+            # _run_sage_action_loop_v3, 3 call sites, all commented "empty
+            # for Sage") that the owner-facing agent's OWN turn — the
+            # primary, highest-volume caller of this exact connector when a
+            # box is paired — never has active_agent_install_id/
+            # agent_install_id set in session_ctx at all. A hard fail here
+            # would break Sage's own file/shell tool use outright, not just
+            # a specialist edge case. This mirrors PLATFORM-MAP.md's Part
+            # 27.1 precedent for memory: "an empty agent_install_id does not
+            # mean 'no scope' — it resolves to the WORKSPACE ROOT ...
+            # intentional and correct for the owner-facing agent's own
+            # turns." Empty here is a stable, server-controlled signal
+            # ("this is Sage's own turn," never model-forgeable) rather than
+            # a "we don't know who's asking" ambiguity — gateway_adapter's
+            # _agent_scoped_mount leaves the mount unchanged (today's
+            # existing, workspace-level bucket) when it's empty, and scopes
+            # it per-agent whenever a real specialist identity resolves.
+            resolved_agent_install_id = _agent_install_id_from_direct_tool_context(session_ctx)
             gateway_arguments = _gateway_arguments_for_direct_local_tool(
                 normalized_connector,
                 normalized_action,
@@ -4207,6 +4427,7 @@ async def execute_single_direct_tool_call_async(
                             session_ctx=session_ctx,
                         ),
                         agent_scope=_agent_scope_from_direct_tool_context(session_ctx),
+                        agent_install_id=resolved_agent_install_id or None,
                         tenant_id=tenant_id,
                         thread_id=str(thread_id or "").strip(),
                         request_id=gateway_request_id,
@@ -4487,6 +4708,29 @@ def _queue_outbound_media(session_ctx: Optional[Dict[str, Any]], item: Dict[str,
     return True
 
 
+def _memory_redaction_result_fields(saved: Any) -> Dict[str, Any]:
+    """MAN-53: every native memory-writing tool result (memory_write,
+    memory_update, memory_append_daily_note, memory_apply_edit) surfaces
+    whether memory_service redacted a live secret out of the content before
+    it touched disk — never silent. `saved` is whatever the memory_service
+    call returned; a non-dict or a dict with no `redacted` key (an older
+    caller/mock) is treated as "not redacted" rather than raising, so this
+    is purely additive to every one of this function's call sites.
+    The note text is model-facing wording, not hardcoded agent speech --
+    the model reads it and decides how to phrase it to the user (e.g. "I
+    saved that but removed the key")."""
+    redacted = bool(saved.get("redacted")) if isinstance(saved, dict) else False
+    fields: Dict[str, Any] = {"redacted": redacted}
+    if redacted:
+        fields["redaction_note"] = (
+            "Part of this content looked like a live secret (an API key, "
+            "token, password, or similar) and was replaced with a "
+            "redaction placeholder before saving. Tell the user what you "
+            "saved, but mention the secret itself was removed, not stored."
+        )
+    return fields
+
+
 def execute_single_direct_tool_call(
     *,
     tool_call: Dict[str, Any],
@@ -4690,6 +4934,105 @@ def execute_single_direct_tool_call(
             f"Queued {media_item['kind']} to send with your reply: {raw_target}"
             + (f" (caption: {caption})" if caption else "")
         )
+    if connector_id == "skill" and action_id == "invoke":
+        # Level-2 dispatch: the model gets a skill_id (and optional args)
+        # from the Level-1 catalog listing in the system prompt
+        # (sage_skills_api._skill_capability_records, unified from
+        # skill_registry.list_skill_definitions) and this is the ONE call
+        # site that turns it into a real execution — mirrors memory_search's
+        # pattern immediately above rather than inventing a new dispatch
+        # shape. skill_registry.execute_skill already does the right thing
+        # (executor -> handler subprocess -> MCP tool -> bundled-tool
+        # dispatch -> SKILL.md body-injection fallback); this branch's only
+        # job is argument plumbing and turning its structured result into a
+        # tool-result string.
+        skill_id = str(argument_payload.get("skill_id") or argument_payload.get("id") or "").strip()
+        if not skill_id:
+            raise RuntimeError("Tool 'skill_invoke' requires a skill_id.")
+        raw_skill_args = argument_payload.get("args")
+        if isinstance(raw_skill_args, dict):
+            skill_goal = str(raw_skill_args.get("goal") or raw_skill_args.get("input") or "").strip()
+            if not skill_goal and raw_skill_args:
+                skill_goal = json.dumps(raw_skill_args, ensure_ascii=False)
+        elif raw_skill_args is not None and str(raw_skill_args).strip():
+            skill_goal = str(raw_skill_args).strip()
+        else:
+            skill_goal = str(argument_payload.get("goal") or "").strip()
+        from server_modules import skill_registry
+
+        skill_result = callbacks.run_async_tool_call(
+            skill_registry.execute_skill(
+                skill_id=skill_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                goal=skill_goal,
+                agent_label=str(
+                    session_metadata.get("sage_agent_id")
+                    or session_metadata.get("agent_scope")
+                    or "Agent"
+                ).strip()
+                or "Agent",
+                hard_context="",
+                operational_policy="",
+                agent_id=str(session_metadata.get("agent_id") or "").strip(),
+                agent_install_id=str(
+                    session_metadata.get("agent_install_id")
+                    or session_metadata.get("active_agent_install_id")
+                    or ""
+                ).strip(),
+            )
+        )
+        if not isinstance(skill_result, dict):
+            return str(skill_result or "").strip() or f"Skill '{skill_id}' returned no output."
+        reply_text = str(skill_result.get("reply") or "").strip()
+        artifact = skill_result.get("artifact") if isinstance(skill_result.get("artifact"), dict) else None
+        result_parts = [reply_text] if reply_text else []
+        if artifact:
+            # This is the actual progressive-disclosure payoff: a
+            # SKILL.md-backed skill's body only ever reaches context here,
+            # on invoke — never as part of the Level-1 listing.
+            preview = str(artifact.get("preview_content") or "").strip()
+            if preview:
+                artifact_label = str(artifact.get("label") or "Skill content").strip()
+                result_parts.append(f"\n--- {artifact_label} ---\n{preview}")
+        combined_reply = "\n".join(result_parts).strip()
+        return combined_reply or f"Skill '{skill_id}' completed with status {skill_result.get('status')}."
+    if connector_id == "skill" and action_id == "write":
+        # Human-reviewed self-authoring (docs/design/audit-skills.md §1.4,
+        # §3 item 9): reuses the existing, previously agent-unreachable
+        # marketplace pipeline (skills_registry.install_marketplace_skill +
+        # skill_scanner, already wired for the admin HTTP routes) rather
+        # than a new bespoke write path, then immediately downgrades the
+        # freshly installed skill to disabled/pending — see
+        # skills_registry.author_pending_skill for why this is not silent
+        # autonomy.
+        skill_name = str(argument_payload.get("name") or "").strip()
+        skill_description = str(argument_payload.get("description") or "").strip()
+        skill_body = str(argument_payload.get("body") or "").strip()
+        if not skill_name:
+            raise RuntimeError("Tool 'skill_write' requires a name.")
+        if not skill_description:
+            raise RuntimeError("Tool 'skill_write' requires a description.")
+        if not skill_body:
+            raise RuntimeError("Tool 'skill_write' requires a body (the procedure).")
+        from server_modules import skills_registry as skills_marketplace_registry
+
+        authoring_agent = str(
+            session_metadata.get("sage_agent_id")
+            or session_metadata.get("agent_scope")
+            or session_metadata.get("agent_id")
+            or "agent"
+        ).strip() or "agent"
+        write_result = skills_marketplace_registry.author_pending_skill(
+            name=skill_name,
+            description=skill_description,
+            body=skill_body,
+            author=f"agent:{authoring_agent}",
+            skill_class=str(argument_payload.get("skill_class") or "business").strip() or "business",
+            connector_scopes=argument_payload.get("connector_scopes"),
+            trigger_terms=argument_payload.get("trigger_terms"),
+        )
+        return json.dumps(write_result, ensure_ascii=False)
     if connector_id == "browser":
         browser = _resolve_direct_tool_browser_adapter(session_ctx)
         if action_id == "navigate":
@@ -4729,7 +5072,12 @@ def execute_single_direct_tool_call(
             # 2026-07-14.
             agent_install_id=session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id") or None,
         )
-        return json.dumps({"results": results}, ensure_ascii=False)
+        # search_memory_notebook returns a self-describing envelope
+        # ({results, files_searched, errors, status, message}) so the model can
+        # tell "searched everything, confirmed nothing" from "the search never
+        # ran" or "some files were unreadable and NOT searched". Pass it
+        # through flat — re-wrapping would bury status/errors a level deeper.
+        return json.dumps(results, ensure_ascii=False)
     if connector_id == "memory" and action_id == "get":
         rel_path = str(argument_payload.get("path") or argument_payload.get("input") or "").strip()
         if not rel_path:
@@ -4766,6 +5114,18 @@ def execute_single_direct_tool_call(
             reason="memory_update",
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
             audit_metadata={"source": "direct_tool"},
+            # Attribution seam: same session_metadata["envelope"] snapshot
+            # memory_write already threads through (see that branch below) --
+            # a non-owner/unverified turn calling memory_update on a root
+            # file (including MEMORY.md) is subject to the same write filter
+            # as every other memory-writing tool, not a silent bypass.
+            source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
+            attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
+            # Auto-maintained topic-file index (founder ruling): required
+            # only when `filename` is a memory/files/*.md topic file --
+            # no-op/ignored for every other file, so this is unchanged
+            # behavior for root-file and daily-note updates.
+            description=str(argument_payload.get("description") or "").strip() or None,
         )
         return json.dumps(
             {
@@ -4775,6 +5135,7 @@ def execute_single_direct_tool_call(
                 "old_hash": saved.get("old_hash") if isinstance(saved, dict) else None,
                 "new_hash": saved.get("new_hash") if isinstance(saved, dict) else None,
                 "version_id": saved.get("version_id") if isinstance(saved, dict) else None,
+                **_memory_redaction_result_fields(saved),
             },
             ensure_ascii=False,
         )
@@ -4820,9 +5181,27 @@ def execute_single_direct_tool_call(
             # InboundEnvelope object itself. None for any caller that
             # doesn't set it (unchanged behavior).
             source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
+            # Write filter (context-engineering-plan.md item 6): required
+            # whenever the envelope above resolves to a non-owner/unverified
+            # trust tier -- the model must state, in its own tool call, why
+            # this non-owner content is worth saving. Optional/ignored
+            # otherwise (see agent_memory.requires_attribution_reason).
+            attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
+            # Auto-maintained topic-file index (founder ruling, 2026-07-23):
+            # required only when `filename` resolves to a memory/files/*.md
+            # topic file -- ignored/no-op for every other target (MEMORY.md
+            # itself, bootstrap files, daily notes), so this is unchanged
+            # behavior for every write this tool made before description existed.
+            description=str(argument_payload.get("description") or "").strip() or None,
         )
         return json.dumps(
-            {"ok": True, "file": saved.get("file"), "chars_written": saved.get("chars_written"), "mode": saved.get("mode")},
+            {
+                "ok": True,
+                "file": saved.get("file"),
+                "chars_written": saved.get("chars_written"),
+                "mode": saved.get("mode"),
+                **_memory_redaction_result_fields(saved),
+            },
             ensure_ascii=False,
         )
     if connector_id == "memory" and action_id == "stage_edit":
@@ -4894,7 +5273,9 @@ def execute_single_direct_tool_call(
             actor=actor,
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
         )
-        return json.dumps(result if isinstance(result, dict) else {"ok": True}, ensure_ascii=False)
+        payload = dict(result) if isinstance(result, dict) else {"ok": True}
+        payload.update(_memory_redaction_result_fields(payload))
+        return json.dumps(payload, ensure_ascii=False)
     if connector_id == "memory" and action_id == "append_daily_note":
         note = str(argument_payload.get("note") or argument_payload.get("input") or "")
         if not note.strip():
@@ -4912,6 +5293,14 @@ def execute_single_direct_tool_call(
             agent_install_id=session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id") or None,
             actor=actor,
             run_id=str(session_metadata.get("run_id") or session_metadata.get("request_id") or "").strip() or None,
+            # Attribution seam: same session_metadata["envelope"] snapshot
+            # memory_write threads through -- daily notes are consolidated
+            # into MEMORY.md/memory/files/goals.md/etc later (consolidate_
+            # daily_memory_notes), so an unattributed daily note was a real
+            # gap: a non-owner's statement could reach a root file with no
+            # attribution trail at all. Fixed by threading the same seam here.
+            source=session_metadata.get("envelope") if isinstance(session_metadata.get("envelope"), dict) else None,
+            attribution_reason=str(argument_payload.get("attribution_reason") or "").strip() or None,
         )
         return json.dumps(
             {
@@ -4925,6 +5314,7 @@ def execute_single_direct_tool_call(
                 "old_hash": saved.get("old_hash") if isinstance(saved, dict) else None,
                 "new_hash": saved.get("new_hash") if isinstance(saved, dict) else None,
                 "version_id": saved.get("version_id") if isinstance(saved, dict) else None,
+                **_memory_redaction_result_fields(saved),
             },
             ensure_ascii=False,
         )

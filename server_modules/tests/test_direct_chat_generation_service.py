@@ -1390,6 +1390,104 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertNotIn("super-secret-token", followup_prompt)
         self.assertNotIn("API_TOKEN", followup_prompt)
 
+    def test_stream_provider_backed_direct_chat_caps_codex_tool_result_reinjection(self) -> None:
+        # docs/design/audit-context-anatomy.md fix #1: direct_tool_followup_
+        # message (the codex_cli re-injection path) used to receive the raw,
+        # unbounded tool result while every other provider capped it at
+        # 4,000 chars. A huge tool result must now come through truncated the
+        # same way for codex_cli too.
+        captured_messages: list[list[dict[str, object]]] = []
+        huge_result = "A" * 10_000
+        stream_rounds = iter(
+            [
+                [
+                    {
+                        "type": "result",
+                        "reply": "",
+                        "usage_masked": {"provider": "codex_cli"},
+                        "provider": "codex_cli",
+                        "model": "gpt-5-codex",
+                        "attempted_providers": "codex_cli",
+                        "error": "",
+                        "tool_calls": [
+                            {
+                                "id": "tool-call-1",
+                                "name": "file__read",
+                                "arguments": {"path": "/tmp/big.txt"},
+                            }
+                        ],
+                    }
+                ],
+                [
+                    {
+                        "type": "result",
+                        "reply": "Done",
+                        "usage_masked": {"provider": "codex_cli"},
+                        "provider": "codex_cli",
+                        "model": "gpt-5-codex",
+                        "attempted_providers": "codex_cli",
+                        "error": "",
+                        "tool_calls": [],
+                    }
+                ],
+            ]
+        )
+
+        def _stream_events(**kwargs):
+            captured_messages.append(list(kwargs.get("prior_messages") or []))
+            return iter(next(stream_rounds))
+
+        services = self._services(stream_events=[])
+        services.generate_chat_reply_stream_with_provider_fallback = _stream_events
+        services.execute_single_direct_tool_call = lambda **_kwargs: huge_result
+
+        events = list(
+            direct_chat_generation_service.stream_provider_backed_direct_chat(
+                services=services,
+                context={"provider": "codex_cli"},
+                metadata={"provider": "codex_cli", "model": "gpt-5-codex"},
+                system_prompt="System prompt",
+                normalized_workspace_id="default",
+                normalized_requested_provider="codex_cli",
+                normalized_requested_model="gpt-5-codex",
+                normalized_reasoning_effort="medium",
+                normalized_thread_id="thread-1",
+                normalized_message="Read the big file.",
+                compacted_prior_messages=[],
+                prior_messages_used=False,
+                history_mode="none",
+                connected_systems=[],
+                tool_capabilities=[],
+                availability_payload={"ai_ready": True},
+                tools=[{"name": "file__read"}],
+                direct_chat_credentials={},
+                proactive_suggestions=[],
+                tool_loop_session_key="session-codex",
+                fallback_reason=None,
+                session_ctx=None,
+                trace_context=None,
+                resolved_chat_max_iterations=3,
+                direct_tool_result_summary_system_message="Summarize tool results.",
+            )
+        )
+
+        self.assertEqual(events[-1]["payload"]["reply"], "Done")
+        self.assertEqual(len(captured_messages), 2)
+        # codex_cli appends the tool-followup ("user") message, then a fixed
+        # system "summarize tool results" message right after it — the
+        # followup (the one carrying the potentially-huge tool result) is
+        # second-to-last, not last.
+        followup_message = captured_messages[1][-2]
+        self.assertEqual(followup_message.get("role"), "user")
+        followup_content = str(followup_message.get("content") or "")
+        # 4,000-char bound: 3,800 chars of real content plus a short
+        # "...[truncated N chars]" marker, tool-name prefix, and the fixed
+        # continuation prompt text the fake direct_tool_followup_message and
+        # the real one both add — total stays well under the raw 10,000.
+        self.assertLess(len(followup_content), 4200)
+        self.assertIn("[truncated", followup_content)
+        self.assertNotIn("A" * 10_000, followup_content)
+
 
 if __name__ == "__main__":
     unittest.main()

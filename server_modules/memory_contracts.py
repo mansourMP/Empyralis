@@ -29,7 +29,11 @@ ORION_MEMORY_MAX_TEXT_CHARS_DEFAULT: int = 6000
 MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
     "profile_memory": {
         "ownership": "Workspace owner profile and durable user preferences.",
-        "storage_location": "Workspace USER.md context file and future profile-specific overlays.",
+        "storage_location": (
+            "Workspace MEMORY.md index plus the memory/files/profile.md topic file "
+            "(see workspace_context.py; USER.md/IDENTITY.md/SOUL.md were removed from "
+            "the root-file taxonomy 2026-07-23) and future profile-specific overlays."
+        ),
         "retention_rules": "Durable until the owner edits or deletes the stored profile notes.",
         "sync_rules": {
             "default": "local_only",

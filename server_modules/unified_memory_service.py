@@ -176,12 +176,18 @@ def search_unified_memory_documents(
     limit: int = 6,
 ) -> List[Dict[str, Any]]:
     safe_limit = max(1, min(int(limit or 6), 20))
-    notebook_hits = memory_service.search_memory_notebook(
+    notebook_search = memory_service.search_memory_notebook(
         workspace_id,
         query,
         max_results=safe_limit,
         agent_install_id=agent_install_id,
     )
+    # search_memory_notebook returns a self-describing envelope (see
+    # agent_memory._search_memory_notebook's docstring) -- "results" holds
+    # the same match-item list this call site always consumed; the sibling
+    # files_searched/status/errors/message fields are for the model-facing
+    # memory_search tool response and aren't needed for this merge.
+    notebook_hits = notebook_search.get("results", []) if isinstance(notebook_search, dict) else (notebook_search or [])
     knowledge_hits = _search_knowledge_documents(
         workspace_id=workspace_id,
         query=query,
@@ -361,7 +367,7 @@ def _state_layer_model(*, audience: str, agent_install_id: str | None = None) ->
 
 def _service_boundaries() -> Dict[str, Dict[str, Any]]:
     return {
-        "profile_memory": {"repository": "workspace_context", "writers": ["write_workspace_context_file(USER.md)"]},
+        "profile_memory": {"repository": "workspace_context", "writers": ["memory_service.update_memory_context_file(memory/files/profile.md)"]},
         "episodic_memory": {"repository": "session_transcript_store + memory_service", "writers": ["save_session_transcript", "save_daily_log"]},
         "app_event_history": {"repository": "personal_context_engine", "writers": ["publish_event"]},
         "shared_operational_board": {
@@ -377,7 +383,7 @@ def _service_boundaries() -> Dict[str, Dict[str, Any]]:
 
 def _ingestion_contract() -> List[Dict[str, Any]]:
     return [
-        {"source_kind": "profile_context", "layer": "profile_memory", "ingestion_path": "workspace_context.USER.md"},
+        {"source_kind": "profile_context", "layer": "profile_memory", "ingestion_path": "workspace_context.memory/files/profile.md"},
         {"source_kind": "transcript_summary", "layer": "episodic_memory", "ingestion_path": "session_transcript_store.save_session_transcript"},
         {"source_kind": "daily_log", "layer": "episodic_memory", "ingestion_path": "memory_service.save_daily_log"},
         {"source_kind": "personal_context_event", "layer": "app_event_history", "ingestion_path": "personal_context_engine.publish_event"},
@@ -389,6 +395,38 @@ def _ingestion_contract() -> List[Dict[str, Any]]:
     ]
 
 
+def _read_profile_text(*, workspace_id: str, agent_install_id: str | None = None) -> tuple[str, str]:
+    """Founder ruling (2026-07-23, final): USER.md is removed from the
+    root-file taxonomy -- onboarding now projects the owner profile into the
+    memory/files/profile.md topic file instead (see sage_profile_service.
+    SAGE_PROFILE_MEMORY_TOPIC_FILE). Read that first; fall back to the raw
+    legacy USER.md file for workspaces/installs that had real content
+    written before this migration (never auto-created or written to
+    anymore, but never deleted -- see workspace_context.read_legacy_root_file).
+    Returns (text, source_label) so this transparency payload accurately
+    reports which one actually supplied the content, rather than always
+    claiming "USER.md"."""
+    text = _meaningful_context_content(
+        "memory/files/profile.md",
+        workspace_context.read_workspace_context_file(
+            "memory/files/profile.md",
+            workspace_id=workspace_id,
+            agent_install_id=agent_install_id,
+        ),
+    )
+    if text:
+        return text, "memory/files/profile.md"
+    legacy_text = _meaningful_context_content(
+        "USER.md",
+        workspace_context.read_legacy_root_file(
+            "USER.md",
+            workspace_id=workspace_id,
+            agent_install_id=agent_install_id,
+        ),
+    )
+    return legacy_text, "USER.md (legacy)"
+
+
 def _profile_layer(
     *,
     workspace_id: str,
@@ -398,32 +436,22 @@ def _profile_layer(
     accessible = audience == "sage"
     layer = _base_layer("profile_memory", accessible=accessible, scope=audience)
     if accessible:
-        user_text = _meaningful_context_content(
-            "USER.md",
-            workspace_context.read_workspace_context_file("USER.md", workspace_id=workspace_id),
-        )
+        user_text, user_source = _read_profile_text(workspace_id=workspace_id)
         if user_text:
             layer["items"].append(
                 {
-                    "source": "USER.md",
+                    "source": user_source,
                     "scope": "workspace",
                     "text": user_text,
                 }
             )
     else:
-        install_text = _meaningful_context_content(
-            "USER.md",
-            workspace_context.read_workspace_context_file(
-                "USER.md",
-                workspace_id=workspace_id,
-                agent_install_id=agent_install_id,
-            ),
-        )
+        install_text, install_source = _read_profile_text(workspace_id=workspace_id, agent_install_id=agent_install_id)
         if install_text:
             layer["accessible"] = True
             layer["items"].append(
                 {
-                    "source": "USER.md",
+                    "source": install_source,
                     "scope": "install",
                     "text": install_text,
                 }

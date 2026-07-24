@@ -35,6 +35,11 @@ PERSISTED_TRACE_EVENT_TYPES = frozenset(
         "assistant.message.completed",
         "trace.completed",
         "trace.failed",
+        # docs/design/audit-context-anatomy.md fix #3 (compaction gap, half
+        # b): compact_turns used to no-op silently (empty summary, no key/
+        # provider) with nothing but a swallowed exception downstream. This
+        # makes that condition visible in trace replay, not just server logs.
+        "compaction.skipped",
     }
 )
 
@@ -45,6 +50,46 @@ EPHEMERAL_TRACE_EVENT_TYPES = frozenset(
         "assistant.message.delta",
     }
 )
+
+# docs/design/audit-storage-lifecycle.md: `assistant.message.completed`'s
+# `data.text` re-embeds the turn's full reply text, which
+# thread_service.record_assistant_turn() already writes into
+# agent_turns.content in the same turn (agent_turn.py calls both
+# execute_agent_turn_request(), which fires this trace event via
+# direct_chat_generation_service.py, and then record_assistant_turn() with
+# the identical `result["reply"]` string — verified byte-for-byte, same
+# turn, same request). That made this one event type ~23% of modeled
+# per-session agent_trace_events bytes for a value nothing but the
+# in-flight response stream needs (the persisted row is read later, after
+# the stream that needed the live text has already finished).
+# WorkTab.tsx (the one persisted-row reader, frontend/lib/workspace/fleet/
+# tabs/WorkTab.tsx:885) already falls back to `assistantTurn?.content`
+# whenever this field is empty, so dropping it from the *stored* copy is
+# safe — see _persisted_trace_event_payload below, applied only to the row
+# written to Postgres, never to the envelope returned to the caller (which
+# still carries the full text for the live in-request response stream).
+TEXT_DEDUPED_TRACE_EVENT_TYPES = frozenset({"assistant.message.completed"})
+
+
+def _persisted_trace_event_payload(event_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the payload actually written to `agent_trace_events.payload`.
+
+    Identical to `data` for every event type except the ones in
+    TEXT_DEDUPED_TRACE_EVENT_TYPES, where the large duplicated text field is
+    dropped and replaced with a pointer + byte count instead of being
+    persisted a second time. The row itself, its ordering (`seq`), and every
+    other field (message_id, citation_refs, artifact_ids) are unchanged, so
+    trace replay ordering and non-text metadata stay fully resolvable.
+    """
+    if event_type not in TEXT_DEDUPED_TRACE_EVENT_TYPES:
+        return data
+    trimmed = dict(data or {})
+    text_value = str(trimmed.get("text") or "")
+    if text_value:
+        trimmed["text"] = ""
+        trimmed["text_ref"] = "agent_turns.content"
+        trimmed["text_bytes_deduped"] = len(text_value.encode("utf-8"))
+    return trimmed
 
 
 @dataclass(slots=True)
@@ -292,7 +337,11 @@ async def emit_with_envelope(
                 event_type=resolved_event_type,
                 persisted=True,
                 agent_id=trace_context.root_agent_id,
-                payload=envelope["data"],
+                # Trim known duplicated-large-text fields before the Postgres
+                # write only — `envelope["data"]` (full, untrimmed) is still
+                # what's returned below for the live in-request response
+                # stream. See TEXT_DEDUPED_TRACE_EVENT_TYPES.
+                payload=_persisted_trace_event_payload(resolved_event_type, envelope["data"]),
                 parent_id=envelope["parent_id"],
                 item_id=envelope["item_id"],
                 tool_call_id=envelope["tool_call_id"],
@@ -887,4 +936,27 @@ async def emit_trace_failed(
         },
         persisted=True,
         item_id=failed_item_id,
+    )
+
+
+async def emit_compaction_skipped(
+    trace_context: Optional[TraceContext],
+    reason: str,
+    provider: Optional[str],
+    model: Optional[str],
+) -> Optional[str]:
+    """compact_turns (compaction_service.py) produced no summary — no key/
+    provider available for the resolved model, or the call itself failed.
+    A no-op here used to be silent (docs/design/audit-context-anatomy.md
+    fix #3); this makes it a first-class, replayable trace event alongside
+    the WARNING log compact_turns itself now emits."""
+    return await emit(
+        trace_context,
+        "compaction.skipped",
+        {
+            "reason": str(reason or "").strip(),
+            "provider": str(provider or "").strip(),
+            "model": str(model or "").strip(),
+        },
+        persisted=True,
     )

@@ -12,6 +12,28 @@ class BoundedSchedulerServiceTests(unittest.IsolatedAsyncioTestCase):
 
         bounded_scheduler_service = importlib.import_module("server_modules.bounded_scheduler_service")
 
+    def test_max_wakes_per_task_per_day_default(self):
+        """STEP 6 numeric backstop (agent-identity plan): the named,
+        easily-tunable constant the per-task wake ceiling reads. Not yet
+        wired to the wake-on-mention trigger (a future wave), but the
+        constant + accessor + enforcement point (schedule_task_assigned_
+        wakeup) are live now."""
+        self.assertEqual(bounded_scheduler_service.DEFAULT_MAX_WAKES_PER_TASK_PER_DAY, 24)
+        self.assertEqual(
+            bounded_scheduler_service.max_wakes_per_task_per_day(),
+            bounded_scheduler_service.DEFAULT_MAX_WAKES_PER_TASK_PER_DAY,
+        )
+
+    @patch.dict("os.environ", {"EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY": "5"})
+    def test_max_wakes_per_task_per_day_respects_env_override(self):
+        self.assertEqual(bounded_scheduler_service.max_wakes_per_task_per_day(), 5)
+
+    @patch.dict("os.environ", {"EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY": "0"})
+    def test_max_wakes_per_task_per_day_floors_at_one(self):
+        """A misconfigured 0 (or negative) override can never mean
+        "unlimited" -- it floors at 1."""
+        self.assertEqual(bounded_scheduler_service.max_wakes_per_task_per_day(), 1)
+
     def test_resolve_scheduler_policy_uses_entitlement_defaults(self):
         policy = bounded_scheduler_service.resolve_scheduler_policy(
             workspace={"metadata": {"billing": {"plan": "free"}}},
