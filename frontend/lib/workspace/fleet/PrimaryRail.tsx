@@ -266,7 +266,13 @@ export function PrimaryRail({
         <div className="fleet-rail-header-top">
           <div className="fleet-rail-workspace">
             <div className="fleet-rail-brand-mark">{(workspaceName || "E").charAt(0).toUpperCase()}</div>
-            {!effectiveCollapsed && <span className="fleet-rail-workspace-name">{workspaceName}</span>}
+            {/* Truncates hard at the rail's 220px width (long real names —
+                "Legibility Verify Two's Workspace" — otherwise overflow into
+                the collapse toggle). A native title tooltip is the cheapest
+                fix that doesn't touch the rail's width contract: hover (or a
+                long-press on touch) reads the full name instead of losing it
+                to an ellipsis with no recovery route. */}
+            {!effectiveCollapsed && <span className="fleet-rail-workspace-name" title={workspaceName}>{workspaceName}</span>}
           </div>
           <button
             type="button"

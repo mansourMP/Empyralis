@@ -17,6 +17,89 @@ type McpKey = {
   created_at: string;
 };
 
+/** Workspace display name — PATCH /api/workspaces/{id} already accepted
+ *  `name` (routes_workspaces.py's update_workspace) with no UI anywhere to
+ *  reach it. Same fetch-on-mount + refresh() idiom as StopAllAgentsSection
+ *  below (useFleetWorkspace), so this section owns its own load state
+ *  independent of the rest of the page. */
+function WorkspaceNameSection({ workspaceId }: { workspaceId: string }) {
+  const { workspace, loading, refresh } = useFleetWorkspace(workspaceId);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Seed the input from the loaded workspace, but only once it actually
+  // changes — never stomp a name the owner is mid-typing on a background
+  // refresh (e.g. the Emergency Stop section's own refresh() firing).
+  useEffect(() => {
+    if (workspace?.name) setName(workspace.name);
+  }, [workspace?.name]);
+
+  const trimmed = name.trim();
+  const dirty = trimmed.length > 0 && trimmed !== workspace?.name;
+
+  async function handleSave() {
+    if (!trimmed) {
+      setError("Workspace name cannot be empty.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setSaved(false);
+    try {
+      const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ name: trimmed }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || `Could not rename workspace (HTTP ${res.status})`);
+      setSaved(true);
+      await refresh();
+      // The rail's own workspace-name source is a separate server-rendered
+      // fetch (loadAccountShellSession), not this hook — reload is the
+      // simplest way to guarantee the rail, breadcrumb root, and every other
+      // reader pick up the new name immediately instead of drifting stale
+      // until the next hard navigation.
+      window.location.reload();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not rename workspace.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="fleet-detail-section-title">Workspace name</div>
+      <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+        Shown in the rail, breadcrumbs, and anywhere else this workspace is referenced.
+      </p>
+      {error ? <div className="fleet-page-state-body" role="alert" style={{ color: "var(--offline-text)" }}>{error}</div> : null}
+      <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "center", flexWrap: "wrap", marginBottom: "var(--space-6)" }}>
+        <input
+          className="fleet-wizard-input"
+          value={name}
+          onChange={(e) => { setName(e.target.value); setSaved(false); }}
+          placeholder="Workspace name"
+          disabled={loading || saving}
+          style={{ flex: "1 1 260px" }}
+        />
+        <button
+          type="button"
+          className="fleet-btn fleet-btn--accent"
+          onClick={handleSave}
+          disabled={saving || loading || !dirty}
+        >
+          {saving ? "Saving…" : saved ? "Saved" : "Save"}
+        </button>
+      </div>
+    </>
+  );
+}
+
 /** Workspace-wide emergency stop — kill_switch_gate's workspace:{id} key.
  *  Blocks every agent's turns immediately (checked before any LLM call, see
  *  sage_agent_runtime_service._run_sage_action_loop_v3). A confirm step
@@ -196,6 +279,7 @@ export default function SettingsPage() {
   return (
     <main className="fleet-content">
       {/* No page-title header — the breadcrumb already says "Settings". */}
+      <WorkspaceNameSection workspaceId={workspaceId} />
       <StopAllAgentsSection workspaceId={workspaceId} />
 
       {/* Billing */}

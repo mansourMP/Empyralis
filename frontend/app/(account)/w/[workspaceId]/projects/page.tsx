@@ -276,13 +276,19 @@ export default function ProjectsPage() {
                         </span>
                       </span>
                     </span>
-                    <span className={`fleet-agent-cell-right fleet-col-agents-count${agentsCount > 0 ? "" : " fleet-cell-muted"}`}>{agentsCount}</span>
+                    {/* Cost this month is the one column that carries full
+                        emphasis (Linear discipline: one value per row, not
+                        five at equal weight) — Agents/Tokens/Last active/
+                        Status all dim to fleet-cell-secondary. A zero/empty
+                        value still drops further to fleet-cell-muted, same
+                        as before. */}
+                    <span className={`fleet-agent-cell-right fleet-col-agents-count fleet-cell-secondary${agentsCount > 0 ? "" : " fleet-cell-muted"}`}>{agentsCount}</span>
                     <span className={`fleet-agent-cell-right${cost > 0 ? "" : " fleet-cell-muted"}`}>{money(cost)}</span>
-                    <span className={`fleet-agent-cell-right fleet-col-tokens${tokens > 0 ? "" : " fleet-cell-muted"}`}>{formatNumber(tokens)}</span>
-                    <span className={`fleet-agent-cell-right fleet-col-last-active${lastActive ? "" : " fleet-cell-muted"}`}>
+                    <span className={`fleet-agent-cell-right fleet-col-tokens fleet-cell-secondary${tokens > 0 ? "" : " fleet-cell-muted"}`}>{formatNumber(tokens)}</span>
+                    <span className={`fleet-agent-cell-right fleet-col-last-active fleet-cell-secondary${lastActive ? "" : " fleet-cell-muted"}`}>
                       {lastActive ? timeAgo(lastActive) : "never"}
                     </span>
-                    <span className={`fleet-agent-cell-right${statusSummary ? "" : " fleet-cell-muted"}`}>
+                    <span className={`fleet-agent-cell-right fleet-cell-secondary${statusSummary ? "" : " fleet-cell-muted"}`}>
                       {statusSummary || "—"}
                     </span>
                   </Link>

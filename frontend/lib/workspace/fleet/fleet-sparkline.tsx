@@ -6,6 +6,8 @@
  * second competing number.
  */
 
+import type { ReactNode } from "react";
+
 export type UsageBucket = {
   bucket: string;
   events?: number | string;
@@ -144,6 +146,7 @@ export function UsageStat({
   unit = "",
   values,
   formattedTotal,
+  action,
 }: {
   label: string;
   total: number;
@@ -153,11 +156,19 @@ export function UsageStat({
    *  precision (e.g. cost's 4 decimals) — overrides `total`/`unit` display,
    *  `total` is still used to decide the muted/accent tone. */
   formattedTotal?: string;
+  /** Optional small control rendered next to the label — e.g. a Day/Week/
+   *  Month period toggle. Kept as a slot rather than a dedicated prop set so
+   *  this stays a display component; the caller owns the control's state and
+   *  its own data refetch. */
+  action?: ReactNode;
 }) {
   return (
     <div className="fleet-usage-stat">
       <div className="fleet-usage-stat-head">
-        <span className="fleet-usage-stat-label">{label}</span>
+        <span className="fleet-usage-stat-label-group">
+          <span className="fleet-usage-stat-label">{label}</span>
+          {action}
+        </span>
         <span className={`fleet-usage-stat-total${total > 0 ? "" : " is-muted"}`}>
           {formattedTotal ?? `${unit}${total}`}
         </span>
