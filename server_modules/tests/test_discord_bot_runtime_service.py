@@ -150,10 +150,12 @@ class DiscordBotRuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "bot_authored")
         route_message.assert_not_awaited()
 
-    async def test_guild_mention_of_someone_else_does_not_route(self):
-        """FIX: a guild message mentioning some OTHER user (not the bot) must
-        stay silent — mentions/message_type=="mention" alone used to be
-        sufficient to trigger, regardless of who was actually mentioned."""
+    async def test_guild_mention_of_someone_else_still_routes_by_default(self):
+        """MAN-117: a guild message mentioning some OTHER user (not the bot)
+        is just a plain, unaddressed group message now — it still routes by
+        default (see-and-decide, require_mention=False, mirroring the same
+        default WhatsApp/Telegram/local-bridge/cloud already use), with the
+        envelope honestly telling the model it wasn't addressed."""
         route_message = AsyncMock(return_value={"ok": True, "triggered": True, "run_id": "run-1"})
         service = self._service(rows=[], route_message=route_message)
 
@@ -176,6 +178,40 @@ class DiscordBotRuntimeServiceTests(unittest.IsolatedAsyncioTestCase):
                 "provider": "discord_bot",
                 "workspace_id": "workspace-1",
                 "metadata": {"bot_id": "999"},
+            },
+            credentials={"bot_token": "token", "channel_id": "123"},
+        )
+
+        self.assertTrue(result["triggered"])
+        route_message.assert_awaited_once()
+        envelope = route_message.await_args.kwargs.get("envelope")
+        self.assertIsNotNone(envelope)
+        self.assertFalse(envelope.addressed, "not addressed to US — the envelope must say so honestly")
+
+    async def test_guild_mention_of_someone_else_does_not_route_with_require_mention(self):
+        """The old mention-only gate remains available as an explicit
+        per-connector opt-in via metadata["require_mention"]."""
+        route_message = AsyncMock(return_value={"ok": True, "triggered": True, "run_id": "run-1"})
+        service = self._service(rows=[], route_message=route_message)
+
+        result = await service.handle_parsed_event(
+            {
+                "kind": "event",
+                "event_type": "message_create",
+                "message_type": "mention",
+                "channel_id": "123",
+                "guild_id": "456",
+                "message_id": "msg-2",
+                "user_id": "user-1",
+                "username": "Mansur",
+                "text": "<@555> can you help with this",
+                "mention_ids": ["555"],
+            },
+            connector_entry={
+                "id": "cred-discord",
+                "provider": "discord_bot",
+                "workspace_id": "workspace-1",
+                "metadata": {"bot_id": "999", "require_mention": True},
             },
             credentials={"bot_token": "token", "channel_id": "123"},
         )

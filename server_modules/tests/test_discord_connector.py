@@ -376,15 +376,32 @@ class DiscordConnectorTests(unittest.TestCase):
             data["referenced_message"] = referenced_message
         return discord_connector.parse_inbound_event({"t": "MESSAGE_CREATE", "d": data})
 
-    def test_guild_mention_of_non_bot_user_does_not_trigger(self):
-        """Mentioning some OTHER guild member (not the bot) must stay silent."""
+    def test_guild_mention_of_non_bot_user_still_triggers_by_default(self):
+        """MAN-117: mentioning some OTHER guild member (not the bot) is just
+        a plain group message from the agent's perspective now — it still
+        reaches the agent by default (see-and-decide, require_mention=False),
+        which decides for itself whether to reply via the [SILENT]
+        convention. It is NOT treated as addressed (was_mentioned=False),
+        so the envelope still tells the model honestly it wasn't addressed."""
         parsed = self._guild_mention_payload(mention_ids=["555"], text="<@555> can you take this")
         self.assertEqual(parsed["message_type"], "mention")
-        self.assertFalse(
+        self.assertTrue(
             discord_connector.should_trigger_agent_run(
                 parsed,
                 {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
                 metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_guild_mention_of_non_bot_user_does_not_trigger_with_require_mention(self):
+        """The old mention-only gate remains available as an explicit
+        per-connector opt-in via metadata["require_mention"]."""
+        parsed = self._guild_mention_payload(mention_ids=["555"], text="<@555> can you take this")
+        self.assertFalse(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={"bot_id": "999", "require_mention": True},
             )
         )
 
@@ -428,8 +445,26 @@ class DiscordConnectorTests(unittest.TestCase):
             )
         )
 
-    def test_guild_reply_to_someone_elses_message_does_not_trigger(self):
-        """A reply to a DIFFERENT member's message (not the bot's) stays silent."""
+    def test_guild_reply_to_someone_elses_message_still_triggers_by_default(self):
+        """MAN-117: a reply to a DIFFERENT member's message (not the bot's) is
+        still just a plain group message by default — reaches the agent,
+        which decides for itself (see-and-decide, require_mention=False)."""
+        parsed = self._guild_mention_payload(
+            mention_ids=[],
+            text="sounds good",
+            referenced_message={"author": {"id": "555"}},
+        )
+        self.assertTrue(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_guild_reply_to_someone_elses_message_does_not_trigger_with_require_mention(self):
+        """The old reply-gated behavior remains available via the explicit
+        require_mention=True per-connector opt-in."""
         parsed = self._guild_mention_payload(
             mention_ids=[],
             text="sounds good",
@@ -439,19 +474,35 @@ class DiscordConnectorTests(unittest.TestCase):
             discord_connector.should_trigger_agent_run(
                 parsed,
                 {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
-                metadata={"bot_id": "999"},
+                metadata={"bot_id": "999", "require_mention": True},
             )
         )
 
-    def test_guild_mention_fails_closed_when_bot_id_is_unresolvable(self):
-        """With no bot_id configured anywhere (metadata, credentials), a
-        mention must NOT trigger — unknown identity fails closed, not open."""
+    def test_guild_mention_open_by_default_even_when_bot_id_is_unresolvable(self):
+        """MAN-117: with no bot_id configured anywhere, was_mentioned can't be
+        computed (fails closed to False), but under the default open policy
+        (require_mention=False) that no longer blocks the message — it still
+        reaches the agent as an unaddressed group message."""
+        parsed = self._guild_mention_payload(mention_ids=["999"], text="<@999> hello")
+        self.assertTrue(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
+                metadata={},
+            )
+        )
+
+    def test_guild_mention_fails_closed_when_bot_id_is_unresolvable_and_require_mention_is_set(self):
+        """With require_mention=True explicitly configured, an unresolvable
+        bot id still fails closed — unknown identity never escalates to a
+        stricter default than a configured connector (mirrors personal_
+        channels_service's own unresolved-identity ruling)."""
         parsed = self._guild_mention_payload(mention_ids=["999"], text="<@999> hello")
         self.assertFalse(
             discord_connector.should_trigger_agent_run(
                 parsed,
                 {"bot_token": "t", "channel_id": "123", "guild_id": "456"},
-                metadata={},
+                metadata={"require_mention": True},
             )
         )
 
@@ -508,18 +559,33 @@ class DiscordConnectorTests(unittest.TestCase):
             data["referenced_message"] = referenced_message
         return discord_connector.parse_inbound_event({"t": "MESSAGE_CREATE", "d": data})
 
-    def test_group_dm_message_not_addressing_bot_stays_silent(self):
-        """A Group DM message that neither mentions nor replies to the bot
-        must NOT trigger — this is the exact bug: zero addressing check
-        meant every Group DM message triggered a reply."""
+    def test_group_dm_message_not_addressing_bot_still_triggers_by_default(self):
+        """MAN-117: a Group DM is a group (multi-party), same as a guild
+        channel — a message that neither mentions nor replies to the bot
+        still reaches the agent by default (see-and-decide), which decides
+        for itself whether to reply. Not "every Group DM message unaddressed
+        gets a reply" — that restraint lives downstream in the model's own
+        [SILENT] judgment, driven by the envelope's honest addressed=False."""
         parsed = self._group_dm_payload(text="what time works for everyone?")
         self.assertIsNone(parsed["guild_id"])
         self.assertNotEqual(parsed["message_type"], "direct_message", "a Group DM must not collapse into the unconditional 1:1 DM path")
-        self.assertFalse(
+        self.assertTrue(
             discord_connector.should_trigger_agent_run(
                 parsed,
                 {"bot_token": "t"},
                 metadata={"bot_id": "999"},
+            )
+        )
+
+    def test_group_dm_message_not_addressing_bot_stays_silent_with_require_mention(self):
+        """The old Group-DM mention/reply gate remains available via the
+        explicit require_mention=True per-connector opt-in."""
+        parsed = self._group_dm_payload(text="what time works for everyone?")
+        self.assertFalse(
+            discord_connector.should_trigger_agent_run(
+                parsed,
+                {"bot_token": "t"},
+                metadata={"bot_id": "999", "require_mention": True},
             )
         )
 

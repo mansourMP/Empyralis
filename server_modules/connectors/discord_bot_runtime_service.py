@@ -11,6 +11,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 from server_modules import runtime_common
 from server_modules.connectors.discord_connector import (
     DiscordGatewayListener,
+    _message_addressed_to_bot,
+    _resolve_discord_bot_id,
     build_run_goal_from_event,
     event_matches_connector,
     should_trigger_agent_run,
@@ -591,10 +593,23 @@ class DiscordBotRuntimeService:
         # multi-party, so surface is always GROUP. No owner-linkage check
         # runs on this path at all (unlike the 1:1 DM /pair path), so
         # is_owner is always None (unverified — fails closed on every
-        # owner-command gate). addressed reflects the real signal
-        # should_trigger_agent_run already computed: a true @mention of the
-        # bot vs. a plain message that only reached here via a configured
-        # trigger_pattern/trigger_on_all_messages.
+        # owner-command gate).
+        #
+        # FIX (MAN-117): `addressed` used to be `message_type == "mention"`,
+        # which — same latent bug should_trigger_agent_run itself already
+        # guards against for its OWN gating decision — is true for ANY
+        # mention/reply in the message, not necessarily one aimed at THIS
+        # bot. That was harmless while should_trigger_agent_run hard-dropped
+        # every message it wasn't addressed by (a mis-addressed "mention"
+        # could never reach this envelope build at all), but now that an
+        # unaddressed group message legitimately reaches here (see-and-
+        # decide, require_mention=False default), `addressed` must
+        # independently recompute the HONEST "was this addressed to us" fact
+        # via the same _resolve_discord_bot_id/_message_addressed_to_bot
+        # pair should_trigger_agent_run uses — never just re-read
+        # message_type — so the model is never told "you were addressed
+        # directly" for a message that mentioned or replied to somebody else.
+        _addressed_bot_id = _resolve_discord_bot_id(credentials, metadata)
         _discord_envelope = InboundEnvelope(
             platform="discord_guild",
             surface=SurfaceKind.GROUP,
@@ -604,7 +619,10 @@ class DiscordBotRuntimeService:
                 is_owner=None,
             ),
             chat=EnvelopeChat(id=str(parsed.get("channel_id") or "").strip()),
-            addressed=str(parsed.get("message_type") or "").strip().lower() == "mention",
+            addressed=(
+                str(parsed.get("message_type") or "").strip().lower() == "mention"
+                and _message_addressed_to_bot(parsed, _addressed_bot_id)
+            ),
         )
 
         trace_id = str(parsed.get("message_id") or parsed.get("interaction_id") or uuid.uuid4().hex).strip()

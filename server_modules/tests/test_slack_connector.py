@@ -178,7 +178,12 @@ class SlackConnectorTests(unittest.IsolatedAsyncioTestCase):
                 metadata={"slack_channel_id": "C123"},
             )
         )
-        self.assertFalse(
+        # MAN-117: a plain, unaddressed channel message now triggers by
+        # default (see-and-decide — same require_mention=False default as
+        # WhatsApp/Telegram/local-bridge/cloud, via mention_gating_service).
+        # This is a deliberate default flip, not a regression — see the
+        # require_mention=True case right below for the explicit opt-out.
+        self.assertTrue(
             slack_connector.should_trigger_agent_run(
                 {**parsed, "message_type": "message", "channel_type": "channel"},
                 {"team_id": "T123", "bot_user_id": "BOT"},
@@ -197,6 +202,54 @@ class SlackConnectorTests(unittest.IsolatedAsyncioTestCase):
                 {**parsed, "user_id": "BOT"},
                 {"team_id": "T123", "bot_user_id": "BOT"},
                 metadata={"slack_channel_id": "C123"},
+            )
+        )
+
+    def test_require_mention_true_restores_the_old_mention_only_gate(self):
+        """An operator can still explicitly opt a Slack connector back into
+        mention-gated-by-default via metadata["require_mention"] — the SAME
+        per-connector override personal_channels_service's group_policy
+        exposes, now threaded through mention_gating_service for Slack too."""
+        parsed = slack_connector.parse_inbound_event(
+            {
+                "type": "event_callback",
+                "team_id": "T123",
+                "event_id": "Ev-rm-1",
+                "event": {
+                    "type": "message",
+                    "channel": "C123",
+                    "user": "U123",
+                    "text": "just chatting, no mention here",
+                    "ts": "1712000005.000100",
+                },
+            }
+        )
+        self.assertFalse(
+            slack_connector.should_trigger_agent_run(
+                parsed,
+                {"team_id": "T123", "bot_user_id": "BOT"},
+                metadata={"slack_channel_id": "C123", "require_mention": True},
+            )
+        )
+        mention_parsed = slack_connector.parse_inbound_event(
+            {
+                "type": "event_callback",
+                "team_id": "T123",
+                "event_id": "Ev-rm-2",
+                "event": {
+                    "type": "app_mention",
+                    "channel": "C123",
+                    "user": "U123",
+                    "text": "<@BOT> hello",
+                    "ts": "1712000006.000100",
+                },
+            }
+        )
+        self.assertTrue(
+            slack_connector.should_trigger_agent_run(
+                mention_parsed,
+                {"team_id": "T123", "bot_user_id": "BOT"},
+                metadata={"slack_channel_id": "C123", "require_mention": True},
             )
         )
 

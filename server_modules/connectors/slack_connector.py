@@ -13,6 +13,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
+from server_modules import mention_gating_service
 
 SlackHttpRequest = Callable[..., Dict[str, Any]]
 
@@ -752,11 +753,36 @@ def should_trigger_agent_run(
     subtype = str(parsed.get("subtype") or "").strip()
     if subtype in {"bot_message", "message_changed", "message_deleted"}:
         return False
-    if str(parsed.get("message_type") or "").strip() == "mention":
-        return True
     metadata = metadata if isinstance(metadata, dict) else {}
     channel_type = str(parsed.get("channel_type") or "").strip()
-    return bool(metadata.get("trigger_on_all_messages")) or channel_type == "im"
+    # A DM is never a group — always trigger, matching every other channel's
+    # dm_policy-is-separate-from-group_policy split (personal_channels_
+    # service._enforce_group_policy's own is_group short-circuit).
+    if channel_type == "im":
+        return True
+    # trigger_on_all_messages remains a valid explicit override (unaffected
+    # by the mention_gating_service default below — it always triggers).
+    if bool(metadata.get("trigger_on_all_messages")):
+        return True
+    # FIX (MAN-117): this used to hard-gate every non-mention channel message
+    # (return False unless trigger_on_all_messages was explicitly set) — the
+    # opposite of the locked "see-and-decide by default" policy every other
+    # channel (WhatsApp/Telegram/local-bridge/cloud) already follows via
+    # mention_gating_service.resolve_inbound_mention_decision with
+    # require_mention=False. Slack now goes through the SAME shared resolver
+    # with the SAME default: an unaddressed channel message is no longer
+    # dropped here — it reaches the agent, which decides for itself whether
+    # to reply (see inbound_envelope.render_envelope_header's [SILENT]
+    # instruction, driven by the envelope's `addressed` field this function's
+    # caller — connectors_actions.slack_events_webhook — already threads
+    # through). require_mention=True remains an explicit per-connector
+    # opt-in (metadata["require_mention"]) back to the old mention-only gate.
+    was_mentioned = str(parsed.get("message_type") or "").strip() == "mention"
+    decision = mention_gating_service.resolve_inbound_mention_decision(
+        facts={"can_detect_mention": True, "was_mentioned": was_mentioned},
+        policy={"is_group": True, "require_mention": bool(metadata.get("require_mention"))},
+    )
+    return not decision["should_skip"]
 
 
 def build_run_goal_from_event(parsed: Dict[str, Any]) -> str:

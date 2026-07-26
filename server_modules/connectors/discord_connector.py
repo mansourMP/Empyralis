@@ -85,6 +85,7 @@ def _env_first(*names: str) -> str:
 
 from server_modules.channel_sdk import _http_json_request
 from server_modules.inbound_envelope import InboundEnvelope, EnvelopeSender, SurfaceKind
+from server_modules import mention_gating_service
 
 
 def _multipart_request(
@@ -924,16 +925,36 @@ def should_trigger_agent_run(
         except re.error:
             return trigger_pattern.lower() in text.lower()
     message_type = str(parsed.get("message_type") or "").strip().lower()
-    if message_type == "mention":
-        # FIX: a guild message (or Group DM) can @mention or reply to any
-        # number of unrelated users — parse_inbound_event setting
-        # message_type="mention" only means SOMEONE was mentioned/replied
-        # to, not that it was us. Only trigger when the bot's own id is
-        # actually in the mix; an unresolved bot id (nothing configured
-        # anywhere) fails closed via _message_addressed_to_bot.
-        bot_id = _resolve_discord_bot_id(credentials, metadata_value)
-        return _message_addressed_to_bot(parsed, bot_id)
-    return message_type == "direct_message"
+    if message_type == "direct_message":
+        # A true 1:1 DM is never a group — always trigger, matching every
+        # other channel's dm_policy-is-separate-from-group_policy split.
+        return True
+    # FIX (MAN-117): a guild message (or Group DM) can @mention or reply to
+    # any number of unrelated users — parse_inbound_event setting
+    # message_type="mention" only means SOMEONE was mentioned/replied to,
+    # not that it was us. was_mentioned below is only True when the bot's
+    # own id is actually in the mix (_message_addressed_to_bot fails closed
+    # to False on an unresolved bot id), which feeds the SAME shared
+    # mention_gating_service.resolve_inbound_mention_decision resolver every
+    # other channel (WhatsApp/Telegram/local-bridge/cloud, and now Slack)
+    # already uses, with the same require_mention=False (see-and-decide)
+    # default this policy is locked to. Before this fix, a plain group
+    # message (message_type=="message", no mention/reply) was hard-dropped
+    # here unconditionally — the opposite default. Now it reaches the agent,
+    # which decides for itself whether to reply (see
+    # inbound_envelope.render_envelope_header's [SILENT] instruction, driven
+    # by the envelope's `addressed` field this function's callers already
+    # thread through — discord_bot_runtime_service.handle_parsed_event's
+    # _discord_envelope and connectors_actions.discord_webhook's
+    # _dm_envelope). require_mention=True remains an explicit per-connector
+    # opt-in (metadata["require_mention"]) back to the old mention-only gate.
+    bot_id = _resolve_discord_bot_id(credentials, metadata_value)
+    was_mentioned = message_type == "mention" and _message_addressed_to_bot(parsed, bot_id)
+    decision = mention_gating_service.resolve_inbound_mention_decision(
+        facts={"can_detect_mention": True, "was_mentioned": was_mentioned},
+        policy={"is_group": True, "require_mention": bool(metadata_value.get("require_mention"))},
+    )
+    return not decision["should_skip"]
 
 
 def build_run_goal_from_event(parsed: Dict[str, Any]) -> str:
