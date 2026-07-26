@@ -30,6 +30,7 @@ import { ProjectIcon } from "./fleet-project-identity";
 import { FleetHelpButton } from "./FleetHelpButton";
 import { SageLauncher } from "./SageLauncher";
 import { CreditBalanceChip } from "./CreditBalanceChip";
+import { SystemHealthButton } from "./SystemHealthButton";
 
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
@@ -409,6 +410,7 @@ export function PrimaryRail({
         >
           {theme === "dark" ? <Sun size={CONTROL_ICON} strokeWidth={1.75} /> : <Moon size={CONTROL_ICON} strokeWidth={1.75} />}
         </button>
+        <SystemHealthButton workspaceId={workspaceId} />
         <FleetHelpButton asControl />
       </div>
 

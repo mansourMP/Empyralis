@@ -983,6 +983,99 @@ a.fleet-breadcrumb:hover {
   white-space: nowrap;
 }
 
+/* ── System health rail control (MAN-107) ── */
+/* Same icon-button + anchored-popover pattern as .fleet-help-float above,
+   but lives directly in .fleet-rail-controls (not .fleet-rail-utility) since
+   it's a control-mode-only surface, not also a full nav row — no
+   `asControl`-less variant exists for this one. */
+
+.fleet-health-float {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  z-index: 20;
+}
+
+.fleet-health-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  width: 300px;
+  max-height: min(420px, calc(100vh - 120px));
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
+  padding: 10px;
+  animation: fleet-fade 150ms ease-out;
+}
+
+/* Collapsed rail: anchor from the left edge instead of matching the
+   icon-only button's own (near-zero) width, same fix the account popover
+   already applies for the same collapsed state. */
+.fleet-rail--collapsed .fleet-health-popover {
+  left: 8px;
+}
+
+.fleet-health-popover-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  padding: 2px 4px 8px;
+}
+
+.fleet-health-section-label {
+  font-size: 11px;
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: 8px 4px 4px;
+}
+
+.fleet-health-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fleet-health-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.fleet-health-row-label {
+  flex-shrink: 0;
+  color: var(--text-primary);
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-health-row-meta {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-health-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  padding: 4px;
+  margin: 4px 0 0;
+}
+
 /* ── Ask AI rail row (formerly a floating corner console, sat left of Help) ── */
 /* Trigger button composes .fleet-rail-item too — see SageLauncher.tsx. */
 
@@ -1815,6 +1908,7 @@ a.fleet-breadcrumb:hover {
   animation: fleet-status-pulse 2s ease-in-out infinite;
 }
 .fleet-sdot--ready { background: var(--ready-dot); }
+.fleet-sdot--degraded { background: var(--degraded-dot); }
 .fleet-sdot--offline {
   background: transparent;
   border: 1.5px solid var(--offline-dot);
@@ -6670,7 +6764,8 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
      matter which of those dismissal paths fired, instead of chasing each
      one to also close the panel's React state. */
   .fleet-rail:not(.fleet-rail--mobile-open) .fleet-sage-console,
-  .fleet-rail:not(.fleet-rail--mobile-open) .fleet-help-popover {
+  .fleet-rail:not(.fleet-rail--mobile-open) .fleet-help-popover,
+  .fleet-rail:not(.fleet-rail--mobile-open) .fleet-health-popover {
     display: none;
   }
 
