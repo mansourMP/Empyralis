@@ -271,7 +271,10 @@ export default function ProjectDetailPage() {
 
           {view === "tasks" ? (
             tasksLoading && tasks.length === 0 ? (
-              <FleetListSkeleton rows={4} />
+              // rowHeight matches .fleet-task-row's real min-height (52px) —
+              // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton
+              // row snaps taller the moment TasksList swaps in.
+              <FleetListSkeleton rows={4} rowHeight={52} />
             ) : tasks.length === 0 ? (
               <div className="fleet-empty">
                 <div className="fleet-empty-icon">
@@ -291,7 +294,10 @@ export default function ProjectDetailPage() {
               <TasksList tasks={tasks} agents={inProject} onAssign={handleAssign} />
             )
           ) : loading && inProject.length === 0 ? (
-            <FleetListSkeleton rows={4} />
+            // rowHeight matches .fleet-agent-row's real min-height (52px) —
+            // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton row
+            // snaps taller the moment AgentsList swaps in.
+            <FleetListSkeleton rows={4} rowHeight={52} />
           ) : inProject.length === 0 ? (
             <FirstAgentEmpty
               title="No agents in this project"

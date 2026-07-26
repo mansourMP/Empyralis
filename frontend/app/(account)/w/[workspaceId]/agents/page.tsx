@@ -212,7 +212,10 @@ export default function AgentsPage() {
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
           {loading && agents.length === 0 ? (
-            <FleetListSkeleton rows={6} />
+            // rowHeight matches .fleet-agent-row's real min-height (52px) —
+            // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton row
+            // snaps taller the moment AgentsList swaps in.
+            <FleetListSkeleton rows={6} rowHeight={52} />
           ) : error && agents.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
           ) : agents.length === 0 ? (

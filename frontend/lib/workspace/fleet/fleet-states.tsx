@@ -8,11 +8,32 @@ import { AlertCircle } from "lucide-react";
  * human-readable (never raw JSON or a silent empty state).
  */
 
-export function FleetListSkeleton({ rows = 5 }: { rows?: number }) {
+export function FleetListSkeleton({
+  rows = 5,
+  rowHeight,
+}: {
+  rows?: number;
+  /** Match the real content's row height (e.g. AgentsList/TasksList's
+   *  .fleet-agent-row / .fleet-task-row, both `min-height: 52px`) so this
+   *  placeholder doesn't reflow the page when the fetch resolves and the
+   *  real list swaps in. Left unset, rows fall back to their old ~37px
+   *  (12px bar + 12px top/bottom padding) — correct for the plain
+   *  `.fleet-list-row` callers (Inbox, Billing, the Projects list) this
+   *  component also serves. MAN-113: the un-set default caused a visible
+   *  "renders one way, then snaps to another" jump on the project detail
+   *  page — its Agents/Tasks views render into 52px grid rows, ~15px taller
+   *  than this skeleton's un-pinned rows, so the whole list resized the
+   *  moment the loading skeleton was replaced by real content. */
+  rowHeight?: number;
+}) {
   return (
     <div className="fleet-list" aria-busy="true" aria-label="Loading">
       {Array.from({ length: rows }).map((_, i) => (
-        <div key={i} className="fleet-list-row">
+        <div
+          key={i}
+          className="fleet-list-row"
+          style={rowHeight ? { minHeight: rowHeight, boxSizing: "border-box" } : undefined}
+        >
           <div className="fleet-skeleton-bar" style={{ width: `${38 + (i % 3) * 16}%`, height: 12 }} />
           <div className="fleet-skeleton-bar" style={{ width: 48, height: 12, marginLeft: "auto" }} />
         </div>
