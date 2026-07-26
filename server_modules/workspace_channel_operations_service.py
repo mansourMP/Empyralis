@@ -199,7 +199,7 @@ def _build_channel_family_modes(
         "configured": bool(registration) and personal_status not in {"gateway_required", "unknown"},
         "current_status": personal_status,
         "description": f"Use your real {family.title()} account through the paired local gateway.",
-        "best_for": "Sage acting as you from your own account and device-resident session.",
+        "best_for": "Your agent acting as you from your own account and device-resident session.",
         "gateway_id": gateway_id,
         "linked_identity": _personal_linked_identity(family, personal_state),
         "setup_hint": _personal_mode_hint(family, registration, personal_state),

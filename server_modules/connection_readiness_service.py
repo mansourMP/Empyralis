@@ -40,17 +40,17 @@ _EXTERNAL_ACCOUNT_CONNECTION_IDS = {
 
 _CERTIFICATION_REQUIREMENTS: Dict[str, list[str]] = {
     "signal_personal": [
-        "Select an online Sage Agent Computer.",
+        "Select an online Agent Computer.",
         "Install and configure the Signal local bridge on that Agent Computer.",
         "Pass bridge health, inbound event, outbound send, restart, and replay checks.",
     ],
     "imessage_personal": [
-        "Select an online Mac Sage Agent Computer.",
+        "Select an online Mac Agent Computer.",
         "Configure the BlueBubbles or approved macOS Messages bridge on that Mac.",
         "Pass bridge health, inbound event, outbound send, restart, and replay checks.",
     ],
     "wechat_personal": [
-        "Select an online Sage Agent Computer.",
+        "Select an online Agent Computer.",
         "Configure a WeChat local bridge URL and token on that Agent Computer.",
         "Pass bridge health, inbound event, outbound send, restart, and replay checks.",
     ],

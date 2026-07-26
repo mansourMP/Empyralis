@@ -66,7 +66,7 @@ async def start_pairing(
         minimum_role="owner",
     )
     if not hosted.is_configured():
-        raise HTTPException(status_code=503, detail="Sage Telegram hosted bot is not configured")
+        raise HTTPException(status_code=503, detail="Telegram hosted bot is not configured")
 
     # Warm the bot-username cache so build_deep_link can return a real URL
     # even when EMPYRALIS_TELEGRAM_HOSTED_BOT_USERNAME is not set. The token

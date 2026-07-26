@@ -43,7 +43,7 @@ MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
         },
         "indexing_retrieval": "Context markdown is available for direct read and summary synthesis; it is not broadly searchable by specialists.",
         "privacy_level": "personal_profile",
-        "readers": "Sage by default. Specialists only via explicit shared excerpts or install-specific profile notes.",
+        "readers": "The operator agent by default. Specialists only via explicit shared excerpts or install-specific profile notes.",
     },
     "episodic_memory": {
         "ownership": "Recent conversations, transcript summaries, and short-horizon behavioral history.",
@@ -57,7 +57,7 @@ MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
         },
         "indexing_retrieval": "Recent-first transcript and daily-log summaries with bounded excerpts.",
         "privacy_level": "behavioral_history",
-        "readers": "Sage by default. Specialists can read only their own install-scoped episodic memory.",
+        "readers": "The operator agent by default. Specialists can read only their own install-scoped episodic memory.",
     },
     "app_event_history": {
         "ownership": "Structured mobile/app/module event publishers.",
@@ -71,7 +71,7 @@ MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
         },
         "indexing_retrieval": "Structured filters by type, source app, priority, install scope, and seen state.",
         "privacy_level": "structured_event_feed",
-        "readers": "Sage by default. Specialists only when the event scope explicitly includes them.",
+        "readers": "The operator agent by default. Specialists only when the event scope explicitly includes them.",
     },
     "shared_operational_board": {
         "ownership": "Workspace-visible operational instructions, SOPs, handoffs, and approved artifact references.",
@@ -85,7 +85,7 @@ MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
         },
         "indexing_retrieval": "Board entries are listed by revision history and published operational state.",
         "privacy_level": "workspace_shared_operational",
-        "readers": "Sage and permitted specialists read published entries. Proposals require elevated board permissions to inspect.",
+        "readers": "The operator agent and permitted specialists read published entries. Proposals require elevated board permissions to inspect.",
     },
     "notes_documents_retrieval": {
         "ownership": "Workspace notes, curated memory, uploaded knowledge, and retrieval snippets.",
@@ -99,7 +99,7 @@ MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
         },
         "indexing_retrieval": "File listing plus bounded text snippet retrieval for notebook and knowledge sources.",
         "privacy_level": "document_knowledge",
-        "readers": "Sage by default. Specialists get only their install namespace or explicitly shared document context.",
+        "readers": "The operator agent by default. Specialists get only their install namespace or explicitly shared document context.",
     },
     "specialist_scoped_memory": {
         "ownership": "Per-install specialist namespace.",
@@ -113,7 +113,7 @@ MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
         },
         "indexing_retrieval": "Install-scoped snapshot, recent log summaries, and document search restricted to the install namespace.",
         "privacy_level": "specialist_private",
-        "readers": "The owning specialist install and Sage when explicitly brokered. Other specialists are denied by default.",
+        "readers": "The owning specialist install and the operator agent when explicitly brokered. Other specialists are denied by default.",
     },
     "local_private_memory": {
         "ownership": "Device-local state and private workspace memory that should not leave the host by default.",
@@ -127,7 +127,7 @@ MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
         },
         "indexing_retrieval": "Local-only retrieval. Accessible through the local runtime, not through broad cloud sync.",
         "privacy_level": "local_private",
-        "readers": "Sage through an attached local runtime only. Specialists do not inherit this layer by default.",
+        "readers": "The operator agent through an attached local runtime only. Specialists do not inherit this layer by default.",
     },
     "cloud_synced_memory": {
         "ownership": "Cloud-safe structured summaries and explicitly synced feeds.",
@@ -141,6 +141,6 @@ MEMORY_LAYER_SPECS: dict[str, dict[str, Any]] = {
         },
         "indexing_retrieval": "Structured metadata and summary retrieval on synced payloads only.",
         "privacy_level": "cloud_safe_structured",
-        "readers": "Sage by default. Specialists only when the synced memory item is explicitly scoped to them.",
+        "readers": "The operator agent by default. Specialists only when the synced memory item is explicitly scoped to them.",
     },
 }

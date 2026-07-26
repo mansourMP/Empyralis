@@ -1265,9 +1265,9 @@ def _permission_summary_from_contract(contract: Dict[str, Any]) -> List[str]:
     else:
         rows.append("Does not save app data by default.")
     if mini_app_host_service.APP_PERMISSION_BRIDGE_SAGE_REQUEST in permissions:
-        rows.append("Can ask Sage for approved help.")
+        rows.append("Can ask the agent for approved help.")
     else:
-        rows.append("No Sage bridge by default.")
+        rows.append("No agent bridge by default.")
     runtime_access = str(contract.get("runtime_access") or "none").strip().lower()
     rows.append("No computer or device access." if runtime_access == "none" else "Uses approved runtime access.")
     return rows
@@ -2094,7 +2094,7 @@ def build_mini_apps_context_block(
         return ""
     sections = [
         "Mini App Summaries\n"
-        "These are compact app-level summaries for Sage. They are not complete raw histories. "
+        "These are compact app-level summaries for the agent. They are not complete raw histories. "
         "Use mini-app record retrieval when deeper detail is needed."
     ]
     for item in items[:max_apps]:

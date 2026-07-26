@@ -306,7 +306,7 @@ def direct_tool_step_payload(
         elif normalized_action == "create_entry":
             label = "Saving service entry"
         else:
-            label = "Updating Sage service"
+            label = "Updating service"
         detail = detail or service_label
     elif normalized_connector == "fleet":
         kind = "fleet"
@@ -916,7 +916,7 @@ def execute_single_direct_tool_call(
                 pass  # escalation audit is best-effort; the denial below is authoritative
             raise RuntimeError(
                 f"Tool '{tool_name}' is not enabled for this specialist agent. "
-                "Escalate to the operator (Sage) instead of calling it."
+                "Escalate to the operator agent instead of calling it."
             )
     governance_metadata = _direct_tool_governance_metadata(connector_id, action_id, argument_payload)
     audit_metadata = {

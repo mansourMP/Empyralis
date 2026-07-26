@@ -23,7 +23,7 @@ _APPLE_REVIEW_REQUIREMENTS: tuple[Dict[str, str], ...] = (
     {
         "id": "ai_disclosure",
         "label": "AI disclosure",
-        "description": "The channel must clearly tell users they are chatting with Sage, an AI assistant.",
+        "description": "The channel must clearly tell users they are chatting with an AI assistant.",
     },
     {
         "id": "human_handoff",

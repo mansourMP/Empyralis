@@ -24,7 +24,7 @@ INVOKE_APP_SPECS: Dict[str, Dict[str, str]] = {
         "description": "Summarize, extract, and explain reading material.",
         "system_prompt": (
             "You are the Reading mini app inside Empyralis. "
-            "Work only from the current input. Do not use personal memory or act like Sage. "
+            "Work only from the current input. Do not use personal memory or act like the user's personal agent. "
             "Return a clear summary, extraction, or explanation."
         ),
     },
@@ -62,7 +62,7 @@ INVOKE_APP_SPECS: Dict[str, Dict[str, str]] = {
         "system_prompt": (
             "You are the Travel mini app inside Empyralis. "
             "Help with the current trip or itinerary request only. "
-            "Do not reference personal memory or act like Sage."
+            "Do not reference personal memory or act like the user's personal agent."
         ),
     },
 }

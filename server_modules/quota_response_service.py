@@ -26,11 +26,11 @@ from server_modules.quota_policy_service import QuotaDecision
 _HTTP_DETAIL_BY_REASON = {
     "auth_login_rate_limited": "Too many attempts right now. Please wait a moment and try again.",
     "auth_public_rate_limited": "Too many requests right now. Please wait a moment and try again.",
-    "authenticated_api_rate_limited": "Sage is receiving too many requests right now. Please try again shortly.",
-    "service_api_rate_limited": "Sage is receiving too many requests right now. Please try again shortly.",
+    "authenticated_api_rate_limited": "Too many requests right now. Please try again shortly.",
+    "service_api_rate_limited": "Too many requests right now. Please try again shortly.",
     "control_plane_rate_limited": "Setup services are busy right now. Please try again in a moment.",
     "auth_csrf_rate_limited": "Too many invalid security token attempts. Please wait a moment and try again.",
-    "model_invocation_rate_limited": "Sage is receiving too many generation requests right now. Please try again shortly.",
+    "model_invocation_rate_limited": "Too many generation requests right now. Please try again shortly.",
     "mini_app_bridge_rate_limited": "Mini-app bridge traffic is currently limited. Please retry in a moment.",
     "mini_app_invoke_rate_limited": "Mini-app invoke traffic is currently limited. Please retry in a moment.",
 }
@@ -63,7 +63,7 @@ def _channel_failure_class_for_reason(reason: Optional[str]) -> str:
 def http_detail_for_reason(reason: Optional[str]) -> str:
     return _HTTP_DETAIL_BY_REASON.get(
         str(reason or "").strip(),
-        "Sage is temporarily at capacity. Please try again in a moment.",
+        "The service is temporarily at capacity. Please try again in a moment.",
     )
 
 

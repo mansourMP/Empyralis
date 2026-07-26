@@ -242,8 +242,8 @@ class WorkspaceContextMemoryAdapterTests(unittest.TestCase):
         rendered = "\n\n".join(payload["contextual_blocks"])
         self.assertIn("Recent Daily Logs", rendered)
         self.assertIn("Runtime Memory Facts", rendered)
-        self.assertIn("Sage Memory", rendered)
-        self.assertIn("Sage Services", rendered)
+        self.assertIn("Agent Memory", rendered)
+        self.assertIn("Agent Services", rendered)
         self.assertIn("Mini App Summaries", rendered)
         self.assertEqual(payload["diagnostics"]["memory_context_included"], 1)
 

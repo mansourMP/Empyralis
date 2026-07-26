@@ -321,7 +321,7 @@ def load_workspace_context_payload(
         except Exception:
             memory_block = ""
         if memory_block:
-            _append_external_safe_section(stable_sections, "Sage Memory", memory_block)
+            _append_external_safe_section(stable_sections, "Agent Memory", memory_block)
         try:
             from server_modules import sage_services_service
 
@@ -331,7 +331,7 @@ def load_workspace_context_payload(
         except Exception:
             services_memory_block = ""
         if services_memory_block:
-            _append_external_safe_section(stable_sections, "Sage Services", services_memory_block)
+            _append_external_safe_section(stable_sections, "Agent Services", services_memory_block)
         try:
             from server_modules import mini_apps_service
 

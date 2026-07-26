@@ -46,7 +46,7 @@ _RECIPE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
                 "tool": "google_workspace__draft_email",
                 "connector": "google_workspace",
                 "action": "draft_email",
-                "prompt": "Approve Sage to draft email responses from this triage.",
+                "prompt": "Approve this agent to draft email responses from this triage.",
             }
         ],
     },
@@ -72,7 +72,7 @@ _RECIPE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
                 "tool": "google_workspace__create_calendar_event",
                 "connector": "google_workspace",
                 "action": "create_calendar_event",
-                "prompt": "Approve Sage before it creates or changes a calendar event.",
+                "prompt": "Approve this agent before it creates or changes a calendar event.",
             }
         ],
     },
@@ -278,7 +278,7 @@ def _approval_payloads(
                 continue
             approvals.append(
                 {
-                    "prompt": _coerce_text(action.get("prompt")) or f"Approve {connector}.{action_id} before Sage continues.",
+                    "prompt": _coerce_text(action.get("prompt")) or f"Approve {connector}.{action_id} before this agent continues.",
                     "labels": [f"{connector}.{action_id}".strip(".")],
                     "capabilities": [connector] if connector else [],
                     "actions": [action_id] if action_id else [],
@@ -302,7 +302,7 @@ def _approval_payloads(
     if _needs_schedule_approval(message):
         approvals.append(
             {
-                "prompt": f"Approve scheduling the {recipe.get('title', 'Sage')} recipe.",
+                "prompt": f"Approve scheduling the {recipe.get('title', 'Daily operator')} recipe.",
                 "labels": ["sage_recipe.schedule"],
                 "capabilities": ["sage_recipe"],
                 "actions": ["schedule_recipe"],
@@ -361,7 +361,7 @@ def run_daily_operator_recipe(
             **dict(route_decision or {}),
             "mode": "connector_api",
             "user_label": "Connected Assistant",
-            "reason": "This Sage recipe needs connected Google Workspace app actions before it can run.",
+            "reason": "This recipe needs connected Google Workspace app actions before it can run.",
             "required_connections": required_connections,
             "approval_required": False,
         }
@@ -503,7 +503,7 @@ def run_daily_operator_recipe(
         for output in outputs[:3]:
             message_lines.append(f"- {_summarize_output(output, max_chars=900)}")
     if approvals:
-        message_lines.append("Approval is required before Sage sends, changes, or schedules anything.")
+        message_lines.append("Approval is required before the agent sends, changes, or schedules anything.")
     if blocked_tools and not approvals:
         message_lines.append("Some requested app actions could not run; see blocked tools for the operational reason.")
 
@@ -511,7 +511,7 @@ def run_daily_operator_recipe(
         **dict(route_decision or {}),
         "mode": "connector_api",
         "user_label": "Connected Assistant",
-        "reason": "Sage matched this request to a Daily Operator recipe.",
+        "reason": "The agent matched this request to a Daily Operator recipe.",
         "required_connections": sorted(recipe.get("required_tools", {}).keys()),
         "approval_required": bool(approvals),
     }

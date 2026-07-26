@@ -291,12 +291,12 @@ class SageDoctorService:
         spec = _spec_by_id("model_provider_credentials")
         try:
             provider, _credentials = sage_runtime._resolve_cloud_provider(workspace_id)
-            return _pass_spec(spec, detail=f"Sage model provider available: {provider}.")
+            return _pass_spec(spec, detail=f"Model provider available: {provider}.")
         except Exception as exc:
             return _fail_spec(
                 spec,
-                f"No usable Sage model provider is configured: {exc}",
-                "Configure at least one usable Sage model provider in Provider Settings.",
+                f"No usable model provider is configured: {exc}",
+                "Configure at least one usable model provider in Provider Settings.",
             )
 
     @staticmethod

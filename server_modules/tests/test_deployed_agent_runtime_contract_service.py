@@ -455,7 +455,7 @@ class DeployedAgentRuntimeContractServiceTests(unittest.TestCase):
                 stage="create",
             )
 
-        self.assertIn("Studio agents cannot use Sage Full Access", str(error.exception))
+        self.assertIn("Studio agents cannot use Full Access", str(error.exception))
 
     def test_marketplace_package_cannot_force_customer_runtime_without_installer_opt_in(self):
         payload = contract.normalize_runtime_supply_contract(

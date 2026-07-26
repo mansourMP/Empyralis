@@ -78,7 +78,7 @@ def _doctor_checks(item: Dict[str, Any]) -> list[Dict[str, Any]]:
         checks.append({
             "id": "gateway_selected",
             "status": "pass" if gateway_selected else "block",
-            "message": "A Sage Agent Computer is selected." if gateway_selected else "Select a Sage Agent Computer first.",
+            "message": "An Agent Computer is selected." if gateway_selected else "Select an Agent Computer first.",
         })
         checks.append({
             "id": "gateway_channel_health",
@@ -188,7 +188,7 @@ def certify_connection(
 
     if normalized in _LOCAL_BRIDGE_CONNECTION_IDS or bool(item.get("requires_gateway")):
         if not item.get("selected_gateway_id") or item.get("selected_gateway_missing"):
-            raise HTTPException(status_code=409, detail="Select an online Sage Agent Computer before certification.")
+            raise HTTPException(status_code=409, detail="Select an online Agent Computer before certification.")
         if not bool(item.get("connected")) or _token(item.get("health_status")) != "healthy":
             raise HTTPException(
                 status_code=409,

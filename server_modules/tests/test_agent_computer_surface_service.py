@@ -11,7 +11,7 @@ class AgentComputerSurfaceServiceTests(unittest.TestCase):
             "connecting": ("connecting_hardware", "Connecting to your Mac...", "active"),
             "running": ("hardware_running", "Running on your Mac", "active"),
             "completed": ("done", "Done", "completed"),
-            "waiting_approval": ("waiting_approval", "Sage needs your approval", "active"),
+            "waiting_approval": ("waiting_approval", "Agent needs confirmation", "active"),
             "offline": ("error", "Agent Computer offline", "failed"),
             "requires_agent_computer": ("error", "Needs Agent Computer", "failed"),
         }

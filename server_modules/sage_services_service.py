@@ -15,7 +15,7 @@ SAGE_SERVICE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "flashcards": {
         "id": "flashcards",
         "name": "Flashcards",
-        "description": "Store cards Sage can expand into study sessions, recall drills, and spaced review prompts.",
+        "description": "Store cards the agent can expand into study sessions, recall drills, and spaced review prompts.",
         "entry_noun": "card",
         "profile_fields": ("focus_topic", "active_deck"),
         "entry_fields": ("deck", "topic", "front", "back"),
@@ -23,7 +23,7 @@ SAGE_SERVICE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "language_coach": {
         "id": "language_coach",
         "name": "Language Coach",
-        "description": "Track what language you are practicing, recent phrases, and the next area Sage should coach.",
+        "description": "Track what language you are practicing, recent phrases, and the next area the agent should coach.",
         "entry_noun": "practice item",
         "profile_fields": ("target_language", "current_level", "focus_area"),
         "entry_fields": ("language", "phrase", "translation", "notes", "confidence"),
@@ -31,7 +31,7 @@ SAGE_SERVICE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "nutrition_log": {
         "id": "nutrition_log",
         "name": "Nutrition Log",
-        "description": "Capture meals, calories, protein, and diet goals so Sage can keep a running daily picture.",
+        "description": "Capture meals, calories, protein, and diet goals so the agent can keep a running daily picture.",
         "entry_noun": "meal",
         "profile_fields": ("daily_calorie_target", "daily_protein_target", "dietary_pattern"),
         "entry_fields": ("meal", "calories", "protein_grams", "occurred_on", "notes"),
@@ -164,7 +164,7 @@ def _enforce_sage_service_state_decision(
 def _require_service(service_id: str) -> dict[str, Any]:
     service = SAGE_SERVICE_DEFINITIONS.get(str(service_id or "").strip())
     if not service:
-        raise HTTPException(status_code=404, detail="Sage service not found.")
+        raise HTTPException(status_code=404, detail="Service not found.")
     return service
 
 
@@ -347,7 +347,7 @@ def _resolve_sage_write_policy(
     raise HTTPException(
         status_code=403,
         detail=(
-            "Sage service write blocked. "
+            "Service write blocked. "
             "Provide explicit_user_intent=true or an approval grant before writing."
         ),
     )
@@ -449,7 +449,7 @@ def _suggested_prompt(service_id: str, service_state: Dict[str, Any]) -> str:
         return f"Use the language coach state and give me a short practice session for {language}."
     if service_id == "nutrition_log":
         return "Use the nutrition log and summarize today's meals against the targets."
-    return "Use this Sage service in the next turn."
+    return "Use this service in the next turn."
 
 
 def list_sage_services(*, workspace_id: str) -> Dict[str, Any]:
@@ -493,7 +493,7 @@ def build_sage_services_memory_block(*, workspace_id: str) -> str:
                 lines.append(f"{label}: " + " | ".join(normalized_values[:3]))
     if not lines:
         return ""
-    return "Sage services state\n" + "\n".join(f"- {line}" for line in lines)
+    return "Agent services state\n" + "\n".join(f"- {line}" for line in lines)
 
 
 async def update_service_profile(
@@ -515,7 +515,7 @@ async def update_service_profile(
     _append_activity(
         service_state,
         action="profile_updated",
-        summary="Saved service preferences for Sage memory.",
+        summary="Saved service preferences for agent memory.",
         actor_user_id=actor_user_id,
         policy_metadata=write_policy,
     )

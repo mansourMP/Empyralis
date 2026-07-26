@@ -284,7 +284,7 @@ async def create_runtime_session(
         actor={
             "type": "sage_hardware_runtime",
             "id": _text(user_id) or "sage",
-            "display_name": "Sage hardware runtime",
+            "display_name": "Agent hardware runtime",
         },
         channel=HARDWARE_RUNTIME_CHANNEL,
         metadata=metadata,

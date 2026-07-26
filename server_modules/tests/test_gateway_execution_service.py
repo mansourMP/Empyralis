@@ -377,7 +377,7 @@ class GatewayExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
             patch("server_modules.gateway_execution_service.gateway_state_repository.get_gateway_registration", return_value=registration),
             patch("server_modules.gateway_execution_service.gateway_protocol_service.dispatch_tool_invoke", dispatch_mock),
         ):
-            with self.assertRaisesRegex(PermissionError, "available only to Sage"):
+            with self.assertRaisesRegex(PermissionError, "available only to the workspace operator agent"):
                 await gateway_execution_service.execute_tool_via_gateway(
                     gateway_id="gw-1",
                     capability_id="shell.execute",

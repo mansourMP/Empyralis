@@ -59,7 +59,7 @@ SAGE_PROFILE_PROJECTED_FILES: tuple[str, ...] = (
 SAGE_PROFILE_MEMORY_TOPIC_FILE = "memory/files/profile.md"
 SAGE_PROFILE_MEMORY_TOPIC_DESCRIPTION = (
     "Owner profile: preferred name, role/focus, communication style, and "
-    "standing rules captured during Sage setup."
+    "standing rules captured during agent setup."
 )
 
 
@@ -285,7 +285,7 @@ def _project_heartbeat_md(profile: Dict[str, Any]) -> str:
     if not responsibility:
         return (
             "# Heartbeat\n\n"
-            "- Add recurring responsibilities Sage should keep track of here.\n"
+            "- Add recurring responsibilities the agent should keep track of here.\n"
         )
     return (
         "# Heartbeat\n\n"

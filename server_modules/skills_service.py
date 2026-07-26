@@ -870,7 +870,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="memory",
             action_id="update",
             description=(
-                "Update one workspace memory context file. Use only when the user explicitly asks Sage to "
+                "Update one workspace memory context file. Use only when the user explicitly asks the agent to "
                 "remember, correct, or update durable memory. Read the current file first with memory_get, then "
                 "write the complete revised file content. If any of the content you're incorporating came from "
                 "someone other than your owner (or an unverified sender), you MUST also set attribution_reason. "
@@ -1155,7 +1155,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         ),
         ToolDescriptor(
             tool_name="sage_service__list_state",
-            label="Sage service state",
+            label="Personal service state",
             connector_id="sage_service",
             action_id="list_state",
             description="Read the saved state for Flashcards, Language Coach, or Nutrition Log.",
@@ -1165,7 +1165,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "service_id": {
                         "type": "string",
                         "enum": ["flashcards", "language_coach", "nutrition_log"],
-                        "description": "Which Sage service to inspect.",
+                        "description": "Which service to inspect.",
                     },
                 },
                 "required": ["service_id"],
@@ -1175,17 +1175,17 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         ),
         ToolDescriptor(
             tool_name="sage_service__update_profile",
-            label="Sage service profile",
+            label="Personal service profile",
             connector_id="sage_service",
             action_id="update_profile",
-            description="Update saved profile settings for a Sage service, such as study focus or nutrition targets.",
+            description="Update saved profile settings for a personal service, such as study focus or nutrition targets.",
             parameters={
                 "type": "object",
                 "properties": {
                     "service_id": {
                         "type": "string",
                         "enum": ["flashcards", "language_coach", "nutrition_log"],
-                        "description": "Which Sage service to update.",
+                        "description": "Which service to update.",
                     },
                     "profile": {
                         "type": "object",
@@ -1209,7 +1209,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
         ),
         ToolDescriptor(
             tool_name="sage_service__create_entry",
-            label="Sage service entry",
+            label="Personal service entry",
             connector_id="sage_service",
             action_id="create_entry",
             description="Create a new flashcard, language practice item, or nutrition log entry.",
@@ -1219,7 +1219,7 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "service_id": {
                         "type": "string",
                         "enum": ["flashcards", "language_coach", "nutrition_log"],
-                        "description": "Which Sage service to write to.",
+                        "description": "Which service to write to.",
                     },
                     "entry": {
                         "type": "object",
@@ -5750,7 +5750,7 @@ def execute_single_direct_tool_call(
         for item in items or []:
             if str(item.get("id") or "").strip() == service_id:
                 return json.dumps(item, ensure_ascii=False)
-        raise RuntimeError(f"Unknown Sage service '{service_id}'.")
+        raise RuntimeError(f"Unknown service '{service_id}'.")
     if connector_id == "sage_service" and action_id == "update_profile":
         service_id = str(argument_payload.get("service_id") or "").strip()
         profile = argument_payload.get("profile")
@@ -5860,7 +5860,7 @@ def execute_single_direct_tool_call(
                     "ok": False,
                     "error": (
                         f"Fleet tool '{action_id}' requires operator role. "
-                        f"Current role: {role}. Only the workspace operator (Sage) can manage the fleet."
+                        f"Current role: {role}. Only the workspace operator agent can manage the fleet."
                     ),
                 }, ensure_ascii=False)
 

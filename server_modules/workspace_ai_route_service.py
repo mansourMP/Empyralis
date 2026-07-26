@@ -317,7 +317,7 @@ def _build_used_by() -> List[Dict[str, Any]]:
     return [
         {
             "surface": "sage",
-            "label": "Sage",
+            "label": "Agent",
             "scope": "workspace_default",
             "detail": "Workspace default",
             "override": False,

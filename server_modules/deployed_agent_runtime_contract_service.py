@@ -635,7 +635,7 @@ def validate_mode_capability_matrix(
 
     if automation.get("enabled"):
         if full_access_requested:
-            errors.append("Studio agents cannot use Sage Full Access. Use default_guarded or custom.")
+            errors.append("Studio agents cannot use Full Access. Use default_guarded or custom.")
         if len(list(automation.get("allowed_domains") or [])) == 0:
             errors.append("Computer automation requires a non-empty domain allowlist.")
         if int(automation.get("max_concurrent_sessions") or 0) <= 0:

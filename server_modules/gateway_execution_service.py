@@ -521,13 +521,13 @@ async def execute_tool_via_gateway(
         resolved_runtime_access_mode == execution_mode_policy.FULL_RUNTIME_ACCESS_MODE
         and resolved_agent_scope != "sage"
     ):
-        raise PermissionError("full_access Agent Computer execution is available only to Sage.")
+        raise PermissionError("full_access Agent Computer execution is available only to the workspace operator agent.")
     if (
         resolved_runtime_access_mode == execution_mode_policy.FULL_RUNTIME_ACCESS_MODE
         and not _registration_sage_full_access_metadata(registration)
     ):
         raise PermissionError(
-            "full_access Agent Computer execution requires the current Sage Full Access setup warning acknowledgement."
+            "full_access Agent Computer execution requires the current Full Access setup warning acknowledgement."
         )
     policy_payload = _policy_payload_for_dispatch(
         registration=registration,

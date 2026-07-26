@@ -133,9 +133,9 @@ def _runtime_target_status_reason(target: Dict[str, Any]) -> str:
     healthy = bool(target.get("healthy"))
     if target_id == "local_companion":
         if not available:
-            return "No device is paired to this workspace yet, so Sage stays in cloud mode."
+            return "No device is paired to this workspace yet, so the agent stays in cloud mode."
         if not online:
-            return "This Device is paired but offline, so Sage will not start device work until it reconnects."
+            return "This Device is paired but offline, so the agent will not start device work until it reconnects."
         if not healthy:
             return "This Device is connected but not healthy enough for device work yet."
         return "This Device is ready. Sensitive device actions follow the selected access mode."
@@ -145,11 +145,11 @@ def _runtime_target_status_reason(target: Dict[str, Any]) -> str:
         if not online:
             return "The Server/VPS runtime is configured but currently offline."
         if not healthy:
-            return "The Server/VPS runtime is reachable but needs attention before Sage can trust it."
+            return "The Server/VPS runtime is reachable but needs attention before the agent can trust it."
         return "The Server/VPS runtime is ready under the workspace policy boundary."
     if target_id == "sage_cloud_computer":
         if not available:
-            return "Cloud Computer is not enabled for this workspace. Sage will not allocate a hosted computer automatically."
+            return "Cloud Computer is not enabled for this workspace. The agent will not allocate a hosted computer automatically."
         if not online:
             return "Cloud Computer is configured but no hosted session is currently available."
         if not healthy:
@@ -158,7 +158,7 @@ def _runtime_target_status_reason(target: Dict[str, Any]) -> str:
     if not available:
         return f"{label} is not available for this workspace right now."
     if not online or not healthy:
-        return f"{label} is currently degraded, so Sage may not be able to start hosted execution."
+        return f"{label} is currently degraded, so the agent may not be able to start hosted execution."
     return "Cloud execution is ready and remains the default path for ordinary turns."
 
 

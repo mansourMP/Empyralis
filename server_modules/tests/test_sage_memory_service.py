@@ -78,7 +78,7 @@ class SageMemoryServiceTests(unittest.TestCase):
                 )
                 block = sage_memory_service.build_sage_memory_context_block(workspace_id="workspace-1")
 
-            self.assertIn("Sage memory", block)
+            self.assertIn("Agent memory", block)
             self.assertIn("Private", block)
             self.assertIn("Sensitive", block)
             self.assertIn("[pinned]", block)

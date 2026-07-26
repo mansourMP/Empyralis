@@ -113,7 +113,7 @@ def provider_metadata(*, modality: Modality, provider: str = "auto", model: str 
                 cost_class="metered",
                 retention_policy="provider_configured",
                 output_format="text/json",
-                safety_notes=("Transcript must enter Sage through voice policy before actions execute.",),
+                safety_notes=("Transcript must enter the agent through voice policy before actions execute.",),
             )
         if resolved_provider in {"google", "google_speech"}:
             return MultimodalProviderMetadata(
@@ -135,7 +135,7 @@ def provider_metadata(*, modality: Modality, provider: str = "auto", model: str 
             cost_class="metered",
             retention_policy="provider_configured",
             output_format="text/json",
-            safety_notes=("Transcript must enter Sage through voice policy before actions execute.",),
+            safety_notes=("Transcript must enter the agent through voice policy before actions execute.",),
         )
     if modality == "text_to_speech":
         if resolved_provider == "elevenlabs":

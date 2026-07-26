@@ -246,17 +246,17 @@ def _hosted_sage_ai_credit_state(
         resolved_policy = "disabled"
     elif policy == "disabled":
         reason = "policy_disabled"
-        message = "Hosted Sage AI is disabled for this workspace."
+        message = "Hosted AI is disabled for this workspace."
         allowed = False
         resolved_policy = policy
     elif policy == "owner_opt_in":
         reason = "owner_approval_required"
-        message = "Hosted Sage AI needs owner approval before this workspace can use it."
+        message = "Hosted AI needs owner approval before this workspace can use it."
         allowed = False
         resolved_policy = policy
     elif total_available_usd <= 0:
         reason = "cap_reached"
-        message = "Hosted Sage AI monthly cap is reached for this workspace."
+        message = "Hosted AI monthly cap is reached for this workspace."
         allowed = False
         resolved_policy = policy
     else:
@@ -933,8 +933,8 @@ def create_credit_purchase_checkout_session(
         "metadata[purchase_kind]": "credits",
         "metadata[amount_usd]": str(amount_usd),
         "line_items[0][price_data][currency]": str(account.get("default_currency") or "usd").strip().lower() or "usd",
-        "line_items[0][price_data][product_data][name]": "Hosted Sage AI Credits",
-        "line_items[0][price_data][product_data][description]": f"{int(round(amount_usd * HOSTED_SAGE_AI_CREDITS_PER_USD))} credits for hosted Sage AI usage",
+        "line_items[0][price_data][product_data][name]": "Hosted AI Credits",
+        "line_items[0][price_data][product_data][description]": f"{int(round(amount_usd * HOSTED_SAGE_AI_CREDITS_PER_USD))} credits for hosted AI usage",
         "line_items[0][price_data][unit_amount]": unit_amount_cents,
         "line_items[0][quantity]": 1,
     }
@@ -1006,7 +1006,7 @@ def _credit_history_usage_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     public_tier = str(metadata.get("public_tier") or "").strip()
     label = str(metadata.get("chat_title") or metadata.get("thread_title") or "").strip()
     if not label:
-        label = "Sage" if thread_id in {"", "primary"} else f"Sage chat {thread_id[:8]}"
+        label = "Agent chat" if thread_id in {"", "primary"} else f"Agent chat {thread_id[:8]}"
     return {
         "id": str(entry.get("id") or request_id or thread_id or f"usage-{time.time()}").strip(),
         "kind": "usage",
@@ -1037,9 +1037,9 @@ def _credit_history_transaction_entry(transaction: Dict[str, Any], index: int) -
     elif kind == "bonus" and source == "signup_grant":
         label = "Welcome credit grant"
     if kind == "usage_debit" and source == "hosted_sage_ai_turn":
-        label = "Sage AI chat"
+        label = "Agent AI chat"
     elif kind == "usage_debit":
-        label = "Hosted Sage overage"
+        label = "Hosted AI overage"
     return {
         "id": str(transaction.get("id") or transaction.get("request_id") or f"transaction-{index}").strip(),
         "kind": kind,
@@ -1123,7 +1123,7 @@ def _usage_api_label(event: Dict[str, Any], *, fallback: Optional[str] = None) -
     if surface == "mini_app":
         app_id = str(event.get("app_id") or "").strip()
         return f"Mini-app {app_id[:8]}" if app_id else "Mini-app"
-    return "Sage"
+    return "Agent"
 
 
 def _usage_api_item_from_event(

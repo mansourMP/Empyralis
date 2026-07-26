@@ -493,7 +493,7 @@ async def test_hosted_bridge_cannot_trigger_sage_by_default_without_verified_ena
                 metadata={"request_id": "req-2"},
             )
 
-    assert "cannot invoke Sage turns by default" in str(exc_info.value)
+    assert "cannot invoke agent turns by default" in str(exc_info.value)
     execute_turn.assert_not_awaited()
     get_master_install.assert_not_awaited()
     audit_kwargs = audit_event.await_args.kwargs

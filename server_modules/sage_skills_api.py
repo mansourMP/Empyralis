@@ -59,7 +59,7 @@ def _skill_reason(item: Dict[str, Any]) -> str | None:
 
 def _skill_setup_requirement(item: Dict[str, Any]) -> str | None:
     if not bool(item.get("enabled")):
-        return "Enable this skill for the workspace before Sage can use it."
+        return "Enable this skill for the workspace before the agent can use it."
     missing_bins = [
         _coerce_text(token)
         for token in list(item.get("missing_bins") or [])

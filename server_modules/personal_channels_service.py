@@ -212,17 +212,17 @@ _LOCAL_BRIDGE_PERSONAL_CHANNEL_COPY: Dict[str, Dict[str, str]] = {
     "signal_personal": {
         "status_label": "Bridge required",
         "detail": "Signal runs through an Agent Computer local bridge.",
-        "next_step": "Connect an Agent Computer with a Signal bridge to enable Sage messaging.",
+        "next_step": "Connect an Agent Computer with a Signal bridge to enable agent messaging.",
     },
     "imessage_personal": {
         "status_label": "Mac bridge required",
         "detail": "iMessage runs through a user-owned Mac Agent Computer bridge.",
-        "next_step": "Connect a Mac Agent Computer with an iMessage bridge to enable Sage messaging.",
+        "next_step": "Connect a Mac Agent Computer with an iMessage bridge to enable agent messaging.",
     },
     "wechat_personal": {
         "status_label": "Bridge required",
         "detail": "WeChat personal runs through an Agent Computer local bridge.",
-        "next_step": "Connect an Agent Computer with a WeChat bridge to enable Sage messaging.",
+        "next_step": "Connect an Agent Computer with a WeChat bridge to enable agent messaging.",
     },
 }
 
@@ -2327,7 +2327,7 @@ async def _deliver_whatsapp_personal_reply(
                 channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
                 provider=WHATSAPP_PERSONAL_PROVIDER,
                 detail=(
-                    "Automatic WhatsApp personal reply was skipped because Sage returned no reply."
+                    "Automatic WhatsApp personal reply was skipped because the agent returned no reply."
                     if not _raw_reply_text
                     else "Automatic WhatsApp personal reply was suppressed: a hardcoded status/error message may never reach a channel."
                 ),
@@ -2843,7 +2843,7 @@ async def _handle_telegram_gateway_channel_inbound(
                 channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
                 provider=TELEGRAM_PERSONAL_PROVIDER,
                 detail=(
-                    "Automatic Telegram personal reply was skipped because Sage returned no reply."
+                    "Automatic Telegram personal reply was skipped because the agent returned no reply."
                     if not _raw_reply_text
                     else "Automatic Telegram personal reply was suppressed: a hardcoded status/error message may never reach a channel."
                 ),
@@ -3022,7 +3022,7 @@ async def _deliver_local_bridge_personal_reply(
                 channel_key=channel_key,
                 provider=provider,
                 detail=(
-                    f"Automatic {label} personal reply was skipped because Sage returned no reply."
+                    f"Automatic {label} personal reply was skipped because the agent returned no reply."
                     if not _raw_reply_text
                     else f"Automatic {label} personal reply was suppressed: a hardcoded status/error message may never reach a channel."
                 ),

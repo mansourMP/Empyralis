@@ -462,7 +462,7 @@ def _validate_account_for_catalog(
     if lane == _PERSONAL_RUNTIME_LANE:
         raise ChannelPlatformError(
             403,
-            "Personal channels are Agent Computer/Sage runtime channels and cannot be bound to Studio cloud agents.",
+            "Personal channels are Agent Computer runtime channels and cannot be bound to Studio cloud agents.",
         )
     if not bool(item.get("launch_allowed")) or not bool(item.get("live_capable")):
         label = _text(item.get("label")) or _text(item.get("channel_key")) or "Channel"
@@ -723,7 +723,7 @@ async def test_agent_channel_binding(
     if not binding:
         raise ChannelPlatformError(404, "Channel binding not found.")
     if _text(binding.get("runtime_lane")) == _PERSONAL_RUNTIME_LANE:
-        raise ChannelPlatformError(403, "Personal channel sends must go through Agent Computer/Sage.")
+        raise ChannelPlatformError(403, "Personal channel sends must go through Agent Computer.")
     if not bool(binding.get("enabled", True)) or _token(binding.get("binding_status")) in {"paused", "revoked"}:
         raise ChannelPlatformError(409, "Channel binding is paused or revoked.")
     if not dry_run:

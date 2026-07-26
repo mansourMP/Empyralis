@@ -292,7 +292,7 @@ def build_investor_memo(package: Dict[str, Any]) -> Dict[str, Any]:
     enough = readiness.get("proof_status") in {PROOF_STATUS_CASE_STUDY, PROOF_STATUS_INVESTOR_MEMO}
     return {
         "status": readiness.get("proof_status"),
-        "product_wedge": "Sage-centered assistant for WhatsApp/Telegram customer question handling." if enough else "not_enough_data",
+        "product_wedge": "Agent-centered assistant for WhatsApp/Telegram customer question handling." if enough else "not_enough_data",
         "workflow_proven": pilot_operations_service.PILOT_WORKFLOW_NAME if enough else "not_enough_data",
         "pilot_usage": metrics if enough else "not_enough_data",
         "safety_model": "Risky actions are approval-gated or blocked, and proof must include trace IDs." if enough else "not_enough_data",

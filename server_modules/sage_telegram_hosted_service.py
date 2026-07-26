@@ -967,7 +967,7 @@ async def handle_inbound_message(parsed: dict) -> Optional[str]:
             await send_message(
                 chat_id,
                 "✅ You're now connected to Empyralis!\n\n"
-                "Send me any message and I'll route it to your Sage assistant.",
+                "Send me any message and I'll route it to your agent.",
                 reply_to_message_id=message_id,
             )
             return None
@@ -978,7 +978,7 @@ async def handle_inbound_message(parsed: dict) -> Optional[str]:
                 chat_id,
                 f"👋 Welcome to Empyralis on Telegram!\n\n"
                 f"To connect your account:\n"
-                f"1. Open Empyralis → Connections → Telegram → \"Sage on Telegram\"\n"
+                f"1. Open Empyralis → Connections → Telegram → \"Talk to your agent on Telegram\"\n"
                 f"2. Click the link shown there to pair instantly\n"
                 f"3. Or send the 6-digit pairing code to {bot_mention}",
                 reply_to_message_id=message_id,
@@ -1326,7 +1326,7 @@ async def _run_agent_machine_shortcut(
 
     sender_name = str(parsed.get("from_first_name", "")).strip()
     system_prompt = (
-        f"You are Sage, the user's personal AI assistant running locally on their machine. "
+        f"You are the user's personal AI assistant running locally on their machine. "
         f"You are chatting with {sender_name or 'the user'} via Telegram. "
         f"You have direct shell, file, and screenshot access — no approval needed. "
         f"Execute commands immediately when asked. Keep replies concise and conversational. "

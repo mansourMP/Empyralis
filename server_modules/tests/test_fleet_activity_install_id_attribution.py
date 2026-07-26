@@ -72,7 +72,7 @@ class SageChatLedgerFieldsTests(unittest.TestCase):
         )
         self.assertEqual(event_class, "sage_activity")
         self.assertEqual(action, "sage_chat.completed")
-        self.assertEqual(title, "Sage chat completed")
+        self.assertEqual(title, "Agent chat completed")
         self.assertEqual(status, "logged")
 
     def test_sage_turn_failure(self):
@@ -81,7 +81,7 @@ class SageChatLedgerFieldsTests(unittest.TestCase):
         )
         self.assertEqual(event_class, "sage_activity")
         self.assertEqual(action, "sage_chat.failed")
-        self.assertEqual(title, "Sage chat failed")
+        self.assertEqual(title, "Agent chat failed")
         self.assertEqual(status, "error")
 
     def test_specialist_turn_success_carries_its_own_label(self):

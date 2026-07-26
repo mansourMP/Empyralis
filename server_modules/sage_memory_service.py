@@ -15,11 +15,11 @@ from server_modules import workspace_context
 SAGE_MEMORY_CATEGORY_DEFINITIONS: dict[str, dict[str, str]] = {
     "safe_general": {
         "label": "Safe",
-        "description": "Safe, general context Sage can use freely.",
+        "description": "Safe, general context the agent can use freely.",
     },
     "sensitive": {
         "label": "Sensitive",
-        "description": "Sensitive work context Sage should handle carefully.",
+        "description": "Sensitive work context the agent should handle carefully.",
     },
     "private": {
         "label": "Private",
@@ -181,7 +181,7 @@ def _require_category(category: str) -> tuple[str, dict[str, str]]:
     normalized_category = _normalize_category(category)
     definition = SAGE_MEMORY_CATEGORY_DEFINITIONS.get(normalized_category)
     if not definition:
-        raise HTTPException(status_code=400, detail="Unsupported Sage memory category.")
+        raise HTTPException(status_code=400, detail="Unsupported memory category.")
     return normalized_category, definition
 
 
@@ -209,9 +209,9 @@ def _normalize_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     title = _coerce_text(entry.get("title"))
     content = _coerce_text(entry.get("content"))
     if not title:
-        raise HTTPException(status_code=400, detail="Sage memory title is required.")
+        raise HTTPException(status_code=400, detail="Memory title is required.")
     if not content:
-        raise HTTPException(status_code=400, detail="Sage memory content is required.")
+        raise HTTPException(status_code=400, detail="Memory content is required.")
     created_at = _coerce_text(entry.get("created_at")) or _utc_now_iso()
     updated_at = _coerce_text(entry.get("updated_at")) or created_at
     history = _normalize_history(entry.get("history"))
@@ -344,7 +344,7 @@ def sage_memory_storage_policy(*, workspace_id: str) -> Dict[str, Any]:
 
 def _memory_export_markdown(*, workspace_id: str, entries: List[Dict[str, Any]], updated_at: Any) -> str:
     lines: List[str] = [
-        "# Sage Memory Export",
+        "# Agent Memory Export",
         "",
         f"- Workspace: {workspace_id}",
         f"- Exported at: {_utc_now_iso()}",
@@ -472,7 +472,7 @@ def upsert_memory_entry(
         entries[matched_index] = normalized
     else:
         if len(entries) >= SAGE_MEMORY_ENTRY_LIMIT:
-            raise HTTPException(status_code=409, detail="Sage memory limit reached.")
+            raise HTTPException(status_code=409, detail="Memory limit reached.")
         normalized = _normalize_entry(
             {
                 "id": resolved_entry_id or None,
@@ -548,7 +548,7 @@ def set_memory_entry_pinned(
             "entry": updated,
             **list_sage_memory(workspace_id=workspace_id),
         }
-    raise HTTPException(status_code=404, detail="Sage memory entry not found.")
+    raise HTTPException(status_code=404, detail="Memory entry not found.")
 
 
 def delete_memory_entry(
@@ -572,7 +572,7 @@ def delete_memory_entry(
             continue
         remaining.append(item)
     if deleted is None:
-        raise HTTPException(status_code=404, detail="Sage memory entry not found.")
+        raise HTTPException(status_code=404, detail="Memory entry not found.")
     state["entries"] = remaining
     _enforce_sage_memory_state_decision(
         operation="delete_sage_memory_entry",
@@ -599,7 +599,7 @@ def build_sage_memory_context_block(
     if not entries:
         return ""
 
-    lines: List[str] = ["Sage memory"]
+    lines: List[str] = ["Agent memory"]
     for category, definition in SAGE_MEMORY_CATEGORY_DEFINITIONS.items():
         category_entries = [item for item in entries if item.get("category") == category][: max(1, int(limit_per_category))]
         if not category_entries:

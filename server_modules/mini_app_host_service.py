@@ -561,7 +561,7 @@ def _normalize_hosted_bridge_contract(
     if kind == "sage_to_app":
         target_app_id = _normalized_text(target_payload.get("target_app_id") or app_id)
         if not target_app_id:
-            raise HTTPException(status_code=400, detail="Sage -> app bridges require target_app_id.")
+            raise HTTPException(status_code=400, detail="Agent -> app bridges require target_app_id.")
         target_payload["target_app_id"] = target_app_id
     if kind == "app_to_connector_runtime" and not (
         _normalized_text(target_payload.get("connector_id"))
@@ -665,7 +665,7 @@ async def process_hosted_bridge_request(
     rejection_reason = ""
     if kind == "app_to_sage" and not _hosted_app_to_sage_enabled_by_verified_contract(app_contract):
         rejection_reason = (
-            "Hosted mini apps cannot invoke Sage turns by default. "
+            "Hosted mini apps cannot invoke agent turns by default. "
             "A verified bridge contract must explicitly enable app_to_sage execution."
         )
 

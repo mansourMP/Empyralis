@@ -209,7 +209,7 @@ def _marketplace_feed_item(workspace_id: str, item: Dict[str, Any]) -> Optional[
     summary = {
         "agent_template": "Copy this template into Agent Studio as a draft agent.",
         "connector": "Add this MCP capability to the workspace.",
-        "skill": "Add this skill so Sage and eligible agents can use it.",
+        "skill": "Add this skill so this agent and eligible agents can use it.",
         "bundle": "Add a packaged set of capabilities to the workspace.",
     }.get(kind, "Add this capability to the workspace.")
     badges = [_humanize(type_name)]

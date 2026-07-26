@@ -578,7 +578,7 @@ async def _resolve_install_thread_binding(
             owner_user_id=owner_user_id,
             master_agent_install_id=install_id or None,
             channel=str(channel or "web").strip() or "web",
-            title="Sage",
+            title="Agent",
             metadata={
                 "source": "master_chat_context",
                 "system_agent": True,
@@ -1827,7 +1827,7 @@ def register_agent_registry_routes(app) -> None:
             owner_user_id=owner_user_id,
             master_agent_install_id=str(master_install.get("id") or "").strip() or None,
             channel="web",
-            title="Sage",
+            title="Agent",
             metadata={
                 "source": "master_chat_context",
                 "system_agent": True,

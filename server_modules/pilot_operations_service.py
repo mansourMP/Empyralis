@@ -134,7 +134,7 @@ def get_pilot_operations_contract() -> Dict[str, Any]:
                 "cannot": ["change runtime policy", "approve high-risk actions unless promoted to admin"],
             },
             "normal_user": {
-                "can": ["ask Sage/internal assistant questions", "receive drafts", "report usefulness"],
+                "can": ["ask the agent/internal assistant questions", "receive drafts", "report usefulness"],
                 "cannot": ["deploy agents", "view customer audit logs", "kill workspace sessions"],
             },
             "external_customer": {

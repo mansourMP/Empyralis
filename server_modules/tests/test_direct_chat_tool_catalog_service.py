@@ -279,7 +279,7 @@ class DirectChatToolCatalogServiceTests(unittest.TestCase):
             {"cloud_computer_online": True, "local_gateway_online": False},
         )
 
-        self.assertIn("Computer capabilities are available through Sage Cloud Computer.", reply)
+        self.assertIn("Computer capabilities are available through Cloud Computer.", reply)
         self.assertIn("This Device still requires a paired Agent Computer.", reply)
         self.assertIn("Capability availability is based on Agent Computer status, connector state, and workspace policy", reply)
 
@@ -312,7 +312,7 @@ class DirectChatToolCatalogServiceTests(unittest.TestCase):
             },
         )
 
-        self.assertIn("Sage AI: setup required", reply)
+        self.assertIn("Hosted AI: setup required", reply)
         self.assertIn("Workspace AI: blocked (policy disabled)", reply)
         self.assertIn("Agent Computer: offline", reply)
         self.assertIn("Connected apps: Google Workspace, GitHub (not connected)", reply)

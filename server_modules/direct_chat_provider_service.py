@@ -615,17 +615,17 @@ def direct_chat_provider_truth(
     if not payload["platform_runtime_allowed"]:
         if hosted_reason == "owner_approval_required":
             issue_code = "hosted_ai_owner_approval_required"
-            detail = "Hosted Sage AI requires workspace owner approval before this provider can run on Empyralis runtime."
+            detail = "Hosted AI requires workspace owner approval before this provider can run on Empyralis runtime."
         elif hosted_reason == "cap_reached":
             issue_code = "hosted_ai_cap_reached"
             detail = (
-                "Hosted Sage AI monthly cap is reached for this workspace. "
+                "Hosted AI monthly cap is reached for this workspace. "
                 "Switch to your own key or local runtime, or raise the cap."
             )
         else:
             issue_code = "hosted_ai_policy_disabled"
             detail = (
-                "Hosted Sage AI is disabled for this workspace. "
+                "Hosted AI is disabled for this workspace. "
                 "Connect your own provider key or use a local runtime instead."
             )
         payload.update(
@@ -711,7 +711,7 @@ def provider_unavailable_response(
     normalized_issue = str(issue_code or "").strip().lower()
     detail = str(issue_detail or "").strip()
     if normalized_issue in {"hosted_ai_policy_disabled", "hosted_ai_owner_approval_required", "hosted_ai_cap_reached"}:
-        summary = detail or "Hosted Sage AI is currently blocked for this workspace."
+        summary = detail or "Hosted AI is currently blocked for this workspace."
         return {
             "reply": "",
             "actions": [connect_action("Connect", "/connect-ai")],
@@ -719,7 +719,7 @@ def provider_unavailable_response(
             "interventions": [
                 build_intervention(
                     "connect_required",
-                    "Hosted Sage AI is blocked",
+                    "Hosted AI is blocked",
                     detail=summary,
                     severity="warning",
                     status="waiting",

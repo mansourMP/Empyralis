@@ -432,7 +432,7 @@ async def route_inbound_channel_message(
             return {
                 "ok": False,
                 "status": "execution_error",
-                "error": f"Sage turn failed: {exc}",
+                "error": f"Agent turn failed: {exc}",
                 "run_id": run_id,
                 "reply": None,
             }

@@ -719,11 +719,11 @@ def direct_chat_tool_inventory_reply(tools: List[Dict[str, Any]], availability_p
         if isinstance(item, dict) and str(item.get("label") or item.get("provider_id") or "").strip()
     ]
 
-    lines = ["Here is what Sage can do in this workspace right now:"]
+    lines = ["Here is what this agent can do in this workspace right now:"]
     lines.append("")
     lines.append(
         _status_summary_line(
-            "Sage AI",
+            "Hosted AI",
             "ready" if provider_ready else "setup required",
         )
     )
@@ -756,10 +756,10 @@ def direct_chat_tool_inventory_reply(tools: List[Dict[str, Any]], availability_p
         lines.append("This Device capabilities are available through the paired Agent Computer.")
     elif cloud_computer_online:
         lines.append(
-            "Computer capabilities are available through Sage Cloud Computer. This Device still requires a paired Agent Computer."
+            "Computer capabilities are available through Cloud Computer. This Device still requires a paired Agent Computer."
         )
     else:
-        lines.append("This Device capabilities require Agent Computer to be online. Sage Cloud Computer can run cloud-side computer tasks only when enabled.")
+        lines.append("This Device capabilities require Agent Computer to be online. Cloud Computer can run cloud-side computer tasks only when enabled.")
     if setup_actions:
         labels = [
             _public_setup_label(str(item.get("label") or "").strip())

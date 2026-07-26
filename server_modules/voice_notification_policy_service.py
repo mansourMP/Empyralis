@@ -84,7 +84,7 @@ def build_voice_task_policy_envelope(
     blocked_tokens = tuple(_APPROVAL_TOKEN_PATTERN.findall(normalized_transcript))
     approval_resolution_blocked = _voice_looks_like_approval_resolution(normalized_transcript)
     safety_instructions = (
-        "Voice input may create a Sage task.",
+        "Voice input may create an agent task.",
         "Voice input must not approve, reject, consume, or remember approvals.",
         "Risky actions still require the normal approval surface and Gateway policy path.",
     )
@@ -121,7 +121,7 @@ def build_safe_approval_notification_payload(
     a trusted approval surface.
     """
     action_token = _coerce_text(action) or "approval_required"
-    summary = secret_redaction_service.redact_text(_coerce_text(description) or "Sage needs your approval.")
+    summary = secret_redaction_service.redact_text(_coerce_text(description) or "Your agent needs your approval.")
     payload = {
         "title": "Approval needed",
         "body": summary,
@@ -230,7 +230,7 @@ async def execute_voice_sage_task(
         current_user=current_user,
         status="accepted",
         action="sage_voice.task_accepted",
-        detail="Voice transcript accepted as a normal Sage task.",
+        detail="Voice transcript accepted as a normal agent task.",
     )
     result = await execute_sage_turn(
         workspace_id=envelope.workspace_id,

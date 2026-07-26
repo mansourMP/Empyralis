@@ -525,7 +525,7 @@ def hosted_sage_ai_access_state(
             "total_available_credits": int(round(total_available_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
             **credit_fields,
             "reason": "policy_disabled",
-            "message": "Hosted Sage AI is disabled for this workspace.",
+            "message": "Hosted AI is disabled for this workspace.",
         }
     if policy == "owner_opt_in":
         return {
@@ -541,7 +541,7 @@ def hosted_sage_ai_access_state(
             "total_available_credits": int(round(total_available_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
             **credit_fields,
             "reason": "owner_approval_required",
-            "message": "Hosted Sage AI is not enabled for this workspace. Connect your own provider key or switch to a local runtime.",
+            "message": "Hosted AI is not enabled for this workspace. Connect your own provider key or switch to a local runtime.",
         }
     if total_available_usd <= 0:
         credit_balance_credits = int(round(credit_balance_usd * HOSTED_SAGE_AI_CREDITS_PER_USD))
@@ -551,7 +551,7 @@ def hosted_sage_ai_access_state(
         if credit_balance_credits <= 0 and remaining_usd <= 0:
             message = "AI usage limit reached. Open AI & Setup →"
         else:
-            message = "Hosted Sage AI monthly cap is reached for this workspace."
+            message = "Hosted AI monthly cap is reached for this workspace."
         return {
             "allowed": False,
             "plan_allows_hosted_ai": True,

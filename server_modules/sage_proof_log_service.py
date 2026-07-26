@@ -168,7 +168,7 @@ def _build_record(
     now = _utc_now_iso()
     normalized_surface = _coerce_text(surface) or "sage"
     normalized_status = _coerce_text(status) or _coerce_text(sanitized.get("status")) or "logged"
-    normalized_title = _coerce_text(title) or _coerce_text(sanitized.get("title")) or "Sage proof log"
+    normalized_title = _coerce_text(title) or _coerce_text(sanitized.get("title")) or "Agent proof log"
     record = {
         "version": PROOF_LOG_RECORD_VERSION,
         "proof_id": _proof_id_for_record(

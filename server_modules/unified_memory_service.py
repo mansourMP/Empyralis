@@ -458,7 +458,7 @@ def _profile_layer(
             )
     layer["summary"] = {
         "count": len(layer["items"]),
-        "policy": "Shared owner profile is visible to Sage by default and withheld from specialists unless install-specific or explicitly shared.",
+        "policy": "Shared owner profile is visible to the operator agent by default and withheld from specialists unless install-specific or explicitly shared.",
     }
     return layer
 
@@ -616,7 +616,7 @@ def _specialist_layer_for_sage() -> Dict[str, Any]:
     layer = _base_layer("specialist_scoped_memory", accessible=False, scope="sage")
     layer["summary"] = {
         "count": 0,
-        "policy": "Specialist private memory stays isolated. Sage reaches it only through an explicit brokered path, not by default aggregation.",
+        "policy": "Specialist private memory stays isolated. The operator agent reaches it only through an explicit brokered path, not by default aggregation.",
     }
     return layer
 

@@ -319,7 +319,7 @@ def normalize_bridge_contract(
     if kind == "sage_to_app":
         target_app_id = str(target_payload.get("target_app_id") or app_id).strip()
         if not target_app_id:
-            raise HTTPException(status_code=400, detail="Sage -> app bridges require target_app_id.")
+            raise HTTPException(status_code=400, detail="Agent -> app bridges require target_app_id.")
         target_payload["target_app_id"] = target_app_id
     if kind == "app_to_connector_runtime" and not (
         str(target_payload.get("connector_id") or "").strip()

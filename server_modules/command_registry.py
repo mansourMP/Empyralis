@@ -866,7 +866,7 @@ async def _handle_usage(
         if entries:
             lines.append("\nRecent usage:")
             for e in entries[:5]:
-                label = str(e.get("label") or "Sage")
+                label = str(e.get("label") or "Agent")
                 credits = int(e.get("credits") or 0)
                 tokens = int(e.get("total_tokens") or 0)
                 provider = str(e.get("provider") or "").upper() if e.get("provider") else ""
@@ -1003,7 +1003,7 @@ async def _handle_skills(
                 tenant_id=str(kwargs.get("tenant_id") or "default"),
                 workspace_id=workspace_id,
                 goal=str(kwargs.get("remainder") or f"Execute {skill_name}"),
-                agent_label="Sage",
+                agent_label="Agent",
                 hard_context="",
                 operational_policy="",
             )

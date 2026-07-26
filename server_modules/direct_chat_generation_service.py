@@ -1424,7 +1424,7 @@ def stream_provider_backed_direct_chat(
         event_type="plan.started",
         data={
             "plan_id": trace_plan_id,
-            "title": "Sage Plan",
+            "title": "Agent Plan",
             "summary": "Review the request, decide whether tools are needed, and produce the final answer.",
         },
         persisted=True,
