@@ -1330,7 +1330,7 @@ function fallbackErrorMessage(status: number): string {
     return 'Your session expired. Sign in again and retry.';
   }
   if (status === 403) {
-    return 'Sage cannot run that request in this workspace right now.';
+    return 'The agent cannot run that request in this workspace right now.';
   }
   if (status === 429) {
     return 'Capacity is busy right now. Retry in a moment.';
@@ -1499,7 +1499,7 @@ function normalizeTransportFailure(error: unknown): WorkstationClientError {
   let retryable = true;
 
   if (isTimeout) {
-    message = 'Sage took too long to respond. Please try again.';
+    message = 'The agent took too long to respond. Please try again.';
     code = 'request_timeout';
   } else if (isAbort) {
     message = 'The request was cancelled.';
@@ -1987,7 +1987,7 @@ export function createWorkstationClient(
     } catch (error) {
       if (abortHandle?.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
         throw new WorkstationClientError(
-          'Sage stopped before finishing the response.',
+          'The agent stopped before finishing the response.',
           0,
           null,
           'stream_aborted',
@@ -2051,7 +2051,7 @@ export function createWorkstationClient(
       } catch (error) {
         if (abortHandle?.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
           throw new WorkstationClientError(
-            'Sage stopped before finishing the response.',
+            'The agent stopped before finishing the response.',
             0,
             null,
             'stream_aborted',

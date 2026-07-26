@@ -68,7 +68,7 @@ const SHELL_PROFILE_DEFINITIONS: Record<WorkspaceShellProfileId, WorkspaceShellP
   operations_admin_shell: {
     id: 'operations_admin_shell',
     label: 'Operations Admin Shell',
-    description: 'Operations-aware shell with Sage as the default landing surface.',
+    description: 'Operations-aware shell with the agent as the default landing surface.',
     homeRouteId: 'chat',
   },
 };

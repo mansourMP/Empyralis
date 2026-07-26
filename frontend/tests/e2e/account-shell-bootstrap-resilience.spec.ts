@@ -202,7 +202,7 @@ test.describe('account shell and bootstrap resilience', () => {
     await loginAsOwner(page);
 
     await expect(page.getByText(/Loading Sage setup/i)).toBeVisible();
-    await expect(page.getByText(/Sage setup is temporarily unavailable/i)).toBeVisible({ timeout: 12_000 });
+    await expect(page.getByText(/Agent setup is temporarily unavailable/i)).toBeVisible({ timeout: 12_000 });
     await expect(page.getByRole('button', { name: /^retry$/i })).toBeVisible();
     await expect(page.getByText(/DeepSeek/i).first()).toBeVisible();
     await expect(page.getByText(/No AI model/i)).toHaveCount(0);
@@ -299,7 +299,7 @@ test.describe('account shell and bootstrap resilience', () => {
 
     await loginAsOwner(page);
 
-    await expect(page.locator('.app-chat-status-notice').filter({ hasText: 'Sage setup is temporarily unavailable' })).toBeVisible();
+    await expect(page.locator('.app-chat-status-notice').filter({ hasText: 'Agent setup is temporarily unavailable' })).toBeVisible();
     await expect(page.getByRole('button', { name: /^retry$/i })).toBeVisible();
     await expect(page.locator('[data-workstation-chat-composer="root"] textarea')).toHaveAttribute('placeholder', 'Sage setup is temporarily unavailable.');
     await expect(page.getByText(/^Not Found$/)).toHaveCount(0);
@@ -326,7 +326,7 @@ test.describe('account shell and bootstrap resilience', () => {
     await page.getByLabel(/^answer$/i).fill('Mansur');
     await page.getByRole('button', { name: /save and continue/i }).click();
 
-    await expect(page.locator('.app-chat-status-notice').filter({ hasText: 'Sage setup is temporarily unavailable' })).toBeVisible();
+    await expect(page.locator('.app-chat-status-notice').filter({ hasText: 'Agent setup is temporarily unavailable' })).toBeVisible();
     await expect(page.getByRole('button', { name: /^retry$/i })).toBeVisible();
     await expect(page.getByText(/^Not Found$/)).toHaveCount(0);
   });

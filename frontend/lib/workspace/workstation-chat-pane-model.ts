@@ -688,12 +688,12 @@ export function connectorSetupNoticeFromInterventions(interventions: unknown[]):
   if (!recognizedConnectorOrHardwareNotice) {
     return null;
   }
-  let message = detail || title || 'Connect the required system before Sage can use that action.';
+  let message = detail || title || 'Connect the required system before the agent can use that action.';
   let actionLabel = 'Open Connections';
   let actionTarget: NonNullable<SendFailureNotice['actions']>[number]['target'] = 'integrations';
 
   if (code.startsWith('google_workspace_') || combinedText.includes('google workspace')) {
-    message = 'Connect Google Workspace to let Sage use Gmail, Calendar, or Drive actions. You can keep chatting normally.';
+    message = 'Connect Google Workspace to let the agent use Gmail, Calendar, or Drive actions. You can keep chatting normally.';
   } else if (
     code === 'local_setup_required'
     || combinedText.includes('agent computer')
@@ -703,7 +703,7 @@ export function connectorSetupNoticeFromInterventions(interventions: unknown[]):
     || combinedText.includes('local computer')
     || combinedText.includes('screenshot')
   ) {
-    message = 'Connect Agent Computer in Hardware before Sage uses this computer. You can keep chatting normally.';
+    message = 'Connect Agent Computer in Hardware before the agent uses this computer. You can keep chatting normally.';
     actionLabel = 'Open Hardware';
     actionTarget = 'hardware';
   } else if (
@@ -712,15 +712,15 @@ export function connectorSetupNoticeFromInterventions(interventions: unknown[]):
     || combinedText.includes('smtp')
     || combinedText.includes('email connector')
   ) {
-    message = 'Connect an email account before Sage sends email. You can keep chatting normally.';
+    message = 'Connect an email account before the agent sends email. You can keep chatting normally.';
   } else if (code.startsWith('telegram_bot_') || combinedText.includes('telegram')) {
-    message = 'Connect Telegram before Sage uses Telegram actions. You can keep chatting normally.';
+    message = 'Connect Telegram before the agent uses Telegram actions. You can keep chatting normally.';
   } else if (code.startsWith('slack_') || combinedText.includes('slack')) {
-    message = 'Connect Slack before Sage uses Slack actions. You can keep chatting normally.';
+    message = 'Connect Slack before the agent uses Slack actions. You can keep chatting normally.';
   } else if (code.startsWith('dropbox_') || combinedText.includes('dropbox')) {
-    message = 'Connect Dropbox before Sage uses Dropbox actions. You can keep chatting normally.';
+    message = 'Connect Dropbox before the agent uses Dropbox actions. You can keep chatting normally.';
   } else if (code.startsWith('s3_') || combinedText.includes('s3')) {
-    message = 'Connect S3 before Sage uses S3 storage actions. You can keep chatting normally.';
+    message = 'Connect S3 before the agent uses S3 storage actions. You can keep chatting normally.';
   }
 
   return {
@@ -1507,13 +1507,13 @@ export function providerFailureMessageForProvider(provider: ProviderCatalogRecor
   const providerId = readString(provider?.id).toLowerCase();
   const providerLabel = readString(provider?.label) || (providerId ? providerId : 'The selected provider');
   if (providerId === 'ollama' || provider?.local_only === true || credentialPlane === 'local_runtime') {
-    return `${providerLabel} needs Agent Computer in Connectors. Connect a computer, use the default Sage route, or connect your own model account.`;
+    return `${providerLabel} needs Agent Computer in Connectors. Connect a computer, use the default agent route, or connect your own model account.`;
   }
   if (credentialPlane === 'workspace_connection') {
     return 'The selected model account needs attention. Check the connection, quota, or selected model in Connectors.';
   }
   if (credentialPlane === 'platform_runtime') {
-    return 'The default Sage route is active, but the hosted model is temporarily unavailable. Try again or switch model.';
+    return 'The default agent route is active, but the hosted model is temporarily unavailable. Try again or switch model.';
   }
   return 'The selected model route is not available right now. Switch model or open Connectors.';
 }
@@ -2366,9 +2366,9 @@ export function summarizeRuntimeCard(runtimeTargets: WorkspaceBootstrapRuntimeTa
   if (!local || !local.available) {
     return {
       tone: 'neutral',
-      title: `${preferredLabel} is carrying Sage`,
+      title: `${preferredLabel} is carrying the agent`,
       meta: `${preferredStatus} · cloud-first`,
-      body: 'Sage stays in cloud mode until an Agent Computer is connected. Computer work will not start from this workspace yet.',
+      body: 'The agent stays in cloud mode until an Agent Computer is connected. Computer work will not start from this workspace yet.',
       preferredPill: `${preferredLabel} · ${preferredStatus}`,
       localPill: `${agentComputerLabel} · needs connection`,
     };
@@ -2379,7 +2379,7 @@ export function summarizeRuntimeCard(runtimeTargets: WorkspaceBootstrapRuntimeTa
       tone: 'warning',
       title: 'Agent Computer is offline',
       meta: `${preferredLabel} remains active`,
-      body: local.statusReason || 'Sage will stay in cloud mode until Agent Computer reconnects.',
+      body: local.statusReason || 'The agent will stay in cloud mode until Agent Computer reconnects.',
       preferredPill: `${preferredLabel} · ${preferredStatus}`,
       localPill: `${agentComputerLabel} · ${local.statusLabel ?? 'Offline'}`,
     };
@@ -2390,7 +2390,7 @@ export function summarizeRuntimeCard(runtimeTargets: WorkspaceBootstrapRuntimeTa
       tone: 'warning',
       title: 'Agent Computer needs attention',
       meta: `${preferredLabel} remains active`,
-      body: local.statusReason || 'Sage will avoid computer work until the connection is healthy again.',
+      body: local.statusReason || 'The agent will avoid computer work until the connection is healthy again.',
       preferredPill: `${preferredLabel} · ${preferredStatus}`,
       localPill: `${agentComputerLabel} · ${local.statusLabel ?? 'Needs attention'}`,
     };
@@ -2401,8 +2401,8 @@ export function summarizeRuntimeCard(runtimeTargets: WorkspaceBootstrapRuntimeTa
     title: 'Agent Computer is ready',
     meta: `${agentComputerLabel} · ${local.sampleAttachmentLabel ?? local.label} · Default`,
     body: local.supportsFullAccess
-      ? 'Sage still uses cloud execution for ordinary turns. Agent Computer work starts in Default, and dedicated hardware can be switched to Full Access during setup.'
-      : 'Sage still uses cloud execution for ordinary turns. Agent Computer work starts in Default.',
+      ? 'The agent still uses cloud execution for ordinary turns. Agent Computer work starts in Default, and dedicated hardware can be switched to Full Access during setup.'
+      : 'The agent still uses cloud execution for ordinary turns. Agent Computer work starts in Default.',
     preferredPill: `${preferredLabel} · ${preferredStatus}`,
     localPill: `${agentComputerLabel} · ${local.statusLabel ?? 'Ready'}`,
   };
@@ -2419,7 +2419,7 @@ export function latestRunSummary(run: CanonicalRunSummary | undefined): string {
 
 export function latestApprovalSummary(approval: CanonicalApprovalSummary | undefined): string {
   if (!approval) {
-    return 'No approval is blocking Sage right now.';
+    return 'No approval is blocking the agent right now.';
   }
   return readString(approval.prompt) || 'A pending approval is attached to this thread.';
 }
@@ -2495,7 +2495,7 @@ export function classifyStatusNotice(message: string): {
   if (/^sage (setup check|status)/i.test(message)) {
     return {
       tone: 'neutral',
-      title: 'Sage readiness',
+      title: 'Agent readiness',
       body: message,
       requiresLocalAccess: false,
       actionTarget: 'gateway',
@@ -2515,10 +2515,10 @@ export function classifyStatusNotice(message: string): {
   if (isProviderRuntimeGateMessage(message) || /provider error|api key|credential|ollama/i.test(message)) {
     return {
       tone: 'warning',
-      title: 'Sage route needs attention',
+      title: 'Agent route needs attention',
       body: /api key|credential/i.test(message)
         ? 'Check the selected model key or quota in Connectors.'
-        : 'Choose the default Sage route, connect a model account, or connect Agent Computer.',
+        : 'Choose the default agent route, connect a model account, or connect Agent Computer.',
       requiresLocalAccess: false,
       actionTarget: 'integrations',
       actionLabel: 'Open Connectors',
@@ -2706,27 +2706,27 @@ export function normalizeSageProfileSnapshot(payload: unknown): SageProfileSnaps
 export function humanizeSageSetupFailure(error: unknown, mode: 'load' | 'save'): string {
   if (error instanceof Error && /timed out|took too long/i.test(error.message)) {
     return mode === 'save'
-      ? 'Sage setup took too long to save this answer. Retry in a moment.'
-      : 'Sage setup took too long to load. You can retry instead of waiting on this screen.';
+      ? 'Agent setup took too long to save this answer. Retry in a moment.'
+      : 'Agent setup took too long to load. You can retry instead of waiting on this screen.';
   }
   if (error instanceof WorkstationClientError) {
     if (error.status === 404) {
       return mode === 'save'
-        ? 'Sage setup is temporarily unavailable right now, so this answer could not be saved.'
-        : 'Sage setup is temporarily unavailable right now. Retry after the setup service is ready.';
+        ? 'Agent setup is temporarily unavailable right now, so this answer could not be saved.'
+        : 'Agent setup is temporarily unavailable right now. Retry after the setup service is ready.';
     }
     if (error.status === 403) {
-      return 'Sage setup is unavailable in this workspace right now.';
+      return 'Agent setup is unavailable in this workspace right now.';
     }
     if (error.status >= 500 || error.status === 0 || error.retryable) {
       return mode === 'save'
-        ? 'Sage setup could not save this answer right now. Retry in a moment.'
-        : 'Sage setup is temporarily unavailable right now. Retry in a moment.';
+        ? 'Agent setup could not save this answer right now. Retry in a moment.'
+        : 'Agent setup is temporarily unavailable right now. Retry in a moment.';
     }
   }
   return mode === 'save'
-    ? 'Sage setup could not save this answer right now. Retry when ready.'
-    : 'Sage setup is temporarily unavailable right now. Retry when ready.';
+    ? 'Agent setup could not save this answer right now. Retry when ready.'
+    : 'Agent setup is temporarily unavailable right now. Retry when ready.';
 }
 
 export function withTimeout<T>(
@@ -2963,7 +2963,7 @@ export function runPreviewLabel(run: CanonicalRunSummary): string {
     }
   }
 
-  return 'Continue the recent Sage thread';
+  return 'Continue the recent agent thread';
 }
 
 export function runContextTitle(run: CanonicalRunSummary): string {

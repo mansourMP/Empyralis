@@ -450,18 +450,18 @@ function shellPathCopy(command: string, status: 'running' | 'done' | 'error'): {
   if (normalized === 'pwd') {
     return {
       primary: `${action} folder`,
-      path: ['Sage', 'This Device', 'Folder'],
+      path: ['Agent', 'This Device', 'Folder'],
     };
   }
   if (normalized.includes('sw_vers') || normalized.includes('sysctl -n machdep.cpu.brand_string') || normalized.includes('hw.memsize')) {
     return {
       primary: `${action} this Mac`,
-      path: ['Sage', 'This Device', 'Hardware'],
+      path: ['Agent', 'This Device', 'Hardware'],
     };
   }
   return {
     primary: status === 'error' ? 'Local check failed' : `${action} this device`,
-    path: ['Sage', 'This Device', 'Result'],
+    path: ['Agent', 'This Device', 'Result'],
   };
 }
 
@@ -495,7 +495,7 @@ function executionTargetLabel(cell: Extract<CodexTranscriptCell, { kind: 'exec' 
 }
 
 function executionTargetPath(cell: Extract<CodexTranscriptCell, { kind: 'exec' }>): string[] {
-  return ['Sage', executionTargetLabel(cell), 'Terminal'];
+  return ['Agent', executionTargetLabel(cell), 'Terminal'];
 }
 
 function formatDurationMs(value: number | null | undefined): string | null {
@@ -1389,7 +1389,7 @@ export function ErrorCell({ cell }: { cell: Extract<CodexTranscriptCell, { kind:
     || lowerMessage.includes('selected provider')
     || lowerMessage.includes('selected for chat')
     || lowerMessage.includes('local-only')
-    ? 'Choose the default Sage route, connect a model account, or connect Agent Computer.'
+    ? 'Choose the default agent route, connect a model account, or connect Agent Computer.'
     : cell.message;
   return (
     <article data-chat-role="system" className="app-chat-transcript-error">
@@ -1397,7 +1397,7 @@ export function ErrorCell({ cell }: { cell: Extract<CodexTranscriptCell, { kind:
         <CircleAlert size={14} strokeWidth={1.9} />
       </span>
       <div className="app-chat-transcript-error__copy">
-        <strong>Sage route needs attention</strong>
+        <strong>Agent route needs attention</strong>
         <span>{message}</span>
       </div>
       {actionHref && actionLabel ? (

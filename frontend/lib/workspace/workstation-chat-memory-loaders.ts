@@ -93,7 +93,7 @@ export async function loadChatProfileSnapshot(options: LoadProfileOptions): Prom
         }),
       ),
       options.timeoutMs,
-      'Sage setup timed out.',
+      'Agent setup timed out.',
     );
   } catch (error) {
     profileError = error;
