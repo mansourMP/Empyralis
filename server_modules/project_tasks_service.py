@@ -429,6 +429,31 @@ async def _agent_install_exists(
     return row is not None
 
 
+async def agent_project_id(
+    *, tenant_id: str, workspace_id: str, agent_id: str,
+) -> Optional[str]:
+    """The calling agent's own project — the boundary its in-turn
+    project_task__* tools are scoped to (2026-07-25 ruling: a platform
+    agent works its own project's board only; unlike an external MCP key,
+    which is already workspace-wide by design, an agent's native tools
+    must not let it read or edit another project's tasks just by knowing
+    an id). Returns None if the agent has no project (not expected in
+    practice post-46bda1f7e, but every new agent gets one) or doesn't
+    exist in this workspace."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return None
+    row = await pool.fetchrow(
+        "SELECT project_id FROM workspace_agent_installs WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
+        str(agent_id or "").strip(),
+        str(tenant_id or "").strip(),
+        str(workspace_id or "").strip(),
+    )
+    if row is None:
+        return None
+    return str(row["project_id"] or "").strip() or None
+
+
 async def assign_task(
     *,
     tenant_id: str,

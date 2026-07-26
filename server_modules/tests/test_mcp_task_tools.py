@@ -285,5 +285,50 @@ class WriteGateDecisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
 
 
+class _InsertingFakePool:
+    """A pool that answers an INSERT ... RETURNING with a canned row --
+    _WorkspaceScopedFakePool above only simulates lookups against
+    pre-seeded rows, which a brand-new task (create_task's whole point)
+    can never be."""
+
+    def __init__(self, inserted_row):
+        self._inserted_row = dict(inserted_row)
+        self.fetchrow_calls: list[tuple] = []
+
+    async def fetchrow(self, query, *args):
+        self.fetchrow_calls.append((query, args))
+        return dict(self._inserted_row)
+
+
+class CreateTaskTests(unittest.IsolatedAsyncioTestCase):
+    """empyralis_create_task (2026-07-25): the external-MCP-client side of
+    closing the "Claude/ChatGPT can open tasks like a Linear issue" gap --
+    list/get/update_status/comment already existed, create did not."""
+
+    async def test_create_task_happy_path(self):
+        pool = _InsertingFakePool(_task_row(id="task-new", title="Draft the plan"))
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_create_task(
+                project_id="proj-1", title="Draft the plan", ctx=_FakeCtx(),
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["id"], "task-new")
+        self.assertEqual(result["task"]["title"], "Draft the plan")
+
+    async def test_create_task_requires_title(self):
+        pool = _InsertingFakePool(_task_row())
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_create_task(project_id="proj-1", title="  ", ctx=_FakeCtx())
+        self.assertFalse(result["ok"])
+
+    async def test_create_task_not_gated_by_check_write(self):
+        self.assertNotIn("_check_write", inspect.getsource(mcp_server.empyralis_create_task))
+
+    def test_create_task_is_registered_in_always_live_tools(self):
+        self.assertIn("empyralis_create_task", mcp_server.EMPYRALIST_MCP_TOOLS)
+
+
 if __name__ == "__main__":
     unittest.main()

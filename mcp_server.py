@@ -103,6 +103,7 @@ EMPYRALIST_MCP_TOOLS = [
     "empyralis_chat",
     # Tasks (always live — bounded to tasks already visible through this key;
     # see the write-gate rationale in the module docstring)
+    "empyralis_create_task",
     "empyralis_list_my_tasks",
     "empyralis_get_task",
     "empyralis_update_task_status",
@@ -499,6 +500,33 @@ if empyralist_mcp is not None:
     # decision: bounded to tasks already visible through this key, not a
     # workspace-wide configuration mutation, so not behind
     # EMPYRALIS_MCP_WRITE_ENABLED) ─────────────────────────────────────
+
+    @empyralist_mcp.tool(
+        title="Create Task",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_create_task(
+        project_id: str, title: str, description: str = "", due_at: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Create a task on a project's shared board — the same board a human
+        sees in the Tasks view and any platform agent in that project works
+        off of. Created unassigned/'open'; use empyralis_update_task_status
+        (once assigned) to move it through its lifecycle, or ask the owner
+        to assign it. project_id must be a project in this workspace."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        author_id = r.get("external_agent_id") or "external_mcp_client"
+        from server_modules import project_tasks_service as tasks
+        try:
+            task = await tasks.create_task(
+                tenant_id=tenant, workspace_id=ws, project_id=project_id,
+                title=title, description=description, due_at=due_at or None,
+                created_by=author_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — includes an invalid/foreign project_id (FK violation)
+            await _ledger_mcp_call(ws, "empyralis_create_task", False, project_id=project_id, error=str(exc))
+            return {"ok": False, "error": str(exc)}
+        await _ledger_mcp_call(ws, "empyralis_create_task", True, project_id=project_id, task_id=task.get("id"))
+        return {"ok": True, "task": task}
 
     @empyralist_mcp.tool(
         title="List My Tasks",

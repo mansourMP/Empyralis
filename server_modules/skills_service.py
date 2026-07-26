@@ -1241,6 +1241,156 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["service_id", "entry"],
             },
         ),
+        # project_task__* (2026-07-25): the platform-agent side of the
+        # project task board (docs/design/tasks-to-agents-research.md
+        # Section 4.6) — closes the loop the "task_assigned" wakeup opens.
+        # Distinct namespace from task_complete/update_plan above on
+        # purpose: those are per-turn conversational-plan tools (connector
+        # "sage"), these are the durable, cross-turn project board a human
+        # and every agent in the project both see (connector "project_task",
+        # backed by project_tasks_service.py). Every action here is scoped
+        # to the CALLING agent's own project (skills_service._project_task_
+        # scope resolves it from session identity) — an agent cannot read or
+        # edit another project's tasks by guessing an id, matching the
+        # locked "project is the collaboration boundary" ruling. All five
+        # are audience_safe: this is internal work-tracking, not a
+        # credential/instruction-bearing surface.
+        ToolDescriptor(
+            tool_name="project_task__create",
+            label="Create task",
+            connector_id="project_task",
+            action_id="create",
+            description=(
+                "Create a new task on this project's shared task board — the backlog "
+                "a human or any agent in this project can pick up. Starts unassigned "
+                "and 'open'; use project_task__assign to hand it to an agent (yourself "
+                "or a teammate in this project)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short task title."},
+                    "description": {"type": "string", "description": "What needs doing, and what does done look like."},
+                    "due_at": {"type": "string", "description": "Optional ISO 8601 due date/time."},
+                },
+                "required": ["title"],
+            },
+            audience_safe=True,
+            audience_note="Safe: internal work-tracking scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="project_task__list",
+            label="List project tasks",
+            connector_id="project_task",
+            action_id="list",
+            description=(
+                "List tasks on this project's board: tasks assigned to you, plus "
+                "unassigned backlog tasks anyone in the project can pick up. Use "
+                "before starting new work to see what's already tracked."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["open", "in_progress", "blocked", "awaiting_input", "done"],
+                        "description": "Optional status filter.",
+                    },
+                },
+                "required": [],
+            },
+            audience_safe=True,
+            audience_note="Safe: read-only, scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="project_task__get",
+            label="Get project task",
+            connector_id="project_task",
+            action_id="get",
+            description="Get one task by id, including its comment history — must belong to your own project.",
+            parameters={
+                "type": "object",
+                "properties": {"task_id": {"type": "string", "description": "The task id."}},
+                "required": ["task_id"],
+            },
+            audience_safe=True,
+            audience_note="Safe: read-only, scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="project_task__update",
+            label="Update project task",
+            connector_id="project_task",
+            action_id="update",
+            description=(
+                "Edit a task on your project's board — title, description, due date, and/or "
+                "status (open | in_progress | blocked | awaiting_input | done). Call this with "
+                "status='done' when you finish the work — nothing else closes the loop for you. "
+                "Use status='blocked' or 'awaiting_input' the moment you are stuck, so a human "
+                "or teammate sees it on the board instead of the task silently going quiet."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task id."},
+                    "title": {"type": "string", "description": "New title, if changing it."},
+                    "description": {"type": "string", "description": "New description, if changing it."},
+                    "status": {
+                        "type": "string",
+                        "enum": ["open", "in_progress", "blocked", "awaiting_input", "done"],
+                        "description": "New status.",
+                    },
+                    "due_at": {"type": "string", "description": "New ISO 8601 due date/time."},
+                    "clear_due_at": {"type": "boolean", "description": "Set true to remove the due date."},
+                },
+                "required": ["task_id"],
+            },
+            audience_safe=True,
+            audience_note="Safe: scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="project_task__comment",
+            label="Comment on project task",
+            connector_id="project_task",
+            action_id="comment",
+            description=(
+                "Post a progress note on a task — visible to the human owner and any other "
+                "agent in the project who reads it afterward. Use for status updates that "
+                "don't warrant a full field edit."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task id."},
+                    "body": {"type": "string", "description": "The comment text."},
+                },
+                "required": ["task_id", "body"],
+            },
+            audience_safe=True,
+            audience_note="Safe: scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="project_task__assign",
+            label="Assign project task",
+            connector_id="project_task",
+            action_id="assign",
+            description=(
+                "Hand a task on your project's board to an agent in the SAME project — "
+                "yourself, to pick up backlog work, or a teammate, to delegate it. Wakes "
+                "the target agent so it actually starts (subject to its own quiet-hours/"
+                "device policy). Cannot assign across projects or to an agent outside "
+                "this one."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task id."},
+                    "agent_id": {"type": "string", "description": "The agent install id to assign it to — must be in your project."},
+                },
+                "required": ["task_id", "agent_id"],
+            },
+            audience_safe=True,
+            audience_note="Safe: scoped to this agent's own project.",
+        ),
         ToolDescriptor(
             tool_name="browser__navigate",
             label="Browser navigate",
@@ -3958,6 +4108,11 @@ _BUILTIN_DIRECT_TOOL_IDS: frozenset = frozenset(
         # module's execute_single_direct_tool_call docstring), added here
         # only so this set stays authoritative if that ever changes.
         "subagent",
+        # project_task__* (2026-07-25, closing the platform-agent side of the
+        # task-board loop — see docs/design/tasks-to-agents-research.md
+        # Section 4.6): needs session_ctx to resolve the calling agent's own
+        # identity/project, same reasoning as "messaging"/"subagent" above.
+        "project_task",
     }
 )
 
@@ -5419,6 +5574,159 @@ def execute_single_direct_tool_call(
             agent_install_id=session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id") or None,
         )
         return json.dumps(result if isinstance(result, dict) else {"ok": True}, ensure_ascii=False)
+    if connector_id == "project_task":
+        from server_modules import project_tasks_service as _project_tasks
+
+        _caller_agent_id = _agent_install_id_from_direct_tool_context(session_ctx)
+        _caller_tenant_id = _tenant_id_from_direct_tool_context(session_ctx)
+        if not _caller_agent_id:
+            raise RuntimeError(f"Tool 'project_task__{action_id}' requires a resolvable agent identity.")
+        _caller_project_id = callbacks.run_async_tool_call(
+            _project_tasks.agent_project_id(
+                tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=_caller_agent_id,
+            )
+        )
+        if not _caller_project_id:
+            raise RuntimeError(
+                f"Tool 'project_task__{action_id}' is unavailable: this agent has no project, so it has no task board."
+            )
+
+        def _task_in_own_project(task: Optional[Dict[str, Any]], task_id: str) -> Dict[str, Any]:
+            if task is None:
+                raise RuntimeError(f"Task '{task_id}' not found in your project.")
+            if str(task.get("project_id") or "") != _caller_project_id:
+                raise RuntimeError(f"Task '{task_id}' belongs to a different project — not visible to this agent.")
+            return task
+
+        if action_id == "create":
+            title = str(argument_payload.get("title") or "").strip()
+            if not title:
+                raise RuntimeError("Tool 'project_task__create' requires a title.")
+            try:
+                task = callbacks.run_async_tool_call(
+                    _project_tasks.create_task(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        project_id=_caller_project_id,
+                        title=title,
+                        description=str(argument_payload.get("description") or ""),
+                        due_at=argument_payload.get("due_at"),
+                        created_by=_caller_agent_id,
+                    )
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+
+        if action_id == "list":
+            status = str(argument_payload.get("status") or "").strip() or None
+            tasks_rows = callbacks.run_async_tool_call(
+                _project_tasks.list_my_tasks(
+                    tenant_id=_caller_tenant_id,
+                    workspace_id=workspace_id,
+                    agent_id=_caller_agent_id,
+                    project_id=_caller_project_id,
+                    status=status,
+                )
+            )
+            return json.dumps({"ok": True, "tasks": tasks_rows}, ensure_ascii=False)
+
+        if action_id == "get":
+            task_id = str(argument_payload.get("task_id") or "").strip()
+            if not task_id:
+                raise RuntimeError("Tool 'project_task__get' requires task_id.")
+            task = callbacks.run_async_tool_call(
+                _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
+            )
+            task = _task_in_own_project(task, task_id)
+            return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+
+        if action_id == "update":
+            task_id = str(argument_payload.get("task_id") or "").strip()
+            if not task_id:
+                raise RuntimeError("Tool 'project_task__update' requires task_id.")
+            existing = callbacks.run_async_tool_call(
+                _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
+            )
+            _task_in_own_project(existing, task_id)
+            try:
+                task = callbacks.run_async_tool_call(
+                    _project_tasks.update_task(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        title=argument_payload.get("title"),
+                        description=argument_payload.get("description"),
+                        status=argument_payload.get("status"),
+                        due_at=argument_payload.get("due_at"),
+                        clear_due_at=bool(argument_payload.get("clear_due_at")),
+                    )
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+
+        if action_id == "comment":
+            task_id = str(argument_payload.get("task_id") or "").strip()
+            body = str(argument_payload.get("body") or "").strip()
+            if not task_id:
+                raise RuntimeError("Tool 'project_task__comment' requires task_id.")
+            if not body:
+                raise RuntimeError("Tool 'project_task__comment' requires body.")
+            existing = callbacks.run_async_tool_call(
+                _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
+            )
+            _task_in_own_project(existing, task_id)
+            try:
+                task = callbacks.run_async_tool_call(
+                    _project_tasks.add_task_comment(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        author_type="agent",
+                        author_id=_caller_agent_id,
+                        body=body,
+                    )
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+
+        if action_id == "assign":
+            task_id = str(argument_payload.get("task_id") or "").strip()
+            target_agent_id = str(argument_payload.get("agent_id") or "").strip()
+            if not task_id:
+                raise RuntimeError("Tool 'project_task__assign' requires task_id.")
+            if not target_agent_id:
+                raise RuntimeError("Tool 'project_task__assign' requires agent_id.")
+            existing = callbacks.run_async_tool_call(
+                _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
+            )
+            _task_in_own_project(existing, task_id)
+            target_project_id = callbacks.run_async_tool_call(
+                _project_tasks.agent_project_id(
+                    tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=target_agent_id,
+                )
+            )
+            if target_project_id != _caller_project_id:
+                raise RuntimeError(
+                    f"Agent '{target_agent_id}' is not in your project — cannot assign this task to it."
+                )
+            try:
+                result = callbacks.run_async_tool_call(
+                    _project_tasks.assign_task(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        agent_id=target_agent_id,
+                        triggered_by=f"agent:{_caller_agent_id}",
+                    )
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return json.dumps({"ok": True, **result}, ensure_ascii=False)
+
+        raise RuntimeError(f"Unsupported project_task direct tool '{action_id}'.")
     if connector_id == "sage_service" and action_id == "list_state":
         service_id = str(argument_payload.get("service_id") or "").strip()
         if not service_id:
