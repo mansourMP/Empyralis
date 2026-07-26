@@ -823,6 +823,18 @@ async def fleet_get_agent_activity(
     unlike the Inbox (a workspace-wide feed where a completed config action
     is still worth a line), this is the agent's OWN work log — routine
     owner configuration isn't part of that story.
+
+    One deliberate exception: `message_agent_refused`. This is the ledger
+    row `fleet_message_agent` writes every time a message TO this agent
+    can't be delivered (no delivery path exists yet — see that function's
+    docstring). It's already workspace-wide visible in the Inbox
+    (`fleet-data.ts` doesn't filter fleet_control at all), but until now it
+    was the one fleet_control action silently dropped from the very page —
+    this agent's own Overview — where someone debugging "why didn't my
+    message land" would actually look. Letting this one action through
+    doesn't reintroduce the plumbing-noise problem the 2026-07-10 fix
+    solved: routine owner config (configure_agent, create_agent, ...)
+    stays excluded; only this one always-a-real-signal action is let in.
     """
     from server_modules import control_plane_repository as cpr
 
@@ -840,7 +852,7 @@ async def fleet_get_agent_activity(
             FROM activity_ledger_events
             WHERE workspace_id = $1
               AND install_id = $2
-              AND event_class != 'fleet_control'
+              AND (event_class != 'fleet_control' OR action = 'message_agent_refused')
               AND ($3::timestamptz IS NULL OR created_at >= $3::timestamptz)
             ORDER BY created_at DESC
             LIMIT 50
