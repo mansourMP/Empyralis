@@ -4777,7 +4777,9 @@ async def create_workspace_for_user(
     clean_tenant_id = f"tenant_{uuid.uuid4().hex[:12]}"
     tenant_slug = _slugify(f"{clean_name}-{clean_tenant_id[:8]}", f"tenant-{clean_tenant_id[:8]}")
     workspace_slug = _slugify(f"{clean_name}-{resolved_workspace_id[:8]}", f"workspace-{resolved_workspace_id[:8]}")
-    # seed the 10,000-credit signup grant for every new workspace
+    # seed the signup credit grant for every new workspace (derived from
+    # billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD /
+    # HOSTED_SAGE_AI_CREDITS_PER_USD — 100 credits at the current lean rate)
     metadata = _workspace_shell_metadata(
         _new_workspace_billing_metadata(),
         preferred_shell_profile=clean_preferred_shell_profile,

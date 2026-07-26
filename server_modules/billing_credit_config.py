@@ -33,14 +33,15 @@ should hardcode a dollar-to-credit rate or a free-allowance size.
    + 150 output tokens on deepseek-chat ($0.14 / $0.28 per 1M tokens):
        raw_cost  = 500/1e6*0.14 + 150/1e6*0.28  ≈ $0.000112
        billed    = raw_cost * CREDIT_COST_MARGIN_MULTIPLIER (3x) ≈ $0.000336
-       credits   = billed * HOSTED_SAGE_AI_CREDITS_PER_USD (2,000/$) ≈ 0.67
-       charged   = ceil(0.67), floored at MIN_CREDITS_CHARGED_PER_TURN  = 1 credit
-   A heavier turn (5,000 in / 1,500 out) costs about 7 credits under the
-   same formula — proportional, not flat — and a very large-context turn
-   (30,000 in / 5,000 out) costs about 34 credits. The unit stays legible
-   at both ends: a normal exchange reads as "1", a heavy one reads as a
-   small double-digit number, never a fraction and never an opaque cost
-   in micro-dollars.
+       credits   = billed * HOSTED_SAGE_AI_CREDITS_PER_USD (100/$) ≈ 0.034
+       charged   = ceil(0.034), floored at MIN_CREDITS_CHARGED_PER_TURN  = 1 credit
+   A heavier turn (5,000 in / 1,500 out) still floors to 1 credit under the
+   same formula, and a very large-context turn (30,000 in / 5,000 out)
+   costs about 2 credits. The unit stays legible at both ends: a normal
+   exchange reads as "1", a heavy one reads as a small number, never a
+   fraction and never an opaque cost in micro-dollars. (At the retired
+   2,000-credits/$ rate this same worked example produced ~7 and ~34
+   credits respectively — those numbers no longer apply post-lean-grant.)
 
 3. Free allowance — ``NEW_ACCOUNT_SIGNUP_CREDIT_USD``.
    Every workspace (new AND pre-existing) is guaranteed at least this
@@ -48,9 +49,11 @@ should hardcode a dollar-to-credit rate or a free-allowance size.
    bring it below that floor — see
    ``control_plane_repository._ensure_workspace_credit_balance_floor``,
    applied lazily and idempotently the first time a workspace's balance
-   is touched by a real turn. At the default $5.00 and ~1 credit/turn,
-   that is several thousand free turns — nobody should ever see a "0
-   credits" wall during normal use or a demo.
+   is touched by a real turn. At the default $1.00 (100 credits) and
+   ~1 credit/turn, that is roughly a hundred free turns — a small,
+   legible starter allowance (not a giant pile), but still enough that
+   nobody should see a "0 credits" wall on their first few real turns
+   or a demo.
 
 4. Non-blocking, by construction.
    The per-turn debit (``control_plane_repository.

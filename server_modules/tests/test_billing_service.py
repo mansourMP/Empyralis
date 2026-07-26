@@ -426,7 +426,9 @@ class BillingServiceTests(unittest.TestCase):
         self.assertEqual(history["hosted_sage_ai"]["total_available_credits"], 28400)
         self.assertEqual(history["items"][0]["label"], "Hello")
         self.assertEqual(history["items"][0]["thread_id"], "thread_alpha")
-        self.assertEqual(history["items"][0]["credits"], -280)
+        # 0.14 estimated_cost_usd * HOSTED_SAGE_AI_CREDITS_PER_USD (100/$,
+        # post-lean-grant rate — was 2000/$ when this asserted -280).
+        self.assertEqual(history["items"][0]["credits"], -14)
         self.assertEqual(history["items"][1]["credits"], 20000)
 
     def test_unified_credit_usage_merges_ai_and_runtime_ledger_rows(self):

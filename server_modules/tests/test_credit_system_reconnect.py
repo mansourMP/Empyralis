@@ -44,10 +44,15 @@ class CreditConversionTests(unittest.TestCase):
         light_credits = billing_credit_config.credits_for_turn_cost_usd(light_cost)
         heavy_credits = billing_credit_config.credits_for_turn_cost_usd(heavy_cost)
         self.assertGreater(heavy_credits, light_credits)
-        # Genuinely proportional, not just "more than 1" — heavy_cost is
-        # ~75x light_cost, so heavy_credits should land in a comparable
-        # order of magnitude once the floor stops dominating.
-        self.assertGreaterEqual(heavy_credits, 10)
+        # Genuinely proportional, not just "more than 1". At the lean
+        # post-2026-07-21 rate (100 credits/$, 3x margin — see
+        # billing_credit_config.py), heavy_cost (~$0.0056) bills to
+        # ~$0.0168 -> ceil(1.68) = 2 credits; light_cost floors at 1. This
+        # threshold was 10 back when the rate was 2000 credits/$ (the
+        # inflated pre-lean-grant config, where the same heavy_cost billed
+        # to ~34 credits) — updated to match the intentional rate change,
+        # not a regression.
+        self.assertGreaterEqual(heavy_credits, 2)
 
     def test_zero_cost_turn_charges_nothing(self):
         # No ground-truth cost (e.g. pricing unknown) must never be
