@@ -47,7 +47,10 @@ class McpRegistryServiceTests(unittest.TestCase):
 
         self.assertEqual(record["id"], "inventory-feed")
         self.assertEqual(record["tools"][0]["name"], "lookup_stock")
-        self.assertFalse(record["tools"][0]["approved"])
+        # MAN-92/MAN-104: a plain read tool with no money/delete/third-party
+        # signal in its name or description auto-approves on discovery — no
+        # per-tool toggle wall for tools that don't touch real assets.
+        self.assertTrue(record["tools"][0]["approved"])
         self.assertEqual(record["tools"][0]["risk_level"], "low")
         self.assertEqual(record["tools"][0]["cost_class"], "standard")
         self.assertEqual(record["tools"][0]["permission_manifest"]["action_class"], "read")
@@ -66,7 +69,11 @@ class McpRegistryServiceTests(unittest.TestCase):
         self.assertEqual(skills[0]["id"], "mcp:inventory-feed:lookup_stock")
         self.assertEqual(skills[0]["execution_adapter"], "mcp_tool")
 
-    def test_discovered_tools_require_explicit_approval_before_use(self) -> None:
+    def test_only_high_stakes_discovered_tools_require_explicit_approval(self) -> None:
+        """MAN-92/MAN-104: a benign write (update a record) auto-approves on
+        discovery same as a read tool would; only a tool matching the
+        money/delete/third-party-send category (here, a delete) still lands
+        unapproved and needs an explicit approve_mcp_tool() call."""
         with patch.object(
             mcp_registry_service,
             "_list_tools_streamable_http_async",
@@ -86,6 +93,13 @@ class McpRegistryServiceTests(unittest.TestCase):
                         "action_class": "write",
                         "connector_scopes": ["inventory"],
                     },
+                    {
+                        "name": "delete_stock",
+                        "label": "Delete Stock",
+                        "description": "Permanently delete an inventory record.",
+                        "action_class": "write",
+                        "connector_scopes": ["inventory"],
+                    },
                 ]
             ),
         ):
@@ -98,24 +112,44 @@ class McpRegistryServiceTests(unittest.TestCase):
                 discover_tools=True,
             )
 
-        self.assertEqual([tool["approved"] for tool in record["tools"]], [False, False])
-        self.assertEqual(mcp_registry_service.list_workspace_mcp_skill_entries("workspace-1"), [])
+        approval_state = {tool["name"]: tool["approved"] for tool in record["tools"]}
+        self.assertEqual(
+            approval_state,
+            {"lookup_stock": True, "write_stock": True, "delete_stock": False},
+        )
+        # Only the still-unapproved destructive tool is missing from the
+        # live skill catalog; the two auto-approved ones are already usable.
+        skills = mcp_registry_service.list_workspace_mcp_skill_entries("workspace-1")
+        self.assertEqual(
+            sorted(item["id"] for item in skills),
+            ["mcp:inventory-feed:lookup_stock", "mcp:inventory-feed:write_stock"],
+        )
 
         approved = mcp_registry_service.approve_mcp_tool(
             workspace_id="workspace-1",
             server_id="inventory-feed",
-            tool_name="lookup_stock",
+            tool_name="delete_stock",
         )
 
         approval_state = {
             tool["name"]: tool["approved"]
             for tool in approved["tools"]
         }
-        self.assertEqual(approval_state, {"lookup_stock": True, "write_stock": False})
+        self.assertEqual(
+            approval_state,
+            {"lookup_stock": True, "write_stock": True, "delete_stock": True},
+        )
         skills = mcp_registry_service.list_workspace_mcp_skill_entries("workspace-1")
-        self.assertEqual([item["id"] for item in skills], ["mcp:inventory-feed:lookup_stock"])
+        self.assertEqual(
+            sorted(item["id"] for item in skills),
+            [
+                "mcp:inventory-feed:delete_stock",
+                "mcp:inventory-feed:lookup_stock",
+                "mcp:inventory-feed:write_stock",
+            ],
+        )
 
-    def test_manual_tools_default_to_unapproved(self) -> None:
+    def test_manual_benign_tool_auto_approves_but_destructive_tool_does_not(self) -> None:
         record = mcp_registry_service.upsert_workspace_mcp_server(
             workspace_id="workspace-1",
             server_id="inventory-feed",
@@ -129,13 +163,90 @@ class McpRegistryServiceTests(unittest.TestCase):
                     "description": "Read inventory data.",
                     "action_class": "read",
                     "connector_scopes": ["inventory"],
-                }
+                },
+                {
+                    "name": "delete_stock",
+                    "label": "Delete Stock",
+                    "description": "Permanently delete an inventory record.",
+                    "action_class": "write",
+                    "connector_scopes": ["inventory"],
+                },
             ],
             metadata={},
         )
 
-        self.assertEqual(record["tools"][0]["approved"], False)
-        self.assertEqual(mcp_registry_service.list_workspace_mcp_skill_entries("workspace-1"), [])
+        approval_state = {tool["name"]: tool["approved"] for tool in record["tools"]}
+        self.assertEqual(approval_state, {"lookup_stock": True, "delete_stock": False})
+        skills = mcp_registry_service.list_workspace_mcp_skill_entries("workspace-1")
+        self.assertEqual([item["id"] for item in skills], ["mcp:inventory-feed:lookup_stock"])
+
+    def test_high_stakes_keyword_match_is_whole_word_not_substring(self) -> None:
+        """Regression for a real false-positive found while verifying MAN-104's
+        literal example (Google Gmail/Calendar/Drive MCP): naive substring
+        matching flagged "read_email" and "list_messages" as high-stakes just
+        because "email"/"message" are content nouns that appear in the name,
+        and flagged unrelated words like "admin_settings" (contains "dm") and
+        "list_tweets" (contains "tweet") as well. That would recreate the
+        exact per-tool-approval wall this ticket removes, for the exact
+        services the ticket names. Only a real send/post/share action (here,
+        a camelCase Slack-style "chat_postMessage") should require approval."""
+        record = mcp_registry_service.upsert_workspace_mcp_server(
+            workspace_id="workspace-1",
+            server_id="chat-app",
+            label="Chat App",
+            transport="streamable_http",
+            endpoint="https://example.com/mcp",
+            tools=[
+                {
+                    "name": "read_email",
+                    "label": "Read Email",
+                    "description": "Read messages in the inbox.",
+                    "action_class": "read",
+                    "connector_scopes": ["mail"],
+                },
+                {
+                    "name": "list_shared_drives",
+                    "label": "List Shared Drives",
+                    "description": "List drives shared with you.",
+                    "action_class": "read",
+                    "connector_scopes": ["drive"],
+                },
+                {
+                    "name": "admin_settings",
+                    "label": "Admin Settings",
+                    "description": "View workspace admin settings.",
+                    "action_class": "read",
+                    "connector_scopes": ["admin"],
+                },
+                {
+                    "name": "list_tweets",
+                    "label": "List Tweets",
+                    "description": "List recent tweets.",
+                    "action_class": "read",
+                    "connector_scopes": ["social"],
+                },
+                {
+                    "name": "chat_postMessage",
+                    "label": "Post Message",
+                    "description": "Post a message to a channel on the user's behalf.",
+                    "action_class": "write",
+                    "connector_scopes": ["chat"],
+                },
+            ],
+            metadata={},
+        )
+
+        approval_state = {tool["name"]: tool["approved"] for tool in record["tools"]}
+        self.assertEqual(
+            approval_state,
+            {
+                "read_email": True,
+                "list_shared_drives": True,
+                "admin_settings": True,
+                "list_tweets": True,
+                "chat_postMessage": False,
+            },
+        )
 
     def test_refresh_preserves_existing_approvals_and_hides_new_tools(self) -> None:
         mcp_registry_service.upsert_workspace_mcp_server(

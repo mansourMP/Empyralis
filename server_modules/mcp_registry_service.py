@@ -44,6 +44,60 @@ _SUPPORTED_ACTION_CLASSES = {"read", "write", "execute"}
 _SUPPORTED_RISK_LEVELS = {"low", "medium", "high", "critical"}
 _SUPPORTED_COST_CLASSES = {"free", "standard", "metered", "external"}
 _DANGEROUS_TOKENS = {"delete", "remove", "destroy", "drop", "truncate", "reset", "shutdown"}
+
+# MAN-92/MAN-104 (tiered autonomy for MCP tools): real remote MCP servers
+# essentially never self-report action_class/risk_level/requires_approval —
+# that's an Empyralis-only manifest extension, not part of the MCP tool
+# schema — so raw.get("action_class")/raw.get("risk_level") fall back to
+# "read"/"low" for nearly every dynamically-discovered tool regardless of
+# what it actually does. Name/description keyword matching is the only
+# signal available for THIS catalog (unlike skills_service.py's first-party
+# tools, which get a risk_level/requires_approval hand-authored per tool at
+# definition time). Scoped to the same three "genuinely hard-to-reverse or
+# externally-reaching" categories MAN-68's doctrine now teaches the model to
+# pause on: money movement, irreversible deletes, and messaging/acting on a
+# third party on the owner's behalf. Deliberately NOT a blanket "any write
+# needs approval" net — that's the wall-of-toggles behavior this fixes.
+_MONEY_MOVEMENT_TOKENS = {
+    "pay", "payment", "charge", "refund", "transfer", "withdraw", "payout",
+    "invoice", "checkout", "purchase", "subscribe", "billing",
+}
+_THIRD_PARTY_SEND_TOKENS = {
+    "send", "reply", "post", "publish", "share",
+    "invite", "notify", "dm", "tweet",
+}
+_HIGH_STAKES_TOKENS = _DANGEROUS_TOKENS | _MONEY_MOVEMENT_TOKENS | _THIRD_PARTY_SEND_TOKENS
+# Deliberately NOT in _THIRD_PARTY_SEND_TOKENS: "email"/"message". Those are
+# content-type nouns, not send actions — a plain read tool named "read_email"
+# or "list_messages" (exactly what Gmail/Slack/Discord discovery produces,
+# the literal MAN-104 example) legitimately contains those words without
+# doing anything third-party-reaching. The verb tokens above ("send", "post",
+# "reply", ...) already catch the actual send action on those same services
+# (e.g. "send_email", "chat_postMessage").
+
+_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _keyword_tokens(text: str) -> set:
+    """Whole-word tokenizer for _looks_high_stakes: lowercases, splits
+    camelCase boundaries (so "chat_postMessage" yields "post"/"message"
+    instead of one opaque blob), then splits on any non-alnum separator.
+    Whole-word SET MEMBERSHIP (not substring) is required so that plurals
+    and unrelated words that merely contain a token as a substring don't
+    false-positive — e.g. "shared" must not match "share", "tweets" must not
+    match "tweet", and "admin" must not match "dm"."""
+    camel_split = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
+    return {token for token in _WORD_SPLIT_RE.split(camel_split.lower()) if token}
+
+
+def _looks_high_stakes(name: str, description: str) -> bool:
+    """Name/description keyword match for the money/delete/third-party-send
+    categories — see _HIGH_STAKES_TOKENS above for why this exists instead of
+    trusting a declared action_class/risk_level for third-party MCP tools.
+    Matches whole words only (see _keyword_tokens) so read tools that merely
+    mention a high-stakes-adjacent noun aren't swept into the approval gate."""
+    tokens = _keyword_tokens(name) | _keyword_tokens(description)
+    return bool(tokens & _HIGH_STAKES_TOKENS)
 _ARGUMENT_KEY_CANDIDATES = ("arguments", "args", "input", "payload")
 
 _BLOCKED_MCP_HOSTS = {
@@ -383,15 +437,22 @@ def _normalize_tool_payload(raw: Dict[str, Any], *, server_id: str) -> Dict[str,
     trigger_terms = [token.lower() for token in _normalize_list_of_strings(raw.get("trigger_terms"))]
     action_class = _normalize_action_class(raw.get("action_class"))
     risk_level = _normalize_risk_level(raw.get("risk_level"), action_class=action_class)
+    description = str(raw.get("description") or "").strip()
+    high_stakes = _looks_high_stakes(name, description)
+    if high_stakes and risk_level not in {"high", "critical"}:
+        # Keep the risk badge honest for the UI: a declared-safe tool whose
+        # name/description says "send"/"delete"/"charge" etc. shouldn't show
+        # as "low risk" just because the remote server didn't self-report.
+        risk_level = "high"
     permission_scopes = _normalize_list_of_strings(raw.get("permission_scopes")) or list(normalized_scopes)
-    requires_approval = bool(raw.get("requires_approval")) or risk_level in {"high", "critical"}
+    requires_approval = bool(raw.get("requires_approval")) or risk_level in {"high", "critical"} or high_stakes
     allowed_runtime_modes = _normalize_runtime_modes(raw.get("allowed_runtime_modes"))
     cost_class = _normalize_cost_class(raw.get("cost_class"))
     audit_event_type = str(raw.get("audit_event_type") or f"mcp.tool.{action_class}").strip() or f"mcp.tool.{action_class}"
     return {
         "name": name,
         "label": label[:160],
-        "description": str(raw.get("description") or "").strip()[:500],
+        "description": description[:500],
         "input_schema": _normalize_input_schema(raw.get("input_schema")),
         "action_class": action_class,
         "risk_level": risk_level,
@@ -412,7 +473,14 @@ def _normalize_tool_payload(raw: Dict[str, Any], *, server_id: str) -> Dict[str,
             "audit_event_type": audit_event_type,
         },
         "enabled": bool(raw.get("enabled", True)),
-        "approved": bool(raw.get("approved", False)),
+        # MAN-92/MAN-104: auto-approve by default — the wall-of-toggles this
+        # replaces required a manual click per tool regardless of risk. Only
+        # tools flagged requires_approval (money/delete/third-party-send,
+        # or declared high/critical risk) still default to unapproved; the
+        # explicit approve/deny routes remain the only way to change either
+        # state, and an explicit raw["approved"] (e.g. a stored value being
+        # re-normalized) always wins over this default.
+        "approved": bool(raw.get("approved", not requires_approval)),
     }
 
 
@@ -1179,11 +1247,20 @@ def upsert_workspace_mcp_server(
         if discovered:
             for tool in discovered:
                 normalized_name = _normalize_tool_name(tool.get("name"))
-                tool["approved"] = bool(existing_approvals.get(normalized_name, False))
-            _log.warning(
-                "MCP server %s: %d tools discovered but not auto-approved. Use approve_mcp_tool().",
+                # MAN-92/MAN-104: a prior explicit approve/deny always wins;
+                # absent one, keep whatever _normalize_tool_payload already
+                # decided above (auto-approved unless requires_approval —
+                # money/delete/third-party-send, or declared high/critical
+                # risk) instead of unconditionally forcing every rediscovered
+                # tool back to unapproved.
+                tool["approved"] = bool(existing_approvals.get(normalized_name, tool.get("approved", False)))
+            _needs_approval = sum(1 for t in discovered if t.get("requires_approval") and not t.get("approved"))
+            _log.info(
+                "MCP server %s: %d tools discovered, %d auto-enabled, %d awaiting approval (money/destructive/third-party actions).",
                 payload["id"],
                 len(discovered),
+                len(discovered) - _needs_approval,
+                _needs_approval,
             )
             payload["tools"] = discovered
         payload["last_synced_at"] = _utc_now_iso()
@@ -1257,11 +1334,20 @@ async def upsert_workspace_mcp_server_async(
         if discovered:
             for tool in discovered:
                 normalized_name = _normalize_tool_name(tool.get("name"))
-                tool["approved"] = bool(existing_approvals.get(normalized_name, False))
-            _log.warning(
-                "MCP server %s: %d tools discovered but not auto-approved. Use approve_mcp_tool().",
+                # MAN-92/MAN-104: a prior explicit approve/deny always wins;
+                # absent one, keep whatever _normalize_tool_payload already
+                # decided above (auto-approved unless requires_approval —
+                # money/delete/third-party-send, or declared high/critical
+                # risk) instead of unconditionally forcing every rediscovered
+                # tool back to unapproved.
+                tool["approved"] = bool(existing_approvals.get(normalized_name, tool.get("approved", False)))
+            _needs_approval = sum(1 for t in discovered if t.get("requires_approval") and not t.get("approved"))
+            _log.info(
+                "MCP server %s: %d tools discovered, %d auto-enabled, %d awaiting approval (money/destructive/third-party actions).",
                 payload["id"],
                 len(discovered),
+                len(discovered) - _needs_approval,
+                _needs_approval,
             )
             payload["tools"] = discovered
         payload["last_synced_at"] = _utc_now_iso()

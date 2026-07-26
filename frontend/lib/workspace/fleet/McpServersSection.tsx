@@ -22,9 +22,7 @@
 // every other live page in this directory already uses, instead of standing up
 // an unused, orphaned client wrapper for a single new section.
 //
-// Tool approval/deny routes (added same-day this section was built — they were
-// a gap: mcp_registry_service.py had working approve_mcp_tool()/deny_mcp_tool()
-// functions with no REST route):
+// Tool approval/deny routes:
 //   POST   /agent-registry/mcp/servers/{server_id}/tools/approve   approve_mcp_server_tool
 //   POST   /agent-registry/mcp/servers/{server_id}/tools/deny      deny_mcp_server_tool
 // Both take {workspace_id, tool_name} (McpToolApproveRequest) and are owner-gated.
@@ -33,10 +31,31 @@
 // _strip_mcp_tool_approval_flags), a deliberate guard against self-approval;
 // per-tool approval MUST go through these dedicated routes. The whole-server
 // enable/disable toggle is sent with tools omitted so existing approvals survive
-// (mcp_registry_service.py:611, the `tools: normalized_tools or existing tools`
-// fallback).
+// (mcp_registry_service.py's `tools: normalized_tools or existing tools` fallback).
+//
+// MAN-92 / MAN-104 (tiered autonomy — no per-tool toggle wall unless a tool is
+// genuinely high-stakes): server_modules/mcp_registry_service.py now
+// auto-approves a discovered tool unless it's flagged `requires_approval`
+// (money movement, irreversible deletes, or third-party messaging on the
+// owner's behalf — the exact category MAN-68's doctrine work already teaches
+// the model to pause on; see mcp_registry_service._looks_high_stakes). So this
+// screen no longer needs to show every tool as its own approve/deny row —
+// only the ones still gated. Below, tools are bucketed client-side into
+// "auto-enabled" (just a count, no control), "needs your approval" (the real
+// gate, kept front and center), "approved high-risk" (revoke option), and
+// "turned off by you" (re-enable option) — see bucketizeTools().
+//
+// Also per MAN-104's literal example ("Google Calendar MCP / Google Drive MCP
+// / Google Gmail MCP as three separate entries"): connecting one OAuth app
+// (e.g. Google Workspace) registers multiple MCP server rows under
+// APP_MCP_SERVER_MAP (connection_oauth_service.py) — one per remote endpoint —
+// but they share the SAME credential_id (the OAuth grant that produced them).
+// groupServers() below uses that existing, unchanged signal to fold same-app
+// server rows into one entry instead of adding a new backend "provider" field
+// just for this. Any provider with only one MCP server (nearly all of them)
+// renders exactly as before.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronRight, Plus, RefreshCw, Server, Trash2, TriangleAlert } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -48,6 +67,7 @@ export type McpServerTool = {
   description: string;
   action_class: string;
   risk_level: string;
+  requires_approval: boolean;
   approved: boolean;
   enabled: boolean;
 };
@@ -64,6 +84,7 @@ export type McpServerRecord = {
   created_at: string | null;
   updated_at: string | null;
   credential_id: string | null;
+  status?: string;
 };
 
 // ── plain-fetch helpers (matches the convention this whole directory uses —
@@ -134,18 +155,114 @@ function uniqueServerId(base: string, existingIds: Set<string>): string {
   return `${root}-${n}`;
 }
 
-function statusText(server: McpServerRecord): string {
-  // Backend flips status="reauth_required" when a live 401 + failed token
-  // refresh proves the grant is dead (mcp_registry_service auth-durability
-  // seam); it auto-resets to "ok" when a new credential is attached.
-  if ((server as { status?: string }).status === "reauth_required") return "Reconnect needed — sign-in expired";
-  if (!server.enabled) return "Disabled";
-  if (server.tool_count === 0) return server.last_synced_at ? "No tools discovered" : "Pending discovery";
-  const approved = server.tools.filter((t) => t.approved).length;
-  const noun = server.tool_count === 1 ? "tool" : "tools";
-  if (approved === 0) return `${server.tool_count} ${noun} — none approved`;
-  if (approved < server.tool_count) return `${approved}/${server.tool_count} tools approved`;
-  return `${server.tool_count} ${noun} approved`;
+// ── grouping (MAN-104): fold server rows that came from the same OAuth
+//    connect (same credential_id) into one visual entry ───────────────────
+
+type ServiceGroup = {
+  key: string;
+  title: string;
+  subtitle: string;
+  servers: McpServerRecord[];
+};
+
+function stripMcpSuffix(label: string): string {
+  return label.replace(/\(mcp\)/gi, "").replace(/\bmcp\b/gi, "").trim().replace(/\s+/g, " ");
+}
+
+function commonWordPrefixLength(wordLists: string[][]): number {
+  const first = wordLists[0] || [];
+  let n = 0;
+  while (
+    n < first.length &&
+    wordLists.every((words) => (words[n] || "").toLowerCase() === first[n].toLowerCase())
+  ) {
+    n += 1;
+  }
+  return n;
+}
+
+function groupServers(servers: McpServerRecord[]): ServiceGroup[] {
+  const byCredential = new Map<string, McpServerRecord[]>();
+  const singles: McpServerRecord[] = [];
+  for (const server of servers) {
+    const credential = (server.credential_id || "").trim();
+    if (!credential) {
+      singles.push(server);
+      continue;
+    }
+    const bucket = byCredential.get(credential) || [];
+    bucket.push(server);
+    byCredential.set(credential, bucket);
+  }
+
+  const groups: ServiceGroup[] = [];
+  for (const [credential, bucket] of byCredential) {
+    if (bucket.length < 2) {
+      singles.push(...bucket);
+      continue;
+    }
+    const cleanLabels = bucket.map((s) => stripMcpSuffix(s.label || s.id));
+    const wordLists = cleanLabels.map((l) => l.split(" ").filter(Boolean));
+    const prefixLen = commonWordPrefixLength(wordLists);
+    const prefixWords = (wordLists[0] || []).slice(0, prefixLen);
+    const subNames = wordLists.map((words, i) => words.slice(prefixLen).join(" ") || cleanLabels[i]);
+    groups.push({
+      key: credential,
+      title: prefixWords.join(" ") || subNames.join(" / "),
+      subtitle: subNames.join(", "),
+      servers: bucket,
+    });
+  }
+  for (const server of singles) {
+    groups.push({
+      key: server.id,
+      title: server.label || server.id,
+      subtitle: hostFromUrl(server.endpoint),
+      servers: [server],
+    });
+  }
+  // Keep a stable order (by first server's id) so groups don't jump around
+  // as unrelated rows in the list refresh.
+  groups.sort((a, b) => a.servers[0].id.localeCompare(b.servers[0].id));
+  return groups;
+}
+
+function groupStatusText(group: ServiceGroup): string {
+  if (group.servers.some((s) => s.status === "reauth_required")) {
+    return "Reconnect needed — sign-in expired";
+  }
+  if (group.servers.every((s) => !s.enabled)) return "Disabled";
+  const allTools = group.servers.flatMap((s) => s.tools);
+  if (allTools.length === 0) {
+    return group.servers.some((s) => s.last_synced_at) ? "No tools discovered" : "Pending discovery";
+  }
+  const pending = allTools.filter((t) => t.requires_approval && !t.approved).length;
+  if (pending > 0) {
+    return `Connected — ${pending} ${pending === 1 ? "action needs" : "actions need"} your approval`;
+  }
+  return `Connected — ${allTools.length} ${allTools.length === 1 ? "tool" : "tools"} active`;
+}
+
+// A tool paired with the specific server record it lives on — a group can
+// span more than one server row, and approve/deny/refresh all need to know
+// which underlying server_id a given tool belongs to.
+type FlatTool = { tool: McpServerTool; server: McpServerRecord };
+
+function bucketizeTools(group: ServiceGroup) {
+  const flat: FlatTool[] = group.servers.flatMap((server) => server.tools.map((tool) => ({ tool, server })));
+  return {
+    // The whole point of MAN-92/104: these need zero UI — just a count.
+    autoActive: flat.filter((x) => !x.tool.requires_approval && x.tool.approved),
+    // An owner explicitly turned a non-high-stakes tool off — rare, but give
+    // a way back rather than silently hiding it forever.
+    turnedOff: flat.filter((x) => !x.tool.requires_approval && !x.tool.approved),
+    // The real gate this redesign keeps: money/delete/third-party-send tools
+    // still waiting on an explicit yes.
+    needsApproval: flat.filter((x) => x.tool.requires_approval && !x.tool.approved),
+    // High-stakes tools the owner already approved — shown compactly with a
+    // revoke option, not folded into the invisible "auto" bucket.
+    approvedHighStakes: flat.filter((x) => x.tool.requires_approval && x.tool.approved),
+  };
 }
 
 // ── data hook ────────────────────────────────────────────────────────────
@@ -189,38 +306,44 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [rowError, setRowError] = useState<Record<string, string>>({});
 
-  const setRowErr = (id: string, message: string) => setRowError((prev) => ({ ...prev, [id]: message }));
-  const clearRowErr = (id: string) =>
+  const groups = useMemo(() => groupServers(servers), [servers]);
+
+  const setRowErr = (key: string, message: string) => setRowError((prev) => ({ ...prev, [key]: message }));
+  const clearRowErr = (key: string) =>
     setRowError((prev) => {
-      if (!(id in prev)) return prev;
+      if (!(key in prev)) return prev;
       const next = { ...prev };
-      delete next[id];
+      delete next[key];
       return next;
     });
 
   const attemptDiscovery = useCallback(
-    async (id: string) => {
-      setBusyKey(`${id}:refresh`);
+    async (group: ServiceGroup) => {
+      setBusyKey(`${group.key}:refresh`);
       try {
-        await mutateJson(`/api/agent-registry/mcp/servers/${encodeURIComponent(id)}/refresh`, "POST", {
-          workspace_id: workspaceId,
-        });
-        clearRowErr(id);
+        await Promise.all(
+          group.servers.map((server) =>
+            mutateJson(`/api/agent-registry/mcp/servers/${encodeURIComponent(server.id)}/refresh`, "POST", {
+              workspace_id: workspaceId,
+            }),
+          ),
+        );
+        clearRowErr(group.key);
         await refresh();
       } catch (e) {
         setRowErr(
-          id,
+          group.key,
           e instanceof Error
             ? `Discovery failed: ${e.message}`
             : "Discovery failed — the server may require authorization Empyralis doesn't have a connect-flow for yet on custom URLs.",
         );
       } finally {
-        setBusyKey((k) => (k === `${id}:refresh` ? null : k));
+        setBusyKey((k) => (k === `${group.key}:refresh` ? null : k));
       }
     },
     [workspaceId, refresh],
@@ -246,8 +369,8 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
       setEndpointInput("");
       setLabelInput("");
       await refresh();
-      setExpandedId(id);
-      void attemptDiscovery(id);
+      setExpandedKey(id);
+      void attemptDiscovery({ key: id, title: "", subtitle: "", servers: [{ id } as McpServerRecord] });
     } catch (e) {
       setAddError(e instanceof Error ? e.message : "Could not connect to that MCP server.");
     } finally {
@@ -255,60 +378,69 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
     }
   }
 
-  async function handleToggleEnabled(server: McpServerRecord) {
-    const key = `${server.id}:enable`;
+  async function handleToggleEnabled(group: ServiceGroup) {
+    const key = `${group.key}:enable`;
     setBusyKey(key);
+    const nextEnabled = !group.servers.some((s) => s.enabled);
     try {
       // tools intentionally omitted here — see the file-header note on why
       // sending a non-empty tools[] through this route would wipe approvals.
-      await mutateJson(`/api/agent-registry/mcp/servers/${encodeURIComponent(server.id)}`, "PUT", {
-        workspace_id: workspaceId,
-        label: server.label,
-        endpoint: server.endpoint,
-        transport: "streamable_http",
-        enabled: !server.enabled,
-        discover_tools: false,
-      });
-      clearRowErr(server.id);
+      await Promise.all(
+        group.servers.map((server) =>
+          mutateJson(`/api/agent-registry/mcp/servers/${encodeURIComponent(server.id)}`, "PUT", {
+            workspace_id: workspaceId,
+            label: server.label,
+            endpoint: server.endpoint,
+            transport: "streamable_http",
+            enabled: nextEnabled,
+            discover_tools: false,
+          }),
+        ),
+      );
+      clearRowErr(group.key);
       await refresh();
     } catch (e) {
-      setRowErr(server.id, e instanceof Error ? e.message : "Could not update this server.");
+      setRowErr(group.key, e instanceof Error ? e.message : "Could not update this connection.");
     } finally {
       setBusyKey((k) => (k === key ? null : k));
     }
   }
 
-  async function handleDelete(server: McpServerRecord) {
-    const key = `${server.id}:delete`;
+  async function handleDelete(group: ServiceGroup) {
+    const key = `${group.key}:delete`;
     setBusyKey(key);
     try {
-      await mutateJson(
-        `/api/agent-registry/mcp/servers/${encodeURIComponent(server.id)}?workspace_id=${encodeURIComponent(workspaceId)}`,
-        "DELETE",
+      await Promise.all(
+        group.servers.map((server) =>
+          mutateJson(
+            `/api/agent-registry/mcp/servers/${encodeURIComponent(server.id)}?workspace_id=${encodeURIComponent(workspaceId)}`,
+            "DELETE",
+          ),
+        ),
       );
-      setConfirmDeleteId(null);
-      if (expandedId === server.id) setExpandedId(null);
+      setConfirmDeleteKey(null);
+      if (expandedKey === group.key) setExpandedKey(null);
       await refresh();
     } catch (e) {
-      setRowErr(server.id, e instanceof Error ? e.message : "Could not disconnect this server.");
+      setRowErr(group.key, e instanceof Error ? e.message : "Could not disconnect this app.");
     } finally {
       setBusyKey((k) => (k === key ? null : k));
     }
   }
 
-  async function handleToolApproval(server: McpServerRecord, toolName: string, action: "approve" | "deny") {
-    const key = `${server.id}:${action}:${toolName}`;
+  async function handleToolApproval(groupKey: string, server: McpServerRecord, toolName: string, action: "approve" | "deny") {
+    const key = `${groupKey}:${action}:${server.id}:${toolName}`;
     setBusyKey(key);
     try {
       await mutateJson(`/api/agent-registry/mcp/servers/${encodeURIComponent(server.id)}/tools/${action}`, "POST", {
         workspace_id: workspaceId,
         tool_name: toolName,
       });
-      clearRowErr(server.id);
+      clearRowErr(groupKey);
       await refresh();
     } catch (e) {
       const verb = action === "approve" ? "approve" : "revoke";
-      setRowErr(server.id, e instanceof Error ? e.message : `Could not ${verb} "${toolName}".`);
+      setRowErr(groupKey, e instanceof Error ? e.message : `Could not ${verb} "${toolName}".`);
     } finally {
       setBusyKey((k) => (k === key ? null : k));
     }
@@ -318,8 +450,8 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
     <>
       <div className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>MCP servers</div>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Connect a remote MCP server by URL. Discovered tools stay unapproved until you approve them individually —
-        so a workspace can expose <code>create_issue</code> without <code>delete_repo</code>.
+        Connect a remote MCP server by URL. Tools are enabled automatically once a server connects — only
+        money-moving, destructive, or third-party-messaging actions need your explicit approval first.
       </p>
 
       {error ? (
@@ -359,24 +491,34 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
 
       {loading ? (
         <div className="fleet-list"><div className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div></div>
-      ) : servers.length === 0 ? (
+      ) : groups.length === 0 ? (
         <div className="fleet-empty">
           <div className="fleet-empty-title">No MCP servers connected</div>
           <div className="fleet-empty-desc">Paste a server URL above to give this workspace's agents new tools.</div>
         </div>
       ) : (
         <div className="fleet-list">
-          {servers.map((server) => {
-            const expanded = expandedId === server.id;
-            const err = rowError[server.id];
-            const refreshBusy = busyKey === `${server.id}:refresh`;
-            const enableBusy = busyKey === `${server.id}:enable`;
-            const deleteBusy = busyKey === `${server.id}:delete`;
+          {groups.map((group) => {
+            const expanded = expandedKey === group.key;
+            const err = rowError[group.key];
+            const refreshBusy = busyKey === `${group.key}:refresh`;
+            const enableBusy = busyKey === `${group.key}:enable`;
+            const deleteBusy = busyKey === `${group.key}:delete`;
+            const anyEnabled = group.servers.some((s) => s.enabled);
+            const totalTools = group.servers.reduce((n, s) => n + s.tool_count, 0);
+            const lastSynced = group.servers
+              .map((s) => s.last_synced_at)
+              .filter((v): v is string => Boolean(v))
+              .sort()
+              .pop();
+            const buckets = bucketizeTools(group);
+            const primaryEndpoint = group.servers.length === 1 ? group.servers[0].endpoint : "";
+
             return (
-              <div key={server.id} className="fleet-list-row" style={{ flexDirection: "column", alignItems: "stretch", cursor: "default" }}>
+              <div key={group.key} className="fleet-list-row" style={{ flexDirection: "column", alignItems: "stretch", cursor: "default" }}>
                 <button
                   type="button"
-                  onClick={() => setExpandedId(expanded ? null : server.id)}
+                  onClick={() => setExpandedKey(expanded ? null : group.key)}
                   style={{
                     display: "flex", alignItems: "center", gap: 10, width: "100%",
                     background: "none", border: "none", padding: 0, textAlign: "left",
@@ -390,10 +532,12 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
                   />
                   <span className="fleet-list-row-icon"><Server size={16} strokeWidth={1.75} /></span>
                   <span className="fleet-list-row-main">
-                    <span className="fleet-list-row-title">{server.label || server.id}</span>
-                    <span className="fleet-list-row-desc">{hostFromUrl(server.endpoint)}</span>
+                    <span className="fleet-list-row-title">{group.title}</span>
+                    <span className="fleet-list-row-desc">
+                      {group.servers.length > 1 ? `${group.subtitle} · ${totalTools} tools` : (primaryEndpoint ? hostFromUrl(primaryEndpoint) : group.subtitle)}
+                    </span>
                   </span>
-                  <span className="fleet-list-row-meta">{statusText(server)}</span>
+                  <span className="fleet-list-row-meta">{groupStatusText(group)}</span>
                 </button>
 
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
@@ -401,33 +545,33 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
                     type="button"
                     className="fleet-btn"
                     disabled={refreshBusy}
-                    onClick={() => attemptDiscovery(server.id)}
+                    onClick={() => attemptDiscovery(group)}
                   >
                     <RefreshCw size={13} strokeWidth={1.75} /> {refreshBusy ? "Refreshing…" : "Refresh"}
                   </button>
                   <button
                     type="button"
                     role="switch"
-                    aria-checked={server.enabled}
-                    aria-label={`${server.enabled ? "Disable" : "Enable"} ${server.label || server.id}`}
-                    className={`fleet-toggle${server.enabled ? " is-on" : ""}`}
+                    aria-checked={anyEnabled}
+                    aria-label={`${anyEnabled ? "Disable" : "Enable"} ${group.title}`}
+                    className={`fleet-toggle${anyEnabled ? " is-on" : ""}`}
                     disabled={enableBusy}
-                    onClick={() => handleToggleEnabled(server)}
+                    onClick={() => handleToggleEnabled(group)}
                   />
-                  <span className="fleet-toggle-row-desc" style={{ marginTop: 0 }}>{server.enabled ? "Enabled" : "Disabled"}</span>
+                  <span className="fleet-toggle-row-desc" style={{ marginTop: 0 }}>{anyEnabled ? "Enabled" : "Disabled"}</span>
                   <div style={{ flex: 1 }} />
-                  {confirmDeleteId === server.id ? (
+                  {confirmDeleteKey === group.key ? (
                     <>
-                      <span className="fleet-list-row-desc">Disconnect this server?</span>
-                      <button type="button" className="fleet-btn" disabled={deleteBusy} onClick={() => setConfirmDeleteId(null)}>
+                      <span className="fleet-list-row-desc">Disconnect {group.title}?</span>
+                      <button type="button" className="fleet-btn" disabled={deleteBusy} onClick={() => setConfirmDeleteKey(null)}>
                         Cancel
                       </button>
-                      <button type="button" className="fleet-btn fleet-btn--danger" disabled={deleteBusy} onClick={() => handleDelete(server)}>
+                      <button type="button" className="fleet-btn fleet-btn--danger" disabled={deleteBusy} onClick={() => handleDelete(group)}>
                         {deleteBusy ? "Disconnecting…" : "Confirm"}
                       </button>
                     </>
                   ) : (
-                    <button type="button" className="fleet-btn" onClick={() => setConfirmDeleteId(server.id)} title="Disconnect server">
+                    <button type="button" className="fleet-btn" onClick={() => setConfirmDeleteKey(group.key)} title="Disconnect">
                       <Trash2 size={13} strokeWidth={1.75} /> Disconnect
                     </button>
                   )}
@@ -439,55 +583,113 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
                   </p>
                 ) : null}
 
-                {server.last_synced_at ? (
-                  <span className="fleet-list-row-desc" style={{ marginTop: 4 }}>Last discovered {timeAgo(server.last_synced_at)}</span>
+                {lastSynced ? (
+                  <span className="fleet-list-row-desc" style={{ marginTop: 4 }}>Last discovered {timeAgo(lastSynced)}</span>
                 ) : null}
 
                 {expanded ? (
                   <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 8 }}>
-                    {server.tools.length === 0 ? (
+                    {totalTools === 0 ? (
                       <p className="fleet-list-row-desc">
                         {refreshBusy ? "Discovering tools…" : "No tools discovered yet."}
                       </p>
                     ) : (
-                      server.tools.map((tool) => {
-                        const approveBusy = busyKey === `${server.id}:approve:${tool.name}`;
-                        const denyBusy = busyKey === `${server.id}:deny:${tool.name}`;
-                        return (
-                          <div key={tool.name} className="fleet-toggle-row">
-                            <div style={{ minWidth: 0 }}>
-                              <div className="fleet-toggle-row-label">{tool.label || tool.name}</div>
-                              {tool.description ? <div className="fleet-toggle-row-desc">{tool.description}</div> : null}
-                              <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-                                <span className="fleet-badge" style={{ marginLeft: 0 }}>{tool.action_class}</span>
-                                <span className="fleet-badge" style={{ marginLeft: 0 }}>{tool.risk_level} risk</span>
-                              </div>
+                      <>
+                        {buckets.autoActive.length > 0 && (
+                          <p className="fleet-list-row-desc" style={{ marginTop: 0 }}>
+                            {buckets.autoActive.length} {buckets.autoActive.length === 1 ? "tool" : "tools"} enabled automatically —
+                            no action needed.
+                          </p>
+                        )}
+
+                        {buckets.needsApproval.length > 0 && (
+                          <div style={{ marginBottom: 10 }}>
+                            <div className="fleet-toggle-row-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <TriangleAlert size={13} strokeWidth={1.75} style={{ color: "var(--offline-text)" }} />
+                              Needs your approval ({buckets.needsApproval.length})
                             </div>
-                            {tool.approved ? (
-                              <button
-                                type="button"
-                                className="fleet-badge fleet-badge--lock"
-                                style={{ marginLeft: 0, flexShrink: 0 }}
-                                disabled={denyBusy}
-                                title="Revoke approval — the agent loses access to this tool"
-                                onClick={() => handleToolApproval(server, tool.name, "deny")}
-                              >
-                                {denyBusy ? "Revoking…" : "Approved ✕"}
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                className="fleet-badge fleet-badge--action"
-                                style={{ marginLeft: 0, flexShrink: 0 }}
-                                disabled={approveBusy}
-                                onClick={() => handleToolApproval(server, tool.name, "approve")}
-                              >
-                                {approveBusy ? "Approving…" : "Approve"}
-                              </button>
-                            )}
+                            {buckets.needsApproval.map(({ tool, server }) => {
+                              const approveBusy = busyKey === `${group.key}:approve:${server.id}:${tool.name}`;
+                              const denyBusy = busyKey === `${group.key}:deny:${server.id}:${tool.name}`;
+                              return (
+                                <div key={`${server.id}:${tool.name}`} className="fleet-toggle-row">
+                                  <div style={{ minWidth: 0 }}>
+                                    <div className="fleet-toggle-row-label">{tool.label || tool.name}</div>
+                                    {tool.description ? <div className="fleet-toggle-row-desc">{tool.description}</div> : null}
+                                    <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                                      <span className="fleet-badge" style={{ marginLeft: 0 }}>{tool.risk_level} risk</span>
+                                      {group.servers.length > 1 ? (
+                                        <span className="fleet-badge" style={{ marginLeft: 0 }}>{server.label}</span>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="fleet-badge fleet-badge--action"
+                                    style={{ marginLeft: 0, flexShrink: 0 }}
+                                    disabled={approveBusy || denyBusy}
+                                    onClick={() => handleToolApproval(group.key, server, tool.name, "approve")}
+                                  >
+                                    {approveBusy ? "Approving…" : "Approve"}
+                                  </button>
+                                </div>
+                              );
+                            })}
                           </div>
-                        );
-                      })
+                        )}
+
+                        {buckets.approvedHighStakes.length > 0 && (
+                          <div style={{ marginBottom: 10 }}>
+                            <div className="fleet-toggle-row-label">Approved high-risk actions ({buckets.approvedHighStakes.length})</div>
+                            {buckets.approvedHighStakes.map(({ tool, server }) => {
+                              const denyBusy = busyKey === `${group.key}:deny:${server.id}:${tool.name}`;
+                              return (
+                                <div key={`${server.id}:${tool.name}`} className="fleet-toggle-row">
+                                  <div style={{ minWidth: 0 }}>
+                                    <div className="fleet-toggle-row-label">{tool.label || tool.name}</div>
+                                    {tool.description ? <div className="fleet-toggle-row-desc">{tool.description}</div> : null}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="fleet-badge fleet-badge--lock"
+                                    style={{ marginLeft: 0, flexShrink: 0 }}
+                                    disabled={denyBusy}
+                                    title="Revoke — the agent loses access to this tool"
+                                    onClick={() => handleToolApproval(group.key, server, tool.name, "deny")}
+                                  >
+                                    {denyBusy ? "Revoking…" : "Approved ✕"}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {buckets.turnedOff.length > 0 && (
+                          <div>
+                            <div className="fleet-toggle-row-label">Turned off ({buckets.turnedOff.length})</div>
+                            {buckets.turnedOff.map(({ tool, server }) => {
+                              const approveBusy = busyKey === `${group.key}:approve:${server.id}:${tool.name}`;
+                              return (
+                                <div key={`${server.id}:${tool.name}`} className="fleet-toggle-row">
+                                  <div style={{ minWidth: 0 }}>
+                                    <div className="fleet-toggle-row-label">{tool.label || tool.name}</div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="fleet-badge fleet-badge--action"
+                                    style={{ marginLeft: 0, flexShrink: 0 }}
+                                    disabled={approveBusy}
+                                    onClick={() => handleToolApproval(group.key, server, tool.name, "approve")}
+                                  >
+                                    {approveBusy ? "Enabling…" : "Enable"}
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 ) : null}
