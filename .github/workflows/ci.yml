@@ -46,6 +46,7 @@ jobs:
             server_modules/tests/test_direct_chat_provider_service.py \
             server_modules/tests/test_direct_chat_stream_response_service.py \
             server_modules/tests/test_direct_chat_tool_catalog_service.py \
+            server_modules/tests/test_exception_and_task_lint.py \
             server_modules/tests/test_gateway_execution_service.py \
             server_modules/tests/test_gateway_health_service.py \
             server_modules/tests/test_gateway_routes.py \
