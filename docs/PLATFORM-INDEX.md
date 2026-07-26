@@ -112,6 +112,10 @@ product concept.
 - 46-entry connector catalog; Notion and GitHub confirmed to execute real third-party API calls (search/create/update, issues/PRs)
 - `vault_credentials` (Postgres, project-scoped) + `agent_connector_bindings` (per-agent enable/disable)
 - Legacy `/api/connectors/vault` credential API — superseded, kept alive only by one internal fallback `(built, not wired)`
+- 10 OAuth providers still need a manually registered dev-console app + env-var client_id/secret before
+  any agent can connect (only a secret-less `GOOGLE_OAUTH_CLIENT_ID` exists today); 16 others
+  self-register via RFC 7591 DCR, zero setup — step-by-step registration checklist per provider in
+  `docs/OAUTH-PROVIDER-SETUP.md`
 
 ## Governance & Safety
 

@@ -44,6 +44,8 @@ Confirmed by directly test-booting the app with the real production-style flags 
 
 `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `OPENAI_API_KEY` / others as configured providers require it · `DATABASE_URL` (local Postgres) · `ORION_JWT_SECRET` (persisted at `~/.empyralis/state/auth/jwt_secret` — do not rotate casually, it invalidates every live session) · `CREDENTIAL_VAULT_KEY` · `EMPYRALIS_SECRETS_BROKER_SECRET` / `EMPYRALIS_TOOL_BROKER_SECRET` (BYOK credential storage refuses to start without these) · `EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN` (confirmed this session: never committed to git, lives only in this file).
 
+Third-party OAuth connector client_id/secret pairs (`GOOGLE_WORKSPACE_OAUTH_CLIENT_ID`, `GITHUB_OAUTH_CLIENT_ID`, etc.) are a separate, larger checklist — see `docs/OAUTH-PROVIDER-SETUP.md` for which of the 26 connector providers need one of these registered manually vs. self-register with no setup.
+
 ### Frontend (`/opt/empyralis-app/frontend`, or via `deploy/empyralis-frontend.service`'s `Environment=` lines)
 
 | Var | Value |
