@@ -95,6 +95,16 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
     # field at all -- Google has no public self-registration API; an OAuth
     # client must be created in Google Cloud Console. Stays classic-only, no
     # config changes.
+    # NOTE: this base `scopes` tuple is the UNVERIFIED-app default (gmail.modify
+    # + calendar only) -- it must never include the Drive scope directly. Drive
+    # is opt-in only, added by _effective_scopes() when GOOGLE_WORKSPACE_ENABLE_
+    # DRIVE_SCOPE/GOOGLE_OAUTH_ENABLE_DRIVE_SCOPE is set (see that function and
+    # test_google_oauth_verification_readiness.py). Baking drive.file in here
+    # made that opt-in gate a no-op -- every Google Workspace OAuth start
+    # (Gmail/Calendar included) silently requested Drive too, which is exactly
+    # the kind of scope creep Google's app-verification review blocks an
+    # unverified app on, so it could stall the *entire* Google authorize step,
+    # not just Drive's.
     "google_workspace": OAuthProviderConfig(
         label="Google Workspace",
         env_vars={
@@ -107,7 +117,6 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "profile",
             "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/calendar",
-            "https://www.googleapis.com/auth/drive.file",
         ),
         auth_url="https://accounts.google.com/o/oauth2/v2/auth",
         token_url="https://oauth2.googleapis.com/token",
