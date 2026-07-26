@@ -396,7 +396,7 @@ async def start_connection_setup(
         if not selected_gateway_id:
             raise HTTPException(status_code=409, detail="Choose Agent Computer before setting up this connection.")
         if requested_gateway_id and requested_gateway_id != selected_gateway_id:
-            raise HTTPException(status_code=409, detail="Personal channels can only use the selected Sage Agent Computer.")
+            raise HTTPException(status_code=409, detail="Personal channels can only use the selected Agent Computer.")
         gateway_id = selected_gateway_id
         registration = _require_selectable_gateway(
             gateway_id=gateway_id,

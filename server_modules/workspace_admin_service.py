@@ -406,7 +406,7 @@ async def update_workspace_sage_tool_policy_payload(
     normalized_tool_key = _read_string(tool_key).lower()
     definition = SAGE_TOOL_POLICY_DEFINITIONS.get(normalized_tool_key)
     if not isinstance(definition, dict):
-        raise HTTPException(status_code=404, detail="Unknown Sage tool.")
+        raise HTTPException(status_code=404, detail="Unknown agent tool.")
 
     existing_policy = auth_module.load_workspace_policy(resolved_workspace_id)
     denied = {
@@ -471,7 +471,7 @@ async def upsert_workspace_provider_credential(
             raise HTTPException(status_code=400, detail="Provider credential is required.")
         credential_payload = await connectors_actions.create_vault_credential(
             CredentialUpsertRequest(
-                label=f"Sage {provider_profiles_service.provider_catalog_entry(provider_id).get('label') or provider_id}",
+                label=f"Agent {provider_profiles_service.provider_catalog_entry(provider_id).get('label') or provider_id}",
                 provider=provider_id,
                 workspace_id=resolved_workspace_id,
                 mode="byok",
@@ -518,7 +518,7 @@ async def upsert_workspace_provider_credential(
             provider=provider_id,
             label=_read_string(
                 current_profile.get("label"),
-                f"Sage {provider_profiles_service.provider_catalog_entry(provider_id).get('label') or provider_id}",
+                f"Agent {provider_profiles_service.provider_catalog_entry(provider_id).get('label') or provider_id}",
             ),
             credential_id=credential_id,
             auth_mode=provider_profiles_service.normalize_auth_mode(provider_id, credentials=credential_secret_payload),
@@ -578,7 +578,7 @@ async def refresh_workspace_provider_models(
         profile_payload = await connectors_core.upsert_provider_profile(
             ProviderProfileUpsertRequest(
                 provider=provider_id,
-                label=f"Sage {entry.get('label') or provider_id}",
+                label=f"Agent {entry.get('label') or provider_id}",
                 credential_id=credential_id,
                 auth_mode=provider_profiles_service.normalize_auth_mode(provider_id),
                 workspace_id=resolved_workspace_id,
@@ -595,7 +595,7 @@ async def refresh_workspace_provider_models(
                 provider=provider_id,
                 label=_read_string(
                     current_profile.get("label"),
-                    f"Sage {provider_profiles_service.provider_catalog_entry(provider_id).get('label') or provider_id}",
+                    f"Agent {provider_profiles_service.provider_catalog_entry(provider_id).get('label') or provider_id}",
                 ),
                 credential_id=credential_id,
                 auth_mode=_read_string(current_profile.get("auth_mode")) or provider_profiles_service.normalize_auth_mode(provider_id),

@@ -74,7 +74,7 @@ class ExecutionModePolicyTests(unittest.TestCase):
         )
         self.assertEqual(execution_mode_policy.public_runtime_access_label("custom"), "Custom")
         self.assertIn(
-            "Full Access lets Sage run commands",
+            "Full Access lets this agent run commands",
             execution_mode_policy.runtime_access_setup_warning("full_access") or "",
         )
         self.assertIn(

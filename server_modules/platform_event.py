@@ -130,13 +130,13 @@ SAGE_HELP = PlatformEvent(
     detail="Available commands:\n"
     "/compact — summarize and clear old context\n"
     "/new — start a new task session\n"
-    "/main — return to the main Sage thread\n"
+    "/main — return to the main agent thread\n"
     "/memory — show stored memory\n"
     "/help — show this message",
     channel_text="Available commands:\n"
     "/compact — summarize and clear old context\n"
     "/new — start a new task session\n"
-    "/main — return to the main Sage thread\n"
+    "/main — return to the main agent thread\n"
     "/memory — show stored memory\n"
     "/help — show this message",
     severity="info",

@@ -328,7 +328,7 @@ def no_provider_reasoning_required_response() -> Dict[str, Any]:
             build_intervention(
                 "connect_required",
                 "AI provider required",
-                detail="Connect Workspace AI, your own AI account, or a local AI runtime before model-backed Sage chat can continue.",
+                detail="Connect Workspace AI, your own AI account, or a local AI runtime before model-backed agent chat can continue.",
                 severity="warning",
                 status="waiting",
                 code="no_provider",

@@ -33,7 +33,7 @@ RUNTIME_TARGET_MODE_MATRIX: dict[str, tuple[str, ...]] = {
 MODE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "default": {
         "label": GUARDED_RUNTIME_ACCESS_PUBLIC_LABEL,
-        "description": "Sage can use obvious low-risk tools and asks before risky actions.",
+        "description": "This agent can use obvious low-risk tools and asks before risky actions.",
         "destructive_actions_require_approval": True,
         "external_send_requires_approval": True,
         "dangerous_shell_requires_approval": True,
@@ -44,7 +44,7 @@ MODE_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "approval_mode": {
         "label": "Approvals",
-        "description": "Sage asks before tools that touch private data, external channels, or execution surfaces.",
+        "description": "This agent asks before tools that touch private data, external channels, or execution surfaces.",
         "destructive_actions_require_approval": True,
         "external_send_requires_approval": True,
         "dangerous_shell_requires_approval": True,
@@ -55,7 +55,7 @@ MODE_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     "autopilot": {
         "label": "Autopilot",
-        "description": "Sage can continue a task in an isolated or policy-scoped runtime, with destructive actions still gated.",
+        "description": "This agent can continue a task in an isolated or policy-scoped runtime, with destructive actions still gated.",
         "destructive_actions_require_approval": True,
         "external_send_requires_approval": True,
         "dangerous_shell_requires_approval": True,
@@ -80,7 +80,7 @@ MODE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "full_access": {
         "label": FULL_RUNTIME_ACCESS_PUBLIC_LABEL,
         "description": (
-            "For a dedicated Agent Computer. Sage can read, write, delete, run commands, "
+            "For a dedicated Agent Computer. This agent can read, write, delete, run commands, "
             "use browser data, and access secrets without per-action approval prompts."
         ),
         "destructive_actions_require_approval": False,
@@ -91,7 +91,7 @@ MODE_DEFINITIONS: dict[str, dict[str, Any]] = {
         "requires_explicit_selection": True,
         "requires_owner_approval": True,
         "setup_warning": (
-            "Full Access lets Sage run commands, read, write, delete files, and access secrets, "
+            "Full Access lets this agent run commands, read, write, delete files, and access secrets, "
             "browser data, tokens, SSH keys, and connected accounts on this Agent Computer; "
             "dedicated hardware is recommended."
         ),
@@ -151,7 +151,7 @@ def mode_contract_for_target(target_id: str) -> List[Dict[str, Any]]:
         if mode_id == "autopilot" and target == "local_companion":
             definition["requires_owner_approval"] = True
             definition["description"] = (
-                "Sage can continue a task on the paired physical computer only after explicit owner approval."
+                "This agent can continue a task on the paired physical computer only after explicit owner approval."
             )
         contracts.append({
             "id": mode_id,

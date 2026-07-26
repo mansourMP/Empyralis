@@ -470,7 +470,7 @@ def _raise_full_access_reconfirmation_required() -> None:
         status_code=409,
         detail={
             "error": "FULL_ACCESS_RECONFIRMATION_REQUIRED",
-            "reason": "This Agent Computer must be re-confirmed through the current Sage Full Access setup before full-access actions can run.",
+            "reason": "This Agent Computer must be re-confirmed through the current Full Access setup before full-access actions can run.",
         },
     )
 
