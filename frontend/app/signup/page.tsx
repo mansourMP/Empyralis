@@ -77,6 +77,23 @@ function AuthErrorNotice({ title, message }: { title: string; message: string })
   );
 }
 
+// Mirrors /login's safeNextPath (frontend/app/login/page.tsx) — only ever
+// same-origin, path-relative redirects, never an absolute/protocol-relative
+// URL. Needed so the "Create an account" button on the workspace-invite
+// accept page (frontend/app/join/[token]/page.tsx) can carry a visitor who
+// has no account yet all the way back to /join/{token} once signup
+// finishes, instead of dropping them on their own new, unrelated workspace
+// (MAN-114 — without this, a brand-new teammate's invite never actually
+// gets accepted after they sign up; they'd have to notice and click the
+// invite link a second time).
+function safeNextPath(rawNext: string): string {
+  const trimmed = rawNext.trim();
+  if (!trimmed || !trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('\\')) {
+    return '/';
+  }
+  return trimmed;
+}
+
 export default function SignupPage() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -96,6 +113,12 @@ export default function SignupPage() {
   const [channel, setChannel] = useState('');
   const [workspaceId, setWorkspaceId] = useState('');
   const [pilotCode, setPilotCode] = useState('');
+  // Where to land after signup succeeds — defaults to '/' (today's
+  // behavior), but a same-origin `?next=` (e.g. /join/{token} from the
+  // workspace-invite accept page) takes the new account straight back to
+  // finish whatever brought them here instead of stranding them on their
+  // own fresh, unrelated workspace.
+  const [nextTarget, setNextTarget] = useState('/');
   const loginSearchParams = new URLSearchParams();
   if (source) {
     loginSearchParams.set('source', source);
@@ -115,6 +138,9 @@ export default function SignupPage() {
   if (pilotCode) {
     loginSearchParams.set('pilot_code', pilotCode);
   }
+  if (nextTarget !== '/') {
+    loginSearchParams.set('next', nextTarget);
+  }
   const loginHref = loginSearchParams.size > 0
     ? `/login?${loginSearchParams.toString()}`
     : '/login';
@@ -128,6 +154,7 @@ export default function SignupPage() {
     setChannel(String(params.get('channel') || '').trim());
     setWorkspaceId(String(params.get('workspace_id') || '').trim());
     setPilotCode(String(params.get('pilot_code') || '').trim());
+    setNextTarget(safeNextPath(String(params.get('next') || '')));
     const providerError = String(params.get('error') || '').trim();
     if (providerError) {
       clearExternalAuthPending();
@@ -168,7 +195,7 @@ export default function SignupPage() {
           return;
         }
         clearExternalAuthPending();
-        window.location.replace('/');
+        window.location.replace(nextTarget);
       } catch {
         // keep waiting for callback handoff
       } finally {
@@ -180,7 +207,7 @@ export default function SignupPage() {
     return watchExternalAuthCompletion(() => {
       void recoverGoogleAuth();
     });
-  }, [isHydrated]);
+  }, [isHydrated, nextTarget]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -189,7 +216,7 @@ export default function SignupPage() {
     try {
       await signup(email, password, name || undefined, pilotCode || undefined, inviteCode || undefined);
       await awaitBrowserAuthReady({ attempts: 12, delayMs: 250 });
-      window.location.replace('/');
+      window.location.replace(nextTarget);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Signup failed.');
     } finally {

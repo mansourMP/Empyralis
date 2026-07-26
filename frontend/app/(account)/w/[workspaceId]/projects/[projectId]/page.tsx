@@ -14,6 +14,7 @@ import {
   type FleetAgent,
 } from "@/lib/workspace/fleet/fleet-data";
 import { TasksList } from "@/lib/workspace/fleet/TasksList";
+import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { breadcrumbCount, tintKeyForIndex, TINTS, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
@@ -263,6 +264,15 @@ export default function ProjectDetailPage() {
           with a permanent sibling. */}
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
+          {/* Top-right of the main content area, above whichever view is
+              active — "project member" == "workspace member" for now (MAN-70
+              ruling, no per-project ACL table yet), so this pulls the
+              workspace's own member list. `tasks` is passed through only so
+              the hover tooltip can surface real per-member attribution
+              (tasks they created in this project) — never fetched
+              independently. */}
+          <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
+
           {taskNotice ? (
             <div className="fleet-page-state-body" role="alert" style={{ color: "var(--warning-text)" }}>
               {taskNotice}

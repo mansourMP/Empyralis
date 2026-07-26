@@ -568,9 +568,15 @@ of a few to a few dozen agents), not force-fit into Linear's object
 entirely.
 
 **6. Real-time multiplayer presence (cursors, "so-and-so is viewing
-this").** Linear is a multi-human collaborative editor; we're a
-single-owner console for supervising software. There's no second human
-whose cursor needs to be shown. Skip.
+this").** Superseded 2026-07-26 (MAN-114) — Multiplayer Projects (MAN-70)
+shipped, so there genuinely can be a second human in a workspace now. A
+lightweight roster indicator (an overlapping member-avatar stack on the
+project page, hover for name/role) is in scope and built; see
+MemberAvatarStack.tsx. True live presence — cursor tracking, "X is viewing
+this issue right now" — is still probably out of scope: nothing here is a
+shared real-time editor surface the way a Linear issue description is, so
+there's no cursor-bearing canvas for it to attach to. Revisit if that
+changes, but don't build it speculatively.
 
 ### Drop (things we do today that don't belong)
 

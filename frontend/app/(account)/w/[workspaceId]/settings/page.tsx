@@ -9,6 +9,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { resumeFleetWorkspace, stopFleetWorkspace, useFleetWorkspace } from "@/lib/workspace/fleet/fleet-data";
 import { timeAgo, formatDate } from "@/lib/workspace/fleet/fleet-presentation";
 import { McpServersSection } from "@/lib/workspace/fleet/McpServersSection";
+import { MembersSection } from "@/lib/workspace/fleet/MembersSection";
 
 type McpKey = {
   key_id: string;
@@ -280,6 +281,7 @@ export default function SettingsPage() {
     <main className="fleet-content">
       {/* No page-title header — the breadcrumb already says "Settings". */}
       <WorkspaceNameSection workspaceId={workspaceId} />
+      <MembersSection workspaceId={workspaceId} />
       <StopAllAgentsSection workspaceId={workspaceId} />
 
       {/* Billing */}

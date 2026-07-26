@@ -5045,6 +5045,89 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   font-size: 11px;
   font-weight: var(--weight-medium);
 }
+
+/* ── Member avatar stack (MAN-114) ──────────────────────────────────────── */
+/* Same circular identity-avatar treatment as .fleet-agent-avatar just above
+   (initials, tinted via --tile-bg/--tile-fg), reused for human workspace
+   members instead of agents — a person and an agent are both "team
+   members" in this UI, they just carry different data (initials vs
+   AgentSigil, workspace role vs brain/placement). */
+.fleet-member-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--tile-bg, var(--rail-active));
+  color: var(--tile-fg, var(--text-secondary));
+  font-weight: var(--weight-medium);
+  border: 2px solid var(--bg-content);
+}
+.fleet-member-avatar--overflow {
+  background: var(--rail-active);
+  color: var(--text-secondary);
+}
+
+/* The overlapping stack itself — Linear/Slack-style "-8px" overlap, most
+   senior (first-loaded) member on top via inline z-index (see
+   MemberAvatarStack.tsx). Lives top-right of the project page's main
+   content area, above the Agents/Tasks list. */
+.fleet-member-avatar-stack {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-bottom: var(--space-3);
+}
+.fleet-member-avatar-stack-item {
+  position: relative;
+  margin-left: -8px;
+}
+.fleet-member-avatar-stack-item:first-child {
+  margin-left: 0;
+}
+
+/* Hover-reveal name/role card — same fade entrance as lib/ui/motion.tsx's
+   MotionInlineBanner (APP_MOTION_TRANSITIONS.fade), reused here via the same
+   "motion" dependency rather than adding framer-motion as a second one (this
+   repo already ships "motion", the current package name for what used to be
+   called Framer Motion — same API, see frontend/package.json).
+   Drops DOWNWARD (top: 100%+8px), not upward — the stack sits at the very
+   top of .fleet-content-main's own scroll container, right under the
+   sticky topbar, so a tooltip that opened upward had nowhere to render and
+   clipped behind the topbar (verified in-browser, MAN-114). */
+.fleet-member-avatar-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 200;
+  min-width: max-content;
+  max-width: 220px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.45);
+  padding: 8px 10px;
+  pointer-events: none;
+}
+.fleet-member-avatar-tooltip-name {
+  font-size: 13px;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.fleet-member-avatar-tooltip-role {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 1px;
+}
+.fleet-member-avatar-tooltip-attribution {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: normal;
+  max-width: 200px;
+}
+
 .fleet-agent-cell-agent-text {
   display: flex;
   flex-direction: column;
