@@ -7,7 +7,14 @@ from server_modules import sage_instruction_compiler_service as compiler
 
 
 class SageInstructionCompilerServiceTests(unittest.TestCase):
-    def test_byok_kernel_prompt_is_small_environment_contract(self) -> None:
+    def test_byok_kernel_prompt_is_doctrine_first_environment_contract(self) -> None:
+        # MAN-68 doctrine synthesis: this test used to assert the kernel was
+        # a tiny (<100-word) "environment contract" with no priority
+        # statement, no tiered-autonomy doctrine, and no subsystem purpose
+        # map — that was the audit's own top finding (a zero-hit grep for any
+        # first-priority phrasing at all). The kernel is deliberately richer
+        # now; this test asserts the doctrine content is actually present,
+        # not that the kernel stays small.
         bundle = compiler.build_sage_instruction_bundle(
             workspace_id="ws-1",
             tenant_id="tenant-1",
@@ -21,8 +28,20 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         system_prompt = bundle.system_prompt.lower()
         self.assertIn("operating inside empyralis", system_prompt)
         self.assertIn("this ai model", system_prompt)
-        self.assertIn("tools, files, memory, apps, and computer capabilities", system_prompt)
+        self.assertIn("tools, files, memory, and apps", system_prompt)
         self.assertIn("workspace identity and role files", system_prompt)
+        # First-priority statement (audit finding #4 / plan item 9).
+        self.assertIn("your job:", system_prompt)
+        self.assertIn("the user will not name one for you", system_prompt)
+        # Tiered autonomy (founder requirement, not a flat "always act").
+        self.assertIn("tiered, not blanket", system_prompt)
+        self.assertIn("no ceremony", system_prompt)
+        self.assertIn("approval required", system_prompt)
+        # Purpose-mapped subsystem map (audit finding #1: scheduler was
+        # invisible to the model; this is the fix).
+        self.assertIn("why each system exists", system_prompt)
+        self.assertIn("fleet__schedule_task", system_prompt)
+        self.assertIn("not a skill to go discover", system_prompt)
         self.assertNotIn("sage, the signed-in user's main personal ai assistant", system_prompt)
         self.assertNotIn("sage surface boundary", system_prompt)
         self.assertNotIn("tool rule", system_prompt)
@@ -32,7 +51,6 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertNotIn("model deepseek-chat", system_prompt)
         self.assertNotIn("connect my computer", system_prompt)
         self.assertNotIn("open integrations", system_prompt)
-        self.assertLess(len(bundle.system_prompt.split()), 100)
 
     def test_platform_paid_kernel_uses_empyralis_ai_without_internal_route(self) -> None:
         bundle = compiler.build_sage_instruction_bundle(
@@ -53,7 +71,10 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertNotIn("this ai model", system_prompt)
         self.assertNotIn("deepseek", system_prompt)
         self.assertNotIn("deepseek-v4-pro", system_prompt)
-        self.assertLess(len(bundle.system_prompt.split()), 100)
+        # Doctrine content renders on the platform-paid branch too — not just
+        # the BYOK branch above.
+        self.assertIn("tiered, not blanket", system_prompt)
+        self.assertIn("why each system exists", system_prompt)
 
     def test_root_memory_brief_preserves_files_without_full_dump(self) -> None:
         # A realistic-sized MEMORY.md (well under the write-side 200-line/

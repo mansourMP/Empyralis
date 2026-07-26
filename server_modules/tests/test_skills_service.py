@@ -1935,6 +1935,39 @@ class AuthorityMandateGateTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "audience")
 
+    def test_schedule_task_with_no_agent_id_schedules_the_caller_itself(self) -> None:
+        """MAN-68 doctrine fix (audit-system-prompt-doctrine.md #1 ranked
+        gap): the model was never told a self-wakeup scheduler exists, and
+        this dispatcher used to hard-require agent_id even though
+        bounded_scheduler_service.propose_self_wakeup (what schedule_task
+        actually calls) takes no agent_id parameter at all — it always
+        resolves the wake-up to the calling workspace's own master install.
+        Omitting agent_id must succeed (not raise "requires agent_id") and
+        fall back to the caller's own actor identity — this is the mechanism
+        the standing-order ("check on X every morning") scenario needs: the
+        owner-facing agent scheduling ITSELF, with no agent_id to supply."""
+        with patch(
+            "server_modules.bounded_scheduler_service.propose_self_wakeup",
+            new=AsyncMock(return_value={"accepted": True, "wake_request": {"id": "wake-self-1"}}),
+        ) as propose_mock:
+            raw = skills_service.execute_single_direct_tool_call(
+                tool_call={
+                    "name": "fleet__schedule_task",
+                    "arguments": {"when": "in 24 hours", "instruction": "Check inbox and summarize."},
+                },
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                index=1,
+                session_ctx={"authority_tier": "owner"},
+                callbacks=self._callbacks(),
+            )
+        result = json.loads(raw)
+        self.assertTrue(result["ok"])
+        self.assertTrue(propose_mock.called)
+        # No agent_id supplied by the model, yet the wake-up was still
+        # proposed successfully — self-scheduling, not a validation error.
+        self.assertEqual(propose_mock.call_args.kwargs["payload"]["authority_tier"], "owner")
+
 
 class SubagentSpawnDispatchTests(unittest.TestCase):
     """execute_single_direct_tool_call's connector_id=="subagent" branch

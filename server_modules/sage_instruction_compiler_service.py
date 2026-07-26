@@ -552,6 +552,89 @@ _FIRST_PRIORITY_STATEMENT = (
     "going until the work is actually done, not merely attempted."
 )
 
+# MAN-68 doctrine synthesis (2026-07-26), two founder requirements layered on
+# top of docs/design/agent-service-doctrine-research.md and
+# docs/design/audit-system-prompt-doctrine.md, neither of which either
+# research pass had derived on its own:
+#
+# (1) TIERED autonomy, not blanket autonomy. The research doc's own template
+# (§B4) and Codex's shipped escalation prompt (§B1,
+# `.../permissions/approval_policy/on_request.md`: "ask only before genuinely
+# risky, unrequested, or irreversible actions") already draw a line here, but
+# a flat "always act, never ask" instruction is a real risk once an agent
+# holds live credentials and payment-adjacent connector access, which
+# Empyralis agents do. _TIERED_AUTONOMY_STATEMENT below is the explicit
+# two-category version the founder asked for: no ceremony at all inside the
+# agent's own sandbox (its own paired hardware, its own files, its own
+# tools), and a distinct, smaller pause-and-disclose category for anything
+# hard to reverse or reaching outside that sandbox (real money, a message to
+# a third party on the owner's behalf, an unrecoverable delete, anything
+# off-sandbox). This is written to agree with, not duplicate, the live
+# `approval_required` signal already rendered per-tool by
+# _capability_manifest_text below ("(approval required)") — the doctrine
+# text names that exact tag as the concrete instance of the second category,
+# instead of inventing a second, competing vocabulary for the same thing.
+#
+# (2) Why copy the Claude-Code/Codex harness *shape* at all — stated as a
+# reason, not an unstated assumption. Anthropic's own published numbers
+# (research doc §A4 — the Tool Search Tool moving Opus 4 from 49%->74%
+# accuracy, Opus 4.5 from 79.5%->88.1%) show harness/prompt STRUCTURE
+# measurably moves tool-use reliability, independent of which model sits
+# behind it. That is the one lever that pays off no matter which model a
+# customer picked — which is exactly the lever that matters for Empyralis,
+# since Empyralis is multi-provider/BYO-model: the same compiled prompt below
+# runs behind Claude, GPT, DeepSeek, or a local model, per workspace. A
+# model-specific prompt hack only ever helps the one provider it was tuned
+# for; a better-structured harness (priority-first, purpose-mapped, detail
+# deferred until needed) helps whichever model the customer actually picked.
+# That is why this file imitates Claude Code/Codex's *shape* — priority
+# statement, then purpose-mapped subsystems, then mechanical detail — not
+# their literal prose.
+_TIERED_AUTONOMY_STATEMENT = (
+    "Autonomy is tiered, not blanket. Inside your own sandbox — your own paired computer, "
+    "your own files, your own installed tools, your own code — there is no ceremony: choose "
+    "whichever tool or skill fits, read or write your own files, run and rerun your own code, "
+    "iterate until it works. That is the job itself, not something to request permission for.\n"
+    "\n"
+    "A smaller, distinct category is different: moving real money, messaging a third party on "
+    "the user's behalf, deleting something that cannot be recovered, or reaching outside your "
+    "own sandbox onto someone else's system or a public surface. For that category, disclose "
+    "what you are about to do plainly before you do it, rather than acting silently — tools "
+    "your callable-tools list marks \"approval required\" are exactly this category. When you "
+    "genuinely can't tell which bucket an action falls in, treat it as the second one."
+)
+
+# Purpose-mapped subsystem map (audit-system-prompt-doctrine.md §5 items 1 &
+# 5; agent-service-doctrine-research.md §B4): states WHY each subsystem
+# exists and when it's the right tool, never a decision-tree script — the
+# doctrine standard both docs converge on. Memory keeps its own detailed
+# write/read mechanics in memory_rule below (unchanged); this map gives the
+# other subsystems the same purpose-first treatment memory already had,
+# closing the audit's sharpest gap (finding #1 in the ranked list): nothing
+# in the prompt used to tell the model a self-wakeup scheduler exists at
+# all. fleet__schedule_task now accepts an omitted agent_id as "schedule
+# myself" (see skills_service.py's ToolDescriptor + dispatcher for that
+# change) — the line below is accurate to that, not aspirational.
+_SUBSYSTEM_PURPOSE_MAP = (
+    "Why each system exists — reason from this, the user will not name a system for you:\n"
+    "- Memory exists so the user never has to repeat themselves across sessions (full "
+    "read/write doctrine right below).\n"
+    "- A visible plan (update_plan) exists so a real multi-step task keeps its own shape "
+    "across a long turn — lay one out before diving into genuinely multi-step work, skip it "
+    "for anything simple.\n"
+    "- Standing schedules exist for recurring work with nobody re-prompting you: when the "
+    "user's actual ask is recurring (\"every morning, check...\") rather than one-off, call "
+    "fleet__schedule_task with no target agent to wake yourself up and run it, instead of "
+    "waiting to be asked again tomorrow.\n"
+    "- Skills are ready-made procedures — reach for one when its description matches the "
+    "task's shape, never because it was named to you.\n"
+    "- Connected apps and MCP tools are your hands in the outside world, chosen the same way; "
+    "query_tool_registry finds one the moment a task needs it.\n"
+    "- General compute — shell, files, browser control on your own paired hardware — is a "
+    "standing capability of yours, not a skill to go discover; reach for it directly whenever "
+    "it's the natural way to get something done."
+)
+
 
 def _kernel_prompt(
     *,
@@ -608,12 +691,14 @@ def _kernel_prompt(
             _FIRST_PRIORITY_STATEMENT + "\n\n"
             "You are operating inside Empyralis, an environment connecting the user with AI, tools, files, memory, and apps. "
             "The active AI source is Empyralis AI. "
-            "Workspace identity and role files may be available through tools or workspace context when relevant."
+            "Workspace identity and role files may be available through tools or workspace context when relevant.\n\n"
+            + _TIERED_AUTONOMY_STATEMENT + "\n\n" + _SUBSYSTEM_PURPOSE_MAP
         ) + memory_rule
     return (
         _FIRST_PRIORITY_STATEMENT + "\n\n"
         "You are operating inside Empyralis, an environment connecting the user with this AI model, tools, files, memory, and apps. "
-        "Workspace identity and role files may be available through tools or workspace context when relevant."
+        "Workspace identity and role files may be available through tools or workspace context when relevant.\n\n"
+        + _TIERED_AUTONOMY_STATEMENT + "\n\n" + _SUBSYSTEM_PURPOSE_MAP
     ) + memory_rule
 
 

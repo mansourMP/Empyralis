@@ -4797,6 +4797,24 @@ async def handle_sage_chat(
             "belong to the operator (Sage). If a request falls outside your scope, "
             "say so and escalate to the operator instead of acting."
         )
+        # MAN-68 doctrine synthesis (2026-07-26): audit-system-prompt-
+        # doctrine.md §5's ranked gaps are worse on this branch than the
+        # master's (§4 item 5 — specialists are the higher-traffic,
+        # customer-facing surface and got the thinnest prompt). The tiered-
+        # autonomy doctrine the founder asked for applies here at least as
+        # much as to the master path: a specialist can hold its own bound-
+        # connector credentials. Mirrors sage_instruction_compiler_service.
+        # _TIERED_AUTONOMY_STATEMENT, condensed for the specialist's own
+        # (unbounded, no shared budget) prompt.
+        _spec_autonomy_rule = (
+            "\n\n## Decision doctrine\n"
+            "Inside your own scope, act without asking — pick whichever tool or skill fits "
+            "the task, run it, verify the result. Pause and disclose first only for the rare "
+            "action that's hard to undo or reaches outside what you were asked: moving money, "
+            "messaging someone on the user's behalf who isn't part of this conversation, "
+            "deleting something unrecoverable, or anything your callable-tools list marks "
+            "\"approval required.\" Everything else is your call."
+        )
         # Applies regardless of whether the persona above is the configured one
         # or the generic fallback — a real customer should never be the one
         # asked who THEY are.
@@ -4879,8 +4897,29 @@ async def handle_sage_chat(
         # memory_context here is this install's own MEMORY.md brief (see the
         # "Specialist turn" branch above) — empty when the agent's MEMORY.md
         # is still the untouched default scaffold, never fabricated.
-        _spec_memory_block = f"\n\n## Your memory\n{memory_context}" if memory_context else ""
-        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
+        #
+        # audit-system-prompt-doctrine.md §2b/§3: this branch used to be a
+        # bare content dump with zero rule attached — no write-trigger, no
+        # read-trigger, nothing telling a specialist a memory_write tool
+        # exists or why to use it. _spec_memory_why states the purpose
+        # unconditionally (memory tools are always-on native tools for a
+        # specialist too, per tool_registry_service.ALWAYS_ON_TOOL_NAMES,
+        # regardless of whether a brief exists yet); the literal "## Your
+        # memory" heading + content stays conditional on memory_context, same
+        # as before — test_sage_agent_runtime_service.py's fresh-agent tests
+        # assert that heading is ABSENT for an empty/untouched MEMORY.md, and
+        # that invariant (no fabricated memory content) is preserved here.
+        _spec_memory_why = (
+            "\n\n## Memory — why first\n"
+            "Everything said in this conversation is gone once the session ends unless you "
+            "call a memory tool — that's the only reason to use one. After a message that "
+            "shares something durable and reusable (a preference, decision, ongoing project, "
+            "account detail), silently call memory_write to save it — never just say you'll "
+            "remember. When asked what you know or recall, call memory_search or memory_read "
+            "before answering, don't guess."
+        )
+        _spec_memory_block = _spec_memory_why + (f"\n\n## Your memory\n{memory_context}" if memory_context else "")
+        _specialist_system_prompt = f"{_spec_persona}{_spec_scope_rule}{_spec_autonomy_rule}{_spec_intro_rule}{_spec_honesty_rule}{_spec_capability_manifest_block}{_channel_action_honesty_rule}{_spec_memory_block}{_audience_instructions}{attachment_context}{mcp_tool_inventory}"
         envelope = _build_prompt_envelope(
             workspace_id=normalized_workspace_id,
             message=normalized_message,

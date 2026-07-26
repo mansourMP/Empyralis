@@ -1628,18 +1628,28 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="fleet",
             action_id="schedule_task",
             description=(
-                "Schedule a future task for an agent — it wakes at the given time and "
-                "executes the instruction. 'when' accepts 'in N minutes/hours' or an "
-                "ISO-8601 datetime."
+                "Schedule future work so nobody has to re-prompt you — including for "
+                "yourself. Omit agent_id to wake YOURSELF at the given time and run the "
+                "instruction (the standing-order case: 'check X every morning', a delayed "
+                "follow-up, a reminder). Pass a different agent's install id to schedule "
+                "that agent instead (fleet management). 'when' accepts 'in N minutes/hours' "
+                "or an ISO-8601 datetime. Underlying mechanism: propose_self_wakeup — a "
+                "self-scheduling primitive, not a queue you're borrowing for this."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "agent_id": {"type": "string", "description": "The agent install id to wake and run this instruction."},
+                    "agent_id": {
+                        "type": "string",
+                        "description": (
+                            "The agent install id to wake and run this instruction. Omit this "
+                            "field entirely to schedule YOURSELF instead of another agent."
+                        ),
+                    },
                     "when": {"type": "string", "description": "e.g. 'in 30 minutes', 'in 2 hours', or '2026-07-04T09:00:00Z'."},
                     "instruction": {"type": "string", "description": "What the agent should do when it wakes."},
                 },
-                "required": ["agent_id", "when", "instruction"],
+                "required": ["when", "instruction"],
             },
             risk_level="moderate",
             # Not audience_safe by default: scheduling future work is a
@@ -1650,7 +1660,11 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             # allowlist, so the owner opts specific agents into it, not the
             # platform by default.
             audience_safe=False,
-            audience_note="Operator-only: schedules future work for an agent. Owner/operator access.",
+            audience_note=(
+                "Operator-only: schedules future work — for yourself (self-wakeup, no "
+                "agent_id) or for another agent (fleet management, explicit agent_id). "
+                "Owner/operator access."
+            ),
         ),
         # ── Skills: Level-2 progressive disclosure (docs/design/audit-skills.md §3.4) ──
         # The unified skill catalog (skill_registry.list_skill_definitions,
@@ -5935,11 +5949,23 @@ def execute_single_direct_tool_call(
             return json.dumps(result, ensure_ascii=False)
 
         if action_id == "schedule_task":
+            # audit-system-prompt-doctrine.md's #1 ranked gap: the model was
+            # never told a self-wakeup scheduler exists, and this dispatcher
+            # required an agent_id even though fleet_tools.schedule_task ->
+            # bounded_scheduler_service.propose_self_wakeup already resolves
+            # the wake-up to the calling workspace's own master install
+            # regardless of agent_id (propose_self_wakeup's signature takes
+            # no agent_id parameter at all — it isn't used for routing).
+            # agent_id is now optional: when the model omits it, schedule_task
+            # falls back to actor_id (agent_id or actor_id, see fleet_tools.py)
+            # — the calling agent's own identity — which is exactly "schedule
+            # myself." An explicit agent_id still targets a different agent
+            # (fleet management), unchanged.
             agent_id = str(argument_payload.get("agent_id") or "").strip()
             when = str(argument_payload.get("when") or "").strip()
             instruction = str(argument_payload.get("instruction") or "").strip()
-            if not agent_id or not when or not instruction:
-                raise RuntimeError("Tool 'fleet__schedule_task' requires agent_id, when, and instruction.")
+            if not when or not instruction:
+                raise RuntimeError("Tool 'fleet__schedule_task' requires when and instruction (agent_id is optional — omit it to schedule yourself).")
             # Mandate: the wake request must carry THIS turn's tier, not a
             # freshly-derived one — inherit_tier() (called inside
             # schedule_task) is the enforcement; passing the raw session_ctx
