@@ -5286,6 +5286,8 @@ async def get_workspace_member_invite(invite_id: str) -> Optional[Dict[str, Any]
         )
     if row is None:
         return None
+    row_keys = set(row.keys()) if hasattr(row, "keys") else set()
+    raw_metadata = row["metadata"] if "metadata" in row_keys else row["metadata_json"] if "metadata_json" in row_keys else None
     return {
         "id": str(row["id"] or "").strip(),
         "tenant_id": str(row["tenant_id"] or "").strip() or None,
@@ -5295,6 +5297,7 @@ async def get_workspace_member_invite(invite_id: str) -> Optional[Dict[str, Any]
         "status": str(row["status"] or "").strip() or "pending",
         "invited_by_user_id": str(row["invited_by_user_id"] or "").strip() or None,
         "accepted_by_user_id": str(row["accepted_by_user_id"] or "").strip() or None,
+        "metadata": _decode_json_object(raw_metadata),
         "created_at": _ts_or_none(row["created_at"]),
         "updated_at": _ts_or_none(row["updated_at"]),
         "accepted_at": _ts_or_none(row["accepted_at"]),
@@ -5422,7 +5425,29 @@ async def accept_workspace_invite(
     *,
     invite_id: str,
     accepted_by_user_id: str,
+    metadata_patch: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Marks an invite 'accepted'. Idempotent -- calling this again on an
+    already-accepted invite just refreshes accepted_by_user_id/accepted_at,
+    it does not error.
+
+    `metadata_patch`, when given, is shallow-merged into the invite's stored
+    metadata (patch keys overwrite existing keys of the same name, everything
+    else is left alone). This is how accept_workspace_invite_route
+    (routes_workspaces.py) and auth.accept_workspace_invites_for_user
+    (server_modules/auth.py) coordinate around the fact that an invite can be
+    accepted through two independent paths for the same invite: explicitly,
+    via the signed /join/{token} link, or implicitly, as a side effect of the
+    invitee simply logging in/registering with the invited email (which
+    auto-accepts every pending invite for that email -- see
+    accept_workspace_invites_for_user's call sites in auth.login_user /
+    auth.register_user). The auto-accept path stamps
+    metadata.auto_accepted_at_login = True; the explicit route recognizes
+    that marker as "this token's invite was already fulfilled by my own
+    login, not by someone else" and reports success instead of a false-
+    negative 404, then clears the marker so a true second call with the same
+    token (replay) still 404s like any other already-consumed invite.
+    """
     clean_invite_id = str(invite_id or "").strip()
     clean_user_id = str(accepted_by_user_id or "").strip()
     if not clean_invite_id or not clean_user_id:
@@ -5443,38 +5468,79 @@ async def accept_workspace_invite(
             now_ts = int(time.time())
             with _LOCAL_IDENTITY_LOCK:
                 with _connect_local_identity_db() as fallback:
-                    fallback.execute(
-                        """
-                        UPDATE workspace_member_invites
-                        SET status = 'accepted',
-                            accepted_by_user_id = ?,
-                            accepted_at = ?,
-                            updated_at = ?,
-                            revoked_at = NULL
-                        WHERE id = ?
-                        """,
-                        (clean_user_id, now_ts, now_ts, clean_invite_id),
-                    )
+                    if metadata_patch:
+                        existing_row = fallback.execute(
+                            "SELECT metadata_json FROM workspace_member_invites WHERE id = ? LIMIT 1",
+                            (clean_invite_id,),
+                        ).fetchone()
+                        existing_metadata = _decode_json_object(
+                            existing_row["metadata_json"] if existing_row is not None else None
+                        )
+                        existing_metadata.update(metadata_patch)
+                        fallback.execute(
+                            """
+                            UPDATE workspace_member_invites
+                            SET status = 'accepted',
+                                accepted_by_user_id = ?,
+                                accepted_at = ?,
+                                updated_at = ?,
+                                revoked_at = NULL,
+                                metadata_json = ?
+                            WHERE id = ?
+                            """,
+                            (clean_user_id, now_ts, now_ts, _to_json(existing_metadata, default={}), clean_invite_id),
+                        )
+                    else:
+                        fallback.execute(
+                            """
+                            UPDATE workspace_member_invites
+                            SET status = 'accepted',
+                                accepted_by_user_id = ?,
+                                accepted_at = ?,
+                                updated_at = ?,
+                                revoked_at = NULL
+                            WHERE id = ?
+                            """,
+                            (clean_user_id, now_ts, now_ts, clean_invite_id),
+                        )
                     row = fallback.execute(
                         "SELECT * FROM workspace_member_invites WHERE id = ? LIMIT 1",
                         (clean_invite_id,),
                     ).fetchone()
                     fallback.commit()
             return _workspace_invite_record_from_row(row)
-        await connection.execute(
-            """
-            UPDATE workspace_member_invites
-            SET status = 'accepted',
-                accepted_by_user_id = $2,
-                accepted_at = $3::timestamptz,
-                updated_at = $3::timestamptz,
-                revoked_at = NULL
-            WHERE id = $1
-            """,
-            clean_invite_id,
-            clean_user_id,
-            _utc_now_ts(),
-        )
+        if metadata_patch:
+            await connection.execute(
+                """
+                UPDATE workspace_member_invites
+                SET status = 'accepted',
+                    accepted_by_user_id = $2,
+                    accepted_at = $3::timestamptz,
+                    updated_at = $3::timestamptz,
+                    revoked_at = NULL,
+                    metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb
+                WHERE id = $1
+                """,
+                clean_invite_id,
+                clean_user_id,
+                _utc_now_ts(),
+                _to_json(metadata_patch, default={}),
+            )
+        else:
+            await connection.execute(
+                """
+                UPDATE workspace_member_invites
+                SET status = 'accepted',
+                    accepted_by_user_id = $2,
+                    accepted_at = $3::timestamptz,
+                    updated_at = $3::timestamptz,
+                    revoked_at = NULL
+                WHERE id = $1
+                """,
+                clean_invite_id,
+                clean_user_id,
+                _utc_now_ts(),
+            )
         row = await connection.fetchrow(
             "SELECT * FROM workspace_member_invites WHERE id = $1 LIMIT 1",
             clean_invite_id,

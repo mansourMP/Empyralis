@@ -2821,10 +2821,17 @@ def accept_workspace_invites_for_user(user_id: str, email: str) -> list[dict[str
         upsert_workspace_membership(clean_user_id, workspace_id, role)
         invite_id = str(invite.get("id") or "").strip()
         if invite_id:
+            # Stamp auto_accepted_at_login=True so accept_workspace_invite_route
+            # (server_modules/routes_workspaces.py) can tell "this invite was
+            # already fulfilled as a side effect of my own login, report
+            # success" apart from "this invite is genuinely already used by
+            # someone/something else, reject" -- see accept_workspace_invite's
+            # docstring in control_plane_repository.py for the full picture.
             _control_plane_call(
                 control_plane_repository.accept_workspace_invite(
                     invite_id=invite_id,
                     accepted_by_user_id=clean_user_id,
+                    metadata_patch={"auto_accepted_at_login": True},
                 )
             )
         accepted.append(

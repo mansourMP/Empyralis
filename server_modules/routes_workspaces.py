@@ -1018,8 +1018,10 @@ async def accept_workspace_invite_route(
     """Accept a workspace invite link. Any authenticated user may call this --
     there is no workspace-role gate (the caller isn't a member of the target
     workspace yet, by definition). The token must verify (signature + not
-    expired), the underlying invite row must still be 'pending', and the
-    caller's authenticated email must match the invite's email exactly.
+    expired), the underlying invite row must still be 'pending' (or already
+    accepted by this exact caller as an auto-accept-at-login side effect --
+    see below), and the caller's authenticated email must match the invite's
+    email exactly.
     """
     auth_module.validate_csrf(request)
     user = auth_module.get_authenticated_user_record(current_user)
@@ -1035,7 +1037,32 @@ async def accept_workspace_invite_route(
 
     invite_id = str(claims.get("invite_id") or "").strip()
     invite = await control_plane_repository.get_workspace_member_invite(invite_id)
-    if not isinstance(invite, dict) or str(invite.get("status") or "").strip() != "pending":
+    if not isinstance(invite, dict):
+        raise HTTPException(status_code=404, detail="Invite is no longer valid.")
+
+    invite_status = str(invite.get("status") or "").strip()
+    invite_metadata = invite.get("metadata") if isinstance(invite.get("metadata"), dict) else {}
+    accepted_by_user_id = str(invite.get("accepted_by_user_id") or "").strip()
+
+    # A user's own login/registration auto-accepts every pending invite that
+    # matches their email (auth.accept_workspace_invites_for_user, called
+    # from auth.login_user/register_user) -- entirely independent of this
+    # token-based flow. That means by the time someone who just signed up
+    # via a /join/{token} link lands back here, the invite this exact token
+    # points at may *already* be 'accepted' -- accepted by them, via their
+    # own login, moments ago. That is a real success, not an invalid invite,
+    # so it must not 404. auto_accepted_at_login is the marker
+    # accept_workspace_invites_for_user stamps for exactly this case; it is
+    # cleared below once this route has acknowledged it, so a genuine repeat
+    # call with the same token (replay) still 404s like any other
+    # already-consumed invite.
+    already_confirmed_via_login = (
+        invite_status == "accepted"
+        and bool(invite_metadata.get("auto_accepted_at_login"))
+        and accepted_by_user_id == user_id
+    )
+
+    if invite_status != "pending" and not already_confirmed_via_login:
         raise HTTPException(status_code=404, detail="Invite is no longer valid.")
 
     invite_workspace_id = str(invite.get("workspace_id") or "").strip()
@@ -1050,6 +1077,7 @@ async def accept_workspace_invite_route(
     accepted = await control_plane_repository.accept_workspace_invite(
         invite_id=invite_id,
         accepted_by_user_id=user_id,
+        metadata_patch={"auto_accepted_at_login": False},
     )
     return {
         "workspace_id": invite_workspace_id,

@@ -162,6 +162,63 @@ async def test_second_real_user_accepts_invite_and_becomes_member(second_real_us
 
 
 @pytest.mark.anyio
+async def test_accept_invite_succeeds_when_invitee_signup_already_auto_accepted_it(second_real_user_in_workspace):
+    """Regression test for the real-world ordering the previous test
+    deliberately avoids (see its comment): an owner sends an invite link to
+    someone who does NOT have an account yet, so the invite is created
+    BEFORE the invitee registers. When that invitee signs up (via
+    /join/{token} -> /signup?next=/join/{token} -> back to /join/{token}),
+    auth.register_user's own accept_workspace_invites_for_user call already
+    auto-accepts this exact invite (it matches their email) before the
+    /join/{token} page ever calls POST /workspaces/invites/accept with the
+    token. The explicit accept call must still report success (the user did
+    get the right membership -- just via the login side effect), not the
+    false-negative 404 the endpoint used to return here. And a genuine
+    replay of the same token afterward must still be rejected as invalid.
+    """
+    app = _build_app()
+    owner = _register_owner()
+    invitee_email = "invited-before-signup@example.com"
+
+    create_response = await _create_invite(app, owner["current_user"], owner["workspace_id"], email=invitee_email, role="member")
+    assert create_response.status_code == 200
+    token = create_response.json()["token"]
+
+    # NOW the invitee registers -- this is the real /signup flow order, and
+    # it silently auto-accepts the invite above as a side effect of
+    # register_user() before the token is ever presented to the accept route.
+    invitee = second_real_user_in_workspace(
+        owner["workspace_id"],
+        email=invitee_email,
+        join_workspace=False,
+    )
+    # Proof the race already happened: the invitee is a real member even
+    # though the explicit accept endpoint hasn't been called yet.
+    real_memberships = auth._list_workspace_memberships(invitee["user_id"])
+    assert any(
+        str(item.get("workspace_id")) == owner["workspace_id"] and item.get("role") == "member"
+        for item in real_memberships
+    )
+    pending_before = await control_plane_repository.list_pending_workspace_invites(owner["workspace_id"])
+    assert pending_before == []
+
+    # The /join/{token} page's call: must succeed, not 404.
+    first_accept_response = await _accept_invite(app, invitee["current_user"], token)
+    assert first_accept_response.status_code == 200
+    first_payload = first_accept_response.json()
+    assert first_payload["workspace_id"] == owner["workspace_id"]
+    assert first_payload["role"] == "member"
+    assert first_payload["status"] == "accepted"
+
+    # A genuine second call with the same token (replay) must still be
+    # rejected -- the fix must not turn this into a permanently-idempotent
+    # endpoint.
+    second_accept_response = await _accept_invite(app, invitee["current_user"], token)
+    assert second_accept_response.status_code == 404
+    assert second_accept_response.json()["detail"] == "Invite is no longer valid."
+
+
+@pytest.mark.anyio
 async def test_list_workspace_members_shows_owner_and_accepted_member(second_real_user_in_workspace):
     app = _build_app()
     owner = _register_owner()
