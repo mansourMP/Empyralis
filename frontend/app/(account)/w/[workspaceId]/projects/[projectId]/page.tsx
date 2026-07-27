@@ -14,6 +14,7 @@ import {
   type FleetAgent,
 } from "@/lib/workspace/fleet/fleet-data";
 import { TasksList } from "@/lib/workspace/fleet/TasksList";
+import { ProjectOverview } from "@/lib/workspace/fleet/ProjectOverview";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { breadcrumbCount, tintKeyForIndex, TINTS, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
@@ -92,9 +93,10 @@ export default function ProjectDetailPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
-  // Agents | Tasks. Two views of the same project: who is in it, and what
-  // they are working on.
-  const [view, setView] = useState<"agents" | "tasks">("agents");
+  // Overview | Agents | Tasks. Overview (MAN-110 Phase 1) is the landing
+  // summary — status roll-up + real activity feed; Agents/Tasks are the two
+  // working views: who is in the project, and what they are working on.
+  const [view, setView] = useState<"overview" | "agents" | "tasks">("overview");
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
   // A failed wake is reported here rather than swallowed: assigning fires a
   // wake so the agent actually starts, and a silent wake failure would read
@@ -219,11 +221,11 @@ export default function ProjectDetailPage() {
           <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
             <span className="fleet-btn-plus">+</span> New agent
           </button>
-        ) : (
+        ) : view === "tasks" ? (
           <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setTaskDialogOpen(true)}>
             <span className="fleet-btn-plus">+</span> New task
           </button>
-        )}
+        ) : null}
       </HeaderAction>
 
       {/* The view switch lives in the content toolbar, not the topbar — the
@@ -231,7 +233,7 @@ export default function ProjectDetailPage() {
           this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
         <div className="fleet-segmented" role="tablist" aria-label="Project view">
-          {(["agents", "tasks"] as const).map((v) => (
+          {(["overview", "agents", "tasks"] as const).map((v) => (
             <button
               key={v}
               type="button"
@@ -240,7 +242,7 @@ export default function ProjectDetailPage() {
               className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
               onClick={() => setView(v)}
             >
-              {v === "agents" ? "Agents" : "Tasks"}
+              {v === "overview" ? "Overview" : v === "agents" ? "Agents" : "Tasks"}
             </button>
           ))}
         </div>
@@ -279,7 +281,15 @@ export default function ProjectDetailPage() {
             </div>
           ) : null}
 
-          {view === "tasks" ? (
+          {view === "overview" ? (
+            <ProjectOverview
+              workspaceId={workspaceId}
+              agents={inProject}
+              tasks={tasks}
+              tasksLoading={tasksLoading}
+              rollup={rollup}
+            />
+          ) : view === "tasks" ? (
             tasksLoading && tasks.length === 0 ? (
               // rowHeight matches .fleet-task-row's real min-height (52px) —
               // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton

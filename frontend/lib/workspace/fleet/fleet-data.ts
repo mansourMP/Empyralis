@@ -788,6 +788,12 @@ export type WorkspaceActivityEvent = {
   install_id: string | null;
   channel: string | null;
   actor_type: string | null;
+  // Already returned by _project_timeline_item (activity_ledger_service.py:270)
+  // but never captured on this type until the project Activity feed
+  // (MAN-110 Phase 1) needed it to tell agents apart from each other beyond
+  // just install_id, and to leave room for a future human-actor match
+  // against workspace_id member rows.
+  actor_id: string | null;
   review_required: boolean;
 };
 
@@ -976,6 +982,14 @@ export type FleetTask = {
   plan?: unknown;
   metadata?: Record<string, unknown>;
   created_at?: string | null;
+  // project_tasks_service._row_to_task (:104) already returns this — added
+  // here for the project Activity feed (MAN-110 Phase 1), which needs a
+  // real "last touched" timestamp for status-derived events (e.g. a task
+  // reaching `done`). Today this column only ever moves on assign_task or
+  // update_task, and neither op is exposed to more than one field at a
+  // time, so treat it as "when the current status/assignee last changed" —
+  // not a full history.
+  updated_at?: string | null;
 };
 
 /** The five statuses project_tasks_service.VALID_TASK_STATUSES (:29) accepts.
