@@ -555,6 +555,58 @@ def test_allowed_tenant_ids_reuses_workspace_access_without_rebuild(
     assert auth.workspace_tenant_id(current_user, workspace_id) == tenant_id
 
 
+def test_orphaned_workspace_membership_does_not_break_access_to_valid_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    """Regression test for a real bug: a membership row (or stale JWT
+    workspace_ids claim) pointing at a workspace that no longer exists in the
+    tenant-binding store used to raise an *uncaught* HTTPException from deep
+    inside ``_effective_workspace_access`` -- taking down auth resolution for
+    ALL of the user's workspaces, not just the orphaned one. This happens for
+    real whenever a workspace is deleted while a user still belongs to
+    another one (and is exactly what an accidental wipe of the `workspaces`
+    table reproduces in local dev). The fix: skip orphaned workspace_ids and
+    keep resolving the rest.
+    """
+    auth, _, _ = _reload_auth(monkeypatch, tmp_path)
+    created = auth.register_user("tenant.orphaned@example.com", "password-123", name="Orphaned Membership")
+    workspace_entry = created["workspace_access"][0]
+    valid_workspace_id = workspace_entry["workspace_id"]
+    valid_tenant_id = workspace_entry["tenant_id"]
+    user_id = created["user"]["id"]
+
+    orphaned_workspace_id = "ws_deleted_never_bound"
+    real_list_memberships = auth._list_workspace_memberships
+
+    def _with_orphaned_membership(uid: str):
+        rows = list(real_list_memberships(uid))
+        if uid == user_id:
+            rows.append({"workspace_id": orphaned_workspace_id, "role": "owner"})
+        return rows
+
+    monkeypatch.setattr(auth, "_list_workspace_memberships", _with_orphaned_membership)
+
+    current_user = auth.get_current_user(_Request(), authorization=f"Bearer {created['token']}")
+
+    # get_current_user itself must not raise even though one of the user's
+    # memberships is orphaned.
+    access = current_user["workspace_access"]
+    assert valid_workspace_id in access
+    assert orphaned_workspace_id not in access
+
+    assert auth.allowed_tenant_ids(current_user) == {valid_tenant_id}
+    assert auth.enforce_workspace_access(
+        current_user, valid_workspace_id, minimum_role="viewer"
+    ) == valid_workspace_id
+
+    # The orphaned workspace itself correctly still fails (it really doesn't
+    # exist) -- but with the specific, expected error, not an unrelated crash.
+    with pytest.raises(HTTPException) as exc:
+        auth.enforce_workspace_access(current_user, orphaned_workspace_id, minimum_role="viewer")
+    assert exc.value.status_code == 403
+
+
 def test_enterprise_settings_and_admin_provisioning_hooks(monkeypatch: pytest.MonkeyPatch, tmp_path):
     auth, _, _ = _reload_auth(monkeypatch, tmp_path)
     finance_workspace_id = f"finance-{tmp_path.name}"

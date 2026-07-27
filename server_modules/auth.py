@@ -4417,7 +4417,21 @@ def _effective_workspace_access(
 
     access: dict[str, dict[str, Any]] = {}
     for workspace_id in sorted(effective_workspace_ids):
-        tenant_id = tenant_id_for_workspace(workspace_id)
+        try:
+            tenant_id = tenant_id_for_workspace(workspace_id)
+        except HTTPException:
+            # A membership/claim can outlive its workspace (the workspace was
+            # deleted, or -- in local dev -- the workspaces table was wiped
+            # out from under still-referenced membership rows). Don't let one
+            # orphaned workspace_id take down access resolution for the
+            # user's other, still-valid workspaces; just drop it.
+            LOGGER.warning(
+                "workspace_access_map: skipping orphaned workspace_id '%s' for user_id '%s' "
+                "(no matching row in workspaces).",
+                workspace_id,
+                user_id,
+            )
+            continue
         tenant_policy = load_tenant_policy(tenant_id)
         policy_row = load_workspace_policy(workspace_id)
         role_value = membership_roles.get(workspace_id) or claim_roles.get(workspace_id)
@@ -4822,10 +4836,20 @@ def allowed_tenant_ids(user: Optional[Dict[str, Any]]) -> Optional[set[str]]:
     access = tenant_access_map(user)
     if access:
         return set(access.keys())
-    return {
-        tenant_id_for_workspace(workspace_id)
-        for workspace_id in _normalize_workspace_ids_claim(user.get("workspace_ids"))
-    }
+    resolved_fallback: set[str] = set()
+    for workspace_id in _normalize_workspace_ids_claim(user.get("workspace_ids")):
+        try:
+            resolved_fallback.add(tenant_id_for_workspace(workspace_id))
+        except HTTPException:
+            # Orphaned workspace_id claim (workspace no longer exists) --
+            # drop it rather than blowing up tenant resolution for the user.
+            LOGGER.warning(
+                "allowed_tenant_ids: dropping orphaned workspace_id claim '%s' for user_id '%s'.",
+                workspace_id,
+                str(user.get("user_id") or "").strip(),
+            )
+            continue
+    return resolved_fallback
 
 
 def workspace_access_map(current_user: Optional[Dict[str, Any]]) -> dict[str, dict[str, Any]]:
