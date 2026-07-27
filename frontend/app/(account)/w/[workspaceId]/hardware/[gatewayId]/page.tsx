@@ -679,7 +679,7 @@ function CliSetupControl({
     primaryAction = (
       <button
         type="button"
-        className="fleet-btn fleet-btn--accent"
+        className="fleet-btn fleet-btn--accent-fill"
         onClick={runInstall}
         disabled={installBusy}
       >
@@ -691,7 +691,7 @@ function CliSetupControl({
     primaryAction = (
       <button
         type="button"
-        className="fleet-btn fleet-btn--accent"
+        className="fleet-btn fleet-btn--accent-fill"
         onClick={openPicker}
         disabled={verifying}
       >

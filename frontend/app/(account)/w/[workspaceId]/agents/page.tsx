@@ -187,7 +187,7 @@ export default function AgentsPage() {
           so the Properties toggle stays reachable; filters/sort still hide
           themselves when there's nothing to filter/sort. */}
       <HeaderAction>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+        <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
           <span className="fleet-btn-plus">+</span>
           New agent
         </button>

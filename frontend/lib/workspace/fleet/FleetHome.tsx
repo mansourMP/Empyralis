@@ -73,7 +73,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
               {mapped.length} {mapped.length === 1 ? "agent" : "agents"} · {onlineCount} online
             </p>
           </div>
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
             <span className="fleet-btn-plus">+</span>
             New agent
           </button>

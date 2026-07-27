@@ -27,7 +27,7 @@ export function FirstAgentEmpty({
       <div className="fleet-empty-title">{title}</div>
       <div className="fleet-empty-desc">{desc}</div>
       <div className="fleet-empty-actions">
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={onCreate}>
+        <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={onCreate}>
           Create your first agent
         </button>
       </div>

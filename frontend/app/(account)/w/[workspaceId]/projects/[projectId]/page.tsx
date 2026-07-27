@@ -218,11 +218,11 @@ export default function ProjectDetailPage() {
           independently optional). */}
       <HeaderAction>
         {view === "agents" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
             <span className="fleet-btn-plus">+</span> New agent
           </button>
         ) : view === "tasks" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setTaskDialogOpen(true)}>
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setTaskDialogOpen(true)}>
             <span className="fleet-btn-plus">+</span> New task
           </button>
         ) : null}
@@ -305,7 +305,7 @@ export default function ProjectDetailPage() {
                   Tasks live inside this project and can be assigned to an agent to work on.
                 </div>
                 <div className="fleet-empty-actions">
-                  <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setTaskDialogOpen(true)}>
+                  <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setTaskDialogOpen(true)}>
                     <span className="fleet-btn-plus">+</span> New task
                   </button>
                 </div>

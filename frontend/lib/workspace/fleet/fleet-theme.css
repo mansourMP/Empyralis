@@ -2424,6 +2424,30 @@ a.fleet-breadcrumb:hover {
   color: var(--accent);
 }
 
+/* Solid accent fill — MAN-103's other half. Reserved for a curated set of
+   high-intent creation/connection CTAs that most deserve a customer's
+   attention: "New agent" / "New task" / "New project", the BYO-subscription
+   sign-in buttons (Claude Code / Codex), and the VPS/hardware pairing
+   button. Everywhere else — Save, Invite, Connect a channel, and other
+   routine actions — keeps .fleet-btn--accent's quiet hairline above; this
+   class is deliberately opt-in per button, never a blanket upgrade. White
+   label on a solid --accent fill, same shape/height as every other
+   .fleet-btn (mirrors --danger's one-saturated-fill precedent below). */
+.fleet-btn--accent-fill {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.fleet-btn--accent-fill:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.fleet-btn--accent-fill .fleet-btn-plus {
+  color: inherit;
+}
+
 /* Destructive — the one button style that IS a saturated fill, on purpose:
    an irreversible action (Stop agent) confirmed inside a modal gets one
    unambiguous signal, not the primary button's quiet hairline treatment.

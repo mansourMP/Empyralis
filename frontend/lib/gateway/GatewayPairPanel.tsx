@@ -206,7 +206,7 @@ export function GatewayPairPanel({
               </select>
             </label>
           </div>
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={handleGenerate} disabled={busy}>
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={handleGenerate} disabled={busy}>
             {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
             {busy ? "Generating…" : "Generate pairing command"}
           </button>

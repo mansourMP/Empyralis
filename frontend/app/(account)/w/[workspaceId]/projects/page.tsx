@@ -213,7 +213,7 @@ export default function ProjectsPage() {
           can't drift, just no longer sharing the top line with the
           breadcrumb (U3-E's "one header bar" reading was wrong). */}
       <HeaderAction>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setDialogOpen(true)}>
+        <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setDialogOpen(true)}>
           <span className="fleet-btn-plus">+</span>
           New project
         </button>
