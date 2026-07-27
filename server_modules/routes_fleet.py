@@ -381,6 +381,71 @@ async def fleet_assign_task(
         return {"ok": False, "error": str(exc)}
 
 
+# ── Bug reports (MAN-106): the small "report an issue" entry point in the
+# fleet rail (BugReportButton.tsx). Any workspace member can file one
+# (viewer minimum -- reporting a bug you ran into isn't a privileged action);
+# reading the list back is owner-gated, matching every other read of
+# workspace-wide operational data in this router. ──────────────────────────
+
+class FleetCreateBugReportRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    page_path: str = ""
+
+
+@router.post("/api/w/{workspace_id}/fleet/bug-reports")
+async def fleet_create_bug_report(
+    request: Request,
+    workspace_id: str,
+    body: FleetCreateBugReportRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Persist a bug report -- see bug_report_service.py. Deliberately never
+    raises an HTTPException for a business-logic failure, matching every
+    other mutation in this router: the dialog that submits this always gets
+    a JSON body back to render, success or failure."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    from server_modules import bug_report_service
+
+    try:
+        report = await bug_report_service.create_report(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            title=body.title,
+            description=body.description,
+            reported_by_user_id=str((current_user or {}).get("user_id") or "").strip() or None,
+            page_path=body.page_path,
+            user_agent=request.headers.get("user-agent", ""),
+        )
+        return {"ok": True, "report": report}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.get("/api/w/{workspace_id}/fleet/bug-reports")
+async def fleet_list_bug_reports(
+    request: Request,
+    workspace_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Read back submitted bug reports -- no dedicated ops UI ships with
+    this yet; this is the durable, queryable surface an operator (or a
+    future admin view) reads from."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import bug_report_service
+
+    try:
+        reports = await bug_report_service.list_reports(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            limit=limit,
+        )
+        return {"ok": True, "reports": reports}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "reports": []}
+
+
 class FleetCreateAgentRequest(BaseModel):
     name: str = ""  # optional — server assigns a pool name when absent (see agent_name_pool.py)
     instructions: str = ""

@@ -1076,6 +1076,86 @@ a.fleet-breadcrumb:hover {
   margin: 4px 0 0;
 }
 
+/* ── Report a bug rail control (MAN-106) ── */
+/* Same icon-button + anchored-popover pattern as .fleet-help-float/
+   .fleet-health-float above, but the popover holds a small form instead of
+   a read-only panel. Buttons inside reuse the shared .fleet-btn/.fleet-
+   btn--accent system rather than inventing a one-off style. */
+
+.fleet-bugreport-float {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  z-index: 20;
+}
+
+.fleet-bugreport-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  width: 260px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
+  padding: 10px;
+  animation: fleet-fade 150ms ease-out;
+}
+
+.fleet-rail--collapsed .fleet-bugreport-popover {
+  left: 8px;
+}
+
+.fleet-bugreport-popover-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding: 2px 4px 8px;
+}
+
+.fleet-bugreport-textarea {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  resize: none;
+}
+
+.fleet-bugreport-textarea:focus-visible,
+.fleet-bugreport-popover .fleet-wizard-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.fleet-bugreport-error {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--destructive);
+  padding: 6px 2px 0;
+  margin: 0;
+}
+
+.fleet-bugreport-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.fleet-bugreport-sent {
+  font-size: 13px;
+  color: var(--text-primary);
+  padding: 6px 4px;
+  margin: 0;
+}
+
 /* ── Ask AI rail row (formerly a floating corner console, sat left of Help) ── */
 /* Trigger button composes .fleet-rail-item too — see SageLauncher.tsx. */
 
