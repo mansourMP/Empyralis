@@ -2032,6 +2032,25 @@ async def get_hardware_vps_plans(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.get("/hardware/vps/connections")
+async def list_hardware_vps_connections(
+    workspace_id: Optional[str] = None,
+    current_user=Depends(require_api_key),
+):
+    """Backend-authoritative list of this workspace's already-connected VPS
+    providers (MAN-105) — CloudVpsSetupPanel calls this on open and reuses
+    any returned token_id straight into fetch_provider_plans instead of
+    sending the user through DigitalOcean OAuth / Google sign-in /
+    CloudFormation again, whether that connection was made from this
+    browser, a different one, or by a teammate on the same workspace."""
+    workspace = enforce_workspace_access(
+        current_user,
+        workspace_id or "default",
+        minimum_role="owner",
+    )
+    return {"connections": vps_provisioning_service.list_vps_provider_tokens(workspace_id=workspace)}
+
+
 # Holds strong references to the fire-and-forget asyncio.Task objects
 # provision_hardware_vps schedules for the actual (multi-minute) droplet
 # lifecycle — asyncio only weakly tracks a Task via the event loop while

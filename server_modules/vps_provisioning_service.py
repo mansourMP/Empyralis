@@ -781,6 +781,65 @@ def load_vps_provider_credentials(
     return credentials
 
 
+def list_vps_provider_tokens(*, workspace_id: str) -> list[Dict[str, Any]]:
+    """Non-secret listing of this workspace's already-stored provider
+    connections (DigitalOcean OAuth, Google post-bootstrap, AWS
+    CloudFormation role) — every one of them lands in the same "tokens"
+    bucket via _store_provider_token_record/_store_aws_credentials, so this
+    is a plain workspace_id filter over that bucket.
+
+    This is the fix for MAN-105 ("reuse existing credentials instead of
+    re-pairing each time"): credentials were ALREADY persisted per-workspace
+    (not per-VPS-instance) the whole time, but nothing on the backend ever
+    told a caller what a workspace already had connected — the only place
+    that fact lived was CloudVpsSetupPanel's own browser localStorage (see
+    connectionStorageKey), so a second browser, a different device, or a
+    teammate on the same workspace always got sent through OAuth/
+    CloudFormation again despite a valid, already-encrypted credential
+    sitting right here. The frontend now calls this (via GET
+    /hardware/vps/connections) before showing "Connect" and reuses the
+    returned token_id straight into fetch_provider_plans instead.
+
+    Deliberately returns no secret material — never credentials_ciphertext,
+    never a decrypted value. token_id is the only handle the caller gets
+    back; every use of it (fetch_provider_plans, fetch_provider_regions,
+    provision_vps) re-validates it against workspace_id via
+    load_vps_provider_credentials, so handing out a bare token_id here
+    carries no more trust than the OAuth-complete/token-create responses
+    already do today.
+    """
+    clean_workspace_id = str(workspace_id or "").strip() or "default"
+    with _STATE_LOCK:
+        tokens = dict((_load_state().get("tokens") or {}))
+    # One entry per provider: if a workspace somehow accumulated more than
+    # one stored token for the same provider (e.g. a reconnect that minted a
+    # fresh token_id rather than overwriting the old one), the
+    # most-recently-updated record wins.
+    by_provider: Dict[str, Dict[str, Any]] = {}
+    for record in tokens.values():
+        if not isinstance(record, Mapping):
+            continue
+        if str(record.get("workspace_id") or "").strip() != clean_workspace_id:
+            continue
+        provider_id = str(record.get("provider") or "").strip()
+        if provider_id not in PROVIDER_CONFIGS:
+            continue
+        existing = by_provider.get(provider_id)
+        if existing is not None and str(existing.get("updated_at") or "") >= str(record.get("updated_at") or ""):
+            continue
+        by_provider[provider_id] = dict(record)
+    return [
+        {
+            "provider": provider_id,
+            "token_id": str(record.get("token_id") or ""),
+            "source": str(record.get("source") or ""),
+            "connected_at": str(record.get("created_at") or ""),
+            "updated_at": str(record.get("updated_at") or ""),
+        }
+        for provider_id, record in sorted(by_provider.items())
+    ]
+
+
 def fetch_provider_plans(
     provider: str,
     *,

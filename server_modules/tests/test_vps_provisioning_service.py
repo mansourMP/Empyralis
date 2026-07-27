@@ -455,6 +455,121 @@ def test_store_vps_provider_token_does_not_stamp_expiry_for_pasted_token(tmp_pat
     assert "access_token_expires_at" not in loaded
 
 
+def test_list_vps_provider_tokens_scopes_to_workspace_and_hides_secrets(tmp_path, monkeypatch):
+    # MAN-105: list_vps_provider_tokens is the backend-authoritative source
+    # CloudVpsSetupPanel now checks before demanding a fresh credential —
+    # verify it's scoped strictly to the requesting workspace and never
+    # leaks any secret material (ciphertext or decrypted).
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    do_token_id = vps.store_vps_provider_token(
+        provider="digitalocean",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        credentials={"access_token": "do_secret"},
+        source="oauth",
+    )
+    vps._store_aws_credentials(
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        credentials={"role_arn": "arn:aws:iam::123456789012:role/EmpyralisVPSProvisioner", "external_id": "ext-1"},
+    )
+    # A different workspace's token must never show up in ws-1's list.
+    vps.store_vps_provider_token(
+        provider="digitalocean",
+        workspace_id="ws-2",
+        tenant_id="tenant-1",
+        user_id="user-2",
+        credentials={"access_token": "other_workspace_secret"},
+        source="oauth",
+    )
+
+    connections = vps.list_vps_provider_tokens(workspace_id="ws-1")
+
+    assert {entry["provider"] for entry in connections} == {"digitalocean", "aws"}
+    do_entry = next(entry for entry in connections if entry["provider"] == "digitalocean")
+    assert do_entry["token_id"] == do_token_id
+    assert do_entry["source"] == "oauth"
+    assert do_entry["connected_at"]
+    for entry in connections:
+        assert "credentials" not in entry
+        assert "credentials_ciphertext" not in entry
+        assert "do_secret" not in str(entry)
+        assert "other_workspace_secret" not in str(entry)
+
+
+def test_list_vps_provider_tokens_returns_empty_for_unknown_workspace(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+
+    assert vps.list_vps_provider_tokens(workspace_id="ws-does-not-exist") == []
+
+
+def test_list_vps_provider_tokens_prefers_most_recently_updated_token_per_provider(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    vps.store_vps_provider_token(
+        provider="digitalocean",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        credentials={"access_token": "first_secret"},
+        source="oauth",
+    )
+    time.sleep(0.01)
+    newest_token_id = vps.store_vps_provider_token(
+        provider="digitalocean",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        credentials={"access_token": "second_secret"},
+        source="oauth",
+    )
+
+    connections = vps.list_vps_provider_tokens(workspace_id="ws-1")
+
+    assert len(connections) == 1
+    assert connections[0]["token_id"] == newest_token_id
+
+
+@pytest.mark.asyncio
+async def test_list_hardware_vps_connections_route_returns_workspace_connections(tmp_path, monkeypatch):
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+    token_id = vps.store_vps_provider_token(
+        provider="digitalocean",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        credentials={"access_token": "do_secret"},
+        source="oauth",
+    )
+
+    with patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1") as access_mock:
+        response = await routes_gateway.list_hardware_vps_connections(
+            workspace_id="ws-1", current_user={"user_id": "user-1"}
+        )
+
+    access_mock.assert_called_once()
+    assert response == {
+        "connections": [
+            {
+                "provider": "digitalocean",
+                "token_id": token_id,
+                "source": "oauth",
+                "connected_at": response["connections"][0]["connected_at"],
+                "updated_at": response["connections"][0]["updated_at"],
+            }
+        ]
+    }
+
+
 def test_load_vps_provider_credentials_proactively_refreshes_expiring_digitalocean_token(tmp_path, monkeypatch):
     monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")

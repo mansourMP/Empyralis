@@ -326,6 +326,56 @@ function saveStoredConnections(workspaceId: string, connections: Partial<Record<
   window.localStorage.setItem(connectionStorageKey(workspaceId), JSON.stringify(connections));
 }
 
+type VpsConnectionsPayload = {
+  connections?: Array<{
+    provider?: string;
+    token_id?: string;
+    source?: string;
+    connected_at?: string;
+    updated_at?: string;
+  }>;
+};
+
+function providerAccountLabel(providerId: VpsProviderId): string {
+  return `${PROVIDERS[providerId].label} account`;
+}
+
+// MAN-105: the backend now tracks every stored provider credential per
+// workspace (see list_vps_provider_tokens / GET /hardware/vps/connections)
+// — this is what makes "already connected" survive a different browser, a
+// different device, or a teammate on the same workspace, none of which the
+// old localStorage-only cache (loadStoredConnections above) could ever see.
+// The backend list is authoritative; `fallback` (this browser's own cache)
+// only fills in if the request fails outright, so same-browser reuse still
+// works offline exactly like it did before this endpoint existed.
+async function loadWorkspaceConnections(
+  workspaceId: string,
+  fallback: Partial<Record<VpsProviderId, VpsConnection>>,
+): Promise<Partial<Record<VpsProviderId, VpsConnection>>> {
+  try {
+    const payload = await requestJson<VpsConnectionsPayload>(
+      `/api/hardware/vps/connections?workspace_id=${encodeURIComponent(workspaceId)}`,
+    );
+    const next: Partial<Record<VpsProviderId, VpsConnection>> = { ...fallback };
+    for (const entry of payload?.connections ?? []) {
+      const providerId = entry?.provider as VpsProviderId | undefined;
+      const tokenId = String(entry?.token_id || '').trim();
+      if (!providerId || !PROVIDERS[providerId] || !tokenId) {
+        continue;
+      }
+      next[providerId] = {
+        provider: providerId,
+        tokenId,
+        accountLabel: fallback[providerId]?.accountLabel ?? providerAccountLabel(providerId),
+        connectedAt: String(entry?.connected_at || fallback[providerId]?.connectedAt || new Date().toISOString()),
+      };
+    }
+    return next;
+  } catch {
+    return fallback;
+  }
+}
+
 function tokenPayload(_providerId: VpsProviderId, token: string): Record<string, string> {
   // Only DigitalOcean still accepts a token (as an OAuth fallback); it uses
   // api_token. Google/AWS never token-paste. Vultr's api_key shape is gone.
@@ -460,6 +510,7 @@ export function CloudVpsSetupPanel({
     if (!open) {
       return;
     }
+    let cancelled = false;
     const storedConnections = loadStoredConnections(workspaceId);
     const requestedProvider = initialProviderId && PROVIDERS[initialProviderId] ? initialProviderId : null;
     setConnections(storedConnections);
@@ -500,6 +551,30 @@ export function CloudVpsSetupPanel({
         setStep('access');
       }
     }
+    // MAN-105: reconcile against the backend's workspace-wide connection list
+    // (GET /hardware/vps/connections) — this is what surfaces a provider
+    // connected from a different browser, a different device, or a
+    // teammate on the same workspace, none of which storedConnections above
+    // (this browser's own localStorage cache) could ever know about. Only
+    // auto-advances past the 'access' step when the requested provider had
+    // NO local connection to begin with, so it never re-triggers a flow the
+    // synchronous branch above already started with a locally-cached token.
+    void loadWorkspaceConnections(workspaceId, storedConnections).then((merged) => {
+      if (cancelled) {
+        return;
+      }
+      setConnections(merged);
+      saveStoredConnections(workspaceId, merged);
+      if (requestedProvider && !storedConnections[requestedProvider]?.tokenId) {
+        const discovered = merged[requestedProvider];
+        if (discovered?.tokenId) {
+          void prepareServerChoices(requestedProvider, discovered.tokenId);
+        }
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [initialProviderId, open, workspaceId]);
 
   // Applies the OAuth result the backend redirected back with — the
