@@ -266,6 +266,16 @@ async def test_logout_clears_browser_cookies(monkeypatch: pytest.MonkeyPatch):
     assert any("empyralis_refresh_token=" in header and "Max-Age=0" in header for header in set_cookie_headers)
     assert any("empyralis_csrf_token=" in header and "Max-Age=0" in header for header in set_cookie_headers)
 
+    # The access/refresh cookie deletions must carry HttpOnly, same as when
+    # they were originally set at login -- otherwise the logout Set-Cookie
+    # headers are inconsistent with the cookies they are clearing.
+    access_clear_header = next(h for h in set_cookie_headers if "empyralis_access_token=" in h)
+    refresh_clear_header = next(h for h in set_cookie_headers if "empyralis_refresh_token=" in h)
+    csrf_clear_header = next(h for h in set_cookie_headers if "empyralis_csrf_token=" in h)
+    assert "HttpOnly" in access_clear_header
+    assert "HttpOnly" in refresh_clear_header
+    assert "HttpOnly" not in csrf_clear_header
+
 
 @pytest.mark.anyio
 async def test_auth_me_accepts_access_token_cookie(monkeypatch: pytest.MonkeyPatch):

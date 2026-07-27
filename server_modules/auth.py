@@ -334,6 +334,16 @@ def clear_auth_cookies(response: Response, *, request: Request) -> None:
     secure = _cookie_secure(request)
     domain = _cookie_domain()
     samesite = _cookie_samesite()
+    # httponly must mirror what set_auth_cookies() used for each cookie: the
+    # access/refresh cookies are HttpOnly, the CSRF cookie is intentionally
+    # readable by JS. Starlette's delete_cookie() defaults httponly to False,
+    # so this must be passed explicitly or the deletion Set-Cookie header for
+    # the auth cookies is inconsistent with the cookie that was actually set.
+    httponly_by_cookie = {
+        AUTH_ACCESS_COOKIE_NAME: True,
+        AUTH_REFRESH_COOKIE_NAME: True,
+        AUTH_CSRF_COOKIE_NAME: False,
+    }
     for cookie_name in (AUTH_ACCESS_COOKIE_NAME, AUTH_REFRESH_COOKIE_NAME, AUTH_CSRF_COOKIE_NAME):
         response.delete_cookie(
             key=cookie_name,
@@ -341,6 +351,7 @@ def clear_auth_cookies(response: Response, *, request: Request) -> None:
             domain=domain,
             secure=secure,
             samesite=samesite,
+            httponly=httponly_by_cookie[cookie_name],
         )
 
 
