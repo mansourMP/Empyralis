@@ -574,6 +574,22 @@ class CreateConnectorVaultMcpValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["connector"], "higgsfield")
         self.assertTrue(result["test"]["ok"])
 
+    async def test_create_connector_vault_response_never_carries_raw_credentials(self):
+        """Security regression guard (MAN-109): validate_mcp_scoped_oauth_
+        connector (connector_validators.py) always echoes the normalized
+        credentials dict back under result["credentials"] so create_connector_
+        vault can persist the refreshed value -- but create_connector_vault's
+        own return value must never forward that key to the HTTP caller. Before
+        the fix, POST /connectors/vault handed the just-exchanged access_token
+        straight back to the browser in the response body for every OAuth-
+        connected provider (Slack, GitHub, Stripe, Linear, Notion, ... every
+        provider whose validator nests its result under "credentials")."""
+        with patch.object(mcp_registry_service, "discover_mcp_server_tools", return_value=[{"name": "create_payment_link"}]):
+            result = await self._create("stripe", label="Stripe")
+
+        self.assertNotIn("credentials", result["test"])
+        self.assertNotIn("mcp-scoped-token", str(result))
+
 
 # ---------------------------------------------------------------------------
 # 8. Gap 3 -- a cached DCR client's client_secret can itself expire (RFC

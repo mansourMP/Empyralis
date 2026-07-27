@@ -1889,6 +1889,31 @@ async def github_events_webhook(request: Request):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+def _redact_test_result(test: Any) -> Any:
+    """Strip decrypted secret material from a validate_*_connector() result
+    before it can reach an HTTP response.
+
+    Every validate_*_connector function (connector_validators.py,
+    connectors/github_connector.py, connectors/dropbox_connector.py, ...)
+    returns its normalized/refreshed credentials back to the caller under a
+    top-level "credentials" key -- create_connector_vault and
+    test_connector_vault read that key to persist the refreshed value
+    server-side (token rotation, normalized auth_mode, ...), then used to
+    pass the WHOLE test dict straight through as part of their own return
+    value (create_connector_vault's "test" field, test_connector_vault's
+    entire response). That meant every OAuth-connected or manually-entered
+    connector's live bot_token/access_token/refresh_token round-tripped back
+    to the browser on every connect and on every "Test connection" click --
+    exactly the decrypt-and-return-to-client pattern the vault exists to
+    prevent (see vps_provisioning_service.list_vps_provider_tokens's own
+    "deliberately returns no secret material" precedent). Callers must
+    extract whatever they need from "credentials" BEFORE calling this, since
+    it only strips the copy that's about to leave the server."""
+    if not isinstance(test, dict) or "credentials" not in test:
+        return test
+    return {key: value for key, value in test.items() if key != "credentials"}
+
+
 async def create_connector_vault(body: ConnectorCreate):
     body.validate_fields()
     connector = body.connector.lower().strip()
@@ -2312,7 +2337,7 @@ async def create_connector_vault(body: ConnectorCreate):
         "metadata": entry["metadata"],
         "created_at": entry["created_at"],
         "updated_at": entry["updated_at"],
-        "test": test,
+        "test": _redact_test_result(test),
     }
 
 async def update_connector_vault(credential_id: str, body: ConnectorPatchRequest):
@@ -2682,7 +2707,7 @@ async def test_connector_vault(credential_id: str, workspace_id: Optional[str] =
             raise HTTPException(status_code=400, detail=str(exc))
 
     _persist_capability_verification(test_result)
-    return test_result
+    return _redact_test_result(test_result)
 
 async def delete_connector_vault(credential_id: str, workspace_id: Optional[str] = None):
     item = get_credential(str(credential_id or "").strip())

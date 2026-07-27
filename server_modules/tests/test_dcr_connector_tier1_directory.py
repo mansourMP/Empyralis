@@ -404,3 +404,27 @@ class TestConnectorVaultGenericFallbackTests(unittest.IsolatedAsyncioTestCase):
             result = await connectors_actions.test_connector_vault("cred-1", workspace_id="ws-1")
 
         self.assertTrue(result["ok"])
+
+    async def test_test_connector_vault_response_never_carries_raw_credentials(self):
+        """Security regression guard (MAN-109): test_connector_vault backs the
+        "Test connection" button, callable repeatedly by any workspace owner
+        for an already-connected provider. Its validator's result nests the
+        live access_token under result["credentials"] for internal use --
+        before the fix, that whole dict (including the decrypted token this
+        endpoint just pulled out of the vault) was returned verbatim in the
+        HTTP response on every click."""
+        fake_credential = {"id": "cred-1", "provider": "gusto", "workspace_id": "ws-1", "metadata": {}}
+
+        with (
+            patch(
+                "server_modules.connectors_actions.resolve_vault_credential",
+                return_value={"_provider": "gusto", "access_token": "mcp-scoped-token"},
+            ),
+            patch("server_modules.connectors_actions.get_credential", return_value=fake_credential),
+            patch("server_modules.connectors_actions.update_credential_metadata", return_value=None),
+            patch.object(mcp_registry_service, "discover_mcp_server_tools", return_value=[{"name": "list_employees"}]),
+        ):
+            result = await connectors_actions.test_connector_vault("cred-1", workspace_id="ws-1")
+
+        self.assertNotIn("credentials", result)
+        self.assertNotIn("mcp-scoped-token", str(result))
