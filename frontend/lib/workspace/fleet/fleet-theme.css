@@ -1380,8 +1380,13 @@ a.fleet-breadcrumb:hover {
 
 /* Hardware page regression fix: its provider-card grid + device list is a
    data/cards page like Projects/Agents (which get the wide --with-panel +
-   .fleet-content-main cap, 1140px), not a reading/forms page like Settings/
-   Billing (which keep .fleet-content's plain 820px cap).
+   .fleet-content-main cap, 1140px), not a reading/forms page like Settings
+   (which keeps .fleet-content's plain 820px cap). Billing was originally
+   grouped with Settings here too, but its usage dashboard (multi-series
+   chart + per-agent cost legend table) is dense dashboard content, not a
+   reading/forms column — it now also takes .fleet-content--wide, same
+   simple modifier as Hardware (no --with-panel restructuring needed since
+   neither page has a side panel).
    Just widening max-width here isn't enough — .fleet-content is a flex
    item of .fleet-shell-scroll (display:flex; flex-direction:column), so
    its OWN "width" is the flexbox CROSS axis, and .fleet-content's

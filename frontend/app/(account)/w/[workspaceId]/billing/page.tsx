@@ -195,7 +195,7 @@ export default function UsagePage() {
   );
 
   return (
-    <main className="fleet-content">
+    <main className="fleet-content fleet-content--wide">
       {/* No page-title header — the breadcrumb already says "Usage". The
           period toggle is a real control, not a title, so it rides the
           breadcrumb row's action slot instead of a second header block. */}
