@@ -6,7 +6,8 @@ import base64
 import json
 import re
 import subprocess
-from typing import Any, Dict, List
+import tempfile
+from typing import Any, Dict, List, Optional, Tuple
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
@@ -17,6 +18,90 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0 Safari/537.36"
 )
+
+# MAN-109: both fetch paths below only ever validated the URL once, up
+# front, then followed redirects unconditionally -- urlopen()'s default
+# HTTPRedirectHandler trusts any Location header, and `curl -L` does the
+# same at the process level. A URL that passes assert_safe_outbound_url
+# (a public host) can still 302 to a loopback/link-local/private/cloud-
+# metadata address, and the response comes back as if it were the original
+# target. _ValidatingRedirectHandler and _curl_fetch_with_redirect_guard
+# close that gap by re-validating every redirect hop, not just the first
+# request, mirroring the same fix applied to the MCP client in
+# mcp_registry_service.py's _mcp_redirect_guard_request_hook.
+_MAX_REDIRECT_HOPS = 10
+_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+
+
+class _ValidatingRedirectHandler(urlrequest.HTTPRedirectHandler):
+    """Re-validates every redirect target against assert_safe_outbound_url
+    before urllib.request follows it. The stdlib HTTPRedirectHandler blindly
+    trusts whatever Location header the server sends; raising here aborts
+    the redirect (and the whole request) before urllib ever connects to the
+    unsafe target."""
+
+    def redirect_request(self, req, fp, code, msg, hdrs, newurl):  # noqa: N802 (stdlib signature)
+        assert_safe_outbound_url(newurl)
+        return super().redirect_request(req, fp, code, msg, hdrs, newurl)
+
+
+_VALIDATING_OPENER = urlrequest.build_opener(_ValidatingRedirectHandler)
+
+
+def _parse_curl_status_and_location(headers_text: str) -> Tuple[int, Optional[str]]:
+    """Parse the status code and (if present) Location header out of the
+    raw header block curl writes via `-D`. A single curl invocation with no
+    -L makes exactly one request, so there is exactly one status line/header
+    block to parse here -- no need to handle multiple hops' worth of
+    headers in one blob."""
+    status = 0
+    location: Optional[str] = None
+    for line in headers_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if status == 0:
+            parts = stripped.split(None, 2)
+            if len(parts) >= 2 and parts[1].isdigit():
+                status = int(parts[1])
+            continue
+        if stripped.lower().startswith("location:"):
+            location = stripped.split(":", 1)[1].strip()
+    return status, location
+
+
+def _curl_fetch_with_redirect_guard(url: str, *, timeout: int) -> str:
+    """curl fallback for _fetch_url, with redirects followed manually (curl
+    invoked WITHOUT -L) so each hop's target can be re-validated against
+    assert_safe_outbound_url before it is requested -- see the MAN-109 note
+    above _ValidatingRedirectHandler."""
+    current_url = str(url or "").strip()
+    for _ in range(_MAX_REDIRECT_HOPS + 1):
+        assert_safe_outbound_url(current_url)
+        with tempfile.NamedTemporaryFile(mode="r", suffix=".headers") as headers_file:
+            completed = subprocess.run(
+                [
+                    "curl",
+                    "--max-time",
+                    str(timeout),
+                    "-sS",
+                    "-D",
+                    headers_file.name,
+                    "-A",
+                    DEFAULT_USER_AGENT,
+                    current_url,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            headers_text = headers_file.read()
+        status, location = _parse_curl_status_and_location(headers_text)
+        if status in _REDIRECT_STATUS_CODES and location:
+            current_url = urlparse.urljoin(current_url, location)
+            continue
+        return completed.stdout
+    raise RuntimeError(f"Too many redirects while fetching {url}")
 
 
 def _fetch_url(url: str, *, timeout: int = 15) -> str:
@@ -31,29 +116,14 @@ def _fetch_url(url: str, *, timeout: int = 15) -> str:
         },
     )
     try:
-        with urlrequest.urlopen(request, timeout=timeout) as response:
+        with _VALIDATING_OPENER.open(request, timeout=timeout) as response:
             try:
                 payload = response.read()
             except http.client.IncompleteRead as exc:
                 payload = exc.partial
             return payload.decode("utf-8", "ignore")
     except Exception:
-        completed = subprocess.run(
-            [
-                "curl",
-                "-L",
-                "--max-time",
-                str(timeout),
-                "-sS",
-                "-A",
-                DEFAULT_USER_AGENT,
-                normalized_url,
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return completed.stdout
+        return _curl_fetch_with_redirect_guard(normalized_url, timeout=timeout)
 
 
 def _strip_html(raw_html: str) -> str:

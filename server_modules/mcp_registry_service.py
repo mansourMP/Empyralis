@@ -964,38 +964,41 @@ async def _list_tools_streamable_http_async(
 ) -> List[Dict[str, Any]]:
     if client_session_cls is None or streamable_http_client_fn is None:
         raise RuntimeError("The MCP client dependency is not installed.")
-    max_attempts = 2
-    base_delay = 1.0
-    for attempt in range(1, max_attempts + 1):
-        try:
-            async with asyncio.timeout(discover_timeout_seconds):
-                async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
-                    async with client_session_cls(read_stream, write_stream) as session:
-                        await session.initialize()
-                        result = await session.list_tools()
-            break
-        except TimeoutError:
-            if attempt < max_attempts:
-                _log.warning(
-                    "MCP tool discovery attempt %d/%d timed out after %.0fs for endpoint %s, retrying...",
-                    attempt, max_attempts, discover_timeout_seconds, endpoint,
-                )
-                await asyncio.sleep(base_delay * attempt)
-                continue
-            raise RuntimeError(
-                f"MCP tool discovery timed out after {max_attempts} attempts "
-                f"({discover_timeout_seconds:.0f}s each) for endpoint {endpoint}"
-            ) from None
-        except Exception as exc:
-            if attempt < max_attempts and _is_transient_mcp_error(exc):
-                _log.warning(
-                    "MCP tool discovery attempt %d/%d failed for endpoint %s: %s, retrying...",
-                    attempt, max_attempts, endpoint, exc,
-                )
-                await asyncio.sleep(base_delay * attempt)
-                continue
-            raise
-    return _tool_items_from_list_result(result, server_id="temporary")
+    try:
+        max_attempts = 2
+        base_delay = 1.0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with asyncio.timeout(discover_timeout_seconds):
+                    async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
+                        async with client_session_cls(read_stream, write_stream) as session:
+                            await session.initialize()
+                            result = await session.list_tools()
+                break
+            except TimeoutError:
+                if attempt < max_attempts:
+                    _log.warning(
+                        "MCP tool discovery attempt %d/%d timed out after %.0fs for endpoint %s, retrying...",
+                        attempt, max_attempts, discover_timeout_seconds, endpoint,
+                    )
+                    await asyncio.sleep(base_delay * attempt)
+                    continue
+                raise RuntimeError(
+                    f"MCP tool discovery timed out after {max_attempts} attempts "
+                    f"({discover_timeout_seconds:.0f}s each) for endpoint {endpoint}"
+                ) from None
+            except Exception as exc:
+                if attempt < max_attempts and _is_transient_mcp_error(exc):
+                    _log.warning(
+                        "MCP tool discovery attempt %d/%d failed for endpoint %s: %s, retrying...",
+                        attempt, max_attempts, endpoint, exc,
+                    )
+                    await asyncio.sleep(base_delay * attempt)
+                    continue
+                raise
+        return _tool_items_from_list_result(result, server_id="temporary")
+    finally:
+        await _maybe_close_mcp_http_client(http_client)
 
 
 def _build_mcp_auth_headers(credential: Optional[Dict[str, Any]]) -> Dict[str, str]:
@@ -1020,22 +1023,87 @@ def _build_mcp_auth_headers(credential: Optional[Dict[str, Any]]) -> Dict[str, s
     return {}
 
 
+async def _validate_mcp_request_url_async(url: str) -> None:
+    """Async wrapper around _validate_mcp_endpoint's synchronous checks
+    (scheme, blocked hosts, reserved TLDs, blocked IP ranges, and the
+    assert_safe_outbound_url DNS-resolution check) so it can be awaited from
+    an httpx event hook without blocking the event loop on the DNS lookup
+    inside assert_safe_outbound_url."""
+    await asyncio.to_thread(_validate_mcp_endpoint, url)
+
+
+async def _mcp_redirect_guard_request_hook(request: Any) -> None:
+    """MAN-109: httpx "request" event hook attached to every client built by
+    _build_mcp_http_client below. httpx re-invokes "request" hooks for EACH
+    request it sends, including the redirect-target request on every hop of
+    a redirect chain (see httpx.AsyncClient._send_handling_redirects: the
+    hook loop runs again each time around the `while True` before the next
+    request — built from the prior response's Location header — is sent).
+
+    This is the actual fix for the "validate-once, connect-many" gap: the
+    MCP SDK's create_mcp_http_client() hardcodes follow_redirects=True, and
+    _validate_mcp_endpoint() only ran once, at server-registration time
+    (upsert_workspace_mcp_server{,_async}). Without this hook, a workspace
+    owner could register an innocuous-looking public MCP endpoint that later
+    302s to a loopback/link-local/private/cloud-metadata address, and every
+    subsequent tool-discovery or tool-call connection would follow that
+    redirect transparently. Raising here (ValueError from
+    _validate_mcp_endpoint, or RuntimeError from assert_safe_outbound_url)
+    aborts the request before it is ever sent — httpx does not catch
+    exceptions raised from a "request" hook, so this propagates straight out
+    of the streamable_http_client(...) call.
+    """
+    await _validate_mcp_request_url_async(str(request.url))
+
+
+async def _maybe_close_mcp_http_client(http_client: Any) -> None:
+    """Best-effort close for an httpx.AsyncClient built by
+    _build_mcp_http_client and owned for the lifetime of a single discover/
+    tool-call operation (including its internal retry attempts).
+
+    The streamable_http transport only closes a client it created itself
+    (the http_client=None case) -- a client WE pass in is treated as
+    caller-owned and never closed by the SDK (see streamable_http_client's
+    `client_provided` branch). Since _build_mcp_http_client now ALWAYS
+    builds a client (see below), every discover/call would otherwise leak
+    that client's connection pool. Swallows close failures -- cleanup must
+    never mask the operation's real outcome.
+    """
+    if http_client is None:
+        return
+    aclose = getattr(http_client, "aclose", None)
+    if not callable(aclose):
+        return
+    try:
+        await aclose()
+    except Exception:
+        _log.debug("Failed to close MCP http client", exc_info=True)
+
+
 def _build_mcp_http_client(
     credential: Optional[Dict[str, Any]],
     timeout_seconds: float = 60.0,
 ) -> Any:
-    """Build an httpx.AsyncClient with MCP defaults and auth headers from a credential.
+    """Build an httpx.AsyncClient with MCP defaults, auth headers from a
+    credential (if any), and the MAN-109 per-hop SSRF re-validation hook
+    (_mcp_redirect_guard_request_hook).
 
-    Returns None if no credential is provided or if the SDK is not installed.
-    Callers MUST use the returned client as an async context manager.
+    Returns None only if the MCP SDK is not installed. Unlike before
+    MAN-109, this ALWAYS returns a client -- even with no credential/no auth
+    headers -- because the redirect guard must cover every outbound MCP
+    connection, not only authenticated ones: an unauthenticated MCP server
+    can redirect an outbound connection just as easily as an authenticated
+    one. Callers get a client they own for one discover/call operation (see
+    _maybe_close_mcp_http_client, which every internal caller uses to close
+    it once that operation -- including its retries -- is finished).
     """
     if create_mcp_http_client is None:
         return None
     headers = _build_mcp_auth_headers(credential)
-    if not headers:
-        return None
     timeout = httpx.Timeout(timeout_seconds) if timeout_seconds > 0 else None
-    return create_mcp_http_client(headers=headers, timeout=timeout)
+    client = create_mcp_http_client(headers=headers or None, timeout=timeout)
+    client.event_hooks = {"request": [_mcp_redirect_guard_request_hook]}
+    return client
 
 
 def discover_mcp_server_tools(
@@ -2231,36 +2299,39 @@ async def _call_streamable_http_tool_async(
 ) -> Any:
     if client_session_cls is None or streamable_http_client_fn is None:
         raise RuntimeError("The MCP client dependency is not installed.")
-    max_attempts = 3
-    base_delay = 1.0
-    for attempt in range(1, max_attempts + 1):
-        try:
-            async with asyncio.timeout(call_timeout_seconds):
-                async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
-                    async with client_session_cls(read_stream, write_stream) as session:
-                        await session.initialize()
-                        return await session.call_tool(tool_name, arguments)
-        except TimeoutError:
-            if attempt < max_attempts:
-                _log.warning(
-                    "MCP tool call %s attempt %d/%d timed out after %.0fs, retrying...",
-                    tool_name, attempt, max_attempts, call_timeout_seconds,
-                )
-                await asyncio.sleep(base_delay * attempt)
-                continue
-            raise RuntimeError(
-                f"MCP tool call timed out after {max_attempts} attempts "
-                f"({call_timeout_seconds:.0f}s each): {tool_name} on {endpoint}"
-            ) from None
-        except Exception as exc:
-            if attempt < max_attempts and _is_transient_mcp_error(exc):
-                _log.warning(
-                    "MCP tool call %s attempt %d/%d failed: %s, retrying...",
-                    tool_name, attempt, max_attempts, exc,
-                )
-                await asyncio.sleep(base_delay * attempt)
-                continue
-            raise
+    try:
+        max_attempts = 3
+        base_delay = 1.0
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with asyncio.timeout(call_timeout_seconds):
+                    async with streamable_http_client_fn(endpoint, http_client=http_client) as (read_stream, write_stream, _):
+                        async with client_session_cls(read_stream, write_stream) as session:
+                            await session.initialize()
+                            return await session.call_tool(tool_name, arguments)
+            except TimeoutError:
+                if attempt < max_attempts:
+                    _log.warning(
+                        "MCP tool call %s attempt %d/%d timed out after %.0fs, retrying...",
+                        tool_name, attempt, max_attempts, call_timeout_seconds,
+                    )
+                    await asyncio.sleep(base_delay * attempt)
+                    continue
+                raise RuntimeError(
+                    f"MCP tool call timed out after {max_attempts} attempts "
+                    f"({call_timeout_seconds:.0f}s each): {tool_name} on {endpoint}"
+                ) from None
+            except Exception as exc:
+                if attempt < max_attempts and _is_transient_mcp_error(exc):
+                    _log.warning(
+                        "MCP tool call %s attempt %d/%d failed: %s, retrying...",
+                        tool_name, attempt, max_attempts, exc,
+                    )
+                    await asyncio.sleep(base_delay * attempt)
+                    continue
+                raise
+    finally:
+        await _maybe_close_mcp_http_client(http_client)
 
 
 def invoke_workspace_mcp_skill(
