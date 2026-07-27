@@ -537,12 +537,26 @@ export class GatewayWsClient {
     if (this.passiveInventoryRefresh) {
       return this.passiveInventoryRefresh;
     }
+    // Deliberately NOT passing localRunnerReady into collectPassiveInventorySnapshot
+    // here: service-inventory.ts's own 60s cache (PASSIVE_INVENTORY_CACHE_TTL_MS)
+    // only ever gets written when `options.localRunnerReady` is omitted --
+    // passing a boolean through unconditionally (as this call used to) silently
+    // defeated that cache on every single heartbeat tick, forever, re-running the
+    // full local probe suite (Postgres via a bare `pg_isready`, Docker, Ollama,
+    // Codex/Claude/Grok/Cursor CLI, GPU) at the heartbeat interval instead of
+    // once a minute. On at least one production box this meant a `pg_isready`
+    // against the local Postgres socket -- with no explicit user/db, so it
+    // defaults to this service's own OS account -- every ~10-12s forever,
+    // logging a `FATAL: role "<account>" does not exist` server-side each time
+    // (harmless -- pg_isready treats the response as "server is up" regardless
+    // -- but constant, avoidable log noise). Fetch the cacheable base snapshot
+    // first, then layer readiness on top, same as sendHeartbeat's fast-path
+    // snapshot does a few lines above this.
     this.passiveInventoryRefresh = collectPassiveInventorySnapshot({
       requestedCapabilities,
-      localRunnerReady,
     })
       .then((snapshot) => {
-        this.passiveInventorySnapshot = snapshot;
+        this.passiveInventorySnapshot = applyLocalRunnerReadiness(snapshot, localRunnerReady);
       })
       .catch(async (error) => {
         await this.journal.append("system", "gateway.inventory.refresh_failed", {
