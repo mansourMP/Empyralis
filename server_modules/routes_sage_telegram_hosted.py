@@ -369,7 +369,22 @@ async def telegram_agent_byo_webhook(agent_install_id: str, request: Request) ->
 
 @router.post("/sage/telegram-hosted/dev-poll")
 async def dev_poll_once() -> dict:
-    """Dev-only: manually poll Telegram for updates (no webhook needed)."""
+    """Dev-only: manually poll Telegram for updates (no webhook needed).
+
+    SECURITY: this route carried no auth dependency and no environment gate,
+    so in any deploy where the hosted Telegram bot is configured (a real
+    production feature, not dev-only despite the name/docstring) it let an
+    unauthenticated caller trigger getUpdates polling and message routing on
+    demand -- unmetered outbound calls to Telegram's API, and, mixed with a
+    live webhook, duplicate/interleaved processing of inbound messages. Gate
+    it on local_tool_executor.is_local_dev() so it behaves like every other
+    "dev-only" backdoor in this codebase (command_registry._handle_bash,
+    skills_service's direct shell/file dispatch) instead of being reachable
+    in production.
+    """
+    from server_modules import local_tool_executor
+    if not local_tool_executor.is_local_dev():
+        raise HTTPException(status_code=404, detail="Not found")
     if not hosted.is_configured():
         raise HTTPException(status_code=503, detail="Not configured")
     updates = await hosted.poll_updates(limit=5, timeout=5)

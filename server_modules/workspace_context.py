@@ -318,6 +318,16 @@ def workspace_context_dir() -> Path:
 
 def _normalize_scope_token(value: str, *, default: str) -> str:
     token = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip("-")
+    # SECURITY: dots and hyphens both survive the character filter above (they
+    # are valid in real ids), but a token made up ENTIRELY of dots (".", "..",
+    # "...", ...) is a bare path-traversal segment once it's joined under
+    # scope_root — "agents" / ".." resolves to scope_root's parent, silently
+    # collapsing an agent's scope into a sibling/parent directory instead of
+    # its own. Slashes can't smuggle a multi-segment "../../x" through (they
+    # get replaced with "-" above), but a lone all-dots token still can, so
+    # it's rejected here and treated the same as an empty token.
+    if token and set(token) <= {"."}:
+        token = ""
     return token or default
 
 
