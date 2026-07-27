@@ -223,8 +223,22 @@ export function ConnectorPicker({
         const notConfigured = c.configured === false;
         // healthStatus is fetched on every FleetConnector but was previously
         // dropped on the floor — an expired/degraded connector rendered
-        // identically to a healthy one. Flag anything other than "healthy".
-        const unhealthy = Boolean(c.healthStatus) && c.healthStatus !== "healthy";
+        // identically to a healthy one. Flag anything other than "healthy" —
+        // but ONLY once connected: the backend's default health_status for a
+        // never-connected work_app_connector is "not_configured" regardless
+        // of whether the provider is genuinely blocked on operator setup or
+        // just hasn't been connected by this user yet (see
+        // connection_catalog_service.py status_items(), lane
+        // LANE_WORK_APP_CONNECTOR: `health_status = "healthy" if connected
+        // else "not_configured"`). Gating on `c.connected` here means every
+        // not-yet-connected connector (Linear, Notion, Stripe, etc. included)
+        // stops rendering a spurious "Not Configured" warning badge on top of
+        // its own "Connect" button — that combination read as "this is
+        // broken" when it just meant "you haven't connected it yet". The
+        // `c.configured === false` case (genuinely needs an operator-
+        // registered OAuth app) is already communicated separately via
+        // `notConfigured` above.
+        const unhealthy = c.connected && Boolean(c.healthStatus) && c.healthStatus !== "healthy";
         const manualFieldsOpen = manualFieldsFor?.id === c.id;
         // `?.` here (not narrowing on manualFieldsOpen) so this stays safe
         // regardless of what TS infers about manualFieldsFor's nullability.
