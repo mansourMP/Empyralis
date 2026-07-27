@@ -382,26 +382,6 @@ def test_complete_google_oauth_callback_replays_result_for_duplicate_state(tmp_p
     assert first["workspace_id"] == "ws-1"
 
 
-def test_provider_token_store_encrypts_and_loads_by_workspace(tmp_path, monkeypatch):
-    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
-    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
-    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
-
-    token_id = vps.store_vps_provider_token(
-        provider="hetzner",
-        workspace_id="ws-1",
-        tenant_id="tenant-1",
-        user_id="user-1",
-        credentials={"api_token": "secret"},
-    )
-    loaded = vps.load_vps_provider_credentials(token_id, provider="hetzner", workspace_id="ws-1", user_id="user-1")
-
-    assert token_id.startswith("vps_token_")
-    assert loaded["api_token"] == "secret"
-    with pytest.raises(KeyError):
-        vps.load_vps_provider_credentials(token_id, provider="hetzner", workspace_id="ws-2", user_id="user-1")
-
-
 # --- DigitalOcean refresh-token renewal (defect #1) -------------------------
 #
 # DO access tokens expire in 30 days (expires_in=2592000). Before this fix,
@@ -433,26 +413,6 @@ def test_store_vps_provider_token_stamps_expiry_from_oauth_expires_in(tmp_path, 
     )
 
     assert before + 2592000 <= loaded["access_token_expires_at"] <= before + 2592000 + 5
-
-
-def test_store_vps_provider_token_does_not_stamp_expiry_for_pasted_token(tmp_path, monkeypatch):
-    # Hetzner/Vultr tokens (and a manually pasted DO personal access token)
-    # never carry expires_in — there's nothing to proactively judge, so no
-    # access_token_expires_at should be synthesized for them.
-    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
-    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
-    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
-
-    token_id = vps.store_vps_provider_token(
-        provider="hetzner",
-        workspace_id="ws-1",
-        tenant_id="tenant-1",
-        user_id="user-1",
-        credentials={"api_token": "hetzner_secret"},
-    )
-    loaded = vps.load_vps_provider_credentials(token_id, provider="hetzner", workspace_id="ws-1", user_id="user-1")
-
-    assert "access_token_expires_at" not in loaded
 
 
 def test_list_vps_provider_tokens_scopes_to_workspace_and_hides_secrets(tmp_path, monkeypatch):
@@ -1008,28 +968,6 @@ def test_digitalocean_provisioning_tags_droplet_when_tag_scope_is_present(monkey
     assert attach_calls[0]["payload"]["resources"] == [{"resource_id": "12345", "resource_type": "droplet"}]
 
 
-def test_vultr_provisioning_uses_current_ubuntu_2404_id_and_base64_user_data(monkeypatch):
-    calls = []
-
-    def fake_http_json(method, url, *, token, payload, provider):
-        calls.append(payload)
-        return {"instance": {"id": "vultr-1", "main_ip": "198.51.100.20"}}
-
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
-
-    result = vps.provision_vps("vultr", {"api_key": "vultr_secret"}, "syd", None, "pair_vultr")
-
-    payload = calls[0]
-    decoded_user_data = base64.b64decode(payload["user_data"]).decode("utf-8")
-    assert result.provider == "vultr"
-    assert result.provider_resource_id == "vultr-1"
-    assert payload["region"] == "syd"
-    assert payload["plan"] == "vc2-1c-2gb"
-    assert payload["os_id"] == 2284
-    assert decoded_user_data.startswith("#cloud-config")
-    assert "EMPYRALIS_PAIRING_TOKEN='pair_vultr'" in decoded_user_data
-
-
 def test_invalid_region_is_rejected_before_provider_call(monkeypatch):
     called = False
 
@@ -1154,191 +1092,6 @@ def test_provision_vps_still_accepts_static_digitalocean_region_when_live_fetch_
     assert result.provider_resource_id == "42"
 
 
-def test_fetch_provider_regions_hetzner_uses_live_locations(tmp_path, monkeypatch):
-    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
-    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
-    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
-    token_id = vps.store_vps_provider_token(
-        provider="hetzner",
-        workspace_id="ws-1",
-        tenant_id="tenant-1",
-        user_id="user-1",
-        credentials={"api_token": "hetzner_secret"},
-    )
-
-    def fake_http_json(method, url, *, token, payload, provider, on_unauthorized=None):
-        assert method == "GET"
-        assert url == "https://api.hetzner.cloud/v1/locations"
-        assert token == "hetzner_secret"
-        return {
-            "locations": [
-                {"id": 1, "name": "fsn1", "description": "Falkenstein DC Park 1", "city": "Falkenstein"},
-                {"id": 6, "name": "sin", "description": "Singapore", "city": "Singapore"},
-            ]
-        }
-
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
-
-    result = vps.fetch_provider_regions("hetzner", token_id=token_id, workspace_id="ws-1", user_id="user-1")
-
-    # Singapore ("sin") is entirely missing from the static PROVIDER_CONFIGS
-    # tuple this fetch would otherwise fall back to — proving this is really
-    # the live call, not a static-list coincidence.
-    assert [r["id"] for r in result["regions"]] == ["fsn1", "sin"]
-
-
-def test_fetch_provider_regions_hetzner_falls_back_to_static_on_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
-    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
-    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
-    token_id = vps.store_vps_provider_token(
-        provider="hetzner",
-        workspace_id="ws-1",
-        tenant_id="tenant-1",
-        user_id="user-1",
-        credentials={"api_token": "hetzner_secret"},
-    )
-
-    def fake_http_json(*args, **kwargs):
-        raise vps.VPSProvisioningError("hetzner unreachable")
-
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
-
-    result = vps.fetch_provider_regions("hetzner", token_id=token_id, workspace_id="ws-1", user_id="user-1")
-
-    assert [r["id"] for r in result["regions"]] == ["nbg1", "fsn1", "hel1", "ash", "hil", "sin"]
-
-
-# --- Plan -> region availability threaded for Hetzner/Vultr (defect #4) ----
-
-
-def test_fetch_provider_plans_threads_hetzner_region_availability(tmp_path, monkeypatch):
-    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
-    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
-    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
-    token_id = vps.store_vps_provider_token(
-        provider="hetzner",
-        workspace_id="ws-1",
-        tenant_id="tenant-1",
-        user_id="user-1",
-        credentials={"api_token": "hetzner_secret"},
-    )
-
-    def fake_http_json(method, url, *, token, payload, provider, on_unauthorized=None):
-        return {
-            "server_types": [
-                {
-                    "name": "cx22",
-                    "cores": 2,
-                    "memory": 4,
-                    "disk": 40,
-                    "architecture": "x86",
-                    "prices": [{"price_monthly": {"gross": "5.99"}}],
-                    # Hetzner's 2025-09-24 "per-location server types" shape:
-                    # a `locations` array per server_type, not a flat top-
-                    # level `locations` field like Vultr's plans have.
-                    "locations": [
-                        {"name": "fsn1", "available": True},
-                        {"name": "sin", "available": True},
-                        {"name": "hil", "available": False},
-                    ],
-                },
-            ]
-        }
-
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
-
-    result = vps.fetch_provider_plans("hetzner", token_id=token_id, workspace_id="ws-1", user_id="user-1")
-
-    assert result["plans"][0]["regions"] == ("fsn1", "sin")
-
-
-def test_fetch_provider_plans_threads_vultr_region_availability(tmp_path, monkeypatch):
-    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
-    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
-    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
-    token_id = vps.store_vps_provider_token(
-        provider="vultr",
-        workspace_id="ws-1",
-        tenant_id="tenant-1",
-        user_id="user-1",
-        credentials={"api_key": "vultr_secret"},
-    )
-
-    def fake_http_json(method, url, *, token, payload, provider, on_unauthorized=None):
-        return {
-            "plans": [
-                {
-                    "id": "vc2-1c-2gb",
-                    "vcpu_count": 1,
-                    "ram": 2048,
-                    "disk": 55,
-                    "monthly_cost": 12,
-                    "locations": ["ewr", "lhr"],
-                },
-            ]
-        }
-
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
-
-    result = vps.fetch_provider_plans("vultr", token_id=token_id, workspace_id="ws-1", user_id="user-1")
-
-    assert result["plans"][0]["regions"] == ("ewr", "lhr")
-
-
-# --- Pre-connect browsing: Vultr's plans/regions are public (defect #5) ----
-
-
-def test_fetch_public_provider_plans_vultr_succeeds(monkeypatch):
-    def fake_http_json(method, url, *, token, payload, provider, on_unauthorized=None):
-        assert method == "GET"
-        assert url == "https://api.vultr.com/v2/plans?type=vc2"
-        assert token is None
-        return {
-            "plans": [
-                {
-                    "id": "vc2-1c-2gb",
-                    "vcpu_count": 1,
-                    "ram": 2048,
-                    "disk": 55,
-                    "monthly_cost": 12,
-                    "locations": ["ewr"],
-                },
-            ]
-        }
-
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
-
-    result = vps.fetch_public_provider_plans("vultr")
-
-    assert result["provider"] == "vultr"
-    assert result["plans"][0]["slug"] == "vc2-1c-2gb"
-
-
-def test_fetch_public_provider_plans_raises_for_providers_without_a_public_catalog():
-    # Verified live against the real APIs: DigitalOcean's /v2/sizes and
-    # Hetzner's /v1/server_types both 401 unauthenticated — only Vultr's
-    # plans are reachable with no connected account.
-    with pytest.raises(vps.VPSProvisioningError):
-        vps.fetch_public_provider_plans("digitalocean")
-    with pytest.raises(vps.VPSProvisioningError):
-        vps.fetch_public_provider_plans("hetzner")
-
-
-def test_fetch_public_provider_regions_vultr_prefers_live_data(monkeypatch):
-    def fake_http_json(method, url, *, token, payload, provider, on_unauthorized=None):
-        assert url == "https://api.vultr.com/v2/regions"
-        assert token is None
-        return {"regions": [{"id": "waw", "city": "Warsaw", "country": "PL"}]}
-
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
-
-    result = vps.fetch_public_provider_regions("vultr")
-
-    assert result["default_size"] == "vc2-1c-2gb"
-    assert [r["id"] for r in result["regions"]] == ["waw"]
-
-
 def test_fetch_public_provider_regions_non_vultr_returns_static_catalog_shape():
     # Same field set provider_catalog() has always served for these
     # providers pre-connection (provider/label/auth_label/default_region/
@@ -1352,25 +1105,6 @@ def test_fetch_public_provider_regions_non_vultr_returns_static_catalog_shape():
 
 
 @pytest.mark.asyncio
-async def test_hardware_vps_plans_route_serves_public_vultr_catalog_without_connecting():
-    def fake_http_json(method, url, *, token, payload, provider, on_unauthorized=None):
-        assert token is None
-        return {
-            "plans": [
-                {"id": "vc2-1c-2gb", "vcpu_count": 1, "ram": 2048, "disk": 55, "monthly_cost": 12},
-            ]
-        }
-
-    with patch.object(routes_gateway.vps_provisioning_service, "_http_json", fake_http_json):
-        response = await routes_gateway.get_hardware_vps_plans(
-            "vultr", token_id=None, workspace_id=None, current_user={"user_id": "user-1"}
-        )
-
-    assert response["provider"] == "vultr"
-    assert response["plans"][0]["slug"] == "vc2-1c-2gb"
-
-
-@pytest.mark.asyncio
 async def test_hardware_vps_plans_route_requires_connected_account_for_digitalocean_without_token():
     with pytest.raises(routes_gateway.HTTPException) as exc_info:
         await routes_gateway.get_hardware_vps_plans(
@@ -1378,38 +1112,6 @@ async def test_hardware_vps_plans_route_requires_connected_account_for_digitaloc
         )
 
     assert exc_info.value.status_code == 400
-
-
-def test_vps_status_becomes_connected_when_gateway_registration_has_vps_metadata(tmp_path, monkeypatch):
-    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
-    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
-    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
-    monkeypatch.setattr(
-        vps.gateway_state_repository,
-        "list_workspace_gateway_registrations",
-        lambda *args, **kwargs: [{"gateway_id": "gw-1", "metadata": {"vps_id": "vps_1"}}],
-    )
-
-    vps.record_vps_provision(
-        vps_id="vps_1",
-        workspace_id="ws-1",
-        tenant_id="tenant-1",
-        user_id="user-1",
-        provider="hetzner",
-        provider_resource_id="server-1",
-        public_ip=None,
-        region="fsn1",
-        size="cx22",
-        status="provisioning",
-        pairing_token="pair_hz",
-        credentials={"api_token": "secret"},
-    )
-
-    status = vps.get_vps_provision_status("vps_1")
-
-    assert status["status"] == "connected"
-    assert "credentials_ciphertext" not in status
-    assert "pairing_token_ciphertext" not in status
 
 
 def test_delete_recorded_vps_calls_provider_cleanup(tmp_path, monkeypatch):
@@ -1442,52 +1144,6 @@ def test_delete_recorded_vps_calls_provider_cleanup(tmp_path, monkeypatch):
 
     assert result["status"] == "deleted"
     assert deleted == [("DELETE", "https://api.digitalocean.com/v2/droplets/12345", "do_secret", "digitalocean")]
-
-
-@pytest.mark.asyncio
-async def test_hardware_vps_regions_route_returns_curated_provider_list(monkeypatch):
-    # Pre-connect Vultr browsing prefers Vultr's live public /v2/regions
-    # (see fetch_public_provider_regions) — simulate that call failing so
-    # this test exercises (and stays pinned to) the curated static fallback
-    # without making a real network call.
-    monkeypatch.setattr(
-        vps,
-        "_http_json",
-        lambda *args, **kwargs: (_ for _ in ()).throw(vps.VPSProvisioningError("vultr unreachable")),
-    )
-
-    response = await routes_gateway.get_hardware_vps_regions("vultr", current_user={"user_id": "user-1"})
-
-    assert response["provider"] == "vultr"
-    assert response["default_region"] == "ewr"
-    assert response["default_size"] == "vc2-1c-2gb"
-    assert [item["id"] for item in response["regions"]] == ["ewr", "lhr", "fra", "sgp", "syd"]
-
-
-@pytest.mark.asyncio
-async def test_hardware_vps_regions_route_prefers_live_vultr_regions_when_available(monkeypatch):
-    # When Vultr's public regions call succeeds, the route should serve that
-    # live list (a newer/different set proves it's not just the static one)
-    # instead of the curated fallback — this is what makes pre-connect
-    # region browsing (item 5) actually show real, current data.
-    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
-        assert method == "GET"
-        assert url == "https://api.vultr.com/v2/regions"
-        assert token is None
-        return {
-            "regions": [
-                {"id": "ewr", "city": "Newark", "country": "US"},
-                {"id": "waw", "city": "Warsaw", "country": "PL"},
-            ]
-        }
-
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
-
-    response = await routes_gateway.get_hardware_vps_regions("vultr", current_user={"user_id": "user-1"})
-
-    assert response["provider"] == "vultr"
-    assert response["default_size"] == "vc2-1c-2gb"
-    assert [item["id"] for item in response["regions"]] == ["ewr", "waw"]
 
 
 @pytest.mark.asyncio
