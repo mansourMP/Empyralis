@@ -172,6 +172,9 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
         <div className="fleet-usage-chart-title">Credits used · last 14d</div>
         {!historyLoading && !hasAnyDebit ? (
           <div className="fleet-empty" style={{ marginTop: "var(--space-3)" }}>
+            <div className="fleet-empty-icon">
+              <Coins size={20} strokeWidth={1.75} />
+            </div>
             <div className="fleet-empty-title">No credit usage yet</div>
             <div className="fleet-empty-desc">Credits are used as your agents chat with hosted AI.</div>
           </div>

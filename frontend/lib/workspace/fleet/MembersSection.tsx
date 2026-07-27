@@ -193,6 +193,9 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
         <div className="fleet-list"><div className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div></div>
       ) : members.length === 0 ? (
         <div className="fleet-empty">
+          <div className="fleet-empty-icon">
+            <UserPlus size={20} strokeWidth={1.75} />
+          </div>
           <div className="fleet-empty-title">No members yet</div>
           <div className="fleet-empty-desc">Invite someone above to give them access to this workspace.</div>
         </div>

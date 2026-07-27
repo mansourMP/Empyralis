@@ -493,6 +493,9 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
         <div className="fleet-list"><div className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div></div>
       ) : groups.length === 0 ? (
         <div className="fleet-empty">
+          <div className="fleet-empty-icon">
+            <Server size={20} strokeWidth={1.75} />
+          </div>
           <div className="fleet-empty-title">No MCP servers connected</div>
           <div className="fleet-empty-desc">Paste a server URL above to give this workspace's agents new tools.</div>
         </div>

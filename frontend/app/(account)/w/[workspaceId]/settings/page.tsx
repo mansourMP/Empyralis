@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { CreditCard, Copy, Check, Trash2, Plus, Play, Square, TriangleAlert } from "lucide-react";
+import { CreditCard, Copy, Check, Trash2, Plus, Play, Square, TriangleAlert, KeyRound } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { resumeFleetWorkspace, stopFleetWorkspace, useFleetWorkspace } from "@/lib/workspace/fleet/fleet-data";
@@ -342,6 +342,9 @@ export default function SettingsPage() {
         <div className="fleet-list"><div className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "30%", height: 12 }} /></div></div>
       ) : keys.length === 0 ? (
         <div className="fleet-empty">
+          <div className="fleet-empty-icon">
+            <KeyRound size={20} strokeWidth={1.75} />
+          </div>
           <div className="fleet-empty-title">No API keys yet</div>
           <div className="fleet-empty-desc">Create one above to connect an external MCP client.</div>
         </div>

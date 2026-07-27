@@ -481,6 +481,9 @@ export default function HardwarePage() {
             <div className="fleet-page-state-body">{error}</div>
           ) : regs.length === 0 ? (
             <div className="fleet-empty">
+              <div className="fleet-empty-icon">
+                <Server size={20} strokeWidth={1.75} />
+              </div>
               <div className="fleet-empty-title">No computers connected yet</div>
               <div className="fleet-empty-desc">Connect a cloud server above to give agents hardware access.</div>
             </div>

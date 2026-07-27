@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
+import { BarChart3 } from "lucide-react";
 
 import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
 import { formatNumber, tintKeyForIndex, TINTS, usagePayerLabel, type UsageMatrixRow } from "@/lib/workspace/fleet/fleet-presentation";
@@ -238,6 +239,9 @@ export default function UsagePage() {
 
           {!hasAnyUsage ? (
             <div className="fleet-empty" style={{ marginTop: "var(--space-5)" }}>
+              <div className="fleet-empty-icon">
+                <BarChart3 size={20} strokeWidth={1.75} />
+              </div>
               <div className="fleet-empty-title">No usage in this window</div>
               <div className="fleet-empty-desc">Costs appear here as your agents do work.</div>
             </div>

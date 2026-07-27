@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, Cpu, Gpu, Loader2, MemoryStick, Server, Thermometer } from "lucide-react";
+import { ArrowLeft, Cpu, Gpu, Loader2, MemoryStick, Server, ServerOff, Thermometer } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
@@ -1426,6 +1426,9 @@ export default function GatewayDetailPage() {
       <main className="fleet-hw-dashboard">
         {backLink}
         <div className="fleet-empty" style={{ marginTop: 20 }}>
+          <div className="fleet-empty-icon">
+            <ServerOff size={20} strokeWidth={1.75} />
+          </div>
           <div className="fleet-empty-title">This computer isn't in your workspace</div>
           <div className="fleet-empty-desc">It may have been removed, or the link is stale.</div>
         </div>
