@@ -8,6 +8,7 @@ import { CreditCard, Copy, Check, Trash2, Plus, Play, Square, TriangleAlert, Key
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { resumeFleetWorkspace, stopFleetWorkspace, useFleetWorkspace } from "@/lib/workspace/fleet/fleet-data";
 import { timeAgo, formatDate } from "@/lib/workspace/fleet/fleet-presentation";
+import { HardwareSection } from "@/lib/workspace/fleet/HardwareSection";
 import { McpServersSection } from "@/lib/workspace/fleet/McpServersSection";
 import { MembersSection } from "@/lib/workspace/fleet/MembersSection";
 
@@ -282,6 +283,16 @@ export default function SettingsPage() {
       {/* No page-title header — the breadcrumb already says "Settings". */}
       <WorkspaceNameSection workspaceId={workspaceId} />
       <MembersSection workspaceId={workspaceId} />
+
+      {/* Hardware — who works here, then what they work ON. Left the primary
+          rail in the 2026-07 repositioning: which box an agent runs on is
+          decided once, at setup, and never again, which makes it a settings
+          concern rather than a fifth daily destination. Same section shape as
+          MCP servers below (own title + subtitle + own load state); the
+          standalone /w/{ws}/hardware route renders this exact component and
+          stays live for deep links. */}
+      <HardwareSection workspaceId={workspaceId} />
+
       <StopAllAgentsSection workspaceId={workspaceId} />
 
       {/* Billing */}

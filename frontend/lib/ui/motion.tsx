@@ -54,46 +54,45 @@ type SafeDivProps = Omit<
   | 'onAnimationIterationCapture'
 >;
 
+/* MAN-126 — this module now obeys docs/UI-CONTRACT.md §Motion, which it
+   previously contradicted outright: "ease-out, capped at 200ms… No spring,
+   no bounce, no overshoot."
+
+   What changed and why:
+   - `press` and `sheet` were springs (stiffness 420/320). A spring, by
+     definition, overshoots and settles — that is bounce, and its real
+     duration is unbounded. Both are now plain ease-out durations.
+   - The three bespoke easing curves ([0.22,1,0.36,1], [0.16,1,0.3,1],
+     [0.2,0.8,0.2,1] — all back-loaded "expo" curves that hang before
+     arriving) collapse into ONE: the same cubic-bezier(0.2,0,0,1) that
+     --ease-out carries in CSS. One curve, everywhere.
+   - Durations mirror the CSS scale (--dur-1/2/3 = 90/140/200ms) rather than
+     DESIGN_SYSTEM_MOTION's 120/160/220 — 220ms broke the contract's cap. */
+const EASE_OUT = [0.2, 0, 0, 1] as const;
+const EASE_IN = [0.4, 0, 1, 1] as const;
+
+/** Seconds, because Framer/motion takes seconds. Mirrors --dur-1/2/3. */
 const motionSeconds = {
-  fast: DESIGN_SYSTEM_MOTION.fast / 1000,
-  normal: DESIGN_SYSTEM_MOTION.normal / 1000,
-  slow: DESIGN_SYSTEM_MOTION.slow / 1000,
+  fast: 0.09,
+  normal: 0.14,
+  slow: 0.2,
 } as const;
 
 export const APP_MOTION_TIMINGS = {
-  ms: DESIGN_SYSTEM_MOTION,
+  ms: { fast: 90, normal: 140, slow: 200 },
   seconds: motionSeconds,
+  /** Kept for callers that still reference the older shared scale. */
+  legacyMs: DESIGN_SYSTEM_MOTION,
 } as const;
 
 export const APP_MOTION_TRANSITIONS = {
-  hover: {
-    duration: motionSeconds.fast,
-    ease: [0.22, 1, 0.36, 1] as const,
-  },
-  fade: {
-    duration: motionSeconds.normal,
-    ease: [0.16, 1, 0.3, 1] as const,
-  },
-  panel: {
-    duration: motionSeconds.normal,
-    ease: [0.16, 1, 0.3, 1] as const,
-  },
-  press: {
-    type: 'spring' as const,
-    stiffness: 420,
-    damping: 28,
-    mass: 0.82,
-  },
-  sheet: {
-    type: 'spring' as const,
-    stiffness: 320,
-    damping: 30,
-    mass: 0.92,
-  },
-  tab: {
-    duration: motionSeconds.fast,
-    ease: [0.2, 0.8, 0.2, 1] as const,
-  },
+  hover: { duration: motionSeconds.fast, ease: EASE_OUT },
+  fade: { duration: motionSeconds.normal, ease: EASE_OUT },
+  panel: { duration: motionSeconds.normal, ease: EASE_OUT },
+  press: { duration: motionSeconds.fast, ease: EASE_OUT },
+  sheet: { duration: motionSeconds.normal, ease: EASE_OUT },
+  tab: { duration: motionSeconds.normal, ease: EASE_OUT },
+  exit: { duration: motionSeconds.normal, ease: EASE_IN },
 } as const;
 
 export function MotionPressButton({
@@ -109,16 +108,12 @@ export function MotionPressButton({
       {...props}
       disabled={disabled}
       className={className}
-      whileHover={
-        interactive && !reduceMotion
-          ? { y: -1, scale: 1.01 }
-          : undefined
-      }
-      whileTap={
-        interactive && !reduceMotion
-          ? { scale: 0.985, y: 0 }
-          : undefined
-      }
+      /* No whileHover. A button that lifts and grows 1% under the cursor
+         moves the target the user is aiming at, and a pointer already
+         communicates hover perfectly well without the UI flinching. Press
+         is the one interaction that earns motion, because the user is
+         doing something and deserves the confirmation. */
+      whileTap={interactive && !reduceMotion ? { scale: 0.98 } : undefined}
       transition={APP_MOTION_TRANSITIONS.press}
     >
       {children}
@@ -139,16 +134,10 @@ export function MotionSurfaceRow({
     <motion.article
       {...props}
       className={className}
-      whileHover={
-        interactive && !reduceMotion
-          ? { y: -1 }
-          : undefined
-      }
-      whileTap={
-        interactive && !reduceMotion
-          ? { scale: 0.995 }
-          : undefined
-      }
+      /* Rows do not lift on hover — see MotionPressButton. A list of cards
+         that each rise 1px as the cursor crosses them turns an ordinary
+         scan down the page into a ripple of movement. */
+      whileTap={interactive && !reduceMotion ? { scale: 0.98 } : undefined}
       transition={APP_MOTION_TRANSITIONS.press}
     >
       {children}
@@ -207,9 +196,13 @@ export function MotionTabPanel({
     <motion.div
       {...props}
       className={joinClassNames('app-motion-tab-panel', className)}
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -8 }}
+      /* Opacity only. The 10px rise-and-fall this used to do was the same
+         tab-change entrance that was cut from the fleet surface: it delays
+         the content you clicked for in order to tell you that you clicked,
+         which the active-tab highlight already says. */
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
       transition={APP_MOTION_TRANSITIONS.tab}
     >
       {children}
@@ -226,9 +219,12 @@ export function MotionSheetSurface({
     <motion.div
       {...props}
       className={joinClassNames('app-motion-sheet', className)}
-      initial={{ opacity: 0, y: 16, scale: 0.985 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: 12, scale: 0.99 }}
+      /* Slides, no longer scales. The 0.985→1 scale read as a "pop" — the
+         sheet arriving with a flourish rather than simply arriving. The
+         short rise is kept because it says where the sheet came from. */
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
       transition={APP_MOTION_TRANSITIONS.sheet}
     >
       {children}

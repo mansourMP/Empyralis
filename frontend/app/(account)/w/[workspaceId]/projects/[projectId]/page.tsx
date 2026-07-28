@@ -9,11 +9,14 @@ import {
   useFleetAgents,
   useFleetProjects,
   useFleetTasks,
-  createFleetTask,
   assignFleetTask,
+  patchFleetTask,
   type FleetAgent,
+  type FleetTaskStatus,
 } from "@/lib/workspace/fleet/fleet-data";
 import { TasksList } from "@/lib/workspace/fleet/TasksList";
+import { TasksBoard } from "@/lib/workspace/fleet/TasksBoard";
+import { TaskComposer } from "@/lib/workspace/fleet/TaskComposer";
 import { ProjectOverview } from "@/lib/workspace/fleet/ProjectOverview";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
@@ -22,7 +25,7 @@ import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
-import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
+import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/lib/workspace/fleet/FleetRightPanel";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton } from "@/lib/workspace/fleet/fleet-states";
@@ -97,12 +100,30 @@ export default function ProjectDetailPage() {
   // summary — status roll-up + real activity feed; Agents/Tasks are the two
   // working views: who is in the project, and what they are working on.
   const [view, setView] = useState<"overview" | "agents" | "tasks">("overview");
-  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
+  // Board is the default shape of the Tasks view; the flat table stays
+  // reachable because it shows four columns the cards deliberately don't
+  // (assignee name, due, updated, status all at once) and is the better
+  // read when you want to scan everything in one pass.
+  const [taskLayout, setTaskLayout] = useState<"board" | "list">("board");
+  // The task composer (MAN-127). Held as "which status does it open on" rather
+  // than a bare boolean, because a board column's `+` opens it pre-set to that
+  // column — `null` is closed, an object is open.
+  const [composer, setComposer] = useState<{ status?: FleetTaskStatus } | null>(null);
   // A failed wake is reported here rather than swallowed: assigning fires a
   // wake so the agent actually starts, and a silent wake failure would read
   // as "assigned, working" when nothing is running.
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
   const { tasks, loading: tasksLoading, refresh: refreshTasks } = useFleetTasks(workspaceId, projectId);
+  // Statuses written but not yet confirmed by a refetch — see
+  // handleStatusChange. Empty in the steady state, so this is a no-op merge
+  // except for the few hundred ms a PATCH is in flight.
+  const [pendingStatus, setPendingStatus] = useState<Map<string, FleetTaskStatus>>(new Map());
+  const boardTasks = useMemo(
+    () => (pendingStatus.size === 0
+      ? tasks
+      : tasks.map((t) => (pendingStatus.has(t.id) ? { ...t, status: pendingStatus.get(t.id)! } : t))),
+    [tasks, pendingStatus],
+  );
   const [rollup, setRollup] = useState<{ usd_cost: number; total_tokens: number; events: number } | null>(null);
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
   const [cost, setCost] = useState<Map<string, number>>(new Map());
@@ -184,9 +205,15 @@ export default function ProjectDetailPage() {
     },
   ];
 
+  // Same two-uses-one-definition split as taskHref below: `router.push` on a
+  // plain click, and stamped on each row as `data-tab-href` so ⌘/Ctrl+click
+  // and middle-click open a background content tab (see FleetTabs).
+  const agentHref = (agentId: string) =>
+    `${projectBase}/agents/${encodeURIComponent(agentId)}/overview`;
+
   const goToAgent = (agentId: string) => {
     rememberLastViewedAgent(agentId);
-    router.push(`${projectBase}/agents/${encodeURIComponent(agentId)}/overview`);
+    router.push(agentHref(agentId));
   };
 
   const handleAssign = async (taskId: string, agentId: string) => {
@@ -203,6 +230,44 @@ export default function ProjectDetailPage() {
       setTaskNotice(e instanceof Error ? e.message : "Could not assign this task.");
     }
   };
+
+  // The first place in this UI a HUMAN can move a task. patchFleetTask has
+  // existed in fleet-data.ts since the tasks backend landed and had zero
+  // callers anywhere — until this, only an agent calling project_task__update
+  // could change a status, which is why ProjectOverview's own caption says
+  // review attribution isn't a real code path yet.
+  const handleStatusChange = useCallback(async (taskId: string, status: FleetTaskStatus) => {
+    setTaskNotice(null);
+    // Paint the move immediately and reconcile from the server right after:
+    // tasks are polled on a 30s timer, so without this the card would sit in
+    // its old column for a beat after a drag and read as a failed drop.
+    setPendingStatus((prev) => new Map(prev).set(taskId, status));
+    try {
+      await patchFleetTask(workspaceId, taskId, { status });
+      await refreshTasks();
+    } catch (e) {
+      setTaskNotice(e instanceof Error ? e.message : "Could not update this task.");
+    } finally {
+      setPendingStatus((prev) => {
+        const next = new Map(prev);
+        next.delete(taskId);
+        return next;
+      });
+    }
+  }, [workspaceId, refreshTasks]);
+
+  // A task is a PAGE now, not a drawer over this board (MAN-11x): it has its
+  // own route, so it can be deep-linked, ⌘-clicked into a background content
+  // tab, and reached by browser back/forward. taskHref is handed to the board
+  // and the list so each card/row also carries it as `data-tab-href` — that
+  // attribute is what the tab layer reads for modifier clicks.
+  const taskHref = useCallback(
+    (taskId: string) => `${projectBase}/tasks/${encodeURIComponent(taskId)}`,
+    [projectBase],
+  );
+  const openTask = useCallback((taskId: string) => {
+    router.push(taskHref(taskId));
+  }, [router, taskHref]);
 
   return (
     <main className="fleet-content fleet-content--with-panel">
@@ -222,7 +287,7 @@ export default function ProjectDetailPage() {
             <span className="fleet-btn-plus">+</span> New agent
           </button>
         ) : view === "tasks" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setTaskDialogOpen(true)}>
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setComposer({})}>
             <span className="fleet-btn-plus">+</span> New task
           </button>
         ) : null}
@@ -232,6 +297,17 @@ export default function ProjectDetailPage() {
           topbar is where the earlier mobile header-overlap bug came from, and
           this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
+        {/* Top-LEFT of the control row, not a row of its own above the view.
+            "project member" == "workspace member" for now (MAN-70 ruling, no
+            per-project ACL table yet), so this pulls the workspace's member
+            list. `tasks` is passed through only so the hover tooltip can
+            surface real per-member attribution (tasks they created in this
+            project) — never fetched independently.
+            It used to be the first child of .fleet-content-main, which cost
+            the board a whole 44px band of dead space between the tab strip
+            and the first card. The toolbar row's left half was empty anyway
+            and is where Linear puts exactly this. */}
+        <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
         <div className="fleet-segmented" role="tablist" aria-label="Project view">
           {(["overview", "agents", "tasks"] as const).map((v) => (
             <button
@@ -246,6 +322,22 @@ export default function ProjectDetailPage() {
             </button>
           ))}
         </div>
+        {view === "tasks" && tasks.length > 0 ? (
+          <div className="fleet-segmented" role="tablist" aria-label="Task layout">
+            {(["board", "list"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                role="tab"
+                aria-selected={taskLayout === v}
+                className={`fleet-segmented-btn${taskLayout === v ? " fleet-segmented-btn--active" : ""}`}
+                onClick={() => setTaskLayout(v)}
+              >
+                {v === "board" ? "Board" : "List"}
+              </button>
+            ))}
+          </div>
+        ) : null}
         {view === "agents" ? (
           <FleetToolbar
             filters={inProject.length > 0 ? filters : undefined}
@@ -265,16 +357,11 @@ export default function ProjectDetailPage() {
           drawer overlays against; it is no longer a flex row splitting width
           with a permanent sibling. */}
       <div className="fleet-content-with-panel">
-        <div className="fleet-content-main">
-          {/* Top-right of the main content area, above whichever view is
-              active — "project member" == "workspace member" for now (MAN-70
-              ruling, no per-project ACL table yet), so this pulls the
-              workspace's own member list. `tasks` is passed through only so
-              the hover tooltip can surface real per-member attribution
-              (tasks they created in this project) — never fetched
-              independently. */}
-          <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
-
+        {/* The board is the one view that must own its own vertical scroll
+            (columns scroll, the page does not), so the sheet becomes a flex
+            column just for it — a modifier rather than a height calc, so
+            nothing here has to hard-code how tall the chrome above it is. */}
+        <div className={`fleet-content-main${view === "tasks" && taskLayout === "board" ? " fleet-content-main--board" : ""}`}>
           {taskNotice ? (
             <div className="fleet-page-state-body" role="alert" style={{ color: "var(--warning-text)" }}>
               {taskNotice}
@@ -305,13 +392,29 @@ export default function ProjectDetailPage() {
                   Tasks live inside this project and can be assigned to an agent to work on.
                 </div>
                 <div className="fleet-empty-actions">
-                  <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setTaskDialogOpen(true)}>
+                  <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setComposer({})}>
                     <span className="fleet-btn-plus">+</span> New task
                   </button>
                 </div>
               </div>
+            ) : taskLayout === "board" ? (
+              <TasksBoard
+                workspaceId={workspaceId}
+                tasks={boardTasks}
+                agents={inProject}
+                taskHref={taskHref}
+                onSelect={openTask}
+                onStatusChange={handleStatusChange}
+                onCreateTask={(status) => setComposer({ status })}
+              />
             ) : (
-              <TasksList tasks={tasks} agents={inProject} onAssign={handleAssign} />
+              <TasksList
+                tasks={boardTasks}
+                agents={inProject}
+                taskHref={taskHref}
+                onAssign={handleAssign}
+                onSelect={openTask}
+              />
             )
           ) : loading && inProject.length === 0 ? (
             // rowHeight matches .fleet-agent-row's real min-height (52px) —
@@ -327,7 +430,7 @@ export default function ProjectDetailPage() {
           ) : shown.length === 0 ? (
             <div className="fleet-page-state-body">No agents match these filters.</div>
           ) : (
-            <AgentsList workspaceId={workspaceId} agents={shown} costByAgent={cost} onSelect={goToAgent} onAgentStoppedChanged={refresh} />
+            <AgentsList workspaceId={workspaceId} agents={shown} costByAgent={cost} agentHref={agentHref} onSelect={goToAgent} onAgentStoppedChanged={refresh} />
           )}
         </div>
 
@@ -352,7 +455,14 @@ export default function ProjectDetailPage() {
           </PanelSection>
 
           <PanelSection title="Cost by agent">
-            {costByAgent.length === 0 ? (
+            {loading && agents.length === 0 ? (
+              // The rows here are one-per-agent, so this section's depth isn't
+              // known until the agents fetch lands. Reserve it instead of
+              // showing "No agents yet." — that line is both untrue mid-fetch
+              // and shorter than the rows it gets replaced by, so the drawer
+              // grew under the reader as the list arrived.
+              <PanelRowsSkeleton rows={3} />
+            ) : costByAgent.length === 0 ? (
               <div className="fleet-panel-empty">No agents yet.</div>
             ) : (
               costByAgent.map((a, i) => (
@@ -370,12 +480,17 @@ export default function ProjectDetailPage() {
         </FleetRightPanel>
       </div>
 
-      {taskDialogOpen && (
-        <NewTaskDialog
+      {composer && (
+        <TaskComposer
           workspaceId={workspaceId}
           projectId={projectId}
-          onClose={() => setTaskDialogOpen(false)}
-          onCreated={() => { setTaskDialogOpen(false); refreshTasks(); }}
+          projectName={project?.name}
+          agents={inProject}
+          initialStatus={composer.status}
+          onClose={() => setComposer(null)}
+          // Stays open when "Create more" is on — the composer decides that,
+          // not this page, so this handler only refreshes and reports.
+          onCreated={(notice) => { setTaskNotice(notice); refreshTasks(); }}
         />
       )}
 
@@ -407,97 +522,4 @@ function sortAgents(agents: FleetAgent[], sort: SortMode, cost: Map<string, numb
     });
   }
   return list;
-}
-
-/** Create a task. Deliberately has NO assignee field: the API models
- *  creation and assignment as two separate calls (a task is created into the
- *  backlog, then handed to an agent), and the create endpoint has no
- *  agent_id parameter at all. Offering an assignee here would be a UI
- *  invention the backend can't honour in one step. */
-function NewTaskDialog({
-  workspaceId,
-  projectId,
-  onClose,
-  onCreated,
-}: {
-  workspaceId: string;
-  projectId: string;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [dueAt, setDueAt] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function create() {
-    const clean = title.trim();
-    if (!clean) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await createFleetTask(workspaceId, {
-        project_id: projectId,
-        title: clean,
-        description: description.trim(),
-        due_at: dueAt ? new Date(dueAt).toISOString() : null,
-      });
-      onCreated();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not create this task.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="fleet-detail-backdrop" onClick={onClose}>
-      <div className="fleet-small-dialog" role="dialog" aria-modal="true" aria-label="New task" onClick={(e) => e.stopPropagation()}>
-        <div className="fleet-small-dialog-header">
-          <div className="fleet-detail-section-title">New task</div>
-        </div>
-        <div className="fleet-small-dialog-body">
-          <div>
-            <label className="fleet-wizard-label">Title</label>
-            <input
-              className="fleet-wizard-input"
-              value={title}
-              onChange={(e) => setTitle(e.currentTarget.value)}
-              placeholder="e.g. Draft the weekly summary"
-              autoFocus
-            />
-          </div>
-          <div>
-            <label className="fleet-wizard-label">Description (optional)</label>
-            {/* Longer than a one-line input on purpose: this text is what the
-                agent actually receives as the work when the task is assigned. */}
-            <textarea
-              className="fleet-persona-textarea"
-              value={description}
-              onChange={(e) => setDescription(e.currentTarget.value)}
-              placeholder="What needs doing, and what does done look like?"
-              rows={4}
-            />
-          </div>
-          <div>
-            <label className="fleet-wizard-label">Due date (optional)</label>
-            <input
-              type="date"
-              className="fleet-wizard-input"
-              value={dueAt}
-              onChange={(e) => setDueAt(e.currentTarget.value)}
-            />
-          </div>
-          {error && <p className="fleet-channel-expand-error">{error}</p>}
-        </div>
-        <div className="fleet-small-dialog-footer">
-          <button type="button" className="fleet-btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={create} disabled={busy || !title.trim()}>
-            {busy ? "Creating…" : "Create"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 }

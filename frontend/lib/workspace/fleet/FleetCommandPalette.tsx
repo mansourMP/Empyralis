@@ -22,6 +22,7 @@ import {
   Moon,
   Plug,
   Radio,
+  Settings,
   Sparkles,
   Sun,
   UserPlus,
@@ -199,13 +200,18 @@ export function FleetCommandPalette({
     }));
 
     // Mirrors the rail's own destinations (PrimaryRail's RAIL_ITEMS) — the
-    // same five, in the same order.
+    // same four, in the same order — then the two setup surfaces that are
+    // deliberately NOT in the rail. Hardware left the rail in the 2026-07
+    // repositioning and lives in Settings now; the palette is exactly where a
+    // once-in-a-while destination should still be one keystroke away, so it
+    // keeps its entry, hinted with where it actually lives.
     const goToActions: Action[] = [
       { id: "go-inbox", label: "Inbox", group: "Go to", icon: Inbox, run: () => go(`${base}/inbox`) },
       { id: "go-conversations", label: "Conversations", group: "Go to", icon: MessagesSquare, run: () => go(`${base}/conversations`) },
       { id: "go-projects", label: "Projects", group: "Go to", icon: FolderKanban, run: () => go(`${base}/projects`) },
       { id: "go-agents", label: "Agents", group: "Go to", icon: Bot, run: () => go(`${base}/agents`) },
-      { id: "go-hardware", label: "Hardware", group: "Go to", icon: Cpu, run: () => go(`${base}/hardware`) },
+      { id: "go-settings", label: "Settings", group: "Go to", icon: Settings, run: () => go(`${base}/settings`) },
+      { id: "go-hardware", label: "Hardware", hint: "in settings", group: "Go to", icon: Cpu, run: () => go(`${base}/hardware`) },
     ];
 
     // ?new=1 is the existing onboarding hand-off agents/page.tsx already

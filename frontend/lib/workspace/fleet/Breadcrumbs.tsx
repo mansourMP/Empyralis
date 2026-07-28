@@ -64,6 +64,13 @@ export function BreadcrumbLabelProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/** Read the whole id→name registry. The tab strip (FleetTabs) uses this to
+ *  title a tab with the same real name its breadcrumb shows, rather than
+ *  keeping a second, drifting copy of "what is this route called". */
+export function useBreadcrumbLabels(): LabelMap {
+  return useContext(BreadcrumbLabelContext).labels;
+}
+
 /** Register a real display name for a dynamic segment (id) so breadcrumbs and
  *  any other consumer can show it instead of the raw id. */
 export function useBreadcrumbLabel(
@@ -145,7 +152,7 @@ export function HeaderAction({ children }: { children: ReactNode }) {
   return createPortal(children, slotEl);
 }
 
-const STATIC_LABELS: Record<string, string> = {
+export const STATIC_LABELS: Record<string, string> = {
   fleet: "Home",
   inbox: "Inbox",
   conversations: "Conversations",
@@ -202,11 +209,13 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     segments.forEach((seg, i) => {
       acc += `/${seg}`;
       const prev = segments[i - 1];
-      // Skip the structural "agents" segment that sits between a project id and
-      // an agent id (…/projects/{id}/agents/{agentId}); its own path 404s.
-      const isStructuralAgents =
-        seg === "agents" && prev !== undefined && segments[i - 2] === "projects";
-      if (isStructuralAgents) return;
+      // Skip the structural "agents"/"tasks" segment that sits between a
+      // project id and a child id (…/projects/{id}/agents/{agentId},
+      // …/projects/{id}/tasks/{taskId}); neither bare path is a real route,
+      // so crumbing it would draw a dead link mid-chain.
+      const isStructuralChild =
+        (seg === "agents" || seg === "tasks") && prev !== undefined && segments[i - 2] === "projects";
+      if (isStructuralChild) return;
       const registered = labels[seg] || STATIC_LABELS[seg];
       const pending = !registered && looksLikeOpaqueId(seg);
       const label = registered || (pending ? "" : humanize(seg));
