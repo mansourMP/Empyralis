@@ -27,6 +27,8 @@ import { CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 
 import { me } from '@/lib/auth/auth-client';
 import { acceptWorkspaceInvite } from '@/lib/workspace/fleet/members-data';
+import { loadAccountShellBootstrap } from '@/lib/account/account-workspaces-client';
+import { useAccountShell } from '@/lib/shell/account-shell-context';
 import { AppButton } from '@/lib/ui/primitives';
 
 type Status = 'checking-session' | 'accepting' | 'accepted' | 'signed-out' | 'error';
@@ -35,6 +37,7 @@ export default function JoinWorkspaceInvitePage() {
   const router = useRouter();
   const params = useParams();
   const token = typeof params?.token === 'string' ? params.token : '';
+  const { actions } = useAccountShell();
 
   const [status, setStatus] = useState<Status>('checking-session');
   const [error, setError] = useState<string | null>(null);
@@ -59,17 +62,46 @@ export default function JoinWorkspaceInvitePage() {
       setStatus('accepting');
       const result = await acceptWorkspaceInvite(token);
       if (cancelled) return;
-      if (result.ok) {
-        setWorkspaceId(result.workspace_id);
-        setRole(result.role);
-        setStatus('accepted');
-      } else {
+      if (!result.ok) {
         setError(result.error);
         setStatus('error');
+        return;
       }
+
+      setWorkspaceId(result.workspace_id);
+      setRole(result.role);
+      setStatus('accepted');
+
+      // The account shell's workspaceMemberships list (root layout, loaded
+      // once per full page load) predates this accept call, so it doesn't
+      // know the new membership exists yet — refresh it from the same
+      // bootstrap endpoint the rest of the shell hydrates from before
+      // navigating, so the workspace switcher and any workspace-scoped route
+      // guard both see the membership immediately, on the first render,
+      // rather than only after a later full reload picks it up.
+      //
+      // Then land the user directly in the workspace they just joined,
+      // rather than leaving them on this confirmation screen or wherever
+      // they happened to be before (MAN-108 Phase 1 bug 4) — this becomes
+      // the current workspace for the rest of the session the same way any
+      // other workspace navigation does (PrimaryRail's route-sync effect
+      // stamps it as the last-visited workspace on the very next render).
+      const bootstrap = await loadAccountShellBootstrap().catch(() => null);
+      if (cancelled) return;
+      if (bootstrap) {
+        actions.replaceSession(bootstrap);
+      }
+      router.replace(`/w/${encodeURIComponent(result.workspace_id)}/agents`);
     })();
     return () => { cancelled = true; };
-  }, [token]);
+    // `actions` is intentionally excluded: it's a new object identity on
+    // every account-shell state change (see account-shell-context.tsx), and
+    // this effect itself calls actions.replaceSession, which would otherwise
+    // re-trigger it — re-submitting the accept call on every render instead
+    // of running it exactly once per token. `router` is stable across
+    // renders (Next.js), included only for lint-completeness.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, router]);
 
   const nextParam = `?next=${encodeURIComponent(`/join/${token}`)}`;
 

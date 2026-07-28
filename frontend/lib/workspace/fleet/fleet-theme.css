@@ -353,16 +353,9 @@ a.fleet-breadcrumb:hover {
   gap: 8px;
   min-height: 22px;
 }
-.fleet-rail-header-top .fleet-rail-workspace {
-  flex: 1;
-  min-width: 0;
-}
 .fleet-rail--collapsed .fleet-rail-header-top {
   flex-direction: column;
   gap: 10px;
-}
-.fleet-rail--collapsed .fleet-rail-header-top .fleet-rail-workspace {
-  flex: none;
 }
 .fleet-rail-collapse-top {
   flex: none;
@@ -370,11 +363,150 @@ a.fleet-breadcrumb:hover {
   height: 26px;
 }
 
-.fleet-rail-workspace {
+.fleet-rail-workspace-switcher {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.fleet-rail--collapsed .fleet-rail-workspace-switcher {
+  flex: none;
+}
+
+.fleet-rail-workspace-trigger {
   display: flex;
   align-items: center;
   gap: 10px;
   min-height: 22px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background var(--dur-fast) ease-out;
+}
+
+.fleet-rail-workspace-trigger:hover {
+  background: var(--rail-active);
+}
+
+.fleet-rail--collapsed .fleet-rail-workspace-trigger {
+  justify-content: center;
+  padding: 2px;
+  margin: -2px;
+}
+
+.fleet-rail-workspace-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* Anchored below the trigger (not above, like the account popover at the
+   rail's foot) — this trigger lives at the very top of the rail, so there is
+   no room to open upward. Nothing above .fleet-rail clips overflow, so the
+   absolute panel is free to extend past the rail's own 220px width. */
+.fleet-rail-workspace-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: -4px;
+  width: 260px;
+  max-width: calc(100vw - 32px);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 10;
+  animation: fleet-fade 150ms ease-out;
+}
+
+.fleet-rail--collapsed .fleet-rail-workspace-popover {
+  left: 0;
+}
+
+.fleet-rail-workspace-popover-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  width: 100%;
+  transition: background 150ms ease-out, color 150ms ease-out;
+}
+
+.fleet-rail-workspace-popover-row:hover {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.fleet-rail-workspace-popover-row.is-active {
+  color: var(--text-primary);
+}
+
+.fleet-rail-workspace-popover-row--add {
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  margin-top: 2px;
+  padding-top: 8px;
+  color: var(--text-muted);
+}
+
+.fleet-rail-workspace-popover-row--add:hover {
+  color: var(--text-primary);
+}
+
+.fleet-rail-workspace-popover-mark {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: var(--brand-clay);
+  color: var(--brand-clay-contrast);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.fleet-rail-workspace-popover-mark--add {
+  background: var(--rail-active);
+  color: var(--text-muted);
+}
+
+.fleet-rail-workspace-popover-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.fleet-rail-workspace-popover-name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-rail-workspace-popover-role {
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .fleet-rail-brand-mark {

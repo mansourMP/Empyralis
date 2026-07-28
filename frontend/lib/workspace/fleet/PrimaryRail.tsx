@@ -32,6 +32,7 @@ import { SageLauncher } from "./SageLauncher";
 import { CreditBalanceChip } from "./CreditBalanceChip";
 import { SystemHealthButton } from "./SystemHealthButton";
 import { BugReportButton } from "./BugReportButton";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
@@ -266,16 +267,15 @@ export function PrimaryRail({
     >
       <div className="fleet-rail-header">
         <div className="fleet-rail-header-top">
-          <div className="fleet-rail-workspace">
-            <div className="fleet-rail-brand-mark">{(workspaceName || "E").charAt(0).toUpperCase()}</div>
-            {/* Truncates hard at the rail's 220px width (long real names —
-                "Legibility Verify Two's Workspace" — otherwise overflow into
-                the collapse toggle). A native title tooltip is the cheapest
-                fix that doesn't touch the rail's width contract: hover (or a
-                long-press on touch) reads the full name instead of losing it
-                to an ellipsis with no recovery route. */}
-            {!effectiveCollapsed && <span className="fleet-rail-workspace-name" title={workspaceName}>{workspaceName}</span>}
-          </div>
+          {/* Truncates hard at the rail's 220px width (long real names —
+              "Legibility Verify Two's Workspace" — otherwise overflow into
+              the collapse toggle). A native title tooltip is the cheapest
+              fix that doesn't touch the rail's width contract: hover (or a
+              long-press on touch) reads the full name instead of losing it
+              to an ellipsis with no recovery route. Also the switcher's
+              trigger (MAN-108 Phase 1 bug 4) — every workspace the signed-in
+              user belongs to, one click away. */}
+          <WorkspaceSwitcher workspaceId={workspaceId} workspaceName={workspaceName} collapsed={effectiveCollapsed} />
           <button
             type="button"
             className="fleet-rail-control-btn fleet-rail-control-btn--collapse fleet-rail-collapse-top"
