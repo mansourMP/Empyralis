@@ -2118,6 +2118,62 @@ def transition_live_run_status(
                         )
                     except Exception:
                         pass
+                if status in {"failed", "timeout"} and str(previous or "").strip() != str(status or "").strip():
+                    # MAN-108 Bug 2: a task-assigned wake-up's run failing (e.g.
+                    # runs_execution._honest_no_provider_error, or any other
+                    # in-run exception) was previously invisible everywhere a
+                    # human/agent could see it -- run_orion_mission only ever
+                    # calls emit_log into that run's own ephemeral in-memory
+                    # event buffer, never Python logging, and nothing ever told
+                    # the originating task its run had died. The wake request
+                    # itself is no help either: it's already marked "executed"
+                    # the moment the turn was successfully dispatched (see
+                    # runtime_heartbeat_service.build_heartbeat_run_callback),
+                    # well before this run actually finishes or fails minutes
+                    # later. task_id here is set by runtime_heartbeat_service.
+                    # build_heartbeat_turn_request only for a task_assigned
+                    # wakeup (see its own comment) -- a no-op for every other
+                    # run, so this can't affect ordinary chat/workflow runs.
+                    task_metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
+                    failed_task_id = str(task_metadata.get("task_id") or "").strip()
+                    if failed_task_id:
+                        try:
+                            from server_modules import project_tasks_service
+
+                            outcome = run.get("execution_outcome") if isinstance(run.get("execution_outcome"), dict) else {}
+                            failure_summary = (
+                                str(outcome.get("summary") or "").strip()
+                                or str(outcome.get("stderr") or "").strip()
+                                or str(run.get("result") or "").strip()
+                                or f'The assigned agent\'s run ended with status "{status}" and produced no result.'
+                            )
+                            failed_task_tenant_id = _run_tenant_id(run)
+                            failed_task_workspace_id = _run_workspace_id(run)
+                            run_async_tool_call(
+                                project_tasks_service.update_task(
+                                    tenant_id=failed_task_tenant_id,
+                                    workspace_id=failed_task_workspace_id,
+                                    task_id=failed_task_id,
+                                    status="blocked",
+                                )
+                            )
+                            run_async_tool_call(
+                                project_tasks_service.add_task_comment(
+                                    tenant_id=failed_task_tenant_id,
+                                    workspace_id=failed_task_workspace_id,
+                                    task_id=failed_task_id,
+                                    author_type="system",
+                                    author_id="runtime",
+                                    body=f"This task's run ({run_id}) did not complete: {failure_summary[:1500]}",
+                                )
+                            )
+                        except Exception as exc:
+                            LOGGER.warning(
+                                "Failed to surface run failure onto task %s for run %s: %s",
+                                failed_task_id,
+                                run_id,
+                                exc,
+                            )
                 if str(previous or "").strip() != str(status or "").strip():
                     if str((context.get("metadata") if isinstance(context.get("metadata"), dict) else {}).get("deployed_agent_id") or "").strip():
                         cost_cap_settlement_key = f"{run_id}:{status}"

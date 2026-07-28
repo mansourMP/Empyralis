@@ -122,6 +122,22 @@ const SQLITE_CHECKPOINT_ONLY_CLASSES: &[&str] = &[
 
 const TERMINAL_RUN_STATUSES: &[&str] = &[
     "succeeded",
+    // MAN-108 Bug 2: the Python run lifecycle's actual terminal vocabulary
+    // (server_modules/shared.py's TERMINAL_RUN_STATUSES) is "completed" /
+    // "failed" / "timeout" / "stopped" / "cancelled" -- it never uses
+    // "succeeded" at all. Every durable run that actually finished its work
+    // was archived with status="completed", which this list didn't
+    // recognize as terminal, so archive_run always fell into the
+    // archive_non_terminal_run_requires_review approval branch below --
+    // 100% of the time, for every durable run that ever completed
+    // successfully, not just task-assignment ones. Adding the real Python
+    // terminal statuses here (not renaming/removing "succeeded", in case
+    // another caller already relies on it) is a pure widening of what
+    // counts as terminal, so it can only turn a previously-blocked/
+    // approval-required archive into an allowed one -- never the reverse.
+    "completed",
+    "timeout",
+    "stopped",
     "failed",
     "cancelled",
     "canceled",
@@ -1097,9 +1113,26 @@ fn version_conflict(expected: Option<i64>, current: Option<i64>) -> bool {
 }
 
 fn safe_delete_status(status: &str) -> bool {
+    // MAN-108 Bug 2: same Python/Rust terminal-vocabulary gap as
+    // TERMINAL_RUN_STATUSES above -- this list never recognized "completed"
+    // (or "timeout"/"cancelled"/"stopped") either, so remove_live_run_state
+    // (delete_live_run, called right after archive_run for every completed
+    // run) hit destructive_state_operation_requires_approval for every
+    // durable run that ever finished successfully. Same fix, same
+    // reasoning: purely additive, only widens what's already considered a
+    // safe delete.
     matches!(
         status,
-        "closed" | "expired" | "failed" | "terminated" | "archived"
+        "closed"
+            | "expired"
+            | "failed"
+            | "terminated"
+            | "archived"
+            | "completed"
+            | "timeout"
+            | "cancelled"
+            | "canceled"
+            | "stopped"
     )
 }
 

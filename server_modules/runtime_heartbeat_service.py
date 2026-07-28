@@ -61,6 +61,65 @@ def _resolve_heartbeat_scope(
     return tenant_id, workspace_id
 
 
+def _resolve_workspace_default_ai_provider(workspace_id: str) -> str:
+    """The same "ONE AI ROAD, NO FALLBACK" resolution
+    sage_agent_runtime_service._resolve_cloud_provider uses for a live chat
+    turn (explicit workspace sage_ai_provider if set, else the platform
+    DeepSeek default via entitlements, else a raw DeepSeek BYOK key) --
+    reimplemented here rather than imported because that module is mid-edit
+    elsewhere right now and its resolver is async/Sage-turn-specific. This
+    intentionally does NOT fall back to "any provider with a key lying
+    around" (that's what a first attempt at this fix did, via
+    mini_app_invoke_service.resolve_cloud_provider_for_workspace -- it
+    picked whichever cloud provider happened to be first in that function's
+    fixed candidate order, landing on a rate-limited personal Anthropic
+    OAuth session instead of this workspace's actual DeepSeek platform
+    credits and failing the run for an unrelated reason). Returns "" (never
+    raises) when nothing usable is configured -- the caller leaves
+    metadata["provider"] unset and runs_execution._honest_no_provider_error
+    fires its own explicit, correct message; guessing a provider here would
+    make an honest "nothing is configured" failure look like a random
+    provider-specific one instead.
+    """
+    from server_modules import control_plane_repository
+    from server_modules import direct_chat_provider_service
+    from server_modules import entitlements_service
+    from server_modules import workspace_config_schema
+
+    normalized_workspace_id = str(workspace_id or "default").strip() or "default"
+
+    def _usable(provider: str) -> bool:
+        credentials = direct_chat_provider_service.direct_chat_credentials(normalized_workspace_id, provider)
+        return direct_chat_provider_service.supports_direct_message_native_chat(provider, credentials)
+
+    active_provider = ""
+    try:
+        ws_record = _resolve_sync(control_plane_repository.get_workspace_by_id(normalized_workspace_id))
+        ws_metadata = dict((ws_record or {}).get("metadata") or {})
+        admin_defaults = workspace_config_schema.workspace_admin_defaults_from_metadata(ws_metadata)
+        active_provider = str(admin_defaults.sage_ai_provider or "").strip().lower()
+    except Exception as exc:
+        _logger.info("Could not read workspace %s admin defaults for provider resolution: %s", normalized_workspace_id, exc)
+
+    if active_provider:
+        return active_provider if _usable(active_provider) else ""
+
+    import os
+
+    if str(os.getenv("DEEPSEEK_API_KEY") or "").strip():
+        try:
+            access = entitlements_service.hosted_sage_ai_access_state_for_workspace_id(workspace_id=normalized_workspace_id)
+        except Exception as exc:
+            _logger.info("Could not resolve platform AI entitlement for workspace %s: %s", normalized_workspace_id, exc)
+            access = {}
+        if access.get("allowed") and _usable("deepseek"):
+            return "deepseek"
+        if not access.get("allowed"):
+            return ""
+
+    return "deepseek" if _usable("deepseek") else ""
+
+
 def build_heartbeat_turn_request(
     *,
     build_inbound_agent_turn_request: Callable[..., Any],
@@ -190,6 +249,39 @@ def build_heartbeat_turn_request(
         "If no follow-up is needed, explain briefly and stop. Stay inside policy and approval limits."
     )
     heartbeat_goal = "\n\n".join(section for section in sections if str(section).strip())
+    # MAN-108 Bug 2: a heartbeat/wake-triggered turn (this function) never had
+    # anything upstream populate metadata["provider"] -- only a chat turn does
+    # that (via Sage's own entitlement-based _resolve_cloud_provider). Every
+    # task-assignment wakeup therefore reached runs_execution._honest_no_
+    # provider_error with metadata.provider empty and died there ~6s into
+    # execution (after DAG compile/hydration), even on a workspace with a
+    # perfectly good configured provider -- the run was never actually
+    # attempted with it. That failure was also silent: run_orion_mission
+    # catches it internally and only ever calls emit_log (into the run's own
+    # ephemeral in-memory event buffer), never Python logging, so nothing
+    # reached server logs and nothing reached the task. Auto-resolve the
+    # workspace's own default provider here (see
+    # _resolve_workspace_default_ai_provider below) so a task-assigned
+    # wakeup actually runs instead of failing before it starts. If the
+    # workspace genuinely has no provider configured anywhere, this is a
+    # no-op (metadata.provider stays empty) and _honest_no_provider_error's
+    # already-good, explicit message still fires -- that's the correct,
+    # honest outcome for a workspace with nothing configured, not something
+    # to paper over here.
+    if not str(merged_metadata.get("provider") or "").strip():
+        heartbeat_workspace_id = str(merged_metadata.get("workspace_id") or "").strip()
+        if heartbeat_workspace_id:
+            try:
+                resolved_provider = _resolve_workspace_default_ai_provider(heartbeat_workspace_id)
+            except Exception as exc:
+                resolved_provider = ""
+                _logger.info(
+                    "Heartbeat/wake turn found no auto-resolvable cloud provider for workspace %s: %s",
+                    heartbeat_workspace_id,
+                    exc,
+                )
+            if resolved_provider:
+                merged_metadata["provider"] = resolved_provider
     policy_context = {
         "trust_mode": str(merged_metadata.get("trust_mode") or "").strip() or None,
         "outcome_pack": str(merged_metadata.get("outcome_pack") or "").strip() or None,

@@ -6044,6 +6044,21 @@ def run_orion_mission(run_id: str):
             raw_message = str(exc)
             message = friendly_runtime_error_message(exc)
             non_retryable = is_non_retryable_runtime_error(exc)
+            # MAN-108 Bug 2: everywhere else in this function, a failure here
+            # only ever reaches emit_log (this run's own ephemeral in-memory
+            # event buffer -- read only by a client actively streaming this
+            # specific run's logs). Nothing was ever also going to Python
+            # logging, so a durable/wake-triggered run's real exception never
+            # reached server logs at all -- the only visible symptom was the
+            # run's status silently flipping to "failed" minutes later with
+            # no trace of why. Log it for real too.
+            LOGGER.exception(
+                "Empyralis run %s failed on attempt %s/%s: %s",
+                run_id,
+                attempt + 1,
+                ORION_MAX_RETRIES + 1,
+                raw_message,
+            )
 
             if "timeout" in raw_message.lower() or "timeout" in message.lower():
                 run["execution_outcome"] = _normalize_execution_outcome_with_rust(
