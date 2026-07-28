@@ -12461,7 +12461,22 @@ def _scheduler_wake_operation(trigger_kind: str) -> str:
 _SCHEDULER_WAKE_REPOSITORY_NEXT_ACTIONS = {
     "event_trigger": {"schedule_event_trigger"},
     "self_proposed_trigger": {"schedule_self_proposed_trigger"},
-    "wake_decision": {"trigger_wakeup"},
+    # A wake_decision from the Rust kernel isn't always "trigger_wakeup" --
+    # session_scheduler.rs's next_action() also legitimately returns
+    # request_session_scheduler_approval (decision == "require_approval") or
+    # defer_session_scheduler_operation (decision == "defer", e.g. quiet
+    # hours/battery/network gating) for this same operation. Restricting
+    # this to only "trigger_wakeup" made every deferred/approval-gated wake
+    # (a normal, expected outcome) raise as if the kernel had misbehaved,
+    # which surfaced to owners as "the agent could not be woken" on task
+    # assignment even though the wake was simply queued for later. Mirrors
+    # the wake_decision set bounded_scheduler_service._enforce_session_
+    # scheduler_decision already accepts.
+    "wake_decision": {
+        "trigger_wakeup",
+        "request_session_scheduler_approval",
+        "defer_session_scheduler_operation",
+    },
     "claim_wake_requests": {"claim_due_wake_requests"},
     "schedule_retry": {"schedule_retry"},
     "failure_decision": {"record_scheduler_failure"},
