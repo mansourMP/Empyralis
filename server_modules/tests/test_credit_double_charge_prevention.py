@@ -55,6 +55,7 @@ from unittest.mock import AsyncMock, patch
 
 from server_modules import control_plane_repository
 from server_modules import deployed_agent_virtual_runtime_service
+from server_modules import direct_chat_hosted_usage_service
 from server_modules import sage_agent_runtime_service
 
 
@@ -628,6 +629,137 @@ class RuntimeUsageCreditDebitPlanTests(unittest.TestCase):
         )
         turn_key = sage_agent_runtime_service._turn_credit_idempotency_key("collide-id", "trace-x")
         self.assertNotEqual(plan["request_id"], turn_key)
+
+
+class PrimaryPathRealDebitTests(unittest.TestCase):
+    """MAN-108 Bug 3: direct_chat_hosted_usage_service.persist_direct_chat_
+    hosted_usage_best_effort is the PRIMARY debit call site -- it fires on
+    every normal live chat turn (the action-loop-v3 path handle_sage_chat
+    returns from immediately, per the class docstring's point 2/(C) above).
+    Before the fix it called billing_service.debit_workspace_credit_
+    balance_for_hosted_usage, which only draws down credit_balance_usd once
+    a workspace's CUMULATIVE MONTHLY cost exceeds its monthly cap -- a
+    no-op for one real turn under any normal usage. The fix switches this
+    call site to billing_service.debit_workspace_credits_for_turn (the same
+    real, MAN-74-reconnected primitive the fallback path already used).
+    These tests prove: (1) the real primitive is what actually fires and
+    moves the balance, (2) the old dormant primitive is no longer called
+    from here, and (3) running the SAME turn (same request_id) twice only
+    debits once -- idempotency holds end-to-end through the real call site,
+    not just at the raw atomic-function level proven above."""
+
+    def setUp(self) -> None:
+        fallback = _force_local_identity_fallback()
+        fallback.__enter__()
+        self.addCleanup(fallback.__exit__, None, None, None)
+
+    @staticmethod
+    def _persist_kwargs(request_id: str) -> dict:
+        return dict(
+            workspace_id="ws-primary-path-1",
+            thread_id="thread-1",
+            session_ctx={"tenant_id": "tenant-1", "request_id": request_id},
+            availability_payload={
+                "credential_plane": "platform_runtime",
+                "platform_runtime_allowed": True,
+            },
+            usage_masked={
+                "usage_accounting": {
+                    "input_tokens": 500,
+                    "output_tokens": 150,
+                    "total_tokens": 650,
+                    # ~$0.000112 raw -> well above zero after the 3x margin
+                    # and 100-credits/$ retail rate, comfortably nonzero
+                    # credits owed (matches billing_credit_config's
+                    # documented "short hello" worked example).
+                    "estimated_cost_usd": 0.000112,
+                    "effective_provider": "deepseek",
+                    "effective_model": "deepseek-chat",
+                }
+            },
+            requested_provider="deepseek",
+            effective_provider="deepseek",
+            requested_model="deepseek-chat",
+            effective_model="deepseek-chat",
+        )
+
+    def _run_persist_with_real_debit(self, request_id: str):
+        """Runs the real persist_direct_chat_hosted_usage_best_effort call,
+        with only the unrelated ledger-write persistence mocked out (they
+        write to a Postgres-shaped table this sandbox doesn't have) -- the
+        actual credit debit call goes through for real, against the local
+        SQLite identity-DB fallback seeded in setUp."""
+        with (
+            patch(
+                "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_workspace_hosted_ai_monthly_cost_ledger_entry",
+                new=AsyncMock(return_value={"id": "shost_x"}),
+            ),
+            patch(
+                "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_credit_ledger_event",
+                new=AsyncMock(return_value={"id": "cled_x"}),
+            ),
+            patch(
+                "server_modules.billing_service.debit_workspace_credit_balance_for_hosted_usage",
+            ) as mock_dormant_debit,
+        ):
+            direct_chat_hosted_usage_service.persist_direct_chat_hosted_usage_best_effort(
+                **self._persist_kwargs(request_id)
+            )
+        return mock_dormant_debit
+
+    def test_primary_path_calls_the_real_per_turn_debit_and_moves_the_balance(self):
+        workspace_id = "ws-primary-path-1"
+        tenant_id = "tenant-1"
+        _run(_seed_local_workspace(
+            workspace_id=workspace_id, tenant_id=tenant_id,
+            metadata={"admin_defaults": {"credit_balance_usd": 10.0}},
+        ))
+
+        mock_dormant_debit = self._run_persist_with_real_debit("primary-path-req-1")
+
+        # The old dormant monthly-cap-overage function must never be called
+        # from this call site anymore.
+        mock_dormant_debit.assert_not_called()
+
+        # The real per-turn debit actually moved the balance.
+        record = _run(control_plane_repository.get_workspace_by_id(workspace_id))
+        balance_after = record["metadata"]["admin_defaults"]["credit_balance_usd"]
+        self.assertLess(balance_after, 10.0)
+        transactions = record["metadata"]["admin_defaults"]["credit_transactions"]
+        usage_debits = [t for t in transactions if t.get("kind") == "usage_debit" and t.get("request_id") == "primary-path-req-1"]
+        self.assertEqual(len(usage_debits), 1)
+
+    def test_same_turn_run_twice_with_same_request_id_debits_only_once(self):
+        """The critical idempotency proof requested by MAN-108: replaying
+        the exact same turn (same request_id, e.g. a retried webhook or a
+        duplicate stream-completion callback) through the REAL, now-fixed
+        call site must charge the workspace exactly once, not twice."""
+        workspace_id = "ws-primary-path-1"
+        tenant_id = "tenant-1"
+        _run(_seed_local_workspace(
+            workspace_id=workspace_id, tenant_id=tenant_id,
+            metadata={"admin_defaults": {"credit_balance_usd": 10.0}},
+        ))
+        shared_request_id = "primary-path-retry-req-1"
+
+        self._run_persist_with_real_debit(shared_request_id)
+        record_after_first = _run(control_plane_repository.get_workspace_by_id(workspace_id))
+        balance_after_first = record_after_first["metadata"]["admin_defaults"]["credit_balance_usd"]
+        self.assertLess(balance_after_first, 10.0)
+
+        # Re-run the SAME logical turn (identical request_id) a second time.
+        self._run_persist_with_real_debit(shared_request_id)
+        record_after_second = _run(control_plane_repository.get_workspace_by_id(workspace_id))
+        balance_after_second = record_after_second["metadata"]["admin_defaults"]["credit_balance_usd"]
+
+        # Balance must not have moved again -- the second call is a no-op.
+        self.assertEqual(balance_after_second, balance_after_first)
+        transactions = record_after_second["metadata"]["admin_defaults"]["credit_transactions"]
+        usage_debits = [
+            t for t in transactions
+            if t.get("kind") == "usage_debit" and t.get("request_id") == shared_request_id
+        ]
+        self.assertEqual(len(usage_debits), 1, "the same request_id must only ever produce ONE usage_debit transaction")
 
 
 if __name__ == "__main__":

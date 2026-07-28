@@ -20,8 +20,8 @@ class DirectChatHostedUsageServiceTests(unittest.TestCase):
             "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_credit_ledger_event",
             new=AsyncMock(return_value={"id": "cled_1"}),
         ) as record_credit_ledger, patch(
-            "server_modules.billing_service.debit_workspace_credit_balance_for_hosted_usage",
-            return_value={"ok": True, "debited_usd": 0.0},
+            "server_modules.billing_service.debit_workspace_credits_for_turn",
+            return_value={"ok": True, "credits_debited": 1, "debited_usd": 0.0001, "insufficient": False},
         ) as debit_credits:
             direct_chat_hosted_usage_service.persist_direct_chat_hosted_usage_best_effort(
                 workspace_id="ws-1",
@@ -53,6 +53,8 @@ class DirectChatHostedUsageServiceTests(unittest.TestCase):
             workspace_id="ws-1",
             tenant_id="tenant-1",
             request_id="req-1",
+            credits_to_charge=direct_chat_hosted_usage_service.billing_credit_config.credits_for_turn_cost_usd(0.0011),
+            floor_usd=direct_chat_hosted_usage_service.billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD,
         )
         kwargs = record_ledger.await_args.kwargs
         self.assertEqual(kwargs["tenant_id"], "tenant-1")
@@ -90,8 +92,8 @@ class DirectChatHostedUsageServiceTests(unittest.TestCase):
             "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_credit_ledger_event",
             new=AsyncMock(return_value={"id": "cled_2"}),
         ), patch(
-            "server_modules.billing_service.debit_workspace_credit_balance_for_hosted_usage",
-            return_value={"ok": True, "debited_usd": 0.0},
+            "server_modules.billing_service.debit_workspace_credits_for_turn",
+            return_value={"ok": True, "credits_debited": 1, "debited_usd": 0.0001, "insufficient": False},
         ), patch(
             "server_modules.usage_events_repository.record_usage_from_context",
             new=AsyncMock(return_value={"id": "uev_1"}),
@@ -386,7 +388,7 @@ class DirectChatHostedUsageServiceTests(unittest.TestCase):
             "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_credit_ledger_event",
             new=AsyncMock(return_value={"id": "cled_1"}),
         ), patch(
-            "server_modules.billing_service.debit_workspace_credit_balance_for_hosted_usage",
+            "server_modules.billing_service.debit_workspace_credits_for_turn",
             side_effect=RuntimeError("ledger unavailable"),
         ):
             with self.assertRaisesRegex(RuntimeError, "credit debit failed") as ctx:
@@ -424,7 +426,7 @@ class DirectChatHostedUsageServiceTests(unittest.TestCase):
             "server_modules.direct_chat_hosted_usage_service.control_plane_repository.record_credit_ledger_event",
             new=AsyncMock(return_value={"id": "cled_1"}),
         ), patch(
-            "server_modules.billing_service.debit_workspace_credit_balance_for_hosted_usage",
+            "server_modules.billing_service.debit_workspace_credits_for_turn",
             return_value={"ok": False, "error": "insufficient_credits"},
         ), patch(
             "server_modules.direct_chat_hosted_usage_service.release_direct_chat_hosted_usage_reservation_best_effort",

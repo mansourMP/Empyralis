@@ -658,11 +658,44 @@ def persist_direct_chat_hosted_usage_best_effort(
     try:
         from server_modules import billing_service
 
-        debit_result = billing_service.debit_workspace_credit_balance_for_hosted_usage(
-            workspace_id=workspace_token,
-            tenant_id=tenant_id,
-            request_id=request_id,
-        )
+        # MAN-108 Bug 3 fix (2026-07-28): this call site is the PRIMARY debit
+        # path -- it fires on every normal live chat turn that goes through
+        # _run_sage_action_loop_v3 -> stream_provider_backed_direct_chat's
+        # success/error/loop-detected completion handlers (see
+        # sage_agent_runtime_service.py's `_turn_credit_idempotency_key`
+        # docstring for the two-path map). It used to call
+        # billing_service.debit_workspace_credit_balance_for_hosted_usage,
+        # which only draws down credit_balance_usd once a workspace's
+        # CUMULATIVE MONTHLY cost exceeds hosted_sage_ai_monthly_cap_usd (see
+        # control_plane_repository.py's "Direct per-turn credit debit"
+        # section) -- a legacy monthly-cap-overage mechanic that stays inert
+        # for any workspace under the (default $5.00) monthly cap, i.e. for
+        # ~all normal usage. That made this call site a de facto no-op:
+        # ground-truth cost was faithfully metered (the ledger writes above)
+        # but credit_balance_usd never moved, so the Billing page showed $0
+        # usage despite real accruing LLM cost. The OTHER debit path (the
+        # "cloud fallthrough" block in sage_agent_runtime_service.handle_
+        # sage_chat) already calls the correct, MAN-74-reconnected per-turn
+        # primitive -- but that block is only reached when the action loop
+        # returns None, which real turns essentially never do (handle_sage_
+        # chat returns immediately after a non-None action_result). Switching
+        # this call site to the SAME real primitive, with the SAME shared
+        # request_id (computed above via _session_request_id, which reads
+        # exactly the turn_credit_idempotency_key sage_agent_runtime_service
+        # threads into session_ctx), makes the primary path actually debit
+        # while preserving idempotency/no-double-charge against the fallback
+        # path via the shared credit_transactions ledger dedup.
+        _credits_owed = billing_credit_config.credits_for_turn_cost_usd(row.get("estimated_cost_usd"))
+        if _credits_owed > 0:
+            debit_result = billing_service.debit_workspace_credits_for_turn(
+                workspace_id=workspace_token,
+                tenant_id=tenant_id,
+                request_id=request_id,
+                credits_to_charge=_credits_owed,
+                floor_usd=billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD,
+            )
+        else:
+            debit_result = {"ok": True, "credits_debited": 0, "debited_usd": 0.0, "reason": "no_debit_needed"}
     except Exception as exc:
         raise RuntimeError("Hosted AI credit debit failed.") from exc
     debit_payload = _coerce_dict(debit_result)
@@ -674,6 +707,14 @@ def persist_direct_chat_hosted_usage_best_effort(
             or "unknown debit failure"
         )
         raise RuntimeError(f"Hosted AI credit debit failed: {reason}.")
+    if debit_payload.get("insufficient"):
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "credit_debit: workspace=%s ran short covering %s credits (only %s debited) "
+            "for request_id=%s -- turn was NOT blocked.",
+            workspace_token, _credits_owed, debit_payload.get("credits_debited"), request_id,
+        )
     release_direct_chat_hosted_usage_reservation_best_effort(
         workspace_id=workspace_token,
         thread_id=thread_token,
