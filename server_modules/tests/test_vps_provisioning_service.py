@@ -3700,3 +3700,192 @@ def test_aws_cloudformation_template_role_name_matches_constant():
         "ec2:DescribeSubnets",
     }
     assert required_actions.issubset(granted_actions)
+
+
+# --- MAN-121: a transient lookup failure must never read as "not registered" ---
+#
+# _resolved_record_status is polled by run_vps_provisioning_lifecycle, and a
+# 'failed' answer from it causes mark_vps_provision_failed to DESTROY the
+# user's droplet. It previously swallowed every exception from the registration
+# lookup and fell back to `registrations = []`, i.e. it could not tell "this box
+# never paired" apart from "we could not read the registration store right now".
+# Combined with an expired pairing intent that resolved a live, working,
+# already-paired box to 'failed' and deleted it. These tests pin the conservative
+# behaviour: unknown state holds the current status, it never confirms failure.
+
+
+def _provisioning_record(**overrides):
+    record = {
+        "vps_id": "vps_man121",
+        "workspace_id": "ws-1",
+        "tenant_id": "tenant-1",
+        "user_id": "user-1",
+        "provider": "digitalocean",
+        "provider_resource_id": "droplet-1",
+        "status": "provisioning",
+        "pairing_token_ciphertext": "enc:" + '{"pairing_token":"pair_tok_man121"}',
+    }
+    record.update(overrides)
+    return record
+
+
+def _expired_pairing_intent(monkeypatch):
+    monkeypatch.setattr(
+        vps.gateway_state_repository,
+        "get_pairing_intent_by_token",
+        lambda token: {"status": "expired"},
+    )
+
+
+def test_resolved_status_holds_when_registration_lookup_errors(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("registration store briefly unavailable")
+
+    monkeypatch.setattr(vps.gateway_state_repository, "list_workspace_gateway_registrations", boom)
+    # Worst case: the pairing intent has ALSO expired. Pre-fix this combination
+    # returned 'failed' and the background lifecycle destroyed the droplet.
+    _expired_pairing_intent(monkeypatch)
+
+    assert vps._resolved_record_status(_provisioning_record(status="registering")) == "registering"
+
+
+def test_resolved_status_errored_lookup_does_not_confirm_failure_for_a_connected_box(tmp_path, monkeypatch):
+    """The dangerous case in full: the box IS registered, but we cannot read
+    that fact. The answer must not be 'failed'."""
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        vps.gateway_state_repository,
+        "list_workspace_gateway_registrations",
+        lambda *a, **kw: (_ for _ in ()).throw(TimeoutError("db timeout")),
+    )
+    _expired_pairing_intent(monkeypatch)
+
+    assert vps._resolved_record_status(_provisioning_record()) != "failed"
+
+
+def test_resolved_status_holds_when_pairing_token_decrypt_errors(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(vps.gateway_state_repository, "list_workspace_gateway_registrations", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        vps.vault_store,
+        "_openssl_decrypt",
+        lambda text: (_ for _ in ()).throw(RuntimeError("decrypt hiccup")),
+    )
+
+    assert vps._resolved_record_status(_provisioning_record()) == "provisioning"
+
+
+def test_resolved_status_holds_when_pairing_intent_lookup_errors(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(vps.gateway_state_repository, "list_workspace_gateway_registrations", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        vps.gateway_state_repository,
+        "get_pairing_intent_by_token",
+        lambda token: (_ for _ in ()).throw(RuntimeError("pairing store down")),
+    )
+
+    assert vps._resolved_record_status(_provisioning_record()) == "provisioning"
+
+
+def test_resolved_status_still_fails_on_a_genuinely_expired_pairing(tmp_path, monkeypatch):
+    """The fix must not blunt the real failure signal: when every lookup
+    SUCCEEDS and says the box never paired and the intent expired, 'failed' is
+    still the right answer."""
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(vps.gateway_state_repository, "list_workspace_gateway_registrations", lambda *a, **kw: [])
+    _expired_pairing_intent(monkeypatch)
+
+    assert vps._resolved_record_status(_provisioning_record()) == "failed"
+
+
+def test_resolved_status_prefers_a_live_registration_over_a_terminal_beacon(tmp_path, monkeypatch):
+    """A late-but-successful pairing always beats a stale failure beacon."""
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        vps.gateway_state_repository,
+        "list_workspace_gateway_registrations",
+        lambda *a, **kw: [{"metadata": {"vps_id": "vps_man121"}}],
+    )
+    record = _provisioning_record(install_error="artifact download failed", install_terminal=True)
+
+    assert vps._resolved_record_status(record) == "connected"
+
+
+# --- MAN-121: the box's failure beacon ---
+
+
+def test_install_beacon_records_reason_against_the_matching_record(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(vps.gateway_state_repository, "list_workspace_gateway_registrations", lambda *a, **kw: [])
+    monkeypatch.setattr(vps.gateway_state_repository, "get_pairing_intent_by_token", lambda token: None)
+    vps.record_vps_provision(
+        vps_id="vps_beacon_1",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="droplet-9",
+        public_ip="203.0.113.9",
+        region="nyc3",
+        size="s-2vcpu-4gb",
+        status="provisioning",
+        pairing_token="pair_tok_beacon",
+        credentials={"access_token": "do_token"},
+    )
+
+    recorded = vps.record_vps_install_event(
+        pairing_token="pair_tok_beacon",
+        phase="gateway_download",
+        message="could not download the gateway artifact (HTTP 404)",
+        terminal=True,
+    )
+
+    assert recorded is not None
+    assert recorded["install_phase"] == "gateway_download"
+    assert "HTTP 404" in recorded["install_error"]
+    # A terminal beacon is a confirmed failure, so the status API reflects it
+    # immediately rather than after a 20-minute silent timeout.
+    assert vps.get_vps_provision_status("vps_beacon_1")["status"] == "failed"
+    assert "HTTP 404" in vps.load_vps_record("vps_beacon_1")["install_error"]
+
+
+def test_advisory_install_beacon_does_not_fail_the_record(tmp_path, monkeypatch):
+    """The installer's own registration wait elapsing is NOT terminal — the
+    systemd unit is still up and retrying, and giving up here would destroy a
+    box that is about to connect."""
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(vps.gateway_state_repository, "list_workspace_gateway_registrations", lambda *a, **kw: [])
+    monkeypatch.setattr(vps.gateway_state_repository, "get_pairing_intent_by_token", lambda token: {"status": "consumed"})
+    vps.record_vps_provision(
+        vps_id="vps_beacon_2",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="droplet-10",
+        public_ip=None,
+        region="nyc3",
+        size="s-2vcpu-4gb",
+        status="provisioning",
+        pairing_token="pair_tok_beacon_2",
+        credentials={"access_token": "do_token"},
+    )
+
+    vps.record_vps_install_event(
+        pairing_token="pair_tok_beacon_2",
+        phase="registration_wait",
+        message="gateway installed and started but had not registered yet",
+        terminal=False,
+    )
+
+    assert vps.get_vps_provision_status("vps_beacon_2")["status"] != "failed"
+    # ...but the reason is still on the record, so a later timeout can explain itself.
+    assert vps.load_vps_record("vps_beacon_2")["install_error"]
+
+
+def test_install_beacon_with_an_unknown_token_is_discarded(tmp_path, monkeypatch):
+    _isolate_vps_state(tmp_path, monkeypatch)
+
+    assert vps.record_vps_install_event(pairing_token="never-issued", phase="install", message="boom") is None

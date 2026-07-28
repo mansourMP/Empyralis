@@ -1,0 +1,143 @@
+name: Release Gateway (Linux)
+
+# Builds the prebuilt, self-contained Agent Computer gateway artifact that
+# scripts/install-agent-computer.sh downloads on every provisioned droplet
+# (install-agent-computer.sh:26-27) and that gateway_self_update_service.py
+# points at (server_modules/gateway_self_update_service.py:82).
+#
+# WHAT THIS JOB DOES: produces `empyralis-gateway-linux-<arch>.tar.gz` plus a
+# `.sha256` sidecar, and hands them back as a workflow artifact.
+#
+# WHAT THIS JOB DELIBERATELY DOES NOT DO: publish them. Nothing in this repo
+# serves https://empyralis.ai/releases/agent-computer/<version>/ today — no
+# nginx location block (deploy/nginx-empyralis.conf), no Next.js route, no
+# object-storage upload path. Until that hosting decision is made, uploading
+# from here would have nowhere to upload to. The publish step is a deliberate
+# follow-up, not an oversight; see MAN-122.
+#
+# Archive layout is fixed by two consumers and must not drift:
+#   - scripts/install-agent-computer.sh:368-380 (`tar -xzf` into
+#     <stage>/empyralis-gateway, then asserts dist/index.js exists)
+#   - empyralis-gateway/src/update/gateway-artifact-installer.ts:202-233
+#     (identical extraction + assertion for self-update)
+# => the archive ROOT holds dist/, node_modules/, package.json. No wrapper
+# directory. Both consumers create the `empyralis-gateway/` level themselves.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Version label for the artifact. The installer defaults to "latest"
+          (install-agent-computer.sh:18), so a build intended for new droplets
+          must ultimately be reachable at .../releases/agent-computer/latest/.
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: gateway-linux-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gateway:
+    name: Gateway ${{ matrix.arch }} tarball
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The only arch any droplet actually requests today.
+          - arch: x64
+            npm_cpu: x64
+          # Cross-packaged, not cross-compiled: dist/ is plain JavaScript and
+          # the only arch-specific dependency (sharp, pulled in as a Baileys
+          # peer) ships prebuilt per-arch packages that npm selects from the
+          # --cpu override. Costs about a minute; nothing consumes it yet.
+          - arch: arm64
+            npm_cpu: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The droplet installs Node 20 itself (install-agent-computer.sh:174-192)
+      # and run-gateway execs the system `node`, so the tarball ships NO
+      # runtime — only compiled JS plus production node_modules. Building on
+      # Node 20 keeps the compiled output and the installed native prebuilds
+      # matched to the runtime that will actually execute them.
+      - name: Install build dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: empyralis-gateway
+
+      - name: Compile TypeScript
+        run: npm run build
+        working-directory: empyralis-gateway
+
+      - name: Stage compiled output
+        run: mv empyralis-gateway/dist "$RUNNER_TEMP/dist"
+
+      # Reinstall production-only, with the target platform pinned so npm
+      # resolves the Linux/<arch> optional binaries (@img/sharp-linux-<arch>,
+      # bufferutil, utf-8-validate) rather than the runner's own.
+      - name: Install production dependencies for linux-${{ matrix.arch }}
+        run: npm ci --omit=dev --os=linux --cpu=${{ matrix.npm_cpu }} --libc=glibc --no-audit --no-fund
+        working-directory: empyralis-gateway
+
+      - name: Assemble artifact tree
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          mv "$RUNNER_TEMP/dist" "$STAGE/dist"
+          cp -R empyralis-gateway/node_modules "$STAGE/node_modules"
+          cp empyralis-gateway/package.json "$STAGE/package.json"
+          test -f "$STAGE/dist/index.js"
+
+      - name: Create tarball and checksum
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/gateway-stage"
+          OUT="$RUNNER_TEMP/out"
+          mkdir -p "$OUT"
+          TARBALL="empyralis-gateway-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "$OUT/$TARBALL" -C "$STAGE" dist node_modules package.json
+          ( cd "$OUT" && sha256sum "$TARBALL" > "$TARBALL.sha256" )
+          ls -l "$OUT"
+          echo "GATEWAY_TARBALL=$TARBALL" >> "$GITHUB_ENV"
+
+      # Re-runs the exact extraction both consumers perform, so a layout
+      # regression fails here rather than silently on a customer droplet.
+      - name: Verify archive matches what the installer expects
+        run: |
+          set -euo pipefail
+          VERIFY="$RUNNER_TEMP/verify"
+          rm -rf "$VERIFY"
+          mkdir -p "$VERIFY/empyralis-gateway"
+          tar -xzf "$RUNNER_TEMP/out/$GATEWAY_TARBALL" -C "$VERIFY/empyralis-gateway"
+          test -f "$VERIFY/empyralis-gateway/dist/index.js" \
+            || { echo "archive is missing dist/index.js at the installer-expected path" >&2; exit 1; }
+          test -f "$VERIFY/empyralis-gateway/package.json"
+          test -d "$VERIFY/empyralis-gateway/node_modules"
+
+      - name: Attest gateway artifact provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ runner.temp }}/out/${{ env.GATEWAY_TARBALL }}
+
+      - name: Upload gateway artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: empyralis-gateway-linux-${{ matrix.arch }}-${{ inputs.version }}
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+          retention-days: 30

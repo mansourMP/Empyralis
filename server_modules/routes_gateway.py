@@ -593,6 +593,18 @@ class GatewayRegistrationRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class GatewayProvisioningEventRequest(BaseModel):
+    """A status/failure beacon from a box that is still installing — see
+    POST /gateway/provisioning-events. Authenticated by the pairing token the
+    box was handed in cloud-init, exactly like POST /gateway/registrations.
+    """
+
+    pairing_token: str = Field(min_length=1)
+    phase: str = Field(default="install", max_length=64)
+    message: str = Field(default="", max_length=2000)
+    terminal: bool = True
+
+
 class GatewaySshPairingRequest(BaseModel):
     workspace_id: str = Field(min_length=1)
     pairing_token: Optional[str] = None
@@ -2272,6 +2284,11 @@ async def get_hardware_vps_status(
         "size": status_record["size"],
         "status": status_record["status"],
         "error": status_record.get("error"),
+        # MAN-121: what the box itself last said about its own install, so the
+        # setup panel can show a real reason instead of a spinner that stops.
+        "install_error": status_record.get("install_error"),
+        "install_phase": status_record.get("install_phase"),
+        "install_reported_at": status_record.get("install_reported_at"),
     }
 
 
@@ -2324,6 +2341,35 @@ async def register_gateway(body: GatewayRegistrationRequest):
         "gateway_token": str(registration.get("gateway_token") or ""),
         "scope": gateway_registry_service.gateway_scope_payload(registration),
     }
+
+
+@router.post("/gateway/provisioning-events")
+async def report_gateway_provisioning_event(body: GatewayProvisioningEventRequest):
+    """The other half of the pairing conversation (MAN-121).
+
+    POST /gateway/registrations above is the box's success phone-home. This is
+    its failure phone-home: install-agent-computer.sh's error path calls it so a
+    box that dies while installing (artifact download 404, apt failure, Node
+    install failure, unsupported image) can say WHY, instead of the platform
+    silently inferring a 20-minute timeout with no explanation anywhere except a
+    log file behind SSH.
+
+    Unauthenticated by design, like /gateway/registrations — the box has no
+    credential yet except its pairing token, which is the bearer secret here.
+    A token matching no record is discarded; nothing is ever created from a
+    beacon, only annotated onto an existing provisioning record.
+    """
+    try:
+        record = vps_provisioning_service.record_vps_install_event(
+            pairing_token=body.pairing_token,
+            phase=body.phase,
+            message=body.message,
+            terminal=bool(body.terminal),
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must never break the box's install further
+        LOGGER.exception("gateway provisioning beacon could not be recorded")
+        return {"recorded": False}
+    return {"recorded": bool(record)}
 
 
 @router.post("/gateway/sessions")
