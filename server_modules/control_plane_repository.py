@@ -420,6 +420,22 @@ CREATE TABLE IF NOT EXISTS pilot_invites (
 
 CREATE INDEX IF NOT EXISTS idx_pilot_invites_code_status ON pilot_invites(code, status);
 
+CREATE TABLE IF NOT EXISTS email_verification_codes (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    verified_at TIMESTAMPTZ NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_verification_codes_user_created ON email_verification_codes(user_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS workspace_billing_accounts (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -3584,6 +3600,23 @@ def _connect_local_identity_db() -> sqlite3.Connection:
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS email_verification_codes (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            code_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 5,
+            expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            verified_at INTEGER
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS workspace_billing_accounts (
             workspace_id TEXT PRIMARY KEY,
             tenant_id TEXT NOT NULL,
@@ -5846,6 +5879,214 @@ async def revoke_pilot_invite(invite_id: str) -> Optional[Dict[str, Any]]:
             clean_invite_id,
         )
     return dict(row) if row is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# Email verification codes (signup email verification -- MAN, see
+# docs/design/email-verification-plan.md). Placed alongside pilot_invites
+# since both are short-lived, secret-bearing codes stored the same way; see
+# _email_verification_record_from_row for why this table normalizes both the
+# Postgres and SQLite paths to the same shape instead of returning raw rows
+# on the Postgres side the way create_pilot_invite/get_pilot_invite_by_code
+# do above (their Postgres path returns raw asyncpg Record datetimes for
+# expires_at/created_at while their SQLite path returns normalized epoch
+# ints -- callers of *this* table always get epoch ints from either path).
+# --------------------------------------------------------------------------- #
+def _email_verification_record_from_row(row: Any) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    data = dict(row) if not isinstance(row, dict) else row
+
+    def _epoch(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return int(value.timestamp())
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "id": str(data.get("id") or "").strip(),
+        "user_id": str(data.get("user_id") or "").strip(),
+        "email": str(data.get("email") or "").strip().lower(),
+        "code_hash": str(data.get("code_hash") or ""),
+        "status": str(data.get("status") or "pending").strip() or "pending",
+        "attempts": int(data.get("attempts") or 0),
+        "max_attempts": int(data.get("max_attempts") or 5),
+        "expires_at": _epoch(data.get("expires_at")),
+        "created_at": _epoch(data.get("created_at")),
+        "updated_at": _epoch(data.get("updated_at")),
+        "verified_at": _epoch(data.get("verified_at")),
+    }
+
+
+async def create_email_verification_code(
+    *,
+    user_id: str,
+    email: str,
+    code_hash: str,
+    expires_at_epoch: int,
+    max_attempts: int = 5,
+) -> Optional[Dict[str, Any]]:
+    clean_user_id = str(user_id or "").strip()
+    clean_email = str(email or "").strip().lower()
+    clean_hash = str(code_hash or "").strip()
+    if not clean_user_id or not clean_email or not clean_hash:
+        return None
+    record_id = f"email_verify_{uuid.uuid4().hex}"
+    resolved_max_attempts = max(1, int(max_attempts or 5))
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            now_ts = int(time.time())
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    fallback.execute(
+                        """
+                        INSERT INTO email_verification_codes (
+                            id, user_id, email, code_hash, status, attempts, max_attempts,
+                            expires_at, created_at, updated_at, verified_at
+                        ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, NULL)
+                        """,
+                        (
+                            record_id,
+                            clean_user_id,
+                            clean_email,
+                            clean_hash,
+                            resolved_max_attempts,
+                            int(expires_at_epoch),
+                            now_ts,
+                            now_ts,
+                        ),
+                    )
+                    row = fallback.execute(
+                        "SELECT * FROM email_verification_codes WHERE id = ? LIMIT 1",
+                        (record_id,),
+                    ).fetchone()
+                    fallback.commit()
+            return _email_verification_record_from_row(row)
+        now = _utc_now_ts()
+        expires_dt = datetime.fromtimestamp(int(expires_at_epoch), tz=timezone.utc)
+        row = await connection.fetchrow(
+            """
+            INSERT INTO email_verification_codes (
+                id, user_id, email, code_hash, status, attempts, max_attempts,
+                expires_at, created_at, updated_at, verified_at
+            ) VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6::timestamptz, $7::timestamptz, $7::timestamptz, NULL)
+            RETURNING *
+            """,
+            record_id,
+            clean_user_id,
+            clean_email,
+            clean_hash,
+            resolved_max_attempts,
+            expires_dt,
+            now,
+        )
+    return _email_verification_record_from_row(row)
+
+
+async def get_latest_email_verification_code(user_id: str) -> Optional[Dict[str, Any]]:
+    clean_user_id = str(user_id or "").strip()
+    if not clean_user_id:
+        return None
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    row = fallback.execute(
+                        """
+                        SELECT * FROM email_verification_codes
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC, rowid DESC
+                        LIMIT 1
+                        """,
+                        (clean_user_id,),
+                    ).fetchone()
+            return _email_verification_record_from_row(row)
+        row = await connection.fetchrow(
+            """
+            SELECT * FROM email_verification_codes
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            clean_user_id,
+        )
+    return _email_verification_record_from_row(row)
+
+
+async def record_email_verification_attempt(record_id: str) -> Optional[Dict[str, Any]]:
+    clean_id = str(record_id or "").strip()
+    if not clean_id:
+        return None
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            now_ts = int(time.time())
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    fallback.execute(
+                        """
+                        UPDATE email_verification_codes
+                        SET attempts = attempts + 1, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now_ts, clean_id),
+                    )
+                    row = fallback.execute(
+                        "SELECT * FROM email_verification_codes WHERE id = ? LIMIT 1",
+                        (clean_id,),
+                    ).fetchone()
+                    fallback.commit()
+            return _email_verification_record_from_row(row)
+        row = await connection.fetchrow(
+            """
+            UPDATE email_verification_codes
+            SET attempts = attempts + 1, updated_at = $2::timestamptz
+            WHERE id = $1
+            RETURNING *
+            """,
+            clean_id,
+            _utc_now_ts(),
+        )
+    return _email_verification_record_from_row(row)
+
+
+async def mark_email_verification_code_verified(record_id: str) -> Optional[Dict[str, Any]]:
+    clean_id = str(record_id or "").strip()
+    if not clean_id:
+        return None
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            now_ts = int(time.time())
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    fallback.execute(
+                        """
+                        UPDATE email_verification_codes
+                        SET status = 'verified', verified_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now_ts, now_ts, clean_id),
+                    )
+                    row = fallback.execute(
+                        "SELECT * FROM email_verification_codes WHERE id = ? LIMIT 1",
+                        (clean_id,),
+                    ).fetchone()
+                    fallback.commit()
+            return _email_verification_record_from_row(row)
+        row = await connection.fetchrow(
+            """
+            UPDATE email_verification_codes
+            SET status = 'verified', verified_at = $2::timestamptz, updated_at = $2::timestamptz
+            WHERE id = $1
+            RETURNING *
+            """,
+            clean_id,
+            _utc_now_ts(),
+        )
+    return _email_verification_record_from_row(row)
 
 
 async def update_workspace_policy_metadata(

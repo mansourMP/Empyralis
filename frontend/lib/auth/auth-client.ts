@@ -343,6 +343,31 @@ export async function logout(): Promise<Record<string, unknown> | null> {
   });
 }
 
+export type EmailVerificationStatus = {
+  ok?: boolean;
+  status?: 'verified' | 'pending' | 'none';
+  email_verified?: boolean;
+};
+
+export async function getEmailVerificationStatus(): Promise<EmailVerificationStatus | null> {
+  return requestAuth<EmailVerificationStatus | null>('/api/auth/verify-email', {
+    method: 'GET',
+  });
+}
+
+export async function verifyEmailCode(code: string): Promise<Record<string, unknown> | null> {
+  return requestAuth<Record<string, unknown> | null>('/api/auth/verify-email', {
+    method: 'POST',
+    body: { code: String(code || '').trim() },
+  });
+}
+
+export async function resendVerificationEmail(): Promise<Record<string, unknown> | null> {
+  return requestAuth<Record<string, unknown> | null>('/api/auth/verify-email/resend', {
+    method: 'POST',
+  });
+}
+
 export function googleLogin(): void {
   markExternalAuthPending('google');
   const params = new URLSearchParams();

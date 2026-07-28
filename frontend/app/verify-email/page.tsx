@@ -1,0 +1,212 @@
+'use client';
+
+import Link from 'next/link';
+import { FormEvent, Suspense, useEffect, useState } from 'react';
+import { ArrowRight, Mail, ShieldCheck } from 'lucide-react';
+
+import {
+  getEmailVerificationStatus,
+  resendVerificationEmail,
+  verifyEmailCode,
+} from '@/lib/auth/auth-client';
+import { AppButton, AppInput } from '@/lib/ui/primitives';
+
+// Mirrors signup's/login's own safeNextPath (frontend/app/signup/page.tsx,
+// frontend/app/login/page.tsx) -- only ever a same-origin, path-relative
+// redirect, never an absolute/protocol-relative URL.
+function safeNextPath(rawNext: string): string {
+  const trimmed = rawNext.trim();
+  if (!trimmed || !trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.includes('\\')) {
+    return '/';
+  }
+  return trimmed;
+}
+
+function verifyErrorCopy(error: string): string {
+  const normalized = error.trim().toLowerCase();
+  if (normalized.includes('status 429') || normalized.includes('too many')) {
+    return 'Too many attempts. Wait a moment, then try again.';
+  }
+  if (normalized.includes('expired')) {
+    return 'That code expired. Request a new one below.';
+  }
+  if (normalized.includes('incorrect')) {
+    return "That code is incorrect. Double-check your email and try again.";
+  }
+  if (normalized.includes('no verification code was found')) {
+    return 'No code is on file for this account yet. Request one below.';
+  }
+  if (normalized.includes('status 401')) {
+    return 'Your session expired. Sign in again to keep verifying this account.';
+  }
+  return error || 'Could not verify that code. Try again.';
+}
+
+function resendErrorCopy(error: string): string {
+  const normalized = error.trim().toLowerCase();
+  if (normalized.includes('status 503') || normalized.includes('not configured')) {
+    return 'Email sending is not configured in this environment yet. Contact support to finish verifying your account.';
+  }
+  if (normalized.includes('status 502')) {
+    return 'The email provider could not send your code just now. Try again shortly.';
+  }
+  if (normalized.includes('status 429') || normalized.includes('wait')) {
+    return error || 'Please wait before requesting another code.';
+  }
+  return error || 'Could not send a new code. Try again.';
+}
+
+function VerifyEmailForm() {
+  const [code, setCode] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [resendBusy, setResendBusy] = useState(false);
+  const [resendNotice, setResendNotice] = useState<string | null>(null);
+  const [checkingStatus, setCheckingStatus] = useState(true);
+  const [nextTarget, setNextTarget] = useState('/');
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    setNextTarget(safeNextPath(String(params.get('next') || '')));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await getEmailVerificationStatus();
+        if (!cancelled && status?.email_verified) {
+          window.location.replace(nextTarget);
+          return;
+        }
+      } catch {
+        // Not verified (or status check failed) -- fall through to the form.
+      } finally {
+        if (!cancelled) {
+          setCheckingStatus(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [nextTarget]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await verifyEmailCode(code);
+      window.location.replace(nextTarget);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : 'Verification failed.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleResend() {
+    setResendBusy(true);
+    setResendNotice(null);
+    setError(null);
+    try {
+      await resendVerificationEmail();
+      setResendNotice('A new code is on its way. It can take a minute to arrive.');
+    } catch (nextError) {
+      setResendNotice(resendErrorCopy(nextError instanceof Error ? nextError.message : ''));
+    } finally {
+      setResendBusy(false);
+    }
+  }
+
+  if (checkingStatus) {
+    return (
+      <main className="app-auth-page">
+        <div className="app-auth-shell">
+          <section className="app-auth-card app-auth-card--elevated app-auth-form" aria-busy="true">
+            <p className="app-auth-subtitle">Checking your account…</p>
+          </section>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="app-auth-page">
+      <div className="app-auth-shell">
+        <section className="app-auth-hero" aria-label="Empyralis email verification">
+          <div className="app-auth-hero__badge">Empyralis</div>
+          <div className="app-auth-hero__copy">
+            <h1 className="app-auth-hero__title">Check your email.</h1>
+            <p className="app-auth-hero__body">
+              We sent a 6-digit code to the address you signed up with. Enter it below to finish
+              setting up your account.
+            </p>
+          </div>
+          <div className="app-auth-hero__rail">
+            <div className="app-auth-hero__point">
+              <ShieldCheck size={16} aria-hidden="true" />
+              <span>Confirms this is really your inbox before your account gets full access.</span>
+            </div>
+          </div>
+        </section>
+        <form method="post" onSubmit={handleSubmit} className="app-auth-card app-auth-card--elevated app-auth-form">
+          <div className="app-auth-header">
+            <span className="app-auth-kicker">Verify email</span>
+            <h2 className="app-auth-title">Enter your code</h2>
+            <p className="app-auth-subtitle">The code expires in a little while — request a new one if it's stale.</p>
+          </div>
+          <label className="app-auth-field">
+            <span className="app-auth-field__label">Verification code</span>
+            <span className="app-auth-input-shell">
+              <Mail className="app-auth-input-shell__icon" size={16} aria-hidden="true" />
+              <AppInput
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                name="code"
+                required
+                minLength={6}
+                maxLength={6}
+                value={code}
+                className="app-auth-input"
+                placeholder="000000"
+                onChange={(event) => setCode(event.target.value.replace(/[^0-9]/g, '').slice(0, 6))}
+              />
+            </span>
+          </label>
+          {error ? (
+            <div role="alert" className="app-auth-error">
+              <strong>Couldn’t verify that code</strong>
+              <span>{verifyErrorCopy(error)}</span>
+            </div>
+          ) : null}
+          {resendNotice ? <p className="app-auth-provider-note">{resendNotice}</p> : null}
+          <AppButton type="submit" disabled={submitting || code.length !== 6} className="app-auth-submit">
+            <span>{submitting ? 'Verifying…' : 'Verify email'}</span>
+            <ArrowRight size={16} aria-hidden="true" />
+          </AppButton>
+          <AppButton
+            type="button"
+            tone="secondary"
+            disabled={resendBusy}
+            onClick={() => void handleResend()}
+          >
+            <span>{resendBusy ? 'Sending…' : "Didn't get a code? Resend"}</span>
+          </AppButton>
+          <p className="app-auth-footer">
+            Wrong account? <Link href="/login">Log in with a different one</Link>
+          </p>
+        </form>
+      </div>
+    </main>
+  );
+}
+
+export default function VerifyEmailPage() {
+  return (
+    <Suspense fallback={null}>
+      <VerifyEmailForm />
+    </Suspense>
+  );
+}

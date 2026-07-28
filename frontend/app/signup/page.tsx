@@ -216,7 +216,15 @@ export default function SignupPage() {
     try {
       await signup(email, password, name || undefined, pilotCode || undefined, inviteCode || undefined);
       await awaitBrowserAuthReady({ attempts: 12, delayMs: 250 });
-      window.location.replace(nextTarget);
+      // A brand-new signup goes straight to the "check your email" screen
+      // before it ever sees the app -- see docs/design/email-verification-plan.md.
+      // /verify-email carries `next` forward and lands the user on whatever
+      // `nextTarget` this page would have gone to (e.g. a pending workspace
+      // invite from /join/{token}) once the code is confirmed.
+      const verifyUrl = nextTarget === '/'
+        ? '/verify-email'
+        : `/verify-email?next=${encodeURIComponent(nextTarget)}`;
+      window.location.replace(verifyUrl);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Signup failed.');
     } finally {

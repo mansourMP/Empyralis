@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import Mock, patch
+import contextlib
+from unittest.mock import AsyncMock, Mock, patch
 
 from server_modules import auth
 
@@ -70,6 +71,75 @@ def test_login_user_accepts_pending_workspace_invites_before_resolving_access() 
     assert payload == {"ok": True}
     accept_mock.assert_called_once_with("user-1", "owner@example.com")
     assert issue_mock.call_args.kwargs["workspace_access"]["ws-invited"]["workspace_id"] == "ws-invited"
+
+
+def _patched_register_user_dependencies():
+    """Shared mock set for a bare register_user() call, mirroring
+    test_register_user_accepts_pending_workspace_invites_before_resolving_access
+    below -- factored out so the email-verification-hook tests don't have to
+    repeat the whole plumbing just to reach the new call at the end of the
+    function."""
+    return (
+        patch.object(auth, "_find_user_by_email", return_value=None),
+        patch.object(auth, "_hash_password", return_value="hash"),
+        patch.object(auth.control_plane_repository, "create_local_password_account", new=Mock(return_value=None)),
+        patch.object(auth.control_plane_repository, "get_local_auth_identity_by_email", new=Mock(return_value=None)),
+        patch.object(
+            auth,
+            "_control_plane_call",
+            return_value={
+                "user": {"id": "user-1", "email": "owner@example.com"},
+                "memberships": [{"workspace_id": "ws-home", "tenant_id": "tenant-home", "role": "owner"}],
+            },
+        ),
+        patch.object(auth, "_connect_auth_db", return_value=_FakeAuthConnection()),
+        patch.object(auth, "_upsert_user_auth_method_locked"),
+        patch.object(auth, "_ensure_user_identity_versions_locked"),
+        patch.object(auth, "_find_user_by_id", return_value={"id": "user-1", "email": "owner@example.com"}),
+        patch.object(auth, "accept_workspace_invites_for_user"),
+        patch.object(auth, "_list_workspace_memberships", return_value=[{"workspace_id": "ws-home", "role": "owner"}]),
+        patch.object(auth, "_effective_workspace_access", return_value={"ws-home": {"workspace_id": "ws-home"}}),
+        patch.object(auth, "_issue_authenticated_user_payload", return_value={"ok": True}),
+    )
+
+
+def test_register_user_kicks_off_email_verification_for_the_new_account() -> None:
+    """The actual wiring point for signup email verification (MAN --
+    docs/design/email-verification-plan.md): register_user() must call
+    email_verification_service.start_verification with the new user's id and
+    email once the account exists, without changing what register_user
+    returns to the caller."""
+    with contextlib.ExitStack() as stack:
+        for dependency in _patched_register_user_dependencies():
+            stack.enter_context(dependency)
+        start_mock = stack.enter_context(
+            patch.object(auth.email_verification_service, "start_verification", new=AsyncMock(return_value=None))
+        )
+        payload = auth.register_user("owner@example.com", "password-123", name="Owner")
+
+    assert payload == {"ok": True}
+    start_mock.assert_awaited_once_with(user_id="user-1", email="owner@example.com")
+
+
+def test_register_user_signup_survives_email_verification_provider_failure() -> None:
+    """Account creation must not be undone or fail just because the email
+    provider is unconfigured/unreachable -- register_user() logs and
+    continues (see the try/except right after the start_verification call)
+    rather than raising, which would turn a signup into a 500 whenever
+    EMAIL_PROVIDER_API_KEY is unset."""
+    with contextlib.ExitStack() as stack:
+        for dependency in _patched_register_user_dependencies():
+            stack.enter_context(dependency)
+        stack.enter_context(
+            patch.object(
+                auth.email_verification_service,
+                "start_verification",
+                new=AsyncMock(side_effect=RuntimeError("EMAIL_PROVIDER_API_KEY is not configured.")),
+            )
+        )
+        payload = auth.register_user("owner@example.com", "password-123", name="Owner")
+
+    assert payload == {"ok": True}
 
 
 def test_register_user_accepts_pending_workspace_invites_before_resolving_access() -> None:

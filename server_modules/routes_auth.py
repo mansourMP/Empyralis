@@ -12,8 +12,10 @@ from server_modules.auth import (
     enterprise_status_for_user,
     ensure_public_registration_enabled,
     get_authenticated_user_profile,
+    get_authenticated_user_record,
     list_authenticated_user_devices,
     get_current_user,
+    limit_email_verification_requests,
     limit_login_requests,
     limit_public_requests,
     limit_refresh_requests,
@@ -42,7 +44,8 @@ from server_modules.channel_pairing_service import (
 from server_modules.channel_user_acquisition_service import CHANNEL_ATTRIBUTION_QUERY_PARAM
 from server_modules.profile_api import register_profile_routes
 from server_modules import control_plane_repository, pilot_invite_service
-from server_modules.schemas import AuthLoginRequest, AuthRegisterRequest
+from server_modules import email_provider_service, email_verification_service
+from server_modules.schemas import AuthLoginRequest, AuthRegisterRequest, AuthVerifyEmailRequest
 
 
 router = APIRouter()
@@ -332,6 +335,47 @@ async def auth_status(current_user=Depends(get_current_user)):
     profile = get_authenticated_user_profile(current_user)
     user = profile.get("user") if isinstance(profile, dict) else None
     return {"authenticated": True, "user": user}
+
+
+def _authenticated_user_id_and_email(current_user: dict) -> tuple[str, str]:
+    user = get_authenticated_user_record(current_user)
+    user_id = str(user.get("id") or "").strip()
+    email = str(user.get("email") or "").strip().lower()
+    if not user_id or not email:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return user_id, email
+
+
+@router.get("/auth/verify-email/status")
+async def auth_verify_email_status(current_user=Depends(get_current_user)):
+    user_id, _email = _authenticated_user_id_and_email(current_user)
+    status = await email_verification_service.verification_status(user_id)
+    return {"ok": True, "status": status, "email_verified": status in {"verified", "none"}}
+
+
+@router.post("/auth/verify-email", dependencies=[Depends(limit_email_verification_requests)])
+async def auth_verify_email(
+    body: AuthVerifyEmailRequest,
+    request: Request,
+    current_user=Depends(get_current_user),
+):
+    validate_csrf(request)
+    user_id, _email = _authenticated_user_id_and_email(current_user)
+    await email_verification_service.verify_code(user_id=user_id, code=body.code)
+    return {"ok": True, "email_verified": True}
+
+
+@router.post("/auth/verify-email/resend", dependencies=[Depends(limit_email_verification_requests)])
+async def auth_resend_verify_email(request: Request, current_user=Depends(get_current_user)):
+    validate_csrf(request)
+    user_id, email = _authenticated_user_id_and_email(current_user)
+    try:
+        await email_verification_service.resend_verification(user_id=user_id, email=email)
+    except email_provider_service.EmailProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except email_provider_service.EmailSendFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, "sent": True}
 
 
 @router.post("/auth/refresh", dependencies=[Depends(limit_refresh_requests)])

@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Header, HTTPException, Request, Response
 from server_modules import control_plane_repository
 from server_modules import auth_store_repository
+from server_modules import email_verification_service
 from server_modules import entitlements_service
 from server_modules import client_identity_service, quota_policy_service, quota_response_service
 from server_modules import security_audit_service
@@ -51,6 +52,8 @@ CSRF_FAILURE_RATE_LIMIT_LOCK = threading.Lock()
 CSRF_FAILURE_RATE_LIMIT_BUCKETS: Dict[str, list[float]] = {}
 REFRESH_RATE_LIMIT_LOCK = threading.Lock()
 REFRESH_RATE_LIMIT_BUCKETS: Dict[str, list[float]] = {}
+EMAIL_VERIFICATION_RATE_LIMIT_LOCK = threading.Lock()
+EMAIL_VERIFICATION_RATE_LIMIT_BUCKETS: Dict[str, list[float]] = {}
 JWT_EXP_SECONDS = int(os.getenv("ORION_JWT_EXP_SECONDS", "3600"))
 MOBILE_JWT_EXP_SECONDS = int(os.getenv("ORION_MOBILE_JWT_EXP_SECONDS", str(60 * 60 * 24 * 30)))
 MOBILE_REFRESH_EXP_SECONDS = int(os.getenv("ORION_MOBILE_REFRESH_EXP_SECONDS", str(60 * 60 * 24 * 180)))
@@ -76,6 +79,9 @@ ORION_AUTH_CSRF_FAILURE_RATE_LIMIT_PER_MINUTE = int(
 )
 ORION_AUTH_REFRESH_RATE_LIMIT_PER_MINUTE = int(
     os.getenv("ORION_AUTH_REFRESH_RATE_LIMIT_PER_MINUTE", "10")
+)
+ORION_AUTH_EMAIL_VERIFICATION_RATE_LIMIT_PER_MINUTE = int(
+    os.getenv("ORION_AUTH_EMAIL_VERIFICATION_RATE_LIMIT_PER_MINUTE", "10")
 )
 ORION_MOBILE_BETA_AUTO_SIGNIN_ENABLED = str(
     os.getenv("ORION_MOBILE_BETA_AUTO_SIGNIN_ENABLED", "0")
@@ -5333,6 +5339,17 @@ def limit_refresh_requests(request: Request) -> None:
     )
 
 
+def limit_email_verification_requests(request: Request) -> None:
+    _enforce_window_limit(
+        request=request,
+        buckets=EMAIL_VERIFICATION_RATE_LIMIT_BUCKETS,
+        lock=EMAIL_VERIFICATION_RATE_LIMIT_LOCK,
+        key=f"email_verification:{_client_ip(request)}",
+        limit=max(1, int(ORION_AUTH_EMAIL_VERIFICATION_RATE_LIMIT_PER_MINUTE or 10)),
+        profile_name=quota_policy_service.AUTH_EMAIL_VERIFICATION_PROFILE.name,
+    )
+
+
 def mobile_beta_auto_signin_enabled() -> bool:
     raw = os.getenv("ORION_MOBILE_BETA_AUTO_SIGNIN_ENABLED")
     if raw is None:
@@ -5573,6 +5590,29 @@ def register_user(
             )
         except Exception:
             pass
+    # Kick off signup email verification: create + email a 6-digit code.
+    # Best-effort by design -- account creation above already succeeded and
+    # must not be undone or blocked by email provider latency/misconfig (see
+    # docs/design/email-verification-plan.md). A failure here (most likely:
+    # EMAIL_PROVIDER_API_KEY unset) is logged loudly, never swallowed
+    # silently -- the user can still hit /auth/verify-email/resend once the
+    # provider is configured, which surfaces the same failure as a real HTTP
+    # error instead of a no-op.
+    try:
+        run_async_tool_call(
+            email_verification_service.start_verification(
+                user_id=user_id,
+                email=str(user.get("email") or "").strip().lower() or email_token,
+            )
+        )
+    except Exception:
+        LOGGER.error(
+            "signup_email_verification_start_failed: could not send verification email "
+            "for user_id=%s (email provider may be unconfigured -- see "
+            "EMAIL_PROVIDER_API_KEY).",
+            user_id,
+            exc_info=True,
+        )
     return payload
 
 

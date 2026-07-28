@@ -22,6 +22,10 @@ class WorkflowDelete(BaseModel):
     app_id: str
 
 
+class AuthVerifyEmailRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=16)
+
+
 class AppCaptainBridgeRequest(BaseModel):
     workspace_id: str
     app_id: str
