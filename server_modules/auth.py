@@ -5200,6 +5200,68 @@ def enforce_workspace_access(
     return token
 
 
+async def enforce_project_access(
+    current_user: Optional[Dict[str, Any]],
+    workspace_id: Optional[str],
+    project_id: Optional[str],
+    *,
+    tenant_id: Optional[str] = None,
+    minimum_role: str = "viewer",
+) -> str:
+    """MAN-115: the real per-project ACL check, layered on top of workspace
+    access. Call this instead of (never in addition to, and never after a
+    try/except that would swallow its HTTPException) enforce_workspace_access
+    for any route/service call that reads or mutates one specific project's
+    data — project detail, its tasks, its activity feed, its connectors, its
+    member roster, agent-to-project assignment.
+
+    Policy (2026-07-28 ruling, MAN-70 follow-up): a workspace OWNER always
+    sees and can act on every project in their own workspace, full stop — an
+    owner must never lose visibility into their own workspace's projects
+    just because nobody explicitly added a project_memberships row for them.
+    Every other role (member/viewer) needs an explicit project_memberships
+    row for THIS project; having one for a different project in the same
+    workspace grants nothing here. There is no "everyone sees the default
+    project" carve-out — the workspace's own "General" project is gated
+    exactly like any other.
+
+    Raises 404 "Project not found" (not 403) when the caller has no access —
+    matching enforce_workspace_access's HTTPException-before-the-try-block
+    convention so this actually rejects instead of getting swallowed into a
+    200 {"ok": false} by a route's blanket `except Exception`. 404 rather
+    than 403 is deliberate: a non-member must not be able to distinguish
+    "this project doesn't exist" from "this project exists but you can't see
+    it" — either would leak the same information a 403 would.
+    """
+    resolved_workspace_id = enforce_workspace_access(
+        current_user, workspace_id, tenant_id=tenant_id, minimum_role=minimum_role,
+    )
+    clean_project_id = str(project_id or "").strip()
+    if not clean_project_id:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    actual_role = normalize_rbac_role(
+        workspace_role(current_user, resolved_workspace_id) or current_user_role(current_user, default="viewer"),
+        default="viewer",
+    )
+    if RBAC_ROLE_ORDER[actual_role] >= RBAC_ROLE_ORDER["owner"]:
+        return resolved_workspace_id
+    user_id = str((current_user or {}).get("user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    resolved_tenant_id = tenant_id or workspace_tenant_id(current_user, resolved_workspace_id)
+    from server_modules import projects_repository  # local import: projects_repository -> control_plane_repository is a heavier chain than most of this module's top-level imports pull in
+
+    is_member = await projects_repository.is_project_member(
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
+        project_id=clean_project_id,
+        user_id=user_id,
+    )
+    if not is_member:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return resolved_workspace_id
+
+
 def _enforce_window_limit(
     *,
     request: Request,

@@ -1,0 +1,337 @@
+"use client";
+
+/**
+ * Task detail as a PAGE, not a drawer.
+ *
+ * It used to be a right-hand overlay (FleetRightPanel) floating over the
+ * board. That was wrong for the same reason Linear's issue view is a page:
+ * a task is a destination — it has a URL, it is where you read a long
+ * description and a thread, and it should be the thing the content area is
+ * showing, not a 380px column pasted over the thing you were just looking at.
+ *
+ * SHAPE (Linear's issue view):
+ *   ┌──────────────────────────────────────┬───────────────┐
+ *   │ title                                │  Properties   │
+ *   │ description                          │  Status       │
+ *   │ Activity ─ comments                  │  Priority     │
+ *   │                                      │  Assignee …   │
+ *   └──────────────────────────────────────┴───────────────┘
+ * The properties column is PART OF THE PAGE — a real flex sibling that the
+ * main column shares width with — not a floating panel over it. The two
+ * columns scroll independently.
+ *
+ * WHAT IS NOT HERE, on purpose:
+ *  · Sub-issues. There is no parent/child column on project_tasks and no API
+ *    for one, so a sub-issues section would be a drawn promise. Linear's
+ *    screenshot has one; ours honestly does not yet.
+ *  · A comment composer. Agents write comments today
+ *    (project_tasks_service.add_task_comment, backing project_task__comment)
+ *    into task.metadata.comments and the Activity feed below RENDERS THOSE
+ *    REAL COMMENTS — but there is no HTTP route for a human to post one, so
+ *    there is no box to type in. The feed says so rather than showing a dead
+ *    input.
+ *  · Rich text. `description` is a plain-text column; it is rendered with
+ *    paragraph breaks preserved, not parsed as markdown it may not be.
+ */
+
+import { useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { useRouter } from "next/navigation";
+import { Calendar, Clock3, FolderKanban, MessageSquare, SignalHigh, User } from "lucide-react";
+
+import { AgentSigil } from "./fleet-indicators";
+import {
+  TaskStatusIcon,
+  TaskPriorityIcon,
+  taskShortId,
+  taskStatusLabel,
+  taskPriority,
+  TASK_PRIORITIES,
+  TASK_PRIORITY_LABELS,
+} from "./task-status";
+import { TINTS, tintForAgent, formatDateTime, timeAgo } from "./fleet-presentation";
+import { FLEET_TASK_STATUSES, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
+
+/** Minute precision, not the default's seconds — no decision on this page
+ *  turns on a second, and the extra characters only cost the value column
+ *  width it does not have. */
+function stamp(value: string): string {
+  return formatDateTime(value, { dateStyle: "medium", timeStyle: "short" });
+}
+
+type TaskComment = { id?: string; author_type?: string; author_id?: string; body?: string; created_at?: string };
+
+/** task.metadata.comments as written by add_task_comment. Defensive on the
+ *  way in — this is free-form JSONB, so anything that is not an object with a
+ *  body is skipped rather than rendered as "[object Object]". */
+function readComments(task: FleetTask): TaskComment[] {
+  const raw = task.metadata?.comments;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((c): c is TaskComment => Boolean(c) && typeof c === "object")
+    .filter((c) => String(c.body || "").trim().length > 0);
+}
+
+export function TaskDetailView({
+  task,
+  agents,
+  projectName,
+  projectHref,
+  onStatusChange,
+  onPriorityChange,
+  onAssign,
+}: {
+  task: FleetTask;
+  /** Agents in this project — the only valid assignees. */
+  agents: FleetAgent[];
+  projectName: string;
+  projectHref: string;
+  onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
+  onPriorityChange?: (taskId: string, priority: number) => void;
+  onAssign: (taskId: string, agentId: string) => void;
+}) {
+  const router = useRouter();
+  const headingRef = useRef<HTMLHeadingElement | null>(null);
+
+  // Escape returns to the board — the page equivalent of the drawer's
+  // dismiss, and the same affordance the agent detail page already has.
+  // Ignored while a control has focus (a <select> owns Escape to cancel its
+  // own listbox) or while any overlay is open above this page.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      if (document.querySelector("[role='dialog'], .fleet-detail-backdrop")) return;
+      router.push(projectHref);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [router, projectHref]);
+
+  // Announce the task to a screen reader on arrival, exactly as the drawer
+  // did when it opened.
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, [task.id]);
+
+  const priority = taskPriority(task);
+  const assignee = agents.find((a) => a.agent_id === task.assignee_agent_id) || null;
+  const assigneeIndex = assignee ? agents.indexOf(assignee) : 0;
+  const tint = assignee ? TINTS[tintForAgent(assignee, assigneeIndex)] : null;
+  const avatarStyle = (tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) as CSSProperties;
+  const comments = useMemo(() => readComments(task), [task]);
+
+  return (
+    <div className="fleet-task-page">
+      <div className="fleet-task-page-main">
+        <div className="fleet-task-page-body">
+          <div className="fleet-task-page-eyebrow">{taskShortId(task.id)}</div>
+          <h1 className="fleet-task-page-title" tabIndex={-1} ref={headingRef}>
+            {task.title || "Untitled task"}
+          </h1>
+
+          {task.description ? (
+            <div className="fleet-task-page-desc">
+              {task.description.split(/\n{2,}/).map((para, i) => (
+                <p key={i}>{para}</p>
+              ))}
+            </div>
+          ) : (
+            <p className="fleet-task-page-desc fleet-cell-muted">No description.</p>
+          )}
+
+          <section className="fleet-task-page-section" aria-label="Activity">
+            <h2 className="fleet-task-page-section-title">Activity</h2>
+            {comments.length === 0 ? (
+              <div className="fleet-task-page-activity-empty">
+                <MessageSquare size={14} strokeWidth={1.75} />
+                <span>
+                  No comments yet. Agents working this task post here via{" "}
+                  <code>project_task__comment</code>; there is no route for a person to
+                  post one yet, so there is no composer.
+                </span>
+              </div>
+            ) : (
+              <>
+                <ul className="fleet-task-page-comments">
+                  {comments.map((c, i) => (
+                    <li key={c.id || i} className="fleet-task-page-comment">
+                      <div className="fleet-task-page-comment-head">
+                        <span className="fleet-task-page-comment-author">
+                          {commentAuthorLabel(c, agents)}
+                        </span>
+                        {c.created_at ? (
+                          <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
+                            {timeAgo(c.created_at) || stamp(c.created_at)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="fleet-task-page-comment-body">{c.body}</div>
+                    </li>
+                  ))}
+                </ul>
+                <div className="fleet-task-page-activity-note">
+                  Read-only: only agents can post comments today.
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      </div>
+
+      <aside className="fleet-task-page-side" aria-label="Properties">
+        <div className="fleet-task-page-side-inner">
+          <div className="fleet-task-page-side-title">Properties</div>
+
+          <div className="fleet-panel-row">
+            <span className="fleet-panel-row-label">
+              <span className="fleet-panel-row-icon"><TaskStatusIcon status={task.status} size={15} /></span>
+              <span>Status</span>
+            </span>
+            <span className="fleet-task-detail-control">
+              <select
+                className="fleet-task-detail-select"
+                value={task.status}
+                aria-label="Task status"
+                onChange={(e) => {
+                  const next = e.currentTarget.value as FleetTaskStatus;
+                  if (next !== task.status) onStatusChange(task.id, next);
+                }}
+              >
+                {FLEET_TASK_STATUSES.map((s) => (
+                  <option key={s} value={s}>{taskStatusLabel(s)}</option>
+                ))}
+              </select>
+            </span>
+          </div>
+
+          <div className="fleet-panel-row">
+            <span className="fleet-panel-row-label">
+              <span className="fleet-panel-row-icon">
+                {onPriorityChange ? <TaskPriorityIcon priority={priority} size={15} /> : <SignalHigh size={15} strokeWidth={1.75} />}
+              </span>
+              <span>Priority</span>
+            </span>
+            <span className="fleet-task-detail-control">
+              {onPriorityChange ? (
+                <select
+                  className="fleet-task-detail-select"
+                  value={priority}
+                  aria-label="Task priority"
+                  onChange={(e) => {
+                    const next = Number(e.currentTarget.value);
+                    if (next !== priority) onPriorityChange(task.id, next);
+                  }}
+                >
+                  {TASK_PRIORITIES.map((p) => (
+                    <option key={p} value={p}>{TASK_PRIORITY_LABELS[p]}</option>
+                  ))}
+                </select>
+              ) : (
+                <span className="fleet-cell-secondary">{TASK_PRIORITY_LABELS[priority]}</span>
+              )}
+            </span>
+          </div>
+
+          {/* Assignment is agent-only (fleet-data.FleetTask) and is not a plain
+              field write — assignFleetTask also wakes the agent — so this
+              hands the id to the caller's existing handler rather than
+              patching anything itself. */}
+          <div className="fleet-panel-row">
+            <span className="fleet-panel-row-label">
+              <span className="fleet-panel-row-icon"><User size={15} strokeWidth={1.75} /></span>
+              <span>Assignee</span>
+            </span>
+            <span className="fleet-task-detail-control">
+              {assignee ? (
+                <span className="fleet-agent-avatar" style={avatarStyle}>
+                  <AgentSigil seed={assignee.agent_id} size={14} />
+                </span>
+              ) : null}
+              <select
+                className="fleet-task-detail-select"
+                value={task.assignee_agent_id || ""}
+                aria-label="Task assignee"
+                onChange={(e) => {
+                  const next = e.currentTarget.value;
+                  if (next && next !== task.assignee_agent_id) onAssign(task.id, next);
+                }}
+              >
+                <option value="">Unassigned</option>
+                {agents.map((a) => (
+                  <option key={a.agent_id} value={a.agent_id}>{a.label || "Unnamed agent"}</option>
+                ))}
+              </select>
+            </span>
+          </div>
+
+          <div className="fleet-panel-row">
+            <span className="fleet-panel-row-label">
+              <span className="fleet-panel-row-icon"><FolderKanban size={15} strokeWidth={1.75} /></span>
+              <span>Project</span>
+            </span>
+            <span className="fleet-panel-row-value">
+              <a className="fleet-task-page-side-link" href={projectHref} data-tab-title={projectName}>
+                {projectName}
+              </a>
+            </span>
+          </div>
+
+          <div className="fleet-panel-row">
+            <span className="fleet-panel-row-label">
+              <span className="fleet-panel-row-icon"><Calendar size={15} strokeWidth={1.75} /></span>
+              <span>Due</span>
+            </span>
+            <span className={`fleet-panel-row-value${task.due_at ? "" : " fleet-panel-row-value--muted"}`}>
+              {task.due_at ? stamp(task.due_at) : "—"}
+            </span>
+          </div>
+
+          <div className="fleet-panel-row">
+            <span className="fleet-panel-row-label">
+              <span className="fleet-panel-row-icon"><Clock3 size={15} strokeWidth={1.75} /></span>
+              <span>Created</span>
+            </span>
+            <span className={`fleet-panel-row-value${task.created_at ? "" : " fleet-panel-row-value--muted"}`}>
+              {task.created_at ? stamp(task.created_at) : "—"}
+            </span>
+          </div>
+
+          <div className="fleet-panel-row">
+            <span
+              className="fleet-panel-row-label"
+              title="Last write of any kind — status, assignee, or an agent comment. Not a history."
+            >
+              <span className="fleet-panel-row-icon"><Clock3 size={15} strokeWidth={1.75} /></span>
+              <span>Updated</span>
+            </span>
+            <span className={`fleet-panel-row-value${task.updated_at ? "" : " fleet-panel-row-value--muted"}`}>
+              {task.updated_at ? stamp(task.updated_at) : "—"}
+            </span>
+          </div>
+
+          {/* Labels have no column on project_tasks — saying so is better than
+              an empty "Labels" row that looks like a control that lost its
+              value. */}
+          <div className="fleet-task-page-side-note">
+            Labels and sub-tasks aren’t stored yet — no column for either.
+          </div>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+/** Comment authors are stored as an opaque (author_type, author_id) pair.
+ *  An agent id resolves to its real label when that agent is in this project;
+ *  anything else falls back to the honest raw type. */
+function commentAuthorLabel(comment: TaskComment, agents: FleetAgent[]): string {
+  const id = String(comment.author_id || "").trim();
+  const type = String(comment.author_type || "").trim();
+  const agent = agents.find((a) => a.agent_id === id);
+  if (agent) return agent.label || "Unnamed agent";
+  if (type === "agent") return id || "Agent";
+  if (type === "user" || type === "human") return id || "Person";
+  return id || type || "Unknown";
+}

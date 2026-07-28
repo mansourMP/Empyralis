@@ -8,6 +8,7 @@ from server_modules import shared as shared
 from server_modules import runtime_common as common
 from server_modules import secrets_broker
 from server_modules import secret_redaction_service
+from server_modules import vault_helpers
 from server_modules import provider_profiles as provider_profiles_service
 from server_modules import rust_runtime_kernel_client
 from server_modules.model_router import list_model_aliases
@@ -669,6 +670,10 @@ async def export_vault_credentials(body: VaultExportRequest):
 
     export_items = []
     for entry in items:
+        # Platform-internal rows (the OAuth dynamic-client registration store)
+        # are not the user's credentials and must not leave in their export.
+        if vault_helpers.is_internal_vault_entry(entry):
+            continue
         if not _workspace_visible(entry.get("workspace_id"), workspace_id):
             continue
         encrypted = entry.get("encrypted_secret")

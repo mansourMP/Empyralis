@@ -976,6 +976,13 @@ export type FleetTask = {
   title: string;
   description?: string;
   status: FleetTaskStatus;
+  /** Linear's integer convention, adopted verbatim by the backend:
+   *  0 none · 1 urgent · 2 high · 3 medium · 4 low (1 is the MOST urgent).
+   *  OPTIONAL ON PURPOSE — the column is landing separately, so every
+   *  response predating it simply omits the field. Never read this directly;
+   *  go through task-status.taskPriority(), which coerces anything unexpected
+   *  (absent, null, a string, an out-of-range number) to 0. */
+  priority?: number | null;
   assignee_agent_id?: string | null;
   created_by?: string | null;
   due_at?: string | null;
@@ -990,25 +997,100 @@ export type FleetTask = {
   // time, so treat it as "when the current status/assignee last changed" —
   // not a full history.
   updated_at?: string | null;
+  /** Rolled up by project_tasks_service's LATERAL join; always an array on a
+   *  server that has migrations/add_task_labels.sql, absent on one that
+   *  doesn't — so read it as `task.labels || []`. */
+  labels?: FleetLabel[];
 };
 
-/** The five statuses project_tasks_service.VALID_TASK_STATUSES (:29) accepts.
- *  `blocked` and `awaiting_input` are the two that mean a human is needed —
- *  they are what makes a board readable at a glance, not decoration. */
-export type FleetTaskStatus = "open" | "in_progress" | "blocked" | "awaiting_input" | "done";
+/** The seven statuses project_tasks_service.TASK_STATUS_ORDER accepts.
+ *  `blocked` and `awaiting_input` are the two that mean a human is needed;
+ *  `in_review` is agent-completed work parked for a human to approve before
+ *  it leaves the board — they are what makes a board readable at a glance,
+ *  not decoration. */
+export type FleetTaskStatus =
+  | "backlog"
+  | "todo"
+  | "in_progress"
+  | "awaiting_input"
+  | "blocked"
+  | "in_review"
+  | "done";
 
+/** Board column order, left to right — the single source of truth for BOTH
+ *  the kanban columns and the status menu, so the two can't drift. Mirrors
+ *  project_tasks_service.TASK_STATUS_ORDER exactly. */
 export const FLEET_TASK_STATUSES: FleetTaskStatus[] = [
-  "open",
+  "backlog",
+  "todo",
   "in_progress",
-  "blocked",
   "awaiting_input",
+  "blocked",
+  "in_review",
   "done",
 ];
+
+/** Legacy spellings accepted on the way IN and silently mapped forward,
+ *  never rendered. `open` was this table's original name for `todo` (see
+ *  migrations/add_project_tasks.sql); the backend's own `_normalize_status`
+ *  does the same mapping, but a row can still reach this client as `open`
+ *  from a response cached before the forward migration landed. Normalizing
+ *  here too means the board never grows a mystery eighth column. */
+const FLEET_TASK_STATUS_ALIASES: Record<string, FleetTaskStatus> = { open: "todo" };
+
+export function normalizeTaskStatus(value: unknown): FleetTaskStatus {
+  const token = String(value ?? "").trim().toLowerCase();
+  const forward = FLEET_TASK_STATUS_ALIASES[token] || token;
+  return (FLEET_TASK_STATUSES as string[]).includes(forward)
+    ? (forward as FleetTaskStatus)
+    : "todo";
+}
+
+/** Counts per status, every column present (0 rather than undefined) so a
+ *  column header and a stat card can both read straight off it. One place so
+ *  the board's header counts and the Overview tab's roll-up cannot disagree
+ *  about what a status means. */
+export function countTasksByStatus(tasks: FleetTask[]): Record<FleetTaskStatus, number> {
+  const counts = Object.fromEntries(FLEET_TASK_STATUSES.map((s) => [s, 0])) as Record<FleetTaskStatus, number>;
+  for (const task of tasks) counts[normalizeTaskStatus(task.status)] += 1;
+  return counts;
+}
 
 /** The two statuses that mean the agent has stopped and is waiting on a
  *  person. Kept as one exported list so the board, and any future "needs me"
  *  aggregate, cannot drift apart on what "needs me" means. */
 export const FLEET_TASK_NEEDS_HUMAN: FleetTaskStatus[] = ["blocked", "awaiting_input"];
+
+/** Turn a failed task/label response into something a human can read.
+ *
+ *  The routes report a service-level failure as `{ok:false,error:"..."}` (a
+ *  string, fine), but an auth or validation failure comes back as FastAPI's
+ *  `detail`, which is a string for an HTTPException and an OBJECT or a LIST
+ *  for a 401 envelope / 422 validation error. Interpolating that straight into
+ *  a message is how a panel ends up telling somebody "[object Object]" — which
+ *  it did, out loud, the first time the composer surfaced a 401. */
+function apiErrorMessage(data: unknown, fallback: string): string {
+  const body = (data || {}) as Record<string, unknown>;
+  const raw = body.error ?? body.detail;
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  if (Array.isArray(raw)) {
+    const first = raw.find((item) => typeof (item as { msg?: unknown })?.msg === "string");
+    if (first) return String((first as { msg: string }).msg);
+  }
+  if (raw && typeof raw === "object") {
+    const nested = raw as Record<string, unknown>;
+    for (const key of ["message", "error", "detail", "reason"]) {
+      const value = nested[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return fallback;
+}
+
+function withNormalizedStatus(task: FleetTask): FleetTask {
+  const status = normalizeTaskStatus(task?.status);
+  return task && task.status === status ? task : { ...task, status };
+}
 
 export function useFleetTasks(workspaceId: string, projectId: string | null) {
   const fetcher = useCallback(async (): Promise<FleetTask[]> => {
@@ -1019,7 +1101,10 @@ export function useFleetTasks(workspaceId: string, projectId: string | null) {
     );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    return Array.isArray(data.tasks) ? data.tasks : [];
+    // Normalize on the way in, once, so every consumer downstream can trust
+    // `task.status` is one of the seven board statuses — no `open` leaks
+    // through from a pre-migration row or a cached response.
+    return Array.isArray(data.tasks) ? (data.tasks as FleetTask[]).map(withNormalizedStatus) : [];
   }, [workspaceId, projectId]);
 
   // Polled like every other fleet resource: agents move tasks on their own,
@@ -1036,7 +1121,17 @@ export function useFleetTasks(workspaceId: string, projectId: string | null) {
 
 export async function createFleetTask(
   workspaceId: string,
-  input: { project_id: string; title: string; description?: string; due_at?: string | null }
+  input: {
+    project_id: string;
+    title: string;
+    description?: string;
+    due_at?: string | null;
+    /** 0..4, Linear's scale (see FleetTask.priority). Accepted by the create
+     *  route itself, so a triaged task is one call rather than create+patch.
+     *  STATUS is not — the row is born at the table default ('todo') and any
+     *  other starting column costs a follow-up patchFleetTask. */
+    priority?: number;
+  }
 ): Promise<FleetTask> {
   const res = await fetch(`/api/w/${workspaceId}/fleet/tasks`, {
     method: "POST",
@@ -1048,15 +1143,27 @@ export async function createFleetTask(
   // The route returns {ok:false,error} with HTTP 200 on a service-level
   // failure, so checking res.ok alone would silently swallow it.
   if (!res.ok || data?.ok === false) {
-    throw new Error(data?.error || data?.detail || `Could not create task (HTTP ${res.status})`);
+    throw new Error(apiErrorMessage(data, `Could not create task (HTTP ${res.status})`));
   }
-  return data.task as FleetTask;
+  return withNormalizedStatus(data.task as FleetTask);
 }
 
 export async function patchFleetTask(
   workspaceId: string,
   taskId: string,
-  patch: { title?: string; description?: string; status?: FleetTaskStatus; due_at?: string | null; clear_due_at?: boolean }
+  patch: {
+    title?: string;
+    description?: string;
+    status?: FleetTaskStatus;
+    /** 0..4, Linear's scale. Sent only when a human actually changes it, so a
+     *  backend that does not yet accept the field never sees it on an
+     *  unrelated write. If it IS sent and the route rejects it, the caller's
+     *  normal error path surfaces the message — nothing here pretends the
+     *  write succeeded. */
+    priority?: number;
+    due_at?: string | null;
+    clear_due_at?: boolean;
+  }
 ): Promise<FleetTask> {
   const res = await fetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}`, {
     method: "PATCH",
@@ -1066,9 +1173,111 @@ export async function patchFleetTask(
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
-    throw new Error(data?.error || data?.detail || `Could not update task (HTTP ${res.status})`);
+    throw new Error(apiErrorMessage(data, `Could not update task (HTTP ${res.status})`));
   }
-  return data.task as FleetTask;
+  return withNormalizedStatus(data.task as FleetTask);
+}
+
+/* ── Labels ────────────────────────────────────────────────────────────────
+   A per-WORKSPACE vocabulary (routes_fleet.py: /fleet/labels), not per
+   project — "bug" means the same thing wherever the work sits. `color` is a
+   palette TOKEN NAME ('grey' | 'red' | ... ), never a hex: the theme decides
+   what each token looks like per mode, exactly as it already does for task
+   statuses. AGENTS CANNOT CREATE LABELS — only humans can — so the composer
+   is the one place in the product that offers to mint one. */
+
+export type FleetLabel = {
+  id: string;
+  name: string;
+  /** One of LABEL_COLORS. Anything unknown renders as grey rather than blank. */
+  color: string;
+  task_count?: number;
+};
+
+/** workspace_labels_service.LABEL_COLOR_ORDER, verbatim and in order. */
+export const LABEL_COLORS = [
+  "grey",
+  "red",
+  "orange",
+  "amber",
+  "green",
+  "teal",
+  "blue",
+  "indigo",
+  "violet",
+  "pink",
+] as const;
+
+/** The workspace's label vocabulary. NOT polled: a label list changes when a
+ *  human changes it, and the one surface that can (the composer's label
+ *  picker) refreshes it itself after a create. */
+export function useFleetLabels(workspaceId: string, enabled = true) {
+  const [labels, setLabels] = useState<FleetLabel[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!workspaceId) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/labels`, {
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({}));
+      setLabels(Array.isArray(data?.labels) ? (data.labels as FleetLabel[]) : []);
+    } catch {
+      // A labels endpoint that isn't reachable must not break task creation —
+      // the picker simply has nothing to offer.
+      setLabels([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    if (!enabled) return;
+    void refresh();
+  }, [enabled, refresh]);
+
+  return { labels, loading, refresh };
+}
+
+export async function createFleetLabel(
+  workspaceId: string,
+  input: { name: string; color?: string },
+): Promise<FleetLabel> {
+  const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/labels`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+    body: JSON.stringify(input),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not create label (HTTP ${res.status})`));
+  }
+  return data.label as FleetLabel;
+}
+
+/** Put an existing label on a task. Idempotent server-side; takes an id OR a
+ *  name. Never creates the label — the vocabulary is curated on purpose. */
+export async function attachFleetTaskLabel(
+  workspaceId: string,
+  taskId: string,
+  label: string,
+): Promise<void> {
+  const res = await fetch(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/tasks/${encodeURIComponent(taskId)}/labels`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+      body: JSON.stringify({ label }),
+    },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not add label (HTTP ${res.status})`));
+  }
 }
 
 /** Assigning is not just a label change — project_tasks_service.assign_task
@@ -1089,11 +1298,11 @@ export async function assignFleetTask(
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
-    throw new Error(data?.error || data?.detail || `Could not assign task (HTTP ${res.status})`);
+    throw new Error(apiErrorMessage(data, `Could not assign task (HTTP ${res.status})`));
   }
   const wakeError = data?.wake_error ? String(data.wake_error) : null;
   return {
-    task: data.task as FleetTask,
+    task: withNormalizedStatus(data.task as FleetTask),
     wakeError,
     woke: Boolean(data?.wake_request) && !wakeError,
   };

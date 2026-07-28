@@ -657,6 +657,35 @@ CREATE TABLE IF NOT EXISTS projects (
     UNIQUE(tenant_id, workspace_id, slug)
 );
 
+-- Real per-project ACL (MAN-115, follow-up to the MAN-70 placeholder ruling
+-- that "project member" == "workspace member" with no per-project table).
+-- A row here means "this user can see/act on this project." Workspace
+-- OWNERS bypass this table entirely (enforced in auth.enforce_project_access,
+-- not here) -- an owner must never lose visibility into their own
+-- workspace's projects just because nobody explicitly added a row. Every
+-- other role (member/viewer) needs an explicit row per project, including
+-- the workspace's own default ("General") project -- there is no implicit
+-- "everyone sees the default project" carve-out, matching the real
+-- boundary the founder asked for. No RLS -- scoped like `projects`/
+-- `project_tasks`/`bug_reports`: every query filters by (tenant_id,
+-- workspace_id) explicitly in projects_repository.py.
+CREATE TABLE IF NOT EXISTS project_memberships (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'member',
+    added_by TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(project_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_memberships_project
+    ON project_memberships(tenant_id, workspace_id, project_id);
+CREATE INDEX IF NOT EXISTS idx_project_memberships_user
+    ON project_memberships(tenant_id, workspace_id, user_id);
+
 CREATE TABLE IF NOT EXISTS workspace_agent_installs (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -695,8 +724,27 @@ CREATE TABLE IF NOT EXISTS project_tasks (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'open'
-        CHECK (status IN ('open', 'in_progress', 'blocked', 'awaiting_input', 'done')),
+    status TEXT NOT NULL DEFAULT 'todo'
+        CONSTRAINT project_tasks_status_check CHECK (status IN (
+            'backlog', 'todo', 'in_progress', 'awaiting_input', 'blocked', 'in_review', 'done'
+        )),
+    -- Linear's five-level priority scale, encoding and all: 0 = none
+    -- (default/untriaged), 1 = urgent, 2 = high, 3 = medium, 4 = low. 1 is
+    -- the MOST urgent -- Linear's own convention, matched so no translation
+    -- layer sits between this table and the Linear MCP API. See
+    -- migrations/add_task_priority.sql.
+    priority SMALLINT NOT NULL DEFAULT 0
+        CONSTRAINT project_tasks_priority_check CHECK (priority BETWEEN 0 AND 4),
+    -- Sub-tasks: a self-reference, not a second table (a sub-task IS a task).
+    -- ON DELETE SET NULL is the orphaning decision -- deleting a parent
+    -- PROMOTES its children to top-level, it never destroys them. The
+    -- single-level rule (a sub-task may not itself have sub-tasks) needs a
+    -- lookup a CHECK cannot express and lives in project_tasks_service.py;
+    -- the storage layer enforces only the degenerate self-parent case. See
+    -- migrations/add_task_parent.sql.
+    parent_task_id TEXT NULL REFERENCES project_tasks(id) ON DELETE SET NULL
+        CONSTRAINT project_tasks_parent_not_self_check
+        CHECK (parent_task_id IS NULL OR parent_task_id <> id),
     assignee_agent_id TEXT NULL REFERENCES workspace_agent_installs(id) ON DELETE SET NULL,
     created_by TEXT NULL,
     due_at TIMESTAMPTZ NULL,
@@ -704,6 +752,49 @@ CREATE TABLE IF NOT EXISTS project_tasks (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Labels: a per-WORKSPACE vocabulary ("bug", "customer-reported") that any
+-- project's tasks can reuse, plus the many-to-many join onto tasks. Scoped
+-- to the workspace, not the project, because a label describes a KIND of
+-- work and that kind does not change when the work moves to another client
+-- -- the same boundary agent display names already use. `color` holds a
+-- palette TOKEN name, never a hex: the frontend owns what each token
+-- resolves to per theme, exactly as it already does for the --task-*
+-- custom properties (see frontend/lib/workspace/fleet/task-status.tsx). No
+-- RLS -- scoped like `projects`/`project_tasks`, every query in
+-- workspace_labels_service.py filters by (tenant_id, workspace_id). See
+-- migrations/add_task_labels.sql for the standalone copy of this DDL and
+-- the full reasoning.
+CREATE TABLE IF NOT EXISTS workspace_labels (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT 'grey'
+        CONSTRAINT workspace_labels_color_check CHECK (color IN (
+            'grey', 'red', 'orange', 'amber', 'green',
+            'teal', 'blue', 'indigo', 'violet', 'pink'
+        )),
+    created_by TEXT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Both FKs CASCADE, which is the OPPOSITE of parent_task_id's SET NULL
+-- above and deliberately so: a row here is a LINK, not user content, and a
+-- link to a thing that no longer exists is a dangling pointer rather than
+-- data worth preserving. The task and the label are the content; neither is
+-- touched by the other's removal.
+CREATE TABLE IF NOT EXISTS project_task_labels (
+    task_id TEXT NOT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+    label_id TEXT NOT NULL REFERENCES workspace_labels(id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    added_by TEXT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (task_id, label_id)
 );
 
 -- Bug reports (MAN-106): a small, honest "report an issue" entry point
@@ -1537,6 +1628,21 @@ CREATE INDEX IF NOT EXISTS idx_workspace_inventory_items_vehicle ON workspace_in
 CREATE INDEX IF NOT EXISTS idx_workspace_inventory_items_product_name ON workspace_inventory_items(tenant_id, workspace_id, product_name);
 CREATE INDEX IF NOT EXISTS idx_project_tasks_project ON project_tasks(tenant_id, workspace_id, project_id, status);
 CREATE INDEX IF NOT EXISTS idx_project_tasks_assignee ON project_tasks(tenant_id, workspace_id, assignee_agent_id) WHERE assignee_agent_id IS NOT NULL;
+-- NOTE: idx_project_tasks_parent is deliberately NOT here. It indexes
+-- project_tasks.parent_task_id, a column this file's own CREATE TABLE only
+-- creates on a BRAND NEW database -- on an already-provisioned one the
+-- `IF NOT EXISTS` makes the CREATE TABLE a no-op and the column arrives
+-- later, from the guarded ALTER in ensure_control_plane_schema()'s migration
+-- section. A `CREATE INDEX IF NOT EXISTS` here would therefore run BEFORE
+-- that ALTER and fail with `column "parent_task_id" does not exist`,
+-- crashing bootstrap outright on every existing database. The index is
+-- created inside that same guarded DO block instead, immediately after the
+-- column it indexes. (The workspace_labels indexes below are safe here for
+-- the opposite reason: their tables are brand new and created a few
+-- statements above, so the columns always exist by the time these run.)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_labels_name ON workspace_labels(tenant_id, workspace_id, lower(name));
+CREATE INDEX IF NOT EXISTS idx_workspace_labels_workspace ON workspace_labels(tenant_id, workspace_id);
+CREATE INDEX IF NOT EXISTS idx_project_task_labels_label ON project_task_labels(tenant_id, workspace_id, label_id);
 CREATE INDEX IF NOT EXISTS idx_mcp_external_agent_roster_workspace ON mcp_external_agent_roster(tenant_id, workspace_id, revoked);
 CREATE INDEX IF NOT EXISTS idx_agent_manifests_scope ON agent_manifests(tenant_id, workspace_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_bible_versions_install_number ON agent_bible_versions(tenant_id, workspace_id, agent_install_id, version_number DESC);
@@ -3878,6 +3984,170 @@ async def ensure_control_plane_schema() -> Any:
             "CREATE INDEX IF NOT EXISTS idx_vault_credentials_project "
             "ON vault_credentials(project_id) WHERE project_id IS NOT NULL"
         )
+        # ── Task status vocabulary -> Linear-style kanban columns. The
+        # CREATE TABLE above already declares the seven-value constraint, but
+        # it is `IF NOT EXISTS`, so an already-provisioned database keeps the
+        # original five-value CHECK ('open' | in_progress | blocked |
+        # awaiting_input | done) forever without this. project_tasks_service.py
+        # writes 'todo'/'backlog'/'in_review' as of the same change, so an
+        # un-migrated database would reject those writes outright — this is the
+        # self-heal that makes deploy order not matter. Same DDL as the
+        # standalone migrations/add_task_status_vocabulary.sql (see it for why
+        # existing rows become 'todo' and never 'backlog'); mirroring a
+        # migration file into this function is the established convention here.
+        #
+        # One atomic DO block, so a failure leaves the OLD constraint intact
+        # rather than an unconstrained column, and guarded like the
+        # btree_gist block below so it can never crash bootstrap: if it does
+        # fail, the warning tells the operator to apply the migration by hand.
+        # Idempotent — re-running drops and re-adds the same named constraint
+        # and rewrites zero rows.
+        try:
+            await pool.execute(
+                """
+                DO $$
+                DECLARE
+                    existing_constraint RECORD;
+                BEGIN
+                    FOR existing_constraint IN
+                        SELECT conname
+                        FROM pg_constraint
+                        WHERE conrelid = 'public.project_tasks'::regclass
+                          AND contype = 'c'
+                          AND pg_get_constraintdef(oid) ILIKE '%status%'
+                    LOOP
+                        EXECUTE format(
+                            'ALTER TABLE project_tasks DROP CONSTRAINT %I',
+                            existing_constraint.conname
+                        );
+                    END LOOP;
+                    UPDATE project_tasks SET status = 'todo' WHERE status = 'open';
+                    ALTER TABLE project_tasks ALTER COLUMN status SET DEFAULT 'todo';
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_status_check
+                        CHECK (status IN (
+                            'backlog', 'todo', 'in_progress', 'awaiting_input',
+                            'blocked', 'in_review', 'done'
+                        ));
+                END $$;
+                """
+            )
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.warning(
+                "project_tasks status vocabulary migration not applied (%s); the table "
+                "may still carry the original five-value CHECK, which will reject "
+                "'backlog'/'todo'/'in_review' writes. Apply "
+                "migrations/add_task_status_vocabulary.sql manually.",
+                exc,
+            )
+        # ── Task priority (Linear's five-level scale). Same reasoning as the
+        # status-vocabulary block directly above: the CREATE TABLE already
+        # declares the column, but it is `IF NOT EXISTS`, so a database
+        # provisioned before this change would never grow a `priority`
+        # column and every task SELECT (which now names it explicitly) would
+        # fail outright. This is the self-heal that makes deploy order not
+        # matter. Same DDL as the standalone
+        # migrations/add_task_priority.sql — see it for the encoding and for
+        # why this is safe against real rows (purely additive; every existing
+        # task lands on 0/'none', i.e. untriaged, and no row is rewritten).
+        #
+        # One atomic DO block, guarded so it can never crash bootstrap;
+        # idempotent (IF NOT EXISTS column add, drop-then-re-add of a stably
+        # named constraint).
+        try:
+            await pool.execute(
+                """
+                DO $$
+                BEGIN
+                    ALTER TABLE project_tasks
+                        ADD COLUMN IF NOT EXISTS priority SMALLINT NOT NULL DEFAULT 0;
+                    ALTER TABLE project_tasks
+                        DROP CONSTRAINT IF EXISTS project_tasks_priority_check;
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_priority_check
+                        CHECK (priority BETWEEN 0 AND 4);
+                END $$;
+                """
+            )
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.warning(
+                "project_tasks priority column migration not applied (%s); the table "
+                "may still lack the `priority` column, which will fail every task "
+                "read and write. Apply migrations/add_task_priority.sql manually.",
+                exc,
+            )
+        # ── Sub-tasks: project_tasks.parent_task_id. Same reasoning as the
+        # two blocks directly above — the CREATE TABLE declares the column,
+        # but it is `IF NOT EXISTS`, so a database provisioned before this
+        # change would never grow one and every task SELECT (which now names
+        # it explicitly) would fail outright. This is the self-heal that
+        # makes deploy order not matter. Same DDL as the standalone
+        # migrations/add_task_parent.sql — see it for the single-level and
+        # orphaning decisions, and for why this is safe against real rows
+        # (purely additive; every existing task lands on NULL, i.e. "a
+        # top-level task", which is what all of them already are).
+        #
+        # One atomic DO block, guarded so it can never crash bootstrap;
+        # idempotent (IF NOT EXISTS column add, drop-then-re-add of stably
+        # named constraints, IF NOT EXISTS index).
+        try:
+            await pool.execute(
+                """
+                DO $$
+                BEGIN
+                    ALTER TABLE project_tasks
+                        ADD COLUMN IF NOT EXISTS parent_task_id TEXT NULL;
+                    ALTER TABLE project_tasks
+                        DROP CONSTRAINT IF EXISTS project_tasks_parent_task_id_fkey;
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_parent_task_id_fkey
+                        FOREIGN KEY (parent_task_id) REFERENCES project_tasks(id)
+                        ON DELETE SET NULL;
+                    ALTER TABLE project_tasks
+                        DROP CONSTRAINT IF EXISTS project_tasks_parent_not_self_check;
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_parent_not_self_check
+                        CHECK (parent_task_id IS NULL OR parent_task_id <> id);
+                    CREATE INDEX IF NOT EXISTS idx_project_tasks_parent
+                        ON project_tasks(parent_task_id)
+                        WHERE parent_task_id IS NOT NULL;
+                END $$;
+                """
+            )
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.warning(
+                "project_tasks parent_task_id migration not applied (%s); the table "
+                "may still lack the `parent_task_id` column, which will fail every "
+                "task read and write. Apply migrations/add_task_parent.sql manually.",
+                exc,
+            )
+        # ── Labels: workspace_labels + project_task_labels. Unlike the three
+        # blocks above these are whole TABLES, which CONTROL_PLANE_SCHEMA_SQL's
+        # `CREATE TABLE IF NOT EXISTS` above does create on an existing
+        # database too — so this block exists for the INDEXES, and in
+        # particular for the case-insensitive UNIQUE one. That index is
+        # declared in the schema SQL as well; repeating it here (guarded)
+        # keeps a partially-provisioned database self-healing rather than
+        # crashing bootstrap on the one statement that CAN legitimately fail
+        # (a UNIQUE index refuses to build over conflicting rows). There are
+        # no such rows today — the tables are new — but a workspace that
+        # somehow acquired "Bug" and "bug" through a direct-SQL path would
+        # otherwise take the whole process down on boot instead of logging
+        # it. Same DDL as migrations/add_task_labels.sql.
+        try:
+            await pool.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_workspace_labels_name
+                    ON workspace_labels(tenant_id, workspace_id, lower(name));
+                """
+            )
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.warning(
+                "workspace_labels case-insensitive name uniqueness index not applied "
+                "(%s); two labels differing only in case could coexist in one "
+                "workspace. Apply migrations/add_task_labels.sql manually.",
+                exc,
+            )
         # ── Phase 5B: ONE TENANT PER WORKSPACE is the law. A workspace's installs
         # may never span tenants. Enforced by a Postgres EXCLUSION constraint —
         # the only constraint type that can express "no two rows share a

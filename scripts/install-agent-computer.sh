@@ -39,7 +39,70 @@ DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME:-$(hostname -f 2>/dev/null || hos
 # so they default on here. Overridable for an operator who explicitly
 # wants a channel-free box.
 PERSONAL_CHANNELS_ENABLED="${EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED:-true}"
-REGISTRATION_TIMEOUT_SECONDS="${EMPYRALIS_REGISTRATION_TIMEOUT_SECONDS:-180}"
+# How long to wait, after the gateway service has been started, for it to
+# phone home and land registration.json. This clock starts AFTER apt, Node 20
+# and the artifact download are already done, so it is purely gateway
+# boot -> POST /gateway/registrations -> write state file.
+#
+# MAN-121: this was 180s. On the smallest droplets that is tight enough to be
+# a coin flip — a cold Node process on 1 shared vCPU, plus a first outbound TLS
+# handshake to the platform, plus systemd's Restart=always/RestartSec=5 backoff
+# if the very first attempt loses a race with cloud-init's network setup, can
+# comfortably eat past three minutes. Widened to 600s, which sits deliberately
+# under the pairing intent's 15-minute TTL (DEFAULT_GATEWAY_PAIRING_TTL_SECONDS
+# in server_modules/gateway_pairing_service.py) and under the backend's own
+# 20-minute watch window (VPS_CONNECT_TIMEOUT_SECONDS), so this timer can never
+# be the first thing to give up — the authoritative clocks stay authoritative.
+# Note this timer does not stop anything: the systemd unit keeps running and
+# retrying past it, which is why the beacon it sends is advisory, not terminal.
+REGISTRATION_TIMEOUT_SECONDS="${EMPYRALIS_REGISTRATION_TIMEOUT_SECONDS:-600}"
+
+# MAN-121 failure channel. Until now the box only ever reported SUCCESS (via
+# POST /gateway/registrations); every install failure died here in stderr,
+# readable only by SSHing into the droplet. The platform could therefore only
+# infer "timed out", never explain anything. These few lines give the box a way
+# to say what went wrong, using the pairing token and API URL it already has.
+INSTALL_PHASE="startup"
+BEACON_SENT=0
+
+json_escape() {
+  # Pure bash so this works before apt has installed anything.
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\r'/}"
+  s="${s//$'\n'/ }"
+  s="${s//$'\t'/ }"
+  printf '%s' "${s}"
+}
+
+report_beacon() {
+  # report_beacon <terminal:0|1> <message>
+  local terminal="$1"
+  local message="$2"
+  local payload
+  if [[ "${EMPYRALIS_DISABLE_INSTALL_BEACON:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -z "${PAIRING_TOKEN}" || -z "${API_URL}" ]]; then
+    return 0
+  fi
+  # First beacon wins: the first failure is the useful one, and later noise
+  # from unwinding shouldn't overwrite it.
+  if (( BEACON_SENT )); then
+    return 0
+  fi
+  BEACON_SENT=1
+  payload="$(printf '{"pairing_token":"%s","phase":"%s","message":"%s","terminal":%s}' \
+    "$(json_escape "${PAIRING_TOKEN}")" \
+    "$(json_escape "${INSTALL_PHASE}")" \
+    "$(json_escape "${message}")" \
+    "$([[ "${terminal}" == "1" ]] && printf 'true' || printf 'false')")"
+  # Never let reporting a failure cause a further failure.
+  curl -fsS -m 15 -X POST "${API_URL%/}/gateway/provisioning-events" \
+    -H 'content-type: application/json' \
+    --data-binary "${payload}" >/dev/null 2>&1 || true
+}
 
 log() {
   printf '[empyralis-agent-computer] %s\n' "$*"
@@ -47,8 +110,20 @@ log() {
 
 fail() {
   printf '[empyralis-agent-computer] ERROR: %s\n' "$*" >&2
+  report_beacon 1 "$*"
   exit 1
 }
+
+on_unexpected_error() {
+  # set -Eeuo pipefail kills the installer on any unchecked command failure;
+  # without this those deaths are invisible to the platform too. `exit` from
+  # fail() does not trigger ERR, so this only catches what fail() missed.
+  local code=$?
+  report_beacon 1 "installer aborted during '${INSTALL_PHASE}' (exit ${code}, line ${BASH_LINENO[0]:-unknown})"
+  exit "${code}"
+}
+
+trap on_unexpected_error ERR
 
 require_root() {
   if [[ "$(id -u)" != "0" ]]; then
@@ -275,9 +350,18 @@ install_gateway_from_artifact() {
   gateway_archive="${tmp_dir}/gateway.tar.gz"
 
   log "downloading prebuilt gateway artifact ${GATEWAY_ARTIFACT_URL}"
-  if ! curl -fsSL "${GATEWAY_ARTIFACT_URL}" -o "${gateway_archive}"; then
+  # MAN-121: this download is the single most likely silent killer of a
+  # provision — if the release host does not serve this exact object (wrong or
+  # unpublished ${AGENT_COMPUTER_VERSION}, moved path, 404, 403, rate limit,
+  # captive proxy) the box can never start the gateway, and before the beacon
+  # existed nothing anywhere said so. Capture the HTTP status and curl's own
+  # exit code so the reported reason names the cause rather than just the URL.
+  local http_status="" curl_exit=0
+  http_status="$(curl -sS -L -m 180 -w '%{http_code}' \
+    -o "${gateway_archive}" "${GATEWAY_ARTIFACT_URL}" 2>/dev/null)" || curl_exit=$?
+  if [[ ! -s "${gateway_archive}" || "${http_status}" != "200" ]]; then
     rm -rf "${tmp_dir}"
-    fail "could not download gateway artifact from ${GATEWAY_ARTIFACT_URL}"
+    fail "could not download the gateway artifact from ${GATEWAY_ARTIFACT_URL} (HTTP ${http_status:-none}, curl exit ${curl_exit}). The release host must serve this exact file for version '${AGENT_COMPUTER_VERSION}'; check EMPYRALIS_AGENT_COMPUTER_VERSION / EMPYRALIS_ARTIFACT_BASE_URL."
   fi
 
   rm -rf "${stage_dir}"
@@ -513,6 +597,14 @@ wait_for_registration() {
     sleep 2
   done
   print_recent_logs
+  # ADVISORY, not terminal (MAN-121). Everything the installer had to do has
+  # succeeded by this point; the gateway service is installed, enabled and
+  # running under systemd with Restart=always, so it keeps trying to pair long
+  # after this script exits — and often succeeds. Reporting this as terminal
+  # would let the backend give up early and DESTROY a box that was about to
+  # come up. So: tell the platform what we saw, then exit non-zero for
+  # cloud-init's log, and let the backend's own 20-minute window decide.
+  report_beacon 0 "the gateway service was installed and started, but had not confirmed registration ${REGISTRATION_TIMEOUT_SECONDS}s later. It is still running and retrying; check 'journalctl -u ${GATEWAY_SERVICE}' on the server if it never connects."
   fail "Gateway did not confirm registration within ${REGISTRATION_TIMEOUT_SECONDS}s"
 }
 
@@ -522,19 +614,29 @@ final_status() {
 }
 
 main() {
+  # INSTALL_PHASE names the step for the failure beacon, so a report says
+  # "died downloading the gateway" rather than just "died".
+  INSTALL_PHASE="preflight"
   require_root
   detect_ubuntu
   require_pairing_token
+  INSTALL_PHASE="system_dependencies"
   apt_install_system_deps
+  INSTALL_PHASE="node_install"
   install_node20
+  INSTALL_PHASE="prepare_host"
   create_service_user
   prepare_directories
   write_env_file
+  INSTALL_PHASE="gateway_download"
   install_release_artifacts
+  INSTALL_PHASE="service_setup"
   write_launcher_scripts
   write_systemd_units
   chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_ROOT}" "${LOG_DIR}" "${RUN_DIR}"
+  INSTALL_PHASE="service_start"
   start_services
+  INSTALL_PHASE="registration_wait"
   final_status
 }
 

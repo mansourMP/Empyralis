@@ -235,7 +235,10 @@ export default function ProjectsPage() {
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
           {loading && projects.length === 0 ? (
-            <FleetListSkeleton rows={4} />
+            // rowHeight matches .fleet-project-row's real min-height (52px) —
+            // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton row
+            // snaps taller the moment the projects list swaps in.
+            <FleetListSkeleton rows={4} rowHeight={52} />
           ) : error && projects.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load projects" message={error} onRetry={refresh} />
           ) : projects.length === 0 ? (
@@ -265,7 +268,12 @@ export default function ProjectsPage() {
                 const lastActive = stats?.lastActive ?? null;
                 const statusSummary = stats ? summarizeStatus(stats.statusCounts) : "";
                 return (
-                  <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-project-row">
+                  // data-tab-title: a ⌘-clicked row opens a background content
+                  // tab (see FleetTabs), and without this the new tab is
+                  // titled "Project" until someone actually visits it — the
+                  // breadcrumb name registry only learns a project's name from
+                  // the project's own page.
+                  <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-project-row" data-tab-title={p.name}>
                     <span className="fleet-project-cell-name">
                       <ProjectIcon icon={p.icon} tint={p.tint} />
                       <span className="fleet-project-cell-name-text">

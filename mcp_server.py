@@ -36,7 +36,25 @@ Tasks (always live — see "Write-gate decision" below):
     this key's external_agent_id, OR unassigned/backlog)
   - ``empyralis_get_task`` → project_tasks_service.get_task
   - ``empyralis_update_task_status`` → project_tasks_service.update_task (status only)
+  - ``empyralis_set_task_priority`` → project_tasks_service.update_task (priority only;
+    a separate tool from status because priority and status are independent
+    facts and setting one must never quietly change the other)
   - ``empyralis_comment_on_task`` → project_tasks_service.add_task_comment
+  - ``empyralis_create_task`` → project_tasks_service.create_task (accepts
+    ``parent_task_id`` to create a SUB-TASK; exactly one level of nesting)
+  - ``empyralis_set_task_parent`` → project_tasks_service.set_task_parent
+    (re-file an existing task under a parent, or detach it back to top-level)
+  - ``empyralis_list_labels`` → workspace_labels_service.list_labels
+  - ``empyralis_add_task_label`` → workspace_labels_service.attach_label
+  - ``empyralis_remove_task_label`` → workspace_labels_service.detach_label
+
+Sub-tasks and labels (2026-07-29): a sub-task is a plain task carrying
+``parent_task_id``, so every tool above already works on one unchanged, and
+every task returned by any tool here carries ``subtask_count`` /
+``subtask_done_count`` (the "1/3 done" rollup) and its ``labels``. Labels are
+a per-WORKSPACE vocabulary: an external agent can list it and attach/detach
+its entries, but deliberately cannot CREATE labels — that stays a human
+decision, so a guessed word cannot fill the vocabulary with near-duplicates.
 
 Write-gate decision (task tools): NOT behind ``EMPYRALIS_MCP_WRITE_ENABLED``.
 The 8 gated tools below are workspace-wide configuration mutations (create/
@@ -107,7 +125,14 @@ EMPYRALIST_MCP_TOOLS = [
     "empyralis_list_my_tasks",
     "empyralis_get_task",
     "empyralis_update_task_status",
+    "empyralis_set_task_priority",
     "empyralis_comment_on_task",
+    "empyralis_set_task_parent",
+    # Labels (always live, same bound: the workspace vocabulary is readable
+    # and attachable, but NOT creatable — see the module docstring)
+    "empyralis_list_labels",
+    "empyralis_add_task_label",
+    "empyralis_remove_task_label",
     # Write (gated behind EMPYRALIS_MCP_WRITE_ENABLED + per-key writes_enabled)
     "empyralis_create_project",
     "empyralis_create_agent",
@@ -506,13 +531,29 @@ if empyralist_mcp is not None:
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
     )
     async def empyralis_create_task(
-        project_id: str, title: str, description: str = "", due_at: str = "", ctx: Context = None,
+        project_id: str, title: str, description: str = "", due_at: str = "",
+        priority: int = 0, parent_task_id: str = "", ctx: Context = None,
     ) -> Dict[str, Any]:
         """Create a task on a project's shared board — the same board a human
         sees in the Tasks view and any platform agent in that project works
-        off of. Created unassigned/'open'; use empyralis_update_task_status
+        off of. Created unassigned/'todo'; use empyralis_update_task_status
         (once assigned) to move it through its lifecycle, or ask the owner
-        to assign it. project_id must be a project in this workspace."""
+        to assign it. project_id must be a project in this workspace.
+
+        priority uses Linear's scale: 0 = none (default, untriaged),
+        1 = urgent, 2 = high, 3 = medium, 4 = low. NOTE the direction —
+        1 is the MOST urgent and 4 the least, so a LOWER number means MORE
+        urgent. An out-of-range value is rejected with a clear error rather
+        than silently becoming 'none'.
+
+        parent_task_id files this as a SUB-TASK of an existing task — use it
+        when you are breaking a big piece of work into steps, so the parent
+        card shows real progress ("1/3 done") instead of the steps scattering
+        across the board as unrelated cards. IMPORTANT: this board allows
+        exactly ONE level of nesting. The parent must be a top-level task; a
+        parent that is itself already a sub-task is rejected with a clear
+        error (attach it to that sub-task's own parent instead). Parent and
+        sub-task must be in the same project."""
         r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         author_id = r.get("external_agent_id") or "external_mcp_client"
         from server_modules import project_tasks_service as tasks
@@ -520,6 +561,8 @@ if empyralist_mcp is not None:
             task = await tasks.create_task(
                 tenant_id=tenant, workspace_id=ws, project_id=project_id,
                 title=title, description=description, due_at=due_at or None,
+                priority=priority,
+                parent_task_id=parent_task_id or None,
                 created_by=author_id,
             )
         except Exception as exc:  # noqa: BLE001 — includes an invalid/foreign project_id (FK violation)
@@ -533,12 +576,18 @@ if empyralist_mcp is not None:
         annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
     )
     async def empyralis_list_my_tasks(
-        project_id: str = "", status: str = "", ctx: Context = None,
+        project_id: str = "", status: str = "", sort: str = "", ctx: Context = None,
     ) -> Dict[str, Any]:
         """List tasks assigned to you (this key's external-agent identity) or
-        unassigned/backlog tasks still open for anyone in the workspace.
+        unassigned tasks still open for anyone in the workspace.
         Optionally filter to one project_id or one status
-        (open|in_progress|blocked|awaiting_input|done)."""
+        (backlog|todo|in_progress|awaiting_input|blocked|in_review|done).
+
+        Every task comes back with `priority` (0 = none, 1 = urgent, 2 = high,
+        3 = medium, 4 = low — a LOWER number is MORE urgent) and a
+        plain-English `priority_label`. Pass sort='priority' to get the most
+        urgent work first and untriaged work last — that is how you decide
+        what to pick up next; the default ordering is newest-first."""
         r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         external_agent_id = r.get("external_agent_id") or None
         from server_modules import project_tasks_service as tasks
@@ -548,6 +597,7 @@ if empyralist_mcp is not None:
                 external_agent_id=external_agent_id,
                 project_id=project_id or None,
                 status=status or None,
+                sort=sort or None,
             )
         except Exception as exc:  # noqa: BLE001
             await _ledger_mcp_call(ws, "empyralis_list_my_tasks", False, error=str(exc))
@@ -574,13 +624,70 @@ if empyralist_mcp is not None:
         """Get one task by id. Scoped like every other tool here — any task in
         your workspace, not only ones assigned to you (same precedent as
         empyralis_configure_agent: any agent in the workspace, not only yours).
-        Comments live under task.metadata.comments."""
+        Comments live under task.metadata.comments; `priority` (0 = none,
+        1 = urgent, 2 = high, 3 = medium, 4 = low — lower is more urgent) and
+        its plain-English `priority_label` are returned on the task itself.
+
+        Also returns the SUB-TASK ROLLUP — `task.subtask_count` and
+        `task.subtask_done_count`, which together are the "1/3 done" progress
+        on the card — plus the full `subtasks` list, `task.parent_task_id` if
+        this task is itself a sub-task, and `task.labels`. Check the rollup
+        before reporting a parent complete: a task whose sub-tasks are not all
+        done is not done."""
         r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import project_tasks_service as tasks
         task = await tasks.get_task(tenant_id=tenant, workspace_id=ws, task_id=task_id)
         await _ledger_mcp_call(ws, "empyralis_get_task", task is not None, task_id=task_id)
         if task is None:
             return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
+        # The counts ride on the task itself (same query). The CHILDREN are a
+        # second read, done only on this single-task path -- never on
+        # empyralis_list_my_tasks, where it would be one extra query per card.
+        subtasks = await tasks.list_subtasks(
+            tenant_id=tenant, workspace_id=ws, parent_task_id=task_id,
+        )
+        return {"ok": True, "task": task, "subtasks": subtasks}
+
+    @empyralist_mcp.tool(
+        title="Set Task Parent",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_set_task_parent(
+        task_id: str, parent_task_id: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """File an EXISTING task under another as a sub-task, or detach it back
+        to top-level by leaving parent_task_id empty. Use when you realize a
+        task already on the board is really a step of a bigger one.
+
+        IMPORTANT: this board allows exactly ONE level of nesting. The parent
+        must be a top-level task, and a task that already has sub-tasks of its
+        own cannot itself become one — both are rejected with a clear error
+        naming the reason, never silently applied. Parent and sub-task must be
+        in the same project.
+
+        Detaching is safe and non-destructive: the task keeps everything else
+        (status, assignee, comments, labels) and simply returns to the
+        top-level board. That is also what happens on its own if a parent task
+        is ever deleted — sub-tasks are promoted, never deleted with it.
+
+        Workspace-scoped like empyralis_get_task."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import project_tasks_service as tasks
+        try:
+            task = await tasks.set_task_parent(
+                tenant_id=tenant, workspace_id=ws, task_id=task_id,
+                parent_task_id=parent_task_id or None,
+            )
+        except ValueError as exc:
+            await _ledger_mcp_call(ws, "empyralis_set_task_parent", False, task_id=task_id)
+            return {"ok": False, "error": str(exc), "task_id": task_id}
+        if task is None:
+            await _ledger_mcp_call(ws, "empyralis_set_task_parent", False, task_id=task_id)
+            return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
+        await _ledger_mcp_call(
+            ws, "empyralis_set_task_parent", True,
+            task_id=task_id, parent_task_id=parent_task_id or None,
+        )
         return {"ok": True, "task": task}
 
     @empyralist_mcp.tool(
@@ -590,10 +697,14 @@ if empyralist_mcp is not None:
     async def empyralis_update_task_status(
         task_id: str, status: str, ctx: Context = None,
     ) -> Dict[str, Any]:
-        """Update a task's status: open | in_progress | blocked | awaiting_input
-        | done. Workspace-scoped like empyralis_get_task — any task in your
-        workspace. An invalid status is rejected with a clear, agent-facing
-        error naming the valid set; it is never silently coerced."""
+        """Update a task's status: backlog | todo | in_progress | awaiting_input
+        | blocked | in_review | done. Set 'in_review' when you have finished the
+        work and a human should check it before the task is closed — that is the
+        normal way to hand work back; reserve 'done' for work that needs no
+        sign-off. ('open' is still accepted as the old name for 'todo'.)
+        Workspace-scoped like empyralis_get_task — any task in your workspace.
+        An invalid status is rejected with a clear, agent-facing error naming
+        the valid set; it is never silently coerced."""
         r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import project_tasks_service as tasks
         try:
@@ -605,6 +716,43 @@ if empyralist_mcp is not None:
             await _ledger_mcp_call(ws, "empyralis_update_task_status", False, task_id=task_id, status=status)
             return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
         await _ledger_mcp_call(ws, "empyralis_update_task_status", True, task_id=task_id, status=status)
+        return {"ok": True, "task": task}
+
+    @empyralist_mcp.tool(
+        title="Set Task Priority",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_set_task_priority(
+        task_id: str, priority: int, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Set a task's priority on Linear's scale: 0 = none (untriaged),
+        1 = urgent, 2 = high, 3 = medium, 4 = low. NOTE the direction —
+        1 is the MOST urgent and 4 the least, so a LOWER number means MORE
+        urgent. Pass 0 to clear a priority back to untriaged.
+
+        Triage is yours to do, not only the owner's: if you can tell that a
+        task is more or less urgent than the board currently says, set it.
+        A separate tool from empyralis_update_task_status on purpose —
+        priority (how urgent) and status (where it is in the workflow) are
+        independent, and changing one should never quietly change the other.
+
+        Workspace-scoped like empyralis_get_task — any task in your
+        workspace. An out-of-range priority is rejected with a clear,
+        agent-facing error naming the valid set; it is never silently
+        coerced to 'none'."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import project_tasks_service as tasks
+        try:
+            task = await tasks.update_task(
+                tenant_id=tenant, workspace_id=ws, task_id=task_id, priority=priority,
+            )
+        except ValueError as exc:
+            await _ledger_mcp_call(ws, "empyralis_set_task_priority", False, task_id=task_id, priority=priority)
+            return {"ok": False, "error": str(exc), "task_id": task_id}
+        if task is None:
+            await _ledger_mcp_call(ws, "empyralis_set_task_priority", False, task_id=task_id, priority=priority)
+            return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
+        await _ledger_mcp_call(ws, "empyralis_set_task_priority", True, task_id=task_id, priority=priority)
         return {"ok": True, "task": task}
 
     @empyralist_mcp.tool(
@@ -633,6 +781,95 @@ if empyralist_mcp is not None:
             return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
         await _ledger_mcp_call(ws, "empyralis_comment_on_task", True, task_id=task_id)
         return {"ok": True, "task": task}
+
+    # ── Labels. Ungated for the same reason the task tools above are (see
+    # the module docstring's write-gate decision): attaching a chip to a task
+    # you can already see is a narrower mutation than empyralis_chat, which
+    # runs a whole AI turn ungated. Note what is MISSING here on purpose --
+    # there is no empyralis_create_label. The workspace's label vocabulary is
+    # a small curated human-owned thing, and an external agent that can mint
+    # a label on a guessed word fills it with "bug"/"Bugs"/"bugfix" within a
+    # week. empyralis_list_labels exists so attaching is a choice from a real
+    # list rather than a guess. ──────────────────────────────────────────
+
+    @empyralist_mcp.tool(
+        title="List Labels",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    async def empyralis_list_labels(ctx: Context = None) -> Dict[str, Any]:
+        """List every label available in this workspace, with its colour and
+        how many tasks currently carry it. Labels are shared across ALL
+        projects in the workspace — a label like 'bug' means the same thing on
+        every board. Call this before empyralis_add_task_label so you attach a
+        label that actually exists; you cannot create new ones."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import workspace_labels_service as labels
+        try:
+            rows = await labels.list_labels(tenant_id=tenant, workspace_id=ws)
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(ws, "empyralis_list_labels", False, error=str(exc))
+            return {"ok": False, "error": str(exc), "labels": []}
+        await _ledger_mcp_call(ws, "empyralis_list_labels", True, label_count=len(rows))
+        return {"ok": True, "labels": rows}
+
+    @empyralist_mcp.tool(
+        title="Add Task Label",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_add_task_label(
+        task_id: str, label: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Attach an existing workspace label to a task — how you categorize
+        work so a human can filter for it later (e.g. tagging something you hit
+        as 'bug'). `label` may be the label's NAME (matched case-insensitively,
+        so 'bug' finds a label a human created as 'Bug') or its id.
+
+        Idempotent: attaching a label the task already carries succeeds and
+        changes nothing. Does NOT create unknown labels — if the one you want
+        does not exist the error lists the ones that do, and the right move is
+        to pick one or tell the owner what is missing.
+
+        Workspace-scoped like empyralis_get_task — any task in your
+        workspace."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        author_id = r.get("external_agent_id") or "external_mcp_client"
+        from server_modules import workspace_labels_service as labels
+        try:
+            attached = await labels.attach_label(
+                tenant_id=tenant, workspace_id=ws, task_id=task_id,
+                label=label, added_by=author_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — unknown label / unknown task both land here
+            await _ledger_mcp_call(ws, "empyralis_add_task_label", False, task_id=task_id, label=label)
+            return {"ok": False, "error": str(exc), "task_id": task_id}
+        await _ledger_mcp_call(ws, "empyralis_add_task_label", True, task_id=task_id, label=label)
+        return {"ok": True, "task_id": task_id, "labels": attached}
+
+    @empyralist_mcp.tool(
+        title="Remove Task Label",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_remove_task_label(
+        task_id: str, label: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Take a label off a task. `label` may be the label's name
+        (case-insensitive) or its id. Removes only the LINK — the label itself
+        stays in the workspace vocabulary for every other task. Idempotent:
+        detaching a label the task does not carry succeeds and changes nothing.
+
+        Workspace-scoped like empyralis_get_task — any task in your
+        workspace."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import workspace_labels_service as labels
+        try:
+            remaining = await labels.detach_label(
+                tenant_id=tenant, workspace_id=ws, task_id=task_id, label=label,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(ws, "empyralis_remove_task_label", False, task_id=task_id, label=label)
+            return {"ok": False, "error": str(exc), "task_id": task_id}
+        await _ledger_mcp_call(ws, "empyralis_remove_task_label", True, task_id=task_id, label=label)
+        return {"ok": True, "task_id": task_id, "labels": remaining}
 
     # ── Write tools (gated per-key + global off-switch) ──────────────
 

@@ -27,6 +27,18 @@ def workspace_visible(entry_workspace_id: Optional[str], requested_workspace_id:
     return entry_ws == req_ws
 
 
+# Platform-internal vault rows that are NOT a user credential and must never
+# appear in any user-facing list. Today this is only the OAuth dynamic-client
+# registration store (MAN-124): those rows hold the platform's own
+# self-registered OAuth client_id/secret for a provider, keyed under a
+# sentinel provider name precisely so no provider-name lookup can find them.
+INTERNAL_VAULT_PROVIDERS = frozenset({"_oauth_dcr_client"})
+
+
+def is_internal_vault_entry(entry: Dict[str, Any]) -> bool:
+    return str(entry.get("provider") or "") in INTERNAL_VAULT_PROVIDERS
+
+
 def list_vault_credentials(
     load_vault_fn: LoadVaultFn,
     connector_catalog: Dict[str, Any],
@@ -34,6 +46,8 @@ def list_vault_credentials(
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for entry in load_vault_fn().get("credentials", []):
+        if is_internal_vault_entry(entry):
+            continue
         if not workspace_visible(entry.get("workspace_id"), workspace_id):
             continue
         provider = entry.get("provider")

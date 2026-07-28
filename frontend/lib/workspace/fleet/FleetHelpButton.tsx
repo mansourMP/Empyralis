@@ -3,14 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 import { HelpCircle } from "lucide-react";
 
+// One row per chord that actually works. The `g`-chords are driven by
+// PrimaryRail's RAIL_ITEMS — if a destination isn't in the rail, there is no
+// chord for it and it must not be listed here. "G H" (Hardware) went when
+// Hardware moved into Settings (2026-07); "G B" (Billing) was listed but had
+// never been bound at all — Billing lives in the account menu, not the rail.
 const SHORTCUTS: { keys: string; label: string }[] = [
   { keys: "⌘K", label: "Command palette" },
   { keys: "G I", label: "Go to Inbox" },
   { keys: "G C", label: "Go to Conversations" },
   { keys: "G P", label: "Go to Projects" },
   { keys: "G A", label: "Go to Agents" },
-  { keys: "G H", label: "Go to Hardware" },
-  { keys: "G B", label: "Go to Billing" },
   { keys: "J / K", label: "Move focus down / up" },
   { keys: "Enter", label: "Open the focused item" },
 ];

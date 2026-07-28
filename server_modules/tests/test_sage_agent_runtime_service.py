@@ -614,7 +614,7 @@ class SageAgentRuntimeAuditTests(unittest.TestCase):
             self.assertEqual(len(failed_calls), 1)
             kwargs = failed_calls[0].kwargs
             self.assertEqual(kwargs["status"], "error")
-            self.assertEqual(kwargs["title"], "Sage chat failed")
+            self.assertEqual(kwargs["title"], "Agent chat failed")
             completed_calls = [
                 call for call in mock_activity.await_args_list
                 if call.kwargs.get("action") == "sage_chat.completed"
@@ -777,7 +777,7 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
         self.assertFalse(mock_generate.called)
         self.assertTrue(mock_stream.called)
         stream_kwargs = mock_stream.call_args.kwargs
-        self.assertIn("You're Sage", stream_kwargs["system_prompt"])
+        self.assertIn("You're the user's personal AI assistant", stream_kwargs["system_prompt"])
         self.assertEqual(stream_kwargs["session_ctx"]["agent_turn_request"]["policy_context"]["agent_scope"], "sage")
         self.assertEqual(stream_kwargs["session_ctx"]["agent_turn_request"]["policy_context"]["agent_id"], "sage_main_agent")
 

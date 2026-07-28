@@ -16,10 +16,13 @@ export function FleetListSkeleton({
   /** Match the real content's row height (e.g. AgentsList/TasksList's
    *  .fleet-agent-row / .fleet-task-row, both `min-height: 52px`) so this
    *  placeholder doesn't reflow the page when the fetch resolves and the
-   *  real list swaps in. Left unset, rows fall back to their old ~37px
-   *  (12px bar + 12px top/bottom padding) — correct for the plain
-   *  `.fleet-list-row` callers (Inbox, Billing, the Projects list) this
-   *  component also serves. MAN-113: the un-set default caused a visible
+   *  real list swaps in. Every caller standing in for a *list* passes this:
+   *  52 for agent/task/project rows, 44 for .fleet-inbox-row, 64 for
+   *  ProjectOverview's two-line .fleet-activity-item. Left unset, rows fall
+   *  back to ~37px (12px bar + 12px top/bottom padding), which is right only
+   *  for the plain `.fleet-list-row` shape — today that's Billing, whose
+   *  ~37.8px .fleet-usage-legend-row already matches within a pixel.
+   *  MAN-113: the un-set default caused a visible
    *  "renders one way, then snaps to another" jump on the project detail
    *  page — its Agents/Tasks views render into 52px grid rows, ~15px taller
    *  than this skeleton's un-pinned rows, so the whole list resized the

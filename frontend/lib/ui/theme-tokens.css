@@ -68,10 +68,58 @@
   --content-max: 820px;       /* reading/forms column, Claude-lean */
   --content-max-wide: 1140px; /* data-table pages need more room */
 
-  /* Motion — appear instant, dismiss brief (Linear's asymmetric timing) */
-  --motion-fast: 100ms;
-  --motion-base: 150ms;
-  --motion-slow: 250ms;
+  /* ── Motion (MAN-126) ───────────────────────────────────────────────────
+     The single source of truth for every duration and curve in the app.
+     Three durations, deliberately: if a change needs a fourth, the change is
+     wrong. Motion here exists to explain a spatial relationship — where a
+     panel came from, that a width is still the same width — and nothing
+     else. Decoration is not a use case.
+
+     What may be animated: transform, opacity, panel width/height (collapse
+     only), scrim fade. What may NOT: colour, background, border-colour,
+     box-shadow. Those are state, and state should read as instant — a
+     150ms colour fade on hover is the single most common way an interface
+     starts to feel laggy. See docs/UI-CONTRACT.md §"Motion". */
+  --dur-1: 90ms;    /* hover, focus ring, press */
+  --dur-2: 140ms;   /* default: panel enter/exit, collapse, disclosure */
+  --dur-3: 200ms;   /* max — overlays/scrims only. Nothing exceeds this. */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in:  cubic-bezier(0.4, 0, 1, 1);
+
+  /* Legacy aliases — the three forked motion vocabularies this replaced
+     (theme-tokens' own --motion-*, fleet-theme's --dur-fast/--dur-base,
+     chrome's --transition). Kept pointing at the canonical scale so the
+     ~270 call sites that still reference them resolve to the new values
+     instead of breaking. Do not use these in new code. */
+  --motion-fast: var(--dur-1);
+  --motion-base: var(--dur-2);
+  --motion-slow: var(--dur-3);
+  --dur-fast: var(--dur-1);
+  --dur-base: var(--dur-2);
+  --transition: var(--dur-1) var(--ease-out);
+}
+
+/* Reduced motion, at the app root (MAN-126). The fleet surface has had its
+   own kill-switch for a while; this raises it to the whole document so the
+   legacy chrome.css surfaces are covered by the same guarantee.
+
+   Note what this does NOT do: it kills durations, not effects. A collapsing
+   rail still changes width, a drawer still opens — they just arrive rather
+   than travel. And a resize drag is untouched by design, because it was
+   never animated in the first place: dragging tracks the pointer 1:1 for
+   everyone. transition-delay is zeroed too, so state that is deliberately
+   deferred until an exit finishes (the drawer's `visibility`) flips
+   immediately instead of hanging for a duration that no longer runs. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 :root,
@@ -139,6 +187,47 @@ html[data-theme="dark"] {
      the vivid "actively working" green and not plain unknown-gray either. */
   --ready-dot: #5b8c73;
   --degraded-dot: #f59e0b;
+
+  /* ── Task status vocabulary (kanban board + task list) ────────────────────
+     A SEPARATE semantic ramp from the agent-status tones above, because a
+     task's lifecycle is not an agent's health: seven states that must all be
+     distinguishable side by side as seven board columns. Before this, Needs
+     input and In review both resolved to the same amber and two of the seven
+     columns read identically.
+
+     Assignment mirrors Linear's own semantics:
+       backlog / todo  grey    not started (the column heading, not colour,
+                               separates triaged-out from queued)
+       in progress     amber   an agent is executing
+       needs input     blue    calm — a human is needed, nothing is wrong
+       blocked         red     stopped, something IS wrong
+       in review       green   agent-complete, parked for a human
+       done            violet  the product accent, and Linear's own done state
+
+     Only `done` borrows --accent. That is a deliberate, single exception to
+     the "accent is reserved for the primary action" rule at the top of this
+     file: a completed task IS the product's success state, and Linear draws
+     the same equivalence. */
+  --task-backlog: #8a8f98;
+  --task-todo: #8a8f98;
+  --task-progress: #f2b23e;
+  --task-input: #5e9cf5;
+  --task-blocked: #ef4444;
+  --task-review: #4cb782;
+  --task-done: var(--accent);
+
+  /* Priority (Linear's integer convention: 1 urgent … 4 low). Only URGENT
+     carries colour; high/medium/low are grey bar glyphs, so a wall of cards
+     doesn't turn into a wall of colour. */
+  --priority-urgent: #f2683c;
+  --priority-bar: var(--text-secondary);
+  --priority-bar-empty: color-mix(in srgb, var(--text-muted) 40%, transparent);
+
+  /* Board cards float directly on the page in the restyled kanban (no column
+     container behind them), so in LIGHT theme a white card on a white panel
+     needs a whisper of elevation on top of its hairline border. Dark theme
+     already has a real fill step (--bg-card vs --bg-panel) and takes none. */
+  --card-shadow: none;
 }
 
 html[data-theme="light"] {
@@ -189,4 +278,20 @@ html[data-theme="light"] {
   --warning-text: #b45309;
   --unknown-dot: #a1a1aa;
   --ready-dot: #4b7a5e;
+
+  /* Task status ramp — same seven roles, darkened so each holds contrast on
+     a white panel. See the dark-theme block above for what each role means. */
+  --task-backlog: #6b7280;
+  --task-todo: #6b7280;
+  --task-progress: #d97706;
+  --task-input: #2563eb;
+  --task-blocked: #dc2626;
+  --task-review: #15803d;
+  --task-done: var(--accent);
+
+  --priority-urgent: #d9481c;
+  --priority-bar: var(--text-secondary);
+  --priority-bar-empty: color-mix(in srgb, var(--text-muted) 55%, transparent);
+
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }

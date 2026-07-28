@@ -34,6 +34,65 @@ async def _resolve_tenant(workspace_id: str) -> str:
     return await control_plane_repository.resolve_tenant_id_for_workspace(workspace_id, default="default")
 
 
+# ── MAN-115: real per-project ACL wiring ─────────────────────────────────
+# The MAN-70 placeholder ("project member" == "workspace member", no
+# per-project table) is replaced by project_memberships
+# (server_modules/projects_repository.py, auth_module.enforce_project_access).
+# Two helpers below wire it into this router: one for routes that already
+# have a project_id in hand, one for agent-scoped routes that only have an
+# agent_id and must resolve its owning project first (an agent belongs to
+# exactly one project — see project_tasks_service.agent_project_id).
+
+async def _visible_project_ids(
+    current_user: Dict[str, Any], resolved_workspace_id: str, tenant_id: str,
+) -> Optional[set]:
+    """None means "no filter needed" (the caller is a workspace owner and
+    sees every project). A concrete set means "only these project ids" —
+    the explicit project_memberships rows for a non-owner caller. Used to
+    filter list endpoints (projects, agents, tasks) that have no single
+    project_id to gate on via enforce_project_access."""
+    actual_role = auth_module.normalize_rbac_role(
+        auth_module.workspace_role(current_user, resolved_workspace_id)
+        or auth_module.current_user_role(current_user, default="viewer"),
+        default="viewer",
+    )
+    if auth_module.RBAC_ROLE_ORDER[actual_role] >= auth_module.RBAC_ROLE_ORDER["owner"]:
+        return None
+    from server_modules import projects_repository as projects
+
+    user_id = str((current_user or {}).get("user_id") or "").strip()
+    ids = await projects.list_member_project_ids(
+        tenant_id=tenant_id, workspace_id=resolved_workspace_id, user_id=user_id,
+    )
+    return set(ids)
+
+
+async def _enforce_agent_project_access(
+    current_user: Dict[str, Any],
+    resolved_workspace_id: str,
+    tenant_id: str,
+    agent_id: str,
+    *,
+    minimum_role: str = "viewer",
+) -> None:
+    """Resolve the project this agent belongs to and enforce MAN-115 access
+    to it. If the agent can't be resolved to a project (doesn't exist, or —
+    not expected in practice — has none), this deliberately does NOT raise:
+    there is nothing to leak for an agent that isn't there, and the
+    underlying service call a route makes right after this will itself
+    return a normal not-found/empty result."""
+    from server_modules import project_tasks_service as tasks
+
+    project_id = await tasks.agent_project_id(
+        tenant_id=tenant_id, workspace_id=resolved_workspace_id, agent_id=agent_id,
+    )
+    if not project_id:
+        return
+    await auth_module.enforce_project_access(
+        current_user, resolved_workspace_id, project_id, minimum_role=minimum_role,
+    )
+
+
 async def _channel_already_owned_message(
     subject: str, conflict: Dict[str, Any], *, tenant_id: str, workspace_id: str,
 ) -> str:
@@ -68,6 +127,11 @@ async def fleet_usage(
     """Phase 5A: normalized usage rollup — per-agent / per-project / per-workspace,
     bucketed by day/week/month, with usd_cost totals."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    # MAN-115: scope=project leaks a project's own cost/token totals to
+    # whoever knows its id unless gated the same as every other
+    # project-scoped read below.
+    if scope == "project" and id:
+        await auth_module.enforce_project_access(current_user, resolved_workspace_id, id, minimum_role="viewer")
     from server_modules import usage_events_repository as usage_repo
 
     try:
@@ -116,19 +180,35 @@ async def fleet_agents(
     Each agent carries its project_id (Phase 2). Optionally filter to one
     project via ?project_id=."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    # MAN-115: a specific ?project_id= is a direct access check; with none,
+    # this returns every agent in the workspace, so a non-owner caller gets
+    # silently filtered down to agents in projects they actually belong to
+    # rather than seeing (and being able to open) agents from a project they
+    # were never added to.
+    if project_id:
+        await auth_module.enforce_project_access(current_user, resolved_workspace_id, project_id, minimum_role="viewer")
+        visible_ids = None
+    else:
+        visible_ids = await _visible_project_ids(current_user, resolved_workspace_id, tenant_id)
     from server_modules.fleet_tools import fleet_list_agents
 
     try:
         result = await fleet_list_agents(
             actor_id="fleet_ui",
             workspace_id=resolved_workspace_id,
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            tenant_id=tenant_id,
         )
-        if project_id and result.get("ok") and isinstance(result.get("agents"), list):
-            wanted = str(project_id).strip()
-            result["agents"] = [
-                a for a in result["agents"] if str(a.get("project_id") or "").strip() == wanted
-            ]
+        if result.get("ok") and isinstance(result.get("agents"), list):
+            if project_id:
+                wanted = str(project_id).strip()
+                result["agents"] = [
+                    a for a in result["agents"] if str(a.get("project_id") or "").strip() == wanted
+                ]
+            elif visible_ids is not None:
+                result["agents"] = [
+                    a for a in result["agents"] if str(a.get("project_id") or "").strip() in visible_ids
+                ]
         return result
     except Exception as exc:
         return {"ok": False, "error": str(exc), "agents": []}
@@ -143,19 +223,27 @@ async def fleet_projects(
     include_archived: bool = Query(False),
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """List projects in the workspace, each with its agent count."""
+    """List projects in the workspace, each with its agent count. MAN-115:
+    a non-owner only sees projects they were explicitly added to — this is
+    the list a Sidebar/Projects page renders from, so filtering here (not
+    just on the detail route) is what actually keeps Project B invisible to
+    someone who was never added to it, not just unopenable."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
     from server_modules import projects_repository as projects
 
     try:
+        tenant_id = await _resolve_tenant(resolved_workspace_id)
         # Guarantee a default project exists so ungrouped agents have a home.
-        await projects.ensure_default_project(tenant_id=await _resolve_tenant(resolved_workspace_id), workspace_id=resolved_workspace_id)
+        await projects.ensure_default_project(tenant_id=tenant_id, workspace_id=resolved_workspace_id)
         rows = await projects.list_projects(
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             include_archived=include_archived,
         )
-        counts = await projects.count_agents_by_project(tenant_id=await _resolve_tenant(resolved_workspace_id), workspace_id=resolved_workspace_id)
+        visible_ids = await _visible_project_ids(current_user, resolved_workspace_id, tenant_id)
+        if visible_ids is not None:
+            rows = [p for p in rows if str(p.get("id") or "").strip() in visible_ids]
+        counts = await projects.count_agents_by_project(tenant_id=tenant_id, workspace_id=resolved_workspace_id)
         for p in rows:
             p["agent_count"] = int(counts.get(p["id"], 0))
         return {"ok": True, "projects": rows}
@@ -185,6 +273,12 @@ async def fleet_create_project(
             workspace_id=resolved_workspace_id,
             name=body.name,
             description=body.description,
+            # MAN-115: give the creator an explicit membership row too, even
+            # though creation is owner-gated (owners already bypass the
+            # project check) — keeps the project's own member roster honest
+            # rather than showing an empty list for a project someone just
+            # made.
+            created_by_user_id=str((current_user or {}).get("user_id") or "").strip() or None,
         )
         return {"ok": True, "project": project}
     except Exception as exc:
@@ -233,6 +327,117 @@ async def fleet_patch_project(
         return {"ok": False, "error": str(exc)}
 
 
+# ── MAN-115: project member management ───────────────────────────────────
+# The UI for the real per-project ACL: who, specifically, can see this
+# project. Reuses the workspace's own member list as the pool to add
+# from — you can only add someone to a project if they're already a
+# workspace member (checked below via control_plane_repository.
+# list_workspace_members, the exact same call the Settings members section
+# and MemberAvatarStack already use). Reads are viewer-gated through
+# enforce_project_access (so a project member can see their own project's
+# roster); grant/revoke are owner-gated, matching every other roster
+# mutation in this file (invites, bug-report list, etc.).
+
+@router.get("/api/w/{workspace_id}/fleet/projects/{project_id}/members")
+async def fleet_list_project_members(
+    request: Request,
+    workspace_id: str,
+    project_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Explicit project_memberships rows only — does NOT include workspace
+    owners, who see this project via the bypass in enforce_project_access
+    rather than a row here. The frontend renders owners separately (from
+    the workspace member list it already fetches) captioned as "always has
+    access", so the two lists together are the true roster."""
+    resolved_workspace_id = await auth_module.enforce_project_access(
+        current_user, workspace_id, project_id, minimum_role="viewer",
+    )
+    from server_modules import projects_repository as projects
+
+    try:
+        members = await projects.list_project_members(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            project_id=project_id,
+        )
+        return {"ok": True, "members": members}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "members": []}
+
+
+class FleetAddProjectMemberRequest(BaseModel):
+    user_id: str = Field(min_length=1)
+
+
+@router.post("/api/w/{workspace_id}/fleet/projects/{project_id}/members")
+async def fleet_add_project_member(
+    request: Request,
+    workspace_id: str,
+    project_id: str,
+    body: FleetAddProjectMemberRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Grant a workspace member access to this project. Owner-only — same
+    tier as creating/archiving a project itself. The target must already be
+    a workspace member: this is a visibility grant within a workspace the
+    person is already in, never a back door for adding a stranger."""
+    # Workspace-owner check first (not enforce_project_access's viewer
+    # floor) -- granting project access is a privileged action regardless
+    # of the caller's own project membership.
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import control_plane_repository, projects_repository as projects
+
+    try:
+        target_user_id = str(body.user_id or "").strip()
+        workspace_members = await control_plane_repository.list_workspace_members(resolved_workspace_id)
+        if not any(str(m.get("user_id") or "").strip() == target_user_id for m in workspace_members):
+            return {"ok": False, "error": "That person isn't a member of this workspace yet."}
+        project = await projects.get_project(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            project_id=project_id,
+        )
+        if project is None:
+            return {"ok": False, "error": "Project not found."}
+        member = await projects.add_project_member(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            project_id=project_id,
+            user_id=target_user_id,
+            added_by=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+        return {"ok": True, "member": member}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/projects/{project_id}/members/{user_id}")
+async def fleet_remove_project_member(
+    request: Request,
+    workspace_id: str,
+    project_id: str,
+    user_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Revoke a member's access to this project. Owner-only. Removing a row
+    here never touches workspace membership itself — it only narrows which
+    projects this person can see, matching the "add" side's own scope."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import projects_repository as projects
+
+    try:
+        removed = await projects.remove_project_member(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            project_id=project_id,
+            user_id=user_id,
+        )
+        return {"ok": True, "removed": removed}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 # ── Tasks -> Agents backend foundation (docs/design/tasks-to-agents-
 # research.md Section 4.6, steps 1-3): a first-class task object inside a
 # Project that can be assigned to an agent. Same auth/response conventions
@@ -247,21 +452,42 @@ async def fleet_list_tasks(
     project_id: Optional[str] = Query(None, description="Filter to one project"),
     assignee_agent_id: Optional[str] = Query(None, description="Filter to one assignee"),
     status: Optional[str] = Query(None, description="open | in_progress | blocked | awaiting_input | done"),
+    sort: Optional[str] = Query(None, description="created_at (default, newest first) | priority (urgent first, untriaged last)"),
+    parent_task_id: Optional[str] = Query(None, description="Filter to one task's sub-tasks"),
+    top_level_only: bool = Query(False, description="Exclude sub-tasks (what a kanban board wants — a sub-task belongs on its parent's card)"),
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """List tasks in the workspace, optionally filtered to a project,
-    assignee, and/or status."""
+    assignee, and/or status. MAN-115: a task is exactly as visible as the
+    project it lives in — same enforce-when-scoped / filter-when-not
+    pattern as fleet_agents above.
+
+    `sort=priority` returns the board triage-ordered (urgent first,
+    untriaged last); anything else keeps the historical newest-first
+    ordering, so an existing client that never passes `sort` sees no
+    change."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    if project_id:
+        await auth_module.enforce_project_access(current_user, resolved_workspace_id, project_id, minimum_role="viewer")
+        visible_ids = None
+    else:
+        visible_ids = await _visible_project_ids(current_user, resolved_workspace_id, tenant_id)
     from server_modules import project_tasks_service as tasks
 
     try:
         rows = await tasks.list_tasks(
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             project_id=project_id,
             assignee_agent_id=assignee_agent_id,
             status=status,
+            sort=sort,
+            parent_task_id=parent_task_id,
+            top_level_only=top_level_only,
         )
+        if visible_ids is not None:
+            rows = [t for t in rows if str(t.get("project_id") or "").strip() in visible_ids]
         return {"ok": True, "tasks": rows}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "tasks": []}
@@ -272,6 +498,17 @@ class FleetCreateTaskRequest(BaseModel):
     title: str = Field(min_length=1)
     description: str = ""
     due_at: Optional[str] = None
+    # Sub-tasks: name a parent here to create this as its sub-task. Exactly
+    # ONE level of nesting is allowed and the rule is enforced in
+    # project_tasks_service (it needs a lookup no CHECK can express), so the
+    # HTTP API and the agent tool surfaces reject exactly the same shapes
+    # with exactly the same message.
+    parent_task_id: Optional[str] = None
+    # Linear's scale: 0 = none (default/untriaged), 1 = urgent, 2 = high,
+    # 3 = medium, 4 = low -- 1 is the MOST urgent. Range-validated in
+    # project_tasks_service, not here, so the HTTP API and the agent tool
+    # surfaces reject exactly the same set with exactly the same message.
+    priority: Optional[int] = None
 
 
 @router.post("/api/w/{workspace_id}/fleet/tasks")
@@ -297,6 +534,8 @@ async def fleet_create_task(
             description=body.description,
             created_by=str((current_user or {}).get("user_id") or "").strip() or None,
             due_at=body.due_at,
+            priority=body.priority,
+            parent_task_id=body.parent_task_id,
         )
         return {"ok": True, "task": task}
     except Exception as exc:
@@ -307,6 +546,9 @@ class FleetPatchTaskRequest(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     status: Optional[str] = None
+    # See FleetCreateTaskRequest.priority. `0` is a real patch here ("clear
+    # the priority"); only omitting the field leaves it untouched.
+    priority: Optional[int] = None
     due_at: Optional[str] = None
     clear_due_at: bool = False
 
@@ -319,7 +561,7 @@ async def fleet_patch_task(
     body: FleetPatchTaskRequest,
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """Edit a task's title/description/status/due_at. Status transitions are
+    """Edit a task's title/description/status/priority/due_at. Status transitions are
     plain field updates here -- open/in_progress/blocked/awaiting_input/done
     are all reachable through this one endpoint; a "done" review gate is a
     later step (docs/design/tasks-to-agents-research.md §4.6 step 6), not
@@ -336,6 +578,7 @@ async def fleet_patch_task(
             title=body.title,
             description=body.description,
             status=body.status,
+            priority=body.priority,
             due_at=body.due_at,
             clear_due_at=body.clear_due_at,
         )
@@ -377,6 +620,274 @@ async def fleet_assign_task(
             triggered_by=str((current_user or {}).get("user_id") or "").strip() or "owner",
         )
         return {"ok": True, **result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ── Sub-tasks: a parent link on the task itself, not a new object. Exactly
+# ONE level of nesting -- a sub-task cannot have sub-tasks of its own. That
+# rule is enforced in project_tasks_service (it needs a lookup no CHECK can
+# express) so this endpoint and every agent tool reject the same shapes with
+# the same message. Deleting a parent PROMOTES its sub-tasks to top-level
+# rather than deleting them (ON DELETE SET NULL, see
+# migrations/add_task_parent.sql) -- the rollup counts every task read
+# already returns (subtask_count / subtask_done_count) are the "1/3" badge.
+# ─────────────────────────────────────────────────────────────────────────
+
+@router.get("/api/w/{workspace_id}/fleet/tasks/{task_id}/subtasks")
+async def fleet_list_subtasks(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """One task's sub-tasks. Same shape as any other task list -- a sub-task
+    is a full task, so it carries its own status, priority, assignee and
+    labels."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        tenant_id = await _resolve_tenant(resolved_workspace_id)
+        parent = await tasks.get_task(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id, task_id=task_id,
+        )
+        if parent is None:
+            return {"ok": False, "error": "Task not found.", "tasks": []}
+        # A sub-task is exactly as visible as the project its parent lives
+        # in -- same enforce-when-scoped rule fleet_list_tasks uses, applied
+        # to the parent's project since parent and child always share one.
+        await auth_module.enforce_project_access(
+            current_user, resolved_workspace_id, str(parent.get("project_id") or ""), minimum_role="viewer",
+        )
+        rows = await tasks.list_subtasks(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id, parent_task_id=task_id,
+        )
+        return {"ok": True, "tasks": rows, "parent_task_id": task_id}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "tasks": []}
+
+
+class FleetSetTaskParentRequest(BaseModel):
+    # None/"" DETACHES -- promoting a sub-task back to a top-level task. That
+    # is the deliberate manual counterpart of what the database does on its
+    # own when a parent row is deleted.
+    parent_task_id: Optional[str] = None
+
+
+@router.post("/api/w/{workspace_id}/fleet/tasks/{task_id}/parent")
+async def fleet_set_task_parent(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    body: FleetSetTaskParentRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Make a task a sub-task of another, or detach it back to top-level.
+
+    Its own endpoint rather than a field on the PATCH above, for the same
+    reason /assign is: this is a structural change with a validity question
+    attached (does it break the one-level rule?), not a plain field edit."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        task = await tasks.set_task_parent(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            task_id=task_id,
+            parent_task_id=body.parent_task_id,
+        )
+        if task is None:
+            return {"ok": False, "error": "Task not found."}
+        return {"ok": True, "task": task}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ── Labels: a per-WORKSPACE vocabulary, not per-project -- a label like
+# "bug" describes a KIND of work and stays the same label when the work
+# moves to another client. `color` is a palette TOKEN NAME, never a hex: the
+# theme owns what each token looks like in light and dark mode, exactly as
+# it already does for task statuses. Name uniqueness is per workspace and
+# case-insensitive, enforced by a functional UNIQUE index. Reads are viewer,
+# mutations are owner, matching every other route in this router. See
+# migrations/add_task_labels.sql. ─────────────────────────────────────────
+
+@router.get("/api/w/{workspace_id}/fleet/labels")
+async def fleet_list_labels(
+    request: Request,
+    workspace_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Every label in the workspace, each with how many tasks carry it. Not
+    project-filtered: the vocabulary is workspace-wide by design, and a
+    picker that hid labels because no task in THIS project uses them yet
+    would make the first use of a label impossible."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    from server_modules import workspace_labels_service as labels
+
+    try:
+        rows = await labels.list_labels(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+        )
+        return {"ok": True, "labels": rows, "colors": list(labels.LABEL_COLOR_ORDER)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "labels": []}
+
+
+class FleetCreateLabelRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    # A palette token name ('grey', 'red', ... see
+    # workspace_labels_service.LABEL_COLOR_ORDER), NOT a hex code. Validated
+    # in the service so this endpoint and the agent surfaces reject the same
+    # set with the same message.
+    color: Optional[str] = None
+
+
+@router.post("/api/w/{workspace_id}/fleet/labels")
+async def fleet_create_label(
+    request: Request,
+    workspace_id: str,
+    body: FleetCreateLabelRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Add a label to the workspace vocabulary. A name that already exists
+    (compared case-insensitively) is rejected with a message naming the
+    existing label, never silently merged."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import workspace_labels_service as labels
+
+    try:
+        label = await labels.create_label(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            name=body.name,
+            color=body.color,
+            created_by=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+        return {"ok": True, "label": label}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+class FleetPatchLabelRequest(BaseModel):
+    name: Optional[str] = None
+    color: Optional[str] = None
+
+
+@router.patch("/api/w/{workspace_id}/fleet/labels/{label_id}")
+async def fleet_patch_label(
+    request: Request,
+    workspace_id: str,
+    label_id: str,
+    body: FleetPatchLabelRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Rename and/or recolour a label. One row changes and every task
+    carrying it updates at once -- the property that made this a join table
+    rather than an array on the task."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import workspace_labels_service as labels
+
+    try:
+        label = await labels.update_label(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            label_id=label_id,
+            name=body.name,
+            color=body.color,
+        )
+        if label is None:
+            return {"ok": False, "error": "Label not found."}
+        return {"ok": True, "label": label}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/labels/{label_id}")
+async def fleet_delete_label(
+    request: Request,
+    workspace_id: str,
+    label_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Remove a label from the workspace vocabulary. Its attachments go with
+    it -- no task is deleted and no task field changes, the chip simply
+    stops being on the card."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import workspace_labels_service as labels
+
+    try:
+        removed = await labels.delete_label(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            label_id=label_id,
+        )
+        if not removed:
+            return {"ok": False, "error": "Label not found."}
+        return {"ok": True, "removed": True, "label_id": label_id}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+class FleetAttachLabelRequest(BaseModel):
+    # A label id OR a label name (resolved case-insensitively) -- the same
+    # forgiving input the agent tools take, so a client that has the name
+    # in hand does not need a lookup round trip first.
+    label: str = Field(min_length=1)
+
+
+@router.post("/api/w/{workspace_id}/fleet/tasks/{task_id}/labels")
+async def fleet_attach_task_label(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    body: FleetAttachLabelRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Put a label on a task. Idempotent -- re-attaching an existing label
+    succeeds and changes nothing. Does NOT create unknown labels: the
+    vocabulary is curated, and an attach that mints a label on a typo turns
+    it into a junk drawer."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import workspace_labels_service as labels
+
+    try:
+        attached = await labels.attach_label(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            task_id=task_id,
+            label=body.label,
+            added_by=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+        return {"ok": True, "task_id": task_id, "labels": attached}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/tasks/{task_id}/labels/{label}")
+async def fleet_detach_task_label(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    label: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Take a label off a task. Idempotent, and the label itself survives --
+    this removes the link, never the vocabulary entry."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import workspace_labels_service as labels
+
+    try:
+        remaining = await labels.detach_label(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            task_id=task_id,
+            label=label,
+        )
+        return {"ok": True, "task_id": task_id, "labels": remaining}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -769,6 +1280,8 @@ async def fleet_agent_activity(
 ) -> Dict[str, Any]:
     """Get REAL ledger events for an agent (Phase U4 detail panel Activity tab)."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, tenant_id, agent_id, minimum_role="viewer")
     from server_modules.fleet_tools import fleet_get_agent_activity
 
     try:
@@ -794,6 +1307,7 @@ async def fleet_project_activity(
     """Recent ledger events across a project's agents (project detail right
     panel's Activity section — panel-only, no separate tab)."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await auth_module.enforce_project_access(current_user, resolved_workspace_id, project_id, minimum_role="viewer")
     from server_modules.fleet_tools import fleet_get_project_activity
 
     try:
@@ -817,6 +1331,8 @@ async def fleet_agent_memory(
 ) -> Dict[str, Any]:
     """Per-agent memory file listing (agent detail modal → Memory tab)."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, tenant_id, agent_id, minimum_role="viewer")
     from server_modules.agent_memory_tools import memory_list
 
     try:
@@ -863,6 +1379,7 @@ async def fleet_agent_memory_tree(
 ) -> Dict[str, Any]:
     """The agent's memory tree: MEMORY.md index + topic files."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
     from server_modules import agent_memory_tree_service as tree
 
     try:
@@ -883,6 +1400,7 @@ async def fleet_agent_memory_file_read(
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
     from server_modules import agent_memory_tree_service as tree
 
     try:
@@ -954,6 +1472,7 @@ async def fleet_agent_channels(
     regardless of real state.
     """
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
     from server_modules.connection_catalog_service import agent_status_items
     from server_modules.sage_telegram_hosted_service import is_configured as hosted_configured
 
@@ -1048,6 +1567,7 @@ async def fleet_agent_connectors(
     make it connected here.
     """
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
     from server_modules.connection_catalog_service import agent_status_items
     from server_modules.connection_oauth_service import OAUTH_PROVIDER_CONFIGS, oauth_provider_configured
 
@@ -1186,6 +1706,7 @@ async def fleet_project_connectors(
     to it, so the picker can show "Use acme-support@gmail.com" for any
     provider the project already has."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await auth_module.enforce_project_access(current_user, resolved_workspace_id, project_id, minimum_role="viewer")
     from server_modules.connectors_actions import list_project_connectors
 
     try:
@@ -1509,6 +2030,7 @@ async def fleet_agent_tools(
     Returns the tool manifest for this agent based on its hardware_status
     and role."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
     from server_modules.fleet_tools import fleet_get_agent_tools
 
     try:
@@ -1539,6 +2061,7 @@ async def fleet_agent_capabilities(
     """Per-agent capability catalog + resolved state (agent detail →
     Capabilities tab). Never returns key material."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    await _enforce_agent_project_access(current_user, resolved_workspace_id, await _resolve_tenant(resolved_workspace_id), agent_id, minimum_role="viewer")
     from server_modules.fleet_tools import fleet_get_agent_capabilities
 
     try:

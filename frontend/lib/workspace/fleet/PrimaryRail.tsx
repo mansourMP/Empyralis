@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSelectedLayoutSegment } from "next/navigation";
 import {
   BarChart3,
   Bot,
   ChevronRight,
-  Cpu,
   FolderKanban,
   Inbox,
   LogOut,
@@ -34,17 +33,26 @@ import { SystemHealthButton } from "./SystemHealthButton";
 import { BugReportButton } from "./BugReportButton";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
+import { RAIL_WIDTH, useResizableWidth } from "./fleet-preferences";
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
 type RailNavItem = { key: string; label: string; segment: string; icon: LucideIcon; chord: string };
 
 // Rail vocabulary. `chord` is the second key of Linear-style "g then <key>".
+//
+// Every entry here is WORK — the things a teammate touches daily. Hardware
+// used to sit at the bottom of this list and was removed in the 2026-07
+// repositioning: which box an agent runs on is decided once, at setup, and
+// then never thought about again, so it belongs in Settings (where it now
+// renders as a real section — see settings/page.tsx and HardwareSection.tsx)
+// rather than in the app's spine. The /w/{ws}/hardware route itself is still
+// live, so every link, bookmark and redirect that pointed at it still
+// resolves; it just isn't a standing destination any more.
 const RAIL_ITEMS: RailNavItem[] = [
   { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i" },
   { key: "conversations", label: "Conversations", segment: "conversations", icon: MessagesSquare, chord: "c" },
   { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
   { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a" },
-  { key: "hardware", label: "Hardware", segment: "hardware", icon: Cpu, chord: "h" },
 ];
 
 const RAIL_ICON = 16;
@@ -66,8 +74,8 @@ const money = (n: number) => `$${n.toFixed(4)}`;
  * block. Billing lives in the account menu instead — it's a look-up-
  * occasionally screen, not a nav destination. Keyboard: `j`/`k` move a
  * highlight, Enter opens it; `g` then a section key jumps directly (g i
- * inbox, g p projects, g a agents, g h hardware) — the Linear muscle-memory
- * model.
+ * inbox, g c conversations, g p projects, g a agents) — the Linear
+ * muscle-memory model.
  */
 export function PrimaryRail({
   workspaceId,
@@ -117,6 +125,65 @@ export function PrimaryRail({
   // breakpoint (see fleet-theme.css), so effectiveCollapsed only differs
   // from collapsed in exactly the narrow-viewport case that should ignore it.
   const effectiveCollapsed = collapsed && !mobileOpen;
+
+  // ── Rail resize ─────────────────────────────────────────────────────────
+  // Two different gestures share one edge, and keeping them distinct is the
+  // whole point: DRAGGING is never animated (it must track the pointer 1:1 —
+  // easing a drag is just lag), while COLLAPSE/EXPAND is animated, because
+  // there the width is changing on its own and the motion explains that the
+  // rail shrank rather than vanished. useResizableWidth writes the live width
+  // straight to --rail-w during a drag and adds `.is-resizing` to .fleet-root,
+  // which kills the transition for the duration.
+  const lastWidthRef = useRef<number>(RAIL_WIDTH.def);
+  const handleRelease = useCallback(
+    (raw: number) => {
+      if (collapsed) {
+        // Dragging right, out of a collapsed rail: past the restore
+        // threshold it reopens at whatever width the pointer settled on.
+        if (raw > RAIL_WIDTH.restoreAt) {
+          onToggleCollapsed();
+          return Math.max(raw, RAIL_WIDTH.min);
+        }
+        return lastWidthRef.current;
+      }
+      // Dragging left past the minimum is how you collapse — the rail snaps
+      // shut on release rather than being pinned at an unusable 200px.
+      if (raw < RAIL_WIDTH.min) {
+        onToggleCollapsed();
+        return lastWidthRef.current;
+      }
+      return raw;
+    },
+    [collapsed, onToggleCollapsed],
+  );
+
+  const rail = useResizableWidth({
+    storageKey: RAIL_WIDTH.key,
+    defaultWidth: RAIL_WIDTH.def,
+    minWidth: RAIL_WIDTH.min,
+    maxWidth: RAIL_WIDTH.max,
+    cssVar: "--rail-w",
+    edge: "right",
+    // Let the drag *show* widths down to the collapsed size so the snap
+    // reads as a destination, not a wall.
+    dragFloor: RAIL_WIDTH.collapsed,
+    onRelease: handleRelease,
+  });
+  useEffect(() => {
+    lastWidthRef.current = rail.width;
+  }, [rail.width]);
+
+  const onResizerKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLElement>) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        onToggleCollapsed();
+        return;
+      }
+      rail.separatorProps.onKeyDown(event);
+    },
+    [onToggleCollapsed, rail.separatorProps],
+  );
 
   // Close the drawer on every navigation, regardless of which link/button
   // triggered it (rail item, project/agent subitem, account-menu row) —
@@ -263,8 +330,21 @@ export function PrimaryRail({
 
   return (
     <aside
+      ref={rail.elRef as React.RefObject<HTMLElement>}
       className={`fleet-rail${effectiveCollapsed ? " fleet-rail--collapsed" : ""}${mobileOpen ? " fleet-rail--mobile-open" : ""}`}
     >
+      {/* Resize handle. 8px hit area straddling the rail's trailing edge; the
+          hairline inside it is invisible until you hover, focus or drag it,
+          so the edge is discoverable without drawing a permanent line down
+          the middle of the app. Enter toggles collapse, which makes the same
+          control serve both gestures from the keyboard. */}
+      <div
+        {...rail.separatorProps}
+        onKeyDown={onResizerKeyDown}
+        className="fleet-rail-resizer"
+        aria-label="Resize sidebar"
+        title="Drag to resize · Enter to collapse"
+      />
       <div className="fleet-rail-header">
         <div className="fleet-rail-header-top">
           {/* Truncates hard at the rail's 220px width (long real names —

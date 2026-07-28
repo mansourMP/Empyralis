@@ -208,17 +208,20 @@ export function HardwareTab({
             ))}
           </div>
           {access !== "none" && (
-            <>
-              <GatewayBoxPicker
-                workspaceId={workspaceId}
-                value={preferredGateway}
-                disabled={saving}
-                onChange={selectGateway}
-              />
-              <p className="fleet-channel-expand-hint">
-                Optional — leave unset to use whichever paired computer is online.
-              </p>
-            </>
+            // `kind` keyed off the selected access mode: the picker then
+            // lists only boxes that mode can actually use, and its empty
+            // state names the right missing thing ("no cloud server" vs "no
+            // paired computer") with a link to the Hardware page, where all
+            // provisioning/pairing lives (founder ruling 2026-07-28). The
+            // "leave unset to use whichever … is online" hint now comes from
+            // the picker itself so it can match the mode too.
+            <GatewayBoxPicker
+              workspaceId={workspaceId}
+              kind={access === "vps" ? "vps" : "gateway"}
+              value={preferredGateway}
+              disabled={saving}
+              onChange={selectGateway}
+            />
           )}
           <div style={{ marginTop: 12, minHeight: 20 }}>
             {saving && <span className="fleet-channel-expand-hint" style={{ margin: 0 }}>Saving…</span>}

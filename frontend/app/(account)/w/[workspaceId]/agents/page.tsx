@@ -165,10 +165,16 @@ export default function AgentsPage() {
     },
   ];
 
+  // One definition of where an agent row goes, used twice: `router.push` for a
+  // plain click, and stamped on the row as `data-tab-href` so ⌘/Ctrl+click and
+  // middle-click open it in a background content tab (see FleetTabs). The two
+  // can't be allowed to drift, which is why the href isn't rebuilt in the list.
+  const agentHref = (agentId: string, projectId: string) =>
+    `${base}/projects/${encodeURIComponent(resolveAgentProjectId(projectId, projects))}/agents/${encodeURIComponent(agentId)}/overview`;
+
   const goToAgent = (agentId: string, projectId: string) => {
     rememberLastViewedAgent(agentId);
-    const resolvedProjectId = resolveAgentProjectId(projectId, projects);
-    router.push(`${base}/projects/${encodeURIComponent(resolvedProjectId)}/agents/${encodeURIComponent(agentId)}/overview`);
+    router.push(agentHref(agentId, projectId));
   };
 
   const activeCount = agents.filter((a) => (a.hardware_status || "").toLowerCase() === "online").length;
@@ -233,6 +239,7 @@ export default function AgentsPage() {
               costByAgent={cost}
               projectById={projById}
               groupByProject={sort === "group"}
+              agentHref={agentHref}
               onSelect={goToAgent}
               onAgentStoppedChanged={refresh}
             />

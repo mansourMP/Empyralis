@@ -44,7 +44,13 @@
     ".next-preview-verify2/types/**/*.ts",
     ".next-preview-verify2/dev/types/**/*.ts",
     ".next-preview-u2/types/**/*.ts",
-    ".next-preview-u2/dev/types/**/*.ts"
+    ".next-preview-u2/dev/types/**/*.ts",
+    ".next-verify-tabs/types/**/*.ts",
+    ".next-verify-tabs/dev/types/**/*.ts",
+    ".next-verify/types/**/*.ts",
+    ".next-verify/dev/types/**/*.ts",
+    ".next-build-check/types/**/*.ts",
+    ".next-build-check/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

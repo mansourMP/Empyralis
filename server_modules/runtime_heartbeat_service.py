@@ -307,7 +307,21 @@ def build_heartbeat_turn_request(
             or str(merged_metadata.get("thread_id") or "").strip()
             or str(merged_metadata.get("parent_run_id") or "").strip()
             or str(merged_metadata.get("workflow_id") or "").strip()
-            or "run-start"
+            # Workspace-scoped, not the bare literal "run-start": that literal
+            # is a single global key in runtime_sessions (session_id has no
+            # workspace column in its lookup), so every workspace that ever
+            # fell through to this fallback collided on the SAME row. Once
+            # session_service.get_session_scoped's tenant-isolation check
+            # enforces scope (default-on via ORION_ENFORCE_SCOPED_SESSION_
+            # RESUME), every workspace except whichever one created that row
+            # first raises SessionScopeViolationError here, so a task-
+            # assigned wake-up's turn execution fails 100% of the time
+            # (finalize_scheduler_wake_requests marks it
+            # denial_reason="execution_failed") for every other workspace.
+            # Scoping the fallback per-workspace makes the collision
+            # impossible by construction instead of relying on enforcement
+            # being loosened.
+            or f"run-start:{workspace_id}"
         ),
         channel=str(merged_metadata.get("channel") or "web").strip() or "web",
         actor_type="user",

@@ -12,8 +12,12 @@
    for interactive state). Semantic status (online/offline/working/error)
    is its own vocabulary too — color there is information, not decoration.
    Sans throughout. Type/space/motion scales are the shared tokens from
-   theme-tokens.css. Motion: 150ms ease-out on hover/panel-open only. No
-   spin, no bounce.
+   theme-tokens.css. Motion (MAN-126): only transform, opacity, and panel
+   width/height may animate, on the --dur-1/2/3 + --ease-out/--ease-in
+   scale. Colour, background, border-colour and shadow changes are INSTANT
+   — hover and selection are state, and state should not fade in. No hover
+   lift, no hover scale, no route/tab entrance, no spring, no bounce, and no
+   loops except a genuine indeterminate spinner.
 
    Shell: a flat canvas (--bg-canvas) with the rail sitting bare on it and the
    content column floating as a bordered panel (--bg-panel, --radius-control)
@@ -50,16 +54,11 @@
      both themes so those panels keep visible depth either way. */
   --fleet-float-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px -8px rgba(0, 0, 0, 0.14);
 
-  /* U3-B motion scale — deliberately narrower than theme-tokens.css's shared
-     --motion-* (100/150/250ms, used across fleet AND legacy chrome): these
-     two are fleet-local and named for what they're FOR, not just "fast/base",
-     so a reviewer can tell at the call site whether a duration was chosen
-     (row hover / button press = --dur-fast) or is one of the few bespoke,
-     slightly-longer entrances (drawer 200ms, palette/tab-change 150ms) that
-     intentionally sit between the two tiers. ease-out is the one easing
-     curve used throughout — nothing bounces, nothing exceeds 220ms. */
-  --dur-fast: 120ms;
-  --dur-base: 180ms;
+  /* Motion tokens live in theme-tokens.css (MAN-126). This file used to
+     fork its own --dur-fast/--dur-base here, which is how the app ended up
+     with three parallel duration vocabularies that disagreed (120/180 here,
+     100/150/250 in theme-tokens, 120 in chrome). Use --dur-1/2/3 and
+     --ease-out/--ease-in. */
 
   display: flex;
   height: 100vh;
@@ -95,9 +94,23 @@
   --fleet-float-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -10px rgba(0, 0, 0, 0.55);
 }
 
-/* ── Shell content frame (floating panel > breadcrumb topbar + scroll) ─────── */
+/* ── Shell content frame (tab strip > floating panel > topbar + scroll) ────── */
+/* The main-content COLUMN: everything to the right of the primary rail. Two
+   stacked children — the tab strip, bare on the canvas, and the content panel
+   under it. The column exists so the strip spans the content width and NOT the
+   rail (MAN-127 FIX 1). */
+.fleet-shell-column {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* The content column floats over the canvas as a bordered panel; the rail
-   stays bare on the canvas to its left, so the gutter is top/right/bottom. */
+   stays bare on the canvas to its left, so the gutter is top/right/bottom.
+   Inside .fleet-shell-column the top gutter belongs to the strip instead —
+   see the margin override right below. */
 .fleet-shell-panel {
   flex: 1;
   min-width: 0;
@@ -113,6 +126,13 @@
      Shadows stay reserved for genuinely-floating overlays (popovers,
      modals, palette) that sit ABOVE content, never for static structure. */
   overflow: hidden;
+}
+/* The strip above owns the top gutter, so the panel's own top margin goes.
+   The panel's TOP BORDER is then the dividing line between chrome and page —
+   one crisp 1px rule running the full content width, with nothing sitting on
+   top of it. */
+.fleet-shell-column > .fleet-shell-panel {
+  margin-top: 0;
 }
 .fleet-shell-main {
   display: flex;
@@ -221,7 +241,6 @@
   text-decoration: none;
   padding: 2px 6px;
   border-radius: var(--radius-control);
-  transition: color var(--motion-base) ease-out, background var(--motion-base) ease-out;
 }
 a.fleet-breadcrumb:hover {
   color: var(--text-primary);
@@ -287,7 +306,6 @@ a.fleet-breadcrumb:hover {
   color: var(--text-secondary);
   text-decoration: none;
   font-size: var(--text-sm);
-  transition: color var(--motion-base) ease-out, background var(--motion-base) ease-out;
 }
 .fleet-breadcrumb-mobile-back:hover {
   color: var(--text-primary);
@@ -313,18 +331,93 @@ a.fleet-breadcrumb:hover {
 /* ── Primary rail ────────────────────────────────────────────────────────── */
 
 .fleet-rail {
-  width: 220px;
+  /* --rail-w is owned by useResizableWidth: React writes the committed width
+     here, and a live drag writes straight to it on every pointermove. */
+  width: var(--rail-w, 240px);
+  min-width: 0;
   flex-shrink: 0;
+  position: relative;   /* containing block for the resize handle */
   background: transparent;
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  transition: width 150ms ease-out;
+  /* Collapse/expand is animated — the width changes on its own and the
+     motion explains that the rail shrank rather than disappeared. A DRAG is
+     not: see .fleet-root.is-resizing below. */
+  transition: width var(--dur-2) var(--ease-out);
 }
 
 .fleet-rail--collapsed {
-  width: 56px;
+  width: var(--rail-collapsed-w, 56px);
   padding: 10px 8px;
+}
+
+/* The single most important rule in this file's motion story: while the
+   pointer is down on a resize handle, nothing eases. A drag must track the
+   hand 1:1 — a 140ms ease on a width the user is physically dragging reads
+   as the app lagging behind them, not as polish. */
+.fleet-root.is-resizing .fleet-rail,
+.fleet-root.is-resizing .fleet-properties-drawer {
+  transition: none;
+}
+/* While dragging out of a collapsed rail the pointer, not the collapsed
+   class, owns the width — otherwise the 56px rule pins it and the rail
+   simply refuses to follow the drag. */
+.fleet-root.is-resizing .fleet-rail--collapsed {
+  width: var(--rail-w);
+}
+
+/* ── Resize handles (rail + properties drawer) ───────────────────────────
+   8px hit area straddling the panel edge — comfortably grabbable without
+   stealing clicks from the content on either side. The hairline inside is
+   invisible at rest: a permanent line down the middle of the app is visual
+   noise for an affordance most sessions never use. It appears on hover and
+   thickens 1px→2px on focus/drag, both at --dur-1. */
+.fleet-rail-resizer,
+.fleet-properties-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 40;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;    /* the drag owns the gesture, not the scroller */
+}
+/* The rail straddles its edge (nothing clips it); the drawer sits just
+   inside its own, because the drawer is overflow:hidden for its radius. */
+.fleet-rail-resizer { right: -4px; }
+.fleet-rail-resizer::after { left: 50%; transform: translateX(-50%); }
+.fleet-properties-resizer { left: 0; }
+.fleet-properties-resizer::after { left: 0; }
+
+.fleet-rail-resizer::after,
+.fleet-properties-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--accent-ring, var(--border-strong));
+  opacity: 0;
+  transition: opacity var(--dur-1) var(--ease-out), width var(--dur-1) var(--ease-out);
+}
+.fleet-rail-resizer:hover::after,
+.fleet-properties-resizer:hover::after {
+  opacity: 1;
+}
+.fleet-rail-resizer:focus-visible::after,
+.fleet-properties-resizer:focus-visible::after,
+.fleet-root.is-resizing .fleet-rail-resizer::after,
+.fleet-root.is-resizing .fleet-properties-resizer::after {
+  opacity: 1;
+  width: 2px;
+}
+.fleet-rail-resizer:focus-visible,
+.fleet-properties-resizer:focus-visible {
+  outline: none;   /* the hairline IS the focus indicator here */
 }
 
 /* U3-G: a real workspace header — identity row (mark + name) plus the two
@@ -387,7 +480,6 @@ a.fleet-breadcrumb:hover {
   cursor: pointer;
   font-family: inherit;
   text-align: left;
-  transition: background var(--dur-fast) ease-out;
 }
 
 .fleet-rail-workspace-trigger:hover {
@@ -424,7 +516,7 @@ a.fleet-breadcrumb:hover {
   flex-direction: column;
   gap: 2px;
   z-index: 10;
-  animation: fleet-fade 150ms ease-out;
+  animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
 .fleet-rail--collapsed .fleet-rail-workspace-popover {
@@ -446,7 +538,6 @@ a.fleet-breadcrumb:hover {
   text-decoration: none;
   cursor: pointer;
   width: 100%;
-  transition: background 150ms ease-out, color 150ms ease-out;
 }
 
 .fleet-rail-workspace-popover-row:hover {
@@ -552,7 +643,6 @@ a.fleet-breadcrumb:hover {
   color: var(--text-muted);
   font-family: inherit;
   cursor: pointer;
-  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .fleet-rail-search-btn:hover {
   background: var(--rail-active);
@@ -583,7 +673,6 @@ a.fleet-breadcrumb:hover {
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
 }
 .fleet-rail-new-btn:hover {
   background: var(--rail-active);
@@ -612,7 +701,6 @@ a.fleet-breadcrumb:hover {
   text-align: left;
   cursor: pointer;
   width: 100%;
-  transition: background var(--motion-base) ease-out;
 }
 .fleet-rail-sage:hover { background: var(--rail-active); }
 .fleet-rail-sage--active { background: var(--rail-active); }
@@ -672,7 +760,6 @@ a.fleet-breadcrumb:hover {
   font-weight: 500;
   cursor: pointer;
   border-radius: var(--radius-control);
-  transition: background 150ms ease-out, color 150ms ease-out;
 }
 
 .fleet-rail-section-header:hover {
@@ -680,7 +767,7 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-rail-section-header-chevron {
-  transition: transform 150ms ease-out;
+  transition: transform var(--dur-2) var(--ease-out);
 }
 
 .fleet-rail-section-header[aria-expanded="false"] .fleet-rail-section-header-chevron {
@@ -700,7 +787,7 @@ a.fleet-breadcrumb:hover {
      instantly instead of animating. The visible effect is unchanged in
      spirit — content still fades — without animating layout on every tap of
      a nav section header, which is inside the mobile drawer. */
-  transition: opacity 150ms ease-out;
+  transition: opacity var(--dur-2) var(--ease-out);
 }
 
 .fleet-rail-section-items[data-collapsed="true"] {
@@ -726,7 +813,6 @@ a.fleet-breadcrumb:hover {
   text-align: left;
   cursor: pointer;
   width: 100%;
-  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 
 .fleet-rail-item:hover {
@@ -825,7 +911,6 @@ a.fleet-breadcrumb:hover {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out;
 }
 
 .fleet-rail-control-btn:hover {
@@ -888,7 +973,6 @@ a.fleet-breadcrumb:hover {
   text-decoration: none;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
-  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
 }
 .fleet-rail-credit-chip:hover {
   background: var(--bg-card-hover);
@@ -933,7 +1017,6 @@ a.fleet-breadcrumb:hover {
   cursor: pointer;
   font-family: inherit;
   text-align: left;
-  transition: background 150ms ease-out;
 }
 
 .fleet-rail-owner-trigger:hover {
@@ -997,14 +1080,16 @@ a.fleet-breadcrumb:hover {
 
 .fleet-rail-account-popover {
   position: absolute;
-  /* .fleet-rail-controls (theme/collapse buttons), .fleet-rail-pulse
-     (U3-G footer line), and .fleet-rail-credit-chip (persistent credit
-     balance, 2026-07-20) all sit directly above this trigger and are
-     shorter than the popover itself, so anchoring at the usual "+8px"
-     would let the popover's own rows render on top of that clickable
-     area. Offset by their combined height (~84px) plus the normal 8px
-     gap so the popover never overlaps another interactive element. */
-  bottom: calc(100% + 92px);
+  /* Anchored to its trigger with the same 8px gap every other popover in
+     this file uses. .fleet-rail-owner is position:relative, so `bottom:
+     100%` is already the top edge of the account block — this used to add
+     a further ~84px to clear the controls/pulse/credit-chip rows stacked
+     above it, which left the menu floating far from the control that
+     opened it (MAN-100). Overlapping those rows is fine and always was:
+     .fleet-rail-popover-backdrop (z-index 9) absorbs the click that
+     dismisses the menu, and this popover's z-index 10 paints above them,
+     so no click ever reaches the row underneath. */
+  bottom: calc(100% + 8px);
   left: 8px;
   right: 8px;
   background: var(--bg-card);
@@ -1016,7 +1101,7 @@ a.fleet-breadcrumb:hover {
   flex-direction: column;
   gap: 2px;
   z-index: 10;
-  animation: fleet-fade 150ms ease-out;
+  animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
 .fleet-rail--collapsed .fleet-rail-account-popover {
@@ -1041,7 +1126,6 @@ a.fleet-breadcrumb:hover {
   text-decoration: none;
   cursor: pointer;
   width: 100%;
-  transition: background 150ms ease-out, color 150ms ease-out;
 }
 
 .fleet-rail-account-popover-row:hover {
@@ -1086,7 +1170,7 @@ a.fleet-breadcrumb:hover {
   border-radius: var(--radius-card);
   box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
   padding: 10px;
-  animation: fleet-fade 150ms ease-out;
+  animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
 .fleet-help-popover-title {
@@ -1142,7 +1226,7 @@ a.fleet-breadcrumb:hover {
   border-radius: var(--radius-card);
   box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
   padding: 10px;
-  animation: fleet-fade 150ms ease-out;
+  animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
 /* Collapsed rail: anchor from the left edge instead of matching the
@@ -1233,7 +1317,7 @@ a.fleet-breadcrumb:hover {
   border-radius: var(--radius-card);
   box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
   padding: 10px;
-  animation: fleet-fade 150ms ease-out;
+  animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
 .fleet-rail--collapsed .fleet-bugreport-popover {
@@ -1320,7 +1404,7 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: fleet-fade 150ms ease-out;
+  animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
 .fleet-sage-console-header {
@@ -1333,35 +1417,12 @@ a.fleet-breadcrumb:hover {
   gap: 8px;
 }
 
-.fleet-sage-console-tabs {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.fleet-sage-console-tab {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 4px 10px;
-  border: none;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--text-muted);
-  font-family: inherit;
+/* Replaced the old Chat/Connect tab strip (MAN-93 removed Connect, leaving
+   one section — see SageLauncher.tsx). Same 12px/medium as the tab labels
+   it succeeds, at full contrast since it's a title now, not a picker. */
+.fleet-sage-console-title {
   font-size: 12px;
   font-weight: var(--weight-medium);
-  cursor: pointer;
-  transition: background var(--motion-base) ease-out, color var(--motion-base) ease-out;
-}
-
-.fleet-sage-console-tab:hover {
-  background: var(--bg-card-hover);
-  color: var(--text-primary);
-}
-
-.fleet-sage-console-tab.is-active {
-  background: var(--bg-inset);
   color: var(--text-primary);
 }
 
@@ -1393,103 +1454,6 @@ a.fleet-breadcrumb:hover {
 .fleet-sage-console-body .fleet-sage-chat {
   flex: 1;
   min-height: 0;
-}
-
-/* ── Sage console: Connect tab ──────────────────────────────────────────── */
-
-.fleet-sage-connect {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 14px;
-}
-
-.fleet-sage-connect-heading {
-  font-size: 13px;
-  font-weight: var(--weight-medium);
-  color: var(--text-primary);
-  margin-bottom: 6px;
-}
-
-.fleet-sage-connect-desc {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin: 0 0 14px;
-  line-height: 1.5;
-}
-
-.fleet-sage-connect-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.fleet-sage-connect-unsupported {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.5;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-card);
-}
-
-.fleet-sage-connect-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-card);
-  cursor: pointer;
-  text-align: left;
-  font-family: inherit;
-  width: 100%;
-  transition: border-color var(--motion-base) ease-out;
-}
-
-.fleet-sage-connect-card:hover {
-  border-color: var(--border-strong);
-}
-
-.fleet-sage-connect-card-label {
-  font-size: 13px;
-  font-weight: var(--weight-medium);
-  color: var(--text-primary);
-}
-
-.fleet-sage-connect-card-desc {
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.fleet-sage-connect-back {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.fleet-sage-connect-back-btn {
-  font-size: 12px;
-  color: var(--text-muted);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  font-family: inherit;
-}
-
-.fleet-sage-connect-back-btn:hover {
-  color: var(--text-primary);
-}
-
-.fleet-sage-connect-channel-label {
-  font-size: 13px;
-  font-weight: var(--weight-medium);
-  color: var(--text-primary);
 }
 
 /* ── Content area ────────────────────────────────────────────────────────── */
@@ -1591,7 +1555,7 @@ a.fleet-breadcrumb:hover {
   color: var(--text-secondary);
   cursor: pointer;
   text-decoration: none;
-  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, transform var(--dur-fast) ease-out;
+  transition: transform var(--dur-1) var(--ease-out);
 }
 .fleet-icon-btn:active:not(:disabled) {
   transform: scale(0.98);
@@ -1767,7 +1731,6 @@ a.fleet-breadcrumb:hover {
   text-align: left;
   font: inherit;
   cursor: pointer;
-  transition: background var(--dur-fast) ease-out;
 }
 .fleet-inbox-list .fleet-inbox-row:last-child { border-bottom: none; }
 .fleet-inbox-row:hover { background: var(--bg-card-hover); }
@@ -1909,6 +1872,14 @@ a.fleet-breadcrumb:hover {
   inset: 0;
   z-index: 29;
   background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease-in);
+}
+.fleet-properties-scrim[data-open="true"] {
+  opacity: 1;
+  pointer-events: auto;
+  transition: opacity var(--dur-2) var(--ease-out);
 }
 
 .fleet-properties-drawer {
@@ -1917,20 +1888,37 @@ a.fleet-breadcrumb:hover {
   right: 12px;
   bottom: 12px;
   z-index: 30;
-  width: 300px;
+  /* --panel-w is written by useResizableWidth, exactly as --rail-w is. */
+  width: var(--panel-w, 320px);
   display: flex;
   flex-direction: column;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
+  /* Stays clipped so inner content can't bleed past the rounded corners —
+     which is why this panel's handle sits just INSIDE the edge rather than
+     straddling it like the rail's (a straddling child would be clipped
+     away here). Same 8px target either way. */
   overflow: hidden;
-  animation: fleet-drawer-in 200ms ease-out;
-}
 
-@keyframes fleet-drawer-in {
-  from { opacity: 0; transform: translateX(10px); }
-  to { opacity: 1; transform: none; }
+  /* Exit — the panel leaves the way it came, slightly faster off the mark
+     (--ease-in) because a dismissal should get out of the way rather than
+     linger. `visibility` is delayed by the full duration so the slide is
+     actually seen before the element is taken out of the tab order; this is
+     what the old `if (!open) return null` made impossible. */
+  transform: translateX(calc(100% + 12px));
+  visibility: hidden;
+  transition:
+    transform var(--dur-2) var(--ease-in),
+    visibility 0s linear var(--dur-2);
+}
+.fleet-properties-drawer[data-open="true"] {
+  transform: translateX(0);
+  visibility: visible;
+  transition:
+    transform var(--dur-2) var(--ease-out),
+    visibility 0s;
 }
 
 /* Always the small inset card, at every viewport width — never full-bleed.
@@ -1954,7 +1942,6 @@ a.fleet-breadcrumb:hover {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
 }
 .fleet-properties-drawer-close:hover {
   background: var(--bg-card-hover);
@@ -2068,7 +2055,6 @@ a.fleet-breadcrumb:hover {
   font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
 }
 
 .fleet-model-picker-trigger:hover {
@@ -2265,7 +2251,6 @@ a.fleet-breadcrumb:hover {
   font-weight: 400;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background 120ms ease-out, color 120ms ease-out;
 }
 .fleet-usage-period-btn:hover {
   color: var(--text-secondary);
@@ -2467,7 +2452,7 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: fleet-modal-in 150ms ease-out;
+  animation: fleet-modal-in var(--dur-2) var(--ease-out);
 }
 
 .fleet-small-dialog-header {
@@ -2522,7 +2507,7 @@ a.fleet-breadcrumb:hover {
   color: var(--text-primary);
   cursor: pointer;
   white-space: nowrap;
-  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out, transform var(--dur-fast) ease-out;
+  transition: transform var(--dur-1) var(--ease-out);
 }
 
 .fleet-btn:hover:not(:disabled) {
@@ -2735,7 +2720,6 @@ a.fleet-breadcrumb:hover {
   border-radius: var(--radius-card);
   cursor: pointer;
   text-align: left;
-  transition: background 150ms ease-out, border-color 150ms ease-out;
 }
 
 .fleet-channel-card:hover,
@@ -2980,7 +2964,7 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: fleet-modal-in 150ms ease-out;
+  animation: fleet-modal-in var(--dur-2) var(--ease-out);
 }
 
 .fleet-channel-banner-header {
@@ -3117,7 +3101,6 @@ a.fleet-breadcrumb:hover {
   font-size: 12px;
   text-align: left;
   cursor: pointer;
-  transition: border-color 150ms ease-out, background 150ms ease-out;
 }
 
 .fleet-connector-picker-row:hover {
@@ -3201,7 +3184,6 @@ a.fleet-breadcrumb:hover {
   padding: 16px;
   margin-bottom: 20px;
   cursor: pointer;
-  transition: background 150ms ease-out, border-color 150ms ease-out;
 }
 
 .fleet-sage:hover {
@@ -3275,7 +3257,6 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   color: var(--text-primary);
-  transition: background 150ms ease-out, border-color 150ms ease-out;
 }
 
 .fleet-card:hover {
@@ -3384,7 +3365,7 @@ a.fleet-breadcrumb:hover {
   display: flex;
   gap: 4px;
   opacity: 0;
-  transition: opacity 150ms ease-out;
+  transition: opacity var(--dur-2) var(--ease-out);
 }
 
 .fleet-card:hover .fleet-card-actions,
@@ -3403,7 +3384,6 @@ a.fleet-breadcrumb:hover {
   background: var(--bg-card);
   color: var(--text-muted);
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
 }
 
 .fleet-card-action-btn:hover {
@@ -3415,7 +3395,7 @@ a.fleet-breadcrumb:hover {
 .fleet-card:hover .fleet-card-status,
 .fleet-card:focus-within .fleet-card-status {
   opacity: 0;
-  transition: opacity 150ms ease-out;
+  transition: opacity var(--dur-2) var(--ease-out);
 }
 
 /* ── Empty state — the Linear pattern: centered column, icon tile, 15px
@@ -3507,7 +3487,7 @@ a.fleet-breadcrumb:hover {
   padding: 24px;
   background: rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(12px);
-  animation: fleet-fade 150ms ease-out;
+  animation: fleet-fade var(--dur-2) var(--ease-out);
 }
 
 .fleet-detail {
@@ -3523,7 +3503,7 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: fleet-modal-in 150ms ease-out;
+  animation: fleet-modal-in var(--dur-2) var(--ease-out);
 }
 
 /* ── Agent detail: tabs on TOP, one navigation (contract: never a right-panel
@@ -3594,7 +3574,6 @@ a.fleet-breadcrumb:hover {
   font-weight: 400;
   white-space: nowrap;
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out;
 }
 .fleet-detail-toptab:hover { background: var(--rail-active); color: var(--text-primary); }
 .fleet-detail-toptab.is-active { background: var(--rail-active); color: var(--text-primary); font-weight: 500; }
@@ -3671,21 +3650,14 @@ a.fleet-breadcrumb:hover {
   to { opacity: 1; transform: none; }
 }
 
-/* Content settles in on view / route change — Linear's quiet "the page arrives"
-   feel: a short fade with a few px of rise, ease-out, no bounce. */
-@keyframes fleet-view-enter {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: none; }
-}
-
-.fleet-content,
-.fleet-detail-pad {
-  animation: fleet-view-enter var(--motion-base) ease-out;
-}
-
-/* U3-C: the U3-B tab-change fade+rise (applied here) was cut — decorative on
-   every routine tab click, not carrying information the active-tab
-   highlight doesn't already give. Elegance pass: restraint over polish. */
+/* MAN-126: the route/view-change entrance animation (fleet-view-enter — a
+   fade + 4px rise on .fleet-content/.fleet-detail-pad) was deleted. It fired
+   on EVERY navigation, delaying the content the user just asked for by a
+   frame budget to communicate something they already knew: that they
+   navigated. Nothing replaces it — arriving content is simply there.
+   This follows the same reasoning that already cut the U3-B tab-change
+   fade+rise: decorative on a routine click, carrying no information the
+   active-tab highlight doesn't already give. Restraint over polish. */
 
 /* Respect the OS "reduce motion" setting — collapse entrance animations and
    transitions to near-instant. Linear does this; it's basic polish + a11y. */
@@ -3717,7 +3689,7 @@ a.fleet-breadcrumb:hover {
   margin: 12px 12px 12px 0;
   padding: 16px 12px 12px;
   overflow: hidden;
-  transition: width var(--motion-base) ease-out, padding var(--motion-base) ease-out, margin var(--motion-base) ease-out, border-color var(--motion-base) ease-out;
+  transition: width var(--dur-2) var(--ease-out), padding var(--dur-2) var(--ease-out), margin var(--dur-2) var(--ease-out);
 }
 
 .fleet-detail-nav--collapsed {
@@ -3812,7 +3784,6 @@ a.fleet-breadcrumb:hover {
   font-weight: 400;
   text-align: left;
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out;
 }
 
 .fleet-detail-nav-tab:hover {
@@ -3853,7 +3824,6 @@ a.fleet-breadcrumb:hover {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
 }
 
 .fleet-detail-close:hover {
@@ -3883,7 +3853,6 @@ a.fleet-breadcrumb:hover {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
 }
 
 .fleet-detail-nav-toggle--modal { right: 52px; }
@@ -3943,7 +3912,7 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  transition: width 150ms ease-out, padding 150ms ease-out, border-color 150ms ease-out;
+  transition: width var(--dur-2) var(--ease-out), padding var(--dur-2) var(--ease-out);
 }
 .fleet-detail-properties > div + div {
   padding-top: 18px;
@@ -4044,6 +4013,214 @@ a.fleet-breadcrumb:hover {
   outline: none;
 }
 
+/* ── Project Overview roll-up ─────────────────────────────────────────────
+   Replaces the six-tile .fleet-stat-grid this tab used to open with (see
+   ProjectOverview.tsx's header for the why). Three pieces, in descending
+   order of how much the reader can act on them: a quiet inline properties
+   line, a callout that only exists when something is actually waiting on a
+   person, and one stacked bar carrying the whole status distribution.
+   Every colour here is an existing token — the bar's stripes come straight
+   from the --task-* ramp task-status.tsx already owns, so a segment and its
+   board column are the same colour by construction. */
+
+.fleet-overview-props {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fleet-overview-prop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.fleet-overview-prop > svg {
+  flex: none;
+  color: var(--text-muted);
+}
+
+/* Every figure on this surface — properties line, done ratio, legend counts,
+   callout counts. The NUMBER is the only thing allowed full contrast; the
+   units and labels around it stay one step back, so each line scans as a
+   figure with context rather than a wall of grey. One class for all four so
+   they cannot drift. */
+.fleet-overview-num {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── "Needs you" callout ──────────────────────────────────────────────────
+   Deliberately a box, unlike everything else on this page: it is the one
+   element that should read as an interruption, and it is absent entirely at
+   zero. Amber lives on the icon and the left rule only — the counts keep the
+   status ring colours so the three states stay tellable apart. */
+.fleet-overview-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--warning-text);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  box-shadow: var(--card-shadow);
+}
+
+.fleet-overview-callout-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--warning-text);
+}
+
+.fleet-overview-callout-body {
+  min-width: 0;
+}
+
+.fleet-overview-callout-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.fleet-overview-callout-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 6px;
+}
+
+.fleet-overview-callout-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* ── Status distribution bar ─────────────────────────────────────────────── */
+
+.fleet-overview-progress {
+  margin-top: 20px;
+}
+
+.fleet-overview-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.fleet-overview-progress-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+}
+
+.fleet-overview-progress-count {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-status-bar {
+  display: flex;
+  gap: 2px;
+  height: 8px;
+}
+
+.fleet-status-bar-seg {
+  /* flex-grow carries the count (set inline), flex-basis 0 so growth alone
+     decides width; min-width keeps a single task in a 40-task project from
+     rendering as a 1px smudge — at that point the bar is showing "some" and
+     the legend carries the exact figure. */
+  flex: 1 1 0;
+  min-width: 6px;
+  border-radius: 2px;
+}
+
+/* Backlog and Todo deliberately share one grey in the --task-* ramp (see
+   task-status.tsx), which is fine for two rings sitting in different columns
+   but makes two ADJACENT stripes read as a single smudge. Rather than invent
+   an eighth colour, backlog's stripe is the same token at half strength —
+   the bar's equivalent of the dashed outline that already means "not really
+   on the board yet". */
+.fleet-status-bar-seg--backlog {
+  opacity: 0.5;
+}
+
+.fleet-status-bar-seg:first-child {
+  border-top-left-radius: var(--radius-pill);
+  border-bottom-left-radius: var(--radius-pill);
+}
+
+.fleet-status-bar-seg:last-child {
+  border-top-right-radius: var(--radius-pill);
+  border-bottom-right-radius: var(--radius-pill);
+}
+
+.fleet-status-bar--empty {
+  background: var(--bg-inset);
+  border-radius: var(--radius-pill);
+}
+
+.fleet-overview-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 12px;
+}
+
+.fleet-overview-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* Honest small print — the empty-project explanation and the review-
+   attribution caveat both land here. Capped to a readable measure rather
+   than running the full 1140px content width. */
+.fleet-overview-note {
+  margin: 12px 0 0;
+  max-width: 78ch;
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--text-muted);
+}
+
+.fleet-overview-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 28px 0 4px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.fleet-overview-section-head .fleet-detail-section-title {
+  margin: 0;
+}
+
+.fleet-overview-section-meta {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Activity ledger ─────────────────────────────────────────────────────── */
 
 .fleet-activity {
@@ -4058,6 +4235,19 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-activity-item:last-child { border-bottom: none; }
+
+/* Project Overview only. The shared ledger carries a 20px horizontal inset
+   because it sits inside a padded detail drawer (FleetAgentDetail, FleetHome);
+   on the Overview tab everything above it — properties line, callout, status
+   bar — is flush with the content column, so the same inset would leave the
+   feed visibly hanging to the right of everything else. A modifier rather
+   than a change to the base rule: the drawer still wants its inset. */
+.fleet-activity--flush { padding-top: 0; }
+.fleet-activity--flush .fleet-activity-item,
+.fleet-activity--flush .fleet-activity-day-heading {
+  padding-left: 0;
+  padding-right: 0;
+}
 
 .fleet-activity-dot {
   margin-top: 4px;
@@ -4217,7 +4407,6 @@ a.fleet-breadcrumb:hover {
   background: var(--bg-inset);
   cursor: pointer;
   padding: 0;
-  transition: background var(--motion-base, 0.15s) ease-out, border-color var(--motion-base, 0.15s) ease-out;
 }
 .fleet-toggle::after {
   content: "";
@@ -4228,7 +4417,7 @@ a.fleet-breadcrumb:hover {
   height: 14px;
   border-radius: 50%;
   background: var(--text-muted);
-  transition: transform var(--motion-base, 0.15s) ease-out, background var(--motion-base, 0.15s) ease-out;
+  transition: transform var(--dur-1) var(--ease-out);
 }
 .fleet-toggle.is-on {
   background: var(--text-primary);
@@ -4280,7 +4469,7 @@ a.fleet-breadcrumb:hover {
 }
 .fleet-disclosure-trigger:hover { color: var(--text-primary); }
 .fleet-disclosure-chevron {
-  transition: transform var(--motion-base, 0.15s) ease-out;
+  transition: transform var(--dur-1) var(--ease-out);
 }
 .fleet-disclosure.is-open .fleet-disclosure-chevron { transform: rotate(90deg); }
 .fleet-disclosure-body { padding-bottom: 12px; }
@@ -4301,7 +4490,7 @@ a.fleet-breadcrumb:hover {
   font-family: inherit;
   font-size: 13px;
   line-height: 1.6;
-  transition: min-height var(--motion-base, 0.15s) ease-out;
+  transition: min-height var(--dur-2) var(--ease-out);
 }
 .fleet-persona-textarea--expanded {
   min-height: 240px;
@@ -4318,7 +4507,7 @@ a.fleet-breadcrumb:hover {
   inset: 0;
   z-index: 100;
   background: rgba(0, 0, 0, 0.45);
-  animation: fleet-fade 150ms ease-out;
+  animation: fleet-fade var(--dur-2) var(--ease-out);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -4336,7 +4525,7 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: fleet-palette-in 150ms ease-out;
+  animation: fleet-palette-in var(--dur-2) var(--ease-out);
 }
 
 .fleet-palette-input-wrap {
@@ -4388,7 +4577,6 @@ a.fleet-breadcrumb:hover {
   width: 100%;
   text-align: left;
   font-family: inherit;
-  transition: background 150ms ease-out, color 150ms ease-out;
 }
 
 .fleet-palette-item--active,
@@ -4644,7 +4832,6 @@ a.fleet-breadcrumb:hover {
   border-radius: var(--radius-card);
   color: var(--text-muted);
   text-decoration: none;
-  transition: background 150ms ease-out, border-color 150ms ease-out;
 }
 
 .fleet-status-strip-item:hover {
@@ -4689,7 +4876,7 @@ a.fleet-breadcrumb:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: fleet-modal-in 150ms ease-out;
+  animation: fleet-modal-in var(--dur-2) var(--ease-out);
 }
 
 .fleet-wizard-header {
@@ -4817,7 +5004,6 @@ a.fleet-breadcrumb:hover {
   font-family: inherit;
   text-align: left;
   cursor: pointer;
-  transition: border-color 150ms ease-out, background 150ms ease-out;
 }
 
 .fleet-wizard-option:hover {
@@ -4969,7 +5155,6 @@ a.fleet-breadcrumb:hover {
   font-size: 12px;
   text-align: left;
   cursor: pointer;
-  transition: background 150ms ease-out, color 150ms ease-out;
 }
 .fleet-memory-file-item svg {
   flex-shrink: 0;
@@ -5175,7 +5360,6 @@ a.fleet-breadcrumb:hover {
   background: transparent;
   color: var(--text-primary);
   text-decoration: none;
-  transition: background var(--dur-fast) ease-out;
 }
 .fleet-list-row:last-child { border-bottom: none; }
 /* Hardware list rows are 3-line (name / type / location) — tighten their
@@ -5312,7 +5496,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   text-align: left;
   font: inherit;
   cursor: pointer;
-  transition: background var(--dur-fast) ease-out;
 }
 .fleet-agents-list .fleet-agent-row:last-child { border-bottom: none; }
 .fleet-agent-row:hover { background: var(--bg-card-hover); }
@@ -5413,6 +5596,14 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   align-items: center;
   justify-content: flex-end;
   margin-bottom: var(--space-3);
+}
+/* In the project page's control row the stack is a LEFT-hand item sharing a
+   40px line with the view tabs, not a band of its own above the content — see
+   the comment where it is rendered. margin-right:auto keeps everything else in
+   that row right-aligned exactly as .fleet-content-toolbar's flex-end did. */
+.fleet-content-toolbar > .fleet-member-avatar-stack {
+  margin-bottom: 0;
+  margin-right: auto;
 }
 .fleet-member-avatar-stack-item {
   position: relative;
@@ -5646,7 +5837,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   border-bottom: 1px solid var(--border);
   color: var(--text-primary);
   text-decoration: none;
-  transition: background var(--dur-fast) ease-out;
 }
 .fleet-projects-list .fleet-project-row:last-child { border-bottom: none; }
 .fleet-project-row:hover { background: var(--bg-card-hover); }
@@ -5703,7 +5893,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
      outer radius so it reads as properly inset, not concentric. */
   border-radius: calc(var(--radius-control) - 2px);
   cursor: pointer;
-  transition: background var(--motion-base) ease-out, color var(--motion-base) ease-out;
 }
 .fleet-segmented-btn--active { background: var(--bg-card); color: var(--text-primary); }
 
@@ -5757,10 +5946,9 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .fleet-rail-subnav-toggle:hover { background: var(--rail-active); color: var(--text-primary); }
-.fleet-rail-subnav-toggle svg { transition: transform var(--dur-fast) ease-out; }
+.fleet-rail-subnav-toggle svg { transition: transform var(--dur-2) var(--ease-out); }
 .fleet-rail-subnav-toggle.is-expanded svg { transform: rotate(90deg); }
 .fleet-rail-item--focus { box-shadow: inset 0 0 0 1px var(--accent-ring); }
 .fleet-rail-item-caret {
@@ -5780,7 +5968,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   border-radius: 4px;
   padding: 1px 4px;
   opacity: 0;
-  transition: opacity var(--motion-base) ease-out;
+  transition: opacity var(--dur-2) var(--ease-out);
 }
 .fleet-rail-item:hover .fleet-rail-item-chord { opacity: 0.7; }
 /* Inbox's unread count — same right-aligned slot as the chord hint above
@@ -5810,7 +5998,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-secondary);
   text-decoration: none;
   font-size: var(--text-sm);
-  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .fleet-rail-subitem:hover { background: var(--rail-active); color: var(--text-primary); }
 .fleet-rail-subitem--active { background: var(--rail-active); color: var(--text-primary); }
@@ -5858,7 +6045,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    default" stays a plain non-interactive span. */
 .fleet-badge--action {
   cursor: pointer; font: inherit; -webkit-appearance: none; appearance: none;
-  transition: border-color var(--motion-base, 0.15s) ease-out, background var(--motion-base, 0.15s) ease-out;
 }
 .fleet-badge--action:hover:not(:disabled) { border-color: var(--border-strong); }
 .fleet-badge--action:disabled { cursor: not-allowed; opacity: 0.6; }
@@ -5886,7 +6072,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   display: flex; flex-direction: column; gap: 3px; align-items: stretch;
   padding: var(--space-3) var(--space-4); border: none; border-bottom: 1px solid var(--border);
   background: transparent; text-align: left; cursor: pointer;
-  transition: background var(--motion-base) ease-out;
 }
 .fleet-work-conv:hover { background: var(--bg-card-hover); }
 .fleet-work-conv--active { background: var(--rail-active); }
@@ -5980,8 +6165,13 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 /* The Work tab is a flush two-pane like the Inbox — no 28px body inset, so the
    list ↔ activity split runs edge-to-edge under the tab bar. The agent controls
    (Stop / Chat) live in the top header (HeaderAction), not inside the content,
-   so there is nothing above the split to reserve room for. */
-.fleet-detail-body:has(> .fleet-work-root) {
+   so there is nothing above the split to reserve room for. Memory is the same
+   shape (its left list already shares Inbox/Work's geometry via the canonical
+   rule near .fleet-inbox-list), so it takes the same opt-out — MAN-90: without
+   it the Memory rail alone rendered inset inside the centered reading column
+   while the other two ran edge-to-edge. */
+.fleet-detail-body:has(> .fleet-work-root),
+.fleet-detail-body:has(> .fleet-memory-browser) {
   padding: 0;
 }
 /* ...and opt the two-pane OUT of the `.fleet-detail-body > *` reading-column
@@ -5989,7 +6179,8 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    for text tabs (Overview/Model/…), but it was centering the Work split to
    820px inside a ~1050px body — leaving the big left+right gaps that made it
    read nothing like the flush Inbox. The two-pane wants the FULL width. */
-.fleet-detail-body > .fleet-work-root {
+.fleet-detail-body > .fleet-work-root,
+.fleet-detail-body > .fleet-memory-browser {
   max-width: none;
   margin-inline: 0;
   width: 100%;
@@ -6068,7 +6259,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   width: 100%; padding: var(--space-3) var(--space-4);
   border: none; border-bottom: 1px solid var(--border);
   background: transparent; text-align: left; cursor: pointer;
-  transition: background var(--motion-base) ease-out, opacity var(--motion-base) ease-out;
+  transition: opacity var(--dur-2) var(--ease-out);
 }
 .fleet-work-item:hover { background: var(--bg-card-hover); }
 .fleet-work-item--active { background: var(--rail-active); }
@@ -6142,7 +6333,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-work-plan-row {
   display: flex; align-items: center; gap: 9px;
   padding: 5px var(--space-5);
-  animation: fleet-activity-row-in 0.22s ease-out both;
+  animation: fleet-activity-row-in var(--dur-2) var(--ease-out) both;
 }
 .fleet-work-plan-mark {
   flex-shrink: 0; width: 15px; height: 15px;
@@ -6165,7 +6356,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-work-activity-row {
   display: flex; align-items: flex-start; gap: 10px;
   padding: 7px var(--space-5); border-bottom: 1px solid var(--border);
-  animation: fleet-activity-row-in 0.22s ease-out both;
+  animation: fleet-activity-row-in var(--dur-2) var(--ease-out) both;
 }
 .fleet-work-activity-list .fleet-work-activity-row:last-child { border-bottom: none; }
 .fleet-work-activity-ts {
@@ -6297,7 +6488,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   height: 100%;
   border-radius: 999px;
   background: var(--online-text);
-  transition: width var(--motion-slow) ease;
+  transition: width var(--dur-3) var(--ease-out);
 }
 .fleet-hw-dash-gauge-bar-fill--warn { background: var(--warning-text); }
 .fleet-hw-dash-gauge-bar-fill--danger { background: var(--offline-text); }
@@ -6554,7 +6745,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   font-size: var(--text-xs);
   cursor: pointer;
   flex-shrink: 0;
-  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .fleet-list-row:hover .fleet-list-row-menu-trigger,
 .fleet-list-row:focus-within .fleet-list-row-menu-trigger,
@@ -6791,6 +6981,13 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     border-radius: 0;
   }
 
+  /* The panel goes edge-to-edge here, so the strip above it does too — and it
+     keeps a line of its own, since the panel no longer draws one (MAN-127). */
+  .fleet-tabstrip {
+    margin-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
   .fleet-shell-topbar {
     height: 48px;
     min-height: 48px;
@@ -6846,11 +7043,19 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     border-right: 1px solid var(--border);
     box-shadow: 0 12px 32px -10px rgba(0, 0, 0, 0.35);
     transform: translateX(-100%);
-    transition: transform var(--dur-base) ease-out;
+    transition: transform var(--dur-2) var(--ease-out);
   }
 
   .fleet-rail--mobile-open {
     transform: translateX(0);
+  }
+
+  /* No resizing on a touch drawer — it's a fixed-width overlay here, and an
+     8px col-resize strip along its edge would only compete with the swipe
+     and scroll gestures that matter on this size of screen. */
+  .fleet-rail-resizer,
+  .fleet-properties-resizer {
+    display: none;
   }
 
   /* The desktop icon-only collapse is meaningless inside an overlay drawer
@@ -6910,7 +7115,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     inset: 0;
     z-index: 65;
     background: rgba(0, 0, 0, 0.4);
-    animation: fleet-scrim-fade-in var(--dur-base) ease-out both;
+    animation: fleet-scrim-fade-in var(--dur-3) var(--ease-out) both;
   }
 }
 
@@ -7424,7 +7629,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-primary);
   text-decoration: none;
   cursor: pointer;
-  transition: background var(--dur-fast) ease-out;
 }
 .fleet-tasks-list .fleet-task-row:last-child { border-bottom: none; }
 .fleet-task-row:hover { background: var(--bg-card-hover); }
@@ -7456,6 +7660,19 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-task-cell-title { min-width: 0; }
 .fleet-task-cell-assignee { min-width: 0; }
 
+/* Priority glyph leading the title in the flat list — same icon as the board
+   card, so one task reads identically in both layouts. */
+.fleet-task-cell-titleline {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.fleet-task-cell-prio {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
 @media (max-width: 768px) {
   .fleet-tasks-list {
     --fleet-list-padding-x: 0px;
@@ -7476,4 +7693,1095 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   .fleet-task-row .fleet-agent-cell-right {
     display: none;
   }
+}
+
+/* ── Project task board (kanban) ─────────────────────────────────────────────
+   One column per status, scrolling HORIZONTALLY as a set — seven columns is
+   the intent, not an overflow bug, so nothing here tries to squeeze them into
+   the sheet's width. Each column scrolls vertically on its own with its
+   header pinned, so the count you are reading always belongs to the cards
+   under it.
+
+   THE COLUMN IS NOT A BOX. This is the single biggest thing separating this
+   board from Linear's. A column has no background, no border, no rounded
+   tray — just a header row and a stack of cards floating on the page. Every
+   drawn container between the cards read as a vertical rule, and a grid of
+   grey rounded rectangles is what made the whole surface feel dated. The only
+   vertical separation is the GAP between columns, which is why that gap is
+   deliberately generous (20px) rather than the 12px a bordered layout could
+   get away with.
+
+   Colour comes from the task vocabulary in lib/ui/theme-tokens.css via
+   task-status.tsx's ring, never from a literal here. The card is a smaller
+   restatement of .fleet-agent-row's own hover/focus/selected behaviour, not a
+   new interaction language. */
+.fleet-board {
+  display: flex;
+  gap: 20px;
+  align-items: stretch;
+  /* The horizontal scroller. .fleet-content-main is overflow-x: hidden, so
+     this box owns the sideways movement rather than the page doing it. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 10px;
+  /* Fills whatever vertical room the sheet has left after the chrome above
+     it, so the COLUMNS scroll and the page doesn't. Height comes from the
+     flex parent (.fleet-content-main--board), never a hard-coded viewport
+     subtraction — the chrome above the board is different on every viewport
+     and any magic number here would be wrong on most of them. */
+  flex: 1;
+  min-height: 320px;
+}
+
+/* Applied to the content sheet only while the board is the active view (see
+   the project page): turns the sheet into a flex column that clips instead
+   of scrolling, which is what lets .fleet-board above claim the leftover
+   height. Every other view keeps the sheet's normal page-scroll behaviour.
+
+   FULL-BLEED (MAN-115). .fleet-content-main's normal geometry is a
+   --content-max-wide (1140px) column centred with margin-inline:auto. Inside
+   the ~1210px content frame at 1440x900 that left a 35px dead gutter on EACH
+   side, and with the sheet's own 32px padding on top of it the first card
+   started ~76px in from the frame edge with the same again on the right —
+   the board read as a page inside a page. This is the same opt-out
+   .fleet-work-root and .fleet-memory-browser already take from the
+   .fleet-detail-body reading-column cap, for the same reason: a board is not
+   prose and wants the FULL width.
+
+   Padding is asymmetric on purpose. Left keeps the sheet's normal 32px so
+   the first column lines up with the tab strip above it and every other page
+   in the app. Right is ZERO and the scroller bleeds past the frame edge, so
+   the next column is clipped mid-card — Linear's own board does exactly this,
+   and a half-visible column is a far better "there is more sideways" cue than
+   an empty margin. */
+.fleet-content-main--board {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: hidden;
+  max-width: none;
+  margin-inline: 0;
+  width: 100%;
+  /* Was 28px top: the board should start immediately under the control row,
+     not a third of the way down the sheet. */
+  padding: 10px 32px 0;
+}
+.fleet-content-main--board > .fleet-board {
+  margin-right: -32px;
+}
+/* ...but once you HAVE scrolled to the end, the last column still wants a
+   gutter rather than butting into the frame. Carried on the column instead of
+   as padding-right on the flex scroller, which browsers have historically
+   dropped at the end of an overflowing flex row. */
+.fleet-content-main--board > .fleet-board > .fleet-board-column:last-child {
+  margin-right: 32px;
+}
+
+/* Mobile is explicitly out of scope for the restyle, and the full-bleed rule
+   above would otherwise stomp the 12px page gutter the 768px block further up
+   this file sets for every .fleet-content-main. This preserves that gutter
+   exactly — it is a no-change guard, not a mobile redesign. */
+@media (max-width: 768px) {
+  .fleet-content-main--board {
+    padding: 16px 12px 0;
+  }
+  .fleet-content-main--board > .fleet-board {
+    margin-right: -12px;
+  }
+  .fleet-content-main--board > .fleet-board > .fleet-board-column:last-child {
+    margin-right: 12px;
+  }
+}
+
+.fleet-board-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 0 0 252px;
+  width: 252px;
+  /* No background, no border, no radius — see the section header. The tray is
+     gone on purpose; do not put it back. */
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-card);
+}
+/* Drop affordance while a card is dragged over this column. With no column
+   box to re-colour, this is the one moment a container appears at all: a
+   faint wash plus an inset hairline, drawn only for the duration of the drag.
+   Deliberately not a colour — which column you are over is structural
+   information, and the status colours are already spoken for. */
+.fleet-board-column.is-drop-target {
+  background: var(--rail-active);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.fleet-board-column-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  /* 2px left so the header's status ring optically lines up with the cards'
+     left edge below it (the cards carry a 1px border plus 9px padding). */
+  padding: 0 2px 9px;
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.fleet-board-column-title {
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Bare number, not a pill. The pill was chrome the header no longer needs now
+   that there is no bordered box around it to balance against. */
+.fleet-board-column-count {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding-right: 2px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-board-column-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* Only enough inline padding for the drop-target wash to breathe; the cards
+     themselves define the column's real edges now. */
+  padding: 0 2px 2px;
+}
+
+.fleet-board-column-empty {
+  padding: 10px 4px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+/* DENSITY. Title first, one compact meta row under it — the previous card led
+   with a metadata row (id + a status dropdown that spelled out the status in
+   words, directly under a column heading already saying it), which cost a
+   whole line before the reader reached the only thing they scan for. Padding,
+   gap and line-height are all tightened; a two-line card is ~78px against the
+   old ~115px, so roughly half again as many cards fit a column. */
+.fleet-board-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 8px 9px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  /* none in dark (--bg-card already steps off --bg-panel), a whisper in light
+     where card and panel are both pure white and the hairline alone left the
+     cards looking unmoored once the column tray went away. */
+  box-shadow: var(--card-shadow);
+  cursor: pointer;
+}
+.fleet-board-card:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
+.fleet-board-card:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -1px;
+}
+/* Which card the open detail drawer is showing — the same "selected, not
+   hovered" distinction the agent list draws. */
+.fleet-board-card.is-selected {
+  border-color: var(--accent-muted);
+  box-shadow: inset 0 0 0 1px var(--accent-muted);
+}
+.fleet-board-card.is-dragging { opacity: 0.4; }
+
+.fleet-board-card-title {
+  font-size: var(--text-sm);
+  line-height: 1.3;
+  color: var(--text-primary);
+  /* Two lines, then ellipsis: a card is a scannable handle, not the task. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* One row: status ring · priority glyph · id … date · assignee. Everything on
+   it is an icon or a short numeric token, which is what keeps it to a single
+   14px line. */
+.fleet-board-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 16px;
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+}
+/* The date carries the row's single auto margin (see .fleet-board-card-date);
+   the avatar simply trails it. Two auto margins would split the free space
+   and strand the date mid-row. */
+.fleet-board-card-meta > .fleet-agent-avatar {
+  flex-shrink: 0;
+  /* The shared avatar is 26px, sized for a 52px list row. On a meta line that
+     is the tallest thing present, so it sets the card's floor — hence 18. */
+  width: 18px;
+  height: 18px;
+}
+
+.fleet-board-card-id {
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-board-card-prio {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* The status control, and the reason the board needs no drag library to stay
+   operable: HTML5 drag-and-drop has no keyboard equivalent. It is a real
+   native <select> — platform listbox, platform keyboard model, platform
+   screen-reader semantics — laid transparently OVER the status ring, so it
+   costs the card no width and reads as the ring you can click. The old
+   version rendered the select's own text ("Needs input", "In progress") on
+   every card, repeating the column heading and taking the widest slot in the
+   row. */
+.fleet-board-card-statuspick {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border-radius: var(--radius-control);
+}
+.fleet-board-card-statuspick .fleet-board-card-status {
+  position: absolute;
+  inset: -2px;
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: transparent;
+  font: inherit;
+  opacity: 0;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+/* Focus is otherwise invisible — the control itself is transparent, so the
+   ring underneath has to show the state. */
+.fleet-board-card-statuspick:has(.fleet-board-card-status:focus-visible) {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+.fleet-board-card-statuspick:hover {
+  box-shadow: 0 0 0 3px var(--rail-active);
+  background: var(--rail-active);
+}
+
+.fleet-board-card-date {
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+  white-space: nowrap;
+}
+/* An empty right-hand slot, not an em dash: a column of "—" glyphs where the
+   avatars aren't is noise, and "no assignee" is already legible from the
+   absence of one. Sized so the meta row's height doesn't change. */
+.fleet-board-card-unassigned {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+/* ── Task detail PAGE ────────────────────────────────────────────────────────
+   Was a right-hand drawer over the board; is now a routed page
+   (/projects/{id}/tasks/{taskId}), Linear's issue view. Two real columns —
+   a reading column and a properties column — that share the width and scroll
+   independently. The properties column is a flex SIBLING, not an overlay:
+   nothing here floats above the board, because the board isn't underneath it
+   any more. */
+.fleet-task-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.fleet-task-page-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* The reading column is capped and left-aligned inside its own scroller —
+   a description set across 900px is unreadable, and Linear caps this too. */
+.fleet-task-page-body {
+  max-width: 720px;
+  padding: 32px 40px 64px;
+}
+
+.fleet-task-page-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-task-page-title {
+  margin: 6px 0 0;
+  font-size: 24px;
+  font-weight: var(--weight-semibold);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+/* The title is focused PROGRAMMATICALLY on arrival, purely so a screen reader
+   announces which task just opened — it is not an interactive control and
+   there is nothing to activate on it. Chrome still matches :focus-visible on
+   that programmatic focus, which drew a ring around the heading of every task
+   page on load. Suppressed for the same reason the standard
+   "focus the heading for the announcement" pattern always suppresses it.
+   Both properties are cleared: the fleet ring is an `outline`, but
+   globals.css's app-wide `:focus-visible` draws a `box-shadow` ring too. */
+.fleet-task-page-title:focus,
+.fleet-task-page-title:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.fleet-task-page-desc {
+  margin: 16px 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+/* Paragraph breaks in the plain-text description column are preserved as real
+   paragraphs; single newlines stay soft wraps. */
+.fleet-task-page-desc p {
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+}
+.fleet-task-page-desc p:last-child { margin-bottom: 0; }
+
+.fleet-task-page-section {
+  margin-top: 36px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
+.fleet-task-page-section-title {
+  margin: 0 0 12px;
+  font-size: 12px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.fleet-task-page-activity-empty {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+.fleet-task-page-activity-empty svg { flex-shrink: 0; margin-top: 3px; }
+.fleet-task-page-activity-empty code {
+  font-size: 12px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-inset);
+}
+
+.fleet-task-page-comments {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.fleet-task-page-comment {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+.fleet-task-page-comment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.fleet-task-page-comment-author {
+  font-size: 12.5px;
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+.fleet-task-page-comment-time {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.fleet-task-page-comment-body {
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+.fleet-task-page-activity-note {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* Properties column — part of the page, bordered off from the reading column
+   on its left, its own scroller. */
+.fleet-task-page-side {
+  width: 300px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+}
+.fleet-task-page-side-inner {
+  padding: 32px 20px 48px;
+}
+.fleet-task-page-side-title {
+  font-size: 12px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.fleet-task-page-side-link {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-weight: var(--weight-semibold);
+}
+.fleet-task-page-side-link:hover { text-decoration: underline; }
+.fleet-task-page-side-note {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+/* Narrow viewports: the properties column stacks under the reading column
+   rather than squeezing both. Out of the desktop-first scope for this pass,
+   but a one-rule guard is cheaper than a broken 900px window. */
+@media (max-width: 1000px) {
+  .fleet-task-page { flex-direction: column; overflow-y: auto; }
+  .fleet-task-page-main { overflow: visible; flex: none; }
+  .fleet-task-page-body { padding: 24px 20px 24px; max-width: none; }
+  .fleet-task-page-side {
+    width: auto;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    overflow: visible;
+  }
+  .fleet-task-page-side-inner { padding: 20px; }
+}
+
+/* Value side of an editable property row — keeps the dot/avatar and the
+   control on one line, right-aligned like every other .fleet-panel-row. */
+.fleet-task-detail-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fleet-task-detail-select {
+  max-width: 150px;
+  height: 24px;
+  padding: 0 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.fleet-task-detail-select:hover {
+  border-color: var(--border);
+  background: var(--bg-card-hover);
+}
+.fleet-task-detail-select:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+/* ── Main-content tab strip (Safari / VS Code) ────────────────────────────────
+   MAN-127 FIX 1: sits ON THE CANVAS, ABOVE the content panel and outside it —
+   the strip is window chrome, the panel below is the page. It spans the
+   main-content column only, so the primary rail to its left is neither
+   covered by it nor scrolled by it (tabs swap main-content views only).
+
+   The strip draws NO line of its own: the panel's top border directly beneath
+   is the divider, and one line is crisper than two 4px apart. Chrome is
+   deliberately quiet — a tab is navigation furniture, not a card. The active
+   tab is cut from the same material as the panel below it (--bg-panel + the
+   same 1px border), so it reads as the page's own handle; inactive tabs sit
+   bare on the canvas. */
+.fleet-tabstrip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 40px;
+  min-height: 40px;
+  padding: 8px 6px 4px;
+  margin-right: 8px;
+  background: transparent;
+}
+
+.fleet-tabstrip-list {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* Content-sized, NOT flex:1 — a growing scroller ate the strip's whole width
+     and shoved `+` against the far edge. Shrinkable (min-width:0) so a full
+     strip scrolls inside itself with `+` pinned beside the last visible tab. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.fleet-tabstrip-list::-webkit-scrollbar { display: none; }
+
+.fleet-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px 0 8px;
+  border-radius: var(--radius-control);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: var(--weight-medium);
+  max-width: 190px;
+  min-width: 0;
+  flex-shrink: 0;
+  cursor: default;
+  user-select: none;
+}
+/* Hover on the canvas, not inside the panel: --rail-active is the neutral
+   wash that reads on the canvas in both themes (--bg-inset is a PANEL-inset
+   colour and goes the wrong way against --bg-canvas in light mode). */
+.fleet-tab:hover { background: var(--rail-active); color: var(--text-secondary); }
+.fleet-tab:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -1px;
+}
+.fleet-tab--active {
+  background: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+
+.fleet-tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.fleet-tab--active .fleet-tab-icon { color: var(--text-secondary); }
+
+.fleet-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Revealed on hover/active only — a permanent row of × glyphs turns the strip
+   into a column of controls instead of a list of places. The slot is always
+   present (opacity, not display), so revealing it never re-flows the strip. */
+.fleet-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.fleet-tab:hover .fleet-tab-close,
+.fleet-tab--active .fleet-tab-close { opacity: 1; }
+.fleet-tab-close:hover { background: var(--bg-card-hover); color: var(--text-primary); }
+
+.fleet-tabstrip-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.fleet-tabstrip-new:hover { background: var(--rail-active); color: var(--text-primary); }
+.fleet-tabstrip-new:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -1px;
+}
+
+/* ── Task composer (MAN-127 FIX 2) — paper, not a form ───────────────────────
+   The old "New task" dialog was three labelled, bordered fields stacked in a
+   box. This is a sheet of paper: bare textareas straight on the surface, the
+   placeholder as the only label, size difference as the only hierarchy, and
+   the properties that decide whether an agent can pick the work up sitting
+   underneath as chips you set BEFORE creating.
+
+   NOTHING here draws a box around text entry. If a future change adds a
+   border, an inset background or a focus outline to .fleet-composer-title /
+   -desc, it has undone the point of the change — the caret is the focus
+   indicator. Real controls (chips, menu items, buttons) keep their focus
+   rings, because those are controls.
+
+   Motion: the panel enters at --dur-2/--ease-out and leaves at --dur-2/
+   --ease-in (both by REVERSING the existing keyframes, so there is exactly
+   one entrance curve in the file). Nothing else moves. */
+
+.fleet-composer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 12vh 16px 16px;
+  background: rgba(0, 0, 0, 0.45);
+  animation: fleet-fade var(--dur-2) var(--ease-out);
+}
+.fleet-composer-backdrop.is-closing {
+  animation: fleet-fade var(--dur-2) var(--ease-in) reverse forwards;
+}
+
+.fleet-composer {
+  width: 640px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.6);
+  animation: fleet-modal-in var(--dur-2) var(--ease-out);
+}
+.fleet-composer.is-closing {
+  animation: fleet-modal-in var(--dur-2) var(--ease-in) reverse forwards;
+}
+
+.fleet-composer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 0 16px;
+}
+.fleet-composer-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.fleet-composer-crumb-project {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.fleet-composer-created {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.fleet-composer-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.fleet-composer-close:hover { background: var(--rail-active); color: var(--text-primary); }
+
+/* The paper itself. */
+.fleet-composer-paper {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 16px 6px;
+}
+.fleet-composer-title,
+.fleet-composer-desc {
+  width: 100%;
+  border: none;
+  background: transparent;
+  outline: none;
+  resize: none;
+  font-family: inherit;
+  letter-spacing: -0.01em;
+  padding: 0;
+}
+.fleet-composer-title {
+  font-size: 17px;
+  font-weight: var(--weight-medium);
+  line-height: 1.35;
+  color: var(--text-primary);
+  padding: 6px 0 2px;
+  overflow: hidden; /* auto-grown from JS; never its own scrollbox */
+}
+.fleet-composer-desc {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  min-height: 60px;
+  padding: 2px 0 4px;
+}
+.fleet-composer-title::placeholder,
+.fleet-composer-desc::placeholder { color: var(--text-muted); }
+/* THE rule this whole panel turns on. TWO global rules draw a box on a focused
+   field and both have to go here: `.fleet-root *:focus-visible` (a 2px accent
+   outline) and globals.css' app-wide `:focus-visible { box-shadow:
+   var(--app-shadow-focus) }` (a 2px grey ring). Either one puts back exactly
+   the rectangle this design exists to remove — paper with a box around it is a
+   form again. Text entry shows focus the way text entry has always shown it:
+   the caret. Every real CONTROL in here (chips, menu items, buttons) keeps its
+   ring, so keyboard focus is never actually lost. */
+.fleet-composer-title:focus-visible,
+.fleet-composer-desc:focus-visible,
+.fleet-composer-pop-input:focus-visible,
+.fleet-composer-date:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* ── Property chips ─────────────────────────────────────────────────────── */
+.fleet-composer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 16px 12px;
+}
+.fleet-composer-chipwrap {
+  position: relative;
+  display: inline-flex;
+}
+.fleet-composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.fleet-composer-chip:hover { background: var(--rail-active); color: var(--text-secondary); }
+/* Set = this property now carries a value. Full-strength text is the whole
+   signal — the row then reads at a glance as "these three are decided". */
+.fleet-composer-chip.is-set { color: var(--text-primary); border-color: var(--border-strong); }
+.fleet-composer-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.fleet-composer-chip.is-set .fleet-composer-chip-icon { color: inherit; }
+/* Non-interactive: states where the task lands, offers no choice. */
+.fleet-composer-chip--static {
+  background: var(--bg-inset);
+  border-color: transparent;
+  color: var(--text-secondary);
+  cursor: default;
+}
+.fleet-composer-sigil {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--rail-active);
+  color: var(--text-secondary);
+}
+.fleet-composer-nobody {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-strong);
+}
+
+/* ── Chip menus ─────────────────────────────────────────────────────────── */
+.fleet-composer-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 2;
+  min-width: 208px;
+  max-height: 288px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--fleet-float-shadow);
+}
+.fleet-composer-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.fleet-composer-pop-item:hover:not(:disabled),
+.fleet-composer-pop-item:focus-visible { background: var(--rail-active); color: var(--text-primary); }
+.fleet-composer-pop-item:disabled { color: var(--text-muted); cursor: default; }
+.fleet-composer-pop-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.fleet-composer-pop-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-composer-pop-check { flex-shrink: 0; color: var(--text-secondary); }
+.fleet-composer-pop-empty {
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+.fleet-composer-pop-search {
+  padding: 2px 4px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+/* Same rule as the paper above: a filter field is text entry, so no box. */
+.fleet-composer-pop-input,
+.fleet-composer-date {
+  width: 100%;
+  height: 26px;
+  padding: 0 6px;
+  border: none;
+  background: transparent;
+  outline: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+}
+.fleet-composer-pop-input::placeholder { color: var(--text-muted); }
+.fleet-composer-pop-pad { padding: 2px; }
+.fleet-composer-pop-list { display: flex; flex-direction: column; }
+
+.fleet-composer-error {
+  margin: 0;
+  padding: 0 16px 8px;
+  font-size: 12px;
+  color: var(--offline-text);
+}
+
+/* ── Footer: "Create more" + the one primary button ─────────────────────── */
+.fleet-composer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px 10px 10px;
+  border-top: 1px solid var(--border);
+}
+.fleet-composer-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+.fleet-composer-switch:hover { background: var(--rail-active); color: var(--text-secondary); }
+.fleet-composer-switch.is-on { color: var(--text-primary); }
+.fleet-composer-switch-track {
+  position: relative;
+  display: inline-block;
+  width: 22px;
+  height: 13px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+.fleet-composer-switch.is-on .fleet-composer-switch-track { background: var(--accent); }
+.fleet-composer-switch-knob {
+  position: absolute;
+  top: 1.5px;
+  left: 1.5px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--bg-card);
+  /* Transform only — the one property motion is allowed to animate here. */
+  transition: transform var(--dur-1) var(--ease-out);
+}
+.fleet-composer-switch.is-on .fleet-composer-switch-knob { transform: translateX(9px); }
+
+/* ── Label dots ─────────────────────────────────────────────────────────────
+   `color` on a label is a palette TOKEN NAME from the server
+   (workspace_labels_service.LABEL_COLOR_ORDER), never a hex — the theme owns
+   what each token looks like, exactly as it already does for task statuses.
+   These ten are mid-tones chosen to hold up on both the light and the dark
+   surface, so no per-theme fork is needed. */
+.fleet-root {
+  --label-grey: #8b8b94;
+  --label-red: #e5534b;
+  --label-orange: #e8853a;
+  --label-amber: #cf9a22;
+  --label-green: #3fa863;
+  --label-teal: #2ea89a;
+  --label-blue: #4a8ff0;
+  --label-indigo: #6a6ce0;
+  --label-violet: #9b6ae0;
+  --label-pink: #e05a9b;
+}
+.fleet-label-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--label-grey);
+}
+.fleet-label-dot[data-color="red"] { background: var(--label-red); }
+.fleet-label-dot[data-color="orange"] { background: var(--label-orange); }
+.fleet-label-dot[data-color="amber"] { background: var(--label-amber); }
+.fleet-label-dot[data-color="green"] { background: var(--label-green); }
+.fleet-label-dot[data-color="teal"] { background: var(--label-teal); }
+.fleet-label-dot[data-color="blue"] { background: var(--label-blue); }
+.fleet-label-dot[data-color="indigo"] { background: var(--label-indigo); }
+.fleet-label-dot[data-color="violet"] { background: var(--label-violet); }
+.fleet-label-dot[data-color="pink"] { background: var(--label-pink); }
+/* "no labels chosen yet" — an outline, not a filled dot claiming a colour. */
+.fleet-label-dot[data-color="none"] {
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+}
+
+/* ── Board column header controls (MAN-127 FIX 3) ────────────────────────────
+   `+` and `⋯` sit at the right end of the header, revealed on hover/focus of
+   the column (and kept visible while the menu is open) — a permanent pair of
+   glyphs on all seven columns turns the header row into a control panel, which
+   is the same reasoning the tab strip's × follows. The slots are always laid
+   out (opacity, not display), so revealing them never re-flows the header. */
+.fleet-board-column-menuwrap {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.fleet-board-column-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.fleet-board-column:hover .fleet-board-column-btn,
+.fleet-board-column:focus-within .fleet-board-column-btn,
+.fleet-board-column-btn.is-open { opacity: 1; }
+.fleet-board-column-btn:hover,
+.fleet-board-column-btn.is-open { background: var(--rail-active); color: var(--text-primary); }
+.fleet-board-column-btn:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -1px;
+}
+/* The count sits between the title and these controls; it keeps its
+   margin-left:auto push, so the controls simply follow it. */
+.fleet-board-column-header .fleet-board-column-count { margin-right: 2px; }
+
+.fleet-board-column-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 3;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--fleet-float-shadow);
+  /* Menu items are .fleet-composer-pop-item — one menu-row style for the whole
+     surface rather than a second, near-identical one that drifts. */
+  font-size: 13px;
 }

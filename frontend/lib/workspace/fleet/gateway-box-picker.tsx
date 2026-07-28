@@ -113,6 +113,60 @@ export function gatewayIsOnline(g: FleetGateway): boolean {
   return `${g.connection_status || ""} ${g.status || ""}`.toLowerCase().includes("online");
 }
 
+/** The two kinds of box the same /gateway/registrations list holds — an
+ *  Empyralis-provisioned (or SSH-connected) cloud server vs a computer the
+ *  owner paired. Same partition the Hardware page and the create wizard use
+ *  (hardware_kind === "cloud_vps"), kept here so the picker, the placement
+ *  resolver, and those pages can never disagree about which box is which. */
+export function gatewayIsCloudVps(g: FleetGateway): boolean {
+  return String(g.hardware_kind || "").toLowerCase() === "cloud_vps";
+}
+
+/** hardware_access's two hardware-bearing modes. "none" (Cloud only) never
+ *  reaches a box list, so it isn't part of this type. */
+export type HardwareBoxKind = "vps" | "gateway";
+
+/** The boxes that a given access mode can legally use. Without this the
+ *  picker offered every registration under both modes — you could pick
+ *  "Cloud VPS" and then select your laptop, and the "nothing here yet" state
+ *  was computed from the wrong population entirely. */
+export function gatewaysOfKind(gateways: FleetGateway[], kind: HardwareBoxKind): FleetGateway[] {
+  return kind === "vps" ? gateways.filter(gatewayIsCloudVps) : gateways.filter((g) => !gatewayIsCloudVps(g));
+}
+
+/** Every user-facing string that depends on which box kind is selected, in
+ *  one place, so the picker's label/empty state and the placement preview
+ *  always describe the same thing. */
+export const BOX_KIND_COPY: Record<
+  HardwareBoxKind,
+  { noun: string; pickerLabel: string; emptyTitle: string; emptyBody: string; emptyCta: string; anyLabel: string; noneLabel: string; disconnectedLabel: string; anyHint: string }
+> = {
+  vps: {
+    noun: "cloud server",
+    pickerLabel: "Which cloud server?",
+    emptyTitle: "No cloud server yet.",
+    emptyBody:
+      "You picked Cloud VPS, and this workspace has no cloud server connected. Create one (or connect your own over SSH) on the Hardware page, then choose it here.",
+    emptyCta: "Go to Hardware →",
+    anyLabel: "Any cloud server",
+    noneLabel: "No cloud server yet",
+    disconnectedLabel: "Cloud server (disconnected)",
+    anyHint: "Optional — leave unset to use whichever cloud server is online.",
+  },
+  gateway: {
+    noun: "paired computer",
+    pickerLabel: "Which computer runs it?",
+    emptyTitle: "No paired computers yet.",
+    emptyBody:
+      "You picked Paired computer, and this workspace has no computer paired. Pair one on the Hardware page, then choose it here.",
+    emptyCta: "Go to Hardware →",
+    anyLabel: "Any paired computer",
+    noneLabel: "No computer paired yet",
+    disconnectedLabel: "Paired computer (disconnected)",
+    anyHint: "Optional — leave unset to use whichever paired computer is online.",
+  },
+};
+
 /** The honest 3-way signal for a subscription CLI on a box. `.detected` alone
  *  (the field every caller used to read) is true the moment the binary is
  *  found on PATH, regardless of login state — it cannot tell "installed but
@@ -234,14 +288,27 @@ export function resolveHardwarePlacement(
   }
   const access = (hardwareAccess || "none").toLowerCase();
   if (access === "none") return { label: "Cloud", tone: "cloud" };
+  // Which population "nothing here yet" is judged against depends on the
+  // mode: a workspace full of paired laptops still has no cloud server, and
+  // reporting "No computer paired yet" for a vps agent (as this did before)
+  // described a different situation than the one the owner is in.
+  const kind: HardwareBoxKind = access === "vps" ? "vps" : "gateway";
+  const copy = BOX_KIND_COPY[kind];
+  const candidates = gatewaysOfKind(gateways, kind);
   const preferred = String(preferredGatewayId || "").trim();
   if (preferred) {
-    const match = gateways.find((g) => gatewayId(g) === preferred);
+    const match = candidates.find((g) => gatewayId(g) === preferred);
     if (match) return { label: gatewayLabel(match), tone: connectionTone(match) };
-    return { label: "Paired computer (disconnected)", tone: "offline" };
+    // Pinned to a box that exists but isn't of this mode's kind (mode was
+    // switched after the box was pinned). Naming the box AND the mismatch
+    // beats both silent options: showing the box as if it were fine, or
+    // showing "disconnected" for a box that's sitting right there online.
+    const wrongKind = gateways.find((g) => gatewayId(g) === preferred);
+    if (wrongKind) return { label: `${gatewayLabel(wrongKind)} — not a ${copy.noun}`, tone: "degraded" };
+    return { label: copy.disconnectedLabel, tone: "offline" };
   }
-  if (gateways.length === 0) return { label: "No computer paired yet", tone: "unpaired" };
-  return { label: "Any paired computer", tone: gateways.some(gatewayIsOnline) ? "online" : "offline" };
+  if (candidates.length === 0) return { label: copy.noneLabel, tone: "unpaired" };
+  return { label: copy.anyLabel, tone: candidates.some(gatewayIsOnline) ? "online" : "offline" };
 }
 
 type AgentBrainStatusFields = {
@@ -357,11 +424,19 @@ export function GatewayBoxPicker({
   disabled,
   requireLocalModel,
   requireRuntime,
+  kind,
 }: {
   workspaceId: string;
   value: string;
   onChange: (gatewayId: string) => void;
   disabled?: boolean;
+  /** Restricts the list — and every string around it — to one kind of box.
+   *  Set by the Hardware tab from the selected access mode, so "Cloud VPS"
+   *  never lists a paired laptop and its empty state says a cloud server is
+   *  missing rather than repeating the pairing copy. Left unset by the BRAIN
+   *  pickers (Model tab / create wizard), where either kind can host a
+   *  subscription CLI or a local model and the list should stay complete. */
+  kind?: HardwareBoxKind;
   /** When true (mode = "Run locally"), annotate each box with Ollama readiness
    *  and warn if the selected box can't serve a local model. */
   requireLocalModel?: boolean;
@@ -370,22 +445,48 @@ export function GatewayBoxPicker({
    *  selected box doesn't have it. */
   requireRuntime?: CliSubscriptionRuntime;
 }) {
-  const { gateways, loading } = useWorkspaceGateways(workspaceId);
+  const { gateways: allGateways, loading } = useWorkspaceGateways(workspaceId);
+  const gateways = kind ? gatewaysOfKind(allGateways, kind) : allGateways;
+  const copy = kind ? BOX_KIND_COPY[kind] : null;
+  const hardwareHref = `/w/${encodeURIComponent(workspaceId)}/hardware`;
   const selected = gateways.find((g) => gatewayId(g) === value);
   const selectedMissingLocalModel = Boolean(
     requireLocalModel && selected && !gatewayLocalModelReady(selected),
   );
   const selectedRuntimeState = requireRuntime && selected ? gatewayRuntimeState(selected, requireRuntime) : null;
   const runtimeLabel = requireRuntime ? RUNTIME_LABELS[requireRuntime] : "";
+  // A saved box that exists but is the WRONG kind for the current mode —
+  // e.g. the agent was pinned to a laptop and the mode was later switched to
+  // Cloud VPS. The <select> can only render it as blank, which reads as "not
+  // set" when something is very much set; say what actually happened.
+  const staleOtherKind = Boolean(
+    kind && value && !selected && allGateways.some((g) => gatewayId(g) === value),
+  );
 
   return (
     <div style={{ marginTop: 12 }}>
-      <label className="fleet-wizard-label">Which computer runs it?</label>
+      <label className="fleet-wizard-label">{copy ? copy.pickerLabel : "Which computer runs it?"}</label>
       {loading ? (
-        <p className="fleet-channel-expand-hint">Loading your paired computers…</p>
-      ) : gateways.length === 0 ? (
         <p className="fleet-channel-expand-hint">
-          No paired computers yet. Pair one from the Hardware page, then choose it here.
+          {copy ? `Loading your ${copy.noun}s…` : "Loading your paired computers…"}
+        </p>
+      ) : gateways.length === 0 ? (
+        // Mode-specific: the two modes are different situations with
+        // different next actions, and used to share one sentence. Hardware
+        // is created on the Hardware page (founder ruling 2026-07-28 — no
+        // inline provisioning here), so the affordance is a link there.
+        <p className="fleet-channel-expand-hint">
+          {copy ? (
+            <>
+              <strong>{copy.emptyTitle}</strong> {copy.emptyBody}{" "}
+              <Link href={hardwareHref}>{copy.emptyCta}</Link>
+            </>
+          ) : (
+            <>
+              No computers or cloud servers connected yet. Add one from the Hardware page, then choose
+              it here. <Link href={hardwareHref}>Go to Hardware →</Link>
+            </>
+          )}
         </p>
       ) : (
         <>
@@ -395,7 +496,7 @@ export function GatewayBoxPicker({
             disabled={disabled}
             onChange={(e) => onChange(e.currentTarget.value)}
           >
-            <option value="">Select a computer…</option>
+            <option value="">{copy ? `Select a ${copy.noun}…` : "Select a computer…"}</option>
             {gateways.map((g) => {
               const id = gatewayId(g);
               const online = gatewayIsOnline(g);
@@ -443,6 +544,18 @@ export function GatewayBoxPicker({
                 </Link>
               )}
             </p>
+          ) : staleOtherKind && copy ? (
+            <p className="fleet-channel-expand-error" style={{ margin: "6px 0 0" }}>
+              This agent is still pinned to a {kind === "vps" ? "paired computer" : "cloud server"},
+              which this mode can&apos;t use — that&apos;s why the box above looks unselected, and why
+              the placement above reads as a mismatch. Pick a {copy.noun} to fix it.
+            </p>
+          ) : copy ? (
+            // `kind` is only set by the TOOL-reach picker (Hardware tab), so
+            // the brain-privacy sentence below would be plainly wrong here —
+            // this control decides where the agent's tools run, not where
+            // completions are generated.
+            <p className="fleet-channel-expand-hint">{copy.anyHint}</p>
           ) : (
             <p className="fleet-channel-expand-hint">
               The brain runs on this machine. Empyralis only sends the prompt and receives the reply —

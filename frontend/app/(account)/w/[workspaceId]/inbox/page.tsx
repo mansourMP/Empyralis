@@ -97,7 +97,11 @@ export default function InboxPage() {
   return (
     <main className={isEmptyState ? "fleet-content" : splitClassName}>
       {loading && events.length === 0 ? (
-        <FleetListSkeleton rows={6} />
+        // rowHeight matches .fleet-inbox-row's real height (12px top/bottom
+        // padding + a 13px title line + the 1px divider = ~44px) — see
+        // FleetListSkeleton's MAN-113 note; an un-pinned skeleton row snaps
+        // taller the moment the real inbox list swaps in.
+        <FleetListSkeleton rows={6} rowHeight={44} />
       ) : error && events.length === 0 ? (
         <FleetSurfaceError title="Couldn’t load your inbox" message={error} />
       ) : events.length === 0 && freshWorkspace ? (

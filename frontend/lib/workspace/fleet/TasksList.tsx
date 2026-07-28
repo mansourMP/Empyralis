@@ -19,33 +19,20 @@
 
 import { useState, type CSSProperties } from "react";
 
-import { timeAgo, TINTS, tintForAgent, type AgentStatusTone } from "./fleet-presentation";
-import { StatusChip, AgentSigil } from "./fleet-indicators";
+import { timeAgo, TINTS, tintForAgent } from "./fleet-presentation";
+import { AgentSigil } from "./fleet-indicators";
+import { TaskStatusChip, TaskPriorityIcon, taskPriority, taskStatusLabel, TASK_PRIORITY_LABELS } from "./task-status";
 import type { FleetAgent, FleetTask, FleetTaskStatus } from "./fleet-data";
 
-/** Task status → the existing agent-status tone vocabulary. No new colours:
- *  `blocked` and `awaiting_input` map to the two most saturated tones in the
- *  system (red, amber) because those are the two states that mean an agent
- *  has stopped and a person is needed — the whole point of glancing at the
- *  board. Neither is the accent, which stays reserved for action buttons.
- *
- *  `awaiting_input` → `degraded` reuses a tone whose own definition already
- *  reads "needs your action, not broken" (fleet-theme.css:1869-1874).
- *  `done` → `ready` is a deliberate repurpose: the words differ but the
- *  visual (muted, calm, settled) carries correctly. */
-const TASK_STATUS_PRESENTATION: Record<FleetTaskStatus, { tone: AgentStatusTone; label: string }> = {
-  open: { tone: "unknown", label: "Open" },
-  in_progress: { tone: "working", label: "In progress" },
-  blocked: { tone: "error", label: "Blocked" },
-  awaiting_input: { tone: "degraded", label: "Needs input" },
-  done: { tone: "ready", label: "Done" },
-};
+/* Status presentation moved WHOLESALE to ./task-status (taskStatusLabel /
+   TaskStatusIcon / TaskStatusChip). The map that used to live here borrowed
+   the AGENT-health tone vocabulary (AgentStatusTone), and that borrowing was
+   the bug: seven task states do not fit eight health tones, so
+   `awaiting_input` and `in_review` both landed on `degraded` and two of the
+   seven board columns rendered identical amber. Tasks now own a seven-colour
+   ramp plus Linear's progressive ring. */
 
-export function taskStatusPresentation(status: FleetTaskStatus) {
-  return TASK_STATUS_PRESENTATION[status] ?? TASK_STATUS_PRESENTATION.open;
-}
-
-function dueLabel(dueAt: string | null | undefined): string {
+export function dueLabel(dueAt: string | null | undefined): string {
   const raw = String(dueAt || "").trim();
   if (!raw) return "";
   const d = new Date(raw);
@@ -56,12 +43,16 @@ function dueLabel(dueAt: string | null | undefined): string {
 export function TasksList({
   tasks,
   agents,
+  taskHref,
   onAssign,
   onSelect,
 }: {
   tasks: FleetTask[];
   /** Agents in this project — the only valid assignees. */
   agents: FleetAgent[];
+  /** The task's real route — stamped as `data-tab-href` so ⌘/Ctrl+click and
+   *  middle-click open it in a background content tab (see FleetTabs). */
+  taskHref?: (taskId: string) => string;
   onAssign: (taskId: string, agentId: string) => void;
   onSelect?: (taskId: string) => void;
 }) {
@@ -80,6 +71,7 @@ export function TasksList({
           task={task}
           agents={agents}
           index={index}
+          href={taskHref?.(task.id)}
           onAssign={onAssign}
           onSelect={onSelect}
         />
@@ -92,17 +84,19 @@ function TaskRow({
   task,
   agents,
   index,
+  href,
   onAssign,
   onSelect,
 }: {
   task: FleetTask;
   agents: FleetAgent[];
   index: number;
+  href?: string;
   onAssign: (taskId: string, agentId: string) => void;
   onSelect?: (taskId: string) => void;
 }) {
   const [assigning, setAssigning] = useState(false);
-  const st = taskStatusPresentation(task.status);
+  const priority = taskPriority(task);
   const assignee = agents.find((a) => a.agent_id === task.assignee_agent_id) || null;
   const due = dueLabel(task.due_at);
   const updated = timeAgo(task.created_at);
@@ -162,7 +156,14 @@ function TaskRow({
       className="fleet-task-row"
       role="row"
       tabIndex={0}
-      onClick={() => onSelect?.(task.id)}
+      data-tab-href={href}
+      data-tab-title={task.title || "Untitled task"}
+      onClick={(e) => {
+        // See TasksBoard's TaskCard: a modifier click belongs to the tab
+        // layer (background tab), not to this row.
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        onSelect?.(task.id);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -172,7 +173,14 @@ function TaskRow({
     >
       {/* Desktop cells */}
       <span className="fleet-agent-cell-agent-text fleet-task-cell-title">
-        <span className="fleet-agent-name">{task.title || "Untitled task"}</span>
+        <span className="fleet-task-cell-titleline">
+          {/* Same glyph as the board card, so a task reads the same in both
+              layouts. Absent backend field degrades to "no priority". */}
+          <span className="fleet-task-cell-prio" title={TASK_PRIORITY_LABELS[priority]}>
+            <TaskPriorityIcon priority={priority} size={14} />
+          </span>
+          <span className="fleet-agent-name">{task.title || "Untitled task"}</span>
+        </span>
         {task.description ? (
           <span className="fleet-agent-preview">{task.description}</span>
         ) : null}
@@ -185,7 +193,7 @@ function TaskRow({
         {updated || "—"}
       </span>
       <span className="fleet-task-cell-status">
-        <StatusChip tone={st.tone} label={st.label} />
+        <TaskStatusChip status={task.status} />
       </span>
 
       {/* Mobile replacement — reuses the Agents list's own mobile classes
@@ -194,7 +202,7 @@ function TaskRow({
       <div className="fleet-agent-row-mobile">
         <div className="fleet-agent-row-mobile-line1">
           <span className="fleet-agent-row-mobile-name">{task.title || "Untitled task"}</span>
-          <StatusChip tone={st.tone} label={st.label} />
+          <TaskStatusChip status={task.status} />
         </div>
         <div className="fleet-agent-row-mobile-line2">
           {[

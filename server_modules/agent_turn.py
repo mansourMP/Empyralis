@@ -1383,7 +1383,14 @@ def build_run_start_turn_request(req: Any, *, current_user: Any = None) -> Agent
         or str(metadata.get("thread_id") or "").strip()
         or str(metadata.get("parent_run_id") or "").strip()
         or str(getattr(req, "workflow_id", None) or "").strip()
-        or "run-start"
+        # Workspace-scoped, not the bare literal "run-start" -- see the
+        # matching fallback in runtime_heartbeat_service.build_heartbeat_
+        # turn_request for why: that literal is a single global row in
+        # runtime_sessions with no workspace scoping in its lookup key, so
+        # every workspace falling through to it collided on the same
+        # session and tripped session_service.get_session_scoped's
+        # tenant-isolation enforcement.
+        or f"run-start:{workspace_id}"
     )
     message = (
         str(getattr(req, "user_goal", None) or "").strip()

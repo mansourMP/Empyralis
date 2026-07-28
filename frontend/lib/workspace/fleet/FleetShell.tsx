@@ -90,9 +90,10 @@ export function FleetShell({
         onCloseSage={onCloseSage}
       />
       {mobileNavOpen && <div className="fleet-rail-scrim" onClick={closeMobileNav} />}
-      <div className="fleet-shell-panel">
-        <FleetShellDecider workspaceId={workspaceId} shellSlot={shellSlot}>{children}</FleetShellDecider>
-      </div>
+      {/* No panel wrapper here (MAN-127): the fleet branch needs the tab strip
+          ABOVE the panel and outside it, so each branch of the decider owns its
+          own panel box — see FleetContentFrame / FleetShellDecider. */}
+      <FleetShellDecider workspaceId={workspaceId} shellSlot={shellSlot}>{children}</FleetShellDecider>
       <FleetCommandPalette
         workspaceId={workspaceId}
         theme={theme}

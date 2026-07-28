@@ -1155,13 +1155,18 @@ def resolve_provider_options(
 
 
 def _installer_repo_token() -> str:
-    # Interim measure while the Empyralis repo is private and no artifact
-    # publish pipeline exists: install-agent-computer.sh builds the gateway
-    # from a git clone rather than a prebuilt download, so it needs read
-    # access to that private repo. This is an operator credential — set once
-    # on the backend host, never generated or stored by this service — not
-    # something an end user provides. See install-agent-computer.sh's own
-    # EMPYRALIS_REPO_TOKEN handling for the client side of this.
+    # STALE-COMMENT WARNING (MAN-121): this used to be the credential that made
+    # provisioning work, back when install-agent-computer.sh built the gateway
+    # from a git clone. It is NOT that any more. The installer's default path is
+    # now a prebuilt-artifact download (install_gateway_from_artifact, scripts/
+    # install-agent-computer.sh:268) and it only reads EMPYRALIS_REPO_TOKEN when
+    # EMPYRALIS_GATEWAY_BUILD_FROM_SOURCE=1 — which cloud_init_script below does
+    # NOT set. So on a provisioned box this token is passed and then ignored:
+    # setting, rotating or fixing it changes nothing about whether the box
+    # pairs. What actually decides that is whether EMPYRALIS_ARTIFACT_BASE_URL /
+    # the default https://empyralis.ai/releases/agent-computer/<version>/ serves
+    # a real empyralis-gateway-linux-x64.tar.gz. Kept threaded through only for
+    # the collaborator opt-in build path.
     return (os.getenv("EMPYRALIS_REPO_TOKEN") or "").strip()
 
 
@@ -1424,20 +1429,41 @@ async def run_vps_provisioning_lifecycle(
             if status == "deleted":
                 return
             if status == "failed":
+                # MAN-121: prefer the reason the box itself reported over the
+                # old blanket "it didn't connect" string, which told the user
+                # nothing actionable.
+                reported = str(status_record.get("install_error") or "").strip()
+                phase = str(status_record.get("install_phase") or "").strip()
                 await asyncio.to_thread(
                     mark_vps_provision_failed,
                     vps_id,
-                    reason="The agent computer did not connect before the setup window expired.",
+                    reason=(
+                        f"The agent computer failed during setup ({phase}): {reported}"
+                        if reported
+                        else "The agent computer did not connect before the setup window expired."
+                    ),
                 )
                 return
 
+        timeout_reason = (
+            f"Timed out after {VPS_CONNECT_TIMEOUT_SECONDS // 60} minutes waiting for the "
+            "agent computer to connect."
+        )
+        # Fold in the last thing the box said about itself, if anything. Even an
+        # advisory beacon (e.g. "the gateway had not registered 10 minutes in")
+        # turns an opaque timeout into something a human can act on.
+        try:
+            last_record = await asyncio.to_thread(load_vps_record, vps_id)
+        except Exception:  # noqa: BLE001 - diagnostics only; never block the failure write
+            last_record = {}
+        reported = str((last_record or {}).get("install_error") or "").strip()
+        if reported:
+            phase = str((last_record or {}).get("install_phase") or "install").strip()
+            timeout_reason = f"{timeout_reason} Last report from the server ({phase}): {reported}"
         await asyncio.to_thread(
             mark_vps_provision_failed,
             vps_id,
-            reason=(
-                f"Timed out after {VPS_CONNECT_TIMEOUT_SECONDS // 60} minutes waiting for the "
-                "agent computer to connect."
-            ),
+            reason=timeout_reason,
         )
     except Exception:  # noqa: BLE001 - a background task has no caller to propagate to; never die silently
         _LOGGER.exception("vps provisioning background lifecycle crashed unexpectedly vps_id=%s", vps_id)
@@ -1499,6 +1525,94 @@ def get_vps_provision_status(vps_id: str) -> Dict[str, Any]:
             record["updated_at"] = _utc_now_iso()
             state.setdefault("vps", {})[clean_vps_id] = record
             _write_state(state)
+    return _public_record(record)
+
+
+INSTALL_BEACON_MAX_MESSAGE_CHARS = 500
+INSTALL_BEACON_MAX_PHASE_CHARS = 64
+
+
+def record_vps_install_event(
+    *,
+    pairing_token: str,
+    phase: str,
+    message: str,
+    terminal: bool = True,
+) -> Optional[Dict[str, Any]]:
+    """Record a status/failure beacon sent by the box while it installs.
+
+    MAN-121: before this existed, pairing was one-way — the box phoned home
+    ONLY on success, and every install failure (bad artifact URL, apt failure,
+    Node install failure, unsupported image) died in a log file that is only
+    readable by SSHing into the droplet. The platform could therefore only ever
+    infer "it timed out", never say why. install-agent-computer.sh's fail()
+    path now POSTs here (see routes_gateway.report_gateway_provisioning_event),
+    authenticated by the same pairing token it was already given.
+
+    `terminal` distinguishes "this install is dead" (download/build/OS failures
+    — the gateway will never start) from advisory notes such as the installer's
+    own registration wait elapsing while the systemd unit is still up and
+    retrying. Only a terminal beacon is allowed to resolve the record to
+    'failed' (see _resolved_record_status); an advisory one is recorded for
+    diagnostics and folded into the eventual timeout message, but never
+    shortens the box's window to connect.
+
+    Returns None when the token matches no record (unknown/rotated/already
+    deleted) — an unknown beacon is discarded, never used to create state.
+    """
+    token = str(pairing_token or "").strip()
+    if not token:
+        return None
+    clean_phase = str(phase or "install").strip()[:INSTALL_BEACON_MAX_PHASE_CHARS] or "install"
+    clean_message = " ".join(str(message or "").split())[:INSTALL_BEACON_MAX_MESSAGE_CHARS]
+    if not clean_message:
+        clean_message = f"The agent computer reported a problem during the '{clean_phase}' step."
+    with _STATE_LOCK:
+        state = _load_state()
+        matched_id: Optional[str] = None
+        for candidate_id, candidate in (state.get("vps") or {}).items():
+            if not isinstance(candidate, Mapping):
+                continue
+            if str(candidate.get("status") or "") in {"deleted"}:
+                continue
+            try:
+                candidate_token = _decrypt_pairing_token(str(candidate.get("pairing_token_ciphertext") or ""))
+            except Exception:  # noqa: BLE001 - one unreadable record must not hide the others
+                _LOGGER.warning(
+                    "vps install beacon could not decrypt the pairing token on record vps_id=%s; skipping it",
+                    candidate_id,
+                )
+                continue
+            if candidate_token and secrets.compare_digest(candidate_token, token):
+                matched_id = str(candidate_id)
+                break
+        if matched_id is None:
+            _LOGGER.info("vps install beacon phase=%s did not match any provisioning record; discarded", clean_phase)
+            return None
+        record = dict((state.get("vps") or {})[matched_id])
+        record["install_phase"] = clean_phase
+        record["install_error"] = clean_message
+        record["install_terminal"] = bool(terminal)
+        record["install_reported_at"] = _utc_now_iso()
+        record["updated_at"] = record["install_reported_at"]
+        if terminal:
+            # `error` is the field the setup panel renders on a failed record
+            # (cloud-vps-setup-panel.tsx -> friendlyProvisionFailureMessage).
+            # Fill it here as well as on the record's install_* fields, so the
+            # reason is visible on the very next status poll rather than only
+            # after the background lifecycle's next 15s tick calls
+            # mark_vps_provision_failed.
+            record["error"] = f"The agent computer failed during setup ({clean_phase}): {clean_message}"[:500]
+        state.setdefault("vps", {})[matched_id] = record
+        _write_state(state)
+    _LOGGER.error(
+        "vps install beacon vps_id=%s provider=%s phase=%s terminal=%s: %s",
+        matched_id,
+        record.get("provider"),
+        clean_phase,
+        bool(terminal),
+        clean_message,
+    )
     return _public_record(record)
 
 
@@ -2011,11 +2125,39 @@ def _delete_provider_resource(
     raise VPSProvisioningError(f"Unsupported VPS provider: {provider_id}")
 
 
+def terminal_install_failure_reason(record: Mapping[str, Any]) -> str:
+    """The reason string from a TERMINAL install beacon the box itself sent
+    (see record_vps_install_event / install-agent-computer.sh's report_beacon).
+    Empty when no beacon arrived, or when the beacon was advisory
+    (terminal=false) — e.g. the installer's own registration wait elapsed while
+    the gateway systemd unit is still up and retrying, which is emphatically
+    NOT a reason to give up on the box.
+    """
+    if not bool(record.get("install_terminal")):
+        return ""
+    return str(record.get("install_error") or "").strip()
+
+
 def _resolved_record_status(record: Mapping[str, Any]) -> str:
+    """Derive the live status of a VPS record from external state.
+
+    SAFETY CONTRACT (MAN-121): this function is what run_vps_provisioning_
+    lifecycle polls, and a 'failed' answer from it causes
+    mark_vps_provision_failed to DESTROY the user's droplet. So a 'failed'
+    return must only ever mean "we positively established this box did not
+    pair", never "we could not tell". Every lookup below can fail transiently
+    (state-file contention, a decrypt hiccup, the repository being briefly
+    unavailable); when one does, we log loudly and return the record's CURRENT
+    status, which keeps the box in 'provisioning'/'registering' and lets the
+    next poll — or the outer 20-minute timeout — decide. Falling back to
+    "assume nothing is registered" (the previous behaviour) meant one bad read
+    could resolve a genuinely-connected box to 'failed' and delete it.
+    """
     workspace_id = str(record.get("workspace_id") or "").strip()
     tenant_id = str(record.get("tenant_id") or "").strip() or None
     user_id = str(record.get("user_id") or "").strip() or None
     vps_id = str(record.get("vps_id") or "").strip()
+    current_status = _normalize_status(str(record.get("status") or "provisioning"))
     try:
         registrations = gateway_state_repository.list_workspace_gateway_registrations(
             workspace_id,
@@ -2024,23 +2166,54 @@ def _resolved_record_status(record: Mapping[str, Any]) -> str:
             include_revoked=False,
         )
     except Exception:
-        registrations = []
+        # UNKNOWN, not "none". Do not let this become a confirmed failure.
+        _LOGGER.exception(
+            "vps provisioning could not read gateway registrations for vps_id=%s workspace_id=%s -- "
+            "registration state is UNKNOWN, holding status=%s rather than risking a false 'failed' "
+            "(which would destroy a possibly-working server)",
+            vps_id,
+            workspace_id,
+            current_status,
+        )
+        return current_status
     for registration in registrations:
         metadata = registration.get("metadata") if isinstance(registration.get("metadata"), dict) else {}
         if str(metadata.get("vps_id") or "").strip() == vps_id:
             return "connected"
+
+    # The box positively told us it could not finish installing. Checked only
+    # AFTER the registration scan above succeeded and came back without this
+    # box, so a late-but-successful pairing always wins over a stale beacon.
+    if terminal_install_failure_reason(record):
+        return "failed"
+
     try:
         pairing_token = _decrypt_pairing_token(str(record.get("pairing_token_ciphertext") or ""))
     except Exception:
-        pairing_token = ""
+        _LOGGER.exception(
+            "vps provisioning could not decrypt the pairing token for vps_id=%s -- pairing state is "
+            "UNKNOWN, holding status=%s instead of resolving to 'failed'",
+            vps_id,
+            current_status,
+        )
+        return current_status
     if pairing_token:
-        pairing = gateway_state_repository.get_pairing_intent_by_token(pairing_token)
+        try:
+            pairing = gateway_state_repository.get_pairing_intent_by_token(pairing_token)
+        except Exception:
+            _LOGGER.exception(
+                "vps provisioning could not read the pairing intent for vps_id=%s -- pairing state is "
+                "UNKNOWN, holding status=%s instead of resolving to 'failed'",
+                vps_id,
+                current_status,
+            )
+            return current_status
         pairing_status = str((pairing or {}).get("status") or "").strip().lower()
         if pairing_status == "consumed":
             return "registering"
         if pairing_status in {"expired", "cancelled", "failed"}:
             return "failed"
-    return _normalize_status(str(record.get("status") or "provisioning"))
+    return current_status
 
 
 def _load_state() -> Dict[str, Any]:
@@ -2127,6 +2300,14 @@ def _public_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "status": _normalize_status(str(record.get("status") or "provisioning")),
         "pairing_id": str(record.get("pairing_id") or "").strip() or None,
         "error": str(record.get("error") or "").strip() or None,
+        # MAN-121 diagnostics: what the box itself last reported while
+        # installing (see record_vps_install_event). install_error is the
+        # human-readable reason, install_phase the step it died in, and
+        # install_terminal whether the installer considered it unrecoverable.
+        "install_error": str(record.get("install_error") or "").strip() or None,
+        "install_phase": str(record.get("install_phase") or "").strip() or None,
+        "install_terminal": bool(record.get("install_terminal")) if record.get("install_error") else None,
+        "install_reported_at": str(record.get("install_reported_at") or "").strip() or None,
         "created_at": str(record.get("created_at") or "").strip(),
         "updated_at": str(record.get("updated_at") or "").strip(),
     }
