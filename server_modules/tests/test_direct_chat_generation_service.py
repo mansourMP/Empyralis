@@ -1488,6 +1488,214 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertIn("[truncated", followup_content)
         self.assertNotIn("A" * 10_000, followup_content)
 
+    # ── Tool-result honesty on the DISPLAY path ────────────────────────────
+    # A tool that fails by RETURNING an error payload (an MCP/gateway timeout
+    # is exactly that — a normal return value, never an exception) used to ride
+    # the success path and emit a hardcoded "ok", so the live activity view
+    # painted a green "completed" row over a call that did not succeed.
+
+    # Success tokens the two trace consumers treat as "this worked" (the
+    # activity view's non-danger fallthrough, the projector's `done` list).
+    _SUCCESS_STATUS_TOKENS = {"ok", "done", "complete", "completed", "success", "succeeded"}
+
+    def _trace_harness(self):
+        trace_context = agent_trace_service.TraceContext(
+            trace_id="trace-tool-status",
+            workspace_id="default",
+            tenant_id="tenant-1",
+            thread_id="thread-1",
+            run_id=None,
+            root_agent_id="sage",
+        )
+        emitted: list[dict[str, object]] = []
+
+        async def _emit_with_envelope(trace_ctx, event_type, data, **kwargs):
+            envelope = {
+                "id": f"tevent-{trace_ctx.next_seq()}",
+                "trace_id": trace_ctx.trace_id,
+                "event_type": event_type,
+                "data": dict(data or {}),
+                "tool_call_id": kwargs.get("tool_call_id"),
+            }
+            emitted.append(envelope)
+            return envelope
+
+        return trace_context, emitted, _emit_with_envelope
+
+    @staticmethod
+    def _last_plan_update_for(emitted, tool_name):
+        """The tool's own plan item (its summary names the tool) — not the
+        turn's other plan items, which also emit plan.item.updated."""
+        return [
+            item for item in emitted
+            if item["event_type"] == "plan.item.updated"
+            and tool_name in str(item["data"].get("summary") or "")
+        ][-1]
+
+    def _run_single_tool_turn(self, *, tool_call, tool_name, execute, trace_context, emit_with_envelope):
+        stream_rounds = iter(
+            [
+                [
+                    {
+                        "type": "result",
+                        "reply": "",
+                        "usage_masked": {"provider": "openai"},
+                        "provider": "openai",
+                        "model": "gpt-5.4",
+                        "attempted_providers": "openai",
+                        "error": "",
+                        "tool_calls": [tool_call],
+                    }
+                ],
+                [
+                    {
+                        "type": "result",
+                        "reply": "Done",
+                        "usage_masked": {"provider": "openai"},
+                        "provider": "openai",
+                        "model": "gpt-5.4",
+                        "attempted_providers": "openai",
+                        "error": "",
+                        "tool_calls": [],
+                    }
+                ],
+            ]
+        )
+
+        services = self._services(stream_events=[])
+        services.generate_chat_reply_stream_with_provider_fallback = lambda **_kwargs: iter(next(stream_rounds))
+        services.execute_single_direct_tool_call = execute
+
+        with mock.patch.object(
+            direct_chat_generation_service.agent_trace_service,
+            "emit_with_envelope",
+            side_effect=emit_with_envelope,
+        ), mock.patch.object(
+            direct_chat_generation_service.agent_trace_service,
+            "finish_trace",
+            new=mock.AsyncMock(return_value={}),
+        ):
+            return list(
+                direct_chat_generation_service.stream_provider_backed_direct_chat(
+                    services=services,
+                    context={"provider": "openai"},
+                    metadata={"provider": "openai", "model": "gpt-5.4"},
+                    system_prompt="System prompt",
+                    normalized_workspace_id="default",
+                    normalized_requested_provider="openai",
+                    normalized_requested_model="gpt-5.4",
+                    normalized_reasoning_effort="medium",
+                    normalized_thread_id="thread-1",
+                    normalized_message="read the config file",
+                    compacted_prior_messages=[],
+                    prior_messages_used=False,
+                    history_mode="none",
+                    connected_systems=[],
+                    tool_capabilities=[],
+                    availability_payload={"ai_ready": True},
+                    tools=[{"name": tool_name}],
+                    direct_chat_credentials={},
+                    proactive_suggestions=[],
+                    tool_loop_session_key="session-tool-status",
+                    fallback_reason=None,
+                    session_ctx=None,
+                    trace_context=trace_context,
+                    resolved_chat_max_iterations=3,
+                    direct_tool_result_summary_system_message="Summarize tool results.",
+                )
+            )
+
+    def test_stream_provider_backed_direct_chat_reports_error_shaped_tool_result_as_failed(self) -> None:
+        trace_context, emitted, emit_with_envelope = self._trace_harness()
+
+        self._run_single_tool_turn(
+            tool_call={"id": "tool-call-file", "name": "file__read", "arguments": {"path": "/etc/hosts"}},
+            tool_name="file__read",
+            # Shaped exactly like the per-tool timeout payload the loop builds
+            # itself: a returned value, not a raised exception.
+            execute=lambda **_kwargs: '{"error": "timeout", "message": "The tool \'file__read\' timed out after 30s."}',
+            trace_context=trace_context,
+            emit_with_envelope=emit_with_envelope,
+        )
+
+        started = next(item for item in emitted if item["event_type"] == "tool.started")
+        result = next(item for item in emitted if item["event_type"] == "tool.result")
+        status = str(result["data"]["status"]).strip().lower()
+        self.assertNotIn(status, self._SUCCESS_STATUS_TOKENS)
+        self.assertIn(status, {"failed", "error"})
+        # Still one row, not an orphan: the failure resolves its own start event.
+        self.assertEqual(result["tool_call_id"], started["tool_call_id"])
+        self.assertEqual(result["tool_call_id"], "tool-call-file")
+        plan_final = self._last_plan_update_for(emitted, "file__read")
+        self.assertEqual(plan_final["data"]["status"], "failed")
+
+    def test_stream_provider_backed_direct_chat_keeps_successful_tool_result_ok(self) -> None:
+        trace_context, emitted, emit_with_envelope = self._trace_harness()
+
+        self._run_single_tool_turn(
+            tool_call={"id": "tool-call-file", "name": "file__read", "arguments": {"path": "/etc/hosts"}},
+            tool_name="file__read",
+            execute=lambda **_kwargs: "127.0.0.1 localhost",
+            trace_context=trace_context,
+            emit_with_envelope=emit_with_envelope,
+        )
+
+        result = next(item for item in emitted if item["event_type"] == "tool.result")
+        self.assertEqual(result["data"]["status"], "ok")
+        plan_final = self._last_plan_update_for(emitted, "file__read")
+        self.assertEqual(plan_final["data"]["status"], "done")
+
+    def test_stream_provider_backed_direct_chat_marks_failed_local_gateway_activity(self) -> None:
+        trace_context, emitted, emit_with_envelope = self._trace_harness()
+
+        self._run_single_tool_turn(
+            tool_call={
+                "id": "tool-call-hardware",
+                "name": "hardware__action",
+                "arguments": {
+                    "action": "shell",
+                    "command": "echo hello from hardware",
+                    "runtime_target": "user_device_gateway",
+                },
+            },
+            tool_name="hardware__action",
+            execute=lambda **_kwargs: '{"error": "gateway_offline", "message": "The Agent Computer is offline."}',
+            trace_context=trace_context,
+            emit_with_envelope=emit_with_envelope,
+        )
+
+        result = next(item for item in emitted if item["event_type"] == "tool.result")
+        self.assertEqual(result["data"]["connector_id"], "hardware_runtime")
+        # The hardware card reads state/agent_activity, not the outer status —
+        # both must carry the same verdict or the card stays green.
+        self.assertEqual(result["data"]["status"], "failed")
+        self.assertEqual(result["data"]["state"], "failed")
+        self.assertEqual(result["data"]["agent_activity"]["status"], "failed")
+
+    def test_stream_provider_backed_direct_chat_error_event_reuses_started_tool_call_id(self) -> None:
+        trace_context, emitted, emit_with_envelope = self._trace_harness()
+
+        def _explode(**_kwargs):
+            raise RuntimeError("connector_action_failed")
+
+        self._run_single_tool_turn(
+            tool_call={"id": "tool-call-file", "name": "file__read", "arguments": {"path": "/etc/hosts"}},
+            tool_name="file__read",
+            execute=_explode,
+            trace_context=trace_context,
+            emit_with_envelope=emit_with_envelope,
+        )
+
+        started = next(item for item in emitted if item["event_type"] == "tool.started")
+        result = next(item for item in emitted if item["event_type"] == "tool.result")
+        self.assertEqual(str(result["data"]["status"]).lower(), "error")
+        # The whole point: a synthetic "toolcall_error:<iteration>" id matched
+        # nothing, so the original "Running file__read" row never resolved and a
+        # second, unlinked red row appeared beneath it.
+        self.assertEqual(result["tool_call_id"], started["tool_call_id"])
+        self.assertEqual(result["tool_call_id"], "tool-call-file")
+        self.assertNotIn("toolcall_error", str(result["tool_call_id"]))
+
 
 if __name__ == "__main__":
     unittest.main()

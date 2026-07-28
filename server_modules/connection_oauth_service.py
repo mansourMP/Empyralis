@@ -2314,8 +2314,65 @@ class _DynamicClientRegistration:
         return time.time() >= (self.client_secret_expires_at - safety_margin_seconds)
 
 
+# In-process READ-THROUGH cache in front of the durable store
+# (oauth_dynamic_client_store). It saves a Postgres round trip on the hot path
+# and nothing more — correctness must never depend on it, because the OAuth
+# flow spans two HTTP requests that can land on different workers or straddle
+# a process restart (MAN-124). Every miss falls through to the vault.
 _DYNAMIC_CLIENT_CACHE: Dict[tuple[str, str], _DynamicClientRegistration] = {}
 _DYNAMIC_CLIENT_CACHE_LOCK = threading.Lock()
+
+
+def _dynamic_client_store():
+    from server_modules import oauth_dynamic_client_store
+
+    return oauth_dynamic_client_store
+
+
+def _registration_from_record(record: Dict[str, Any] | None) -> _DynamicClientRegistration | None:
+    if not isinstance(record, dict):
+        return None
+    client_id = str(record.get("client_id") or "").strip()
+    if not client_id:
+        return None
+    return _DynamicClientRegistration(
+        client_id=client_id,
+        client_secret=str(record.get("client_secret") or ""),
+        client_id_issued_at=_coerce_epoch_seconds(record.get("client_id_issued_at")),
+        client_secret_expires_at=_coerce_epoch_seconds(record.get("client_secret_expires_at")),
+    )
+
+
+def _load_persisted_dynamic_client(provider: str, redirect_uri: str) -> _DynamicClientRegistration | None:
+    """Read a stored registration, degrading to None (never raising) if the
+    vault is unavailable — a storage outage must not turn a working OAuth flow
+    into a hard failure; it just costs us a re-registration."""
+    try:
+        return _registration_from_record(_dynamic_client_store().load(provider, redirect_uri))
+    except Exception as exc:
+        _log.warning("Could not read persisted OAuth client for %s (%s): %s", provider, redirect_uri, exc)
+        return None
+
+
+def _persist_dynamic_client(provider: str, redirect_uri: str, entry: _DynamicClientRegistration) -> None:
+    """Store a registration durably. A failure here is logged loudly but not
+    raised: the in-process cache still holds the client, so the connect the
+    user is in the middle of will complete — it just isn't restart-proof."""
+    try:
+        _dynamic_client_store().save(
+            provider=provider,
+            redirect_uri=redirect_uri,
+            client_id=entry.client_id,
+            client_secret=entry.client_secret,
+            client_id_issued_at=entry.client_id_issued_at,
+            client_secret_expires_at=entry.client_secret_expires_at,
+        )
+    except Exception as exc:
+        _log.warning(
+            "Registered an OAuth client for %s but could not persist it (%s) — this connection "
+            "will not survive a process restart: %s",
+            provider, redirect_uri, exc,
+        )
 
 
 def _dynamic_registration_enabled(provider: str) -> bool:
@@ -2327,17 +2384,23 @@ def _dynamic_registration_enabled(provider: str) -> bool:
 
 
 def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirect_uri: str) -> tuple[str, str]:
-    """Self-register an OAuth client via RFC 7591 and cache the result for
-    the life of the process, keyed by (provider, redirect_uri) — a client
+    """Self-register an OAuth client via RFC 7591 and store the result durably
+    (encrypted, in the credential vault), keyed by (provider, redirect_uri) —
+    a client
     registration is bound to the redirect_uris declared at registration time,
     so a cached entry is only reusable for the exact redirect_uri it was
     registered with (stable in practice: one production origin per deploy).
 
-    A cached entry whose client_secret_expires_at has passed (or is within
+    An entry whose client_secret_expires_at has passed (or is within
     _DYNAMIC_CLIENT_EXPIRY_SAFETY_MARGIN_SECONDS of passing) is treated as
     absent and transparently re-registered — see _DynamicClientRegistration.
     is_expired(). Entries with client_secret_expires_at == 0 (or missing
-    from the registration response) never expire, per RFC 7591."""
+    from the registration response) never expire, per RFC 7591.
+
+    Lookup order is: in-process cache → durable vault store → register. The
+    vault step is what makes the two halves of the OAuth round trip agree on
+    one client_id when they are served by different workers or separated by a
+    restart (MAN-124)."""
     cache_key = (provider, redirect_uri)
     cached = _DYNAMIC_CLIENT_CACHE.get(cache_key)
     if cached is not None and not cached.is_expired():
@@ -2346,6 +2409,15 @@ def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirec
         cached = _DYNAMIC_CLIENT_CACHE.get(cache_key)
         if cached is not None and not cached.is_expired():
             return (cached.client_id, cached.client_secret)
+        persisted = _load_persisted_dynamic_client(provider, redirect_uri)
+        if persisted is not None and not persisted.is_expired():
+            # Registered by an earlier process (or a sibling worker) — reuse it
+            # rather than minting a second client the pending auth code was
+            # never issued to.
+            _DYNAMIC_CLIENT_CACHE[cache_key] = persisted
+            return (persisted.client_id, persisted.client_secret)
+        if cached is None and persisted is not None:
+            cached = persisted  # only affects the log wording below
         if not config.registration_endpoint:
             raise HTTPException(status_code=409, detail=f"{_connector_label(provider)} has no dynamic registration endpoint configured.")
         payload = {
@@ -2365,6 +2437,22 @@ def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirec
             # to a method the subsequent token exchange doesn't match.
             "token_endpoint_auth_method": config.dynamic_registration_token_auth_method,
         }
+        # RFC 7591 §2: a registration request MAY declare the scopes the client
+        # will ask for, and some authorization servers BIND the granted scope
+        # set at registration time. Omitting it left those providers with a
+        # client that is not allowed to request what our authorize URL asks
+        # for, which surfaces as an invalid_scope error (or a token with fewer
+        # tools than the user expects). Send the same scope string the
+        # authorize URL will use, so the two always agree.
+        # Space-delimited regardless of config.scope_separator: RFC 7591 §2
+        # defines the registration `scope` field as a space-separated list,
+        # while scope_separator exists only to satisfy a couple of providers'
+        # non-standard *authorization URL* quirk (Slack's comma form). Using
+        # the separator here would send a malformed registration to every
+        # standards-compliant server.
+        registration_scope = " ".join(_effective_scopes(provider, config))
+        if registration_scope:
+            payload["scope"] = registration_scope
         try:
             registration = _post_json(config.registration_endpoint, payload)
         except Exception as exc:
@@ -2386,6 +2474,7 @@ def _register_dynamic_client(provider: str, config: OAuthProviderConfig, redirec
             client_secret_expires_at=_coerce_epoch_seconds(registration.get("client_secret_expires_at")),
         )
         _DYNAMIC_CLIENT_CACHE[cache_key] = entry
+        _persist_dynamic_client(provider, redirect_uri, entry)
         if cached is not None:
             _log.info(
                 "Re-registered OAuth client for %s (redirect_uri=%s) — previous client_secret was expired or expiring within %ds",
@@ -2418,25 +2507,70 @@ def _resolve_oauth_client(provider: str, redirect_uri: str) -> tuple[str, str]:
 
 def _resolve_oauth_client_for_refresh(provider: str) -> tuple[str, str]:
     """Same resolution as _resolve_oauth_client(), for background token
-    refresh where no live Request/redirect_uri is available. Reuses whichever
-    dynamically-registered client is already cached for this provider (it was
-    registered during the original start_oauth call that produced the
-    credential now being refreshed).
+    refresh where no live Request (and therefore no redirect_uri) is
+    available.
 
-    Unlike _register_dynamic_client, this path has no redirect_uri and so
-    can never re-register an expired entry (RFC 7591 registration requires
-    declaring redirect_uris) -- an expired cache entry is skipped rather
-    than handed back, so a refresh attempt fails fast locally (falling
-    through to `raise`) instead of spending a network round trip on a
-    client_secret the token endpoint is guaranteed to reject."""
+    Resolution order:
+      1. static env-configured client (every non-DCR provider stops here);
+      2. a live, unexpired entry in the in-process cache;
+      3. a live, unexpired registration in the durable vault store — this is
+         what keeps DCR connections alive across a restart or a refresh that
+         runs on a different worker than the original connect;
+      4. RE-REGISTER. Previously impossible here: RFC 7591 requires declaring
+         redirect_uris, and this path has no Request to derive one from, so an
+         expired secret was terminal and the user had to reconnect by hand.
+         The store keeps each registration's redirect_uri alongside it, so we
+         can now register a fresh client against the same redirect_uri. This
+         is the path Linear needs — its client_secret expires every 24h
+         (live-verified 2026-07-19), which used to kill the connection daily.
+
+    Only if all four fail does this raise, exactly as before."""
     try:
         return ensure_oauth_configured(provider)
     except HTTPException:
-        config = OAUTH_PROVIDER_CONFIGS.get(str(provider or "").strip().lower())
-        if config is not None and config.registration_endpoint:
-            for (cached_provider, _redirect_uri), entry in _DYNAMIC_CLIENT_CACHE.items():
-                if cached_provider == provider and not entry.is_expired():
-                    return (entry.client_id, entry.client_secret)
+        normalized = str(provider or "").strip().lower()
+        config = OAUTH_PROVIDER_CONFIGS.get(normalized)
+        if config is None or not config.registration_endpoint:
+            raise
+
+        for (cached_provider, _redirect_uri), entry in list(_DYNAMIC_CLIENT_CACHE.items()):
+            if cached_provider == provider and not entry.is_expired():
+                return (entry.client_id, entry.client_secret)
+
+        try:
+            records = _dynamic_client_store().load_all_for_provider(provider)
+        except Exception as exc:
+            _log.warning("Could not read persisted OAuth clients for %s during refresh: %s", provider, exc)
+            records = []
+
+        stale_redirect_uri = ""
+        for record in records:
+            registration = _registration_from_record(record)
+            if registration is None:
+                continue
+            redirect_uri = str(record.get("redirect_uri") or "").strip()
+            if not registration.is_expired():
+                if redirect_uri:
+                    _DYNAMIC_CLIENT_CACHE[(provider, redirect_uri)] = registration
+                return (registration.client_id, registration.client_secret)
+            if redirect_uri and not stale_redirect_uri:
+                stale_redirect_uri = redirect_uri
+
+        if not stale_redirect_uri:
+            # Nothing durable to re-register against; fall back to a
+            # redirect_uri an expired in-process entry remembers.
+            for (cached_provider, cached_redirect_uri), _entry in list(_DYNAMIC_CLIENT_CACHE.items()):
+                if cached_provider == provider and cached_redirect_uri:
+                    stale_redirect_uri = cached_redirect_uri
+                    break
+
+        if stale_redirect_uri and _dynamic_registration_enabled(provider):
+            _log.info(
+                "Re-registering an OAuth client for %s during token refresh — the stored "
+                "client_secret is expired or missing (redirect_uri=%s)",
+                provider, stale_redirect_uri,
+            )
+            return _register_dynamic_client(provider, config, stale_redirect_uri)
         raise
 
 
@@ -3894,9 +4028,12 @@ async def _register_mcp_servers_for_provider(
 ) -> Dict[str, Any]:
     """Register MCP servers from APP_MCP_SERVER_MAP for a provider.
 
-    Called after OAuth credential storage.  Failures are logged, never
-    raised — MCP registration is best-effort and must not block the
-    OAuth flow.
+    Called after OAuth credential storage.  Failures are never raised — MCP
+    registration is best-effort and must not block the OAuth flow — but they
+    are no longer swallowed either: every failure is reported back under
+    "failures" (plus a human-readable "warning"), because a connect that
+    quietly produces a connector with zero tools is indistinguishable to the
+    user from the product being broken (MAN-124).
 
     §1.3 containment (Multiplayer Projects plan): mcp_registry_service now
     refuses (McpServerCredentialCollisionError) rather than silently
@@ -3914,10 +4051,11 @@ async def _register_mcp_servers_for_provider(
 
     server_entries = APP_MCP_SERVER_MAP.get(normalized_provider)
     if not server_entries:
-        return {"registered": 0, "servers": [], "collisions": []}
+        return {"registered": 0, "servers": [], "collisions": [], "failures": []}
 
     registered: list[Dict[str, Any]] = []
     collisions: list[Dict[str, Any]] = []
+    failures: list[Dict[str, Any]] = []
     for entry in server_entries:
         server_id = str(entry.get("server_id") or "").strip()
         endpoint = entry.get("endpoint")
@@ -3945,9 +4083,34 @@ async def _register_mcp_servers_for_provider(
             )
             collisions.append({"server_id": server_id, "detail": str(exc)})
         except Exception as exc:
+            # Do NOT let this vanish into a log line. When MCP registration
+            # fails the connect still "succeeds" from the user's point of
+            # view, but the connector arrives with zero tools and no stated
+            # reason — the single most common shape of "some MCP
+            # applications just don't work" (MAN-124). Report it back so the
+            # callback response, and the UI, can say what went wrong.
             _log.warning(
                 "MCP auto-register failed for %s/%s: %s",
                 normalized_provider, server_id, exc,
             )
+            failures.append({
+                "server_id": server_id,
+                "detail": str(exc) or exc.__class__.__name__,
+            })
 
-    return {"registered": len(registered), "servers": registered, "collisions": collisions}
+    result: Dict[str, Any] = {
+        "registered": len(registered),
+        "servers": registered,
+        "collisions": collisions,
+        "failures": failures,
+    }
+    if failures:
+        # A single human-readable sentence the UI can show verbatim, so a
+        # connector that lands with no tools explains itself instead of
+        # looking like a silent success.
+        detail = "; ".join(f"{item['server_id']}: {item['detail']}" for item in failures)
+        result["warning"] = (
+            f"Connected, but {len(failures)} {_connector_label(normalized_provider)} MCP "
+            f"server(s) could not be registered, so their tools are unavailable — {detail}"
+        )
+    return result

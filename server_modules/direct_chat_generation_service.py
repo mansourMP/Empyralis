@@ -1912,6 +1912,10 @@ def stream_provider_backed_direct_chat(
                         action_id = ""
                         argument_payload: Dict[str, Any] = {}
                         step_id = f"tool:{thinking_iteration}:0"
+                        # Pre-set for the same reason as the four above: the except handler
+                        # emits the failure event under THIS id so it resolves the tool.started
+                        # row it belongs to, and must never reference it unset.
+                        tool_call_id = ""
                         for tool_index, tool_call in enumerate(iteration_tool_calls, start=1):
                             # Assigned up front, before anything below that can raise
                             # (parse_tool_name included) — an exception mid-iteration must
@@ -2282,9 +2286,17 @@ def stream_provider_backed_direct_chat(
                             # as a real "completed" result, since a failed tool later denied
                             # in the reply is correct honesty, not a guard mismatch.
                             _looks_like_tool_error = result_summary[:80].lstrip().startswith('{"error"') or '"error":' in str(tool_result or "")[:120]
+                            # ONE verdict, every consumer. This same call/failed decision now
+                            # drives the trace events the user actually sees (tool.result,
+                            # the plan item, the chat step chip) as well as the guard's private
+                            # list — a tool that came back with an error payload rather than
+                            # raising (a timeout is exactly that: a normal return value, see
+                            # the _cf.TimeoutError branch above) must never paint a green
+                            # "completed" row while the guard privately knows it failed.
+                            _tool_call_failed = bool(_looks_like_tool_error) or not result_summary
                             _tool_trace_entry = {
                                 "name": tool_name,
-                                "status": "failed" if (_looks_like_tool_error or not result_summary) else "completed",
+                                "status": "failed" if _tool_call_failed else "completed",
                             }
                             if _looks_like_tool_error:
                                 _tool_trace_entry["error"] = result_summary
@@ -2292,7 +2304,10 @@ def stream_provider_backed_direct_chat(
                                 _tool_trace_entry["output"] = result_summary
                             turn_tool_trace.append(_tool_trace_entry)
                             tool_result_data = {
-                                "status": "ok",
+                                # "failed" is the failure token both trace consumers match on
+                                # (the activity view paints the row red; the runtime's derived
+                                # tool trace records an error) — "ok" stays the success token.
+                                "status": "failed" if _tool_call_failed else "ok",
                                 "summary": result_summary,
                                 "execution_environment": completed_execution_environment,
                                 "artifact_ids": (
@@ -2320,12 +2335,15 @@ def stream_provider_backed_direct_chat(
                                     else str(tool_name or "Tool").strip() or "Tool"
                                 )
                                 tool_result_data["connector_id"] = "hardware_runtime"
-                                tool_result_data["state"] = "completed"
+                                # The hardware activity card reads `state`/`agent_activity.status`
+                                # rather than the outer status, so it has to carry the same verdict
+                                # or the card stays green on a failed local-gateway call.
+                                tool_result_data["state"] = "failed" if _tool_call_failed else "completed"
                                 tool_result_data["agent_activity"] = _local_gateway_activity_payload(
                                     tool_call_id=tool_call_id,
-                                    activity_type="done",
+                                    activity_type="error" if _tool_call_failed else "done",
                                     label=_hw_label,
-                                    status="completed",
+                                    status="failed" if _tool_call_failed else "completed",
                                     detail=result_summary,
                                 )
                             tool_result_event = _emit_trace_event(
@@ -2342,8 +2360,14 @@ def stream_provider_backed_direct_chat(
                                 event_type="plan.item.updated",
                                 data={
                                     "item_id": tool_item_id,
-                                    "status": "done",
-                                    "summary": f"Completed {tool_name}.",
+                                    # Same failure vocabulary the raised-exception path below
+                                    # uses, so a tool that failed by returning an error payload
+                                    # reads identically to one that failed by raising.
+                                    "status": "failed" if _tool_call_failed else "done",
+                                    "summary": (
+                                        f"{tool_name} failed." if _tool_call_failed
+                                        else f"Completed {tool_name}."
+                                    ),
                                 },
                                 persisted=True,
                                 item_id=tool_item_id,
@@ -2355,7 +2379,8 @@ def stream_provider_backed_direct_chat(
                                 action_id,
                                 argument_payload,
                                 step_id=step_id,
-                                status="done",
+                                status="error" if _tool_call_failed else "done",
+                                detail_override=result_summary if _tool_call_failed else None,
                             )
                             # Same 4,000-char bound for every provider, codex_cli included —
                             # codex_cli tool results (shell/file/apply_patch output routed
@@ -2442,7 +2467,12 @@ def stream_provider_backed_direct_chat(
                                 "artifact_ids": [],
                             },
                             persisted=True,
-                            tool_call_id=f"toolcall_error:{thinking_iteration}",
+                            # The id of the call that actually failed — the activity view
+                            # correlates start↔result by this, so a synthetic id left the
+                            # original "Running X" row spinning forever and stacked an
+                            # unlinked red row underneath it. The fallback only applies if
+                            # we blew up before any tool call was read (no row to resolve).
+                            tool_call_id=tool_call_id or f"toolcall_error:{thinking_iteration}",
                         )
                         if tool_failure is not None:
                             yield tool_failure

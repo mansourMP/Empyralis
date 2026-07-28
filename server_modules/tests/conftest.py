@@ -505,6 +505,72 @@ def _isolate_empyralis_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         pass
 
 
+class _InMemoryDcrVault:
+    """Stand-in for `vault_store` used by oauth_dynamic_client_store in tests.
+
+    Rows live in a plain dict instead of Postgres, but the CIPHERTEXT is
+    produced by the real vault encryption routine under a fixed test
+    passphrase — so a test can still assert that a client_secret is stored
+    encrypted rather than in the clear, without a database and without
+    touching the developer's real vault.
+    """
+
+    PASSPHRASE = "test-only-dcr-vault-passphrase"
+
+    def __init__(self) -> None:
+        self.rows: dict = {}
+
+    # -- encryption (real algorithm, test passphrase) --
+    def _openssl_encrypt(self, plaintext: str) -> str:
+        from server_modules import vault_store
+
+        return vault_store._openssl_encrypt_with_passphrase(plaintext, self.PASSPHRASE)
+
+    def _openssl_decrypt(self, ciphertext: str) -> str:
+        from server_modules import vault_store
+
+        return vault_store._openssl_decrypt_with_passphrase(ciphertext, self.PASSPHRASE)
+
+    # -- single-row storage API --
+    def get_credential(self, credential_id: str):
+        return self.rows.get(str(credential_id))
+
+    def list_credentials(self) -> list:
+        return list(self.rows.values())
+
+    def upsert_credential(self, entry: dict) -> dict:
+        import copy
+
+        stored = copy.deepcopy(entry)
+        stored.setdefault("created_at", "2026-01-01T00:00:00Z")
+        stored["updated_at"] = f"2026-01-01T00:00:{len(self.rows):02d}Z"
+        self.rows[str(entry.get("id"))] = stored
+        return stored
+
+    def delete_credential(self, credential_id: str) -> bool:
+        return self.rows.pop(str(credential_id), None) is not None
+
+
+@pytest.fixture(autouse=True)
+def dcr_client_vault(monkeypatch: pytest.MonkeyPatch) -> _InMemoryDcrVault:
+    """Autouse guard: dynamically-registered OAuth clients (MAN-124) are now
+    persisted in the encrypted credential vault. Without this, any test that
+    exercises the DCR path would write real rows into whatever database
+    DATABASE_URL points at — and read them back in the NEXT test session,
+    which is exactly how these tests started failing for each other.
+
+    Tests that want to inspect what was persisted can request this fixture.
+    """
+    fake = _InMemoryDcrVault()
+    try:
+        from server_modules import oauth_dynamic_client_store
+
+        monkeypatch.setattr(oauth_dynamic_client_store, "_vault", lambda: fake)
+    except Exception:
+        pass
+    return fake
+
+
 @pytest.fixture
 def second_real_user_in_workspace():
     """Factory fixture for multiplayer-correctness tests: register a REAL,

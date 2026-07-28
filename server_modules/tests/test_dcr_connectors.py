@@ -757,13 +757,13 @@ def test_garbage_expiry_values_degrade_to_never_expiring(monkeypatch) -> None:
     assert cached.is_expired() is False
 
 
-def test_resolve_oauth_client_for_refresh_skips_expired_cached_entry(monkeypatch) -> None:
-    """Unlike _resolve_oauth_client, the background-refresh path has no
-    redirect_uri and so can never re-register -- an expired cached entry
-    must be skipped (falling through to the same 'not configured' failure
-    as no cache entry at all) rather than handed back so a refresh attempt
-    wastes a network round trip on a client_secret the token endpoint is
-    guaranteed to reject."""
+def test_resolve_oauth_client_for_refresh_reregisters_an_expired_entry(monkeypatch) -> None:
+    """An expired client_secret must NEVER be handed back to the token
+    endpoint (it is guaranteed to be rejected). It used to fall through to a
+    hard 'not configured' failure, which permanently killed every Linear
+    connection every 24 hours -- Linear's DCR client_secret expires that
+    fast. MAN-124: the registration's redirect_uri is now stored alongside
+    it, so this path re-registers instead of giving up."""
     _clear_env(monkeypatch)
     monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
 
@@ -774,12 +774,38 @@ def test_resolve_oauth_client_for_refresh_skips_expired_cached_entry(monkeypatch
         client_secret_expires_at=int(time.time()) - 10,
     )
 
-    try:
+    calls: list = []
+
+    def fake_post_json(url, payload, *, headers=None):
+        calls.append((url, payload))
+        return {"client_id": "reregistered-id", "client_secret": "reregistered-secret"}
+
+    monkeypatch.setattr(service, "_post_json", fake_post_json)
+
+    client_id, client_secret = service._resolve_oauth_client_for_refresh("linear")
+
+    assert (client_id, client_secret) == ("reregistered-id", "reregistered-secret")
+    assert len(calls) == 1
+    # Re-registered against the SAME redirect_uri the stale client used.
+    assert calls[0][1]["redirect_uris"] == [redirect_uri]
+    # The stale entry never reaches a token endpoint.
+    assert "stale-secret" not in (client_secret,)
+
+
+def test_resolve_oauth_client_for_refresh_still_fails_when_nothing_is_known(monkeypatch) -> None:
+    """With no cached and no stored registration there is no redirect_uri to
+    re-register against, so the original 'not configured' failure must still
+    propagate rather than the code inventing one."""
+    _clear_env(monkeypatch)
+    monkeypatch.setattr(service, "_DYNAMIC_CLIENT_CACHE", {})
+
+    def fail_post_json(*_args, **_kwargs):
+        raise AssertionError("must not register without a known redirect_uri")
+
+    monkeypatch.setattr(service, "_post_json", fail_post_json)
+
+    with pytest.raises(HTTPException):
         service._resolve_oauth_client_for_refresh("linear")
-    except Exception as exc:
-        assert "not configured" in str(exc)
-    else:
-        raise AssertionError("expected ensure_oauth_configured's 409 to propagate for an expired cache entry")
 
 
 def test_resolve_oauth_client_for_refresh_reuses_non_expired_cached_entry(monkeypatch) -> None:
