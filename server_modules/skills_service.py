@@ -656,6 +656,53 @@ def _local_tool_descriptors() -> List[ToolDescriptor]:
     ]
 
 
+# The `priority` parameter shared by project_task__create and
+# project_task__update. Written once, deliberately: an agent can only ever
+# set a field its tool schema advertises, so the two schemas drifting apart
+# would silently make priority settable on one path and not the other.
+#
+# Advertised as the raw integer rather than a name enum because that is what
+# the column stores and what the Linear MCP API accepts — a name enum here
+# would put a translation layer back exactly where matching Linear's
+# encoding was meant to remove one. The inversion (1 = MOST urgent) is
+# spelled out in full because it is the one thing a model is likely to get
+# backwards from intuition; project_tasks_service._normalize_priority also
+# accepts the names as a safety net if it does.
+_PROJECT_TASK_PRIORITY_SCHEMA = {
+    "type": "integer",
+    "enum": [0, 1, 2, 3, 4],
+    "description": (
+        "Priority, on Linear's scale: 0 = none (no priority set / untriaged), "
+        "1 = urgent, 2 = high, 3 = medium, 4 = low. NOTE the direction: 1 is the "
+        "MOST urgent and 4 the least — a LOWER number means MORE urgent. Use 0 to "
+        "clear a priority back to untriaged."
+    ),
+}
+
+# The `parent_task_id` parameter shared by project_task__create and
+# project_task__set_parent, written once for the same reason the priority
+# schema above is: an agent can only ever set a field its tool schema
+# advertises, so two copies drifting apart would silently make sub-tasks
+# creatable on one path and not the other.
+#
+# The one-level constraint is spelled out IN THE DESCRIPTION, not left to
+# the error path. A model that only discovers the rule by being rejected
+# burns a turn and often retries the same shape; a model that reads it up
+# front simply does the right thing. The rule is enforced for real in
+# project_tasks_service._resolve_parent_task either way.
+_PROJECT_TASK_PARENT_SCHEMA = {
+    "type": "string",
+    "description": (
+        "Optional. The id of an existing task in this project to file this one "
+        "under as a SUB-TASK. IMPORTANT: this board allows exactly ONE level of "
+        "nesting — the parent must be a top-level task. Pointing at a task that is "
+        "itself already a sub-task is rejected; attach it to that sub-task's own "
+        "parent instead. Parent and sub-task must be in the same project. Omit for "
+        "a normal top-level task."
+    ),
+}
+
+
 def _builtin_tool_descriptors() -> List[ToolDescriptor]:
     return [
         ToolDescriptor(
@@ -1261,10 +1308,16 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="project_task",
             action_id="create",
             description=(
-                "Create a new task on this project's shared task board — the backlog "
+                "Create a new task on this project's shared task board — work "
                 "a human or any agent in this project can pick up. Starts unassigned "
-                "and 'open'; use project_task__assign to hand it to an agent (yourself "
-                "or a teammate in this project)."
+                "and 'todo'; use project_task__assign to hand it to an agent (yourself "
+                "or a teammate in this project). Set priority if you already know how "
+                "urgent the work is — it defaults to 0 (no priority set), which means "
+                "nobody has triaged it yet. Pass parent_task_id to create this as a "
+                "SUB-TASK of an existing task — the right move when you are breaking a "
+                "big piece of work into steps, so the parent card shows real progress "
+                "(\"1/3 done\") instead of the steps scattering across the board as "
+                "unrelated cards."
             ),
             parameters={
                 "type": "object",
@@ -1272,6 +1325,8 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "title": {"type": "string", "description": "Short task title."},
                     "description": {"type": "string", "description": "What needs doing, and what does done look like."},
                     "due_at": {"type": "string", "description": "Optional ISO 8601 due date/time."},
+                    "priority": _PROJECT_TASK_PRIORITY_SCHEMA,
+                    "parent_task_id": _PROJECT_TASK_PARENT_SCHEMA,
                 },
                 "required": ["title"],
             },
@@ -1285,16 +1340,32 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             action_id="list",
             description=(
                 "List tasks on this project's board: tasks assigned to you, plus "
-                "unassigned backlog tasks anyone in the project can pick up. Use "
-                "before starting new work to see what's already tracked."
+                "unassigned tasks anyone in the project can pick up. Use "
+                "before starting new work to see what's already tracked. Every task "
+                "comes back with its priority (0 = none, 1 = urgent, 2 = high, "
+                "3 = medium, 4 = low — lower is more urgent) and a plain-English "
+                "priority_label; pass sort='priority' to get the most urgent work "
+                "first, which is how you decide what to pick up next."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["open", "in_progress", "blocked", "awaiting_input", "done"],
+                        "enum": [
+                            "backlog", "todo", "in_progress", "awaiting_input",
+                            "blocked", "in_review", "done",
+                        ],
                         "description": "Optional status filter.",
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["created_at", "priority"],
+                        "description": (
+                            "Ordering. 'priority' puts the most urgent work first and "
+                            "untriaged (priority 0) work last; 'created_at' (the default) "
+                            "puts the newest first."
+                        ),
                     },
                 },
                 "required": [],
@@ -1307,7 +1378,14 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             label="Get project task",
             connector_id="project_task",
             action_id="get",
-            description="Get one task by id, including its comment history — must belong to your own project.",
+            description=(
+                "Get one task by id, including its comment history — must belong to your "
+                "own project. Also returns the task's SUB-TASK ROLLUP (subtask_count and "
+                "subtask_done_count — the \"1/3 done\" progress on the card), the full list "
+                "of its sub-tasks, its parent_task_id if it is itself a sub-task, and the "
+                "labels attached to it. Read this before reporting a task complete: a "
+                "parent whose sub-tasks are not all done is not done."
+            ),
             parameters={
                 "type": "object",
                 "properties": {"task_id": {"type": "string", "description": "The task id."}},
@@ -1317,16 +1395,45 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             audience_note="Safe: read-only, scoped to this agent's own project.",
         ),
         ToolDescriptor(
+            tool_name="project_task__set_parent",
+            label="Set task parent",
+            connector_id="project_task",
+            action_id="set_parent",
+            description=(
+                "File an EXISTING task under another as a sub-task, or detach it back to "
+                "top-level by omitting parent_task_id. Use when you realize a task you or "
+                "somebody else already created is really a step of a bigger one. This board "
+                "allows exactly ONE level of nesting: the parent must be a top-level task, "
+                "and a task that already has sub-tasks of its own cannot become one. Both "
+                "tasks must be in your project."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task to re-file."},
+                    "parent_task_id": _PROJECT_TASK_PARENT_SCHEMA,
+                },
+                "required": ["task_id"],
+            },
+            audience_safe=True,
+            audience_note="Safe: scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
             tool_name="project_task__update",
             label="Update project task",
             connector_id="project_task",
             action_id="update",
             description=(
-                "Edit a task on your project's board — title, description, due date, and/or "
-                "status (open | in_progress | blocked | awaiting_input | done). Call this with "
-                "status='done' when you finish the work — nothing else closes the loop for you. "
-                "Use status='blocked' or 'awaiting_input' the moment you are stuck, so a human "
-                "or teammate sees it on the board instead of the task silently going quiet."
+                "Edit a task on your project's board — title, description, due date, priority, "
+                "and/or status (backlog | todo | in_progress | awaiting_input | blocked | "
+                "in_review | done). Call this with status='in_review' when you finish the work "
+                "— that is how you hand it back for a human to check, and nothing else closes "
+                "the loop for you. Only use status='done' for work that genuinely needs no "
+                "human sign-off; when in doubt, 'in_review' is the right call. Use "
+                "status='blocked' or 'awaiting_input' the moment you are stuck, so a human or "
+                "teammate sees it on the board instead of the task silently going quiet. Set "
+                "priority when you learn how urgent something really is — triaging the board "
+                "is part of your job, not just the human's."
             ),
             parameters={
                 "type": "object",
@@ -1336,9 +1443,16 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "description": {"type": "string", "description": "New description, if changing it."},
                     "status": {
                         "type": "string",
-                        "enum": ["open", "in_progress", "blocked", "awaiting_input", "done"],
-                        "description": "New status.",
+                        "enum": [
+                            "backlog", "todo", "in_progress", "awaiting_input",
+                            "blocked", "in_review", "done",
+                        ],
+                        "description": (
+                            "New status. Use 'in_review' when you have finished the work "
+                            "and a human should check it before it is closed."
+                        ),
                     },
+                    "priority": _PROJECT_TASK_PRIORITY_SCHEMA,
                     "due_at": {"type": "string", "description": "New ISO 8601 due date/time."},
                     "clear_due_at": {"type": "boolean", "description": "Set true to remove the due date."},
                 },
@@ -1387,6 +1501,76 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "agent_id": {"type": "string", "description": "The agent install id to assign it to — must be in your project."},
                 },
                 "required": ["task_id", "agent_id"],
+            },
+            audience_safe=True,
+            audience_note="Safe: scoped to this agent's own project.",
+        ),
+        # Labels. The vocabulary is per-WORKSPACE (shared across every
+        # project) while attach/detach is scoped to the calling agent's own
+        # project like everything else in this namespace. An agent can READ
+        # the vocabulary and put labels on/off its own tasks; it deliberately
+        # cannot CREATE labels — that stays a human decision, because a
+        # vocabulary any model can extend on a guessed word degrades into
+        # "bug"/"Bugs"/"bugfix" within a week. project_task__list_labels
+        # exists precisely so attaching is a choice from a real list rather
+        # than a guess.
+        ToolDescriptor(
+            tool_name="project_task__list_labels",
+            label="List workspace labels",
+            connector_id="project_task",
+            action_id="list_labels",
+            description=(
+                "List every label available in this workspace, with its colour and how "
+                "many tasks currently carry it. Labels are shared across all projects in "
+                "the workspace. Call this before project_task__add_label so you attach a "
+                "label that actually exists — you cannot create new ones."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+            audience_safe=True,
+            audience_note="Safe: read-only workspace label vocabulary.",
+        ),
+        ToolDescriptor(
+            tool_name="project_task__add_label",
+            label="Add label to task",
+            connector_id="project_task",
+            action_id="add_label",
+            description=(
+                "Attach an existing workspace label to a task on your project's board — "
+                "how you categorize work so a human can filter for it later (e.g. tagging "
+                "something you hit as 'bug'). Accepts the label's name or its id; names are "
+                "matched case-insensitively. Already attached is not an error. You cannot "
+                "create a new label this way — if the one you want does not exist, say so "
+                "and ask an owner to add it. Use project_task__list_labels to see what "
+                "exists."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task id."},
+                    "label": {"type": "string", "description": "Label name (case-insensitive) or label id."},
+                },
+                "required": ["task_id", "label"],
+            },
+            audience_safe=True,
+            audience_note="Safe: scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="project_task__remove_label",
+            label="Remove label from task",
+            connector_id="project_task",
+            action_id="remove_label",
+            description=(
+                "Take a label off a task on your project's board. Removes only the link — "
+                "the label itself stays in the workspace vocabulary for other tasks. "
+                "Accepts the label's name or its id."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "The task id."},
+                    "label": {"type": "string", "description": "Label name (case-insensitive) or label id."},
+                },
+                "required": ["task_id", "label"],
             },
             audience_safe=True,
             audience_note="Safe: scoped to this agent's own project.",
@@ -5625,6 +5809,8 @@ def execute_single_direct_tool_call(
                         title=title,
                         description=str(argument_payload.get("description") or ""),
                         due_at=argument_payload.get("due_at"),
+                        priority=argument_payload.get("priority"),
+                        parent_task_id=argument_payload.get("parent_task_id"),
                         created_by=_caller_agent_id,
                     )
                 )
@@ -5641,6 +5827,7 @@ def execute_single_direct_tool_call(
                     agent_id=_caller_agent_id,
                     project_id=_caller_project_id,
                     status=status,
+                    sort=argument_payload.get("sort"),
                 )
             )
             return json.dumps({"ok": True, "tasks": tasks_rows}, ensure_ascii=False)
@@ -5653,7 +5840,100 @@ def execute_single_direct_tool_call(
                 _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
             )
             task = _task_in_own_project(task, task_id)
+            # The sub-task rollup (subtask_count / subtask_done_count) rides
+            # along on the task itself, already computed by the same query.
+            # The CHILDREN are a second read, done only here on the
+            # single-task path -- deliberately not on `list`, where it would
+            # be one extra query per card.
+            subtasks = callbacks.run_async_tool_call(
+                _project_tasks.list_subtasks(
+                    tenant_id=_caller_tenant_id, workspace_id=workspace_id, parent_task_id=task_id,
+                )
+            )
+            return json.dumps({"ok": True, "task": task, "subtasks": subtasks}, ensure_ascii=False)
+
+        if action_id == "set_parent":
+            task_id = str(argument_payload.get("task_id") or "").strip()
+            if not task_id:
+                raise RuntimeError("Tool 'project_task__set_parent' requires task_id.")
+            existing = callbacks.run_async_tool_call(
+                _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
+            )
+            _task_in_own_project(existing, task_id)
+            new_parent_id = str(argument_payload.get("parent_task_id") or "").strip()
+            if new_parent_id:
+                # The proposed parent has to clear the SAME project boundary
+                # the task itself did -- project_tasks_service checks that
+                # parent and child share a project, but this check is what
+                # makes the failure an honest "not visible to this agent"
+                # rather than leaking whether some other project's task id
+                # happens to exist.
+                proposed = callbacks.run_async_tool_call(
+                    _project_tasks.get_task(
+                        tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=new_parent_id,
+                    )
+                )
+                _task_in_own_project(proposed, new_parent_id)
+            try:
+                task = callbacks.run_async_tool_call(
+                    _project_tasks.set_task_parent(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        task_id=task_id,
+                        parent_task_id=new_parent_id or None,
+                    )
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
             return json.dumps({"ok": True, "task": task}, ensure_ascii=False)
+
+        if action_id in ("list_labels", "add_label", "remove_label"):
+            from server_modules import workspace_labels_service as _labels
+
+            if action_id == "list_labels":
+                # Workspace-scoped by design (a label is shared across every
+                # project), unlike every other action in this namespace --
+                # reading the vocabulary is not reading another project's
+                # work, and an agent that cannot see the list cannot attach
+                # anything from it.
+                rows = callbacks.run_async_tool_call(
+                    _labels.list_labels(tenant_id=_caller_tenant_id, workspace_id=workspace_id)
+                )
+                return json.dumps({"ok": True, "labels": rows}, ensure_ascii=False)
+
+            task_id = str(argument_payload.get("task_id") or "").strip()
+            label_token = str(argument_payload.get("label") or "").strip()
+            if not task_id:
+                raise RuntimeError(f"Tool 'project_task__{action_id}' requires task_id.")
+            if not label_token:
+                raise RuntimeError(f"Tool 'project_task__{action_id}' requires label.")
+            existing = callbacks.run_async_tool_call(
+                _project_tasks.get_task(tenant_id=_caller_tenant_id, workspace_id=workspace_id, task_id=task_id)
+            )
+            _task_in_own_project(existing, task_id)
+            try:
+                if action_id == "add_label":
+                    labels_now = callbacks.run_async_tool_call(
+                        _labels.attach_label(
+                            tenant_id=_caller_tenant_id,
+                            workspace_id=workspace_id,
+                            task_id=task_id,
+                            label=label_token,
+                            added_by=_caller_agent_id,
+                        )
+                    )
+                else:
+                    labels_now = callbacks.run_async_tool_call(
+                        _labels.detach_label(
+                            tenant_id=_caller_tenant_id,
+                            workspace_id=workspace_id,
+                            task_id=task_id,
+                            label=label_token,
+                        )
+                    )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return json.dumps({"ok": True, "task_id": task_id, "labels": labels_now}, ensure_ascii=False)
 
         if action_id == "update":
             task_id = str(argument_payload.get("task_id") or "").strip()
@@ -5672,6 +5952,7 @@ def execute_single_direct_tool_call(
                         title=argument_payload.get("title"),
                         description=argument_payload.get("description"),
                         status=argument_payload.get("status"),
+                        priority=argument_payload.get("priority"),
                         due_at=argument_payload.get("due_at"),
                         clear_due_at=bool(argument_payload.get("clear_due_at")),
                     )

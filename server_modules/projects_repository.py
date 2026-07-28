@@ -178,6 +178,7 @@ async def create_project(
     slug: Optional[str] = None,
     is_default: bool = False,
     project_id: Optional[str] = None,
+    created_by_user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     tenant_id = str(tenant_id or "").strip()
     workspace_id = str(workspace_id or "").strip()
@@ -217,7 +218,30 @@ async def create_project(
         bool(is_default),
         json.dumps(identity),
     )
-    return _row_to_project(row)
+    project = _row_to_project(row)
+    # MAN-115: the creator gets an explicit project_memberships row so they
+    # are never locked out of a project they just made — this matters even
+    # though creation is owner-gated today (owners bypass the membership
+    # check anyway) because it keeps the roster honest (the creator shows
+    # up as a real member, not an invisible bypass) and costs nothing if a
+    # future non-owner creation path ever lands. Best-effort: the project
+    # itself is already committed by this point, so a membership-insert
+    # failure must not undo (or appear to undo) a successful create.
+    clean_creator = str(created_by_user_id or "").strip()
+    if project and clean_creator:
+        try:
+            await add_project_member(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                project_id=project["id"],
+                user_id=clean_creator,
+                role="owner",
+                added_by=clean_creator,
+                pool=pool,
+            )
+        except Exception:
+            pass
+    return project
 
 
 async def ensure_default_project(
@@ -395,3 +419,199 @@ async def count_agents_by_project(
         tenant_id=tenant_id, workspace_id=workspace_id,
     )
     return {str(r["project_id"]): int(r["n"]) for r in (rows or [])}
+
+
+# ── MAN-115: real per-project ACL ────────────────────────────────────────
+# Follow-up to the MAN-70 placeholder ruling ("project member" == "workspace
+# member" for now, no per-project ACL table). This is that table:
+# project_memberships (migrations/add_project_memberships.sql). A row means
+# "this user can see/act on this project." Workspace OWNERS bypass this
+# table entirely — that check lives in auth.enforce_project_access, not
+# here; every function below is a plain, unprivileged membership CRUD/read,
+# same direct-pool pattern as the rest of this file (Postgres-first, no
+# RLS, explicit tenant_id/workspace_id filters on every query).
+
+def _new_membership_id() -> str:
+    return f"projmember_{uuid.uuid4().hex[:16]}"
+
+
+def _row_to_member(row: Any) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    r = dict(row)
+    return {
+        "id": str(r.get("id") or "").strip(),
+        "project_id": str(r.get("project_id") or "").strip(),
+        "user_id": str(r.get("user_id") or "").strip(),
+        "email": str(r.get("email") or "").strip().lower() or None,
+        "display_name": str(r.get("display_name") or "").strip() or None,
+        "avatar_url": str(r.get("avatar_url") or "").strip() or None,
+        "role": str(r.get("role") or "").strip() or "member",
+        "added_by": str(r.get("added_by") or "").strip() or None,
+        "created_at": str(r.get("created_at") or "") or None,
+    }
+
+
+async def add_project_member(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+    user_id: str,
+    role: str = "member",
+    added_by: Optional[str] = None,
+    pool: Any = None,
+) -> Dict[str, Any]:
+    """Grant a user access to a project. Idempotent — adding an existing
+    member updates `role`/`added_by` rather than erroring (ON CONFLICT),
+    since re-adding someone who's already there is a no-op from the
+    caller's point of view, not a failure. `pool` may be passed by a caller
+    that already resolved one (create_project's auto-add-creator path) to
+    avoid a second ensure_control_plane_schema() round trip."""
+    tenant_id = str(tenant_id or "").strip()
+    workspace_id = str(workspace_id or "").strip()
+    project_id = str(project_id or "").strip()
+    user_id = str(user_id or "").strip()
+    if not tenant_id or not workspace_id:
+        raise ValueError("tenant_id and workspace_id are required to add a project member.")
+    if not project_id:
+        raise ValueError("project_id is required to add a project member.")
+    if not user_id:
+        raise ValueError("user_id is required to add a project member.")
+    if pool is None:
+        pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
+            "Postgres is required to add a project member."
+        )
+    row = await pool.fetchrow(
+        """
+        INSERT INTO project_memberships (id, tenant_id, workspace_id, project_id, user_id, role, added_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (project_id, user_id) DO UPDATE
+            SET role = EXCLUDED.role,
+                added_by = COALESCE(EXCLUDED.added_by, project_memberships.added_by)
+        RETURNING id, project_id, user_id, role, added_by, created_at
+        """,
+        _new_membership_id(),
+        tenant_id,
+        workspace_id,
+        project_id,
+        user_id,
+        str(role or "member").strip().lower() or "member",
+        str(added_by or "").strip() or None,
+    )
+    member = _row_to_member(row)
+    if member is None:
+        raise RuntimeError("Project membership insert did not return a row.")
+    return member
+
+
+async def remove_project_member(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+    user_id: str,
+) -> bool:
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return False
+    result = await pool.execute(
+        """
+        DELETE FROM project_memberships
+        WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3 AND user_id = $4
+        """,
+        str(tenant_id or "").strip(),
+        str(workspace_id or "").strip(),
+        str(project_id or "").strip(),
+        str(user_id or "").strip(),
+    )
+    return str(result or "").endswith(" 1") or str(result or "").endswith("-1")
+
+
+async def list_project_members(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+) -> List[Dict[str, Any]]:
+    """The USERS explicitly granted access to a project — joined against
+    `users` for email/display_name/avatar_url, same shape as
+    control_plane_repository.list_workspace_members. Does NOT include
+    workspace owners who see the project via the bypass in
+    auth.enforce_project_access — those aren't rows in this table (a role
+    grant, not a membership grant), so a caller that wants "everyone who
+    can actually see this project" must union this with the workspace's
+    owner list separately (see routes_fleet.py's project-members route)."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return []
+    rows = await pool.fetch(
+        """
+        SELECT pm.id, pm.project_id, pm.user_id, pm.role, pm.added_by, pm.created_at,
+               u.email, u.display_name, u.avatar_url
+        FROM project_memberships pm
+        JOIN users u ON u.id = pm.user_id
+        WHERE pm.tenant_id = $1 AND pm.workspace_id = $2 AND pm.project_id = $3
+        ORDER BY pm.created_at ASC, pm.user_id ASC
+        """,
+        str(tenant_id or "").strip(),
+        str(workspace_id or "").strip(),
+        str(project_id or "").strip(),
+    )
+    return [m for m in (_row_to_member(r) for r in rows) if m]
+
+
+async def is_project_member(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+    user_id: str,
+) -> bool:
+    """The core access-check primitive — does this user have an explicit
+    project_memberships row for this project? Does NOT account for the
+    workspace-owner bypass; callers that need the full "can this user see
+    this project" answer must check owner role first (see
+    auth.enforce_project_access, the one real caller of this for access
+    control)."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return False
+    row = await pool.fetchrow(
+        """
+        SELECT 1 FROM project_memberships
+        WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3 AND user_id = $4
+        """,
+        str(tenant_id or "").strip(),
+        str(workspace_id or "").strip(),
+        str(project_id or "").strip(),
+        str(user_id or "").strip(),
+    )
+    return row is not None
+
+
+async def list_member_project_ids(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: str,
+) -> List[str]:
+    """Every project id this user has an explicit membership row for, within
+    one workspace — the filter fleet_projects (list) applies for a
+    non-owner caller so the project list itself doesn't leak the existence
+    of projects the caller can't open."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return []
+    rows = await pool.fetch(
+        """
+        SELECT project_id FROM project_memberships
+        WHERE tenant_id = $1 AND workspace_id = $2 AND user_id = $3
+        """,
+        str(tenant_id or "").strip(),
+        str(workspace_id or "").strip(),
+        str(user_id or "").strip(),
+    )
+    return [str(r["project_id"]).strip() for r in (rows or []) if str(r["project_id"] or "").strip()]

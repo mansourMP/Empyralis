@@ -53,11 +53,18 @@ class _WorkspaceScopedFakePool:
                     pass  # update_task path -- status coalesce handled below
                 updated = dict(row)
                 if "UPDATE project_tasks" in query and "SET title" in query:
-                    # update_task(...): args = (tenant, ws, id, title, description, status, clear_due_at, due_at)
+                    # update_task(...): args = (tenant, ws, id, title, description,
+                    #                           status, clear_due_at, due_at, priority)
                     status = args[5]
                     if status:
                         updated["status"] = status
                         row["status"] = status
+                    # Priority uses `is not None`, not truthiness: 0 is a real
+                    # patch ("clear the priority"), only None means "leave it".
+                    priority = args[8] if len(args) >= 9 else None
+                    if priority is not None:
+                        updated["priority"] = priority
+                        row["priority"] = priority
                 if "jsonb_set" in query:
                     # add_task_comment(...): args = (tenant, ws, id, comments_json)
                     import json as _json
@@ -102,6 +109,7 @@ def _task_row(**overrides):
         "title": "Ship it",
         "description": "",
         "status": "open",
+        "priority": 0,
         "assignee_agent_id": None,
         "created_by": "user-1",
         "due_at": None,
@@ -242,7 +250,9 @@ class InvalidStatusTests(unittest.IsolatedAsyncioTestCase):
         with p1, p2, p3, p4:
             result = await mcp_server.empyralis_update_task_status(task_id="task-1", status="cancelled", ctx=_FakeCtx())
         self.assertFalse(result["ok"])
-        self.assertIn("open", result["error"])  # names the valid status set
+        # Names the valid status set, including the new review seam.
+        self.assertIn("in_review", result["error"])
+        self.assertIn("todo", result["error"])
 
     async def test_missing_task_returns_clear_error(self):
         pool = _WorkspaceScopedFakePool([])
@@ -328,6 +338,156 @@ class CreateTaskTests(unittest.IsolatedAsyncioTestCase):
 
     def test_create_task_is_registered_in_always_live_tools(self):
         self.assertIn("empyralis_create_task", mcp_server.EMPYRALIST_MCP_TOOLS)
+
+
+class TaskPriorityTests(unittest.IsolatedAsyncioTestCase):
+    """An EXTERNAL agent (Claude/ChatGPT through this MCP surface) must be
+    able to both READ and SET priority, not just see one a human typed --
+    otherwise the field is human-only and the board never gets triaged by
+    the agents actually working it. Priority uses Linear's scale, inversion
+    and all: 0 = none, 1 = urgent, 2 = high, 3 = medium, 4 = low.
+    """
+
+    async def test_set_task_priority_is_registered_in_always_live_tools(self):
+        self.assertIn("empyralis_set_task_priority", mcp_server.EMPYRALIST_MCP_TOOLS)
+
+    async def test_set_task_priority_is_not_gated_by_check_write(self):
+        """Same write-gate decision as the other task tools (see the module
+        docstring): triage is bounded to tasks already visible through this
+        key, not a workspace-wide configuration mutation."""
+        self.assertNotIn("_check_write", inspect.getsource(mcp_server.empyralis_set_task_priority))
+
+    async def test_external_agent_can_set_every_priority(self):
+        from server_modules import project_tasks_service
+
+        for priority in project_tasks_service.TASK_PRIORITY_ORDER:
+            with self.subTest(priority=priority):
+                pool = _WorkspaceScopedFakePool([_task_row()])
+                p1, p2, p3, p4 = _patched(pool)
+                with p1, p2, p3, p4:
+                    result = await mcp_server.empyralis_set_task_priority(
+                        task_id="task-1", priority=priority, ctx=_FakeCtx(),
+                    )
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["task"]["priority"], priority)
+                self.assertEqual(
+                    result["task"]["priority_label"],
+                    project_tasks_service.TASK_PRIORITY_LABELS[priority],
+                )
+
+    async def test_priority_survives_a_round_trip_through_set_then_get(self):
+        pool = _WorkspaceScopedFakePool([_task_row()])
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            written = await mcp_server.empyralis_set_task_priority(
+                task_id="task-1", priority=1, ctx=_FakeCtx(),
+            )
+            fetched = await mcp_server.empyralis_get_task(task_id="task-1", ctx=_FakeCtx())
+        self.assertEqual(written["task"]["priority"], 1)
+        self.assertEqual(fetched["task"]["priority"], 1)
+        self.assertEqual(fetched["task"]["priority_label"], "urgent")
+
+    async def test_out_of_range_priority_returns_a_clear_agent_facing_error(self):
+        for bad in (5, -1, 99):
+            with self.subTest(bad=bad):
+                pool = _WorkspaceScopedFakePool([_task_row()])
+                p1, p2, p3, p4 = _patched(pool)
+                with p1, p2, p3, p4:
+                    result = await mcp_server.empyralis_set_task_priority(
+                        task_id="task-1", priority=bad, ctx=_FakeCtx(),
+                    )
+                self.assertFalse(result["ok"])
+                # Names the scale AND which end is urgent -- the thing a
+                # caller getting this error most likely got backwards.
+                self.assertIn("1 = urgent", result["error"])
+                self.assertIn("MOST urgent", result["error"])
+
+    async def test_set_priority_cannot_touch_another_workspaces_task(self):
+        pool = _WorkspaceScopedFakePool([_task_row(workspace_id="ws-A", tenant_id="tenant-A")])
+        resolved = _resolved(workspace_id="ws-B", external_agent_id="ext_agent_bbb")
+        p1, p2, p3, p4 = _patched(pool, tenant_id="tenant-B", resolved=resolved)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_set_task_priority(
+                task_id="task-1", priority=1, ctx=_FakeCtx(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("not found", result["error"].lower())
+
+    async def test_setting_priority_never_changes_status(self):
+        """The two are independent facts, which is why they are separate
+        tools -- setting one must not quietly move the other."""
+        pool = _WorkspaceScopedFakePool([_task_row(status="in_progress")])
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_set_task_priority(
+                task_id="task-1", priority=2, ctx=_FakeCtx(),
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["status"], "in_progress")
+        self.assertEqual(result["task"]["priority"], 2)
+
+    async def test_setting_status_never_changes_priority(self):
+        pool = _WorkspaceScopedFakePool([_task_row(priority=1)])
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_update_task_status(
+                task_id="task-1", status="done", ctx=_FakeCtx(),
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["status"], "done")
+        self.assertEqual(result["task"]["priority"], 1)
+
+    async def test_create_task_defaults_to_no_priority(self):
+        pool = _InsertingFakePool(_task_row(id="task-new"))
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_create_task(
+                project_id="proj-1", title="Draft the plan", ctx=_FakeCtx(),
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["priority"], 0)
+        _query, args = pool.fetchrow_calls[0]
+        self.assertEqual(args[8], 0)
+
+    async def test_external_agent_can_create_a_task_at_urgent(self):
+        pool = _InsertingFakePool(_task_row(id="task-new", priority=1))
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_create_task(
+                project_id="proj-1", title="Prod is down", priority=1, ctx=_FakeCtx(),
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["priority"], 1)
+        _query, args = pool.fetchrow_calls[0]
+        self.assertEqual(args[8], 1)
+
+    async def test_create_task_rejects_an_out_of_range_priority(self):
+        pool = _InsertingFakePool(_task_row())
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_create_task(
+                project_id="proj-1", title="Draft the plan", priority=7, ctx=_FakeCtx(),
+            )
+        self.assertFalse(result["ok"])
+
+    async def test_list_my_tasks_returns_priority_and_can_sort_by_it(self):
+        pool = _WorkspaceScopedFakePool([_task_row(id="task-urgent", priority=1)])
+        p1, p2, p3, p4 = _patched(pool)
+        with p1, p2, p3, p4:
+            result = await mcp_server.empyralis_list_my_tasks(sort="priority", ctx=_FakeCtx())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tasks"][0]["priority"], 1)
+        self.assertEqual(result["tasks"][0]["priority_label"], "urgent")
+
+    async def test_tool_docstrings_explain_which_end_of_the_scale_is_urgent(self):
+        """An external agent has nothing but the docstring to go on -- the
+        MCP tool description IS the schema description here."""
+        for tool in (mcp_server.empyralis_set_task_priority, mcp_server.empyralis_create_task):
+            with self.subTest(tool=tool.__name__):
+                doc = tool.__doc__ or ""
+                self.assertIn("1 = urgent", doc)
+                self.assertIn("4 = low", doc)
+                self.assertIn("MOST urgent", doc)
 
 
 if __name__ == "__main__":

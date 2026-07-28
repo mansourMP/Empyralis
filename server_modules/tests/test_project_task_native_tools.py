@@ -66,6 +66,7 @@ def _task_row(**overrides) -> dict:
         "title": "Ship the widget",
         "description": "Build and ship it.",
         "status": "open",
+        "priority": 0,
         "assignee_agent_id": None,
         "created_by": "user-1",
         "due_at": None,
@@ -242,6 +243,218 @@ class ProjectTaskNativeToolTests(unittest.TestCase):
         result = _call("project_task__assign", {"task_id": "task-1", "agent_id": "agent-2"}, pool=pool)
         self.assertTrue(result["ok"])
         self.assertEqual(result["task"]["assignee_agent_id"], "agent-2")
+
+
+class ProjectTaskStatusVocabularyReachabilityTests(unittest.TestCase):
+    """`in_review` only earns its keep if an AGENT can actually put a task
+    there. An agent can only emit what the tool schema advertises, so the
+    reachability property has two halves: the descriptor enum must offer the
+    status, and the dispatch path must write it through. Both are checked
+    here — a correct service layer behind a stale tool schema would leave
+    `in_review` permanently unreachable by the only actors that produce
+    work needing review.
+    """
+
+    def _descriptor(self, tool_name: str):
+        for descriptor in skills_service._builtin_tool_descriptors():
+            if descriptor.tool_name == tool_name:
+                return descriptor
+        raise AssertionError(f"tool descriptor {tool_name} not found")
+
+    def test_update_tool_schema_offers_all_seven_statuses(self):
+        from server_modules import project_tasks_service
+
+        enum = self._descriptor("project_task__update").parameters["properties"]["status"]["enum"]
+        self.assertEqual(enum, list(project_tasks_service.TASK_STATUS_ORDER))
+        self.assertIn("in_review", enum)
+        self.assertIn("backlog", enum)
+
+    def test_list_tool_schema_offers_all_seven_statuses(self):
+        from server_modules import project_tasks_service
+
+        enum = self._descriptor("project_task__list").parameters["properties"]["status"]["enum"]
+        self.assertEqual(enum, list(project_tasks_service.TASK_STATUS_ORDER))
+
+    def test_update_tool_description_tells_the_agent_to_use_in_review(self):
+        """The enum alone doesn't get used — the description is what makes an
+        agent hand finished work back for review instead of self-closing it."""
+        description = self._descriptor("project_task__update").description
+        self.assertIn("in_review", description)
+
+    def test_agent_can_actually_move_its_own_task_to_in_review(self):
+        pool = _QueuedFakePool(
+            fetchrow_results=[
+                {"project_id": "proj-1"},
+                _task_row(project_id="proj-1", status="in_progress"),
+                _task_row(project_id="proj-1", status="in_review"),
+            ],
+        )
+        result = _call("project_task__update", {"task_id": "task-1", "status": "in_review"}, pool=pool)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["status"], "in_review")
+        # The status reached the UPDATE verbatim, not coerced to a default.
+        _query, args = pool.fetchrow_calls[-1]
+        self.assertEqual(args[5], "in_review")
+
+    def test_agent_can_move_a_task_to_backlog(self):
+        pool = _QueuedFakePool(
+            fetchrow_results=[
+                {"project_id": "proj-1"},
+                _task_row(project_id="proj-1"),
+                _task_row(project_id="proj-1", status="backlog"),
+            ],
+        )
+        result = _call("project_task__update", {"task_id": "task-1", "status": "backlog"}, pool=pool)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["status"], "backlog")
+
+    def test_agent_sending_the_legacy_open_status_still_works(self):
+        """An agent holding a cached copy of the old tool schema keeps
+        working — 'open' lands on 'todo' instead of erroring the turn."""
+        pool = _QueuedFakePool(
+            fetchrow_results=[
+                {"project_id": "proj-1"},
+                _task_row(project_id="proj-1"),
+                _task_row(project_id="proj-1", status="todo"),
+            ],
+        )
+        result = _call("project_task__update", {"task_id": "task-1", "status": "open"}, pool=pool)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["status"], "todo")
+        _query, args = pool.fetchrow_calls[-1]
+        self.assertEqual(args[5], "todo")
+
+
+class ProjectTaskPriorityReachabilityTests(unittest.TestCase):
+    """Priority is only worth having if an AGENT can set it, not just a
+    human — otherwise the board never gets triaged unless somebody opens the
+    UI. An agent can only ever emit a field its tool schema advertises, so
+    the reachability property has two halves, both checked here: the
+    descriptor must offer `priority`, and the dispatch path must actually
+    write it through to project_tasks_service. A correct service layer
+    behind a stale tool schema is exactly the failure mode this class
+    exists to catch (it is what was missed when the field was first
+    scoped).
+    """
+
+    def _descriptor(self, tool_name: str):
+        for descriptor in skills_service._builtin_tool_descriptors():
+            if descriptor.tool_name == tool_name:
+                return descriptor
+        raise AssertionError(f"tool descriptor {tool_name} not found")
+
+    def test_create_and_update_tool_schemas_both_offer_priority(self):
+        for tool_name in ("project_task__create", "project_task__update"):
+            with self.subTest(tool_name=tool_name):
+                schema = self._descriptor(tool_name).parameters["properties"]
+                self.assertIn("priority", schema)
+                self.assertEqual(schema["priority"]["enum"], [0, 1, 2, 3, 4])
+
+    def test_priority_schema_description_explains_the_inversion(self):
+        """The enum alone is useless to a model: 1..4 with no explanation
+        reads as "bigger is more urgent", which is backwards."""
+        description = self._descriptor("project_task__update").parameters["properties"]["priority"]["description"]
+        for expected in ("0 = none", "1 = urgent", "2 = high", "3 = medium", "4 = low"):
+            self.assertIn(expected, description)
+        self.assertIn("MOST urgent", description)
+
+    def test_update_tool_description_tells_the_agent_to_triage(self):
+        self.assertIn("priority", self._descriptor("project_task__update").description)
+
+    def test_list_tool_offers_priority_sorting(self):
+        schema = self._descriptor("project_task__list").parameters["properties"]
+        self.assertIn("sort", schema)
+        self.assertIn("priority", schema["sort"]["enum"])
+
+    def test_agent_can_create_a_task_at_urgent(self):
+        pool = _QueuedFakePool(
+            fetchrow_results=[{"project_id": "proj-1"}, _task_row(priority=1)],
+        )
+        result = _call(
+            "project_task__create", {"title": "Prod is down", "priority": 1}, pool=pool,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["priority"], 1)
+        self.assertEqual(result["task"]["priority_label"], "urgent")
+        # Reached the INSERT verbatim rather than being dropped on the floor.
+        _query, args = pool.fetchrow_calls[-1]
+        self.assertEqual(args[8], 1)
+
+    def test_agent_can_set_every_priority_on_its_own_task(self):
+        from server_modules import project_tasks_service
+
+        for priority in project_tasks_service.TASK_PRIORITY_ORDER:
+            with self.subTest(priority=priority):
+                pool = _QueuedFakePool(
+                    fetchrow_results=[
+                        {"project_id": "proj-1"},
+                        _task_row(project_id="proj-1"),
+                        _task_row(project_id="proj-1", priority=priority),
+                    ],
+                )
+                result = _call(
+                    "project_task__update", {"task_id": "task-1", "priority": priority}, pool=pool,
+                )
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["task"]["priority"], priority)
+                _query, args = pool.fetchrow_calls[-1]
+                self.assertEqual(args[8], priority)
+
+    def test_agent_setting_an_out_of_range_priority_is_rejected(self):
+        pool = _QueuedFakePool(
+            fetchrow_results=[{"project_id": "proj-1"}, _task_row(project_id="proj-1")],
+        )
+        with self.assertRaises(RuntimeError) as ctx:
+            _call("project_task__update", {"task_id": "task-1", "priority": 9}, pool=pool)
+        self.assertIn("urgent", str(ctx.exception))
+
+    def test_agent_can_set_priority_and_status_in_one_call(self):
+        """Triage and workflow are independent fields; patching both at once
+        must not make either overwrite the other."""
+        pool = _QueuedFakePool(
+            fetchrow_results=[
+                {"project_id": "proj-1"},
+                _task_row(project_id="proj-1"),
+                _task_row(project_id="proj-1", status="in_review", priority=2),
+            ],
+        )
+        result = _call(
+            "project_task__update",
+            {"task_id": "task-1", "status": "in_review", "priority": 2},
+            pool=pool,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["task"]["status"], "in_review")
+        self.assertEqual(result["task"]["priority"], 2)
+        _query, args = pool.fetchrow_calls[-1]
+        self.assertEqual(args[5], "in_review")
+        self.assertEqual(args[8], 2)
+
+    def test_agent_reads_priority_back_on_list_and_get(self):
+        pool = _QueuedFakePool(
+            fetchrow_results=[{"project_id": "proj-1"}],
+            fetch_results=[[_task_row(priority=1)]],
+        )
+        listed = _call("project_task__list", {}, pool=pool)
+        self.assertEqual(listed["tasks"][0]["priority"], 1)
+        self.assertEqual(listed["tasks"][0]["priority_label"], "urgent")
+
+        pool = _QueuedFakePool(
+            fetchrow_results=[{"project_id": "proj-1"}, _task_row(project_id="proj-1", priority=3)],
+        )
+        fetched = _call("project_task__get", {"task_id": "task-1"}, pool=pool)
+        self.assertEqual(fetched["task"]["priority"], 3)
+        self.assertEqual(fetched["task"]["priority_label"], "medium")
+
+    def test_agent_can_ask_for_the_board_priority_ordered(self):
+        pool = _QueuedFakePool(
+            fetchrow_results=[{"project_id": "proj-1"}],
+            fetch_results=[[_task_row(priority=1)]],
+        )
+        result = _call("project_task__list", {"sort": "priority"}, pool=pool)
+        self.assertTrue(result["ok"])
+        query, _args = pool.fetch_calls[0]
+        self.assertIn("NULLIF(priority, 0) ASC NULLS LAST", " ".join(query.split()))
 
 
 if __name__ == "__main__":

@@ -68,7 +68,8 @@ def _task_row(**overrides) -> dict:
         "project_id": "proj-1",
         "title": "Ship the widget",
         "description": "Build and ship it.",
-        "status": "open",
+        "status": "todo",
+        "priority": 0,
         "assignee_agent_id": None,
         "created_by": "user-1",
         "due_at": None,
@@ -120,7 +121,7 @@ class ProjectTasksCrudTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(task["id"], "task-1")
-        self.assertEqual(task["status"], "open")
+        self.assertEqual(task["status"], "todo")
         self.assertEqual(task["assignee_agent_id"], None)
         self.assertEqual(len(pool.fetchrow_calls), 1)
         query, args = pool.fetchrow_calls[0]
@@ -169,8 +170,10 @@ class ProjectTasksCrudTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("project_id = $3", query)
         self.assertIn("assignee_agent_id = $4", query)
         self.assertIn("status = $5", query)
-        # Status is normalized (lowercased) before hitting the query.
-        self.assertEqual(args[-1], "open")
+        # Status is normalized before hitting the query: lowercased, AND the
+        # legacy 'open' spelling mapped forward to its new name 'todo'. A
+        # caller still filtering by 'open' therefore gets the rows it means.
+        self.assertEqual(args[-1], "todo")
 
     async def test_update_task_rejects_invalid_status(self):
         pool = _QueuedFakePool()
@@ -228,6 +231,522 @@ class ProjectTasksCrudTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"title": "Step 1"', args[-1])
 
 
+class TaskPriorityTests(unittest.IsolatedAsyncioTestCase):
+    """Task priority on Linear's five-level scale
+    (migrations/add_task_priority.sql):
+
+        0 = none (default) | 1 = urgent | 2 = high | 3 = medium | 4 = low
+
+    The property that matters most here is the INVERSION: 1 is the most
+    urgent and 4 the least, matching what Linear stores and what the Linear
+    MCP API accepts. Getting that backwards would be silent and disastrous
+    (every 'urgent' card rendering as 'low'), so it is pinned explicitly
+    rather than only implied by the sort test.
+    """
+
+    async def test_encoding_matches_linears_scale_exactly(self):
+        self.assertEqual(project_tasks_service.TASK_PRIORITY_NONE, 0)
+        self.assertEqual(project_tasks_service.TASK_PRIORITY_URGENT, 1)
+        self.assertEqual(project_tasks_service.TASK_PRIORITY_HIGH, 2)
+        self.assertEqual(project_tasks_service.TASK_PRIORITY_MEDIUM, 3)
+        self.assertEqual(project_tasks_service.TASK_PRIORITY_LOW, 4)
+        self.assertEqual(
+            project_tasks_service.TASK_PRIORITY_LABELS,
+            {0: "none", 1: "urgent", 2: "high", 3: "medium", 4: "low"},
+        )
+        self.assertEqual(project_tasks_service.VALID_TASK_PRIORITIES, {0, 1, 2, 3, 4})
+
+    async def test_default_priority_is_none_zero(self):
+        self.assertEqual(project_tasks_service.DEFAULT_TASK_PRIORITY, 0)
+
+    async def test_create_task_defaults_priority_to_zero(self):
+        """A task created with no priority argument is untriaged (0), and
+        that 0 is written explicitly rather than left to the column
+        default -- so the value is the same whether or not the database has
+        had the migration's DEFAULT applied."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row()])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.create_task(
+                tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1", title="Ship the widget",
+            )
+        self.assertEqual(task["priority"], 0)
+        self.assertEqual(task["priority_label"], "none")
+        _query, args = pool.fetchrow_calls[0]
+        self.assertEqual(args[8], 0)
+
+    async def test_create_task_accepts_every_valid_priority(self):
+        for priority in project_tasks_service.TASK_PRIORITY_ORDER:
+            with self.subTest(priority=priority):
+                pool = _QueuedFakePool(fetchrow_results=[_task_row(priority=priority)])
+                with patch(
+                    "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                    new=AsyncMock(return_value=pool),
+                ):
+                    task = await project_tasks_service.create_task(
+                        tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
+                        title="Ship the widget", priority=priority,
+                    )
+                self.assertEqual(task["priority"], priority)
+                _query, args = pool.fetchrow_calls[0]
+                self.assertEqual(args[8], priority)
+
+    async def test_update_task_accepts_every_valid_priority(self):
+        for priority in project_tasks_service.TASK_PRIORITY_ORDER:
+            with self.subTest(priority=priority):
+                pool = _QueuedFakePool(fetchrow_results=[_task_row(priority=priority)])
+                with patch(
+                    "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                    new=AsyncMock(return_value=pool),
+                ):
+                    task = await project_tasks_service.update_task(
+                        tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", priority=priority,
+                    )
+                self.assertEqual(task["priority"], priority)
+                # Reached the UPDATE verbatim, not coerced to a default.
+                _query, args = pool.fetchrow_calls[0]
+                self.assertEqual(args[8], priority)
+
+    async def test_out_of_range_priority_is_rejected_on_create(self):
+        for bad in (5, -1, 99):
+            with self.subTest(bad=bad):
+                pool = _QueuedFakePool(fetchrow_results=[_task_row()])
+                with patch(
+                    "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                    new=AsyncMock(return_value=pool),
+                ):
+                    with self.assertRaises(ValueError):
+                        await project_tasks_service.create_task(
+                            tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1",
+                            title="Ship the widget", priority=bad,
+                        )
+                # Rejected before any INSERT was attempted.
+                self.assertEqual(pool.fetchrow_calls, [])
+
+    async def test_out_of_range_priority_is_rejected_on_update(self):
+        for bad in (5, -1, "sometime_soon"):
+            with self.subTest(bad=bad):
+                pool = _QueuedFakePool(fetchrow_results=[_task_row()])
+                with patch(
+                    "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                    new=AsyncMock(return_value=pool),
+                ):
+                    with self.assertRaises(ValueError):
+                        await project_tasks_service.update_task(
+                            tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", priority=bad,
+                        )
+                self.assertEqual(pool.fetchrow_calls, [])
+
+    async def test_rejection_message_spells_out_the_inversion(self):
+        """The error an agent reads has to say WHICH end of the scale is
+        urgent -- that is the single thing a caller getting this error is
+        most likely to have gotten wrong."""
+        pool = _QueuedFakePool()
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                await project_tasks_service.update_task(
+                    tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", priority=7,
+                )
+        message = str(ctx.exception)
+        self.assertIn("1 = urgent", message)
+        self.assertIn("4 = low", message)
+        self.assertIn("0 = none", message)
+
+    async def test_priority_names_are_accepted_as_input(self):
+        """The integer is canonical, but a caller (human or model) that
+        says 'urgent' should not be punished for it."""
+        for name, expected in (
+            ("urgent", 1), ("HIGH", 2), ("medium", 3), ("low", 4), ("none", 0),
+            ("p1", 1), ("critical", 1), ("no_priority", 0), ("2", 2),
+        ):
+            with self.subTest(name=name):
+                pool = _QueuedFakePool(fetchrow_results=[_task_row(priority=expected)])
+                with patch(
+                    "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                    new=AsyncMock(return_value=pool),
+                ):
+                    await project_tasks_service.update_task(
+                        tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", priority=name,
+                    )
+                _query, args = pool.fetchrow_calls[0]
+                self.assertEqual(args[8], expected)
+
+    async def test_boolean_priority_is_rejected_not_read_as_urgent(self):
+        """`True` is an int in Python. Letting it through would silently
+        make a mis-passed flag mean 'urgent'."""
+        pool = _QueuedFakePool()
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            with self.assertRaises(ValueError):
+                await project_tasks_service.update_task(
+                    tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", priority=True,
+                )
+
+    async def test_omitting_priority_leaves_it_untouched(self):
+        """None means "don't patch this field" -- distinct from 0, which
+        means "clear it back to untriaged"."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(priority=1)])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", status="done",
+            )
+        query, args = pool.fetchrow_calls[0]
+        self.assertIn("priority = COALESCE($9::smallint, priority)", query)
+        self.assertIsNone(args[8])
+
+    async def test_empty_string_priority_is_read_as_omitted_not_invalid(self):
+        """Some model clients emit "" for an optional parameter they chose
+        to skip. Failing the whole turn over that would be worse than
+        reading it as "leave the priority alone"."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(priority=1)])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", priority="  ",
+            )
+        _query, args = pool.fetchrow_calls[0]
+        self.assertIsNone(args[8])
+        self.assertEqual(task["priority"], 1)  # untouched
+
+    async def test_clearing_priority_to_zero_is_a_real_patch(self):
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(priority=0)])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", priority=0,
+            )
+        _query, args = pool.fetchrow_calls[0]
+        self.assertEqual(args[8], 0)  # NOT None -- the write actually happens
+        self.assertEqual(task["priority"], 0)
+
+    async def test_priority_survives_a_full_round_trip(self):
+        """Write 'urgent', read it back on every read path -- get_task,
+        list_tasks and list_my_tasks all carry the value AND its label."""
+        for priority, label in project_tasks_service.TASK_PRIORITY_LABELS.items():
+            with self.subTest(priority=priority):
+                row = _task_row(priority=priority)
+                pool = _QueuedFakePool(
+                    fetchrow_results=[row, row],
+                    fetch_results=[[row], [row]],
+                )
+                with patch(
+                    "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                    new=AsyncMock(return_value=pool),
+                ):
+                    written = await project_tasks_service.update_task(
+                        tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", priority=priority,
+                    )
+                    fetched = await project_tasks_service.get_task(
+                        tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                    )
+                    listed = await project_tasks_service.list_tasks(tenant_id="tenant-1", workspace_id="ws-1")
+                    mine = await project_tasks_service.list_my_tasks(
+                        tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-1",
+                    )
+                for task in (written, fetched, listed[0], mine[0]):
+                    self.assertEqual(task["priority"], priority)
+                    self.assertEqual(task["priority_label"], label)
+
+    async def test_a_row_from_an_unmigrated_database_reads_as_none(self):
+        """A SELECT against a database that predates the priority column
+        returns no `priority` key at all. That must read as 0/'none', not
+        blow up -- the deploy-before-migrate window has to stay survivable."""
+        row = _task_row()
+        row.pop("priority")
+        pool = _QueuedFakePool(fetchrow_results=[row])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.get_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+            )
+        self.assertEqual(task["priority"], 0)
+        self.assertEqual(task["priority_label"], "none")
+
+    async def test_every_read_query_selects_the_priority_column(self):
+        """The column has to be in the SELECT list or the field silently
+        reads as 'none' forever, no matter what was written."""
+        row = _task_row(priority=1)
+        pool = _QueuedFakePool(fetchrow_results=[row], fetch_results=[[row], [row]])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.get_task(tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1")
+            await project_tasks_service.list_tasks(tenant_id="tenant-1", workspace_id="ws-1")
+            await project_tasks_service.list_my_tasks(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-1",
+            )
+        for query, _args in pool.fetchrow_calls + pool.fetch_calls:
+            self.assertIn("status, priority", " ".join(query.split()))
+
+
+class TaskPrioritySortTests(unittest.IsolatedAsyncioTestCase):
+    """"Urgent first, none last" is NOT a plain ORDER BY priority, because 0
+    means UNSET and has to sink to the bottom rather than float to the top.
+    These pin the expression that gets that right."""
+
+    async def test_default_sort_is_unchanged_recency(self):
+        pool = _QueuedFakePool(fetch_results=[[_task_row()]])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.list_tasks(tenant_id="tenant-1", workspace_id="ws-1")
+        query, _args = pool.fetch_calls[0]
+        normalized = " ".join(query.split())
+        self.assertIn("ORDER BY created_at DESC", normalized)
+        self.assertNotIn("NULLIF(priority, 0)", normalized)
+
+    async def test_priority_sort_puts_urgent_first_and_untriaged_last(self):
+        pool = _QueuedFakePool(fetch_results=[[_task_row()]])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.list_tasks(
+                tenant_id="tenant-1", workspace_id="ws-1", sort="priority",
+            )
+        query, _args = pool.fetch_calls[0]
+        normalized = " ".join(query.split())
+        # ASC over NULLIF(priority, 0) means 1 (urgent) sorts before 4 (low);
+        # NULLS LAST is what pushes 0/none to the bottom instead of the top.
+        self.assertIn("ORDER BY NULLIF(priority, 0) ASC NULLS LAST, created_at DESC", normalized)
+
+    async def test_priority_sort_keeps_list_my_tasks_mine_first_split(self):
+        """An agent asking "what next" wants ITS OWN urgent work ahead of
+        somebody else's unclaimed urgent work, not interleaved with it."""
+        pool = _QueuedFakePool(fetch_results=[[_task_row()]])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.list_my_tasks(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-1", sort="priority",
+            )
+        query, _args = pool.fetch_calls[0]
+        normalized = " ".join(query.split())
+        self.assertIn(
+            "ORDER BY (assignee_agent_id IS NOT NULL) DESC, NULLIF(priority, 0) ASC NULLS LAST, created_at DESC",
+            normalized,
+        )
+
+    async def test_unknown_sort_falls_back_to_the_default_instead_of_erroring(self):
+        """A bad sort key is a display preference, not a correctness
+        question -- it must not fail a whole board load."""
+        pool = _QueuedFakePool(fetch_results=[[_task_row()]])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            rows = await project_tasks_service.list_tasks(
+                tenant_id="tenant-1", workspace_id="ws-1", sort="; DROP TABLE project_tasks",
+            )
+        self.assertEqual(len(rows), 1)
+        query, _args = pool.fetch_calls[0]
+        normalized = " ".join(query.split())
+        self.assertIn("ORDER BY created_at DESC", normalized)
+        self.assertNotIn("DROP TABLE", normalized)
+
+
+class TaskPrioritySchemaMirrorTests(unittest.IsolatedAsyncioTestCase):
+    """The standalone migration and control_plane_repository's own schema
+    blueprint have to agree -- a fresh database provisioned from the
+    blueprint and an existing one healed by the migration must end up with
+    the same column. This is the convention add_task_status_vocabulary.sql
+    established; forgetting the mirror is how the two silently diverge."""
+
+    def test_migration_file_declares_the_column_and_range_check(self):
+        from pathlib import Path
+
+        sql = (Path(__file__).resolve().parents[2] / "migrations" / "add_task_priority.sql").read_text()
+        self.assertIn("ADD COLUMN IF NOT EXISTS priority SMALLINT NOT NULL DEFAULT 0", sql)
+        self.assertIn("CHECK (priority BETWEEN 0 AND 4)", sql)
+        # Idempotent: re-running must not fail on the constraint already
+        # existing (the reason it is dropped-then-re-added by name).
+        self.assertIn("DROP CONSTRAINT IF EXISTS project_tasks_priority_check", sql)
+
+    def test_new_database_blueprint_declares_the_same_column(self):
+        from server_modules import control_plane_repository as repository
+
+        sql = " ".join(repository.CONTROL_PLANE_SCHEMA_SQL.split())
+        self.assertIn("priority SMALLINT NOT NULL DEFAULT 0", sql)
+        self.assertIn("CHECK (priority BETWEEN 0 AND 4)", sql)
+
+
+class TaskStatusVocabularyTests(unittest.IsolatedAsyncioTestCase):
+    """The seven-status, Linear-style kanban vocabulary
+    (migrations/add_task_status_vocabulary.sql):
+
+        backlog | todo | in_progress | awaiting_input | blocked | in_review | done
+
+    `backlog` and `in_review` are new; `open` was renamed to `todo` and must
+    keep working as an alias rather than erroring, since older clients,
+    cached agent tool schemas and un-migrated DB rows can all still say it.
+    """
+
+    async def test_vocabulary_is_exactly_the_seven_kanban_columns(self):
+        self.assertEqual(
+            project_tasks_service.TASK_STATUS_ORDER,
+            ("backlog", "todo", "in_progress", "awaiting_input", "blocked", "in_review", "done"),
+        )
+        self.assertEqual(
+            project_tasks_service.VALID_TASK_STATUSES,
+            set(project_tasks_service.TASK_STATUS_ORDER),
+        )
+
+    async def test_default_status_is_todo_not_open(self):
+        self.assertEqual(project_tasks_service.DEFAULT_TASK_STATUS, "todo")
+
+    async def test_every_new_status_is_accepted_and_written_through(self):
+        """Each of the seven — including the two new ones — must survive
+        update_task and reach the UPDATE's status parameter verbatim."""
+        for status in project_tasks_service.TASK_STATUS_ORDER:
+            with self.subTest(status=status):
+                pool = _QueuedFakePool(fetchrow_results=[_task_row(status=status)])
+                with patch(
+                    "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                    new=AsyncMock(return_value=pool),
+                ):
+                    task = await project_tasks_service.update_task(
+                        tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", status=status,
+                    )
+                self.assertEqual(task["status"], status)
+                _query, args = pool.fetchrow_calls[0]
+                self.assertEqual(args[5], status)
+
+    async def test_in_review_is_a_real_settable_status(self):
+        """The point of the whole vocabulary change: agent-completed work has
+        somewhere to wait for a human instead of jumping straight to done."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(status="in_review")])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", status="in_review",
+            )
+        self.assertEqual(task["status"], "in_review")
+
+    async def test_open_is_accepted_as_an_alias_and_stored_as_todo(self):
+        """Backward compatibility: a caller still sending the old name must
+        not error, and must land on `todo` — not be written through as a
+        literal 'open' the new CHECK constraint would reject."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(status="todo")])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", status="open",
+            )
+        self.assertEqual(task["status"], "todo")
+        _query, args = pool.fetchrow_calls[0]
+        self.assertEqual(args[5], "todo")
+
+    async def test_open_alias_is_case_and_whitespace_insensitive_too(self):
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(status="todo")])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", status="  OPEN  ",
+            )
+        _query, args = pool.fetchrow_calls[0]
+        self.assertEqual(args[5], "todo")
+
+    async def test_legacy_open_row_read_back_normalizes_to_todo(self):
+        """A row written before the forward migration still literally holds
+        'open'. Reads must present it as 'todo' rather than leaking a status
+        that is no longer in the vocabulary."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(status="open")])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.get_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+            )
+        self.assertEqual(task["status"], "todo")
+
+    async def test_invalid_statuses_are_still_rejected_loudly(self):
+        """Unchanged guarantee: an unknown status raises rather than being
+        silently coerced. 'closed'/'cancelled'/'review' are the near-misses
+        most likely to be guessed by an agent or an older client."""
+        for status in ("closed", "cancelled", "review", "in-review", "backlogged", "in progress", "ready", ""):
+            with self.subTest(status=status):
+                pool = _QueuedFakePool()
+                with patch(
+                    "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                    new=AsyncMock(return_value=pool),
+                ):
+                    with self.assertRaises(ValueError):
+                        await project_tasks_service.update_task(
+                            tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", status=status,
+                        )
+                self.assertEqual(pool.fetchrow_calls, [])
+
+    async def test_punctuation_and_spacing_are_sanitized_not_rejected(self):
+        """Pre-existing normalizer behavior, documented rather than changed:
+        characters outside [a-z_] are stripped before the vocabulary check,
+        so "To Do" resolves to `todo`. Note this is stripping, not fuzzy
+        matching — "in progress" collapses to "inprogress" and is still
+        rejected by the test above."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(status="todo")])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", status="To Do",
+            )
+        _query, args = pool.fetchrow_calls[0]
+        self.assertEqual(args[5], "todo")
+
+    async def test_rejection_message_names_the_new_vocabulary(self):
+        pool = _QueuedFakePool()
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            with self.assertRaises(ValueError) as raised:
+                await project_tasks_service.update_task(
+                    tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", status="cancelled",
+                )
+        message = str(raised.exception)
+        for status in project_tasks_service.TASK_STATUS_ORDER:
+            self.assertIn(status, message)
+
+    async def test_assigning_a_backlog_task_starts_it(self):
+        """`backlog` is new, so it needs the same "assignment starts the
+        work" treatment `todo` gets — otherwise dragging a task out of the
+        backlog onto an agent would leave it sitting in backlog forever."""
+        self.assertIn("backlog", project_tasks_service.UNSTARTED_TASK_STATUSES)
+        self.assertIn("todo", project_tasks_service.UNSTARTED_TASK_STATUSES)
+        # The legacy spelling stays covered for the window between deploying
+        # this code and applying the forward migration.
+        self.assertIn("open", project_tasks_service.UNSTARTED_TASK_STATUSES)
+        # Work already underway (or finished) is never rewound by assignment.
+        for status in ("in_progress", "awaiting_input", "blocked", "in_review", "done"):
+            self.assertNotIn(status, project_tasks_service.UNSTARTED_TASK_STATUSES)
+
+
 class ListMyTasksTests(unittest.IsolatedAsyncioTestCase):
     """list_my_tasks backs the MCP `empyralis_list_my_tasks` tool: tasks
     assigned to the caller (external_agent_id or agent_id) OR unassigned
@@ -277,7 +796,8 @@ class ListMyTasksTests(unittest.IsolatedAsyncioTestCase):
         query, args = pool.fetch_calls[0]
         self.assertIn("project_id = $4", query)
         self.assertIn("status = $5", query)
-        self.assertEqual(args[-2:], ("proj-1", "open"))
+        # 'OPEN' -> 'todo': lowercased and alias-mapped, same as list_tasks.
+        self.assertEqual(args[-2:], ("proj-1", "todo"))
 
     async def test_no_postgres_returns_empty_list_not_error(self):
         with patch(
@@ -369,10 +889,10 @@ class AssignTaskTests(unittest.IsolatedAsyncioTestCase):
                     tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", agent_id="ghost-agent",
                 )
 
-    async def test_assign_task_sets_assignee_flips_open_to_in_progress_and_schedules_wakeup(self):
+    async def test_assign_task_sets_assignee_flips_todo_to_in_progress_and_schedules_wakeup(self):
         pool = _QueuedFakePool(
             fetchrow_results=[
-                _task_row(status="open"),  # get_task
+                _task_row(status="todo"),  # get_task
                 {"id": "agent-1"},  # _agent_install_exists
                 _task_row(status="in_progress", assignee_agent_id="agent-1"),  # UPDATE ... RETURNING
             ]
@@ -409,14 +929,19 @@ class AssignTaskTests(unittest.IsolatedAsyncioTestCase):
         # The UPDATE went through the assignee column, not a generic patch.
         update_query, update_args = pool.fetchrow_calls[-1]
         self.assertIn("SET assignee_agent_id = $4", update_query)
-        self.assertEqual(update_args, ("tenant-1", "ws-1", "task-1", "agent-1"))
+        self.assertEqual(update_args[:4], ("tenant-1", "ws-1", "task-1", "agent-1"))
+        # $5 is the "not started yet" set the UPDATE flips to in_progress:
+        # both new not-started columns, plus the legacy 'open' spelling so a
+        # row written before the status migration still starts correctly.
+        self.assertEqual(update_args[4], ["backlog", "todo", "open"])
+        self.assertIn("status = ANY($5::text[])", update_query)
 
     async def test_assign_task_reports_wake_error_without_undoing_assignment(self):
         """A scheduler failure must not roll back the (already-durable,
         already the thing the owner cares about) assignment itself."""
         pool = _QueuedFakePool(
             fetchrow_results=[
-                _task_row(status="open"),
+                _task_row(status="todo"),
                 {"id": "agent-1"},
                 _task_row(status="in_progress", assignee_agent_id="agent-1"),
             ]

@@ -109,7 +109,7 @@ Full source of truth: the `EMPYRALIST_MCP_TOOLS` list and tool definitions in
 | `empyralis_create_task` | Create a task on a project's shared board |
 | `empyralis_list_my_tasks` | List tasks assigned to this key's external-agent identity, or unassigned/backlog |
 | `empyralis_get_task` | Get one task by id |
-| `empyralis_update_task_status` | Update a task's status (open / in_progress / blocked / awaiting_input / done) |
+| `empyralis_update_task_status` | Update a task's status (backlog / todo / in_progress / awaiting_input / blocked / in_review / done; `open` still accepted as the old name for `todo`) |
 | `empyralis_comment_on_task` | Post a progress comment on a task |
 
 These are not gated behind `EMPYRALIS_MCP_WRITE_ENABLED` — they're bounded to
