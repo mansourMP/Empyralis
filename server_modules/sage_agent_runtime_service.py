@@ -320,7 +320,7 @@ def resolve_model_for_capability(
                 for model_id, model_info in models.items():
                     if isinstance(model_info, dict) and model_info.get("supports_tools"):
                         return provider_id, model_id, dict(credentials)
-        raise RuntimeError("No cloud provider is configured for Sage.")
+        raise RuntimeError("No cloud provider is configured for this agent.")
 
     # Sort by score descending
     matches.sort(key=lambda x: x[3], reverse=True)
@@ -411,12 +411,12 @@ async def _resolve_cloud_provider(
             _master_mode = ""  # lookup failure must never block Sage's normal path
         if _master_mode in ("cli_subscription", "local"):
             raise RuntimeError(
-                f"Sage's Model tab is set to \"{_master_mode}\", but Sage itself doesn't run "
-                "on a Gateway yet — only specialist agents do. That setting is saved but NOT "
-                "being used; Sage is still answering on the platform default. Switch Sage's "
-                "Model tab back to platform credits or your own API key (BYOK) to keep Sage "
-                "responding, or leave it as-is and treat this as a heads-up that cli_subscription/"
-                "local isn't supported for Sage yet."
+                f"This agent's Model tab is set to \"{_master_mode}\", but this agent itself "
+                "doesn't run on a Gateway yet — only specialist agents do. That setting is saved "
+                "but NOT being used; this agent is still answering on the platform default. "
+                "Switch its Model tab back to platform credits or your own API key (BYOK) to "
+                "keep it responding, or leave it as-is and treat this as a heads-up that "
+                "cli_subscription/local isn't supported for this agent yet."
             )
 
     # ── Resolve the active provider ──
@@ -471,7 +471,7 @@ async def _resolve_cloud_provider(
         print(f"[TRACE_PROVIDER_OK] returning provider=deepseek (fallback, no entitlements)", flush=True)
         return "deepseek", credentials
 
-    raise RuntimeError("No cloud provider is configured for Sage.")
+    raise RuntimeError("No cloud provider is configured for this agent.")
 
 
 # ── Phase L: Per-agent AI provider binding ──────────────────────────────────
@@ -846,7 +846,7 @@ def _sage_chat_ledger_fields(
     else:
         event_class = "sage_activity"
         action = f"sage_chat.{verb}"
-        title = f"Sage chat {verb}"
+        title = f"Agent chat {verb}"
     status = "error" if failed else "logged"
     return event_class, action, title, status
 
@@ -2020,7 +2020,7 @@ def _build_sage_route_decision(
     cloud_computer_requested = any(token in compact for token in _CLOUD_COMPUTER_ROUTE_KEYWORDS)
 
     mode = "chat_only"
-    reason = "Sage can answer this directly in chat."
+    reason = "This agent can answer this directly in chat."
     fallback_modes: list[str] = []
     approval_required = False
 
@@ -2034,7 +2034,7 @@ def _build_sage_route_decision(
         if _connector_requirements_satisfied(required_connections, connected_tokens):
             reason = "This should use connected app or MCP tools before any computer runtime."
         else:
-            reason = "This needs connected apps before Sage can do the requested work."
+            reason = "This needs connected apps before this agent can do the requested work."
         fallback_modes = ["cloud_browser", "cloud_computer", "gateway_required"]
         approval_required = any(token in compact for token in ("send", "create", "update", "delete", "post", "schedule", "book"))
     elif browser_requested:
@@ -3322,7 +3322,7 @@ async def _run_sage_action_loop_v3(
                 session_ctx=session_ctx,
                 trace_context=trace_context,
                 resolved_chat_max_iterations=_SAGE_OPERATOR_LOOP_MAX_ITERATIONS,
-                direct_tool_result_summary_system_message="Use the Sage tool results to answer the user's request. Do not paste raw tool output.",
+                direct_tool_result_summary_system_message="Use the tool results to answer the user's request. Do not paste raw tool output.",
                 assistant_plan_tools=tools,
                 tool_registry=availability.get("_tool_registry"),
             )
@@ -4687,11 +4687,11 @@ async def handle_sage_chat(
             normalized_workspace_id, _exc
         )
         instruction_bundle = sage_instruction_compiler_service.SageInstructionBundle(
-            messages=[{"role": "system", "content": "You are Sage, a helpful AI assistant."},
+            messages=[{"role": "system", "content": "You are a helpful AI assistant."},
                        {"role": "user", "content": normalized_message}],
             diagnostics={"error": "bundle_build_failed", "workspace_id": normalized_workspace_id},
             capability_manifest=[],
-            system_prompt="You are Sage, a helpful AI assistant.",
+            system_prompt="You are a helpful AI assistant.",
             user_message=normalized_message,
             prior_messages=[],
         )
@@ -4714,7 +4714,7 @@ async def handle_sage_chat(
 
     sage_surface_guardrails = (
         "\n\n## Who you are\n"
-        "You're Sage - the user's personal AI assistant inside Empyralis. You're warm, "
+        "You're the user's personal AI assistant inside Empyralis. You're warm, "
         "curious, and direct, like a sharp friend who happens to have access to their "
         "computer and accounts. You remember context, you notice things, and you don't "
         "wait to be micromanaged.\n"
@@ -4794,7 +4794,7 @@ async def handle_sage_chat(
             "\n\n## Scope\n"
             "You are a specialist agent. You do NOT manage the fleet, create or "
             "reconfigure other agents, or take workspace-operator actions — those "
-            "belong to the operator (Sage). If a request falls outside your scope, "
+            "belong to the operator agent. If a request falls outside your scope, "
             "say so and escalate to the operator instead of acting."
         )
         # MAN-68 doctrine synthesis (2026-07-26): audit-system-prompt-
@@ -5312,7 +5312,7 @@ async def handle_sage_chat(
                     surface=normalized_surface,
                     proof_log=proof_log_payload,
                     status=_coerce_text(proof_log_payload.get("status")) or action_execution_mode,
-                    title=_coerce_text(proof_log_payload.get("title")) or "Sage proof log",
+                    title=_coerce_text(proof_log_payload.get("title")) or "Agent proof log",
                     source="sage_chat",
                 )
                 proof_log_id = _coerce_text(proof_record.get("proof_id"))
