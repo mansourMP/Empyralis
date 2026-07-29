@@ -565,5 +565,188 @@ class McpKillSwitchTests(_McpRegistryFixtureMixin, unittest.TestCase):
             self.assertFalse(mock_invoke.called)
 
 
+# ── (e) MCP failures are visible: the protocol's own isError flag, and the
+# server/tool/error detail on the trace event the user reads (MAN-125 item 3)
+
+
+class _FakeCallToolResult:
+    """Stand-in for mcp.types.CallToolResult."""
+
+    def __init__(self, *, text: str, is_error: bool = False):
+        self.isError = is_error
+        self.structuredContent = None
+        self.content = [type("_Item", (), {"text": text})()]
+
+
+class McpFailureVisibilityTests(_McpRegistryFixtureMixin, unittest.TestCase):
+    def _metering_patches(self):
+        from server_modules import agent_action_metering_service
+
+        return (
+            patch.object(agent_action_metering_service, "record_started", new=AsyncMock()),
+            patch.object(agent_action_metering_service, "record_completed", new=AsyncMock()),
+            patch.object(agent_action_metering_service, "record_failed", new=AsyncMock()),
+            patch.object(agent_action_metering_service, "record_blocked", new=AsyncMock()),
+        )
+
+    def _seed_approved(self) -> None:
+        self._seed_server(
+            workspace_id="ws-1",
+            server_id="notion-work",
+            label="Notion (Work)",
+            tools=[
+                {
+                    "name": "search_pages",
+                    "description": "Search Notion pages by keyword.",
+                    "input_schema": {},
+                    "enabled": True,
+                    "approved": True,
+                },
+            ],
+        )
+
+    def test_mcp_result_is_error_reads_the_protocol_flag(self) -> None:
+        self.assertTrue(mcp_registry_service.mcp_result_is_error(_FakeCallToolResult(text="x", is_error=True)))
+        self.assertFalse(mcp_registry_service.mcp_result_is_error(_FakeCallToolResult(text="x")))
+        self.assertTrue(mcp_registry_service.mcp_result_is_error({"isError": True}))
+        self.assertFalse(mcp_registry_service.mcp_result_is_error({"isError": False}))
+        self.assertFalse(mcp_registry_service.mcp_result_is_error(None))
+
+    def test_is_error_result_returns_an_explicit_failure_not_a_green_ok(self) -> None:
+        """The regression: a server replying isError=true with "Error: repo not
+        found" used to come back stamped status "ok", paint a green activity row
+        and hand the honesty guard a "real success" to anchor a reply on."""
+        self._seed_approved()
+        started, completed, failed, blocked = self._metering_patches()
+        with started, completed as mock_completed, failed as mock_failed, blocked:
+            with patch.object(
+                mcp_registry_service,
+                "_invoke_mcp_tool_with_auth_recovery_async",
+                new=AsyncMock(return_value=_FakeCallToolResult(text="Error: repo not found", is_error=True)),
+            ):
+                result = _run(
+                    mcp_registry_service.invoke_workspace_mcp_tool_async(
+                        workspace_id="ws-1",
+                        server_id="notion-work",
+                        tool_name="search_pages",
+                        arguments={"query": "x"},
+                    )
+                )
+
+        self.assertEqual(result["status"], "error")
+        self.assertTrue(result["is_error"])
+        # Billed as the failure it is, not as a completed call.
+        self.assertTrue(mock_failed.called)
+        self.assertFalse(mock_completed.called)
+        detail = result["mcp_detail"]
+        self.assertEqual(detail["server_id"], "notion-work")
+        self.assertEqual(detail["tool_name"], "search_pages")
+        self.assertEqual(detail["error_code"], "mcp_tool_error")
+        self.assertIn("repo not found", detail["error"])
+
+    def test_is_error_result_formats_to_a_payload_the_classifier_calls_failed(self) -> None:
+        from server_modules import tool_result_status
+
+        self._seed_approved()
+        started, completed, failed, blocked = self._metering_patches()
+        with started, completed, failed, blocked:
+            with patch.object(
+                mcp_registry_service,
+                "_invoke_mcp_tool_with_auth_recovery_async",
+                new=AsyncMock(return_value=_FakeCallToolResult(text="Error: repo not found", is_error=True)),
+            ):
+                result = _run(
+                    mcp_registry_service.invoke_workspace_mcp_tool_async(
+                        workspace_id="ws-1",
+                        server_id="notion-work",
+                        tool_name="search_pages",
+                        arguments={"query": "x"},
+                    )
+                )
+
+        formatted = mcp_registry_service.format_mcp_tool_result(result)
+        self.assertTrue(tool_result_status.tool_result_failed(formatted))
+        self.assertFalse(json.loads(formatted)["ok"])
+
+    def test_successful_result_still_formats_and_classifies_as_success(self) -> None:
+        from server_modules import tool_result_status
+
+        self._seed_approved()
+        started, completed, failed, blocked = self._metering_patches()
+        with started, completed as mock_completed, failed as mock_failed, blocked:
+            with patch.object(
+                mcp_registry_service,
+                "_invoke_mcp_tool_with_auth_recovery_async",
+                new=AsyncMock(return_value=_FakeCallToolResult(text='{"pages": ["a", "b"]}')),
+            ):
+                result = _run(
+                    mcp_registry_service.invoke_workspace_mcp_tool_async(
+                        workspace_id="ws-1",
+                        server_id="notion-work",
+                        tool_name="search_pages",
+                        arguments={"query": "x"},
+                    )
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["is_error"])
+        self.assertTrue(mock_completed.called)
+        self.assertFalse(mock_failed.called)
+        self.assertFalse(tool_result_status.tool_result_failed(mcp_registry_service.format_mcp_tool_result(result)))
+
+    def test_raised_mcp_failure_is_annotated_with_server_tool_and_error(self) -> None:
+        """MCP calls fail by RAISING; the exception now carries the same facts
+        the metering ledger records, so the trace event can show them."""
+        self._seed_approved()
+        started, completed, failed, blocked = self._metering_patches()
+        with started, completed, failed as mock_failed, blocked:
+            with patch.object(
+                mcp_registry_service,
+                "_invoke_mcp_tool_with_auth_recovery_async",
+                new=AsyncMock(side_effect=RuntimeError("MCP tool call timed out after 3 attempts (60s each)")),
+            ):
+                with self.assertRaises(RuntimeError) as caught:
+                    _run(
+                        mcp_registry_service.invoke_workspace_mcp_tool_async(
+                            workspace_id="ws-1",
+                            server_id="notion-work",
+                            tool_name="search_pages",
+                            arguments={"query": "x"},
+                        )
+                    )
+
+        self.assertTrue(mock_failed.called)
+        detail = getattr(caught.exception, "mcp_detail", None)
+        self.assertIsInstance(detail, dict)
+        self.assertEqual(detail["server_id"], "notion-work")
+        self.assertEqual(detail["tool_name"], "search_pages")
+        self.assertEqual(detail["error_code"], "RuntimeError")
+        self.assertIn("timed out", detail["error"])
+        self.assertEqual(detail["server_label"], "Notion (Work)")
+
+    def test_trace_detail_is_redacted_like_args_preview(self) -> None:
+        """Third-party MCP servers put bearer tokens and keys in their error
+        strings, and this block is rendered to the user and persisted."""
+        detail = mcp_registry_service.build_mcp_trace_detail(
+            server_id="notion-work",
+            tool_name="search_pages",
+            error="401 Unauthorized: Bearer sk-abcdefghijklmnop1234567890 rejected",
+        )
+        self.assertNotIn("sk-abcdefghijklmnop1234567890", detail["error"])
+        self.assertIn("redacted", detail["error"])
+
+    def test_trace_detail_for_a_non_mcp_tool_is_none(self) -> None:
+        from server_modules import direct_chat_generation_service
+
+        self.assertIsNone(direct_chat_generation_service._mcp_trace_detail_for_tool("web__search"))
+        built = direct_chat_generation_service._mcp_trace_detail_for_tool(
+            "mcp__notion-work__search_pages", error="boom", error_code="ok_false"
+        )
+        self.assertEqual(built["server_id"], "notion-work")
+        self.assertEqual(built["tool_name"], "search_pages")
+        self.assertEqual(built["error"], "boom")
+        self.assertEqual(built["error_code"], "ok_false")
+
+
 if __name__ == "__main__":
     unittest.main()

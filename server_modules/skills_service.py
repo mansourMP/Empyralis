@@ -3540,6 +3540,48 @@ def _resolve_direct_tool_gateway_id(
     return None
 
 
+class _GatewayShellToolResultText(str):
+    """`str` subclass returned for the shell/run_command gateway path only.
+
+    MAN-125 residual gap: `_format_gateway_direct_local_tool_result` used to
+    hardcode `"status": "completed"` regardless of `exit_code`, and even once
+    that's fixed the honest status/exit_code never reach
+    `tool_result_status.classify_tool_result` — `callbacks.format_direct_local_tool_result`
+    (production: `direct_tool_config_service.format_direct_local_tool_result`
+    -> `_format_shell_result_for_chat`) flattens the whole envelope to plain
+    prose that never mentions status or exit_code at all, and even the
+    pre-flattening envelope nests the action three levels under
+    `result_data.child_result.outputs.actions[0]` — too deep for that
+    classifier's bounded (depth-2) unwrap, and under a `result_data` key it
+    doesn't even look for.
+
+    Rather than change what the model/human reads (real blast radius: this
+    return value also flows to Sage's daily-operator loop via
+    tool_runtime_bindings.execute_single_direct_tool_call, and to every other
+    execute_single_direct_tool_call caller — see skills_service's callers),
+    this carries the flat `{"status", "exit_code"}` the formatter used
+    ALONGSIDE the exact same prose string, as an attribute nobody else looks
+    for:
+      - `isinstance(x, str)` is True and every string operation on it is
+        identical to a plain str with the same characters.
+      - `str(x)` (used by sanitize_tool_result_for_context and everywhere
+        else the return value gets touched) collapses it back to a genuine
+        plain `str`, dropping the attribute — so nothing downstream of the
+        model-facing text can observe this at all.
+    Only direct_chat_generation_service.py's classify_tool_result call site
+    opportunistically reads `gateway_tool_status` off the raw (unstringified)
+    value, before that collapse happens.
+    """
+
+    gateway_tool_status: Dict[str, Any] = {}
+
+
+def _with_gateway_tool_status(text: str, status: Dict[str, Any]) -> str:
+    wrapped = _GatewayShellToolResultText(text)
+    wrapped.gateway_tool_status = dict(status)
+    return wrapped
+
+
 def _format_gateway_direct_local_tool_result(
     *,
     connector_id: str,
@@ -3561,29 +3603,36 @@ def _format_gateway_direct_local_tool_result(
         stderr = str(inner_result.get("stderr") or "").strip()
         exit_code = inner_result.get("exit_code")
         output_preview = "\n".join(part for part in [stdout, f"stderr:\n{stderr}" if stderr else ""] if part).strip()
+        # Honest regardless of who reads it: a nonzero exit is not
+        # "completed". Previously hardcoded to "completed" no matter what
+        # exit_code said (MAN-125 residual gap).
+        action_status = "completed" if not exit_code else "failed"
+        action_entry = {
+            "tool": "run_command",
+            "command": command,
+            "status": action_status,
+            "exit_code": exit_code,
+            "output_preview": output_preview or (f"Exit code: {exit_code}" if exit_code is not None else ""),
+            "stdout_preview": stdout,
+            "stderr_preview": stderr,
+        }
         result = {
             "summary": "Checked this device.",
             "result_data": {
                 "tool_variant": "run_command",
                 "child_result": {
                     "outputs": {
-                        "actions": [
-                            {
-                                "tool": "run_command",
-                                "command": command,
-                                "status": "completed",
-                                "exit_code": exit_code,
-                                "output_preview": output_preview or (f"Exit code: {exit_code}" if exit_code is not None else ""),
-                                "stdout_preview": stdout,
-                                "stderr_preview": stderr,
-                            }
-                        ],
+                        "actions": [action_entry],
                         "artifacts": [],
                     }
                 },
             },
         }
-        return callbacks.format_direct_local_tool_result(result)
+        formatted = callbacks.format_direct_local_tool_result(result)
+        return _with_gateway_tool_status(
+            formatted,
+            {"status": action_status, "exit_code": exit_code},
+        )
     if normalized_connector == "file" and isinstance(inner_result, dict):
         path = str(inner_result.get("path") or "").strip()
         mode = str(inner_result.get("mode") or normalized_action or "read").strip().lower()

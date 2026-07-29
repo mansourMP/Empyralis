@@ -251,7 +251,7 @@ class VPSPlan:
 
 
 class VPSProvisioningError(RuntimeError):
-    def __init__(self, message: str, *, workspace_id: str = ""):
+    def __init__(self, message: str, *, workspace_id: str = "", return_to: str = ""):
         super().__init__(message)
         # Best-effort context for callers that need to redirect the user
         # somewhere on failure (e.g. the OAuth callback routes in
@@ -259,6 +259,54 @@ class VPSProvisioningError(RuntimeError):
         # right workspace's Hardware page) — empty when unknown, callers
         # must treat that as "nowhere known to redirect to."
         self.workspace_id = str(workspace_id or "").strip()
+        # The in-app page the OAuth flow was STARTED from (see
+        # normalize_oauth_return_path). Carried alongside workspace_id for the
+        # same reason: the failure branches of the callback routes have to send
+        # the user back where they came from, and the state record that knew
+        # it has already been popped by the time they run. Empty means "no
+        # recorded origin" — callers fall back to the Hardware page.
+        self.return_to = normalize_oauth_return_path(return_to)
+
+
+# Hard cap on a stored return path. Long enough for any real in-app route plus
+# its query string, short enough that a hostile `return_to` can't bloat the
+# state file.
+_MAX_OAUTH_RETURN_PATH_LENGTH = 512
+
+
+def normalize_oauth_return_path(value: Any) -> str:
+    """Validate a caller-supplied "send me back here afterwards" path.
+
+    The cloud-VPS OAuth wizard renders at more than one URL (Settings, where
+    it lives now, and the standalone /hardware route kept for deep links), so
+    the callback can't know where the flow began unless the start request
+    tells it. This is that value's gate.
+
+    SAME-ORIGIN ABSOLUTE PATHS ONLY — the returned string is concatenated
+    onto our own origin by the callback route, so anything that could resolve
+    to a different origin is rejected outright rather than sanitized:
+    "//evil.com" (protocol-relative), "https://evil.com" (absolute),
+    "\\evil.com" (backslashes, which some browsers normalize to "/"), and any
+    control character (CR/LF header-splitting). Returns "" for anything
+    rejected; callers must treat "" as "no recorded origin", never as an
+    error. The fragment is dropped (the browser never sends it to us anyway);
+    the query is preserved so a return path can carry its own state.
+    """
+    token = str(value or "").strip()
+    if not token or len(token) > _MAX_OAUTH_RETURN_PATH_LENGTH:
+        return ""
+    if not token.startswith("/") or token.startswith("//"):
+        return ""
+    if "\\" in token:
+        return ""
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in token):
+        return ""
+    parsed = urlparse.urlsplit(token)
+    if parsed.scheme or parsed.netloc:
+        return ""
+    if not parsed.path.startswith("/"):
+        return ""
+    return urlparse.urlunsplit(("", "", parsed.path, parsed.query, ""))
 
 
 PROVIDER_CONFIGS: Dict[str, ProviderConfig] = {
@@ -374,6 +422,7 @@ def create_digitalocean_oauth_start(
     workspace_id: str,
     tenant_id: str,
     user_id: str,
+    return_to: str = "",
 ) -> Dict[str, str]:
     client_id = _digitalocean_client_id()
     state_token = secrets.token_urlsafe(32)
@@ -383,6 +432,10 @@ def create_digitalocean_oauth_start(
         "workspace_id": str(workspace_id or "").strip() or "default",
         "tenant_id": str(tenant_id or "").strip() or "default",
         "user_id": str(user_id or "").strip() or "unknown-user",
+        # Where the user was when they started this flow, so the callback can
+        # put them back there instead of guessing (see
+        # normalize_oauth_return_path). "" when the caller didn't say.
+        "return_to": normalize_oauth_return_path(return_to),
         "created_at": _utc_now_iso(),
     }
     with _STATE_LOCK:
@@ -437,13 +490,26 @@ def peek_oauth_state_workspace_id(state: str) -> str:
     below). Returns "" if the state is missing/unknown/expired; callers must
     treat that as "no workspace to redirect to", not an error.
     """
+    return str(_peek_oauth_state_record(state).get("workspace_id") or "").strip()
+
+
+def peek_oauth_state_return_to(state: str) -> str:
+    """Non-destructive lookup of the in-app page an OAuth flow was started
+    from — the return_to sibling of peek_oauth_state_workspace_id above, used
+    by the same error branches. Returns "" when unknown (no state, no
+    return_to recorded, or a value that failed normalize_oauth_return_path at
+    start time); callers fall back to the Hardware page.
+    """
+    return normalize_oauth_return_path(_peek_oauth_state_record(state).get("return_to"))
+
+
+def _peek_oauth_state_record(state: str) -> Dict[str, Any]:
     clean_state = str(state or "").strip()
     if not clean_state:
-        return ""
+        return {}
     with _STATE_LOCK:
         payload = _load_state()
-        state_record = dict((payload.get("oauth_states") or {}).get(clean_state, {}) or {})
-    return str(state_record.get("workspace_id") or "").strip()
+        return dict((payload.get("oauth_states") or {}).get(clean_state, {}) or {})
 
 
 # How long a completed OAuth callback's outcome stays available for a
@@ -461,6 +527,7 @@ def _record_oauth_result(
     result: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
     workspace_id: str = "",
+    return_to: str = "",
 ) -> None:
     """Cache the outcome of a just-consumed OAuth state token (success or
     failure) so complete_digitalocean_oauth_callback / _google equivalent can
@@ -482,6 +549,7 @@ def _record_oauth_result(
             "result": dict(result or {}),
             "error": str(error or ""),
             "workspace_id": str(workspace_id or "").strip(),
+            "return_to": normalize_oauth_return_path(return_to),
             "expires_at": now + _OAUTH_RESULT_CACHE_TTL_SECONDS,
         }
         # Opportunistic pruning — there's no background sweep for
@@ -530,9 +598,11 @@ def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, 
             raise VPSProvisioningError(
                 str(cached.get("error") or "DigitalOcean OAuth state is invalid or expired."),
                 workspace_id=str(cached.get("workspace_id") or ""),
+                return_to=str(cached.get("return_to") or ""),
             )
         raise VPSProvisioningError("DigitalOcean OAuth state is invalid or expired.")
     state_workspace_id = str(state_record.get("workspace_id") or "default")
+    state_return_to = normalize_oauth_return_path(state_record.get("return_to"))
     try:
         token_payload = _exchange_digitalocean_oauth_code(clean_code)
         token_id = store_vps_provider_token(
@@ -550,14 +620,32 @@ def complete_digitalocean_oauth_callback(*, code: str, state: str) -> Dict[str, 
         # failure so a duplicate hit for this state token gets the same
         # answer instead of a generic "invalid or expired" (see
         # _record_oauth_result).
-        _record_oauth_result(clean_state, "digitalocean", error=str(exc), workspace_id=state_workspace_id)
-        raise VPSProvisioningError(str(exc), workspace_id=state_workspace_id) from exc
+        _record_oauth_result(
+            clean_state,
+            "digitalocean",
+            error=str(exc),
+            workspace_id=state_workspace_id,
+            return_to=state_return_to,
+        )
+        raise VPSProvisioningError(
+            str(exc), workspace_id=state_workspace_id, return_to=state_return_to
+        ) from exc
     result = {
         "provider": "digitalocean",
         "token_id": token_id,
         "workspace_id": state_workspace_id,
+        # Echoed back so the callback route can land the user on the page the
+        # flow started from; "" means "no recorded origin" (fall back to
+        # Hardware), never an error.
+        "return_to": state_return_to,
     }
-    _record_oauth_result(clean_state, "digitalocean", result=result, workspace_id=state_workspace_id)
+    _record_oauth_result(
+        clean_state,
+        "digitalocean",
+        result=result,
+        workspace_id=state_workspace_id,
+        return_to=state_return_to,
+    )
     return result
 
 
@@ -572,6 +660,7 @@ def create_google_oauth_start(
     workspace_id: str,
     tenant_id: str,
     user_id: str,
+    return_to: str = "",
 ) -> Dict[str, str]:
     client_id = _google_client_id()
     state_token = secrets.token_urlsafe(32)
@@ -581,6 +670,8 @@ def create_google_oauth_start(
         "workspace_id": str(workspace_id or "").strip() or "default",
         "tenant_id": str(tenant_id or "").strip() or "default",
         "user_id": str(user_id or "").strip() or "unknown-user",
+        # See create_digitalocean_oauth_start.
+        "return_to": normalize_oauth_return_path(return_to),
         "created_at": _utc_now_iso(),
     }
     with _STATE_LOCK:
@@ -638,9 +729,11 @@ def complete_google_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
             raise VPSProvisioningError(
                 str(cached.get("error") or "Google OAuth state is invalid or expired."),
                 workspace_id=str(cached.get("workspace_id") or ""),
+                return_to=str(cached.get("return_to") or ""),
             )
         raise VPSProvisioningError("Google OAuth state is invalid or expired.")
     state_workspace_id = str(state_record.get("workspace_id") or "default")
+    state_return_to = normalize_oauth_return_path(state_record.get("return_to"))
     try:
         token_payload = _exchange_google_oauth_code(clean_code)
         # Deliberately NOT store_vps_provider_token: Google isn't
@@ -660,14 +753,30 @@ def complete_google_oauth_callback(*, code: str, state: str) -> Dict[str, str]:
         # See the matching comment in complete_digitalocean_oauth_callback —
         # reattach the workspace_id the popped state record carried, and
         # cache the failure so a duplicate hit replays the same answer.
-        _record_oauth_result(clean_state, "google", error=str(exc), workspace_id=state_workspace_id)
-        raise VPSProvisioningError(str(exc), workspace_id=state_workspace_id) from exc
+        _record_oauth_result(
+            clean_state,
+            "google",
+            error=str(exc),
+            workspace_id=state_workspace_id,
+            return_to=state_return_to,
+        )
+        raise VPSProvisioningError(
+            str(exc), workspace_id=state_workspace_id, return_to=state_return_to
+        ) from exc
     result = {
         "provider": "google",
         "setup_id": setup_id,
         "workspace_id": state_workspace_id,
+        # See complete_digitalocean_oauth_callback.
+        "return_to": state_return_to,
     }
-    _record_oauth_result(clean_state, "google", result=result, workspace_id=state_workspace_id)
+    _record_oauth_result(
+        clean_state,
+        "google",
+        result=result,
+        workspace_id=state_workspace_id,
+        return_to=state_return_to,
+    )
     return result
 
 

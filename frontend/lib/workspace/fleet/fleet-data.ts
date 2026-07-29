@@ -1183,8 +1183,9 @@ export async function patchFleetTask(
    project — "bug" means the same thing wherever the work sits. `color` is a
    palette TOKEN NAME ('grey' | 'red' | ... ), never a hex: the theme decides
    what each token looks like per mode, exactly as it already does for task
-   statuses. AGENTS CANNOT CREATE LABELS — only humans can — so the composer
-   is the one place in the product that offers to mint one. */
+   statuses. AGENTS CANNOT CREATE LABELS — only humans can — so the affordance
+   exists on exactly the two human surfaces that label things: the task
+   composer, and the task page's Properties column (task-labels.tsx). */
 
 export type FleetLabel = {
   id: string;
@@ -1277,6 +1278,29 @@ export async function attachFleetTaskLabel(
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
     throw new Error(apiErrorMessage(data, `Could not add label (HTTP ${res.status})`));
+  }
+}
+
+/** Take a label off a task. The label itself survives — this only removes the
+ *  project_task_labels row, so a label pulled off the last task it was on is
+ *  still in the workspace vocabulary and still offerable. Accepts an id OR a
+ *  name, same as attach. Idempotent: removing one that isn't there succeeds. */
+export async function detachFleetTaskLabel(
+  workspaceId: string,
+  taskId: string,
+  label: string,
+): Promise<void> {
+  const res = await fetch(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/tasks/${encodeURIComponent(taskId)}/labels/${encodeURIComponent(label)}`,
+    {
+      method: "DELETE",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("DELETE"),
+    },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not remove label (HTTP ${res.status})`));
   }
 }
 

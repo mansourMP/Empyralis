@@ -35,6 +35,17 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   return (await response.json()) as T;
 }
 
+// Query-string suffix for the two oauth/*/start requests below, telling the
+// backend where its callback should redirect once the provider round-trip
+// finishes (see CloudVpsSetupPanelProps.returnTo for why this is needed).
+// Empty when `returnTo` is absent/blank so the URL is unchanged from before
+// this param existed, and the backend's own same-origin validation
+// (vps_provisioning_service.normalize_oauth_return_path) is the real
+// gatekeeper either way — this is just what asks for it.
+function oauthReturnToParam(returnTo: string | undefined): string {
+  return returnTo ? `&return_to=${encodeURIComponent(returnTo)}` : '';
+}
+
 export type VpsProviderId = 'digitalocean' | 'google' | 'aws';
 // google-project / google-billing are Google-only steps between 'access'
 // (Sign in with Google) and 'plans' — Google needs a project chosen and its
@@ -203,6 +214,17 @@ type CloudVpsSetupPanelProps = {
   workspaceId: string;
   initialProviderId?: VpsProviderId | null;
   initialOAuthResult?: VpsOAuthResumePayload | null;
+  // Where the provider's OAuth callback should send the browser back to once
+  // it's done — this panel renders at both /w/{ws}/settings and the
+  // standalone /w/{ws}/hardware route (see HardwareSection.tsx), so the
+  // caller tells us which one it is. Passed straight through to the
+  // oauth/*/start requests as `return_to`; the backend
+  // (vps_provisioning_service.normalize_oauth_return_path) only accepts a
+  // same-origin absolute path and otherwise falls back to the /hardware
+  // route on its own, so an absent or malformed value here degrades safely
+  // rather than breaking anything. Optional because not every caller (e.g.
+  // FleetCreateAgentWizard) resumes the OAuth result itself.
+  returnTo?: string;
   onOAuthResultConsumed?: () => void;
   onClose: () => void;
   onConnected: () => Promise<void> | void;
@@ -403,6 +425,7 @@ export function CloudVpsSetupPanel({
   workspaceId,
   initialProviderId = null,
   initialOAuthResult = null,
+  returnTo,
   onOAuthResultConsumed,
   onClose,
   onConnected,
@@ -787,7 +810,7 @@ export function CloudVpsSetupPanel({
     // navigation can't double-fire and can't be popup-blocked.
     try {
       const payload = await requestJson<VpsOAuthStartResponse>(
-        `/api/hardware/vps/oauth/digitalocean/start?workspace_id=${encodeURIComponent(workspaceId)}`,
+        `/api/hardware/vps/oauth/digitalocean/start?workspace_id=${encodeURIComponent(workspaceId)}${oauthReturnToParam(returnTo)}`,
       );
       const redirect = String(payload?.oauth_redirect || '').trim();
       if (!redirect) {
@@ -810,7 +833,7 @@ export function CloudVpsSetupPanel({
     // Same-tab navigation — see the comment in startDigitalOceanOAuth above.
     try {
       const payload = await requestJson<VpsOAuthStartResponse>(
-        `/api/hardware/vps/oauth/google/start?workspace_id=${encodeURIComponent(workspaceId)}`,
+        `/api/hardware/vps/oauth/google/start?workspace_id=${encodeURIComponent(workspaceId)}${oauthReturnToParam(returnTo)}`,
       );
       const redirect = String(payload?.oauth_redirect || '').trim();
       if (!redirect) {

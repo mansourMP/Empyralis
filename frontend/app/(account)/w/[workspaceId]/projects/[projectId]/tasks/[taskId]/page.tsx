@@ -173,11 +173,16 @@ export default function TaskDetailPage() {
       <TaskDetailView
         task={task}
         agents={inProject}
+        workspaceId={workspaceId}
         projectName={project?.name || "Project"}
         projectHref={projectHref}
         onStatusChange={handleStatusChange}
         onPriorityChange={handlePriorityChange}
         onAssign={handleAssign}
+        // Labels are their own endpoints (attach/detach), not a field on the
+        // task PATCH, so the editor writes directly and asks for a re-read —
+        // the same polled cache the board reads, so both agree immediately.
+        onLabelsChanged={refresh}
       />
     </main>
   );

@@ -1,8 +1,11 @@
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from server_modules import agent_trace_service
 from server_modules import direct_chat_generation_service
+from server_modules import direct_tool_config_service
+from server_modules import skills_service
 
 
 class DirectChatGenerationServiceTests(unittest.TestCase):
@@ -1671,6 +1674,59 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertEqual(result["data"]["status"], "failed")
         self.assertEqual(result["data"]["state"], "failed")
         self.assertEqual(result["data"]["agent_activity"]["status"], "failed")
+
+    def test_stream_provider_backed_direct_chat_reports_gateway_shell_nonzero_exit_as_failed(self) -> None:
+        # MAN-125 residual gap: a Gateway shell command that exits nonzero
+        # used to paint a green "completed" row. Traces the REAL production
+        # path -- skills_service._format_gateway_direct_local_tool_result
+        # feeding direct_tool_config_service.format_direct_local_tool_result
+        # (not a test-lambda json.dumps stand-in, which would have hidden
+        # this bug) -- all the way through to what
+        # tool_result_status.classify_tool_result actually sees on this turn.
+        trace_context, emitted, emit_with_envelope = self._trace_harness()
+
+        def _execute(**_kwargs) -> str:
+            return skills_service._format_gateway_direct_local_tool_result(
+                connector_id="shell",
+                action_id="exec",
+                capability_id="run_command",
+                gateway_response={
+                    "result": {
+                        "command": "false",
+                        "exit_code": 1,
+                        "stdout": "",
+                        "stderr": "",
+                    }
+                },
+                callbacks=SimpleNamespace(
+                    format_direct_local_tool_result=direct_tool_config_service.format_direct_local_tool_result,
+                ),
+            )
+
+        # Sanity check on the fix's first half: the prose the model/human
+        # reads never mentions status or exit_code (that's the whole reason
+        # the classifier needs the side-channel below) -- but it must no
+        # longer be hardcoded "completed" if anything downstream ever does
+        # look at result_data.child_result.outputs.actions[0].status again.
+        raw = _execute()
+        self.assertEqual(getattr(raw, "gateway_tool_status", None), {"status": "failed", "exit_code": 1})
+
+        self._run_single_tool_turn(
+            tool_call={"id": "tool-call-shell", "name": "shell__exec", "arguments": {"command": "false"}},
+            tool_name="shell__exec",
+            execute=_execute,
+            trace_context=trace_context,
+            emit_with_envelope=emit_with_envelope,
+        )
+
+        started = next(item for item in emitted if item["event_type"] == "tool.started")
+        result = next(item for item in emitted if item["event_type"] == "tool.result")
+        status = str(result["data"]["status"]).strip().lower()
+        self.assertNotIn(status, self._SUCCESS_STATUS_TOKENS)
+        self.assertIn(status, {"failed", "error"})
+        self.assertEqual(result["tool_call_id"], started["tool_call_id"])
+        plan_final = self._last_plan_update_for(emitted, "shell__exec")
+        self.assertEqual(plan_final["data"]["status"], "failed")
 
     def test_stream_provider_backed_direct_chat_error_event_reuses_started_tool_call_id(self) -> None:
         trace_context, emitted, emit_with_envelope = self._trace_harness()

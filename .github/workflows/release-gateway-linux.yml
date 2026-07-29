@@ -6,14 +6,14 @@ name: Release Gateway (Linux)
 # points at (server_modules/gateway_self_update_service.py:82).
 #
 # WHAT THIS JOB DOES: produces `empyralis-gateway-linux-<arch>.tar.gz` plus a
-# `.sha256` sidecar, and hands them back as a workflow artifact.
+# `.sha256` sidecar, hands them back as a workflow artifact, AND publishes them
+# to Cloudflare R2 (bucket `empyralis-agent-computer-releases`) at
+# agent-computer/<version>/ — see MAN-122. A Cloudflare Worker route on
+# empyralis.ai/releases/* serves that bucket back out over plain HTTPS, which
+# is what install-agent-computer.sh and gateway_self_update_service.py expect.
 #
-# WHAT THIS JOB DELIBERATELY DOES NOT DO: publish them. Nothing in this repo
-# serves https://empyralis.ai/releases/agent-computer/<version>/ today — no
-# nginx location block (deploy/nginx-empyralis.conf), no Next.js route, no
-# object-storage upload path. Until that hosting decision is made, uploading
-# from here would have nowhere to upload to. The publish step is a deliberate
-# follow-up, not an oversight; see MAN-122.
+# Credentials: R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY repo secrets, scoped to
+# Object Read & Write on this one bucket only (not account-admin).
 #
 # Archive layout is fixed by two consumers and must not drift:
 #   - scripts/install-agent-computer.sh:368-380 (`tar -xzf` into
@@ -141,3 +141,21 @@ jobs:
           path: ${{ runner.temp }}/out/*
           if-no-files-found: error
           retention-days: 30
+
+      # Publishes to the SAME place install-agent-computer.sh downloads from
+      # by default (empyralis.ai/releases/agent-computer/<version>/) via the
+      # R2 bucket a Cloudflare Worker route serves back out. The AWS CLI
+      # talks to R2 through its S3-compatible endpoint; nothing here is a
+      # real AWS credential.
+      - name: Publish to Cloudflare R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://76e485cbfb611ff8caa5c1d2afa71890.r2.cloudflarestorage.com"
+          BUCKET="empyralis-agent-computer-releases"
+          DEST="s3://${BUCKET}/agent-computer/${{ inputs.version }}/"
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL" "$DEST" --endpoint-url "$ENDPOINT"
+          aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.sha256" "$DEST" --endpoint-url "$ENDPOINT"

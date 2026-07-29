@@ -22,6 +22,7 @@ import { useState, type CSSProperties } from "react";
 import { timeAgo, TINTS, tintForAgent } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { TaskStatusChip, TaskPriorityIcon, taskPriority, taskStatusLabel, TASK_PRIORITY_LABELS } from "./task-status";
+import { TaskLabelChips } from "./task-labels";
 import type { FleetAgent, FleetTask, FleetTaskStatus } from "./fleet-data";
 
 /* Status presentation moved WHOLESALE to ./task-status (taskStatusLabel /
@@ -180,6 +181,11 @@ function TaskRow({
             <TaskPriorityIcon priority={priority} size={14} />
           </span>
           <span className="fleet-agent-name">{task.title || "Untitled task"}</span>
+          {/* Trailing the title, not a column of their own: this table's five
+              tracks are already fixed, and a sixth would cost the Task column
+              the width it needs. Cap 3 here (2 on a board card) — the row is
+              260px+ wide, so three chips fit without pushing the title. */}
+          <TaskLabelChips labels={task.labels} max={3} />
         </span>
         {task.description ? (
           <span className="fleet-agent-preview">{task.description}</span>

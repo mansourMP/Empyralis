@@ -749,15 +749,28 @@ def _vps_oauth_hardware_redirect_url(
     provider: str,
     result: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
+    return_to: str = "",
 ) -> str:
-    """Build the "come back to the Hardware page" URL the DigitalOcean/Google
+    """Build the "come back where you started" URL the DigitalOcean/Google
     cloud-VPS OAuth callbacks redirect to. Mirrors routes_connections.py's
     _oauth_completion_url — the same same-tab redirect pattern every other
     OAuth connector already uses successfully (no popup, no
-    window.opener/postMessage). Always returns a URL: when the workspace_id
-    is unknown (state was invalid/expired/missing before we ever learned it
-    — e.g. the callback URL hit cold, with a garbage state param) this falls
-    back to "default", the same convention create_digitalocean_oauth_start /
+    window.opener/postMessage).
+
+    The wizard (HardwareSection) renders at more than one URL — Settings,
+    where it lives now, and the standalone /hardware route kept for deep
+    links — so the destination is whatever `return_to` the /start request
+    recorded (threaded through the OAuth state record, validated by
+    vps_provisioning_service.normalize_oauth_return_path: same-origin
+    absolute paths only). `/w/{workspace}/hardware` remains the fallback for
+    every case where no origin was recorded: an older client that doesn't
+    send return_to, or a state token so broken we never learned anything
+    about the flow.
+
+    Always returns a URL: when the workspace_id is unknown too (state was
+    invalid/expired/missing before we ever learned it — e.g. the callback URL
+    hit cold, with a garbage state param) the fallback path uses "default",
+    the same convention create_digitalocean_oauth_start /
     create_google_oauth_start use when minting the state record in the first
     place, rather than stranding the user with nowhere to go.
     """
@@ -771,10 +784,18 @@ def _vps_oauth_hardware_redirect_url(
             value = str((result or {}).get(key) or "").strip()
             if value:
                 query[key] = value
+    destination = vps_provisioning_service.normalize_oauth_return_path(
+        return_to or (result or {}).get("return_to")
+    ) or f"/w/{urlparse.quote(clean_workspace_id)}/hardware"
+    # A recorded return_to may carry its own query string; merge rather than
+    # clobber, with the OAuth result params winning on a key collision.
+    split_destination = urlparse.urlsplit(destination)
+    merged_query = dict(urlparse.parse_qsl(split_destination.query, keep_blank_values=True))
+    merged_query.update(query)
     return (
         f"{_oauth_request_origin(request)}"
-        f"/w/{urlparse.quote(clean_workspace_id)}/hardware?"
-        f"{urlparse.urlencode(query)}"
+        f"{split_destination.path}?"
+        f"{urlparse.urlencode(merged_query)}"
     )
 
 
@@ -1683,6 +1704,12 @@ async def get_agent_computer_bootstrap_installer() -> PlainTextResponse:
 @router.get("/hardware/vps/oauth/digitalocean/start")
 async def start_digitalocean_vps_oauth(
     workspace_id: Optional[str] = None,
+    # The in-app path the wizard is being opened from, so the callback can put
+    # the user back there (Settings and /hardware both render it). Optional:
+    # an older client that omits it still lands on the Hardware fallback, and
+    # anything not a same-origin absolute path is dropped by
+    # normalize_oauth_return_path rather than trusted.
+    return_to: Optional[str] = None,
     current_user=Depends(require_api_key),
 ):
     workspace = enforce_workspace_access(
@@ -1697,6 +1724,7 @@ async def start_digitalocean_vps_oauth(
             workspace_id=workspace,
             tenant_id=tenant_id,
             user_id=user_id,
+            return_to=str(return_to or ""),
         )
     except vps_provisioning_service.VPSProvisioningError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1725,7 +1753,11 @@ async def complete_digitalocean_vps_oauth(
         # Hardware page instead of dead-ending on an error page.
         workspace_id = vps_provisioning_service.peek_oauth_state_workspace_id(str(state or ""))
         redirect_url = _vps_oauth_hardware_redirect_url(
-            request, workspace_id=workspace_id, provider="digitalocean", error=message,
+            request,
+            workspace_id=workspace_id,
+            provider="digitalocean",
+            error=message,
+            return_to=vps_provisioning_service.peek_oauth_state_return_to(str(state or "")),
         )
         return RedirectResponse(redirect_url, status_code=303)
     try:
@@ -1744,7 +1776,15 @@ async def complete_digitalocean_vps_oauth(
             str(state or "")
         )
         redirect_url = _vps_oauth_hardware_redirect_url(
-            request, workspace_id=workspace_id, provider="digitalocean", error=str(exc),
+            request,
+            workspace_id=workspace_id,
+            provider="digitalocean",
+            error=str(exc),
+            # Same fallback chain as workspace_id above: the popped state
+            # record's value (reattached to the exception), else a peek for
+            # failures raised before the pop.
+            return_to=getattr(exc, "return_to", "")
+            or vps_provisioning_service.peek_oauth_state_return_to(str(state or "")),
         )
         return RedirectResponse(redirect_url, status_code=303)
     redirect_url = _vps_oauth_hardware_redirect_url(
@@ -1756,6 +1796,8 @@ async def complete_digitalocean_vps_oauth(
 @router.get("/hardware/vps/oauth/google/start")
 async def start_google_vps_oauth(
     workspace_id: Optional[str] = None,
+    # See start_digitalocean_vps_oauth.
+    return_to: Optional[str] = None,
     current_user=Depends(require_api_key),
 ):
     workspace = enforce_workspace_access(
@@ -1770,6 +1812,7 @@ async def start_google_vps_oauth(
             workspace_id=workspace,
             tenant_id=tenant_id,
             user_id=user_id,
+            return_to=str(return_to or ""),
         )
     except vps_provisioning_service.VPSProvisioningError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1789,7 +1832,11 @@ async def complete_google_vps_oauth(
         message = str(error_description or error or "Google authorization was cancelled.")
         workspace_id = vps_provisioning_service.peek_oauth_state_workspace_id(str(state or ""))
         redirect_url = _vps_oauth_hardware_redirect_url(
-            request, workspace_id=workspace_id, provider="google", error=message,
+            request,
+            workspace_id=workspace_id,
+            provider="google",
+            error=message,
+            return_to=vps_provisioning_service.peek_oauth_state_return_to(str(state or "")),
         )
         return RedirectResponse(redirect_url, status_code=303)
     try:
@@ -1802,7 +1849,13 @@ async def complete_google_vps_oauth(
             str(state or "")
         )
         redirect_url = _vps_oauth_hardware_redirect_url(
-            request, workspace_id=workspace_id, provider="google", error=str(exc),
+            request,
+            workspace_id=workspace_id,
+            provider="google",
+            error=str(exc),
+            # See the matching branch in complete_digitalocean_vps_oauth.
+            return_to=getattr(exc, "return_to", "")
+            or vps_provisioning_service.peek_oauth_state_return_to(str(state or "")),
         )
         return RedirectResponse(redirect_url, status_code=303)
     redirect_url = _vps_oauth_hardware_redirect_url(

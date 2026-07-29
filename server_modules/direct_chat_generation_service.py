@@ -20,6 +20,7 @@ from server_modules import response_leak_guard_service
 from server_modules import secret_redaction_service
 from server_modules import tool_honesty_guard
 from server_modules import tool_registry_service
+from server_modules import tool_result_status
 from server_modules import workspace_context_memory_adapter
 from server_modules.direct_chat_context_service import is_public_generation_error_message
 from server_modules.direct_chat_intervention_service import build_intervention
@@ -89,6 +90,42 @@ def _local_gateway_activity_payload(
     if clean_detail:
         payload["detail"] = clean_detail[:500]
     return payload
+
+
+def _mcp_trace_detail_for_tool(
+    tool_name: str,
+    *,
+    error: str = "",
+    error_code: str = "",
+) -> Optional[Dict[str, Any]]:
+    """The `mcp` block for a `tool.result` trace event, or None for any tool
+    that isn't an MCP call (MAN-125 item 3).
+
+    Derived from the `mcp__<server_id>__<tool_name>` name, which is the only
+    MCP identity that survives the tool loop's string-typed result channel.
+    Used for MCP calls that failed by RETURNING, and as the fallback for
+    raised failures that never reached mcp_registry_service (MCP disabled,
+    malformed name) — a raise from inside the registry carries a richer
+    `exc.mcp_detail` instead. Redaction happens in build_mcp_trace_detail,
+    the same secret_redaction_service pass `args_preview` gets.
+    """
+    normalized_tool_name = str(tool_name or "").strip()
+    if not normalized_tool_name.startswith("mcp__"):
+        return None
+    try:
+        from server_modules import mcp_registry_service
+
+        parsed = mcp_registry_service.parse_mcp_tool_name(normalized_tool_name)
+        if not parsed:
+            return None
+        return mcp_registry_service.build_mcp_trace_detail(
+            server_id=parsed["server_id"],
+            tool_name=parsed["tool_name"],
+            error=str(error or "").strip() or None,
+            error_code=str(error_code or "").strip() or None,
+        )
+    except Exception:
+        return None
 
 
 def _humanize_tool_progress(tool_name: str) -> str:
@@ -1916,6 +1953,10 @@ def stream_provider_backed_direct_chat(
                         # emits the failure event under THIS id so it resolves the tool.started
                         # row it belongs to, and must never reference it unset.
                         tool_call_id = ""
+                        # Same reason: the except handler now reads the tool name before it
+                        # emits anything, so a failure raised before the loop body ever runs
+                        # must not cost the user the red row entirely.
+                        tool_call: Dict[str, Any] = {}
                         for tool_index, tool_call in enumerate(iteration_tool_calls, start=1):
                             # Assigned up front, before anything below that can raise
                             # (parse_tool_name included) — an exception mid-iteration must
@@ -2280,26 +2321,50 @@ def stream_provider_backed_direct_chat(
                                 and completed_execution_environment == "local_gateway"
                             )
                             result_summary = str(completed_trace_metadata.get("result_summary") or tool_result_for_context or "").strip()
-                            # Record for the tool-honesty guard's end-of-turn check. Timeouts
-                            # (above) and other tool-level errors surface as a JSON error
-                            # payload in the raw result — matched here rather than trusted
-                            # as a real "completed" result, since a failed tool later denied
-                            # in the reply is correct honesty, not a guard mismatch.
-                            _looks_like_tool_error = result_summary[:80].lstrip().startswith('{"error"') or '"error":' in str(tool_result or "")[:120]
-                            # ONE verdict, every consumer. This same call/failed decision now
-                            # drives the trace events the user actually sees (tool.result,
-                            # the plan item, the chat step chip) as well as the guard's private
-                            # list — a tool that came back with an error payload rather than
-                            # raising (a timeout is exactly that: a normal return value, see
-                            # the _cf.TimeoutError branch above) must never paint a green
+                            # Record for the tool-honesty guard's end-of-turn check. Tools that
+                            # fail by RETURNING rather than raising (a timeout is exactly that,
+                            # see the _cf.TimeoutError branch above; so are subagent, fleet,
+                            # filesystem, hardware/gateway and MCP failures) must not be trusted
+                            # as real "completed" results — a failed tool later disclaimed in the
+                            # reply is correct honesty, not a guard mismatch.
+                            #
+                            # Classified STRUCTURALLY, off the raw `tool_result` rather than the
+                            # 240-char `result_summary`: tool_result_status parses the payload
+                            # and reads its top-level keys, so every failure shape this codebase
+                            # actually produces is caught, and a SUCCESSFUL result whose content
+                            # merely mentions an error (a log file, a stack trace, a bug report)
+                            # is not — see that module's docstring for the precedence rules and
+                            # for what remains undetectable (bare-prose failures).
+                            #
+                            # MAN-125 residual gap: the gateway shell path's `tool_result` is
+                            # plain prose (command output) with no status/exit_code anywhere in
+                            # it — flattened that way for the model to read, by
+                            # direct_tool_config_service.format_direct_local_tool_result. Bare
+                            # prose is unconditionally ambiguous to classify_tool_result (by
+                            # design — see its docstring), so a failed shell command used to
+                            # always classify as "not failed" on this path alone.
+                            # skills_service._with_gateway_tool_status attaches the flat
+                            # {"status", "exit_code"} the formatter actually used as a
+                            # `gateway_tool_status` attribute on that SAME string (inert to every
+                            # other consumer — see _GatewayShellToolResultText's docstring); read
+                            # it here, before anything downstream collapses the value to a plain
+                            # str, so the classifier sees the real exit code instead of prose.
+                            _gateway_tool_status = getattr(tool_result, "gateway_tool_status", None)
+                            _tool_outcome = tool_result_status.classify_tool_result(
+                                _gateway_tool_status if isinstance(_gateway_tool_status, dict) else tool_result
+                            )
+                            # ONE verdict, every consumer. This same call/failed decision drives
+                            # the trace events the user actually sees (tool.result, the plan
+                            # item, the chat step chip) as well as the guard's private list — a
+                            # tool that came back with an error payload must never paint a green
                             # "completed" row while the guard privately knows it failed.
-                            _tool_call_failed = bool(_looks_like_tool_error) or not result_summary
+                            _tool_call_failed = bool(_tool_outcome.failed) or not result_summary
                             _tool_trace_entry = {
                                 "name": tool_name,
                                 "status": "failed" if _tool_call_failed else "completed",
                             }
-                            if _looks_like_tool_error:
-                                _tool_trace_entry["error"] = result_summary
+                            if _tool_call_failed:
+                                _tool_trace_entry["error"] = _tool_outcome.error_text or result_summary
                             else:
                                 _tool_trace_entry["output"] = result_summary
                             turn_tool_trace.append(_tool_trace_entry)
@@ -2317,6 +2382,17 @@ def stream_provider_backed_direct_chat(
                                     else []
                                 ),
                             }
+                            # MAN-125 item 3: name the MCP server and tool (and
+                            # the real error, when there is one) on the event the
+                            # UI reads. Until now that detail only ever reached
+                            # the metering ledger.
+                            _mcp_detail = _mcp_trace_detail_for_tool(
+                                tool_name,
+                                error=_tool_outcome.error_text or (result_summary if _tool_call_failed else ""),
+                                error_code=_tool_outcome.reason if _tool_call_failed else "",
+                            )
+                            if _mcp_detail:
+                                tool_result_data["mcp"] = _mcp_detail
                             if completed_hardware_local_gateway:
                                 _hw_labels = {
                                     ("hardware", "shell_exec"): "Shell command",
@@ -2458,14 +2534,41 @@ def stream_provider_backed_direct_chat(
                     except Exception as exc:
                         llm_error = str(exc).strip() or "connector_action_failed"
                         services.capture_exception(exc)
+                        # This is where an MCP failure actually lands — MCP calls
+                        # fail by RAISING (invoke_workspace_mcp_tool has no
+                        # failure-shaped return), so every MCP error used to
+                        # arrive here as a bare "connector_action_failed"-grade
+                        # string with no server, no tool and no error code. The
+                        # exception now carries all three (see
+                        # mcp_registry_service.annotate_mcp_tool_error), already
+                        # redacted; the name-derived fallback covers failures
+                        # raised BEFORE the registry got involved (MCP disabled
+                        # for the deployment, malformed mcp__ tool name).
+                        _failed_tool_name = str(tool_call.get("name") or f"{connector_id}__{action_id}").strip()
+                        _failure_mcp_detail = getattr(exc, "mcp_detail", None)
+                        if not isinstance(_failure_mcp_detail, dict) or not _failure_mcp_detail:
+                            _failure_mcp_detail = _mcp_trace_detail_for_tool(
+                                _failed_tool_name,
+                                error=llm_error,
+                                error_code=type(exc).__name__,
+                            )
+                        _failure_data: Dict[str, Any] = {
+                            "status": "error",
+                            "summary": llm_error,
+                            "artifact_ids": [],
+                            # The same identity fields tool.started already carries,
+                            # so a failed row is as legible as a successful one
+                            # (agent_trace_service.emit_tool_result's shape).
+                            "tool_name": _failed_tool_name,
+                            "connector_id": str(connector_id or "").strip(),
+                            "args_preview": secret_redaction_service.sanitize_mapping(argument_payload),
+                        }
+                        if _failure_mcp_detail:
+                            _failure_data["mcp"] = _failure_mcp_detail
                         tool_failure = _emit_trace_event(
                             trace_context,
                             event_type="tool.result",
-                            data={
-                                "status": "error",
-                                "summary": llm_error,
-                                "artifact_ids": [],
-                            },
+                            data=_failure_data,
                             persisted=True,
                             # The id of the call that actually failed — the activity view
                             # correlates start↔result by this, so a synthetic id left the

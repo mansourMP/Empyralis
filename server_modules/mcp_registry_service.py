@@ -534,6 +534,27 @@ def _resolve_mcp_credential(server: Dict[str, Any], workspace_id: str) -> Option
         return None
 
 
+def mcp_result_is_error(result: Any) -> bool:
+    """The MCP protocol's OWN failure flag (`CallToolResult.isError`).
+
+    This is the explicit, unambiguous signal — the spec's way for a server to
+    say "the tool ran and failed" without raising a transport error — and it
+    used to be dropped on the floor: _mcp_result_payload read only
+    structuredContent/content, so a server replying isError=true with the text
+    "Error: repository not found" produced a result stamped `status: "ok"`,
+    a green activity row, and a tool-honesty trace entry claiming a real
+    success. Anything downstream that wants to know whether an MCP call failed
+    should read this rather than inferring from the reply text.
+    """
+    if isinstance(result, dict):
+        flag = result.get("isError", result.get("is_error"))
+    else:
+        flag = getattr(result, "isError", None)
+        if flag is None:
+            flag = getattr(result, "is_error", None)
+    return flag is True
+
+
 def _mcp_result_payload(result: Any) -> Any:
     if isinstance(result, dict):
         return result
@@ -1695,21 +1716,109 @@ def list_workspace_mcp_direct_tool_payloads(workspace_id: str) -> List[Dict[str,
     return payloads
 
 
+def build_mcp_trace_detail(
+    *,
+    server_id: str,
+    tool_name: str,
+    server_label: Optional[str] = None,
+    error: Any = None,
+    error_code: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The MCP-specific block attached to a `tool.result` trace event.
+
+    MAN-125 item 3: invoke_workspace_mcp_tool{,_async} record the real error
+    code and message via agent_action_metering_service.record_failed — into
+    the METERING LEDGER, which is billing. The trace stream the UI reads got
+    nothing but a generic "connector_action_failed", so the platform knew
+    exactly why an MCP call failed and showed the user none of it. This is the
+    same facts, shaped for the trace.
+
+    Every value is run through secret_redaction_service the same way
+    `args_preview` already is (sanitize_mapping -> redact_text on each string,
+    sensitive keys blanked) — third-party MCP servers put bearer tokens,
+    cookies and user data in their error strings, and this block is rendered
+    to the user and persisted to agent_trace_events.
+    """
+    from server_modules import secret_redaction_service
+
+    resolved_code = str(error_code or "").strip()
+    if not resolved_code and isinstance(error, BaseException):
+        resolved_code = type(error).__name__
+    detail: Dict[str, Any] = {
+        "server_id": _normalize_server_id(server_id),
+        "tool_name": _normalize_tool_name(tool_name),
+    }
+    label = str(server_label or "").strip()
+    if label:
+        detail["server_label"] = label
+    if resolved_code:
+        detail["error_code"] = resolved_code
+    message = str(error or "").strip()
+    if message:
+        detail["error"] = message[:2000]
+    return secret_redaction_service.sanitize_mapping(detail)
+
+
+def annotate_mcp_tool_error(
+    exc: BaseException,
+    *,
+    server_id: str,
+    tool_name: str,
+    server_label: Optional[str] = None,
+) -> BaseException:
+    """Stamp an in-flight MCP failure with the detail the trace layer needs,
+    then hand the exception back for the caller to re-raise.
+
+    Attribute rather than a new exception subclass on purpose: every existing
+    `except Exception` handler along the direct-chat tool path already does
+    the right thing with the message, and a new type would have changed which
+    handlers catch what. Readers use `getattr(exc, "mcp_detail", None)`.
+    """
+    try:
+        exc.mcp_detail = build_mcp_trace_detail(  # type: ignore[attr-defined]
+            server_id=server_id,
+            tool_name=tool_name,
+            server_label=server_label,
+            error=exc,
+        )
+    except Exception:  # pragma: no cover - annotation must never mask the real error
+        pass
+    return exc
+
+
 def format_mcp_tool_result(result: Any) -> str:
     """Format an invoke_workspace_mcp_tool{,_async}() return dict as the same
     plain tool-result string shape every other direct-chat tool call
     returns (skills_service.execute_single_direct_tool_call{,_async}
     branches, direct_chat_operator_binding_service.execute_single_direct_
     tool_call's custom-connector branch, etc. all return `str`).
+
+    When the server flagged the call as failed (CallToolResult.isError, see
+    mcp_result_is_error) the envelope carries an explicit `"ok": false` and
+    `"error"`, so tool_result_status classifies it off a stated flag instead
+    of inferring anything from the reply text.
     """
     if not isinstance(result, dict):
         return str(result or "").strip()
     reply = str(result.get("reply") or "").strip()
     mcp_block = result.get("mcp") if isinstance(result.get("mcp"), dict) else {}
     payload = mcp_block.get("payload")
+    is_error = bool(result.get("is_error")) or str(result.get("status") or "").strip().lower() == "error"
     if payload not in (None, {}, []):
+        envelope: Dict[str, Any] = {"reply": reply, "result": payload}
+        if is_error:
+            # First key in the dump so it survives any downstream truncation.
+            envelope = {"ok": False, "error": reply or "The MCP tool reported an error.", **envelope}
         try:
-            return json.dumps({"reply": reply, "result": payload}, ensure_ascii=False, indent=2)[:8000]
+            return json.dumps(envelope, ensure_ascii=False, indent=2)[:8000]
+        except Exception:
+            pass
+    if is_error:
+        try:
+            return json.dumps(
+                {"ok": False, "error": reply or "The MCP tool reported an error."},
+                ensure_ascii=False,
+            )
         except Exception:
             pass
     return reply or "MCP tool executed successfully."
@@ -1853,14 +1962,41 @@ async def invoke_workspace_mcp_tool_async(
             error_code=type(exc).__name__,
             output_summary=str(exc),
         )
-        raise
+        # Same facts the ledger line above just captured, stamped onto the
+        # exception so the trace stream the USER reads can carry them too.
+        raise annotate_mcp_tool_error(
+            exc,
+            server_id=normalized_server_id,
+            tool_name=normalized_tool_name,
+            server_label=str(server.get("label") or ""),
+        )
     payload = _mcp_result_payload(result)
-    await agent_action_metering_service.record_completed(
-        **common_event,
-        output_summary=_mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name),
-    )
+    is_error = mcp_result_is_error(result)
+    reply_text = _mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name)
+    if is_error:
+        # A tool that ran and failed — no exception to catch, just the
+        # protocol's isError flag. Bill it as the failure it is, and hand the
+        # caller a result that says so.
+        await agent_action_metering_service.record_failed(
+            **common_event,
+            error_code="mcp_tool_error",
+            output_summary=reply_text,
+        )
+    else:
+        await agent_action_metering_service.record_completed(
+            **common_event,
+            output_summary=reply_text,
+        )
     return {
-        "status": "ok",
+        "status": "error" if is_error else "ok",
+        "is_error": is_error,
+        "mcp_detail": build_mcp_trace_detail(
+            server_id=normalized_server_id,
+            tool_name=normalized_tool_name,
+            server_label=str(server.get("label") or ""),
+            error=reply_text if is_error else None,
+            error_code="mcp_tool_error" if is_error else None,
+        ),
         "reply": _mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name),
         "artifact": {
             "label": str(tool_payload.get("label") or normalized_tool_name).strip() or normalized_tool_name,
@@ -2030,14 +2166,37 @@ def invoke_workspace_mcp_tool(
             error_code=type(exc).__name__,
             output_summary=str(exc),
         )
-        raise
+        # See the matching branch in invoke_workspace_mcp_tool_async.
+        raise annotate_mcp_tool_error(
+            exc,
+            server_id=normalized_server_id,
+            tool_name=normalized_tool_name,
+            server_label=str(server.get("label") or ""),
+        )
     payload = _mcp_result_payload(result)
-    agent_action_metering_service.record_completed_sync(
-        **common_event,
-        output_summary=_mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name),
-    )
+    is_error = mcp_result_is_error(result)
+    reply_text = _mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name)
+    if is_error:
+        agent_action_metering_service.record_failed_sync(
+            **common_event,
+            error_code="mcp_tool_error",
+            output_summary=reply_text,
+        )
+    else:
+        agent_action_metering_service.record_completed_sync(
+            **common_event,
+            output_summary=reply_text,
+        )
     return {
-        "status": "ok",
+        "status": "error" if is_error else "ok",
+        "is_error": is_error,
+        "mcp_detail": build_mcp_trace_detail(
+            server_id=normalized_server_id,
+            tool_name=normalized_tool_name,
+            server_label=str(server.get("label") or ""),
+            error=reply_text if is_error else None,
+            error_code="mcp_tool_error" if is_error else None,
+        ),
         "reply": _mcp_reply(payload, agent_label=agent_label, tool_name=normalized_tool_name),
         "artifact": {
             "label": str(tool_payload.get("label") or normalized_tool_name).strip() or normalized_tool_name,

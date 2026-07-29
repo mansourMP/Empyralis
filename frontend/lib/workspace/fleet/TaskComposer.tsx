@@ -633,12 +633,13 @@ function MenuItem({
 }
 
 /**
- * The label chip. Multi-select, so it stays open as you tick, and it is the
- * one place a label can be MINTED: agents are not allowed to create labels
- * (routes_fleet.py attaches only known ones — an attach that invents a label
- * on a typo turns the vocabulary into a junk drawer), so the affordance has to
- * live on a human surface, and this is the human surface where labelling
- * actually happens.
+ * The label chip. Multi-select, so it stays open as you tick, and one of the
+ * two places a label can be MINTED (the other is the task page's Properties
+ * column — task-labels.TaskLabelEditor): agents are not allowed to create
+ * labels (routes_fleet.py attaches only known ones — an attach that invents a
+ * label on a typo turns the vocabulary into a junk drawer), so the affordance
+ * lives only on human surfaces, and this is the human surface where labelling
+ * first happens.
  */
 function LabelChip({
   workspaceId,

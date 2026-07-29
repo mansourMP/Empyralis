@@ -634,7 +634,15 @@ async def emit_tool_result(
     action_id: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     agent_activity: Optional[Dict[str, Any]] = None,
+    mcp: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
+    """`mcp` (MAN-125 item 3) is the MCP-specific detail block —
+    {server_id, server_label, tool_name, error_code, error} as built by
+    mcp_registry_service.build_mcp_trace_detail, already redacted there with
+    the same secret_redaction_service pass `args_preview` gets. Present only
+    on MCP tool calls; every other field on this event keeps its existing
+    meaning, so this extends the shape rather than forking it.
+    """
     data: Dict[str, Any] = {
         "status": str(status or "").strip(),
         "summary": str(summary or "").strip(),
@@ -658,6 +666,8 @@ async def emit_tool_result(
         data["metadata"] = _normalized_payload(metadata)
     if isinstance(agent_activity, dict) and agent_activity:
         data["agent_activity"] = _normalized_payload(agent_activity)
+    if isinstance(mcp, dict) and mcp:
+        data["mcp"] = _normalized_payload(mcp)
     return await emit(
         trace_context,
         "tool.result",

@@ -65,6 +65,7 @@ import { MoreHorizontal, Plus } from "lucide-react";
 import { dueLabel } from "./TasksList";
 import { TINTS, tintForAgent, timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
+import { TaskLabelChips } from "./task-labels";
 import { TaskStatusIcon, TaskPriorityIcon, taskStatusLabel, taskPriority, taskShortId, TASK_PRIORITY_LABELS } from "./task-status";
 import { FLEET_TASK_STATUSES, countTasksByStatus, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
 
@@ -403,6 +404,17 @@ function TaskCard({
           led with a metadata row, which pushed the one thing you actually
           scan for down a line on every card. */}
       <div className="fleet-board-card-title">{task.title || "Untitled task"}</div>
+
+      {/* Labels get their OWN line rather than a slot in the meta row below.
+          The meta row is already ring + glyph + id + date + avatar inside a
+          252px column; a chip squeezed in there would be ellipsed to two
+          characters and tell you nothing. This line only exists on cards that
+          actually have labels, so the density the card header brags about is
+          unchanged for every card that doesn't.
+          CAP: 2, then "+N" (TaskLabelChips). Two short chips is what fits the
+          column at this font size without wrapping, and a card is a scannable
+          handle — the full set is one click away on the task page. */}
+      <TaskLabelChips labels={task.labels} max={2} className="fleet-board-card-labels" />
 
       <div className="fleet-board-card-meta">
         {/* Keyboard/AT path for the same move a drag performs: a real native

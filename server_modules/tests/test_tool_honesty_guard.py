@@ -87,5 +87,66 @@ class DecideFlowTests(unittest.TestCase):
         self.assertEqual(decision["mismatch_type"], "claims_without_run")
 
 
+class TraceEntryFromRealToolResultTests(unittest.TestCase):
+    """The guard's INPUT, not its policy. direct_chat_generation_service builds
+    each trace entry from tool_result_status.classify_tool_result(tool_result);
+    these reproduce that step so the two stay wired together — the guard is
+    only as honest as the status it is handed.
+    """
+
+    @staticmethod
+    def _entry(tool_name: str, tool_result) -> dict:
+        """Mirrors the loop's construction at direct_chat_generation_service.py."""
+        from server_modules import tool_result_status
+
+        outcome = tool_result_status.classify_tool_result(tool_result)
+        entry = {"name": tool_name, "status": "failed" if outcome.failed else "completed"}
+        if outcome.failed:
+            entry["error"] = outcome.error_text or "failed"
+        else:
+            entry["output"] = str(tool_result)
+        return entry
+
+    def test_ok_false_result_is_not_a_success_the_guard_can_be_challenged_over(self) -> None:
+        # Before structured detection this returned status "completed" with a
+        # green row, so an agent honestly saying the search didn't work got
+        # challenged and regenerated against a failure it was right about.
+        trace = [self._entry("web_search", '{"ok": false, "error": "search backend unavailable"}')]
+        result = guard.check_tool_reply_consistency("I wasn't able to run that search.", trace)
+        self.assertTrue(result["consistent"])
+        self.assertEqual(result["tools"], [])
+
+    def test_mcp_is_error_result_is_not_a_success(self) -> None:
+        trace = [self._entry("mcp__notion-work__search_pages", '{"ok": false, "error": "Error: repo not found"}')]
+        self.assertEqual(trace[0]["status"], "failed")
+        self.assertTrue(guard.check_tool_reply_consistency("I couldn't search that.", trace)["consistent"])
+
+    def test_hardware_offline_result_is_not_a_success(self) -> None:
+        trace = [self._entry("hardware__action", '{"status": "offline", "reason": "agent_computer_offline"}')]
+        self.assertEqual(trace[0]["status"], "failed")
+
+    def test_a_real_success_still_anchors_a_denial_challenge(self) -> None:
+        # The guard must not have been softened into never firing.
+        trace = [self._entry("web_search", '{"ok": true, "results": ["a", "b"]}')]
+        result = guard.check_tool_reply_consistency("I don't have a web search tool.", trace)
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "denies_success")
+
+    def test_successful_read_of_a_log_full_of_errors_still_anchors_a_challenge(self) -> None:
+        # The false-positive case: a working tool whose CONTENT mentions errors
+        # must stay a success, so denying it is still caught.
+        trace = [
+            self._entry(
+                "file__read",
+                '{"content": "{\\"error\\": \\"connection refused\\"}\\nERROR: retry failed", '
+                '"path": "/var/log/app.log", "status": "completed"}',
+            )
+        ]
+        self.assertEqual(trace[0]["status"], "completed")
+        result = guard.check_tool_reply_consistency("I don't have access to real-time data.", trace)
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "denies_success")
+
+
 if __name__ == "__main__":
     unittest.main()

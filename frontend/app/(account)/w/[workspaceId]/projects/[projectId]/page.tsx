@@ -16,6 +16,7 @@ import {
 } from "@/lib/workspace/fleet/fleet-data";
 import { TasksList } from "@/lib/workspace/fleet/TasksList";
 import { TasksBoard } from "@/lib/workspace/fleet/TasksBoard";
+import { TasksGroupedList } from "@/lib/workspace/fleet/TasksGroupedList";
 import { TaskComposer } from "@/lib/workspace/fleet/TaskComposer";
 import { ProjectOverview } from "@/lib/workspace/fleet/ProjectOverview";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
@@ -100,11 +101,12 @@ export default function ProjectDetailPage() {
   // summary — status roll-up + real activity feed; Agents/Tasks are the two
   // working views: who is in the project, and what they are working on.
   const [view, setView] = useState<"overview" | "agents" | "tasks">("overview");
-  // Board is the default shape of the Tasks view; the flat table stays
-  // reachable because it shows four columns the cards deliberately don't
-  // (assignee name, due, updated, status all at once) and is the better
-  // read when you want to scan everything in one pass.
-  const [taskLayout, setTaskLayout] = useState<"board" | "list">("board");
+  // Three shapes of the same tasks, and they answer different questions —
+  // see TasksGroupedList's header. Board is the default (watch the work);
+  // Grouped is the one you work THROUGH; List is the flat table that shows
+  // every field at once. Board stays the default because it is what the
+  // project page has always opened on.
+  const [taskLayout, setTaskLayout] = useState<"board" | "grouped" | "list">("board");
   // The task composer (MAN-127). Held as "which status does it open on" rather
   // than a bare boolean, because a board column's `+` opens it pre-set to that
   // column — `null` is closed, an object is open.
@@ -324,7 +326,7 @@ export default function ProjectDetailPage() {
         </div>
         {view === "tasks" && tasks.length > 0 ? (
           <div className="fleet-segmented" role="tablist" aria-label="Task layout">
-            {(["board", "list"] as const).map((v) => (
+            {(["board", "grouped", "list"] as const).map((v) => (
               <button
                 key={v}
                 type="button"
@@ -333,7 +335,7 @@ export default function ProjectDetailPage() {
                 className={`fleet-segmented-btn${taskLayout === v ? " fleet-segmented-btn--active" : ""}`}
                 onClick={() => setTaskLayout(v)}
               >
-                {v === "board" ? "Board" : "List"}
+                {v === "board" ? "Board" : v === "grouped" ? "Grouped" : "List"}
               </button>
             ))}
           </div>
@@ -399,6 +401,16 @@ export default function ProjectDetailPage() {
               </div>
             ) : taskLayout === "board" ? (
               <TasksBoard
+                workspaceId={workspaceId}
+                tasks={boardTasks}
+                agents={inProject}
+                taskHref={taskHref}
+                onSelect={openTask}
+                onStatusChange={handleStatusChange}
+                onCreateTask={(status) => setComposer({ status })}
+              />
+            ) : taskLayout === "grouped" ? (
+              <TasksGroupedList
                 workspaceId={workspaceId}
                 tasks={boardTasks}
                 agents={inProject}

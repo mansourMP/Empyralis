@@ -21,9 +21,14 @@
  * columns scroll independently.
  *
  * WHAT IS NOT HERE, on purpose:
- *  · Sub-issues. There is no parent/child column on project_tasks and no API
- *    for one, so a sub-issues section would be a drawn promise. Linear's
- *    screenshot has one; ours honestly does not yet.
+ *  · Sub-issues. The COLUMN exists now (migrations/add_task_parent.sql —
+ *    `parent_task_id`, plus the subtask_count / subtask_done_count rollup
+ *    project_tasks_service returns on every read), but nothing in this UI
+ *    creates, lists or links one. A sub-issues section would therefore be a
+ *    drawn promise for a different reason than before: the storage is real,
+ *    the surface isn't built. The side note at the bottom of the properties
+ *    column says exactly that rather than the older, now-false claim that
+ *    neither labels nor sub-tasks were stored at all.
  *  · A comment composer. Agents write comments today
  *    (project_tasks_service.add_task_comment, backing project_task__comment)
  *    into task.metadata.comments and the Activity feed below RENDERS THOSE
@@ -48,6 +53,7 @@ import {
   TASK_PRIORITIES,
   TASK_PRIORITY_LABELS,
 } from "./task-status";
+import { TaskLabelChips, TaskLabelEditor, TaskLabelRowIcon } from "./task-labels";
 import { TINTS, tintForAgent, formatDateTime, timeAgo } from "./fleet-presentation";
 import { FLEET_TASK_STATUSES, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
 
@@ -74,20 +80,30 @@ function readComments(task: FleetTask): TaskComment[] {
 export function TaskDetailView({
   task,
   agents,
+  workspaceId,
   projectName,
   projectHref,
   onStatusChange,
   onPriorityChange,
   onAssign,
+  onLabelsChanged,
 }: {
   task: FleetTask;
   /** Agents in this project — the only valid assignees. */
   agents: FleetAgent[];
+  /** Scopes the label vocabulary — labels are per WORKSPACE, not per project
+   *  (fleet-data's Labels section: "bug" means the same thing wherever the
+   *  work sits). Absent → the Labels row renders read-only chips. */
+  workspaceId?: string;
   projectName: string;
   projectHref: string;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
   onPriorityChange?: (taskId: string, priority: number) => void;
   onAssign: (taskId: string, agentId: string) => void;
+  /** Refetch after a label attach/detach. Labels are not part of the task
+   *  PATCH — they are their own endpoints — so the editor writes directly and
+   *  then asks the page to re-read. */
+  onLabelsChanged?: () => void | Promise<void>;
 }) {
   const router = useRouter();
   const headingRef = useRef<HTMLHeadingElement | null>(null);
@@ -266,6 +282,32 @@ export function TaskDetailView({
             </span>
           </div>
 
+          {/* Labels — a STACKED row, unlike the three above it. Status /
+              Priority / Assignee each hold exactly one short value that fits
+              beside its caption; a label set is a variable number of chips
+              that has to wrap, and squeezing it into the ~170px left over
+              beside the caption in a 300px column would put every chip on its
+              own line anyway. Caption above, chips below, is what Linear does
+              with the same constraint. */}
+          <div className="fleet-panel-row fleet-panel-row--stack">
+            <span className="fleet-panel-row-label">
+              <span className="fleet-panel-row-icon"><TaskLabelRowIcon /></span>
+              <span>Labels</span>
+            </span>
+            {workspaceId && onLabelsChanged ? (
+              <TaskLabelEditor
+                workspaceId={workspaceId}
+                taskId={task.id}
+                labels={task.labels}
+                onChanged={onLabelsChanged}
+              />
+            ) : (task.labels || []).length > 0 ? (
+              <TaskLabelChips labels={task.labels} max={99} />
+            ) : (
+              <span className="fleet-cell-muted">None</span>
+            )}
+          </div>
+
           <div className="fleet-panel-row">
             <span className="fleet-panel-row-label">
               <span className="fleet-panel-row-icon"><FolderKanban size={15} strokeWidth={1.75} /></span>
@@ -311,11 +353,15 @@ export function TaskDetailView({
             </span>
           </div>
 
-          {/* Labels have no column on project_tasks — saying so is better than
-              an empty "Labels" row that looks like a control that lost its
-              value. */}
+          {/* Sub-tasks: honest, and NARROWER than the note this replaces.
+              That note said labels and sub-tasks were both unstored; labels
+              now are (workspace_labels / project_task_labels, edited in the
+              row above), so repeating it would be a lie. `parent_task_id` is
+              real too — what's missing for sub-tasks is this UI, not a
+              column, and that's a different sentence. */}
           <div className="fleet-task-page-side-note">
-            Labels and sub-tasks aren’t stored yet — no column for either.
+            Sub-tasks are stored (<code>parent_task_id</code>) but nothing here creates
+            or lists them yet.
           </div>
         </div>
       </aside>

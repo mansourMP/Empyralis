@@ -156,6 +156,20 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
   // the backend's own VPS OAuth callback redirect
   // (_vps_oauth_hardware_redirect_url in routes_gateway.py always lands there).
   const pathname = usePathname() || "";
+  // Where the DigitalOcean/Google OAuth callback should send the browser back
+  // to once it's done — this same mount, query string and all, so a filtered
+  // or tabbed view round-trips instead of always landing on the bare
+  // /hardware page. Built from `pathname` (already read above) plus
+  // `window.location.search` rather than `usePathname()` alone; the search
+  // half deliberately isn't read through `useSearchParams()` — that hook
+  // bails its whole calling tree out to the nearest Suspense boundary during
+  // prerender (see SearchParamsBridge's comment in FleetTabs.tsx), and this
+  // section mounts directly in both hardware/page.tsx and settings/page.tsx
+  // with no such boundary. Passed down to CloudVpsSetupPanel as a prop so
+  // that component itself never has to reach for `window`. Undefined during
+  // SSR (window isn't there yet) — harmless, since it's only read later, from
+  // an event handler, well after hydration.
+  const vpsOAuthReturnTo = pathname + (typeof window !== "undefined" ? window.location.search : "");
   const [regs, setRegs] = useState<Registration[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -548,6 +562,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
         workspaceId={workspaceId}
         initialProviderId={vpsInitialProvider}
         initialOAuthResult={vpsOAuthResumePayload}
+        returnTo={vpsOAuthReturnTo}
         onOAuthResultConsumed={() => setVpsOAuthResumePayload(null)}
         onClose={() => setVpsPanelOpen(false)}
         onConnected={async () => {

@@ -2629,7 +2629,11 @@ async def test_google_vps_oauth_start_route_returns_authorize_url(monkeypatch):
 
     assert response["provider"] == "google"
     access_mock.assert_called_once_with({"user_id": "user-1"}, "ws-1", minimum_role="owner")
-    start_mock.assert_called_once_with(workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1")
+    # return_to="" is the "caller didn't say where it started from" case —
+    # the callback falls back to the Hardware page, exactly as before.
+    start_mock.assert_called_once_with(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", return_to=""
+    )
 
 
 @pytest.mark.asyncio
@@ -2745,6 +2749,124 @@ async def test_digitalocean_vps_oauth_callback_route_duplicate_hit_redirects_not
     first_query = parse_qs(urlsplit(first_response.headers["location"]).query)
     second_query = parse_qs(urlsplit(second_response.headers["location"]).query)
     assert first_query["token_id"] == second_query["token_id"]
+
+
+# --- return_to: the OAuth callback lands the user where the flow started ----
+
+
+def test_normalize_oauth_return_path_accepts_same_origin_paths():
+    assert vps.normalize_oauth_return_path("/w/ws-1/settings") == "/w/ws-1/settings"
+    assert vps.normalize_oauth_return_path("  /w/ws-1/settings?tab=hardware  ") == "/w/ws-1/settings?tab=hardware"
+    # Fragment dropped (the browser never sends it to us anyway).
+    assert vps.normalize_oauth_return_path("/w/ws-1/settings#hardware") == "/w/ws-1/settings"
+
+
+def test_normalize_oauth_return_path_rejects_off_origin_and_hostile_values():
+    for hostile in (
+        "",
+        "   ",
+        None,
+        "//evil.example.com/steal",          # protocol-relative
+        "https://evil.example.com/steal",    # absolute
+        "http://evil.example.com",
+        "javascript:alert(1)",
+        "/w/ws-1/settings\\@evil.example.com",  # backslash, normalized to "/" by some browsers
+        "\\\\evil.example.com",
+        "/w/ws-1/settings\r\nLocation: https://evil.example.com",  # header splitting
+        "w/ws-1/settings",                   # not absolute
+        "/" + "a" * 600,                     # over the length cap
+    ):
+        assert vps.normalize_oauth_return_path(hostile) == "", hostile
+
+
+@pytest.mark.asyncio
+async def test_digitalocean_vps_oauth_round_trip_returns_to_settings(tmp_path, monkeypatch):
+    # The reported bug: connecting a cloud server from Settings -> Hardware
+    # dumped the user on /hardware afterwards. The start request now records
+    # where it began and the callback honours it.
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _digitalocean_env(monkeypatch)
+    start = vps.create_digitalocean_oauth_start(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", return_to="/w/ws-1/settings",
+    )
+    monkeypatch.setattr(vps, "_http_form_json", lambda *a, **kw: {
+        "access_token": "do_access_token", "refresh_token": "do_refresh_token", "expires_in": 2592000,
+    })
+
+    with patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"):
+        response = await routes_gateway.complete_digitalocean_vps_oauth(
+            request=None, code="auth_code_123", state=start["state"],
+        )
+
+    parsed = urlsplit(response.headers["location"])
+    assert parsed.path == "/w/ws-1/settings"
+    query = parse_qs(parsed.query)
+    assert query["vps_oauth"] == ["digitalocean"]
+    assert query["vps_oauth_provider"] == ["digitalocean"]
+    assert query["token_id"][0].strip()
+
+
+@pytest.mark.asyncio
+async def test_google_vps_oauth_cancellation_returns_to_settings(tmp_path, monkeypatch):
+    # Error branch: the state record is never popped, so the route peeks it
+    # for return_to the same way it already peeks for workspace_id.
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _google_env(monkeypatch)
+    start = vps.create_google_oauth_start(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1", return_to="/w/ws-1/settings",
+    )
+
+    with patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"):
+        response = await routes_gateway.complete_google_vps_oauth(
+            request=None, error="access_denied", state=start["state"],
+        )
+
+    parsed = urlsplit(response.headers["location"])
+    assert parsed.path == "/w/ws-1/settings"
+    assert parse_qs(parsed.query)["vps_oauth_provider"] == ["google"]
+
+
+@pytest.mark.asyncio
+async def test_vps_oauth_callback_falls_back_to_hardware_without_return_to(tmp_path, monkeypatch):
+    # An older client that doesn't send return_to keeps the previous
+    # behaviour exactly — no second guess, just the documented fallback.
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _digitalocean_env(monkeypatch)
+    start = vps.create_digitalocean_oauth_start(workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1")
+    monkeypatch.setattr(vps, "_http_form_json", lambda *a, **kw: {
+        "access_token": "do_access_token", "expires_in": 2592000,
+    })
+
+    with patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"):
+        response = await routes_gateway.complete_digitalocean_vps_oauth(
+            request=None, code="auth_code_123", state=start["state"],
+        )
+
+    assert urlsplit(response.headers["location"]).path == "/w/ws-1/hardware"
+
+
+@pytest.mark.asyncio
+async def test_vps_oauth_callback_ignores_off_origin_return_to(tmp_path, monkeypatch):
+    # A hostile return_to must never become an open redirect: it's rejected
+    # at start time, so the callback lands on the Hardware fallback.
+    _isolate_vps_state(tmp_path, monkeypatch)
+    _digitalocean_env(monkeypatch)
+    start = vps.create_digitalocean_oauth_start(
+        workspace_id="ws-1", tenant_id="tenant-1", user_id="user-1",
+        return_to="https://evil.example.com/steal",
+    )
+    monkeypatch.setattr(vps, "_http_form_json", lambda *a, **kw: {
+        "access_token": "do_access_token", "expires_in": 2592000,
+    })
+
+    with patch.object(routes_gateway, "_oauth_request_origin", return_value="https://app.example.com"):
+        response = await routes_gateway.complete_digitalocean_vps_oauth(
+            request=None, code="auth_code_123", state=start["state"],
+        )
+
+    location = response.headers["location"]
+    assert location.startswith("https://app.example.com/w/ws-1/hardware?")
+    assert "evil.example.com" not in location
 
 
 @pytest.mark.asyncio

@@ -8730,6 +8730,139 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   border: 1px dashed var(--border-strong);
 }
 
+/* ── Label chips (task-labels.tsx) ───────────────────────────────────────────
+   A chip is a DOT plus neutral text in a hairline pill — never a colour-filled
+   pill. Ten saturated pills on one board card would out-shout the status ring,
+   which is the only colour on that card carrying lifecycle meaning (see the
+   "colour is information, not decoration" rule at the top of this file). The
+   dot is the colour channel; the name is the content; the border is neutral in
+   both themes and so needs no per-theme fork.
+
+   The dot inside a chip is smaller than the standalone 9px one — at chip
+   scale, beside 11px text, 9px reads as a bullet rather than a swatch. */
+.fleet-label-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.fleet-label-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: 18px;
+  max-width: 132px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+  line-height: 1;
+  white-space: nowrap;
+}
+.fleet-label-chip .fleet-label-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+}
+.fleet-label-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The "+3" roll-up. Muted and dotless — it stands for a set of colours, so
+   claiming any one of them would be a lie. */
+.fleet-label-chip--more {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Board card: labels get their own line under the title, present only when
+   the task actually has some (TaskLabelChips renders nothing otherwise, so
+   this rule never fires on an unlabelled card). */
+.fleet-board-card-labels { max-width: 100%; }
+
+/* ── Label editor (task page Properties column) ──────────────────────────── */
+.fleet-label-editor {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+.fleet-label-editor-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0 0 25px; /* aligns under the row's caption text, past its icon */
+}
+/* A chip you can take off carries its own ×, which the read-only chip must
+   never grow — a card is not a place to destroy something from. */
+.fleet-label-chip--removable { padding-right: 3px; }
+.fleet-label-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.fleet-label-chip-x:hover { background: var(--rail-active); color: var(--text-primary); }
+.fleet-label-chip-x:disabled { cursor: default; opacity: 0.5; }
+.fleet-label-chip-x:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+.fleet-label-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--text-2xs);
+  line-height: 1;
+  cursor: pointer;
+}
+.fleet-label-add:hover,
+.fleet-label-add.is-open { background: var(--rail-active); color: var(--text-secondary); }
+.fleet-label-add:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+/* The picker is .fleet-composer-pop (one menu style for the whole surface);
+   this only re-anchors it, since the properties column is 300px wide and a
+   left-anchored 208px menu would hang off its right edge. */
+.fleet-label-pop {
+  left: auto;
+  right: 0;
+  min-width: 224px;
+}
+.fleet-label-editor-error {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--warning-text);
+}
+
+/* A property row whose value can't share a line with its caption — today only
+   Labels, whose chips wrap. Everything else in the column stays the normal
+   caption-left/value-right .fleet-panel-row. */
+.fleet-panel-row--stack {
+  display: block;
+}
+
 /* ── Board column header controls (MAN-127 FIX 3) ────────────────────────────
    `+` and `⋯` sit at the right end of the header, revealed on hover/focus of
    the column (and kept visible while the menu is open) — a permanent pair of
@@ -8784,4 +8917,253 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   /* Menu items are .fleet-composer-pop-item — one menu-row style for the whole
      surface rather than a second, near-identical one that drifts. */
   font-size: 13px;
+}
+
+/* ── Grouped task list (TasksGroupedList.tsx) ────────────────────────────────
+   Linear's Issues page: a filter tab strip, then one collapsible section per
+   status, each a sticky heading over a stack of one-line rows. It is the third
+   shape of the same tasks (see that file's header for why three), and it
+   deliberately reuses the vocabulary the other two already established — the
+   status ring, the priority glyph, the tinted agent avatar, the label chip,
+   the `data-tab-href` modifier-click contract.
+
+   MOTION. The chevron rotates (transform, --dur-2). The section body does NOT
+   animate: it unmounts. Animating max-height is layout-triggering — a reflow
+   every frame rather than a composite — which is exactly what
+   .fleet-rail-section-items above documents having removed, and a section
+   holding forty rows would jank on every toggle. Nothing else here transitions
+   at all; hover is a background change and background changes are instant on
+   this surface by policy. */
+.fleet-glist {
+  display: flex;
+  flex-direction: column;
+  max-width: 1400px;
+}
+
+/* Underlined tabs, NOT another .fleet-segmented — a second pill switch
+   directly under the Board/Grouped/List one would read as two halves of a
+   single control. These filter the view one level down, and the different
+   idiom is what says so. */
+.fleet-glist-tabs {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.fleet-glist-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 0 8px;
+  border: none;
+  /* The active underline is drawn as a border on the button itself so the
+     inactive tabs reserve the same 2px and nothing shifts on selection. */
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+.fleet-glist-tab:hover { color: var(--text-secondary); }
+.fleet-glist-tab.is-active {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-primary);
+}
+.fleet-glist-tab:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.fleet-glist-tab-count {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-glist-empty {
+  padding: 28px 4px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.fleet-glist-section { display: flex; flex-direction: column; }
+
+/* Sticky, so the status you are reading rows under is always named. Opaque
+   --bg-panel because rows scroll UNDER it; the panel is what this sheet sits
+   on in both themes. Top is 0: .fleet-content-main is the scroller. */
+.fleet-glist-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 8px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+/* The whole left side is the collapse target — a 13px chevron alone is a
+   miserable hit area, and the heading is the obvious thing to click. */
+.fleet-glist-header-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  margin-left: -6px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.fleet-glist-header-btn:hover { background: var(--rail-active); }
+.fleet-glist-header-btn:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -1px;
+}
+.fleet-glist-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transform: rotate(90deg);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+.fleet-glist-header-btn[aria-expanded="false"] .fleet-glist-chevron {
+  transform: rotate(0deg);
+}
+.fleet-glist-header-title {
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Bare number, same as the board column header — a pill would be chrome. */
+.fleet-glist-header-count {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.fleet-glist-header-spacer { flex: 1; }
+/* Revealed on hover/focus of the section, like the board column's own `+`:
+   a permanent glyph on every heading turns the page into a control panel.
+   opacity, not display, so revealing it never re-flows the heading. */
+.fleet-glist-header-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.fleet-glist-section:hover .fleet-glist-header-add,
+.fleet-glist-section:focus-within .fleet-glist-header-add { opacity: 1; }
+.fleet-glist-header-add:hover { background: var(--rail-active); color: var(--text-primary); }
+.fleet-glist-header-add:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -1px;
+}
+
+.fleet-glist-rows { display: flex; flex-direction: column; }
+.fleet-glist-section-empty {
+  padding: 10px 8px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+/* ONE LINE PER TASK. Seven fixed tracks so the four right-hand columns line up
+   dead straight down the page; labels ride inside the title track rather than
+   claiming an eighth (an `auto` track would be a different width on every row,
+   since every row is its own grid). Denser than .fleet-task-row's 52px — this
+   is the view you scroll, and 34px puts roughly half again as many tasks on
+   screen. */
+.fleet-glist-row {
+  display: grid;
+  grid-template-columns: 16px 56px 16px minmax(0, 1fr) 54px 58px 20px;
+  gap: 10px;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.fleet-glist-rows .fleet-glist-row:last-child { border-bottom: none; }
+.fleet-glist-row:hover { background: var(--bg-card-hover); }
+.fleet-glist-row:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+
+.fleet-glist-cell-prio,
+.fleet-glist-cell-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.fleet-glist-cell-id {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+/* The one emphasized cell on the row — the same discipline the flat list and
+   the Projects table document. Everything else is muted or secondary. */
+.fleet-glist-cell-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+.fleet-glist-cell-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-glist-cell-due,
+.fleet-glist-cell-updated {
+  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.fleet-glist-cell-updated { color: var(--text-muted); }
+.fleet-glist-cell-assignee {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+/* Empty slot, not an em dash — a column of "—" where the avatars aren't is
+   noise, and "unassigned" reads fine from the absence of one. */
+.fleet-glist-cell-unassigned { display: inline-block; }
+
+/* Mobile is out of scope for this pass (desktop-first, 1440x900), but the
+   seven-track grid would be unreadable at 375px and a one-rule guard is
+   cheaper than a broken narrow window: drop the two date columns and the id,
+   keeping glyph · status · title · assignee. */
+@media (max-width: 768px) {
+  .fleet-glist-row {
+    grid-template-columns: 16px 16px minmax(0, 1fr) 20px;
+  }
+  .fleet-glist-cell-id,
+  .fleet-glist-cell-due,
+  .fleet-glist-cell-updated { display: none; }
 }
