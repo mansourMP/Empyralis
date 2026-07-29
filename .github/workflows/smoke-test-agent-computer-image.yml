@@ -1,0 +1,259 @@
+# Boots ONE droplet from the pre-baked Agent Computer image, proves the image
+# is actually usable, and destroys everything it created.
+#
+# WHY THIS EXISTS (MAN-128): the first live provision failed with
+# `422 Image is not available.` because a DigitalOcean private snapshot is
+# scoped to the account that created it — CI bakes the image in Empyralis's
+# account, while the platform was creating droplets in the customer's
+# OAuth-connected account. The fix is to provision in OUR account, and this
+# job is the evidence that booting the image there actually works, taken
+# BEFORE any billing or storage work is built on that assumption.
+#
+# Costs a few cents (a droplet alive for ~2 minutes). Cleanup runs with
+# `if: always()`, so a failed assertion still destroys the droplet and the
+# temporary SSH key — a leaked droplet here bills us forever.
+name: Smoke Test Agent Computer Image (DigitalOcean)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_id:
+        description: 'DigitalOcean image id to boot. Blank = read the published latest.json pointer.'
+        required: false
+        default: ''
+      region:
+        description: 'Region to boot in. Must be one the image is published to.'
+        required: false
+        default: 'nyc3'
+      size:
+        description: 'Droplet size. Needs at least the image min_disk_gb (25).'
+        required: false
+        default: 's-1vcpu-2gb'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: Boot and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      DO_API: https://api.digitalocean.com/v2
+      POINTER_URL: https://empyralis.ai/releases/agent-computer/images/digitalocean/latest.json
+    steps:
+      - name: Fail early if the DigitalOcean token is missing
+        run: |
+          set -euo pipefail
+          if [ -z "${DO_TOKEN:-}" ]; then
+            echo "::error::DIGITALOCEAN_ACCESS_TOKEN is not set — this job cannot create the test droplet." >&2
+            exit 1
+          fi
+
+      # The pointer is the same one the provisioning service reads, so this
+      # tests the image production would actually boot, not a hardcoded id.
+      - name: Resolve the image under test
+        id: image
+        run: |
+          set -euo pipefail
+          IMAGE_ID="${{ inputs.image_id }}"
+          if [ -z "$IMAGE_ID" ]; then
+            POINTER="$(curl -fsSL -m 20 "$POINTER_URL")"
+            echo "$POINTER"
+            IMAGE_ID="$(printf '%s' "$POINTER" | jq -r '.image_id')"
+            REGIONS="$(printf '%s' "$POINTER" | jq -r '.regions | join(",")')"
+            echo "pointer regions: $REGIONS"
+            case ",$REGIONS," in
+              *",${{ inputs.region }},"*) ;;
+              *) echo "::error::region '${{ inputs.region }}' is not one the image is published to ($REGIONS)." >&2; exit 1 ;;
+            esac
+          fi
+          case "$IMAGE_ID" in
+            ''|*[!0-9]*) echo "::error::resolved image id '$IMAGE_ID' is not numeric." >&2; exit 1 ;;
+          esac
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "Booting image $IMAGE_ID in ${{ inputs.region }} on ${{ inputs.size }}"
+
+      # THE assertion this job exists for. If the image is not visible to the
+      # token creating the droplet, this 404s here — the same failure the live
+      # provision hit, caught before a droplet is created.
+      - name: Assert the image is visible to THIS account
+        run: |
+          set -euo pipefail
+          CODE="$(curl -s -o /tmp/img.json -w '%{http_code}' \
+            -H "Authorization: Bearer $DO_TOKEN" \
+            "$DO_API/images/${{ steps.image.outputs.image_id }}")"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::image ${{ steps.image.outputs.image_id }} is NOT visible to this account (HTTP $CODE)." >&2
+            echo "This is the cross-account snapshot problem: a DO private snapshot only exists for the account that made it." >&2
+            cat /tmp/img.json >&2 || true
+            exit 1
+          fi
+          jq -r '"image: \(.image.name)  status: \(.image.status)  regions: \(.image.regions|join(","))  min_disk: \(.image.min_disk_size)"' /tmp/img.json
+
+      - name: Create a throwaway SSH key
+        id: sshkey
+        run: |
+          set -euo pipefail
+          ssh-keygen -t ed25519 -N '' -C "empyralis-image-smoke-$GITHUB_RUN_ID" -f /tmp/smoke_key >/dev/null
+          PUB="$(cat /tmp/smoke_key.pub)"
+          RESP="$(curl -fsS -X POST "$DO_API/account/keys" \
+            -H "Authorization: Bearer $DO_TOKEN" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg name "empyralis-image-smoke-$GITHUB_RUN_ID" --arg key "$PUB" '{name:$name, public_key:$key}')")"
+          KEY_ID="$(printf '%s' "$RESP" | jq -r '.ssh_key.id')"
+          case "$KEY_ID" in ''|null) echo "::error::could not register the temporary SSH key." >&2; exit 1 ;; esac
+          echo "key_id=$KEY_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Create the droplet
+        id: droplet
+        run: |
+          set -euo pipefail
+          BODY="$(jq -n \
+            --arg name "empyralis-image-smoke-$GITHUB_RUN_ID" \
+            --arg region "${{ inputs.region }}" \
+            --arg size "${{ inputs.size }}" \
+            --argjson image ${{ steps.image.outputs.image_id }} \
+            --argjson keys "[${{ steps.sshkey.outputs.key_id }}]" \
+            '{name:$name, region:$region, size:$size, image:$image, ssh_keys:$keys, backups:false, ipv6:false, monitoring:false}')"
+          RESP="$(curl -fsS -X POST "$DO_API/droplets" \
+            -H "Authorization: Bearer $DO_TOKEN" -H 'Content-Type: application/json' -d "$BODY")"
+          ID="$(printf '%s' "$RESP" | jq -r '.droplet.id')"
+          case "$ID" in ''|null) echo "::error::droplet create failed."; printf '%s' "$RESP" >&2; exit 1 ;; esac
+          echo "droplet_id=$ID" >> "$GITHUB_OUTPUT"
+          date +%s > /tmp/created_at
+          echo "droplet $ID created"
+
+      - name: Wait for the droplet to go active
+        id: active
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            RESP="$(curl -fsS -H "Authorization: Bearer $DO_TOKEN" "$DO_API/droplets/${{ steps.droplet.outputs.droplet_id }}")"
+            STATUS="$(printf '%s' "$RESP" | jq -r '.droplet.status')"
+            IP="$(printf '%s' "$RESP" | jq -r '[.droplet.networks.v4[]? | select(.type=="public") | .ip_address] | first // ""')"
+            if [ "$STATUS" = "active" ] && [ -n "$IP" ]; then
+              echo "ip=$IP" >> "$GITHUB_OUTPUT"
+              echo "active after $(( $(date +%s) - $(cat /tmp/created_at) ))s, ip $IP"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::droplet never became active." >&2
+          exit 1
+
+      - name: Wait for SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          for i in $(seq 1 60); do
+            if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                   -o ConnectTimeout=5 -o BatchMode=yes -i /tmp/smoke_key \
+                   root@${{ steps.active.outputs.ip }} true 2>/dev/null; then
+              echo "ssh_ready_after=$(( $(date +%s) - $(cat /tmp/created_at) ))" >> "$GITHUB_ENV"
+              echo "SSH ready $(( $(date +%s) - $(cat /tmp/created_at) ))s after create"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::SSH never came up." >&2
+          exit 1
+
+      # Everything the image CLAIMS to have, checked on a real booted droplet
+      # rather than inside the Packer build where it was written.
+      - name: Verify the baked image survived the snapshot
+        run: |
+          set -euo pipefail
+          # Assertions are inlined below rather than shipped from the repo on
+          # purpose: this job needs no checkout, so what runs here is only ever
+          # what is in this file.
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i /tmp/smoke_key \
+            root@${{ steps.active.outputs.ip }} 'bash -s' <<'REMOTE'
+          set -Eeuo pipefail
+          fail=0
+          ok()   { printf '  ok    %s\n' "$1"; }
+          bad()  { printf '  FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
+          t()    { if eval "$2" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
+
+          t "node is v20"                     'node --version | grep -Eq "^v20\."'
+          t "gateway bundle present"          'test -f /opt/empyralis/agent-computer/current/gateway/dist/index.js'
+          t "gateway node_modules present"    'test -d /opt/empyralis/agent-computer/current/gateway/node_modules'
+          t "baked node parses the bundle"    'node --check /opt/empyralis/agent-computer/current/gateway/dist/index.js'
+          t "empyralis-configure installed"   'test -x /usr/local/sbin/empyralis-configure'
+          t "gateway unit installed"          'test -f /etc/systemd/system/empyralis-gateway.service'
+          t "gateway unit enabled"            'systemctl is-enabled empyralis-gateway.service'
+          t "service user exists"             'id empyralis'
+          # Correct BEFORE configuration: the unit is guarded on an env file
+          # that only empyralis-configure writes, so it must be idle here.
+          t "gateway idle before configure"   '! systemctl is-active --quiet empyralis-gateway.service'
+          # No customer identity may be baked into a shared image.
+          t "NO env file baked in"            '! test -e /etc/empyralis/agent-computer.env'
+          t "NO registration baked in"        '! test -e /var/lib/empyralis/agent-computer/gateway/registration.json'
+
+          echo
+          echo "--- empyralis-configure writes the env file (dummy token, not started) ---"
+          empyralis-configure --pairing-token smoke-test-not-a-real-token \
+                              --api-url https://empyralis.ai/api --no-start
+          t "env file now exists"             'test -f /etc/empyralis/agent-computer.env'
+          t "env file is 0640"                '[ "$(stat -c %a /etc/empyralis/agent-computer.env)" = "640" ]'
+          t "env carries the pairing token"   'grep -q "^EMPYRALIS_PAIRING_TOKEN=" /etc/empyralis/agent-computer.env'
+
+          echo
+          if [ "$fail" -gt 0 ]; then
+            echo "$fail check(s) FAILED on the booted image" >&2
+            exit 1
+          fi
+          echo "all checks passed on the booted image"
+          REMOTE
+
+      - name: Report boot timing
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Agent Computer image smoke test"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`${{ steps.image.outputs.image_id }}\` |"
+            echo "| Region / size | \`${{ inputs.region }}\` / \`${{ inputs.size }}\` |"
+            echo "| SSH reachable after | **${ssh_ready_after:-n/a}s** from droplet create |"
+            echo
+            echo "The boot-time-install path this replaces took several minutes before the gateway"
+            echo "could even start, because apt + Node + the gateway artifact were downloaded on"
+            echo "first boot. Here they are already on disk."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Runs even when an assertion above failed. A droplet left behind here
+      # bills forever, so cleanup is never conditional on success.
+      - name: Destroy the droplet and the temporary key
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "${{ steps.droplet.outputs.droplet_id }}" ]; then
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+              -H "Authorization: Bearer $DO_TOKEN" "$DO_API/droplets/${{ steps.droplet.outputs.droplet_id }}")"
+            echo "destroy droplet ${{ steps.droplet.outputs.droplet_id }} -> HTTP $CODE"
+            [ "$CODE" = "204" ] || echo "::warning::droplet ${{ steps.droplet.outputs.droplet_id }} may still exist — check the DO console."
+          fi
+          if [ -n "${{ steps.sshkey.outputs.key_id }}" ]; then
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+              -H "Authorization: Bearer $DO_TOKEN" "$DO_API/account/keys/${{ steps.sshkey.outputs.key_id }}")"
+            echo "delete ssh key ${{ steps.sshkey.outputs.key_id }} -> HTTP $CODE"
+          fi
+
+      # Belt and braces: if the delete call above failed for any reason, say so
+      # loudly rather than letting a billing droplet sit there quietly.
+      - name: Confirm nothing was left behind
+        if: always()
+        run: |
+          set -uo pipefail
+          LEFT="$(curl -s -H "Authorization: Bearer $DO_TOKEN" \
+            "$DO_API/droplets?tag_name=&per_page=200" \
+            | jq -r '[.droplets[]? | select(.name | startswith("empyralis-image-smoke-")) | "\(.id) \(.name)"] | .[]' 2>/dev/null || true)"
+          if [ -n "$LEFT" ]; then
+            echo "::warning::smoke-test droplets still present:"
+            echo "$LEFT"
+          else
+            echo "no smoke-test droplets remain"
+          fi
