@@ -166,3 +166,35 @@ jobs:
           DEST="s3://${BUCKET}/agent-computer/${{ inputs.version }}/"
           aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL" "$DEST" --endpoint-url "$ENDPOINT"
           aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.sha256" "$DEST" --endpoint-url "$ENDPOINT"
+
+      # Publish the installer script itself, from the SAME commit that built
+      # the artifact above.
+      #
+      # WHY THIS EXISTS (MAN-121/MAN-122, 2026-07-29): the Cloudflare Worker
+      # serving empyralis.ai/install/agent-computer.sh used to carry its own
+      # EMBEDDED copy of this script, updated by hand. It silently drifted ~50
+      # days behind the repo. Droplets were therefore running an installer that
+      # (a) still demanded an `empyralis-supervisor-linux-x64.tar.gz` that no
+      # longer exists in this codebase and was never published — so every
+      # install died on a 404 — and (b) predated the failure-beacon code, so it
+      # could not report *why* it died. Both the failure and the silence came
+      # from the same drift. The Worker now fetches this object instead, so
+      # what droplets run is whatever this workflow last published, and the
+      # repo can no longer disagree with production without anyone noticing.
+      - name: Publish installer script to Cloudflare R2
+        if: matrix.arch == 'x64'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://76e485cbfb611ff8caa5c1d2afa71890.r2.cloudflarestorage.com"
+          BUCKET="empyralis-agent-computer-releases"
+          DEST="s3://${BUCKET}/agent-computer/${{ inputs.version }}/install-agent-computer.sh"
+          # Fail loudly rather than publishing an installer that cannot report
+          # its own failures — that combination is exactly what hid the bug.
+          grep -q 'provisioning-events' scripts/install-agent-computer.sh \
+            || { echo "installer is missing its failure-beacon path; refusing to publish" >&2; exit 1; }
+          aws s3 cp scripts/install-agent-computer.sh "$DEST" \
+            --endpoint-url "$ENDPOINT" --content-type "text/x-shellscript"
