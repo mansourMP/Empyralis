@@ -66,6 +66,28 @@ DEFAULT_DIGITALOCEAN_OAUTH_REDIRECT_URI = (
     "https://empyralis.ai/api/hardware/vps/oauth/digitalocean/callback"
 )
 
+# --- DigitalOcean: pre-baked Agent Computer image (MAN-128) -----------------
+#
+# See deploy/packer/ and .github/workflows/build-agent-computer-image.yml: a
+# scheduled/manual CI job bakes apt, Node 20, and the gateway artifact into a
+# DigitalOcean snapshot ahead of time, then publishes a pointer to that
+# snapshot's numeric image ID at DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL — the
+# same moving-latest.json pattern already used for the gateway release
+# artifact (see the agent-installer Cloudflare Worker), so a rebuilt image is
+# picked up automatically with no redeploy of this service.
+#
+# Gated OFF by default (DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV unset): flipping
+# it on is a deliberate go-live step taken once the baked image has been
+# proven end-to-end, not an automatic side effect of the pointer existing.
+# Unset -> every DigitalOcean provision keeps using the boot-time-install
+# cloud-init path (cloud_init_script) exactly as before this existed.
+DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV = "EMPYRALIS_VPS_DIGITALOCEAN_BAKED_IMAGE_ENABLED"
+DIGITALOCEAN_IMAGE_POINTER_URL_ENV = "EMPYRALIS_VPS_DIGITALOCEAN_IMAGE_POINTER_URL"
+DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL = (
+    "https://empyralis.ai/releases/agent-computer/images/digitalocean/latest.json"
+)
+_DIGITALOCEAN_IMAGE_POINTER_TIMEOUT_SECONDS = 5
+
 # --- Google Cloud: "bootstrap-then-impersonate" ----------------------------
 #
 # Google is deliberately NOT modeled like DigitalOcean/Hetzner/Vultr's "paste
@@ -1403,6 +1425,97 @@ def cloud_init_script(pairing_token: str, *, api_url: Optional[str] = None) -> s
     return "\n".join(cloud_config_lines)
 
 
+def cloud_init_script_for_baked_image(pairing_token: str, *, api_url: Optional[str] = None) -> str:
+    """cloud-init for a droplet booted from the pre-baked Agent Computer
+    image (see deploy/packer/, MAN-128) instead of a bare Ubuntu slug.
+
+    Everything cloud_init_script's docstring above describes fighting —
+    early-boot network flakiness during a download, apt/Node/artifact
+    install time, dash-vs-bash — doesn't apply here: apt, Node 20, and the
+    gateway artifact are already ON the image. The only thing left to do at
+    boot is write this droplet's identity and start the service, which is
+    exactly what empyralis-configure (baked onto the image at
+    /usr/local/sbin, see deploy/packer/files/empyralis-configure) does. This
+    is the "cloud-init's entire job is one line" future that script's own
+    header comment describes.
+    """
+    token = str(pairing_token or "").strip()
+    if not token:
+        raise ValueError("pairing_token is required.")
+    resolved_api_url = _ensure_api_path_suffix(str(api_url or PUBLIC_API_URL))
+    if not resolved_api_url:
+        raise ValueError("api_url is required.")
+    bootstrap_lines = [
+        "#!/bin/sh",
+        "set -u",
+        f"API_URL='{_shell_single_quote(resolved_api_url)}'",
+        f"PAIRING_TOKEN='{_shell_single_quote(token)}'",
+        "",
+        "beacon_configure_failed() {",
+        "  reason=\"$1\"",
+        "  curl -fsS -m 20 -X POST \"$API_URL/gateway/provisioning-events\" \\",
+        "    -H 'Content-Type: application/json' \\",
+        "    -d \"{\\\"pairing_token\\\":\\\"$PAIRING_TOKEN\\\",\\\"phase\\\":\\\"empyralis-configure\\\",\\\"message\\\":\\\"$reason\\\",\\\"terminal\\\":true}\" \\",
+        "    >/dev/null 2>&1 || true",
+        "}",
+        "",
+        'if ! empyralis-configure --pairing-token "$PAIRING_TOKEN" --api-url "$API_URL" >/tmp/empyralis-configure.log 2>&1; then',
+        "  err=$(tail -c 300 /tmp/empyralis-configure.log 2>/dev/null | tr -d '\"' | tr '\\n' ' ')",
+        '  beacon_configure_failed "empyralis-configure failed: ${err}"',
+        "  exit 1",
+        "fi",
+    ]
+    cloud_config_lines = [
+        "#cloud-config",
+        "runcmd:",
+        "  - |",
+        "    cat > /tmp/empyralis-bootstrap.sh <<'EMPYRALIS_BOOTSTRAP_EOF'",
+    ]
+    for line in bootstrap_lines:
+        cloud_config_lines.append(f"    {line}" if line else "")
+    cloud_config_lines.append("    EMPYRALIS_BOOTSTRAP_EOF")
+    cloud_config_lines.append("    chmod +x /tmp/empyralis-bootstrap.sh")
+    cloud_config_lines.append("    /tmp/empyralis-bootstrap.sh")
+    cloud_config_lines.append("")
+    return "\n".join(cloud_config_lines)
+
+
+def _digitalocean_baked_image_id() -> Optional[str]:
+    """Numeric DigitalOcean snapshot ID of the current pre-baked Agent
+    Computer image, or None. See DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV's
+    definition above for the opt-in gate and DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL
+    for where this is fetched from.
+
+    Never raises: an unreachable/malformed pointer just means the caller
+    falls back to booting a bare Ubuntu slug and running the full
+    boot-time installer, exactly like every DigitalOcean provision before
+    this existed. This must never be the reason a provision fails, so
+    every failure mode here (feature off, network error, bad JSON, a
+    non-numeric or missing image_id) returns None rather than raising.
+    """
+    enabled = (os.getenv(DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV) or "").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return None
+    url = (os.getenv(DIGITALOCEAN_IMAGE_POINTER_URL_ENV) or DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL).strip()
+    if not url:
+        return None
+    try:
+        request = urlrequest.Request(url, headers={"Accept": "application/json"})
+        with urlrequest.urlopen(request, timeout=_DIGITALOCEAN_IMAGE_POINTER_TIMEOUT_SECONDS) as response:
+            pointer = json.loads(response.read().decode("utf-8"))
+    except (urlerror.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+        _LOGGER.warning(
+            "digitalocean baked-image pointer unavailable (%s); falling back to boot-time install.", exc
+        )
+        return None
+    if not isinstance(pointer, dict):
+        return None
+    image_id = str(pointer.get("image_id") or "").strip()
+    if not image_id.isdigit():
+        return None
+    return image_id
+
+
 def agent_installer_url() -> str:
     return (
         os.getenv(AGENT_INSTALLER_URL_ENV)
@@ -1434,7 +1547,15 @@ def provision_vps(
     config = PROVIDER_CONFIGS[provider_id]
     resolved_size = str(size or "").strip() or config.default_size
     name = _server_name(provider_id)
-    user_data = cloud_init_script(pairing_token)
+    # Only DigitalOcean has a pre-baked image (MAN-128) so far; every other
+    # provider is untouched and keeps calling cloud_init_script exactly as
+    # before. _digitalocean_baked_image_id() is off unless explicitly
+    # enabled (see its docstring), so this is a no-op call for every other
+    # provider AND for digitalocean until that flag is flipped on.
+    baked_image_id = _digitalocean_baked_image_id() if provider_id == "digitalocean" else None
+    user_data = (
+        cloud_init_script_for_baked_image(pairing_token) if baked_image_id else cloud_init_script(pairing_token)
+    )
 
     if provider_id == "google":
         # Early return: Google's credentials are {project_id,
@@ -1476,7 +1597,14 @@ def provision_vps(
     if provider_id == "digitalocean":
         on_unauthorized = _digitalocean_reauth_callback(token_id, credentials) if token_id else None
         return _provision_digitalocean(
-            config, token, resolved_region, resolved_size, name, user_data, on_unauthorized=on_unauthorized
+            config,
+            token,
+            resolved_region,
+            resolved_size,
+            name,
+            user_data,
+            image_override=baked_image_id,
+            on_unauthorized=on_unauthorized,
         )
     if provider_id == "hetzner":
         return _provision_hetzner(config, token, resolved_region, resolved_size, name, user_data)
@@ -1958,6 +2086,7 @@ def _provision_digitalocean(
     name: str,
     user_data: str,
     *,
+    image_override: Optional[str] = None,
     on_unauthorized: Optional[Callable[[], Optional[str]]] = None,
 ) -> VPSResult:
     # `tags` is intentionally NOT sent in the create-droplet body. DigitalOcean
@@ -1971,11 +2100,18 @@ def _provision_digitalocean(
     # never depend on a scope this app doesn't unconditionally have, so
     # tagging is applied as a separate, best-effort, non-fatal step AFTER the
     # droplet already exists (see _tag_digitalocean_droplet_best_effort).
+    #
+    # image_override, when set, is the numeric snapshot ID of the pre-baked
+    # Agent Computer image (see _digitalocean_baked_image_id / MAN-128) —
+    # sent as an int because DO's API rejects a numeric image id sent as a
+    # string. None (the default until that feature is explicitly enabled)
+    # falls back to config.default_image, the bare Ubuntu slug this provider
+    # has always booted.
     payload = {
         "name": name,
         "region": region,
         "size": size,
-        "image": config.default_image,
+        "image": int(image_override) if image_override else config.default_image,
         "user_data": user_data,
         "backups": False,
         "ipv6": True,

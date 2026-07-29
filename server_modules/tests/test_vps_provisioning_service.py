@@ -191,10 +191,13 @@ def test_cloud_init_script_runs_agent_computer_installer():
     script = vps.cloud_init_script("pair_test", api_url="https://api.example.com/api")
 
     assert script.startswith("#cloud-config")
-    assert "curl -fsSL https://empyralis.ai/install/agent-computer.sh" in script
-    assert "EMPYRALIS_PAIRING_TOKEN='pair_test'" in script
-    assert "EMPYRALIS_API_URL='https://api.example.com/api'" in script
-    assert "sudo -E bash" in script
+    assert "INSTALLER_URL='https://empyralis.ai/install/agent-computer.sh'" in script
+    assert "PAIRING_TOKEN='pair_test'" in script
+    assert "API_URL='https://api.example.com/api'" in script
+    # MUST be bash, not sh/sudo -E: /bin/sh is dash on Ubuntu, which aborts
+    # on the installer's own `set -Eeuo pipefail` (the MAN-121 regression).
+    assert 'bash "$STAGE"' in script
+    assert "sh \"$STAGE\"" not in script.replace('bash "$STAGE"', "")
 
 
 def test_cloud_init_script_appends_missing_api_suffix():
@@ -203,20 +206,20 @@ def test_cloud_init_script_appends_missing_api_suffix():
     # {url}/gateway/registrations with no /api prefix and 404 forever.
     script = vps.cloud_init_script("pair_test", api_url="https://empyralis.ai")
 
-    assert "EMPYRALIS_API_URL='https://empyralis.ai/api'" in script
+    assert "API_URL='https://empyralis.ai/api'" in script
 
 
 def test_cloud_init_script_does_not_double_append_api_suffix():
     script = vps.cloud_init_script("pair_test", api_url="https://empyralis.ai/api")
 
-    assert "EMPYRALIS_API_URL='https://empyralis.ai/api'" in script
+    assert "API_URL='https://empyralis.ai/api'" in script
     assert "/api/api" not in script
 
 
 def test_cloud_init_script_strips_trailing_slash_before_checking_api_suffix():
     script = vps.cloud_init_script("pair_test", api_url="https://empyralis.ai/api/")
 
-    assert "EMPYRALIS_API_URL='https://empyralis.ai/api'" in script
+    assert "API_URL='https://empyralis.ai/api'" in script
     assert "/api/api" not in script
 
 
@@ -225,7 +228,7 @@ def test_cloud_init_script_allows_installer_url_env_override(monkeypatch):
 
     script = vps.cloud_init_script("pair_test", api_url="https://api.example.com")
 
-    assert "curl -fsSL https://empyralis.ai/install/agent-computer.sh" in script
+    assert "INSTALLER_URL='https://empyralis.ai/install/agent-computer.sh'" in script
 
 
 def test_cloud_init_script_omits_repo_token_when_unset(monkeypatch):
@@ -242,9 +245,104 @@ def test_cloud_init_script_threads_repo_token_when_backend_has_one(monkeypatch):
     script = vps.cloud_init_script("pair_test", api_url="https://api.example.com")
 
     assert "EMPYRALIS_REPO_TOKEN='ghp_test_token'" in script
-    # Still precedes sudo -E so it lands in the installer's environment,
-    # same mechanism as the pairing token and API URL.
-    assert script.index("EMPYRALIS_REPO_TOKEN") < script.index("sudo -E bash")
+    # Still precedes the final bash invocation so it lands in the
+    # installer's environment, same mechanism as the pairing token and API
+    # URL.
+    assert script.index("EMPYRALIS_REPO_TOKEN") < script.index('bash "$STAGE"')
+
+
+def test_cloud_init_script_for_baked_image_calls_empyralis_configure():
+    script = vps.cloud_init_script_for_baked_image("pair_test", api_url="https://api.example.com/api")
+
+    assert script.startswith("#cloud-config")
+    assert 'empyralis-configure --pairing-token "$PAIRING_TOKEN" --api-url "$API_URL"' in script
+    assert "PAIRING_TOKEN='pair_test'" in script
+    assert "API_URL='https://api.example.com/api'" in script
+    # Nothing left to download or install — this is the whole point of
+    # booting from a pre-baked image (MAN-128).
+    assert "curl -fsSL" not in script
+    assert "apt" not in script
+
+
+def test_cloud_init_script_for_baked_image_requires_pairing_token():
+    with pytest.raises(ValueError):
+        vps.cloud_init_script_for_baked_image("", api_url="https://api.example.com")
+
+
+def test_digitalocean_baked_image_id_off_by_default(monkeypatch):
+    monkeypatch.delenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, raising=False)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("must not fetch the pointer when the feature is disabled")
+
+    monkeypatch.setattr(vps.urlrequest, "urlopen", fail_if_called)
+
+    assert vps._digitalocean_baked_image_id() is None
+
+
+def test_digitalocean_baked_image_id_returns_numeric_id_when_enabled(monkeypatch):
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "true")
+
+    def fake_urlopen(request, timeout=30):
+        assert request.full_url == vps.DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL
+        return _FakeUrlopenResponse(b'{"image_id": "238979453", "snapshot_name": "empyralis-agent-computer-latest"}')
+
+    monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
+
+    assert vps._digitalocean_baked_image_id() == "238979453"
+
+
+def test_digitalocean_baked_image_id_falls_back_to_none_when_pointer_unreachable(monkeypatch):
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+
+    def fake_urlopen(request, timeout=30):
+        raise vps.urlerror.URLError("connection refused")
+
+    monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
+
+    assert vps._digitalocean_baked_image_id() is None
+
+
+def test_digitalocean_baked_image_id_falls_back_to_none_when_image_id_missing_or_malformed(monkeypatch):
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+
+    def fake_urlopen(request, timeout=30):
+        return _FakeUrlopenResponse(b'{"image_id": "not-a-number"}')
+
+    monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
+
+    assert vps._digitalocean_baked_image_id() is None
+
+
+def test_provision_vps_digitalocean_boots_baked_image_when_enabled(monkeypatch):
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+
+    def fake_urlopen(request, timeout=30):
+        return _FakeUrlopenResponse(b'{"image_id": "238979453"}')
+
+    monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
+
+    calls = []
+
+    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
+        calls.append(payload)
+        return {
+            "droplet": {
+                "id": 12345,
+                "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.10"}]},
+            }
+        }
+
+    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+
+    result = vps.provision_vps("digitalocean", {"api_token": "do_secret"}, "lon1", None, "pair_do")
+
+    assert result.provider_resource_id == "12345"
+    assert calls[0]["image"] == 238979453
+    assert isinstance(calls[0]["image"], int)
+    assert calls[0]["user_data"].startswith("#cloud-config")
+    assert "empyralis-configure" in calls[0]["user_data"]
+    assert "curl -fsSL" not in calls[0]["user_data"]
 
 
 def test_digitalocean_oauth_start_stores_state_and_uses_registered_redirect(tmp_path, monkeypatch):
