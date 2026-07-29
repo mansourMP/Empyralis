@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import "./fleet-theme.css";
+import { CloudProvisionNotifier } from "./CloudProvisionNotifier";
 import { FleetCommandPalette } from "./FleetCommandPalette";
 import { FleetShellDecider } from "./FleetShellDecider";
 import { PrimaryRail } from "./PrimaryRail";
@@ -100,6 +101,12 @@ export function FleetShell({
         onToggleTheme={toggleTheme}
         onOpenSage={onOpenSage}
       />
+      {/* A cloud server can now be set up in the background, which means it
+          usually finishes while the user is somewhere else in the workspace.
+          Mounted here so the "it's ready" / "it failed" notification reaches
+          them wherever that is. Renders nothing at all unless a build is
+          actually settling. */}
+      <CloudProvisionNotifier workspaceId={workspaceId} />
     </div>
   );
 }

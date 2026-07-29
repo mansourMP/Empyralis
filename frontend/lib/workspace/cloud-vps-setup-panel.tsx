@@ -6,6 +6,15 @@ import { ArrowLeft, Check, ExternalLink, X } from 'lucide-react';
 import { AppButton, joinClassNames } from '@/lib/ui/primitives';
 import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
 import { CountryFlag, countryFlagEmoji, resolveRegionCountry } from '@/lib/workspace/geo/country-flag';
+import {
+  formatElapsed,
+  startVpsProvisionWatch,
+  useElapsedSeconds,
+  useVpsProvisionWatch,
+  vpsProvisionStageLabel,
+  clearVpsProvisionWatch,
+  VPS_PROVISION_SLOW_AFTER_MS,
+} from '@/lib/workspace/fleet/vps-provision-watch';
 
 // Fleet routes never mount WorkstationKernelProvider (the legacy workstation
 // shell it depends on is gone), so useWorkspaceServices() throws here. Talk to
@@ -52,7 +61,10 @@ export type VpsProviderId = 'digitalocean' | 'google' | 'aws';
 // billing verified before anything is provisionable, neither of which any
 // other provider here requires (see finishGoogleBootstrap).
 type VpsStep = 'provider' | 'access' | 'plans' | 'region' | 'progress' | 'google-project' | 'google-billing';
-type VpsProgressStage = 'idle' | 'creating' | 'installing' | 'connecting' | 'connected' | 'failed';
+// Mirrors VpsProvisionStage in vps-provision-watch.ts — the watcher is what
+// produces these now, so there is no 'idle' member any more: the progress
+// screen is only ever reached with a build starting or already running.
+type VpsProgressStage = 'creating' | 'installing' | 'connecting' | 'connected' | 'failed';
 
 export type VpsProviderCard = {
   id: VpsProviderId;
@@ -158,42 +170,11 @@ type VpsProvisionResponse = {
   provider_resource_id?: string;
 };
 
-type VpsProvisionStatusPayload = {
-  status?: 'provisioning' | 'registering' | 'connected' | 'failed' | 'deleted' | string;
-  // Both pass through from GET /hardware/vps/{vps_id}/status (see
-  // get_hardware_vps_status / _public_record in vps_provisioning_service.py).
-  // provider_resource_id is empty until the provider actually creates the
-  // resource — with provisioning running as a background task (see
-  // run_vps_provisioning_lifecycle), the initial POST response NEVER carries
-  // a real one (it's a placeholder record), so this field must be re-read
-  // from every status poll, not just the create response. error carries the
-  // real failure reason recorded by mark_vps_provision_failed.
-  provider_resource_id?: string;
-  error?: string;
-};
-
-// Builds the message shown when a background provision lands in status
-// 'failed'. Two things the old hardcoded string got wrong: (1) it always
-// claimed "the server was created" even when provider_resource_id was empty
-// — i.e. the provider create call itself failed (e.g. DigitalOcean's
-// "missing the required permission tag:create") and nothing was ever created
-// or billed; (2) it never showed the actual backend error, just a generic
-// "could not connect". hasProviderResource comes from the SAME status poll
-// that reported 'failed', not stale state from the initial create response.
-function friendlyProvisionFailureMessage(rawError: string, hasProviderResource: boolean): string {
-  const detail = rawError.trim();
-  if (/tag:create|tag:read|tag:delete/i.test(detail)) {
-    return 'Setup failed — the connected DigitalOcean account is missing a permission (tagging). Disconnect and reconnect DigitalOcean, then try again.';
-  }
-  if (!detail) {
-    return hasProviderResource
-      ? 'Setup failed — the server was created but could not connect.'
-      : 'Setup failed before the server could be created.';
-  }
-  return hasProviderResource
-    ? `Setup failed — the server was created but could not connect: ${detail}`
-    : `Setup failed before the server could be created: ${detail}`;
-}
+// Status polling, the failure-message wording and the "is a build in flight"
+// record all moved to lib/workspace/fleet/vps-provision-watch.ts — they have
+// to outlive this modal now that it can be dismissed mid-build. See that
+// file's header for why that is safe (provisioning is a server-side
+// background task; this component was only ever a viewer of it).
 
 // Resumes the wizard after the DigitalOcean/Google OAuth round-trip: both
 // providers now navigate this same tab straight to the provider's authorize
@@ -226,6 +207,12 @@ type CloudVpsSetupPanelProps = {
   // FleetCreateAgentWizard) resumes the OAuth result itself.
   returnTo?: string;
   onOAuthResultConsumed?: () => void;
+  // Re-open straight onto the progress screen for the build that is already
+  // running (see vps-provision-watch.ts) instead of restarting the wizard at
+  // the provider picker. This is what the Hardware page's pending row does
+  // when clicked — nothing is re-provisioned, it just shows the same step
+  // list again with the current state.
+  resumeProgress?: boolean;
   onClose: () => void;
   onConnected: () => Promise<void> | void;
 };
@@ -416,8 +403,25 @@ function progressStepActive(step: VpsProgressStage, current: VpsProgressStage): 
   return step === current;
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+/** Which of the four steps a failed build died on, read from what the record
+ *  actually reported: a provider resource id means the server itself was
+ *  created, and an install_phase means the box got far enough to run (and
+ *  beacon from) the installer. Returns null when a build hasn't failed. */
+function failureStageOf(
+  stage: VpsProgressStage,
+  installPhase: string,
+  providerResourceId: string,
+): VpsProgressStage | null {
+  if (stage !== 'failed') {
+    return null;
+  }
+  if (installPhase === 'registration_wait') {
+    return 'connecting';
+  }
+  if (installPhase || providerResourceId) {
+    return 'installing';
+  }
+  return 'creating';
 }
 
 export function CloudVpsSetupPanel({
@@ -427,6 +431,7 @@ export function CloudVpsSetupPanel({
   initialOAuthResult = null,
   returnTo,
   onOAuthResultConsumed,
+  resumeProgress = false,
   onClose,
   onConnected,
 }: CloudVpsSetupPanelProps) {
@@ -453,19 +458,18 @@ export function CloudVpsSetupPanel({
   const [loadingPlans, setLoadingPlans] = useState(false);
   const [loadingRegions, setLoadingRegions] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [progressStage, setProgressStage] = useState<VpsProgressStage>('idle');
-  const [vpsId, setVpsId] = useState<string | null>(null);
-  const [providerResourceId, setProviderResourceId] = useState<string | null>(null);
   const [cleanupBusy, setCleanupBusy] = useState(false);
-  // Live "motion" for the progress screen: a 1s ticker so the UI is never
-  // visibly frozen during the multi-minute install (the backend record sits
-  // on 'provisioning' the whole time, so there is no per-step signal to show).
-  const [elapsedSec, setElapsedSec] = useState(0);
-  // The install genuinely can outrun the poll window on a fresh box. When it
-  // does, we do NOT lie with a red "Setup failed" — the backend keeps going
-  // for 20 min; we show a calm "still finishing in the background" instead.
-  const [timedOut, setTimedOut] = useState(false);
-  const provisionStartRef = useRef<number | null>(null);
+  // The build in flight, if any — owned by vps-provision-watch.ts, not by
+  // this component, so closing the modal does not lose it. Everything the
+  // progress screen renders (stage, elapsed, install phase, failure reason)
+  // reads from here.
+  const watch = useVpsProvisionWatch(workspaceId);
+  // Covers only the window between clicking "Create server" and the POST
+  // returning a vps_id — before that there is no record to watch yet.
+  const [createStartedAt, setCreateStartedAt] = useState<number | null>(null);
+  // A failure of the create REQUEST itself (not of the build), which never
+  // produces a watch record to carry the reason.
+  const [createError, setCreateError] = useState<string | null>(null);
   // Set when "Create server" is clicked while browsing pre-connect (Vultr) —
   // routes the connect step's success handler straight into creating the
   // server the user already picked, instead of landing back on the plan
@@ -512,25 +516,54 @@ export function CloudVpsSetupPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleRegions]);
 
-  // Drive the live elapsed counter on the progress screen. Runs only while a
-  // build is actually in flight (progress step, not yet connected/failed) so
-  // there is always visible motion even though status polls are 5s apart.
+  // What the progress screen shows. A create-request failure short-circuits
+  // to 'failed'; otherwise the watched record is the single source of truth,
+  // defaulting to 'creating' for the brief pre-record window.
+  const progressStage: VpsProgressStage = createError ? 'failed' : (watch?.stage ?? 'creating');
+  const provisionRunning = step === 'progress' && progressStage !== 'connected' && progressStage !== 'failed';
+  // Live "motion" for the progress screen: a 1s ticker so the UI is never
+  // visibly frozen during the multi-minute install (status polls are 5s
+  // apart, and the record can sit on one stage for minutes at a time).
+  const elapsedSec = useElapsedSeconds(watch?.startedAt ?? createStartedAt, provisionRunning);
+  const timedOut = Boolean(watch?.pollStopped);
+  const progressError = createError || (progressStage === 'failed' ? watch?.error || '' : '');
+  const providerResourceId = watch?.providerResourceId || '';
+  const failedAt = failureStageOf(progressStage, watch?.installPhase || '', providerResourceId);
+
+  // The build finished while this modal was open — hand off to the caller
+  // (Hardware refreshes its list and closes; the agent wizard picks the new
+  // box). Guarded per vps id so a re-render can't fire it twice. When the
+  // modal is CLOSED nothing here runs, and that is fine: the watcher still
+  // resolves and the Hardware page notifies from its own subscription.
+  const onConnectedRef = useRef(onConnected);
+  onConnectedRef.current = onConnected;
+  const connectedHandledRef = useRef<string | null>(null);
+  const watchStage = watch?.stage;
+  const watchVpsId = watch?.vpsId;
   useEffect(() => {
-    if (step !== 'progress') return;
-    if (progressStage === 'connected' || progressStage === 'failed' || progressStage === 'idle') return;
-    const tick = () => {
-      const started = provisionStartRef.current;
-      if (started != null) {
-        setElapsedSec(Math.max(0, Math.floor((Date.now() - started) / 1000)));
-      }
-    };
-    tick();
-    const id = window.setInterval(tick, 1000);
-    return () => window.clearInterval(id);
-  }, [step, progressStage]);
+    if (!open || watchStage !== 'connected' || !watchVpsId) return;
+    if (connectedHandledRef.current === watchVpsId) return;
+    connectedHandledRef.current = watchVpsId;
+    // Beat of "Connected ✓" before the modal gets out of the way.
+    const id = window.setTimeout(() => {
+      void onConnectedRef.current();
+    }, 900);
+    return () => window.clearTimeout(id);
+  }, [open, watchStage, watchVpsId]);
 
   useEffect(() => {
     if (!open) {
+      return;
+    }
+    // Re-opened from the Hardware page's pending row: go straight back to the
+    // step list for the build already in flight. Deliberately skips every
+    // reset below — there is nothing to restart, and clearing the wizard
+    // state would only throw away the connection/plan the user just picked.
+    if (resumeProgress) {
+      setStep('progress');
+      setBusy(false);
+      setError(null);
+      setCreateError(null);
       return;
     }
     let cancelled = false;
@@ -554,9 +587,8 @@ export function CloudVpsSetupPanel({
     setSelectedRegionId('');
     setBusy(false);
     setError(null);
-    setProgressStage('idle');
-    setVpsId(null);
-    setProviderResourceId(null);
+    setCreateStartedAt(null);
+    setCreateError(null);
     setCleanupBusy(false);
     setPendingCreateAfterConnect(false);
     setGoogleSetupId(null);
@@ -598,7 +630,7 @@ export function CloudVpsSetupPanel({
     return () => {
       cancelled = true;
     };
-  }, [initialProviderId, open, workspaceId]);
+  }, [initialProviderId, open, resumeProgress, workspaceId]);
 
   // Applies the OAuth result the backend redirected back with — the
   // top-level tab lands back on the Hardware page with the outcome in the
@@ -779,7 +811,7 @@ export function CloudVpsSetupPanel({
     setSelectedPlanId('');
     setRegions([]);
     setSelectedRegionId('');
-    setProgressStage('idle');
+    setCreateError(null);
     setPendingCreateAfterConnect(false);
     setGoogleSetupId(null);
     setGoogleProjects([]);
@@ -1228,10 +1260,9 @@ export function CloudVpsSetupPanel({
     }
     setBusy(true);
     setError(null);
-    setElapsedSec(0);
-    setTimedOut(false);
-    provisionStartRef.current = Date.now();
-    setProgressStage('creating');
+    setCreateError(null);
+    setCreateStartedAt(Date.now());
+    connectedHandledRef.current = null;
     setStep('progress');
     try {
       const payload = await requestJson<VpsProvisionResponse>('/api/hardware/vps/provision', {
@@ -1257,77 +1288,44 @@ export function CloudVpsSetupPanel({
       if (!nextVpsId) {
         throw new Error('VPS provisioning id was not returned.');
       }
-      setVpsId(nextVpsId);
-      setProviderResourceId(String(payload?.provider_resource_id || '').trim() || null);
-      setProgressStage('installing');
-      void pollProvisionStatus(nextVpsId);
+      // Hand the build over to the watcher: from here on the browser's only
+      // job is polling GET /status, and that outlives this modal. Dismissing
+      // the modal now cancels nothing — the server-side lifecycle task keeps
+      // running either way.
+      startVpsProvisionWatch({
+        vpsId: nextVpsId,
+        workspaceId,
+        provider: selectedProvider,
+        providerLabel: PROVIDERS[selectedProvider]?.label || 'Cloud',
+        planLabel: plans.find((plan) => plan.id === effectivePlanId)?.label || '',
+        regionLabel: regions.find((region) => region.id === effectiveRegionId)?.label || effectiveRegionId,
+        providerResourceId: String(payload?.provider_resource_id || '').trim(),
+      });
     } catch (provisionError) {
-      setProgressStage('failed');
-      setError(provisionError instanceof Error ? provisionError.message : 'Could not create Agent Computer.');
+      setCreateError(provisionError instanceof Error ? provisionError.message : 'Could not create Agent Computer.');
     } finally {
       setBusy(false);
     }
   }
 
-  async function pollProvisionStatus(nextVpsId: string) {
-    // 12 min of client-side polling. A fresh box does apt + Node + gateway
-    // download + pair, which is a real ~2-4 min (longer on slow mirrors);
-    // 5 min used to expire mid-install and paint a false "failed" while the
-    // backend (20-min window) was still working. If we still outrun it, we
-    // fall through to the calm timedOut branch below, never a red failure.
-    const deadline = Date.now() + 720_000;
-    // Tracks the most recently seen provider_resource_id across polls (NOT
-    // React state — a state update from inside this loop wouldn't be visible
-    // to this same closure until the next render) so the deadline fallback
-    // below can also know whether a resource actually got created.
-    let lastKnownResourceId = '';
-    while (Date.now() < deadline) {
-      await wait(5_000);
-      try {
-        const payload = await requestJson<VpsProvisionStatusPayload>(
-          `/api/hardware/vps/${encodeURIComponent(nextVpsId)}/status`,
-        );
-        const status = String(payload?.status || '').toLowerCase();
-        lastKnownResourceId = String(payload?.provider_resource_id || '').trim();
-        setProviderResourceId(lastKnownResourceId || null);
-        if (status === 'connected') {
-          setProgressStage('connected');
-          window.setTimeout(() => {
-            void onConnected();
-          }, 900);
-          return;
-        }
-        if (status === 'failed') {
-          setProgressStage('failed');
-          setError(friendlyProvisionFailureMessage(String(payload?.error || ''), Boolean(lastKnownResourceId)));
-          return;
-        }
-        setProgressStage(status === 'registering' ? 'connecting' : 'installing');
-      } catch (pollError) {
-        setError(pollError instanceof Error ? pollError.message : 'Could not check VPS setup status.');
-      }
-    }
-    // Ran out the client window but the backend never reported 'failed' — the
-    // box is very likely still installing (backend keeps trying for 20 min).
-    // Do NOT show a red failure; keep the last step spinning and let the copy
-    // tell the truth. The Hardware page reflects the real state when it lands.
-    setTimedOut(true);
-    setError(null);
-  }
-
   async function deleteFailedServer() {
-    if (!vpsId) {
+    const failedVpsId = watch?.vpsId;
+    if (!failedVpsId) {
       return;
     }
     setCleanupBusy(true);
     setError(null);
     try {
-      await requestJson<Record<string, unknown>>(`/api/hardware/vps/${encodeURIComponent(vpsId)}`, {
+      await requestJson<Record<string, unknown>>(`/api/hardware/vps/${encodeURIComponent(failedVpsId)}`, {
         method: 'DELETE',
         headers: { accept: 'application/json' },
       });
-      setError('Server deleted.');
-      setProviderResourceId(null);
+      // The failed build is dealt with — drop it from the watcher so the
+      // Hardware page stops showing a row for a server that no longer exists,
+      // then get out of the way. (The list refresh happens on the Hardware
+      // page's own watch subscription.)
+      clearVpsProvisionWatch(workspaceId);
+      onClose();
     } catch (cleanupError) {
       setError(cleanupError instanceof Error ? cleanupError.message : 'Could not delete the server.');
     } finally {
@@ -1404,12 +1402,15 @@ export function CloudVpsSetupPanel({
 
   return (
     <div className="cloud-vps-flow-modal" role="dialog" aria-modal="true" aria-label="Cloud VPS setup">
+      {/* The scrim closes on the progress step too. It used to be disabled
+          there, which is what made a 2-10 minute build feel like a trap:
+          no X, no scrim, no escape. Nothing here cancels the build — see
+          vps-provision-watch.ts. */}
       <button
         className="cloud-vps-flow-modal__scrim"
         type="button"
         aria-label="Close Cloud VPS setup"
         onClick={onClose}
-        disabled={step === 'progress'}
       />
       <section className="cloud-vps-flow-modal__panel">
         <header className="cloud-vps-flow-modal__header">
@@ -1418,11 +1419,14 @@ export function CloudVpsSetupPanel({
               <ArrowLeft size={18} strokeWidth={2} />
             </button>
           ) : <span className="cloud-vps-flow-modal__icon-spacer" aria-hidden="true" />}
-          {step !== 'progress' ? (
-            <button className="cloud-vps-flow-modal__icon-button" type="button" onClick={onClose} aria-label="Close">
-              <X size={18} strokeWidth={2} />
-            </button>
-          ) : <span className="cloud-vps-flow-modal__icon-spacer" aria-hidden="true" />}
+          <button
+            className="cloud-vps-flow-modal__icon-button"
+            type="button"
+            onClick={onClose}
+            aria-label={step === 'progress' && provisionRunning ? 'Close — setup keeps running' : 'Close'}
+          >
+            <X size={18} strokeWidth={2} />
+          </button>
         </header>
 
         {step === 'access' && provider ? (
@@ -1752,30 +1756,53 @@ export function CloudVpsSetupPanel({
         {step === 'progress' ? (
           <section className="cloud-vps-flow-modal__content">
             <div className="cloud-vps-panel__heading">
-              <h2>Creating Agent Computer</h2>
+              <h2>
+                {progressStage === 'connected'
+                  ? 'Agent Computer connected'
+                  : progressStage === 'failed'
+                    ? 'Setup failed'
+                    : 'Creating Agent Computer'}
+              </h2>
               <p>
                 {progressStage === 'connected'
                   ? 'Your Agent Computer is connected.'
-                  : 'This takes a few minutes on a new box — you can leave this open.'}
+                  : progressStage === 'failed'
+                    // mark_vps_provision_failed tears the provider resource
+                    // down itself on every failure path, so nothing is left
+                    // billing in the normal case. "Delete server" stays as
+                    // the retry for when that cleanup itself failed.
+                    ? 'Nothing is still running — a failed server is torn down automatically. Use Delete server if your provider still shows one.'
+                    : 'This runs on our servers, not in this window — close it whenever you like. Setup keeps going and you’ll be notified when it’s ready.'}
               </p>
             </div>
             <div className="cloud-vps-progress" aria-live="polite">
               {PROGRESS_STEPS.map((item) => {
-                const isDone = progressStepDone(item.id, progressStage) || (item.id === 'connected' && progressStage === 'connected');
-                const isActive = progressStepActive(item.id, progressStage) && progressStage !== 'failed' && progressStage !== 'connected';
+                // On failure the list used to grey out wholesale, losing the
+                // one thing worth knowing: how far it actually got. failedAt
+                // comes from the record's own install_phase, so the steps
+                // that really completed stay ticked and the step that died
+                // is marked — see failureStageOf.
+                const isFailedStep = failedAt === item.id;
+                const isDone = failedAt
+                  ? progressRank(item.id) < progressRank(failedAt)
+                  : progressStepDone(item.id, progressStage) || (item.id === 'connected' && progressStage === 'connected');
+                const isActive =
+                  !failedAt && progressStepActive(item.id, progressStage) && progressStage !== 'connected';
                 return (
                   <div
                     key={item.id}
                     className={joinClassNames(
                       'cloud-vps-progress__item',
-                      progressStepActive(item.id, progressStage) && 'is-active',
-                      progressStepDone(item.id, progressStage) && 'is-done',
-                      progressStage === 'failed' && 'is-failed',
+                      isActive && 'is-active',
+                      isDone && 'is-done',
+                      isFailedStep && 'is-failed',
                     )}
                   >
                     <span className="cloud-vps-progress__dot">
                       {isDone ? (
                         <Check size={12} strokeWidth={2.4} aria-hidden="true" />
+                      ) : isFailedStep ? (
+                        <X size={12} strokeWidth={2.4} aria-hidden="true" />
                       ) : isActive ? (
                         <span className="cloud-vps-progress__spin" aria-hidden="true" />
                       ) : null}
@@ -1786,26 +1813,50 @@ export function CloudVpsSetupPanel({
               })}
             </div>
             {progressStage !== 'connected' && progressStage !== 'failed' ? (
+              // Honest, and adaptive. The old line promised "Usually 2-4
+              // minutes" — real builds run 2-10, so it started lying about
+              // 90 seconds in. Past the top of that range it says so rather
+              // than repeating a number the user can already see is wrong.
+              // The leading phrase is the box's own reported install phase
+              // (install_phase, MAN-121) when there is one, so a long step
+              // says WHAT is slow, not just that something is.
               <p className="cloud-vps-progress__meta" aria-live="polite">
                 {timedOut
-                  ? 'Still finishing in the background — a fresh box can take a few minutes on a slow network. You can close this; it’ll appear on the Hardware page once it connects.'
-                  : `Setting up your server… ${Math.floor(elapsedSec / 60)}:${String(elapsedSec % 60).padStart(2, '0')} elapsed. Usually 2–4 minutes.`}
+                  ? 'Still finishing in the background — we stopped checking after 30 minutes. It will appear in your hardware list once it connects.'
+                  : elapsedSec * 1000 >= VPS_PROVISION_SLOW_AFTER_MS
+                    ? `${watch ? vpsProvisionStageLabel(watch) : 'Setting up your server'} · ${formatElapsed(elapsedSec)} elapsed — longer than usual, still working.`
+                    : `${watch ? vpsProvisionStageLabel(watch) : 'Setting up your server'} · ${formatElapsed(elapsedSec)} elapsed. Most servers take 2–10 minutes.`}
               </p>
             ) : null}
             {providerResourceId ? <p className="cloud-vps-panel__note">{`Provider server: ${providerResourceId}`}</p> : null}
+            {progressError ? <p className="cloud-vps-panel__error">{progressError}</p> : null}
+            {/* On this step `error` only ever carries a "couldn't delete the
+                server" message — a real failure, so it reads red too. */}
             {error ? <p className="cloud-vps-panel__error">{error}</p> : null}
-            {progressStage === 'failed' || timedOut ? (
-              <div className="cloud-vps-panel__footer">
-                {timedOut ? (
-                  <AppButton tone="secondary" type="button" onClick={() => onClose()}>
-                    Close and check later
+            <div className="cloud-vps-panel__footer">
+              {progressStage === 'failed' ? (
+                <>
+                  <AppButton
+                    tone="secondary"
+                    type="button"
+                    onClick={() => void deleteFailedServer()}
+                    disabled={!watch?.vpsId || cleanupBusy}
+                  >
+                    {cleanupBusy ? 'Deleting server' : 'Delete server'}
                   </AppButton>
-                ) : null}
-                <AppButton tone="secondary" type="button" onClick={() => void deleteFailedServer()} disabled={!vpsId || cleanupBusy}>
-                  {cleanupBusy ? 'Deleting server' : 'Delete server'}
+                  <AppButton tone="primary" type="button" onClick={() => onClose()}>
+                    Close
+                  </AppButton>
+                </>
+              ) : progressStage !== 'connected' ? (
+                // The whole point of this rebuild: a first-class way out that
+                // leaves the build running. Same action as the X and the
+                // scrim, named so there is no doubt about what it does.
+                <AppButton tone="secondary" type="button" onClick={() => onClose()}>
+                  Run in background
                 </AppButton>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
           </section>
         ) : null}
       </section>

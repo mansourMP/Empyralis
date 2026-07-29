@@ -25772,6 +25772,9 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
 .cloud-vps-panel__footer {
   display: flex;
   justify-content: flex-end;
+  /* The progress step's failure footer pairs "Delete server" with "Close";
+     without this they sat flush against each other. */
+  gap: var(--app-space-2, 8px);
 }
 
 .cloud-vps-panel__error {
@@ -25823,6 +25826,17 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
 .cloud-vps-progress__item.is-done .cloud-vps-progress__dot {
   border-color: var(--app-success);
   background: color-mix(in srgb, var(--app-success) 14%, transparent);
+}
+
+/* The one step a failed build died on. Only this row is marked — the steps
+   before it stay ticked, so the list still says how far it got. */
+.cloud-vps-progress__item.is-failed {
+  color: var(--app-danger);
+}
+
+.cloud-vps-progress__item.is-failed .cloud-vps-progress__dot {
+  border-color: var(--app-danger);
+  background: color-mix(in srgb, var(--app-danger) 14%, transparent);
 }
 
 /* Rotating ring inside the active step's dot — the primary "it's moving"

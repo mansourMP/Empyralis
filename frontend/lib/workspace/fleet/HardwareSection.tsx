@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { Cpu, MemoryStick, MoreHorizontal, Server, Terminal } from "lucide-react";
+import { Cpu, Loader2, MemoryStick, MoreHorizontal, Server, Terminal, TriangleAlert } from "lucide-react";
 
 import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -37,6 +37,14 @@ import {
   type VpsProviderId,
 } from "@/lib/workspace/cloud-vps-setup-panel";
 import { SshServerConnectPanel } from "@/lib/workspace/ssh-server-connect-panel";
+import {
+  clearVpsProvisionWatch,
+  formatElapsed,
+  useElapsedSeconds,
+  useVpsProvisionWatch,
+  vpsProvisionStageLabel,
+  type VpsProvisionWatch,
+} from "@/lib/workspace/fleet/vps-provision-watch";
 
 // Reuse the real gateway shape (gateway-box-picker.tsx's FleetGateway) instead
 // of a hand-trimmed local type — the enrichment below needs hardware_provider/
@@ -182,6 +190,14 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
   const [vpsPanelOpen, setVpsPanelOpen] = useState(false);
   const [vpsInitialProvider, setVpsInitialProvider] = useState<VpsProviderId | null>(null);
   const [vpsOAuthResumePayload, setVpsOAuthResumePayload] = useState<VpsOAuthResumePayload | null>(null);
+  // True when the setup modal is being re-opened onto an already-running
+  // build (from the pending row below) rather than started fresh — nothing
+  // is re-provisioned, it just shows the same step list again.
+  const [vpsResumeProgress, setVpsResumeProgress] = useState(false);
+  // The cloud server currently being built, if any. Owned by
+  // vps-provision-watch.ts, NOT by the setup modal, which is what lets the
+  // modal be dismissed while the build carries on server-side.
+  const provisionWatch = useVpsProvisionWatch(workspaceId);
   const [sshPanelOpen, setSshPanelOpen] = useState(false);
   const [showManualPairing, setShowManualPairing] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -266,8 +282,31 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
 
   const openProviderPanel = (providerId: VpsProviderId) => {
     setVpsInitialProvider(providerId);
+    setVpsResumeProgress(false);
     setVpsPanelOpen(true);
   };
+
+  // Re-open the detailed step list for the build already in flight. Distinct
+  // from openProviderPanel: no wizard reset, no new provision.
+  const openProvisionProgress = () => {
+    setVpsInitialProvider(null);
+    setVpsResumeProgress(true);
+    setVpsPanelOpen(true);
+  };
+
+  // A background build finished — pull the list so the new box appears (or,
+  // on failure, so a half-created row doesn't linger). Runs whether or not
+  // the setup modal was open when it landed; the modal's own onConnected
+  // does the same thing and loadRegistrations dedups overlapping calls.
+  const watchStage = provisionWatch?.stage;
+  const watchVpsId = provisionWatch?.vpsId;
+  const settledWatchRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!watchVpsId || (watchStage !== "connected" && watchStage !== "failed")) return;
+    if (settledWatchRef.current === watchVpsId) return;
+    settledWatchRef.current = watchVpsId;
+    void loadRegistrations();
+  }, [watchStage, watchVpsId, loadRegistrations]);
 
   // Removing a device revokes it — the machine has to be paired from
   // scratch afterward, no undo. The X on the row only opens the confirm
@@ -341,6 +380,12 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
 
   const cloudServers = regs.filter((r) => r.hardware_kind === "cloud_vps");
   const devices = regs.filter((r) => r.hardware_kind !== "cloud_vps");
+
+  // A connected build needs no pending row — the server itself is in the
+  // list below by then, and the notification announces it. Anything else
+  // (still running, failed, or we stopped checking) stays visible until the
+  // user has actually dealt with it.
+  const pendingProvision = provisionWatch && provisionWatch.stage !== "connected" ? provisionWatch : null;
 
   // agent.preferred_gateway_id -> count of agents pinned to that box — the
   // same binding the machine detail page filters on (boundAgents there).
@@ -511,6 +556,26 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
             </button>
           </div>
 
+          {/* The build in flight (or the one that just failed) — the whole
+              point of letting the modal be dismissed. Sits above the real
+              list, in the same row language, and is the way back into the
+              detailed step view. Renders on BOTH mounts of this section
+              (Settings and /hardware) because it lives in this component. */}
+          {pendingProvision ? (
+            <>
+              <div className="fleet-hw-group-title">
+                {pendingProvision.stage === "failed" ? "Needs attention" : "Setting up"}
+              </div>
+              <div className="fleet-list">
+                <ProvisionPendingRow
+                  watch={pendingProvision}
+                  onOpenDetails={openProvisionProgress}
+                  onDismiss={() => clearVpsProvisionWatch(workspaceId)}
+                />
+              </div>
+            </>
+          ) : null}
+
           {loading ? (
             <div className="fleet-list" style={{ marginTop: "var(--space-4)" }}>
               <div className="fleet-list-row">
@@ -519,7 +584,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
             </div>
           ) : error ? (
             <div className="fleet-page-state-body">{error}</div>
-          ) : regs.length === 0 ? (
+          ) : regs.length === 0 && !pendingProvision ? (
             <div className="fleet-empty">
               <div className="fleet-empty-icon">
                 <Server size={20} strokeWidth={1.75} />
@@ -563,10 +628,18 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
         initialProviderId={vpsInitialProvider}
         initialOAuthResult={vpsOAuthResumePayload}
         returnTo={vpsOAuthReturnTo}
+        resumeProgress={vpsResumeProgress}
         onOAuthResultConsumed={() => setVpsOAuthResumePayload(null)}
-        onClose={() => setVpsPanelOpen(false)}
+        onClose={() => {
+          // Closing the setup modal never cancels a build — provisioning is a
+          // server-side background task and this modal is only a viewer of it
+          // (see vps-provision-watch.ts). The pending row above takes over.
+          setVpsPanelOpen(false);
+          setVpsResumeProgress(false);
+        }}
         onConnected={async () => {
           setVpsPanelOpen(false);
+          setVpsResumeProgress(false);
           await loadRegistrations();
         }}
       />
@@ -603,6 +676,11 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
         onCancel={() => setPendingDelete(null)}
       />
 
+      {/* The provisioning result notification is NOT rendered here — it lives
+          in FleetShell (CloudProvisionNotifier) so it reaches the user
+          wherever they are in the workspace while a background build
+          finishes. Only one PlatformNotification can occupy the top-right
+          viewport at a time, so duplicating it here would collide with it. */}
       {disconnectNotice ? (
         <PlatformNotification
           tone="success"
@@ -612,6 +690,62 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
         />
       ) : null}
     </>
+  );
+}
+
+// The low-key persistent indicator for a build that is running (or has
+// failed) with the setup modal dismissed. Deliberately the SAME row language
+// as a real machine row — .fleet-list-row--hw, TintTile, StatusChip — so it
+// reads as "a computer that isn't ready yet" rather than as a new kind of
+// widget. The spinner reuses .fleet-work-activity-spin, the fleet's existing
+// indeterminate spinner (WorkTab.tsx), so no new animation was introduced.
+function ProvisionPendingRow({
+  watch,
+  onOpenDetails,
+  onDismiss,
+}: {
+  watch: VpsProvisionWatch;
+  onOpenDetails: () => void;
+  onDismiss: () => void;
+}) {
+  const failed = watch.stage === "failed";
+  // Only ticks while something is actually running.
+  const elapsed = useElapsedSeconds(watch.startedAt, !failed);
+  const specLine = [watch.planLabel, watch.regionLabel].filter(Boolean).join(" · ");
+  return (
+    <div className="fleet-list-row fleet-list-row--hw">
+      <TintTile tint={failed ? "rose" : "blue"}>
+        {failed ? (
+          <TriangleAlert size={15} strokeWidth={1.75} />
+        ) : (
+          <Loader2 size={15} strokeWidth={1.75} className="fleet-work-activity-spin" />
+        )}
+      </TintTile>
+      <span className="fleet-list-row-main">
+        <span className="fleet-list-row-title">
+          {failed ? `${watch.providerLabel} server — setup failed` : `Setting up ${watch.providerLabel} server`}
+        </span>
+        {specLine ? <span className="fleet-hw-list-type">{specLine}</span> : null}
+        <span className="fleet-list-row-desc" style={{ whiteSpace: "normal" }}>
+          {failed
+            ? watch.error || "Setup did not complete."
+            : watch.pollStopped
+              ? "Still finishing in the background — it will appear here once it connects."
+              : `${vpsProvisionStageLabel(watch)} · ${formatElapsed(elapsed)} elapsed`}
+        </span>
+      </span>
+      <span className="fleet-list-row-meta" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+        <StatusChip tone={failed ? "error" : "working"} label={failed ? "Failed" : "Setting up"} />
+        <button type="button" className="fleet-btn" onClick={onOpenDetails}>
+          {failed ? "See details" : "View setup"}
+        </button>
+        {failed ? (
+          <button type="button" className="fleet-btn" onClick={onDismiss}>
+            Dismiss
+          </button>
+        ) : null}
+      </span>
+    </div>
   );
 }
 
