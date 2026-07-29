@@ -2221,7 +2221,7 @@ async def provision_hardware_vps(
     # lifecycle below (run_vps_provisioning_lifecycle) replaces this same
     # record with the real provider_resource_id/public_ip once the droplet
     # actually exists, and is the only thing that ever gets to fail it.
-    vps_provisioning_service.record_vps_provision(
+    await vps_provisioning_service.record_vps_provision(
         vps_id=vps_id,
         workspace_id=workspace_id,
         tenant_id=tenant_id,
@@ -2314,7 +2314,7 @@ async def get_hardware_vps_status(
     current_user=Depends(require_api_key),
 ):
     try:
-        record = vps_provisioning_service.load_vps_record(vps_id)
+        record = await vps_provisioning_service.load_vps_record(vps_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="VPS provisioning record was not found.") from exc
     workspace_id = enforce_workspace_access(
@@ -2325,7 +2325,7 @@ async def get_hardware_vps_status(
     if workspace_id != str(record.get("workspace_id") or "").strip():
         raise HTTPException(status_code=404, detail="VPS provisioning record was not found.")
     try:
-        status_record = vps_provisioning_service.get_vps_provision_status(vps_id)
+        status_record = await vps_provisioning_service.get_vps_provision_status(vps_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="VPS provisioning record was not found.") from exc
     return {
@@ -2351,7 +2351,7 @@ async def delete_hardware_vps(
     current_user=Depends(require_api_key),
 ):
     try:
-        record = vps_provisioning_service.load_vps_record(vps_id)
+        record = await vps_provisioning_service.load_vps_record(vps_id)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="VPS provisioning record was not found.") from exc
     workspace_id = enforce_workspace_access(
@@ -2362,7 +2362,7 @@ async def delete_hardware_vps(
     if workspace_id != str(record.get("workspace_id") or "").strip():
         raise HTTPException(status_code=404, detail="VPS provisioning record was not found.")
     try:
-        deleted_record = vps_provisioning_service.delete_recorded_vps(vps_id)
+        deleted_record = await vps_provisioning_service.delete_recorded_vps(vps_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="VPS provisioning record was not found.") from exc
     except vps_provisioning_service.VPSProvisioningError as exc:
@@ -2413,7 +2413,7 @@ async def report_gateway_provisioning_event(body: GatewayProvisioningEventReques
     beacon, only annotated onto an existing provisioning record.
     """
     try:
-        record = vps_provisioning_service.record_vps_install_event(
+        record = await vps_provisioning_service.record_vps_install_event(
             pairing_token=body.pairing_token,
             phase=body.phase,
             message=body.message,

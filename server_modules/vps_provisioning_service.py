@@ -17,7 +17,8 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from server_modules import gateway_state_repository, vault_store
+from server_modules import agent_computers_repository, gateway_state_repository, vault_store
+from server_modules import db as runtime_db
 from server_modules.runtime_config import EMPYRALIS_STATE_HOME
 
 # AWS has no OAuth and no pastable API token — see PROVIDER_CONFIGS["aws"]
@@ -204,6 +205,13 @@ PUBLIC_API_URL = (
     or os.getenv("NEXT_PUBLIC_API_URL")
     or "https://empyralis.ai/api"
 ).rstrip("/")
+# The legacy local state file. As of MAN-130 the `vps` bucket in here is NO
+# LONGER the system of record for provisioned agent computers whenever Postgres
+# is configured — agent_computers_repository is, and this file's records are
+# lifted into it once (see _ensure_legacy_records_imported), after which the
+# bucket is read-only legacy that is never deleted. The other buckets (tokens,
+# oauth_states, oauth_results, google_setup_sessions, aws_pending) are untouched
+# by MAN-130 and still live here.
 VPS_STATE_FILE = Path(
     os.getenv(
         "EMPYRALIS_VPS_PROVISIONING_STATE_FILE",
@@ -288,6 +296,15 @@ class VPSProvisioningError(RuntimeError):
         # it has already been popped by the time they run. Empty means "no
         # recorded origin" — callers fall back to the Hardware page.
         self.return_to = normalize_oauth_return_path(return_to)
+
+
+class VPSStateCorruptError(RuntimeError):
+    """The legacy JSON state file exists but could not be parsed (MAN-130).
+
+    Raised instead of quietly returning an empty state, which is how a single
+    truncated file used to erase the entire fleet — and then persist that
+    emptiness on the next write. See _load_state.
+    """
 
 
 # Hard cap on a stored return path. Long enough for any real in-app route plus
@@ -1744,6 +1761,15 @@ async def run_vps_provisioning_lifecycle(
     request AFTER the droplet was already created provider-side — orphaning
     it with no vps_id ever reaching the client to poll or delete it by.
 
+    The record functions below (record_vps_provision, get_vps_provision_status,
+    mark_vps_provision_failed, load_vps_record) are awaited directly rather than
+    thread-offloaded. Their to_thread wrappers only ever existed to keep the
+    JSON state file's blocking I/O off the event loop; since MAN-130 those
+    records live in Postgres over asyncpg, and awaiting inside a worker thread
+    is impossible. The provider calls (provision_vps, and the delete inside
+    mark_vps_provision_failed) are still blocking urllib/boto3 and are still
+    thread-offloaded.
+
     Cleanup contract: the moment provision_vps() returns successfully, its
     provider_resource_id is persisted (record_vps_provision) before
     anything else in this function can fail — so every failure branch after
@@ -1773,8 +1799,7 @@ async def run_vps_provisioning_lifecycle(
                 provider,
                 exc,
             )
-            await asyncio.to_thread(
-                mark_vps_provision_failed,
+            await mark_vps_provision_failed(
                 vps_id,
                 reason=str(exc) or "Provisioning failed.",
                 attempt_cleanup=False,
@@ -1782,8 +1807,7 @@ async def run_vps_provisioning_lifecycle(
             return
 
         try:
-            await asyncio.to_thread(
-                record_vps_provision,
+            await record_vps_provision(
                 vps_id=vps_id,
                 workspace_id=workspace_id,
                 tenant_id=tenant_id,
@@ -1833,7 +1857,7 @@ async def run_vps_provisioning_lifecycle(
         while time.monotonic() < deadline:
             await asyncio.sleep(VPS_CONNECT_POLL_INTERVAL_SECONDS)
             try:
-                status_record = await asyncio.to_thread(get_vps_provision_status, vps_id)
+                status_record = await get_vps_provision_status(vps_id)
             except KeyError:
                 # Record vanished — e.g. the user deleted it out from under
                 # this task via DELETE /hardware/vps/{vps_id} while it was
@@ -1853,8 +1877,7 @@ async def run_vps_provisioning_lifecycle(
                 # nothing actionable.
                 reported = str(status_record.get("install_error") or "").strip()
                 phase = str(status_record.get("install_phase") or "").strip()
-                await asyncio.to_thread(
-                    mark_vps_provision_failed,
+                await mark_vps_provision_failed(
                     vps_id,
                     reason=(
                         f"The agent computer failed during setup ({phase}): {reported}"
@@ -1872,15 +1895,14 @@ async def run_vps_provisioning_lifecycle(
         # advisory beacon (e.g. "the gateway had not registered 10 minutes in")
         # turns an opaque timeout into something a human can act on.
         try:
-            last_record = await asyncio.to_thread(load_vps_record, vps_id)
+            last_record = await load_vps_record(vps_id)
         except Exception:  # noqa: BLE001 - diagnostics only; never block the failure write
             last_record = {}
         reported = str((last_record or {}).get("install_error") or "").strip()
         if reported:
             phase = str((last_record or {}).get("install_phase") or "install").strip()
             timeout_reason = f"{timeout_reason} Last report from the server ({phase}): {reported}"
-        await asyncio.to_thread(
-            mark_vps_provision_failed,
+        await mark_vps_provision_failed(
             vps_id,
             reason=timeout_reason,
         )
@@ -1888,7 +1910,152 @@ async def run_vps_provisioning_lifecycle(
         _LOGGER.exception("vps provisioning background lifecycle crashed unexpectedly vps_id=%s", vps_id)
 
 
-def record_vps_provision(
+# ---------------------------------------------------------------------------
+# Where a provisioned agent computer's record actually lives (MAN-130)
+# ---------------------------------------------------------------------------
+#
+# Postgres (agent_computers_repository), with the legacy JSON file below as a
+# local-development-only fallback. The record functions below are async purely
+# because of this: asyncpg is async, and the same functions are called from both
+# routes_gateway's async handlers and run_vps_provisioning_lifecycle. The
+# asyncio.to_thread hops the lifecycle used to wrap them in existed only to keep
+# blocking file I/O off the event loop and are gone — you cannot await inside a
+# worker thread, so keeping them would have been actively wrong.
+
+_LEGACY_RECORD_IMPORT_DONE = False
+
+_DURABLE_RECORDS_REQUIRED_MESSAGE = (
+    "Postgres is required to store provisioned agent computer (VPS) records; DATABASE_URL is not "
+    "configured or Postgres is unreachable. Refusing to fall back to the local JSON state file, "
+    "which cannot be shared between workers and would lose records."
+)
+
+
+def _legacy_vps_records() -> Dict[str, Any]:
+    """The legacy JSON file's `vps` bucket, read-only.
+
+    Only two things read this now: the one-time import into Postgres, and the
+    local-dev fallback path when no Postgres is configured. A corrupt file is
+    logged and treated as "nothing to import" here specifically — refusing to
+    start up over an unreadable *legacy* file would be worse than skipping it,
+    and the records that matter are already in Postgres by then.
+    """
+    try:
+        with _STATE_LOCK:
+            state = _load_state()
+    except VPSStateCorruptError:
+        _LOGGER.exception(
+            "vps provisioning could not read the legacy state file at %s; skipping the legacy "
+            "record import (records already in Postgres are unaffected)",
+            VPS_STATE_FILE,
+        )
+        return {}
+    bucket = state.get("vps")
+    return dict(bucket) if isinstance(bucket, dict) else {}
+
+
+async def _ensure_legacy_records_imported() -> None:
+    """Lift any records still sitting in the legacy JSON file into Postgres.
+
+    Runs at most once per process, and is idempotent across processes because
+    the insert is ON CONFLICT (vps_id) DO NOTHING — an already-imported record
+    is never duplicated, and never overwritten with the JSON file's stale copy.
+    The JSON file is deliberately left in place: it stays as a read-only
+    fallback/audit trail rather than being deleted out from under an operator.
+    """
+    global _LEGACY_RECORD_IMPORT_DONE
+    if _LEGACY_RECORD_IMPORT_DONE:
+        return
+    records = _legacy_vps_records()
+    if not records:
+        _LEGACY_RECORD_IMPORT_DONE = True
+        return
+    try:
+        imported = await agent_computers_repository.import_legacy_records(records.values())
+    except Exception:  # noqa: BLE001 - a transient DB blip must be retryable, not latched
+        _LOGGER.exception(
+            "vps provisioning could not import %s legacy records from %s into Postgres; will retry",
+            len(records),
+            VPS_STATE_FILE,
+        )
+        return
+    _LEGACY_RECORD_IMPORT_DONE = True
+    if imported:
+        _LOGGER.warning(
+            "vps provisioning imported %s legacy record(s) from %s into Postgres (agent_computers); "
+            "the file is now read-only legacy and was not modified",
+            imported,
+            VPS_STATE_FILE,
+        )
+
+
+async def _durable_records_backend() -> bool:
+    """True when VPS records read/write Postgres.
+
+    False means "no Postgres here, use the legacy JSON file" — which is only
+    ever allowed outside a deployment that requires durable state. Wherever
+    db.durable_runtime_required() holds (beta/staging/production, or an explicit
+    ORION_REQUIRE_DURABLE_RUN_STATE), a missing pool raises instead, matching
+    how bug_report_service / project_tasks_service / projects_repository refuse
+    to pretend a write landed.
+    """
+    pool = await agent_computers_repository.ensure_ready()
+    if pool is not None:
+        await _ensure_legacy_records_imported()
+        return True
+    if runtime_db.durable_runtime_required():
+        raise runtime_db.DurableRuntimeConfigurationError(_DURABLE_RECORDS_REQUIRED_MESSAGE)
+    return False
+
+
+async def list_workspace_vps(*, workspace_id: str, tenant_id: str = "default") -> list[Dict[str, Any]]:
+    """Every agent computer recorded for one workspace, newest first.
+
+    This query simply did not exist before MAN-130 — the JSON store was a single
+    global bucket with no index of any kind.
+    """
+    clean_workspace = str(workspace_id or "").strip()
+    clean_tenant = str(tenant_id or "").strip() or "default"
+    if not clean_workspace:
+        return []
+    if await _durable_records_backend():
+        records = await agent_computers_repository.list_workspace_vps(clean_tenant, clean_workspace)
+    else:
+        records = [
+            dict(record)
+            for record in _legacy_vps_records().values()
+            if isinstance(record, Mapping)
+            and str(record.get("workspace_id") or "").strip() == clean_workspace
+            and (str(record.get("tenant_id") or "").strip() or "default") == clean_tenant
+        ]
+        records.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return [_public_record(record) for record in records]
+
+
+async def count_active_workspace_vps(*, workspace_id: str, tenant_id: str = "default") -> int:
+    """How many machines this workspace currently has standing — the number the
+    per-workspace quota gate (MAN-132) compares against its limit. Active is
+    everything that is not terminal; see
+    agent_computers_repository.ACTIVE_VPS_STATUSES.
+    """
+    clean_workspace = str(workspace_id or "").strip()
+    clean_tenant = str(tenant_id or "").strip() or "default"
+    if not clean_workspace:
+        return 0
+    if await _durable_records_backend():
+        return await agent_computers_repository.count_active_workspace_vps(clean_tenant, clean_workspace)
+    active = set(agent_computers_repository.ACTIVE_VPS_STATUSES)
+    return sum(
+        1
+        for record in _legacy_vps_records().values()
+        if isinstance(record, Mapping)
+        and str(record.get("workspace_id") or "").strip() == clean_workspace
+        and (str(record.get("tenant_id") or "").strip() or "default") == clean_tenant
+        and _normalize_status(str(record.get("status") or "")) in active
+    )
+
+
+async def record_vps_provision(
     *,
     vps_id: str,
     workspace_id: str,
@@ -1924,6 +2091,12 @@ def record_vps_provision(
         "created_at": now,
         "updated_at": now,
     }
+    if await _durable_records_backend():
+        # Whole-row replace, exactly like the JSON store's
+        # `state["vps"][vps_id] = record` — run_vps_provisioning_lifecycle
+        # relies on it to overwrite the placeholder with the real result.
+        stored = await agent_computers_repository.upsert_vps_record(record)
+        return _public_record(stored)
     with _STATE_LOCK:
         state = _load_state()
         state.setdefault("vps", {})[record["vps_id"]] = record
@@ -1931,8 +2104,24 @@ def record_vps_provision(
     return _public_record(record)
 
 
-def get_vps_provision_status(vps_id: str) -> Dict[str, Any]:
+async def get_vps_provision_status(vps_id: str) -> Dict[str, Any]:
     clean_vps_id = _clean_identifier(vps_id, field_name="vps_id")
+    if await _durable_records_backend():
+        record = await agent_computers_repository.get_vps_record(clean_vps_id)
+        if not record:
+            raise KeyError(clean_vps_id)
+        next_status = _resolved_record_status(record)
+        if next_status != record.get("status"):
+            # A targeted UPDATE rather than a read-modify-write of the whole
+            # row: this is the one write several workers race on, and the JSON
+            # store's whole-blob rewrite is precisely how they used to clobber
+            # each other.
+            updated = await agent_computers_repository.update_vps_record(
+                clean_vps_id, status=next_status, updated_at=_utc_now_iso()
+            )
+            if updated:
+                record = updated
+        return _public_record(record)
     with _STATE_LOCK:
         state = _load_state()
         record = dict((state.get("vps") or {}).get(clean_vps_id) or {})
@@ -1951,7 +2140,35 @@ INSTALL_BEACON_MAX_MESSAGE_CHARS = 500
 INSTALL_BEACON_MAX_PHASE_CHARS = 64
 
 
-def record_vps_install_event(
+def _match_record_by_pairing_token(
+    candidates: Iterable[tuple[str, Mapping[str, Any]]], token: str
+) -> Optional[str]:
+    """The id of the record whose stored pairing token matches `token`.
+
+    The token is only ever stored encrypted, so there is no predicate to push
+    into SQL (or into a dict lookup): candidates are decrypted one at a time and
+    compared in constant time, exactly as the JSON scan did. One unreadable
+    record is logged and skipped so it cannot hide the others.
+    """
+    for candidate_id, candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        if str(candidate.get("status") or "") in {"deleted"}:
+            continue
+        try:
+            candidate_token = _decrypt_pairing_token(str(candidate.get("pairing_token_ciphertext") or ""))
+        except Exception:  # noqa: BLE001 - one unreadable record must not hide the others
+            _LOGGER.warning(
+                "vps install beacon could not decrypt the pairing token on record vps_id=%s; skipping it",
+                candidate_id,
+            )
+            continue
+        if candidate_token and secrets.compare_digest(candidate_token, token):
+            return str(candidate_id)
+    return None
+
+
+async def record_vps_install_event(
     *,
     pairing_token: str,
     phase: str,
@@ -1986,42 +2203,56 @@ def record_vps_install_event(
     clean_message = " ".join(str(message or "").split())[:INSTALL_BEACON_MAX_MESSAGE_CHARS]
     if not clean_message:
         clean_message = f"The agent computer reported a problem during the '{clean_phase}' step."
+    reported_at = _utc_now_iso()
+    annotations: Dict[str, Any] = {
+        "install_phase": clean_phase,
+        "install_error": clean_message,
+        "install_terminal": bool(terminal),
+        "install_reported_at": reported_at,
+    }
+    if terminal:
+        # `error` is the field the setup panel renders on a failed record
+        # (cloud-vps-setup-panel.tsx -> friendlyProvisionFailureMessage).
+        # Fill it here as well as on the record's install_* fields, so the
+        # reason is visible on the very next status poll rather than only
+        # after the background lifecycle's next 15s tick calls
+        # mark_vps_provision_failed.
+        annotations["error"] = f"The agent computer failed during setup ({clean_phase}): {clean_message}"[:500]
+
+    if await _durable_records_backend():
+        candidates = await agent_computers_repository.list_records_for_pairing_scan()
+        matched_id = _match_record_by_pairing_token(
+            ((str(candidate.get("vps_id") or ""), candidate) for candidate in candidates), token
+        )
+        if matched_id is None:
+            _LOGGER.info("vps install beacon phase=%s did not match any provisioning record; discarded", clean_phase)
+            return None
+        record = await agent_computers_repository.update_vps_record(
+            matched_id, metadata_updates=annotations, updated_at=reported_at
+        )
+        if record is None:
+            # Deleted between the scan and the write — nothing to annotate.
+            _LOGGER.info("vps install beacon phase=%s lost its record mid-write; discarded", clean_phase)
+            return None
+        _LOGGER.error(
+            "vps install beacon vps_id=%s provider=%s phase=%s terminal=%s: %s",
+            matched_id,
+            record.get("provider"),
+            clean_phase,
+            bool(terminal),
+            clean_message,
+        )
+        return _public_record(record)
+
     with _STATE_LOCK:
         state = _load_state()
-        matched_id: Optional[str] = None
-        for candidate_id, candidate in (state.get("vps") or {}).items():
-            if not isinstance(candidate, Mapping):
-                continue
-            if str(candidate.get("status") or "") in {"deleted"}:
-                continue
-            try:
-                candidate_token = _decrypt_pairing_token(str(candidate.get("pairing_token_ciphertext") or ""))
-            except Exception:  # noqa: BLE001 - one unreadable record must not hide the others
-                _LOGGER.warning(
-                    "vps install beacon could not decrypt the pairing token on record vps_id=%s; skipping it",
-                    candidate_id,
-                )
-                continue
-            if candidate_token and secrets.compare_digest(candidate_token, token):
-                matched_id = str(candidate_id)
-                break
+        matched_id = _match_record_by_pairing_token((state.get("vps") or {}).items(), token)
         if matched_id is None:
             _LOGGER.info("vps install beacon phase=%s did not match any provisioning record; discarded", clean_phase)
             return None
         record = dict((state.get("vps") or {})[matched_id])
-        record["install_phase"] = clean_phase
-        record["install_error"] = clean_message
-        record["install_terminal"] = bool(terminal)
-        record["install_reported_at"] = _utc_now_iso()
-        record["updated_at"] = record["install_reported_at"]
-        if terminal:
-            # `error` is the field the setup panel renders on a failed record
-            # (cloud-vps-setup-panel.tsx -> friendlyProvisionFailureMessage).
-            # Fill it here as well as on the record's install_* fields, so the
-            # reason is visible on the very next status poll rather than only
-            # after the background lifecycle's next 15s tick calls
-            # mark_vps_provision_failed.
-            record["error"] = f"The agent computer failed during setup ({clean_phase}): {clean_message}"[:500]
+        record.update(annotations)
+        record["updated_at"] = reported_at
         state.setdefault("vps", {})[matched_id] = record
         _write_state(state)
     _LOGGER.error(
@@ -2035,7 +2266,11 @@ def record_vps_install_event(
     return _public_record(record)
 
 
-def _destroy_vps_provider_resource(clean_vps_id: str, record: Mapping[str, Any]) -> None:
+def _destroy_vps_provider_resource(
+    clean_vps_id: str,
+    record: Mapping[str, Any],
+    credential_sink: Optional[Dict[str, Any]] = None,
+) -> None:
     """Shared provider-delete dispatch: calls whichever provider's
     delete-droplet/instance API matches record['provider'], addressing
     record['provider_resource_id'] exactly the way provision_vps's own
@@ -2049,6 +2284,15 @@ def _destroy_vps_provider_resource(clean_vps_id: str, record: Mapping[str, Any])
     fatal (delete_recorded_vps) or best-effort/logged (
     mark_vps_provision_failed — a background task has no caller to surface
     the error to).
+
+    Stays synchronous (urllib/boto3) and is called via asyncio.to_thread by its
+    now-async callers, which is why `credential_sink` exists: the DigitalOcean
+    reactive-401 refresh below runs inside that worker thread and so cannot
+    await the (now async) record write. It drops the refreshed credentials into
+    `credential_sink` instead, and the calling coroutine persists them — in a
+    `finally`, so a refresh followed by a failed delete still saves the new
+    token (DigitalOcean may rotate the refresh_token on use, so losing it would
+    strand the record's credential snapshot for good).
     """
     credentials = _decrypt_secret(str(record.get("credentials_ciphertext") or ""))
     provider_id = _normalize_provider(str(record.get("provider") or ""))
@@ -2082,25 +2326,64 @@ def _destroy_vps_provider_resource(clean_vps_id: str, record: Mapping[str, Any])
         # disconnected) original token_id.
         on_unauthorized = None
         if provider_id == "digitalocean":
-            def _reauth(_vps_id: str = clean_vps_id, _credentials: Mapping[str, Any] = credentials) -> Optional[str]:
+            def _reauth(_credentials: Mapping[str, Any] = credentials) -> Optional[str]:
                 refreshed = _refresh_digitalocean_credentials(_credentials)
                 if refreshed is None:
                     return None
-                _update_vps_record_credentials(_vps_id, refreshed)
+                if credential_sink is not None:
+                    credential_sink.clear()
+                    credential_sink.update(refreshed)
                 return str(refreshed.get("access_token") or "").strip() or None
 
             on_unauthorized = _reauth
         _delete_provider_resource(provider_id, token, resource_id, on_unauthorized=on_unauthorized)
 
 
-def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
+async def _destroy_and_persist_refreshed_credentials(
+    clean_vps_id: str, record: Mapping[str, Any]
+) -> None:
+    """_destroy_vps_provider_resource off the event loop, plus the credential
+    write its in-thread reactive-401 refresh could not do itself. The provider
+    call stays on a worker thread exactly as it did when the whole record
+    function was wrapped in asyncio.to_thread; only the record write moved out.
+    """
+    credential_sink: Dict[str, Any] = {}
+    try:
+        await asyncio.to_thread(_destroy_vps_provider_resource, clean_vps_id, record, credential_sink)
+    finally:
+        if credential_sink:
+            try:
+                await _update_vps_record_credentials(clean_vps_id, dict(credential_sink))
+            except Exception:  # noqa: BLE001 - never mask the delete's own outcome
+                _LOGGER.exception(
+                    "vps provisioning could not persist the refreshed provider credential for vps_id=%s",
+                    clean_vps_id,
+                )
+
+
+async def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
     clean_vps_id = _clean_identifier(vps_id, field_name="vps_id")
-    with _STATE_LOCK:
-        state = _load_state()
-        record = dict((state.get("vps") or {}).get(clean_vps_id) or {})
+    durable = await _durable_records_backend()
+    if durable:
+        record = await agent_computers_repository.get_vps_record(clean_vps_id)
         if not record:
             raise KeyError(clean_vps_id)
-    _destroy_vps_provider_resource(clean_vps_id, record)
+    else:
+        with _STATE_LOCK:
+            state = _load_state()
+            record = dict((state.get("vps") or {}).get(clean_vps_id) or {})
+            if not record:
+                raise KeyError(clean_vps_id)
+    await _destroy_and_persist_refreshed_credentials(clean_vps_id, record)
+    if durable:
+        latest = await agent_computers_repository.update_vps_record(
+            clean_vps_id, status="deleted", updated_at=_utc_now_iso()
+        )
+        if latest is None:
+            # Removed underneath us; report the state we set out to reach.
+            latest = dict(record)
+            latest["status"] = "deleted"
+        return _public_record(latest)
     with _STATE_LOCK:
         state = _load_state()
         latest = dict((state.get("vps") or {}).get(clean_vps_id) or record)
@@ -2111,7 +2394,7 @@ def delete_recorded_vps(vps_id: str) -> Dict[str, Any]:
     return _public_record(latest)
 
 
-def mark_vps_provision_failed(vps_id: str, *, reason: str, attempt_cleanup: bool = True) -> Dict[str, Any]:
+async def mark_vps_provision_failed(vps_id: str, *, reason: str, attempt_cleanup: bool = True) -> Dict[str, Any]:
     """Terminal failure path for a background provision (see
     run_vps_provisioning_lifecycle): best-effort destroys the provider
     resource if one was ever recorded, then persists status 'failed'
@@ -2130,16 +2413,22 @@ def mark_vps_provision_failed(vps_id: str, *, reason: str, attempt_cleanup: bool
     will simply try the same delete again).
     """
     clean_vps_id = _clean_identifier(vps_id, field_name="vps_id")
-    with _STATE_LOCK:
-        state = _load_state()
-        record = dict((state.get("vps") or {}).get(clean_vps_id) or {})
+    durable = await _durable_records_backend()
+    if durable:
+        record = await agent_computers_repository.get_vps_record(clean_vps_id)
         if not record:
             raise KeyError(clean_vps_id)
+    else:
+        with _STATE_LOCK:
+            state = _load_state()
+            record = dict((state.get("vps") or {}).get(clean_vps_id) or {})
+            if not record:
+                raise KeyError(clean_vps_id)
     resource_id = str(record.get("provider_resource_id") or "").strip()
     cleanup_error: Optional[str] = None
     if attempt_cleanup and resource_id and str(record.get("status") or "") not in {"deleted", "failed"}:
         try:
-            _destroy_vps_provider_resource(clean_vps_id, record)
+            await _destroy_and_persist_refreshed_credentials(clean_vps_id, record)
         except Exception as exc:  # noqa: BLE001 - best-effort cleanup, never fatal here
             cleanup_error = str(exc)[:500]
             _LOGGER.error(
@@ -2149,21 +2438,39 @@ def mark_vps_provision_failed(vps_id: str, *, reason: str, attempt_cleanup: bool
                 clean_vps_id,
                 exc,
             )
+    failure_annotations: Dict[str, Any] = {"error": str(reason or "Provisioning failed.")[:500]}
+    if cleanup_error:
+        failure_annotations["cleanup_error"] = cleanup_error
+    if durable:
+        latest = await agent_computers_repository.update_vps_record(
+            clean_vps_id,
+            status="failed",
+            metadata_updates=failure_annotations,
+            updated_at=_utc_now_iso(),
+        )
+        if latest is None:
+            latest = dict(record)
+            latest["status"] = "failed"
+            latest.update(failure_annotations)
+        return _public_record(latest)
     with _STATE_LOCK:
         state = _load_state()
         latest = dict((state.get("vps") or {}).get(clean_vps_id) or record)
         latest["status"] = "failed"
-        latest["error"] = str(reason or "Provisioning failed.")[:500]
-        if cleanup_error:
-            latest["cleanup_error"] = cleanup_error
+        latest.update(failure_annotations)
         latest["updated_at"] = _utc_now_iso()
         state.setdefault("vps", {})[clean_vps_id] = latest
         _write_state(state)
     return _public_record(latest)
 
 
-def load_vps_record(vps_id: str) -> Dict[str, Any]:
+async def load_vps_record(vps_id: str) -> Dict[str, Any]:
     clean_vps_id = _clean_identifier(vps_id, field_name="vps_id")
+    if await _durable_records_backend():
+        record = await agent_computers_repository.get_vps_record(clean_vps_id)
+        if not record:
+            raise KeyError(clean_vps_id)
+        return _public_record(record)
     with _STATE_LOCK:
         record = dict((_load_state().get("vps") or {}).get(clean_vps_id) or {})
     if not record:
@@ -2660,6 +2967,16 @@ def _resolved_record_status(record: Mapping[str, Any]) -> str:
 
 
 def _load_state() -> Dict[str, Any]:
+    """Read the legacy JSON state file.
+
+    MAN-130: a file that exists but cannot be parsed now RAISES. It used to
+    swallow every parse error and return `{"v": 1, "vps": {}}`, which meant a
+    single truncated write (or a half-flushed file after a crash) silently
+    erased every VPS record, every stored provider token, and every pending
+    OAuth state — and then the very next `_write_state` persisted that
+    emptiness, making the loss permanent and invisible. A missing file is still
+    an empty file; an unreadable one is an error the caller must see.
+    """
     if not VPS_STATE_FILE.exists():
         return {
             "v": 1,
@@ -2671,11 +2988,22 @@ def _load_state() -> Dict[str, Any]:
             "aws_pending": {},
         }
     try:
-        parsed = json.loads(VPS_STATE_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {"v": 1, "vps": {}}
+        raw = VPS_STATE_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise VPSStateCorruptError(f"{VPS_STATE_FILE} could not be read: {exc}") from exc
+    try:
+        parsed = json.loads(raw)
+    except Exception as exc:
+        raise VPSStateCorruptError(
+            f"{VPS_STATE_FILE} is not valid JSON ({exc}). Refusing to continue with an empty "
+            "state — doing so would erase every record in it on the next write. Move the file "
+            "aside to start over deliberately."
+        ) from exc
     if not isinstance(parsed, dict):
-        return {"v": 1, "vps": {}}
+        raise VPSStateCorruptError(
+            f"{VPS_STATE_FILE} does not contain a JSON object. Refusing to continue with an "
+            "empty state — doing so would erase every record in it on the next write."
+        )
     if not isinstance(parsed.get("vps"), dict):
         parsed["vps"] = {}
     if not isinstance(parsed.get("tokens"), dict):
@@ -2884,17 +3212,27 @@ def _update_stored_token_credentials(token_id: str, credentials: Mapping[str, An
         _write_state(state)
 
 
-def _update_vps_record_credentials(vps_id: str, credentials: Mapping[str, Any]) -> None:
-    """Persist a refreshed credential back into a VPS record's own snapshot
-    (state["vps"][vps_id]) — the separate, point-in-time credentials copy
-    delete_recorded_vps reads from (see record_vps_provision)."""
+async def _update_vps_record_credentials(vps_id: str, credentials: Mapping[str, Any]) -> None:
+    """Persist a refreshed credential back into a VPS record's own snapshot —
+    the separate, point-in-time credentials copy delete_recorded_vps reads from
+    (see record_vps_provision). Async since MAN-130; the one caller that cannot
+    await it (the reactive-401 refresh inside a worker thread) hands the
+    credentials back through _destroy_vps_provider_resource's credential_sink
+    instead."""
+    ciphertext = _encrypt_secret(dict(credentials))
+    now = _utc_now_iso()
+    if await _durable_records_backend():
+        await agent_computers_repository.update_vps_record(
+            vps_id, credentials_ciphertext=ciphertext, updated_at=now
+        )
+        return
     with _STATE_LOCK:
         state = _load_state()
         record = dict((state.get("vps") or {}).get(vps_id) or {})
         if not record:
             return
-        record["credentials_ciphertext"] = _encrypt_secret(dict(credentials))
-        record["updated_at"] = _utc_now_iso()
+        record["credentials_ciphertext"] = ciphertext
+        record["updated_at"] = now
         state.setdefault("vps", {})[vps_id] = record
         _write_state(state)
 
