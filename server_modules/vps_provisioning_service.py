@@ -1301,17 +1301,96 @@ def cloud_init_script(pairing_token: str, *, api_url: Optional[str] = None) -> s
     if not resolved_api_url:
         raise ValueError("api_url is required.")
     repo_token = _installer_repo_token()
-    repo_token_env = f" EMPYRALIS_REPO_TOKEN='{_shell_single_quote(repo_token)}'" if repo_token else ""
-    return "\n".join(
-        [
-            "#cloud-config",
-            "package_update: true",
-            "runcmd:",
-            "  - |",
-            f"    curl -fsSL {agent_installer_url()} | EMPYRALIS_PAIRING_TOKEN='{_shell_single_quote(token)}' EMPYRALIS_API_URL='{_shell_single_quote(resolved_api_url)}'{repo_token_env} sudo -E bash",
-            "",
-        ]
+    installer_url = agent_installer_url()
+    # 2026-07-29 (MAN-121): found via a live droplet that hung forever with NO
+    # beacon at all, not even a failure one — the previous runcmd was a bare
+    # `curl ... | bash` with no pipefail. Cloud-init's runcmd runs each item
+    # via `sh -c`, whose exit status is the LAST command in a pipe, not
+    # curl's. If curl fails for any reason (and a freshly booted box's
+    # network is not reliably up in the very first seconds — this is the
+    # single most common cloud-init race there is), bash receives an EMPTY
+    # stdin, runs nothing, and exits 0. Cloud-init logs a clean success. The
+    # box just sits there forever, and there is nothing to report the
+    # failure because nothing ever ran — this is a failure *before* our own
+    # script, and every beacon this codebase has ever had lives *inside*
+    # that script.
+    #
+    # Fixed by downloading first (so curl's own exit code and HTTP status are
+    # directly inspectable, with retries to ride out early-boot network
+    # flakiness), and — critically — beaconing the failure with a bare curl
+    # POST if the download itself never succeeds. That POST has no
+    # dependency on the installer script at all, so this is now the one
+    # class of failure that can happen before install-agent-computer.sh
+    # exists on disk, and it is still self-reporting.
+    repo_token_prefix = (
+        f"EMPYRALIS_REPO_TOKEN='{_shell_single_quote(repo_token)}' " if repo_token else ""
     )
+    # Written to a plain, quoted heredoc (<<'EOF') further down, which the
+    # writing shell passes through byte-for-byte with NO expansion or
+    # escaping of any kind — that's the whole reason this is a heredoc and
+    # not a printf/quoted-string build-up like the first version of this fix
+    # was: this content contains single quotes ('Content-Type...'), double
+    # quotes, and $-prefixed shell variables that must reach disk exactly as
+    # written, not be interpreted by the shell that's writing them there.
+    bootstrap_lines = [
+        "#!/bin/sh",
+        "set -u",
+        f"API_URL='{_shell_single_quote(resolved_api_url)}'",
+        f"PAIRING_TOKEN='{_shell_single_quote(token)}'",
+        f"INSTALLER_URL='{_shell_single_quote(installer_url)}'",
+        "STAGE=/tmp/empyralis-agent-computer-installer.sh",
+        "",
+        "beacon_fetch_failed() {",
+        "  reason=\"$1\"",
+        "  curl -fsS -m 20 -X POST \"$API_URL/gateway/provisioning-events\" \\",
+        "    -H 'Content-Type: application/json' \\",
+        "    -d \"{\\\"pairing_token\\\":\\\"$PAIRING_TOKEN\\\",\\\"phase\\\":\\\"cloud-init-fetch\\\",\\\"message\\\":\\\"$reason\\\",\\\"terminal\\\":true}\" \\",
+        "    >/dev/null 2>&1 || true",
+        "}",
+        "",
+        "attempt=0",
+        "curl_exit=1",
+        "http_code=000",
+        "while [ \"$attempt\" -lt 8 ]; do",
+        "  attempt=$((attempt + 1))",
+        "  http_code=$(curl -fsSL -m 30 -w '%{http_code}' -o \"$STAGE\" \"$INSTALLER_URL\" 2>/tmp/empyralis-curl-err.log)",
+        "  curl_exit=$?",
+        "  if [ \"$curl_exit\" -eq 0 ] && [ -s \"$STAGE\" ]; then",
+        "    break",
+        "  fi",
+        "  sleep 5",
+        "done",
+        "",
+        "if [ \"$curl_exit\" -ne 0 ] || [ ! -s \"$STAGE\" ]; then",
+        "  err=$(tail -c 300 /tmp/empyralis-curl-err.log 2>/dev/null | tr -d '\"' | tr '\\n' ' ')",
+        "  beacon_fetch_failed \"Could not download the installer after ${attempt} attempts (curl exit ${curl_exit}, last HTTP ${http_code}): ${err}\"",
+        "  exit 1",
+        "fi",
+        "",
+        "chmod +x \"$STAGE\"",
+        f'{repo_token_prefix}EMPYRALIS_PAIRING_TOKEN="$PAIRING_TOKEN" EMPYRALIS_API_URL="$API_URL" sh "$STAGE"',
+    ]
+    cloud_config_lines = [
+        "#cloud-config",
+        "package_update: true",
+        "runcmd:",
+        "  - |",
+        "    cat > /tmp/empyralis-bootstrap.sh <<'EMPYRALIS_BOOTSTRAP_EOF'",
+    ]
+    # Every line — heredoc body AND its own closing delimiter — carries the
+    # SAME fixed 4-space indent so cloud-init's YAML block-scalar parser
+    # strips exactly that much from each and no more, leaving the delimiter
+    # at column 0 in what cloud-init actually executes. A plain `<<'EOF'`
+    # heredoc (unlike `<<-`) requires the closing line to contain nothing
+    # but the delimiter — no leading whitespace survives past the YAML
+    # layer, so this must line up exactly, not approximately.
+    for line in bootstrap_lines:
+        cloud_config_lines.append(f"    {line}" if line else "")
+    cloud_config_lines.append("    EMPYRALIS_BOOTSTRAP_EOF")
+    cloud_config_lines.append("    chmod +x /tmp/empyralis-bootstrap.sh")
+    cloud_config_lines.append("    /tmp/empyralis-bootstrap.sh")
+    cloud_config_lines.append("")
+    return "\n".join(cloud_config_lines)
 
 
 def agent_installer_url() -> str:
