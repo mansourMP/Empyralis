@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import unittest
+from typing import Any, Dict
 from unittest.mock import AsyncMock, patch
 
 from server_modules import cli_setup_service
@@ -230,6 +231,32 @@ class CliSetupServiceDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.exception.status_code, 409)
 
 
+def _frame_wrapped_event(inner_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Builds a gateway_events row shaped the way the REAL repository
+    returns one: gateway_protocol_service.py's unconditional inbound-frame
+    recording calls record_gateway_event(payload=frame, ...), where `frame`
+    is the whole envelope {kind, type, seq, ack, ts, payload: <the actual
+    cli.login.output fields>} — never just the inner payload on its own.
+    See test_gateway_state_repository_cli_login_events.py for the proof
+    against a real DB. A mock that instead hands list_cli_login_events a
+    flat {"payload": {"run_id": ...}} row (the pre-fix shape of this helper)
+    doesn't match production and would hide exactly the bug this file's
+    tests exist to catch: list_cli_login_events silently matching zero rows
+    forever, regardless of run_id, because the real run_id lives one level
+    deeper than a flat mock implies."""
+    return {
+        "message_type": "cli.login.output",
+        "payload": {
+            "kind": "event",
+            "type": "cli.login.output",
+            "seq": 1,
+            "ack": 0,
+            "ts": "2026-07-30T00:00:00Z",
+            "payload": inner_payload,
+        },
+    }
+
+
 class CliSetupServiceEventsTests(unittest.TestCase):
     def setUp(self) -> None:
         global cli_setup_service
@@ -237,21 +264,31 @@ class CliSetupServiceEventsTests(unittest.TestCase):
 
     def test_list_cli_login_events_filters_by_run_id(self) -> None:
         all_events = [
-            {"message_type": "cli.login.output", "payload": {"run_id": "run-1", "event": "output", "kind": "url", "text": "https://x"}},
-            {"message_type": "cli.login.output", "payload": {"run_id": "run-2", "event": "output", "kind": "url", "text": "https://y"}},
-            {"message_type": "cli.login.output", "payload": {"run_id": "run-1", "event": "done", "ok": True}},
+            _frame_wrapped_event({"run_id": "run-1", "event": "output", "kind": "url", "text": "https://x"}),
+            _frame_wrapped_event({"run_id": "run-2", "event": "output", "kind": "url", "text": "https://y"}),
+            _frame_wrapped_event({"run_id": "run-1", "event": "done", "ok": True}),
         ]
         with patch.object(cli_setup_service.gateway_state_repository, "list_gateway_events", return_value=all_events) as list_mock:
             items = cli_setup_service.list_cli_login_events(gateway_id="gw-1", run_id="run-1", limit=50)
         self.assertEqual(len(items), 2)
         self.assertTrue(all(item["payload"]["run_id"] == "run-1" for item in items))
+        # The returned payload must be the FLAT inner event — {run_id, event,
+        # kind, text} — not the raw frame envelope, because that's the shape
+        # routes_gateway.py hands straight to the frontend, and the
+        # frontend's CliLoginOutputPayload type reads item.payload.event /
+        # .kind / .text directly (see hardware/[gatewayId]/page.tsx).
+        self.assertEqual(items[0]["payload"]["event"], "output")
+        self.assertEqual(items[0]["payload"]["kind"], "url")
+        self.assertEqual(items[0]["payload"]["text"], "https://x")
+        self.assertEqual(items[1]["payload"]["event"], "done")
+        self.assertEqual(items[1]["payload"]["ok"], True)
         list_mock.assert_called_once()
         call_kwargs = list_mock.call_args.kwargs
         self.assertEqual(call_kwargs["message_type"], "cli.login.output")
 
     def test_list_cli_login_events_trims_to_requested_limit(self) -> None:
         all_events = [
-            {"message_type": "cli.login.output", "payload": {"run_id": "run-1", "seq": i}}
+            _frame_wrapped_event({"run_id": "run-1", "seq": i})
             for i in range(10)
         ]
         with patch.object(cli_setup_service.gateway_state_repository, "list_gateway_events", return_value=all_events):
@@ -261,11 +298,75 @@ class CliSetupServiceEventsTests(unittest.TestCase):
 
     def test_list_cli_login_events_returns_empty_for_unknown_run_id(self) -> None:
         all_events = [
-            {"message_type": "cli.login.output", "payload": {"run_id": "run-1", "event": "output"}},
+            _frame_wrapped_event({"run_id": "run-1", "event": "output"}),
         ]
         with patch.object(cli_setup_service.gateway_state_repository, "list_gateway_events", return_value=all_events):
             items = cli_setup_service.list_cli_login_events(gateway_id="gw-1", run_id="never-started", limit=50)
         self.assertEqual(items, [])
+
+    def test_list_cli_login_events_against_the_real_repository_round_trip(self) -> None:
+        """The regression test for the actual production bug: seeds a REAL
+        gateway_events row through gateway_state_repository.record_gateway_
+        event exactly the way gateway_protocol_service's unconditional
+        inbound-frame recording does (payload=whole frame), then asserts
+        list_cli_login_events finds it by run_id and unwraps it to the flat
+        shape the frontend expects. Before the fix, this returned an empty
+        list — every real run_id lookup silently matched nothing, which is
+        the root cause of 'Sign in' producing no device code, no URL, and no
+        error: the UI polls this exact function-through-the-route forever
+        and never sees a single event, success or failure."""
+        import importlib
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch as _patch
+
+        gsr = importlib.import_module("server_modules.gateway_state_repository")
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "gateway-state.sqlite3"
+            gsr.init_gateway_state_db(db_path)
+            patchers = [
+                _patch.object(gsr, "GATEWAY_STATE_DB_FILE", db_path),
+                _patch.object(
+                    gsr.rust_runtime_kernel_client,
+                    "run_runtime_kernel_enforced",
+                    side_effect=lambda command, payload: {
+                        "ok": True,
+                        "decision": "allow",
+                        "next_action": "record_gateway_event",
+                    },
+                ),
+            ]
+            for p in patchers:
+                p.start()
+            try:
+                gsr.record_gateway_event(
+                    gateway_id="gw-1",
+                    session_id="sess-1",
+                    direction="inbound",
+                    frame_kind="event",
+                    message_type="cli.login.output",
+                    payload={
+                        "kind": "event",
+                        "type": "cli.login.output",
+                        "payload": {
+                            "run_id": "run-real-1",
+                            "runtime": "claude_code",
+                            "event": "output",
+                            "kind": "url",
+                            "text": "https://claude.ai/oauth/authorize?state=abc123",
+                        },
+                    },
+                )
+                with _patch.object(cli_setup_service, "gateway_state_repository", gsr):
+                    items = cli_setup_service.list_cli_login_events(gateway_id="gw-1", run_id="run-real-1", limit=50)
+            finally:
+                for p in reversed(patchers):
+                    p.stop()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["payload"]["run_id"], "run-real-1")
+        self.assertEqual(items[0]["payload"]["event"], "output")
+        self.assertEqual(items[0]["payload"]["kind"], "url")
+        self.assertEqual(items[0]["payload"]["text"], "https://claude.ai/oauth/authorize?state=abc123")
 
 
 class CliSetupServiceGrokBuildCursorTests(unittest.IsolatedAsyncioTestCase):

@@ -400,15 +400,37 @@ def list_cli_login_events(*, gateway_id: str, run_id: str, limit: int = 100) -> 
     gateway's cli.login.output events and filters/trims to the requested
     run_id in Python. Proportionate for the expected volume of a single,
     human-driven login session (a handful of events), not a general-purpose
-    query path."""
+    query path.
+
+    Shape note (this bit every caller once, so it's spelled out here): each
+    row gateway_state_repository.list_gateway_events returns has `payload`
+    set to the ENTIRE inbound frame — record_gateway_event is called with
+    payload=frame, not payload=frame["payload"] (see gateway_protocol_
+    service.py's unconditional inbound-event recording, and
+    test_gateway_state_repository_cli_login_events.py which proves the
+    round-trip). So the run_id/event/kind/text fields the Gateway actually
+    published live one level deeper, at row["payload"]["payload"], not at
+    row["payload"] directly. Filtering (or returning) row["payload"] as if
+    it already were that inner dict silently matches nothing — every
+    real run_id lookup comes back empty, with no exception anywhere, which
+    is exactly the "start succeeds, then the UI sees no url/code/done,
+    forever" bug this function used to have. The items returned here have
+    `payload` replaced with that unwrapped inner dict — the flat
+    {run_id, runtime, event, kind, text} / {run_id, runtime, event, ok,
+    error, error_kind} shape routes_gateway.py's /cli/login/{run_id}/events
+    hands back verbatim, and the one the frontend's CliLoginOutputPayload
+    type (page.tsx) expects at item.payload.event / .kind / .text."""
     events = gateway_state_repository.list_gateway_events(
         gateway_id,
         message_type=CLI_LOGIN_OUTPUT_MESSAGE_TYPE,
         limit=_GATEWAY_EVENTS_PAGE_SIZE,
     )
     clean_run_id = str(run_id or "").strip()
-    matching = [
-        event for event in events
-        if str((event.get("payload") or {}).get("run_id") or "").strip() == clean_run_id
-    ]
+    matching: List[Dict[str, Any]] = []
+    for event in events:
+        frame = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        inner_payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+        if str(inner_payload.get("run_id") or "").strip() != clean_run_id:
+            continue
+        matching.append({**event, "payload": inner_payload})
     return matching[-max(int(limit or 0), 1):]
