@@ -1981,6 +1981,22 @@ def _provision_digitalocean(
         "ipv6": True,
         "monitoring": True,
     }
+    # Operator debug key. DigitalOcean has NO console-output API — none. Their
+    # web "Droplet Console" is itself SSH over a WebSocket, and the Recovery
+    # Console is browser-only with no API. So a droplet created without an
+    # ssh_keys entry is permanently, structurally unreachable: if it fails to
+    # phone home there is no way, at all, to find out why. Weeks were burned
+    # on exactly that blindness — every diagnosis had to be inferred from the
+    # outside because /var/log/cloud-init-output.log was unreadable.
+    #
+    # Opt-in and off by default: set EMPYRALIS_VPS_OPS_SSH_KEY_IDS to a
+    # comma-separated list of DigitalOcean SSH key IDs or fingerprints (the
+    # key must already exist in the account the OAuth token belongs to).
+    # Unset -> the field is omitted entirely and behaviour is unchanged, so
+    # this can never break a customer provision by being misconfigured.
+    ops_ssh_keys = _digitalocean_ops_ssh_key_ids()
+    if ops_ssh_keys:
+        payload["ssh_keys"] = ops_ssh_keys
     response = _http_json(
         "POST",
         config.create_url,
@@ -4478,6 +4494,26 @@ def _server_name(provider_id: str) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _digitalocean_ops_ssh_key_ids() -> list:
+    """DigitalOcean SSH key IDs/fingerprints to attach to provisioned droplets.
+
+    See the call site in _provision_digitalocean for why this exists: DO has no
+    console-output API, so without a key a failed droplet is unreachable and
+    undiagnosable. Numeric IDs are sent as ints (DO accepts either an int ID or
+    a string fingerprint, and sending a numeric ID as a string is rejected).
+    """
+    raw = (os.getenv("EMPYRALIS_VPS_OPS_SSH_KEY_IDS") or "").strip()
+    if not raw:
+        return []
+    out: list = []
+    for chunk in raw.replace(" ", ",").split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        out.append(int(item) if item.isdigit() else item)
+    return out
 
 
 def _shell_single_quote(value: str) -> str:
