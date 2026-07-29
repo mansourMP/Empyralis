@@ -224,6 +224,10 @@ jobs:
 
       - name: Extract the snapshot ID
         id: snapshot
+        env:
+          # Needed for the regions lookup below — the API is the source of
+          # truth for where the snapshot actually landed.
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
         run: |
           set -euo pipefail
           MANIFEST=deploy/packer/packer-manifest.json
@@ -232,11 +236,28 @@ jobs:
           # The DigitalOcean builder's artifact_id is "<region>,<region>,...:<image id>".
           ARTIFACT_ID="$(jq -r '.builds[-1].artifact_id' "$MANIFEST")"
           IMAGE_ID="${ARTIFACT_ID##*:}"
-          REGIONS="${ARTIFACT_ID%%:*}"
           SNAPSHOT_NAME="$(jq -r '.builds[-1].custom_data.snapshot_name' "$MANIFEST")"
           case "$IMAGE_ID" in
             ''|*[!0-9]*) echo "could not parse a numeric image id out of '$ARTIFACT_ID'" >&2; exit 1 ;;
           esac
+
+          # Regions come from the DigitalOcean API, NOT from artifact_id.
+          #
+          # 2026-07-29: artifact_id reported only the BUILD region ("nyc3:...")
+          # even though snapshot_regions distributes to all six and
+          # wait_snapshot_transfer blocks until those transfers finish. The
+          # published pointer therefore claimed the image existed in one region
+          # while DO reported all six — and vps_provisioning_service's region
+          # guard trusts that list, so five of six regions were needlessly
+          # falling back to the slow boot-time installer. Ask the API, which is
+          # the same source of truth the guard is trying to approximate.
+          REGIONS="$(curl -fsS -H "Authorization: Bearer $DIGITALOCEAN_ACCESS_TOKEN" \
+            "https://api.digitalocean.com/v2/images/${IMAGE_ID}" | jq -r '.image.regions | join(",")')"
+          if [ -z "$REGIONS" ] || [ "$REGIONS" = "null" ]; then
+            echo "could not read the image's regions from the DigitalOcean API" >&2
+            exit 1
+          fi
+          echo "image ${IMAGE_ID} is published to: ${REGIONS}"
           echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
           echo "regions=$REGIONS" >> "$GITHUB_OUTPUT"
           echo "snapshot_name=$SNAPSHOT_NAME" >> "$GITHUB_OUTPUT"
