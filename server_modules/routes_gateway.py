@@ -2169,6 +2169,18 @@ async def provision_hardware_vps(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Platform-account provisioning (our DigitalOcean account, our bill) is
+    # hard-capped per workspace. Enforced HERE, before a pairing intent or a
+    # placeholder record exists, so an over-cap request costs nothing and the
+    # user hears why immediately instead of via a background failure.
+    if resolved["provider"] == "digitalocean" and vps_provisioning_service._platform_digitalocean_token():
+        try:
+            await vps_provisioning_service.enforce_platform_vps_capacity(
+                workspace_id=workspace_id, tenant_id=tenant_id
+            )
+        except vps_provisioning_service.VPSProvisioningError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     vps_id = f"vps_{uuid.uuid4().hex}"
     try:
         request_metadata = dict(body.metadata or {})

@@ -4319,3 +4319,74 @@ async def test_problem_beacon_still_records_install_error(tmp_path, monkeypatch)
     assert updated["install_phase"] == "gateway_download"
     assert updated["install_error"] == "could not download the gateway artifact (HTTP 404)"
     assert "gateway_download" in (updated["error"] or "")
+
+
+def test_provision_vps_uses_platform_account_for_baked_image(monkeypatch):
+    """The direct path (MAN-133): platform token present + baked image
+    published to the region -> the droplet is created with OUR token, from
+    the snapshot, with the one-line configure cloud-init — and the result
+    carries the platform credential so delete talks to the right account."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    monkeypatch.setenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, "dop_v1_platform_secret")
+    monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
+
+    calls = []
+
+    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
+        calls.append({"token": token, "payload": payload, "url": url})
+        return {"droplet": {"id": 555, "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.5"}]}}}
+
+    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+
+    result = vps.provision_vps("digitalocean", {"api_token": "customer_oauth_token"}, "nyc3", None, "pair_do")
+
+    create = calls[0]
+    assert create["token"] == "dop_v1_platform_secret"          # OUR account, not the customer's
+    assert create["payload"]["image"] == 238979453               # the baked snapshot
+    assert "empyralis-configure" in create["payload"]["user_data"]
+    assert "INSTALLER_URL=" not in create["payload"]["user_data"]  # no boot-time installer
+    assert result.record_credentials == {"api_token": "dop_v1_platform_secret"}
+
+
+def test_provision_vps_platform_path_off_without_token(monkeypatch):
+    """No platform token -> exactly the pre-existing customer-account
+    behaviour, even with the baked-image flag on."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    monkeypatch.delenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, raising=False)
+    monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
+
+    calls = []
+
+    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
+        calls.append({"token": token, "payload": payload})
+        return {"droplet": {"id": 556, "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.6"}]}}}
+
+    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+
+    result = vps.provision_vps("digitalocean", {"api_token": "customer_oauth_token"}, "nyc3", None, "pair_do")
+
+    assert calls[0]["token"] == "customer_oauth_token"
+    assert result.record_credentials is None
+
+
+@pytest.mark.asyncio
+async def test_enforce_platform_vps_capacity_blocks_at_the_cap(monkeypatch):
+    async def fake_count(*, workspace_id, tenant_id):
+        return 2
+
+    monkeypatch.setattr(vps, "count_active_workspace_vps", fake_count)
+    monkeypatch.delenv(vps.VPS_MAX_ACTIVE_PER_WORKSPACE_ENV, raising=False)
+
+    with pytest.raises(vps.VPSProvisioningError, match="limit is 2"):
+        await vps.enforce_platform_vps_capacity(workspace_id="ws-1", tenant_id="t-1")
+
+
+@pytest.mark.asyncio
+async def test_enforce_platform_vps_capacity_allows_below_the_cap(monkeypatch):
+    async def fake_count(*, workspace_id, tenant_id):
+        return 1
+
+    monkeypatch.setattr(vps, "count_active_workspace_vps", fake_count)
+    monkeypatch.delenv(vps.VPS_MAX_ACTIVE_PER_WORKSPACE_ENV, raising=False)
+
+    await vps.enforce_platform_vps_capacity(workspace_id="ws-1", tenant_id="t-1")

@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional
@@ -84,6 +84,24 @@ DEFAULT_DIGITALOCEAN_OAUTH_REDIRECT_URI = (
 # cloud-init path (cloud_init_script) exactly as before this existed.
 DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV = "EMPYRALIS_VPS_DIGITALOCEAN_BAKED_IMAGE_ENABLED"
 DIGITALOCEAN_IMAGE_POINTER_URL_ENV = "EMPYRALIS_VPS_DIGITALOCEAN_IMAGE_POINTER_URL"
+# --- Provision in EMPYRALIS's own DigitalOcean account (MAN-133) -----------
+#
+# The baked snapshot lives in our account, and a DO private snapshot is only
+# bootable by the account that owns it — so the fast path REQUIRES creating
+# the droplet with our own token, not the customer's OAuth token. When this
+# env var holds a platform PAT (and the baked-image flag above is on, and the
+# image is published to the requested region), DigitalOcean provisions run in
+# our account from the snapshot: no apt, no downloads, ~65s to connected
+# (proven by .github/workflows/e2e-agent-computer-connect.yml). Unset -> the
+# customer-account path behaves exactly as before.
+#
+# Because these droplets bill US, the platform path is hard-capped per
+# workspace (enforce_platform_vps_capacity) — deliberately crude until the
+# real credit metering lands (MAN-134/135): a count, not a meter, but it
+# bounds the worst case.
+PLATFORM_DIGITALOCEAN_TOKEN_ENV = "EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN"
+VPS_MAX_ACTIVE_PER_WORKSPACE_ENV = "EMPYRALIS_VPS_MAX_ACTIVE_PER_WORKSPACE"
+DEFAULT_VPS_MAX_ACTIVE_PER_WORKSPACE = 2
 DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL = (
     "https://empyralis.ai/releases/agent-computer/images/digitalocean/latest.json"
 )
@@ -260,6 +278,12 @@ class VPSResult:
     size: str
     status: str
     provider: str
+    # When the droplet was created with a DIFFERENT credential than the one
+    # the caller passed in (the platform-account fast path), this carries the
+    # credential that can actually manage/delete the resource. The lifecycle
+    # records it on the VPS record instead of the customer's own credential,
+    # so delete/cleanup talks to the account the droplet really lives in.
+    record_credentials: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -1513,6 +1537,41 @@ def _is_digitalocean_image_unavailable(exc: Exception) -> bool:
     return "422" in detail or "404" in detail or "not_found" in detail or "unprocessable_entity" in detail
 
 
+def _platform_digitalocean_token() -> Optional[str]:
+    """Empyralis's own DigitalOcean PAT, or None. Presence of this token is
+    what switches DigitalOcean provisioning into our account (see
+    provision_vps) — the baked snapshot is only bootable there."""
+    token = (os.getenv(PLATFORM_DIGITALOCEAN_TOKEN_ENV) or "").strip()
+    return token or None
+
+
+def _vps_max_active_per_workspace() -> int:
+    raw = (os.getenv(VPS_MAX_ACTIVE_PER_WORKSPACE_ENV) or "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_VPS_MAX_ACTIVE_PER_WORKSPACE
+    except ValueError:
+        value = DEFAULT_VPS_MAX_ACTIVE_PER_WORKSPACE
+    return max(1, value)
+
+
+async def enforce_platform_vps_capacity(*, workspace_id: str, tenant_id: str) -> None:
+    """Hard per-workspace cap on machines created in EMPYRALIS's own account.
+
+    Deliberately crude — a count, not a meter — until real credit metering
+    lands (MAN-134/135). But it bounds the worst case: without it, nothing at
+    all limits how many droplets a workspace can put on our card. Only called
+    on the platform path; customer-account provisioning bills the customer
+    and keeps its existing (uncapped) behaviour.
+    """
+    limit = _vps_max_active_per_workspace()
+    active = await count_active_workspace_vps(workspace_id=workspace_id, tenant_id=tenant_id)
+    if active >= limit:
+        raise VPSProvisioningError(
+            f"This workspace already has {active} active agent computer(s) — the current limit is "
+            f"{limit}. Delete one you no longer need, then try again."
+        )
+
+
 def _digitalocean_baked_image_id(region: str) -> Optional[str]:
     """Numeric DigitalOcean snapshot ID of the current pre-baked Agent
     Computer image for `region`, or None. See DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV's
@@ -1673,6 +1732,39 @@ def provision_vps(
         # feature being off, or an unreachable pointer) returns None and
         # leaves user_data on the boot-time installer built above.
         baked_image_id = _digitalocean_baked_image_id(resolved_region)
+        platform_token = _platform_digitalocean_token()
+        if baked_image_id and platform_token:
+            # The direct path (MAN-133): OUR account + the baked snapshot +
+            # a one-line configure. Everything the boot-time installer does
+            # (apt, Node, artifact download, unit install) is already ON the
+            # image, so the whole chain is: boot -> empyralis-configure ->
+            # register. Proven at ~65s to connected by
+            # e2e-agent-computer-connect. No on_unauthorized: this is our
+            # PAT, not an OAuth token — there is nothing to refresh.
+            try:
+                result = _provision_digitalocean(
+                    config,
+                    platform_token,
+                    resolved_region,
+                    resolved_size,
+                    name,
+                    cloud_init_script_for_baked_image(pairing_token),
+                    image_override=baked_image_id,
+                )
+                return replace(result, record_credentials={"api_token": platform_token})
+            except VPSProvisioningError as exc:
+                if not _is_digitalocean_image_unavailable(exc):
+                    raise
+                _LOGGER.warning(
+                    "platform-account create rejected baked image %s in %s (%s); "
+                    "falling back to the customer-account installer path.",
+                    baked_image_id,
+                    resolved_region,
+                    exc,
+                )
+                return _provision_digitalocean(
+                    config, token, resolved_region, resolved_size, name, user_data, on_unauthorized=on_unauthorized
+                )
         if not baked_image_id:
             return _provision_digitalocean(
                 config, token, resolved_region, resolved_size, name, user_data, on_unauthorized=on_unauthorized
@@ -1819,7 +1911,10 @@ async def run_vps_provisioning_lifecycle(
                 size=result.size,
                 status=result.status,
                 pairing_token=pairing_token,
-                credentials=credentials,
+                # The platform path creates the droplet in OUR account; the
+                # record must carry the credential that can actually delete
+                # that droplet, not the customer's own (see VPSResult).
+                credentials=result.record_credentials or credentials,
                 pairing_id=pairing_id,
             )
         except Exception as exc:  # noqa: BLE001 - a real resource now exists; must not be left untracked
