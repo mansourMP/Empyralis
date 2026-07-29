@@ -1480,27 +1480,54 @@ def cloud_init_script_for_baked_image(pairing_token: str, *, api_url: Optional[s
     return "\n".join(cloud_config_lines)
 
 
-def _digitalocean_baked_image_id() -> Optional[str]:
+def _digitalocean_baked_image_id(region: str) -> Optional[str]:
     """Numeric DigitalOcean snapshot ID of the current pre-baked Agent
-    Computer image, or None. See DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV's
+    Computer image for `region`, or None. See DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV's
     definition above for the opt-in gate and DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL
     for where this is fetched from.
+
+    REGION IS LOAD-BEARING, not decorative. A DigitalOcean snapshot exists
+    only in the regions it has been distributed to — the build publishes to
+    one (`nyc3`) while the picker offers six. Creating a droplet in a region
+    the snapshot is absent from is rejected outright by DO's API, so a
+    region miss must degrade to the boot-time installer (slower, but it
+    works everywhere) rather than hard-fail the provision. The pointer's
+    own `regions` list is the authority; an absent/empty list is treated as
+    "unknown, don't risk it".
 
     Never raises: an unreachable/malformed pointer just means the caller
     falls back to booting a bare Ubuntu slug and running the full
     boot-time installer, exactly like every DigitalOcean provision before
     this existed. This must never be the reason a provision fails, so
     every failure mode here (feature off, network error, bad JSON, a
-    non-numeric or missing image_id) returns None rather than raising.
+    non-numeric or missing image_id, a region the image isn't in) returns
+    None rather than raising.
     """
     enabled = (os.getenv(DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV) or "").strip().lower()
     if enabled not in ("1", "true", "yes", "on"):
+        return None
+    target_region = str(region or "").strip()
+    if not target_region:
         return None
     url = (os.getenv(DIGITALOCEAN_IMAGE_POINTER_URL_ENV) or DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL).strip()
     if not url:
         return None
     try:
-        request = urlrequest.Request(url, headers={"Accept": "application/json"})
+        # The User-Agent is REQUIRED, not cosmetic. The pointer is served
+        # through Cloudflare, which 403s urllib's default
+        # "Python-urllib/3.x" as bot traffic — verified against the live
+        # URL: default UA -> 403, this UA -> 200. Because this function
+        # fails open, that 403 would not surface as an error; it would
+        # silently route every provision back to the boot-time installer
+        # and make the baked image look like it simply never worked. Same
+        # UA the rest of this module already sends (see _http_json).
+        request = urlrequest.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "Empyralis-VPS-Provisioner/1.0",
+            },
+        )
         with urlrequest.urlopen(request, timeout=_DIGITALOCEAN_IMAGE_POINTER_TIMEOUT_SECONDS) as response:
             pointer = json.loads(response.read().decode("utf-8"))
     except (urlerror.URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
@@ -1512,6 +1539,21 @@ def _digitalocean_baked_image_id() -> Optional[str]:
         return None
     image_id = str(pointer.get("image_id") or "").strip()
     if not image_id.isdigit():
+        return None
+    raw_regions = pointer.get("regions")
+    available = (
+        {str(entry).strip() for entry in raw_regions if str(entry or "").strip()}
+        if isinstance(raw_regions, list)
+        else set()
+    )
+    if target_region not in available:
+        _LOGGER.info(
+            "digitalocean baked image %s is not published to region %s (available: %s); "
+            "falling back to boot-time install.",
+            image_id,
+            target_region,
+            sorted(available) or "none listed",
+        )
         return None
     return image_id
 
@@ -1547,15 +1589,11 @@ def provision_vps(
     config = PROVIDER_CONFIGS[provider_id]
     resolved_size = str(size or "").strip() or config.default_size
     name = _server_name(provider_id)
-    # Only DigitalOcean has a pre-baked image (MAN-128) so far; every other
-    # provider is untouched and keeps calling cloud_init_script exactly as
-    # before. _digitalocean_baked_image_id() is off unless explicitly
-    # enabled (see its docstring), so this is a no-op call for every other
-    # provider AND for digitalocean until that flag is flipped on.
-    baked_image_id = _digitalocean_baked_image_id() if provider_id == "digitalocean" else None
-    user_data = (
-        cloud_init_script_for_baked_image(pairing_token) if baked_image_id else cloud_init_script(pairing_token)
-    )
+    # The boot-time installer is still the default for every provider. Only
+    # DigitalOcean can currently swap it for a pre-baked image, and that
+    # decision is made further down — it depends on the RESOLVED region,
+    # which isn't known until after validation (see the digitalocean branch).
+    user_data = cloud_init_script(pairing_token)
 
     if provider_id == "google":
         # Early return: Google's credentials are {project_id,
@@ -1596,13 +1634,19 @@ def provision_vps(
     resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
     if provider_id == "digitalocean":
         on_unauthorized = _digitalocean_reauth_callback(token_id, credentials) if token_id else None
+        # Decided HERE, not up top, because it depends on resolved_region: a
+        # DO snapshot exists only in the regions it was published to, and
+        # booting it anywhere else is rejected by the API. A miss (or the
+        # feature being off, or an unreachable pointer) returns None and
+        # leaves user_data on the boot-time installer built above.
+        baked_image_id = _digitalocean_baked_image_id(resolved_region)
         return _provision_digitalocean(
             config,
             token,
             resolved_region,
             resolved_size,
             name,
-            user_data,
+            cloud_init_script_for_baked_image(pairing_token) if baked_image_id else user_data,
             image_override=baked_image_id,
             on_unauthorized=on_unauthorized,
         )

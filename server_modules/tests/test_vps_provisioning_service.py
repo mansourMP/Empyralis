@@ -269,6 +269,12 @@ def test_cloud_init_script_for_baked_image_requires_pairing_token():
         vps.cloud_init_script_for_baked_image("", api_url="https://api.example.com")
 
 
+# The pointer as actually published by build-agent-computer-image.yml — the
+# `regions` list is the field that decides whether the image is usable at all
+# for a given provision (see _digitalocean_baked_image_id).
+_BAKED_POINTER = b'{"image_id": "238979453", "regions": ["nyc3"], "min_disk_gb": 25}'
+
+
 def test_digitalocean_baked_image_id_off_by_default(monkeypatch):
     monkeypatch.delenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, raising=False)
 
@@ -277,7 +283,7 @@ def test_digitalocean_baked_image_id_off_by_default(monkeypatch):
 
     monkeypatch.setattr(vps.urlrequest, "urlopen", fail_if_called)
 
-    assert vps._digitalocean_baked_image_id() is None
+    assert vps._digitalocean_baked_image_id("nyc3") is None
 
 
 def test_digitalocean_baked_image_id_returns_numeric_id_when_enabled(monkeypatch):
@@ -285,11 +291,64 @@ def test_digitalocean_baked_image_id_returns_numeric_id_when_enabled(monkeypatch
 
     def fake_urlopen(request, timeout=30):
         assert request.full_url == vps.DEFAULT_DIGITALOCEAN_IMAGE_POINTER_URL
-        return _FakeUrlopenResponse(b'{"image_id": "238979453", "snapshot_name": "empyralis-agent-computer-latest"}')
+        return _FakeUrlopenResponse(_BAKED_POINTER)
 
     monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
 
-    assert vps._digitalocean_baked_image_id() == "238979453"
+    assert vps._digitalocean_baked_image_id("nyc3") == "238979453"
+
+
+def test_digitalocean_baked_image_pointer_request_sends_a_user_agent(monkeypatch):
+    """Cloudflare fronts the pointer and 403s urllib's default
+    "Python-urllib/3.x" as bot traffic (verified against the live URL:
+    default UA -> 403, ours -> 200). This function fails OPEN, so that 403
+    never surfaces as an error — it silently routes every provision back to
+    the boot-time installer and makes the baked image look like it just
+    never worked. Exactly the kind of invisible regression that needs a
+    test rather than a comment."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    seen = {}
+
+    def fake_urlopen(request, timeout=30):
+        seen["user_agent"] = request.get_header("User-agent")
+        return _FakeUrlopenResponse(_BAKED_POINTER)
+
+    monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
+
+    assert vps._digitalocean_baked_image_id("nyc3") == "238979453"
+    assert seen["user_agent"], "pointer fetch must send a User-Agent or Cloudflare 403s it"
+    assert "python-urllib" not in str(seen["user_agent"]).lower()
+
+
+def test_digitalocean_baked_image_id_declines_region_the_image_is_not_published_to(monkeypatch):
+    """The regression this guards is a hard provisioning failure, not a
+    slowdown: a DO snapshot exists only in the regions it was distributed
+    to, and DO rejects a create that references it from anywhere else. The
+    build publishes to nyc3 while the picker offers six regions, so every
+    non-nyc3 pick MUST fall back to the boot-time installer rather than
+    sending an image id that cannot work."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+
+    def fake_urlopen(request, timeout=30):
+        return _FakeUrlopenResponse(_BAKED_POINTER)
+
+    monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
+
+    assert vps._digitalocean_baked_image_id("lon1") is None
+    assert vps._digitalocean_baked_image_id("fra1") is None
+    assert vps._digitalocean_baked_image_id("nyc3") == "238979453"
+
+
+def test_digitalocean_baked_image_id_declines_when_pointer_lists_no_regions(monkeypatch):
+    """An absent/empty regions list is 'unknown', not 'everywhere'."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+
+    def fake_urlopen(request, timeout=30):
+        return _FakeUrlopenResponse(b'{"image_id": "238979453"}')
+
+    monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
+
+    assert vps._digitalocean_baked_image_id("nyc3") is None
 
 
 def test_digitalocean_baked_image_id_falls_back_to_none_when_pointer_unreachable(monkeypatch):
@@ -300,30 +359,21 @@ def test_digitalocean_baked_image_id_falls_back_to_none_when_pointer_unreachable
 
     monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
 
-    assert vps._digitalocean_baked_image_id() is None
+    assert vps._digitalocean_baked_image_id("nyc3") is None
 
 
 def test_digitalocean_baked_image_id_falls_back_to_none_when_image_id_missing_or_malformed(monkeypatch):
     monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
 
     def fake_urlopen(request, timeout=30):
-        return _FakeUrlopenResponse(b'{"image_id": "not-a-number"}')
+        return _FakeUrlopenResponse(b'{"image_id": "not-a-number", "regions": ["nyc3"]}')
 
     monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
 
-    assert vps._digitalocean_baked_image_id() is None
+    assert vps._digitalocean_baked_image_id("nyc3") is None
 
 
-def test_provision_vps_digitalocean_boots_baked_image_when_enabled(monkeypatch):
-    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
-
-    def fake_urlopen(request, timeout=30):
-        return _FakeUrlopenResponse(b'{"image_id": "238979453"}')
-
-    monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
-
-    calls = []
-
+def _fake_droplet_create(calls):
     def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
         calls.append(payload)
         return {
@@ -333,16 +383,43 @@ def test_provision_vps_digitalocean_boots_baked_image_when_enabled(monkeypatch):
             }
         }
 
-    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+    return fake_http_json
 
-    result = vps.provision_vps("digitalocean", {"api_token": "do_secret"}, "lon1", None, "pair_do")
+
+def test_provision_vps_digitalocean_boots_baked_image_in_a_published_region(monkeypatch):
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
+
+    calls = []
+    monkeypatch.setattr(vps, "_http_json", _fake_droplet_create(calls))
+
+    result = vps.provision_vps("digitalocean", {"api_token": "do_secret"}, "nyc3", None, "pair_do")
 
     assert result.provider_resource_id == "12345"
+    # DO rejects a numeric image id sent as a string.
     assert calls[0]["image"] == 238979453
     assert isinstance(calls[0]["image"], int)
     assert calls[0]["user_data"].startswith("#cloud-config")
     assert "empyralis-configure" in calls[0]["user_data"]
     assert "curl -fsSL" not in calls[0]["user_data"]
+
+
+def test_provision_vps_digitalocean_uses_boot_time_installer_outside_published_regions(monkeypatch):
+    """End-to-end half of the region guard: picking a region the snapshot was
+    never published to must still produce a WORKING provision (bare Ubuntu +
+    the installer), not a create call carrying an unusable image id."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
+
+    calls = []
+    monkeypatch.setattr(vps, "_http_json", _fake_droplet_create(calls))
+
+    result = vps.provision_vps("digitalocean", {"api_token": "do_secret"}, "lon1", None, "pair_do")
+
+    assert result.provider_resource_id == "12345"
+    assert calls[0]["image"] == "ubuntu-24-04-x64"
+    assert "empyralis-configure" not in calls[0]["user_data"]
+    assert "INSTALLER_URL=" in calls[0]["user_data"]
 
 
 def test_digitalocean_oauth_start_stores_state_and_uses_registered_redirect(tmp_path, monkeypatch):
