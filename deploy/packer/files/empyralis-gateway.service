@@ -60,6 +60,20 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 NoNewPrivileges=true
 
+# Never let the kernel pick the gateway when memory runs short. Copied from
+# E2B's envd unit, which sets OOMScoreAdjust=-1000 for the same reason: the
+# daemon is the ONLY thing that can report the box's state, so killing it to
+# reclaim memory turns a recoverable memory-pressure event into a permanently
+# silent machine. This is not theoretical here — the smallest offered droplet
+# is s-1vcpu-1gb, and an OOM kill leaves no beacon, no log the control plane
+# can see, and a UI that says "installing" forever.
+# Nice/IO priority likewise follow envd: the daemon must stay responsive even
+# while the box is busy doing the work the daemon was asked to do.
+OOMScoreAdjust=-1000
+Nice=-20
+IOSchedulingClass=realtime
+IOSchedulingPriority=0
+
 RuntimeDirectory=empyralis
 RuntimeDirectoryMode=0750
 

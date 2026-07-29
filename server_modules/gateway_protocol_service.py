@@ -47,6 +47,20 @@ _LIVE_GATEWAY_FRESH_INBOUND_MAX_AGE_SECONDS = float(
 )
 _LIVE_GATEWAY_FRESH_INBOUND_WAIT_SECONDS = 130.0
 _LIVE_GATEWAY_RECONNECT_WAIT_SECONDS = 30.0
+# How much of a session's TTL may burn down before a heartbeat bothers to
+# persist a renewal. See the throttle at the gateway.heartbeat handler: every
+# heartbeat used to write THREE rows (gateway session, auth session, runtime
+# session) to renew a 15-minute TTL, at a 10-second cadence — ~90x more often
+# than the TTL requires. On one long-lived gateway that produced 10k session
+# rows and 271k events in a 2 GB SQLite file on a disk that also holds
+# Postgres. Liveness is unaffected: staleness is decided from an in-memory
+# time.monotonic() stamp (see _LiveGatewayConnection.is_stale), never from the
+# persisted row, so throttling the WRITE does not slow dead-socket detection
+# at all. Renewing with a third of the TTL still to run leaves a 5-minute
+# safety margin against a 15-minute TTL — the same shape as Teleport, which
+# refreshes a 10-minute presence TTL about once a minute rather than on every
+# keep-alive.
+_GATEWAY_SESSION_RENEW_AFTER_FRACTION = 2.0 / 3.0
 _LIVE_GATEWAY_PROBE_TIMEOUT_SECONDS = 8
 _LIVE_GATEWAY_SEND_TIMEOUT_SECONDS = 10.0
 _LOGGER = logging.getLogger(__name__)
@@ -470,6 +484,26 @@ class _LiveGatewayConnection:
         self._writer_task: Optional[asyncio.Task[Any]] = None
         self._closed = False
         self._last_inbound_monotonic = time.monotonic()
+        # When this connection last PERSISTED a session-TTL renewal. Separate
+        # from _last_inbound_monotonic (which is liveness and updates on every
+        # frame) because the two have different jobs: liveness must be exact
+        # and is free, TTL renewal is three database writes and only has to
+        # happen before the TTL runs out. See _GATEWAY_SESSION_RENEW_AFTER_FRACTION.
+        self._last_session_renew_monotonic = 0.0
+
+    def session_renewal_due(self, ttl_seconds: float) -> bool:
+        """True when the persisted session TTL should be renewed now.
+
+        First call on a connection always returns True, so a fresh socket
+        writes its renewal immediately and never inherits a stale expiry.
+        """
+        if self._last_session_renew_monotonic <= 0.0:
+            return True
+        elapsed = time.monotonic() - self._last_session_renew_monotonic
+        return elapsed >= max(float(ttl_seconds), 1.0) * _GATEWAY_SESSION_RENEW_AFTER_FRACTION
+
+    def note_session_renewed(self) -> None:
+        self._last_session_renew_monotonic = time.monotonic()
 
     def start_writer(self) -> None:
         self._owner_loop = asyncio.get_running_loop()
@@ -2722,32 +2756,59 @@ async def handle_gateway_websocket(
                 # Root cause confirmed 2026-07-13: expires_at on all three
                 # session records was set once at connect and never renewed,
                 # so a live, heartbeating WS still expired at its original
-                # ~15-minute TTL. A heartbeat is proof of life — renew all
-                # three here, every time one arrives.
-                gateway_state_repository.touch_gateway_session(
-                    session_id=session_id,
-                    gateway_id=gateway_id,
-                    seq=frame_seq,
-                    ack=frame_ack,
-                    health_state=payload.get("health_state"),
-                    journal_cursor=payload.get("journal_cursor"),
-                    checkpoint_cursor=payload.get("checkpoint_cursor"),
-                    metadata={
-                        "capability_readiness": capability_readiness,
-                        "queue_depth_summary": payload.get("queue_depth_summary"),
-                        "service_inventory": service_inventory,
-                        "native_runtime": native_runtime,
-                        "resources": resources,
-                        "device_trust_state": str(binding["device_link"].get("trust_state") or "verified").strip()
-                        or "verified",
-                    },
-                    ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
+                # ~15-minute TTL. A heartbeat is proof of life — so renew all
+                # three, but NOT on every single beat.
+                #
+                # These are three database writes. At a 10s heartbeat against a
+                # 15-minute TTL that is ~90x more renewal than the TTL needs,
+                # and it is measurable: one long-lived gateway produced 10k
+                # session rows and 271k events in a 2 GB SQLite file, on the
+                # same disk as Postgres. The throttle renews once roughly every
+                # two thirds of the TTL, leaving a ~5 minute margin — the shape
+                # Teleport uses (a 10-minute presence TTL refreshed about once a
+                # minute, not on every keep-alive).
+                #
+                # Liveness is NOT affected. Staleness is decided from
+                # _LiveGatewayConnection's in-memory time.monotonic() stamp
+                # (is_stale / has_recent_inbound_frame), which still updates on
+                # every frame — so dead-socket detection keeps the exact timing
+                # it has today. Only the persisted expiry write is throttled.
+                # A connection with no live object falls back to renewing every
+                # beat, i.e. to the previous behaviour.
+                renew_session_ttl = (
+                    connection.session_renewal_due(
+                        gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS
+                    )
+                    if connection is not None
+                    else True
                 )
-                auth.touch_auth_session(
-                    session_id,
-                    ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
-                )
-                await session_service.extend_session(session_id)
+                if renew_session_ttl:
+                    gateway_state_repository.touch_gateway_session(
+                        session_id=session_id,
+                        gateway_id=gateway_id,
+                        seq=frame_seq,
+                        ack=frame_ack,
+                        health_state=payload.get("health_state"),
+                        journal_cursor=payload.get("journal_cursor"),
+                        checkpoint_cursor=payload.get("checkpoint_cursor"),
+                        metadata={
+                            "capability_readiness": capability_readiness,
+                            "queue_depth_summary": payload.get("queue_depth_summary"),
+                            "service_inventory": service_inventory,
+                            "native_runtime": native_runtime,
+                            "resources": resources,
+                            "device_trust_state": str(binding["device_link"].get("trust_state") or "verified").strip()
+                            or "verified",
+                        },
+                        ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
+                    )
+                    auth.touch_auth_session(
+                        session_id,
+                        ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
+                    )
+                    await session_service.extend_session(session_id)
+                    if connection is not None:
+                        connection.note_session_renewed()
                 heartbeat_response = _response_frame(
                     str(frame.get("id") or "heartbeat"),
                     ok=True,

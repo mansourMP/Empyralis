@@ -506,6 +506,7 @@ Description=Empyralis Agent Computer Gateway
 Documentation=https://empyralis.ai
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -519,6 +520,18 @@ RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30
 NoNewPrivileges=true
+
+# The gateway is the ONLY thing that can report this box's state, so it must
+# outlive both memory pressure and systemd's restart rate limit. Both of these
+# mirror E2B's envd unit, and both close a silent-death path:
+#   OOMScoreAdjust  - the smallest offered droplet is s-1vcpu-1gb; an OOM kill
+#                     leaves no beacon and no log the control plane can see.
+#   StartLimitIntervalSec=0 (above) - without it, Restart=always is honoured
+#                     only until 5 starts in 10s, after which systemd gives up
+#                     PERMANENTLY and a later `systemctl start` answers
+#                     "start request repeated too quickly" and does nothing.
+OOMScoreAdjust=-1000
+Nice=-20
 
 # ── OS CONFINEMENT ────────────────────────────────────────────────────────
 ProtectSystem=strict
