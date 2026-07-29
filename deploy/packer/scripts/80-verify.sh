@@ -88,8 +88,12 @@ check "gateway unit enabled" systemctl is-enabled empyralis-gateway.service
 refute "gateway unit is NOT running" systemctl is-active --quiet empyralis-gateway.service
 check "unit guards on the env file" grep -q '^ConditionPathExists=/etc/empyralis/agent-computer.env$' /etc/systemd/system/empyralis-gateway.service
 check "unit creates its runtime dir" grep -q '^RuntimeDirectory=empyralis$' /etc/systemd/system/empyralis-gateway.service
-# MemoryDenyWriteExecute kills Node outright (V8 W+X). It must never appear.
-refute "unit does NOT set MemoryDenyWriteExecute" grep -q 'MemoryDenyWriteExecute' /etc/systemd/system/empyralis-gateway.service
+# MemoryDenyWriteExecute kills Node outright (V8 W+X). The unit's own header
+# comment explains this in prose, which contains the same substring — so this
+# must check for the systemd DIRECTIVE (unindented, key=value, no leading '#'),
+# not a bare substring match, or the explanatory comment trips this check on
+# every build regardless of whether the real setting is present.
+refute "unit does NOT set MemoryDenyWriteExecute" grep -Eq '^MemoryDenyWriteExecute=' /etc/systemd/system/empyralis-gateway.service
 
 # ── Nothing customer-specific may be baked in ───────────────────────────────
 # This is the security assertion. The image is shared by every customer; a
