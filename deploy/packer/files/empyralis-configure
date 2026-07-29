@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# empyralis-configure — write /etc/empyralis/agent-computer.env and start the
+# gateway. This is the ONLY thing a droplet booted from the Empyralis Agent
+# Computer image has left to do.
+#
+# STATUS: shipped on the image but not yet called by anything. Wiring
+# server_modules/vps_provisioning_service.py's cloud-init to invoke it is the
+# next step (MAN-128), deliberately out of scope for the image build.
+#
+# It exists so that step does not have to reimplement write_env_file() inside a
+# heredoc inside a YAML block scalar inside a Python string — the exact
+# construction that produced the bash/dash regression. Once this is on the
+# image, cloud-init's entire job is one line:
+#
+#   empyralis-configure --pairing-token "$TOKEN" --api-url "$API_URL"
+#
+# Ported from write_env_file() and start_services() in
+# scripts/install-agent-computer.sh (lines 259-314, 527-583).
+set -Eeuo pipefail
+
+SERVICE_USER="empyralis"
+INSTALL_ROOT="/opt/empyralis/agent-computer"
+STATE_ROOT="/var/lib/empyralis/agent-computer"
+CONFIG_DIR="/etc/empyralis"
+ENV_FILE="${CONFIG_DIR}/agent-computer.env"
+CURRENT_DIR="${INSTALL_ROOT}/current"
+GATEWAY_SERVICE="empyralis-gateway.service"
+
+DEFAULT_API_URL="https://empyralis.ai/api"
+
+PAIRING_TOKEN="${EMPYRALIS_PAIRING_TOKEN:-${EMPYRALIS_GATEWAY_PAIRING_TOKEN:-}}"
+API_URL="${EMPYRALIS_API_URL:-${EMPYRALIS_GATEWAY_API_URL:-${DEFAULT_API_URL}}}"
+DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME:-}"
+PERSONAL_CHANNELS_ENABLED="${EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED:-true}"
+START_SERVICE=1
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage: empyralis-configure --pairing-token TOKEN [options]
+
+  --pairing-token TOKEN   Pairing token issued by the Empyralis control plane. Required.
+  --api-url URL           Control-plane API base URL. Default: https://empyralis.ai/api
+  --display-name NAME     Friendly name for this box. Default: the machine's hostname.
+  --personal-channels BOOL  Enable full-account Telegram/WhatsApp channels. Default: true.
+  --no-start              Write the env file but do not start the gateway.
+
+Every option also reads its EMPYRALIS_* environment variable equivalent.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pairing-token) PAIRING_TOKEN="${2:-}"; shift 2 ;;
+    --api-url) API_URL="${2:-}"; shift 2 ;;
+    --display-name) DISPLAY_NAME="${2:-}"; shift 2 ;;
+    --personal-channels) PERSONAL_CHANNELS_ENABLED="${2:-}"; shift 2 ;;
+    --no-start) START_SERVICE=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "empyralis-configure: unknown argument '$1'" >&2; usage; exit 2 ;;
+  esac
+done
+
+if [[ "$(id -u)" != "0" ]]; then
+  echo "empyralis-configure: must run as root" >&2
+  exit 1
+fi
+
+if [[ -z "${PAIRING_TOKEN}" ]]; then
+  echo "empyralis-configure: --pairing-token (or EMPYRALIS_PAIRING_TOKEN) is required" >&2
+  exit 1
+fi
+
+if [[ -z "${API_URL}" ]]; then
+  echo "empyralis-configure: --api-url resolved to empty" >&2
+  exit 1
+fi
+
+if [[ -z "${DISPLAY_NAME}" ]]; then
+  DISPLAY_NAME="$(hostname -f 2>/dev/null || hostname)"
+fi
+
+existing_env_value() {
+  local key="$1"
+  if [[ ! -r "${ENV_FILE}" ]]; then
+    return 1
+  fi
+  awk -F= -v key="${key}" '
+    $1 == key {
+      value = substr($0, length(key) + 2)
+      gsub(/^"/, "", value)
+      gsub(/"$/, "", value)
+      print value
+      exit 0
+    }
+  ' "${ENV_FILE}"
+}
+
+shell_quote_env() {
+  local value="$1"
+  printf '"%s"' "${value//\"/\\\"}"
+}
+
+# Re-running must not orphan an already-paired gateway: carry forward the
+# identity the gateway earned on its first registration.
+existing_gateway_token="$(existing_env_value EMPYRALIS_GATEWAY_TOKEN || true)"
+existing_gateway_id="$(existing_env_value EMPYRALIS_GATEWAY_ID || true)"
+existing_device_id="$(existing_env_value EMPYRALIS_GATEWAY_DEVICE_ID || true)"
+
+previous_umask="$(umask)"
+umask 0077
+{
+  printf 'EMPYRALIS_PAIRING_TOKEN=%s\n' "$(shell_quote_env "${PAIRING_TOKEN}")"
+  printf 'EMPYRALIS_GATEWAY_PAIRING_TOKEN=%s\n' "$(shell_quote_env "${PAIRING_TOKEN}")"
+  printf 'EMPYRALIS_API_URL=%s\n' "$(shell_quote_env "${API_URL}")"
+  printf 'EMPYRALIS_GATEWAY_API_URL=%s\n' "$(shell_quote_env "${API_URL}")"
+  printf 'NODE_ENV="production"\n'
+  printf 'EMPYRALIS_DEPLOY_ENV="agent-computer"\n'
+  printf 'EMPYRALIS_GATEWAY_STATE_DIR=%s\n' "$(shell_quote_env "${STATE_ROOT}/gateway")"
+  printf 'EMPYRALIS_STATE_HOME=%s\n' "$(shell_quote_env "${STATE_ROOT}/.empyralis/state")"
+  printf 'EMPYRALIS_GATEWAY_DISPLAY_NAME=%s\n' "$(shell_quote_env "${DISPLAY_NAME}")"
+  printf 'EMPYRALIS_GATEWAY_BROWSER_PROJECT_ROOT=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
+  printf 'EMPYRALIS_GATEWAY_BROWSER_PYTHON="python3"\n'
+  printf 'EMPYRALIS_AGENT_COMPUTER_INSTALL_DIR=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
+  printf 'EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED=%s\n' "$(shell_quote_env "${PERSONAL_CHANNELS_ENABLED}")"
+  printf 'EMPYRALIS_GATEWAY_CLI_SETUP_ENABLED="true"\n'
+  printf 'NPM_CONFIG_PREFIX=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli")"
+  printf 'HOME=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/home")"
+  printf 'NPM_CONFIG_CACHE=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/npm-cache")"
+  printf 'PATH=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
+  if [[ -n "${existing_gateway_token}" ]]; then
+    printf 'EMPYRALIS_GATEWAY_TOKEN=%s\n' "$(shell_quote_env "${existing_gateway_token}")"
+  fi
+  if [[ -n "${existing_gateway_id}" ]]; then
+    printf 'EMPYRALIS_GATEWAY_ID=%s\n' "$(shell_quote_env "${existing_gateway_id}")"
+  fi
+  if [[ -n "${existing_device_id}" ]]; then
+    printf 'EMPYRALIS_GATEWAY_DEVICE_ID=%s\n' "$(shell_quote_env "${existing_device_id}")"
+  fi
+} > "${ENV_FILE}"
+umask "${previous_umask}"
+
+chown root:"${SERVICE_USER}" "${ENV_FILE}"
+chmod 0640 "${ENV_FILE}"
+
+# The install-time chown is baked into the image, but state and logs are
+# re-asserted here in case anything on the box changed them.
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_ROOT}" /var/log/empyralis
+
+echo "empyralis-configure: wrote ${ENV_FILE}"
+
+if [[ "${START_SERVICE}" != "1" ]]; then
+  echo "empyralis-configure: --no-start given; not starting ${GATEWAY_SERVICE}"
+  exit 0
+fi
+
+if ! command -v systemctl >/dev/null 2>&1 || [[ ! -d /run/systemd/system ]]; then
+  echo "empyralis-configure: systemd is not active on this host; refusing to run the gateway unconfined" >&2
+  exit 1
+fi
+
+# The unit is already enabled on the image; daemon-reload is cheap insurance in
+# case anything dropped a drop-in. `restart` rather than `start` so re-running
+# this picks up a changed env file.
+systemctl daemon-reload
+systemctl enable "${GATEWAY_SERVICE}" >/dev/null
+systemctl restart "${GATEWAY_SERVICE}"
+
+echo "empyralis-configure: ${GATEWAY_SERVICE} started"

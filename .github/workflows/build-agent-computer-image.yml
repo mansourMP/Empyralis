@@ -1,0 +1,330 @@
+name: Build Agent Computer Image (DigitalOcean)
+
+# Builds the pre-baked DigitalOcean snapshot that provisioned Agent Computer
+# droplets boot from (MAN-128), using deploy/packer/agent-computer.pkr.hcl.
+#
+# WHY THIS EXISTS: provisioning used to install the whole runtime at first boot.
+# Every step of that was a network call on a thirty-second-old box, and every
+# failure mode collapsed into the same symptom — silence. This workflow moves
+# all of it to build time, where a failure is a red CI job with a log instead of
+# a customer watching a spinner. Nobody else installs a runtime at first boot;
+# E2B, Modal, GitHub Actions and DigitalOcean's own Marketplace 1-Clicks all
+# boot pre-baked images.
+#
+# CREDENTIALS
+#   DIGITALOCEAN_ACCESS_TOKEN  (repo secret, DOES NOT EXIST YET — see below)
+#       A DigitalOcean personal access token with WRITE scope. The build creates
+#       a throwaway droplet, snapshots it, transfers the snapshot to every
+#       customer-facing region, then destroys the droplet. Minimum scopes:
+#       droplet (create/read/delete), image (read/update/delete), and
+#       regions/sizes read. This is Empyralis' OWN DigitalOcean account, not a
+#       customer's — customer tokens are never used here.
+#   R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY  (repo secrets, already exist)
+#       Reused from release-gateway-linux.yml. Scoped to Object Read & Write on
+#       the empyralis-agent-computer-releases bucket only.
+#
+# OUTPUT
+#   * A job output `image_id` — the numeric DigitalOcean image ID.
+#   * A JSON pointer written to R2 at
+#       agent-computer/images/digitalocean/latest.json          (moving pointer)
+#       agent-computer/images/digitalocean/<snapshot-name>.json (immutable)
+#     served back out at
+#       https://empyralis.ai/releases/agent-computer/images/digitalocean/latest.json
+#     Same bucket and same Worker route the gateway artifact already uses, so no
+#     new infrastructure and no new credential.
+#   * A job summary with the ID, so the founder can read it off the run page.
+#
+#   WHY BOTH: the workflow output is only visible to this run, and R2 is a
+#   durable, human- and machine-readable record of "which image is current".
+#   The provisioning service should read the ID from configuration
+#   (EMPYRALIS_DO_AGENT_IMAGE_ID or equivalent) rather than fetching this file
+#   on every provision — adding a live network dependency to the create-droplet
+#   path is precisely the class of risk this whole change removes. The R2 file
+#   is the source of truth for WHAT to set, not a runtime lookup.
+
+on:
+  workflow_dispatch:
+    inputs:
+      gateway_version:
+        description: >-
+          Gateway release version to bake in. Must already be published by
+          "Release Gateway (Linux)" at
+          empyralis.ai/releases/agent-computer/<version>/. The build downloads it
+          and verifies its .sha256 sidecar.
+        required: true
+        default: latest
+      publish_manifest:
+        description: Publish the image-ID pointer to R2 (uncheck for a test build).
+        type: boolean
+        required: false
+        default: true
+      snapshot_regions:
+        description: >-
+          Comma-separated DigitalOcean regions to copy the snapshot into. Must
+          cover every region offered by the size/region picker. DO bills
+          snapshot storage per region copy.
+        required: false
+        default: nyc3,sfo3,lon1,fra1,sgp1,blr1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-computer-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Cheap, secret-free gate. Catches HCL and formatting errors without ever
+  # touching a DigitalOcean token, so it can run on a fork or a PR.
+  validate:
+    name: Validate Packer template
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: packer init
+        run: packer init deploy/packer
+
+      # Advisory, not a gate. The template was hand-written without a local
+      # Packer binary to normalise it, and failing a build on `=` alignment
+      # would send a misleading signal about whether the image works.
+      - name: packer fmt (advisory)
+        continue-on-error: true
+        run: packer fmt -check -diff deploy/packer
+
+      # -syntax-only because a full `packer validate` instantiates the
+      # DigitalOcean builder, which requires a real api_token.
+      - name: packer validate (syntax)
+        run: packer validate -syntax-only deploy/packer
+
+      - name: Shell-check the provisioner scripts
+        run: |
+          set -euo pipefail
+          # Every one of these runs as root on a box that becomes every customer
+          # machine. A syntax error here is not something to discover on a
+          # droplet. (Parse check only — shellcheck is not a repo dependency.)
+          for f in deploy/packer/scripts/*.sh deploy/packer/files/run-gateway deploy/packer/files/empyralis-configure; do
+            bash -n "$f"
+            echo "ok  $f"
+          done
+
+      # The bake path and the fallback installer must not drift: a package in
+      # one and not the other means a droplet's capabilities depend on which
+      # path provisioned it.
+      - name: Cross-check system package list against the fallback installer
+        run: |
+          set -euo pipefail
+          installer_pkgs="$(sed -n '/apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \\/,/^}/p' scripts/install-agent-computer.sh \
+            | sed -e '1d' -e 's/[\\ ]//g' -e '/^$/d' -e '/^}/d' | sort -u)"
+          image_pkgs="$(sed -n '/apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \\/,/^$/p' deploy/packer/scripts/10-system-deps.sh \
+            | sed -e '1d' -e 's/[\\ ]//g' -e '/^$/d' | sort -u)"
+          if [ "$installer_pkgs" != "$image_pkgs" ]; then
+            echo "System package lists have drifted between scripts/install-agent-computer.sh and deploy/packer/scripts/10-system-deps.sh:" >&2
+            diff <(echo "$installer_pkgs") <(echo "$image_pkgs") >&2 || true
+            exit 1
+          fi
+          echo "package lists match:"
+          echo "$image_pkgs"
+
+  build:
+    name: Build and snapshot
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      image_id: ${{ steps.snapshot.outputs.image_id }}
+      snapshot_name: ${{ steps.snapshot.outputs.snapshot_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Packer
+        uses: hashicorp/setup-packer@v3
+        with:
+          version: latest
+
+      - name: Fail early if the DigitalOcean token is missing
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          # A missing secret otherwise surfaces as an opaque Packer error 20
+          # minutes in. Name it here instead.
+          if [ -z "${DIGITALOCEAN_ACCESS_TOKEN}" ]; then
+            echo "Repo secret DIGITALOCEAN_ACCESS_TOKEN is not set." >&2
+            echo "Add it under Settings -> Secrets and variables -> Actions." >&2
+            echo "It needs a DigitalOcean personal access token with write scope on droplets and images." >&2
+            exit 1
+          fi
+
+      # Confirms the release this build is about to bake in actually exists
+      # before spending money on a droplet. The single most common way the old
+      # boot-time install died was this object not being there.
+      - name: Confirm the gateway release is published
+        env:
+          GATEWAY_VERSION: ${{ inputs.gateway_version }}
+        run: |
+          set -euo pipefail
+          URL="https://empyralis.ai/releases/agent-computer/${GATEWAY_VERSION}/empyralis-gateway-linux-x64.tar.gz"
+          # A one-byte range GET rather than HEAD: the Cloudflare Worker in
+          # front of the bucket is not guaranteed to answer HEAD, and a 405
+          # here would look identical to a missing release.
+          code="$(curl -sS -L -o /dev/null -w '%{http_code}' -r 0-0 "$URL")"
+          case "$code" in
+            200|206) echo "gateway artifact present at $URL (HTTP $code)" ;;
+            *)
+              echo "Gateway artifact is not published at $URL (HTTP $code)." >&2
+              echo "Run the 'Release Gateway (Linux)' workflow for version '${GATEWAY_VERSION}' first." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: packer init
+        run: packer init deploy/packer
+
+      # Inputs travel through the environment, not through string interpolation
+      # into the shell body — a workflow_dispatch input is still attacker-shaped
+      # input if the account is ever compromised.
+      - name: packer validate
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          GATEWAY_VERSION: ${{ inputs.gateway_version }}
+          SNAPSHOT_REGIONS: ${{ inputs.snapshot_regions }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          REGIONS_HCL="[$(printf '%s' "$SNAPSHOT_REGIONS" | sed 's/[^,]*/"&"/g')]"
+          echo "snapshot_regions=$REGIONS_HCL"
+          packer validate \
+            -var "gateway_version=$GATEWAY_VERSION" \
+            -var "snapshot_regions=$REGIONS_HCL" \
+            -var "source_commit=$SOURCE_COMMIT" \
+            deploy/packer
+
+      - name: packer build
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          GATEWAY_VERSION: ${{ inputs.gateway_version }}
+          SNAPSHOT_REGIONS: ${{ inputs.snapshot_regions }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          PACKER_LOG: "1"
+        run: |
+          set -euo pipefail
+          REGIONS_HCL="[$(printf '%s' "$SNAPSHOT_REGIONS" | sed 's/[^,]*/"&"/g')]"
+          packer build \
+            -var "gateway_version=$GATEWAY_VERSION" \
+            -var "snapshot_regions=$REGIONS_HCL" \
+            -var "source_commit=$SOURCE_COMMIT" \
+            deploy/packer
+
+      - name: Extract the snapshot ID
+        id: snapshot
+        run: |
+          set -euo pipefail
+          MANIFEST=deploy/packer/packer-manifest.json
+          test -f "$MANIFEST" || { echo "packer produced no manifest at $MANIFEST" >&2; exit 1; }
+          cat "$MANIFEST"
+          # The DigitalOcean builder's artifact_id is "<region>,<region>,...:<image id>".
+          ARTIFACT_ID="$(jq -r '.builds[-1].artifact_id' "$MANIFEST")"
+          IMAGE_ID="${ARTIFACT_ID##*:}"
+          REGIONS="${ARTIFACT_ID%%:*}"
+          SNAPSHOT_NAME="$(jq -r '.builds[-1].custom_data.snapshot_name' "$MANIFEST")"
+          case "$IMAGE_ID" in
+            ''|*[!0-9]*) echo "could not parse a numeric image id out of '$ARTIFACT_ID'" >&2; exit 1 ;;
+          esac
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "regions=$REGIONS" >> "$GITHUB_OUTPUT"
+          echo "snapshot_name=$SNAPSHOT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Build the image pointer manifest
+        id: pointer
+        env:
+          IMAGE_ID: ${{ steps.snapshot.outputs.image_id }}
+          SNAPSHOT_NAME: ${{ steps.snapshot.outputs.snapshot_name }}
+          SNAPSHOT_REGIONS_OUT: ${{ steps.snapshot.outputs.regions }}
+          GATEWAY_VERSION: ${{ inputs.gateway_version }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/digitalocean-image.json"
+          jq -n \
+            --arg provider "digitalocean" \
+            --arg image_id "$IMAGE_ID" \
+            --arg snapshot_name "$SNAPSHOT_NAME" \
+            --arg gateway_version "$GATEWAY_VERSION" \
+            --arg base_image "ubuntu-24-04-x64" \
+            --arg regions "$SNAPSHOT_REGIONS_OUT" \
+            --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg run_url "$RUN_URL" \
+            '{
+              provider: $provider,
+              image_id: $image_id,
+              snapshot_name: $snapshot_name,
+              gateway_version: $gateway_version,
+              base_image: $base_image,
+              regions: ($regions | split(",")),
+              min_disk_gb: 25,
+              built_at: $built_at,
+              source_commit: $source_commit,
+              workflow_run_url: $run_url
+            }' > "$OUT"
+          cat "$OUT"
+          echo "path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the pointer manifest as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-computer-image-${{ steps.snapshot.outputs.image_id }}
+          path: |
+            ${{ steps.pointer.outputs.path }}
+            deploy/packer/packer-manifest.json
+          if-no-files-found: error
+          retention-days: 90
+
+      # Same bucket and Worker route the gateway artifact already uses, so the
+      # image ID is discoverable exactly where everything else about a release
+      # lives. `latest.json` is a moving pointer; the snapshot-named copy is
+      # immutable so an older image ID stays recoverable for a rollback.
+      - name: Publish the image pointer to Cloudflare R2
+        if: ${{ inputs.publish_manifest }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://76e485cbfb611ff8caa5c1d2afa71890.r2.cloudflarestorage.com"
+          BUCKET="empyralis-agent-computer-releases"
+          PREFIX="s3://${BUCKET}/agent-computer/images/digitalocean"
+          SRC="${{ steps.pointer.outputs.path }}"
+          aws s3 cp "$SRC" "$PREFIX/${{ steps.snapshot.outputs.snapshot_name }}.json" \
+            --endpoint-url "$ENDPOINT" --content-type application/json
+          # no-cache on the moving pointer: a cached stale image ID would point
+          # provisioning at a deleted snapshot.
+          aws s3 cp "$SRC" "$PREFIX/latest.json" \
+            --endpoint-url "$ENDPOINT" --content-type application/json \
+            --cache-control "no-cache, max-age=0"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Agent Computer image built"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| DigitalOcean image ID | \`${{ steps.snapshot.outputs.image_id }}\` |"
+            echo "| Snapshot name | \`${{ steps.snapshot.outputs.snapshot_name }}\` |"
+            echo "| Gateway version baked in | \`${{ inputs.gateway_version }}\` |"
+            echo "| Regions | \`${{ steps.snapshot.outputs.regions }}\` |"
+            echo "| Minimum droplet disk | 25 GB |"
+            echo
+            echo "Set this image ID in the provisioning service's configuration to start using it."
+            echo "Pointer: https://empyralis.ai/releases/agent-computer/images/digitalocean/latest.json"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,86 @@
+# Port of the unit written by write_systemd_units() in
+# scripts/install-agent-computer.sh (lines 475-525), with the paths resolved to
+# the installer's own defaults (there is no caller to override them on a shared
+# base image).
+#
+# THREE DELIBERATE DEVIATIONS from the installer's unit, all forced by the fact
+# that this unit now ships ENABLED on an image that has never been configured:
+#
+#  1. ConditionPathExists=/etc/empyralis/agent-computer.env
+#     The installer writes the env file and only then enables the unit, so the
+#     file always exists by the time systemd looks. On a baked image the unit is
+#     enabled before any config exists, and at first boot systemd reaches
+#     multi-user.target before cloud-init has written the env file. Without this
+#     condition, `EnvironmentFile=` (no `-` prefix) makes the start FAIL, five
+#     times in ten seconds, at which point systemd's start rate limit trips and
+#     the later `systemctl start` from the provisioner returns
+#     "start request repeated too quickly" and does nothing at all — a silent
+#     dead box, which is exactly the failure class this whole change exists to
+#     kill. With the condition, an unconfigured boot is SKIPPED cleanly (no
+#     failure, no rate-limit spend) and the explicit start after the env file
+#     lands re-evaluates the condition and runs.
+#
+#  2. RuntimeDirectory=empyralis / RuntimeDirectoryMode=0750
+#     The installer mkdir's /run/empyralis at install time. /run is a tmpfs and
+#     is wiped on every boot, so a baked directory would not survive; the unit's
+#     ReadWritePaths=/run/empyralis would then fail namespace setup on first
+#     boot. RuntimeDirectory= recreates it, with the right owner and mode, on
+#     every start.
+#
+#  3. StartLimitIntervalSec=0
+#     Restart=always is only honoured until the default rate limit (5 starts in
+#     10s) trips, after which systemd gives up permanently. The installer's own
+#     comments rely on the service continuing to retry pairing long after the
+#     script exits; this makes that true instead of nearly true.
+#
+# Everything else — the confinement block in particular, including the
+# deliberate absence of MemoryDenyWriteExecute — is unchanged. Do not add
+# MemoryDenyWriteExecute: V8 allocates W+X memory at startup and Node aborts
+# immediately, so the gateway never starts and the box hangs at "provisioning"
+# forever. Verified on ubuntu 24.04 / node v20.
+
+[Unit]
+Description=Empyralis Agent Computer Gateway
+Documentation=https://empyralis.ai
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/empyralis/agent-computer.env
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=empyralis
+Group=empyralis
+EnvironmentFile=/etc/empyralis/agent-computer.env
+WorkingDirectory=/opt/empyralis/agent-computer/current
+ExecStart=/opt/empyralis/agent-computer/bin/run-gateway
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+NoNewPrivileges=true
+
+RuntimeDirectory=empyralis
+RuntimeDirectoryMode=0750
+
+# ── OS CONFINEMENT ────────────────────────────────────────────────────────
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# NOTE: MemoryDenyWriteExecute is intentionally NOT set. See the header above.
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Gateway needs write access to state, logs, and its install root
+ReadWritePaths=/var/lib/empyralis/agent-computer /opt/empyralis/agent-computer /var/log/empyralis /run/empyralis
+ReadOnlyPaths=/etc/empyralis
+
+[Install]
+WantedBy=multi-user.target

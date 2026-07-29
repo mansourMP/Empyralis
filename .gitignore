@@ -105,3 +105,10 @@ dump.rdb
 *.rdb
 *.dmg
 graphify-out/
+
+# Packer image build (deploy/packer) — local build artifacts only. The image ID
+# lives in the workflow output and in R2, never in the repo.
+deploy/packer/packer-manifest.json
+.packer.d/
+packer_cache/
+crash.log
