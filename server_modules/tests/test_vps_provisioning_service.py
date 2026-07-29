@@ -920,7 +920,8 @@ def test_fetch_provider_plans_reactive_refresh_persists_new_token_on_401(tmp_pat
     assert reloaded["access_token"] == "reissued_token"
 
 
-def test_delete_recorded_vps_reactively_refreshes_digitalocean_token_on_401(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_delete_recorded_vps_reactively_refreshes_digitalocean_token_on_401(tmp_path, monkeypatch):
     # delete_recorded_vps reads its OWN point-in-time credentials snapshot
     # (record_vps_provision), not the token store — it needs its own
     # reactive-refresh wiring, persisted back into that snapshot.
@@ -930,7 +931,7 @@ def test_delete_recorded_vps_reactively_refreshes_digitalocean_token_on_401(tmp_
     monkeypatch.setenv("DIGITALOCEAN_CLIENT_ID", "do_client")
     monkeypatch.setenv("DIGITALOCEAN_CLIENT_SECRET", "do_client_secret")
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_3",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -963,7 +964,7 @@ def test_delete_recorded_vps_reactively_refreshes_digitalocean_token_on_401(tmp_
 
     monkeypatch.setattr(vps.urlrequest, "urlopen", fake_urlopen)
 
-    result = vps.delete_recorded_vps("vps_3")
+    result = await vps.delete_recorded_vps("vps_3")
 
     assert result["status"] == "deleted"
     assert auth_headers_seen == ["Bearer expired_snapshot", "Bearer renewed_snapshot"]
@@ -1289,7 +1290,8 @@ async def test_hardware_vps_plans_route_requires_connected_account_for_digitaloc
     assert exc_info.value.status_code == 400
 
 
-def test_delete_recorded_vps_calls_provider_cleanup(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_delete_recorded_vps_calls_provider_cleanup(tmp_path, monkeypatch):
     deleted = []
     monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
@@ -1300,7 +1302,7 @@ def test_delete_recorded_vps_calls_provider_cleanup(tmp_path, monkeypatch):
         lambda method, url, *, token, provider, **_kwargs: deleted.append((method, url, token, provider)),
     )
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_2",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -1315,7 +1317,7 @@ def test_delete_recorded_vps_calls_provider_cleanup(tmp_path, monkeypatch):
         credentials={"api_token": "do_secret"},
     )
 
-    result = vps.delete_recorded_vps("vps_2")
+    result = await vps.delete_recorded_vps("vps_2")
 
     assert result["status"] == "deleted"
     assert deleted == [("DELETE", "https://api.digitalocean.com/v2/droplets/12345", "do_secret", "digitalocean")]
@@ -1568,7 +1570,7 @@ async def test_run_vps_provisioning_lifecycle_persists_result_then_waits_for_con
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
     monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_lifecycle_1",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -1622,7 +1624,7 @@ async def test_run_vps_provisioning_lifecycle_persists_result_then_waits_for_con
 
     provision_mock.assert_called_once()
     assert delete_calls == []  # success path never touches cleanup
-    record = vps.load_vps_record("vps_lifecycle_1")
+    record = await vps.load_vps_record("vps_lifecycle_1")
     assert record["provider_resource_id"] == "droplet-42"
     assert record["public_ip"] == "203.0.113.42"
 
@@ -1640,7 +1642,7 @@ async def test_run_vps_provisioning_lifecycle_deletes_droplet_when_connect_fails
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
     monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_lifecycle_2",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -1700,7 +1702,7 @@ async def test_run_vps_provisioning_lifecycle_deletes_droplet_when_connect_fails
     # The provider's delete-droplet API was actually called for the
     # resource that was created.
     assert deleted == [("DELETE", "https://api.digitalocean.com/v2/droplets/droplet-99", "do_secret", "digitalocean")]
-    record = vps.load_vps_record("vps_lifecycle_2")
+    record = await vps.load_vps_record("vps_lifecycle_2")
     assert record["status"] == "failed"
     assert record["provider_resource_id"] == "droplet-99"
 
@@ -1717,7 +1719,7 @@ async def test_run_vps_provisioning_lifecycle_marks_failed_without_cleanup_when_
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
     monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_lifecycle_3",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -1754,7 +1756,7 @@ async def test_run_vps_provisioning_lifecycle_marks_failed_without_cleanup_when_
         )
 
     assert delete_calls == []  # nothing was ever created -- nothing to delete
-    record = vps.load_vps_record("vps_lifecycle_3")
+    record = await vps.load_vps_record("vps_lifecycle_3")
     assert record["status"] == "failed"
     assert record["provider_resource_id"] == ""
     assert "422" in (record.get("error") or "")
@@ -1773,7 +1775,7 @@ async def test_run_vps_provisioning_lifecycle_marks_failed_on_connect_timeout(tm
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
     monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_lifecycle_4",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -1821,11 +1823,12 @@ async def test_run_vps_provisioning_lifecycle_marks_failed_on_connect_timeout(tm
         )
 
     assert deleted == [("DELETE", "https://api.digitalocean.com/v2/droplets/droplet-77", "do_secret", "digitalocean")]
-    record = vps.load_vps_record("vps_lifecycle_4")
+    record = await vps.load_vps_record("vps_lifecycle_4")
     assert record["status"] == "failed"
 
 
-def test_mark_vps_provision_failed_deletes_resource_and_records_reason(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_mark_vps_provision_failed_deletes_resource_and_records_reason(tmp_path, monkeypatch):
     monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
     monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
@@ -1836,7 +1839,7 @@ def test_mark_vps_provision_failed_deletes_resource_and_records_reason(tmp_path,
         lambda method, url, *, token, provider, **_kwargs: deleted.append((method, url, token, provider)),
     )
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_mark_failed_1",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -1851,7 +1854,7 @@ def test_mark_vps_provision_failed_deletes_resource_and_records_reason(tmp_path,
         credentials={"api_token": "do_secret"},
     )
 
-    result = vps.mark_vps_provision_failed("vps_mark_failed_1", reason="boot never completed")
+    result = await vps.mark_vps_provision_failed("vps_mark_failed_1", reason="boot never completed")
 
     assert result["status"] == "failed"
     assert result["error"] == "boot never completed"
@@ -1859,11 +1862,12 @@ def test_mark_vps_provision_failed_deletes_resource_and_records_reason(tmp_path,
 
     # Calling it again (e.g. a second failure signal racing in) must not
     # attempt a second delete against a resource that's already gone.
-    vps.mark_vps_provision_failed("vps_mark_failed_1", reason="second failure signal")
+    await vps.mark_vps_provision_failed("vps_mark_failed_1", reason="second failure signal")
     assert len(deleted) == 1
 
 
-def test_mark_vps_provision_failed_skips_cleanup_when_no_resource_was_created(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_mark_vps_provision_failed_skips_cleanup_when_no_resource_was_created(tmp_path, monkeypatch):
     monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
     monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
@@ -1873,7 +1877,7 @@ def test_mark_vps_provision_failed_skips_cleanup_when_no_resource_was_created(tm
 
     monkeypatch.setattr(vps, "_http_empty", _fail_if_called)
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_mark_failed_2",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -1888,7 +1892,7 @@ def test_mark_vps_provision_failed_skips_cleanup_when_no_resource_was_created(tm
         credentials={"api_token": "do_secret"},
     )
 
-    result = vps.mark_vps_provision_failed("vps_mark_failed_2", reason="create call rejected", attempt_cleanup=False)
+    result = await vps.mark_vps_provision_failed("vps_mark_failed_2", reason="create call rejected", attempt_cleanup=False)
 
     assert result["status"] == "failed"
     assert result["provider_resource_id"] == ""
@@ -2735,12 +2739,13 @@ def test_provision_vps_google_requires_fully_connected_credentials(tmp_path, mon
         vps.provision_vps("google", {"project_id": "my-project"}, "us-central1", "e2-medium", "pair_google_test")
 
 
-def test_delete_recorded_vps_google_resolves_zone_and_deletes_by_instance_name(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_delete_recorded_vps_google_resolves_zone_and_deletes_by_instance_name(tmp_path, monkeypatch):
     _isolate_vps_state(tmp_path, monkeypatch)
     _google_env(monkeypatch)
     monkeypatch.setattr(vps, "_http_form_json", _fake_operator_token_exchange)
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_google_1",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -2773,7 +2778,7 @@ def test_delete_recorded_vps_google_resolves_zone_and_deletes_by_instance_name(t
     monkeypatch.setattr(vps, "_http_json", fake_http_json)
     monkeypatch.setattr(vps, "_http_empty", fake_http_empty)
 
-    result = vps.delete_recorded_vps("vps_google_1")
+    result = await vps.delete_recorded_vps("vps_google_1")
 
     assert result["status"] == "deleted"
     assert deleted == [(
@@ -3782,12 +3787,13 @@ def test_provision_vps_aws_still_accepts_static_region_when_live_fetch_fails(mon
     assert result.provider_resource_id == "i-static-region"
 
 
-def test_delete_recorded_vps_terminates_aws_instance(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_delete_recorded_vps_terminates_aws_instance(tmp_path, monkeypatch):
     monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
     monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
 
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_aws_1",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -3806,7 +3812,7 @@ def test_delete_recorded_vps_terminates_aws_instance(tmp_path, monkeypatch):
     fake_boto3 = _FakeBoto3(sts=_FakeStsClient(), ec2=ec2_client)
     monkeypatch.setattr(vps, "_boto3", fake_boto3)
 
-    result = vps.delete_recorded_vps("vps_aws_1")
+    result = await vps.delete_recorded_vps("vps_aws_1")
 
     assert result["status"] == "deleted"
     assert ec2_client.terminate_instances_calls == [{"InstanceIds": ["i-0123456789abcdef0"]}]
@@ -4113,11 +4119,12 @@ def test_resolved_status_prefers_a_live_registration_over_a_terminal_beacon(tmp_
 # --- MAN-121: the box's failure beacon ---
 
 
-def test_install_beacon_records_reason_against_the_matching_record(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_install_beacon_records_reason_against_the_matching_record(tmp_path, monkeypatch):
     _isolate_vps_state(tmp_path, monkeypatch)
     monkeypatch.setattr(vps.gateway_state_repository, "list_workspace_gateway_registrations", lambda *a, **kw: [])
     monkeypatch.setattr(vps.gateway_state_repository, "get_pairing_intent_by_token", lambda token: None)
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_beacon_1",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -4132,7 +4139,7 @@ def test_install_beacon_records_reason_against_the_matching_record(tmp_path, mon
         credentials={"access_token": "do_token"},
     )
 
-    recorded = vps.record_vps_install_event(
+    recorded = await vps.record_vps_install_event(
         pairing_token="pair_tok_beacon",
         phase="gateway_download",
         message="could not download the gateway artifact (HTTP 404)",
@@ -4144,18 +4151,19 @@ def test_install_beacon_records_reason_against_the_matching_record(tmp_path, mon
     assert "HTTP 404" in recorded["install_error"]
     # A terminal beacon is a confirmed failure, so the status API reflects it
     # immediately rather than after a 20-minute silent timeout.
-    assert vps.get_vps_provision_status("vps_beacon_1")["status"] == "failed"
-    assert "HTTP 404" in vps.load_vps_record("vps_beacon_1")["install_error"]
+    assert (await vps.get_vps_provision_status("vps_beacon_1"))["status"] == "failed"
+    assert "HTTP 404" in (await vps.load_vps_record("vps_beacon_1"))["install_error"]
 
 
-def test_advisory_install_beacon_does_not_fail_the_record(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_advisory_install_beacon_does_not_fail_the_record(tmp_path, monkeypatch):
     """The installer's own registration wait elapsing is NOT terminal — the
     systemd unit is still up and retrying, and giving up here would destroy a
     box that is about to connect."""
     _isolate_vps_state(tmp_path, monkeypatch)
     monkeypatch.setattr(vps.gateway_state_repository, "list_workspace_gateway_registrations", lambda *a, **kw: [])
     monkeypatch.setattr(vps.gateway_state_repository, "get_pairing_intent_by_token", lambda token: {"status": "consumed"})
-    vps.record_vps_provision(
+    await vps.record_vps_provision(
         vps_id="vps_beacon_2",
         workspace_id="ws-1",
         tenant_id="tenant-1",
@@ -4170,22 +4178,23 @@ def test_advisory_install_beacon_does_not_fail_the_record(tmp_path, monkeypatch)
         credentials={"access_token": "do_token"},
     )
 
-    vps.record_vps_install_event(
+    await vps.record_vps_install_event(
         pairing_token="pair_tok_beacon_2",
         phase="registration_wait",
         message="gateway installed and started but had not registered yet",
         terminal=False,
     )
 
-    assert vps.get_vps_provision_status("vps_beacon_2")["status"] != "failed"
+    assert (await vps.get_vps_provision_status("vps_beacon_2"))["status"] != "failed"
     # ...but the reason is still on the record, so a later timeout can explain itself.
-    assert vps.load_vps_record("vps_beacon_2")["install_error"]
+    assert (await vps.load_vps_record("vps_beacon_2"))["install_error"]
 
 
-def test_install_beacon_with_an_unknown_token_is_discarded(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_install_beacon_with_an_unknown_token_is_discarded(tmp_path, monkeypatch):
     _isolate_vps_state(tmp_path, monkeypatch)
 
-    assert vps.record_vps_install_event(pairing_token="never-issued", phase="install", message="boom") is None
+    assert await vps.record_vps_install_event(pairing_token="never-issued", phase="install", message="boom") is None
 
 
 def test_provision_vps_digitalocean_falls_back_when_do_rejects_the_baked_image(monkeypatch):
@@ -4249,3 +4258,64 @@ def test_provision_vps_digitalocean_does_not_retry_on_unrelated_failures(monkeyp
         vps.provision_vps("digitalocean", {"api_token": "do_secret"}, "nyc3", None, "pair_do")
 
     assert len(attempts) == 1, "a non-image failure must not be retried"
+
+
+@pytest.mark.asyncio
+async def test_progress_beacon_reports_phase_without_marking_an_error(tmp_path, monkeypatch):
+    """A progress beacon ("now installing Node.js") must annotate the record
+    with the live phase and NOT populate install_error.
+
+    install_error is what run_vps_provisioning_lifecycle quotes as the failure
+    reason when the 20-minute window expires. If progress wrote into it, a box
+    that was merely slow would report its last SUCCESSFUL step as the thing
+    that killed it — an actively misleading error message.
+    """
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    await vps.record_vps_provision(
+        vps_id="vps_progress_test", workspace_id="ws-1", tenant_id="t-1", user_id="u-1",
+        provider="digitalocean", provider_resource_id="123", public_ip=None,
+        region="nyc3", size="s-1vcpu-2gb", status="provisioning",
+        pairing_token="gpair_progress", credentials={"api_token": "x"},
+    )
+
+    updated = await vps.record_vps_install_event(
+        pairing_token="gpair_progress", phase="node_install",
+        message="installing Node.js 20", terminal=False, kind="progress",
+    )
+
+    assert updated is not None
+    assert updated["install_phase"] == "node_install"
+    assert updated["install_progress"] == "installing Node.js 20"
+    # The whole point: progress is not a failure.
+    assert updated["install_error"] is None
+    assert updated["status"] == "provisioning"
+    assert updated["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_problem_beacon_still_records_install_error(tmp_path, monkeypatch):
+    """The failure channel is unchanged, and `kind` defaults to "problem" so an
+    older installer that never sends the field keeps its existing meaning."""
+    _isolate_vps_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    await vps.record_vps_provision(
+        vps_id="vps_problem_test", workspace_id="ws-1", tenant_id="t-1", user_id="u-1",
+        provider="digitalocean", provider_resource_id="123", public_ip=None,
+        region="nyc3", size="s-1vcpu-2gb", status="provisioning",
+        pairing_token="gpair_problem", credentials={"api_token": "x"},
+    )
+
+    updated = await vps.record_vps_install_event(
+        pairing_token="gpair_problem", phase="gateway_download",
+        message="could not download the gateway artifact (HTTP 404)", terminal=True,
+    )
+
+    assert updated is not None
+    assert updated["install_phase"] == "gateway_download"
+    assert updated["install_error"] == "could not download the gateway artifact (HTTP 404)"
+    assert "gateway_download" in (updated["error"] or "")

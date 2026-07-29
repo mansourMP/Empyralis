@@ -77,9 +77,11 @@ json_escape() {
 }
 
 report_beacon() {
-  # report_beacon <terminal:0|1> <message>
+  # report_beacon <terminal:0|1> <message> [kind]
+  # kind: "problem" (default) or "progress" — see set_phase.
   local terminal="$1"
   local message="$2"
+  local kind="${3:-problem}"
   local payload
   if [[ "${EMPYRALIS_DISABLE_INSTALL_BEACON:-0}" == "1" ]]; then
     return 0
@@ -87,21 +89,45 @@ report_beacon() {
   if [[ -z "${PAIRING_TOKEN}" || -z "${API_URL}" ]]; then
     return 0
   fi
-  # First beacon wins: the first failure is the useful one, and later noise
-  # from unwinding shouldn't overwrite it.
-  if (( BEACON_SENT )); then
-    return 0
+  # First FAILURE beacon wins: the first failure is the useful one, and later
+  # noise from unwinding shouldn't overwrite it. Progress beacons (terminal=0
+  # from set_phase) are exempt — they are the whole point of reporting more
+  # than once — and a failure is still allowed to land after them.
+  if [[ "${terminal}" == "1" ]]; then
+    if (( BEACON_SENT )); then
+      return 0
+    fi
+    BEACON_SENT=1
   fi
-  BEACON_SENT=1
-  payload="$(printf '{"pairing_token":"%s","phase":"%s","message":"%s","terminal":%s}' \
+  payload="$(printf '{"pairing_token":"%s","phase":"%s","message":"%s","terminal":%s,"kind":"%s"}' \
     "$(json_escape "${PAIRING_TOKEN}")" \
     "$(json_escape "${INSTALL_PHASE}")" \
     "$(json_escape "${message}")" \
-    "$([[ "${terminal}" == "1" ]] && printf 'true' || printf 'false')")"
+    "$([[ "${terminal}" == "1" ]] && printf 'true' || printf 'false')" \
+    "${kind}")"
   # Never let reporting a failure cause a further failure.
   curl -fsS -m 15 -X POST "${API_URL%/}/gateway/provisioning-events" \
     -H 'content-type: application/json' \
     --data-binary "${payload}" >/dev/null 2>&1 || true
+}
+
+set_phase() {
+  # set_phase <phase> [human message]
+  #
+  # The platform's ONLY window into a running install. Until this existed the
+  # beacon fired solely on failure, so a box that was merely slow and a box
+  # that was wedged looked identical from the control plane: "Installing Agent
+  # Computer…" and nothing else, for as long as it took. Every provision in
+  # this product's history therefore recorded an empty install_phase.
+  #
+  # Progress is reported with terminal=false, so record_vps_install_event
+  # annotates the record without failing it. The frontend already renders
+  # these phase names (see INSTALL_PHASE_LABELS in vps-provision-watch.ts);
+  # they simply never arrived. Beaconing is best-effort and time-boxed, so a
+  # slow or unreachable control plane can never wedge an install that is
+  # otherwise fine.
+  INSTALL_PHASE="$1"
+  report_beacon 0 "${2:-started ${1}}" progress
 }
 
 log() {
@@ -623,27 +649,27 @@ final_status() {
 main() {
   # INSTALL_PHASE names the step for the failure beacon, so a report says
   # "died downloading the gateway" rather than just "died".
-  INSTALL_PHASE="preflight"
+  set_phase preflight "checking the server"
   require_root
   detect_ubuntu
   require_pairing_token
-  INSTALL_PHASE="system_dependencies"
+  set_phase system_dependencies "installing system packages"
   apt_install_system_deps
-  INSTALL_PHASE="node_install"
+  set_phase node_install "installing Node.js 20"
   install_node20
-  INSTALL_PHASE="prepare_host"
+  set_phase prepare_host "preparing the host"
   create_service_user
   prepare_directories
   write_env_file
-  INSTALL_PHASE="gateway_download"
+  set_phase gateway_download "downloading Agent Computer"
   install_release_artifacts
-  INSTALL_PHASE="service_setup"
+  set_phase service_setup "setting up the service"
   write_launcher_scripts
   write_systemd_units
   chown -R "${SERVICE_USER}:${SERVICE_USER}" "${STATE_ROOT}" "${LOG_DIR}" "${RUN_DIR}"
-  INSTALL_PHASE="service_start"
+  set_phase service_start "starting the service"
   start_services
-  INSTALL_PHASE="registration_wait"
+  set_phase registration_wait "waiting for it to connect"
   final_status
 }
 

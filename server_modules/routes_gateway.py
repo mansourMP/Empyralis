@@ -603,6 +603,11 @@ class GatewayProvisioningEventRequest(BaseModel):
     phase: str = Field(default="install", max_length=64)
     message: str = Field(default="", max_length=2000)
     terminal: bool = True
+    # "progress" = the box announcing the step it just entered (set_phase in
+    # install-agent-computer.sh); "problem" = something went wrong. Defaults to
+    # "problem" so an older installer, which only ever beaconed failures, keeps
+    # its existing meaning without needing to be redeployed in lockstep.
+    kind: str = Field(default="problem", max_length=16)
 
 
 class GatewaySshPairingRequest(BaseModel):
@@ -2417,6 +2422,7 @@ async def report_gateway_provisioning_event(body: GatewayProvisioningEventReques
             pairing_token=body.pairing_token,
             phase=body.phase,
             message=body.message,
+            kind=body.kind,
             terminal=bool(body.terminal),
         )
     except Exception:  # noqa: BLE001 - diagnostics must never break the box's install further

@@ -2174,6 +2174,7 @@ async def record_vps_install_event(
     phase: str,
     message: str,
     terminal: bool = True,
+    kind: str = "problem",
 ) -> Optional[Dict[str, Any]]:
     """Record a status/failure beacon sent by the box while it installs.
 
@@ -2201,15 +2202,34 @@ async def record_vps_install_event(
         return None
     clean_phase = str(phase or "install").strip()[:INSTALL_BEACON_MAX_PHASE_CHARS] or "install"
     clean_message = " ".join(str(message or "").split())[:INSTALL_BEACON_MAX_MESSAGE_CHARS]
-    if not clean_message:
-        clean_message = f"The agent computer reported a problem during the '{clean_phase}' step."
     reported_at = _utc_now_iso()
-    annotations: Dict[str, Any] = {
-        "install_phase": clean_phase,
-        "install_error": clean_message,
-        "install_terminal": bool(terminal),
-        "install_reported_at": reported_at,
-    }
+    # A PROGRESS beacon ("now installing Node.js") is not a problem report, and
+    # must never populate install_error — that field is what the lifecycle
+    # quotes as the failure reason on timeout, so treating progress as an error
+    # would make a healthy-but-slow box report its last successful step as the
+    # thing that killed it. Only `kind == "problem"` (the default, so an older
+    # installer keeps its old meaning) writes install_error.
+    is_progress = str(kind or "problem").strip().lower() == "progress" and not terminal
+    if is_progress:
+        annotations: Dict[str, Any] = {
+            "install_phase": clean_phase,
+            "install_progress": clean_message or clean_phase,
+            "install_reported_at": reported_at,
+        }
+        _LOGGER.info(
+            "vps install progress phase=%s: %s",
+            clean_phase,
+            clean_message or "(no detail)",
+        )
+    else:
+        if not clean_message:
+            clean_message = f"The agent computer reported a problem during the '{clean_phase}' step."
+        annotations = {
+            "install_phase": clean_phase,
+            "install_error": clean_message,
+            "install_terminal": bool(terminal),
+            "install_reported_at": reported_at,
+        }
     if terminal:
         # `error` is the field the setup panel renders on a failed record
         # (cloud-vps-setup-panel.tsx -> friendlyProvisionFailureMessage).
@@ -2234,12 +2254,14 @@ async def record_vps_install_event(
             # Deleted between the scan and the write — nothing to annotate.
             _LOGGER.info("vps install beacon phase=%s lost its record mid-write; discarded", clean_phase)
             return None
-        _LOGGER.error(
-            "vps install beacon vps_id=%s provider=%s phase=%s terminal=%s: %s",
+        _LOGGER.log(
+            logging.INFO if is_progress else logging.ERROR,
+            "vps install beacon vps_id=%s provider=%s phase=%s terminal=%s progress=%s: %s",
             matched_id,
             record.get("provider"),
             clean_phase,
             bool(terminal),
+            is_progress,
             clean_message,
         )
         return _public_record(record)
@@ -2255,12 +2277,14 @@ async def record_vps_install_event(
         record["updated_at"] = reported_at
         state.setdefault("vps", {})[matched_id] = record
         _write_state(state)
-    _LOGGER.error(
-        "vps install beacon vps_id=%s provider=%s phase=%s terminal=%s: %s",
+    _LOGGER.log(
+        logging.INFO if is_progress else logging.ERROR,
+        "vps install beacon vps_id=%s provider=%s phase=%s terminal=%s progress=%s: %s",
         matched_id,
         record.get("provider"),
         clean_phase,
         bool(terminal),
+        is_progress,
         clean_message,
     )
     return _public_record(record)
@@ -3071,6 +3095,11 @@ def _public_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         "status": _normalize_status(str(record.get("status") or "provisioning")),
         "pairing_id": str(record.get("pairing_id") or "").strip() or None,
         "error": str(record.get("error") or "").strip() or None,
+        # The step the box is on RIGHT NOW (progress beacon, not a failure).
+        # This is what turns "Installing Agent Computer…" into a live account
+        # of what is actually happening; the frontend already has labels for
+        # every phase name (INSTALL_PHASE_LABELS in vps-provision-watch.ts).
+        "install_progress": str(record.get("install_progress") or "").strip() or None,
         # MAN-121 diagnostics: what the box itself last reported while
         # installing (see record_vps_install_event). install_error is the
         # human-readable reason, install_phase the step it died in, and
