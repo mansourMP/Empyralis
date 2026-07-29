@@ -156,8 +156,15 @@ require_pairing_token() {
 apt_install_system_deps() {
   export DEBIAN_FRONTEND=noninteractive
   log "installing system dependencies"
-  apt-get update -y
-  apt-get install -y --no-install-recommends \
+  # DPkg::Lock::Timeout is not optional here. A fresh Ubuntu droplet runs
+  # unattended-upgrades on first boot; if apt is invoked while that holds the
+  # lock, apt BLOCKS INDEFINITELY rather than failing. An indefinite block
+  # fires no failure beacon (only a crash does), so the box goes silent and
+  # the control plane can only report an opaque timeout — the same
+  # indistinguishable-silence class of bug as the dash/bash regression.
+  # Bounded wait turns a hang into a real, reportable error.
+  apt-get -o DPkg::Lock::Timeout=300 update -y
+  apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \

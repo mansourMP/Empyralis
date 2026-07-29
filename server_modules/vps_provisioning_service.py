@@ -1368,7 +1368,17 @@ def cloud_init_script(pairing_token: str, *, api_url: Optional[str] = None) -> s
         "fi",
         "",
         "chmod +x \"$STAGE\"",
-        f'{repo_token_prefix}EMPYRALIS_PAIRING_TOKEN="$PAIRING_TOKEN" EMPYRALIS_API_URL="$API_URL" sh "$STAGE"',
+        # MUST be bash, not sh. On Ubuntu /bin/sh is dash, and
+        # install-agent-computer.sh opens with `set -Eeuo pipefail` — dash
+        # rejects `-o pipefail` and aborts on line 2, so NOTHING runs: not
+        # apt, not Node, not the artifact download, and critically not the
+        # installer's own failure beacons (they live inside the script that
+        # never starts). The box then sits silent until the control plane's
+        # timeout gives up, which is indistinguishable from every other
+        # failure mode and is exactly the bug this bootstrap was written to
+        # eliminate. A previous revision of this line used `bash` correctly;
+        # it regressed to `sh` during the download-then-run rewrite.
+        f'{repo_token_prefix}EMPYRALIS_PAIRING_TOKEN="$PAIRING_TOKEN" EMPYRALIS_API_URL="$API_URL" bash "$STAGE"',
     ]
     cloud_config_lines = [
         "#cloud-config",
