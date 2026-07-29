@@ -1480,6 +1480,22 @@ def cloud_init_script_for_baked_image(pairing_token: str, *, api_url: Optional[s
     return "\n".join(cloud_config_lines)
 
 
+def _is_digitalocean_image_unavailable(exc: Exception) -> bool:
+    """True when a create-droplet failure is specifically about the IMAGE
+    being unusable, and therefore retryable on the stock Ubuntu slug.
+
+    Deliberately narrow. A 401/403/quota/region failure means the retry
+    would fail identically, so it must propagate as the real error instead
+    of being masked by a second doomed attempt. The two forms DO returns
+    here are `422 unprocessable_entity "Image is not available."` (the
+    account cannot see the image) and `404 not_found` naming the image.
+    """
+    detail = str(exc)
+    if "image" not in detail.lower():
+        return False
+    return "422" in detail or "404" in detail or "not_found" in detail or "unprocessable_entity" in detail
+
+
 def _digitalocean_baked_image_id(region: str) -> Optional[str]:
     """Numeric DigitalOcean snapshot ID of the current pre-baked Agent
     Computer image for `region`, or None. See DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV's
@@ -1640,16 +1656,49 @@ def provision_vps(
         # feature being off, or an unreachable pointer) returns None and
         # leaves user_data on the boot-time installer built above.
         baked_image_id = _digitalocean_baked_image_id(resolved_region)
-        return _provision_digitalocean(
-            config,
-            token,
-            resolved_region,
-            resolved_size,
-            name,
-            cloud_init_script_for_baked_image(pairing_token) if baked_image_id else user_data,
-            image_override=baked_image_id,
-            on_unauthorized=on_unauthorized,
-        )
+        if not baked_image_id:
+            return _provision_digitalocean(
+                config, token, resolved_region, resolved_size, name, user_data, on_unauthorized=on_unauthorized
+            )
+        try:
+            return _provision_digitalocean(
+                config,
+                token,
+                resolved_region,
+                resolved_size,
+                name,
+                cloud_init_script_for_baked_image(pairing_token),
+                image_override=baked_image_id,
+                on_unauthorized=on_unauthorized,
+            )
+        except VPSProvisioningError as exc:
+            # The baked image was rejected. This is RECOVERABLE — the
+            # boot-time installer needs nothing but a public Ubuntu slug, so
+            # a bad/invisible image must never be the reason a customer
+            # cannot get a server at all.
+            #
+            # 2026-07-29: this is exactly how the first live attempt failed.
+            # A DigitalOcean private snapshot is scoped to the ACCOUNT that
+            # created it; the image is baked in Empyralis's own account by
+            # CI, while droplets are created in the customer's
+            # OAuth-connected account, which cannot see it — DO answers
+            # `422 {"id":"unprocessable_entity","message":"Image is not
+            # available."}`. No droplet is created when this fires (the
+            # whole create is one all-or-nothing request), so retrying on
+            # the stock path cannot orphan or double-bill anything.
+            if not _is_digitalocean_image_unavailable(exc):
+                raise
+            _LOGGER.warning(
+                "digitalocean rejected baked image %s in %s (%s); retrying on the boot-time installer. "
+                "A private DO snapshot is only visible to the account that created it — an image baked "
+                "in a different account than the one being provisioned into can never be booted here.",
+                baked_image_id,
+                resolved_region,
+                exc,
+            )
+            return _provision_digitalocean(
+                config, token, resolved_region, resolved_size, name, user_data, on_unauthorized=on_unauthorized
+            )
     if provider_id == "hetzner":
         return _provision_hetzner(config, token, resolved_region, resolved_size, name, user_data)
     if provider_id == "vultr":

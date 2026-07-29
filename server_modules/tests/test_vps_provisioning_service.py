@@ -4186,3 +4186,66 @@ def test_install_beacon_with_an_unknown_token_is_discarded(tmp_path, monkeypatch
     _isolate_vps_state(tmp_path, monkeypatch)
 
     assert vps.record_vps_install_event(pairing_token="never-issued", phase="install", message="boom") is None
+
+
+def test_provision_vps_digitalocean_falls_back_when_do_rejects_the_baked_image(monkeypatch):
+    """The failure that actually happened on the first live provision
+    (2026-07-29): a DigitalOcean private snapshot is scoped to the ACCOUNT
+    that created it. CI bakes the image in Empyralis's own account, while
+    droplets are created in the customer's OAuth-connected account, which
+    cannot see it — DO answers 422 "Image is not available." and NO droplet
+    is created.
+
+    That must degrade to the boot-time installer, not surface as "you
+    cannot have a server". The retry is safe precisely because the create
+    is one all-or-nothing request: nothing was provisioned or billed."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
+
+    attempts = []
+
+    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
+        if url == "https://api.digitalocean.com/v2/droplets":
+            attempts.append(payload)
+            if payload["image"] != "ubuntu-24-04-x64":
+                raise vps.VPSProvisioningError(
+                    'digitalocean provisioning failed: HTTP 422 '
+                    '{"id":"unprocessable_entity","message":"Image is not available."}'
+                )
+        return {"droplet": {"id": 777, "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.9"}]}}}
+
+    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+
+    result = vps.provision_vps("digitalocean", {"api_token": "do_secret"}, "nyc3", None, "pair_do")
+
+    # The customer still gets a working server.
+    assert result.provider_resource_id == "777"
+    assert len(attempts) == 2
+    assert attempts[0]["image"] == 238979453
+    assert "empyralis-configure" in attempts[0]["user_data"]
+    # The retry is the stock slug + the full boot-time installer.
+    assert attempts[1]["image"] == "ubuntu-24-04-x64"
+    assert "INSTALLER_URL=" in attempts[1]["user_data"]
+
+
+def test_provision_vps_digitalocean_does_not_retry_on_unrelated_failures(monkeypatch):
+    """The guard rail on the fallback above: an auth/quota failure would
+    fail identically on retry, so masking it behind a second doomed attempt
+    would only hide the real reason from the user."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
+
+    attempts = []
+
+    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
+        attempts.append(payload)
+        raise vps.VPSProvisioningError(
+            'digitalocean provisioning failed: HTTP 403 {"id":"forbidden","message":"quota exceeded"}'
+        )
+
+    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+
+    with pytest.raises(vps.VPSProvisioningError, match="quota exceeded"):
+        vps.provision_vps("digitalocean", {"api_token": "do_secret"}, "nyc3", None, "pair_do")
+
+    assert len(attempts) == 1, "a non-image failure must not be retried"
