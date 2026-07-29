@@ -1,0 +1,577 @@
+# Boots ONE droplet from the pre-baked Agent Computer image, configures it with
+# a REAL pairing token, actually STARTS the gateway, and proves it reaches the
+# control plane — then destroys everything it created.
+#
+# WHY THIS EXISTS: smoke-test-agent-computer-image.yml proves the image boots
+# and that the software on it is intact, but it deliberately stops one step
+# short of the truth: it runs `empyralis-configure ... --no-start` with a dummy
+# token, so it only ever proves the gateway bundle *parses*. The single symptom
+# users actually hit — "the VPS is created but never connects" — was therefore
+# completely unverified by CI. This workflow is that missing assertion.
+#
+# WHAT "CONNECTED" MEANS HERE. Two independent signals, both derived from the
+# server's own state machine rather than from a log line that looks hopeful:
+#
+#   BOX SIDE (always asserted, needs no control-plane credential)
+#     - ${STATE}/registration.json exists. The gateway writes it ONLY after
+#       POST /gateway/registrations returned 200 (empyralis-gateway/src/cloud/
+#       ws-client.ts registerFromPairing), so the file existing is proof the
+#       control plane accepted the pairing token and minted a gateway identity.
+#     - ${STATE}/checkpoints.json has healthState == "online" and a sessionId.
+#       ws-client.ts only writes that after POST /gateway/sessions returned a
+#       session AND the WebSocket opened AND the first heartbeat was answered.
+#
+#   SERVER SIDE (asserted when EMPYRALIS_BEARER_TOKEN is available)
+#     - GET /gateway/registrations?workspace_id=... lists this box with
+#       status == "active" and connection_status == "online".
+#       connection_status is computed in gateway_registry_service.py's
+#       _gateway_connection_payload(): "online" requires the latest session to
+#       be `connected` AND the heartbeat to be fresh. It is the same family of
+#       signal vps_provisioning_service._resolved_record_status() resolves to
+#       "connected" for a provisioned box.
+#
+# PAIRING TOKENS. There is no credential-free way to mint one: POST
+# /gateway/pairings/intents is behind require_api_key + workspace owner role,
+# and the ORION_API_KEY "service" identity resolves to an EMPTY workspace set
+# (auth.allowed_workspace_ids), so a service key CANNOT mint one. So either:
+#   (a) an operator mints a token in the app and passes it as the
+#       `pairing_token` input (no new secret, no new production surface), or
+#   (b) the repo holds an EMPYRALIS_BEARER_TOKEN secret (a workspace-owner
+#       bearer token) and this workflow mints a short-TTL token itself.
+# (b) is also what unlocks the server-side half of the assertion above.
+# NOTE on (a): a workflow_dispatch input value is visible in the run's event
+# payload to anyone with repo read access. Tokens are masked out of the LOGS
+# here, but use a short-TTL token — it is single-use and is consumed by this
+# run regardless.
+#
+# Costs a few cents (one droplet for a handful of minutes). Cleanup runs with
+# `if: always()` followed by a leak check, because a droplet left behind bills
+# forever.
+name: E2E Agent Computer Connect (DigitalOcean)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pairing_token:
+        description: 'REAL pairing token (gpair_...). Blank = mint one, which requires the EMPYRALIS_BEARER_TOKEN secret.'
+        required: false
+        default: ''
+      workspace_id:
+        description: 'Workspace the pairing token belongs to. Used for minting and for the server-side assertion.'
+        required: false
+        default: 'default'
+      api_url:
+        description: 'Control-plane API base URL the box will pair against.'
+        required: false
+        default: 'https://empyralis.ai/api'
+      image_id:
+        description: 'DigitalOcean image id to boot. Blank = read the published latest.json pointer.'
+        required: false
+        default: ''
+      region:
+        description: 'Region to boot in. Must be one the image is published to.'
+        required: false
+        default: 'nyc3'
+      size:
+        description: 'Droplet size. Needs at least the image min_disk_gb (25).'
+        required: false
+        default: 's-1vcpu-2gb'
+      connect_timeout_seconds:
+        description: 'How long to wait for the gateway to reach connected after it is started.'
+        required: false
+        default: '300'
+
+permissions:
+  contents: read
+
+jobs:
+  connect:
+    name: Boot, pair, and prove it connects
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DO_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      DO_API: https://api.digitalocean.com/v2
+      POINTER_URL: https://empyralis.ai/releases/agent-computer/images/digitalocean/latest.json
+      API_URL: ${{ inputs.api_url }}
+      WORKSPACE_ID: ${{ inputs.workspace_id }}
+      REGION: ${{ inputs.region }}
+      SIZE: ${{ inputs.size }}
+      IMAGE_ID_INPUT: ${{ inputs.image_id }}
+      CONNECT_TIMEOUT: ${{ inputs.connect_timeout_seconds }}
+      DROPLET_NAME: empyralis-e2e-connect-${{ github.run_id }}
+      SSH_OPTS: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=10
+      GATEWAY_STATE_DIR: /var/lib/empyralis/agent-computer/gateway
+    steps:
+      # Everything that can be known before a single cent is spent is checked
+      # here: no credential means no run, and finding that out AFTER creating a
+      # droplet is how leaked droplets happen.
+      - name: Preflight — credentials and pairing-token source
+        id: preflight
+        env:
+          PAIRING_TOKEN_INPUT: ${{ inputs.pairing_token }}
+          BEARER: ${{ secrets.EMPYRALIS_BEARER_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DO_TOKEN:-}" ]; then
+            echo "::error::DIGITALOCEAN_ACCESS_TOKEN is not set — this job cannot create the test droplet." >&2
+            exit 1
+          fi
+          case "$CONNECT_TIMEOUT" in
+            ''|*[!0-9]*) echo "::error::connect_timeout_seconds must be numeric." >&2; exit 1 ;;
+          esac
+
+          umask 0077
+          if [ -n "${PAIRING_TOKEN_INPUT:-}" ]; then
+            # Mask BEFORE the value can reach any log line, including this one.
+            echo "::add-mask::$PAIRING_TOKEN_INPUT"
+            printf '%s' "$PAIRING_TOKEN_INPUT" > /tmp/pairing_token
+            chmod 600 /tmp/pairing_token
+            echo "token_source=input" >> "$GITHUB_OUTPUT"
+            echo "Pairing token: supplied as a workflow_dispatch input (operator-minted)."
+          elif [ -n "${BEARER:-}" ]; then
+            echo "token_source=minted" >> "$GITHUB_OUTPUT"
+            echo "Pairing token: will be minted via POST \$API_URL/gateway/pairings/intents."
+          else
+            {
+              echo "::error::No pairing token available, so this job cannot prove anything."
+              echo "Give it one of:"
+              echo "  * the 'pairing_token' input — mint one in the app (Add computer) and paste it here; or"
+              echo "  * an EMPYRALIS_BEARER_TOKEN repo secret (a workspace-owner bearer token), which also"
+              echo "    unlocks the server-side half of the connected assertion."
+              echo "There is no third option: POST /gateway/pairings/intents requires workspace-owner access,"
+              echo "and the ORION_API_KEY service identity has an empty workspace set (auth.allowed_workspace_ids)."
+            } >&2
+            exit 1
+          fi
+          if [ -n "${BEARER:-}" ]; then
+            echo "server_side_check=1" >> "$GITHUB_OUTPUT"
+            echo "Server-side assertion: ENABLED (GET /gateway/registrations)."
+          else
+            echo "server_side_check=0" >> "$GITHUB_OUTPUT"
+            echo "::warning::EMPYRALIS_BEARER_TOKEN is not set — the server-side assertion is skipped."
+            echo "The box-side assertion still holds: registration.json and checkpoints.json are only"
+            echo "written after the control plane answered 200 to register/session and the socket opened."
+          fi
+
+      - name: Mint a pairing token
+        id: mint
+        if: steps.preflight.outputs.token_source == 'minted'
+        env:
+          BEARER: ${{ secrets.EMPYRALIS_BEARER_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 0077
+          BODY="$(jq -n --arg ws "$WORKSPACE_ID" --arg name "$DROPLET_NAME" \
+            '{workspace_id:$ws, ttl_seconds:900, display_name:$name, platform:"linux",
+              metadata:{setup_source:"ci-e2e-connect", agent_scope:"sage"}}')"
+          CODE="$(curl -s -o /tmp/pairing.json -w '%{http_code}' -m 30 \
+            -X POST "$API_URL/gateway/pairings/intents" \
+            -H "Authorization: Bearer $BEARER" \
+            -H 'Content-Type: application/json' \
+            -d "$BODY")"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::could not mint a pairing token (HTTP $CODE)." >&2
+            # The error body carries no token; a 401/403 here means the bearer
+            # is expired or is not an owner of this workspace.
+            jq -r '.detail // .' /tmp/pairing.json >&2 2>/dev/null || cat /tmp/pairing.json >&2
+            exit 1
+          fi
+          TOKEN="$(jq -r '.pairing_token // ""' /tmp/pairing.json)"
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::mint response contained no pairing_token." >&2
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          printf '%s' "$TOKEN" > /tmp/pairing_token
+          chmod 600 /tmp/pairing_token
+          jq -r '"minted pairing_id=\(.pairing_id) workspace=\(.workspace_id) expires_at=\(.expires_at)"' /tmp/pairing.json
+          rm -f /tmp/pairing.json
+
+      # Same pointer the provisioning service reads, so this boots the image
+      # production would boot, not a hardcoded id.
+      - name: Resolve the image under test
+        id: image
+        run: |
+          set -euo pipefail
+          IMAGE_ID="$IMAGE_ID_INPUT"
+          if [ -z "$IMAGE_ID" ]; then
+            POINTER="$(curl -fsSL -m 20 "$POINTER_URL")"
+            echo "$POINTER"
+            IMAGE_ID="$(printf '%s' "$POINTER" | jq -r '.image_id')"
+            REGIONS="$(printf '%s' "$POINTER" | jq -r '.regions | join(",")')"
+            case ",$REGIONS," in
+              *",${REGION},"*) ;;
+              *) echo "::error::region '$REGION' is not one the image is published to ($REGIONS)." >&2; exit 1 ;;
+            esac
+          fi
+          case "$IMAGE_ID" in
+            ''|*[!0-9]*) echo "::error::resolved image id '$IMAGE_ID' is not numeric." >&2; exit 1 ;;
+          esac
+          echo "image_id=$IMAGE_ID" >> "$GITHUB_OUTPUT"
+          echo "Booting image $IMAGE_ID in $REGION on $SIZE"
+
+      - name: Assert the image is visible to THIS account
+        run: |
+          set -euo pipefail
+          CODE="$(curl -s -o /tmp/img.json -w '%{http_code}' \
+            -H "Authorization: Bearer $DO_TOKEN" \
+            "$DO_API/images/${{ steps.image.outputs.image_id }}")"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::image ${{ steps.image.outputs.image_id }} is NOT visible to this account (HTTP $CODE)." >&2
+            cat /tmp/img.json >&2 || true
+            exit 1
+          fi
+          jq -r '"image: \(.image.name)  status: \(.image.status)  regions: \(.image.regions|join(","))"' /tmp/img.json
+
+      # DigitalOcean has NO console API, so a droplet with no key on it is a
+      # black box the moment anything goes wrong. This key is what makes the
+      # diagnostics step below possible at all.
+      - name: Create a throwaway SSH key
+        id: sshkey
+        run: |
+          set -euo pipefail
+          ssh-keygen -t ed25519 -N '' -C "$DROPLET_NAME" -f /tmp/e2e_key >/dev/null
+          PUB="$(cat /tmp/e2e_key.pub)"
+          RESP="$(curl -fsS -X POST "$DO_API/account/keys" \
+            -H "Authorization: Bearer $DO_TOKEN" -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg name "$DROPLET_NAME" --arg key "$PUB" '{name:$name, public_key:$key}')")"
+          KEY_ID="$(printf '%s' "$RESP" | jq -r '.ssh_key.id')"
+          case "$KEY_ID" in ''|null) echo "::error::could not register the temporary SSH key." >&2; exit 1 ;; esac
+          echo "key_id=$KEY_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Create the droplet
+        id: droplet
+        run: |
+          set -euo pipefail
+          BODY="$(jq -n \
+            --arg name "$DROPLET_NAME" \
+            --arg region "$REGION" \
+            --arg size "$SIZE" \
+            --argjson image ${{ steps.image.outputs.image_id }} \
+            --argjson keys "[${{ steps.sshkey.outputs.key_id }}]" \
+            '{name:$name, region:$region, size:$size, image:$image, ssh_keys:$keys,
+              backups:false, ipv6:false, monitoring:false}')"
+          RESP="$(curl -fsS -X POST "$DO_API/droplets" \
+            -H "Authorization: Bearer $DO_TOKEN" -H 'Content-Type: application/json' -d "$BODY")"
+          ID="$(printf '%s' "$RESP" | jq -r '.droplet.id')"
+          case "$ID" in ''|null) echo "::error::droplet create failed."; printf '%s' "$RESP" >&2; exit 1 ;; esac
+          echo "droplet_id=$ID" >> "$GITHUB_OUTPUT"
+          date +%s > /tmp/t_created
+          echo "droplet $ID created"
+
+      - name: Wait for the droplet to go active
+        id: active
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            RESP="$(curl -fsS -H "Authorization: Bearer $DO_TOKEN" "$DO_API/droplets/${{ steps.droplet.outputs.droplet_id }}")"
+            STATUS="$(printf '%s' "$RESP" | jq -r '.droplet.status')"
+            IP="$(printf '%s' "$RESP" | jq -r '[.droplet.networks.v4[]? | select(.type=="public") | .ip_address] | first // ""')"
+            if [ "$STATUS" = "active" ] && [ -n "$IP" ]; then
+              echo "ip=$IP" >> "$GITHUB_OUTPUT"
+              echo "$IP" > /tmp/droplet_ip
+              date +%s > /tmp/t_active
+              echo "active after $(( $(date +%s) - $(cat /tmp/t_created) ))s, ip $IP"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::droplet never became active." >&2
+          exit 1
+
+      - name: Wait for SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          IP="$(cat /tmp/droplet_ip)"
+          for i in $(seq 1 60); do
+            if ssh $SSH_OPTS -i /tmp/e2e_key "root@$IP" true 2>/dev/null; then
+              date +%s > /tmp/t_ssh
+              echo "SSH ready $(( $(date +%s) - $(cat /tmp/t_created) ))s after create"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::SSH never came up." >&2
+          exit 1
+
+      # THE step the existing smoke test refuses to take: a real token, and no
+      # --no-start. From here on the box is doing exactly what a customer's
+      # provisioned droplet does.
+      - name: Configure and START the gateway (real token, no --no-start)
+        run: |
+          set -euo pipefail
+          IP="$(cat /tmp/droplet_ip)"
+          umask 0077
+          # The token is substituted into a script file rather than into an ssh
+          # command line so it never enters this runner's own argv, and the
+          # script is fed over stdin so it never enters the log.
+          {
+            printf 'set -Eeuo pipefail\n'
+            printf 'test -x /usr/local/sbin/empyralis-configure || { echo "empyralis-configure MISSING on the image" >&2; exit 1; }\n'
+            printf 'test ! -e /etc/empyralis/agent-computer.env || { echo "env file was already present BEFORE configure — image is contaminated" >&2; exit 1; }\n'
+            printf 'empyralis-configure --pairing-token %q --api-url %q --display-name %q\n' \
+              "$(cat /tmp/pairing_token)" "$API_URL" "$DROPLET_NAME"
+            printf 'systemctl is-active empyralis-gateway.service\n'
+          } > /tmp/remote-configure.sh
+          chmod 600 /tmp/remote-configure.sh
+          ssh $SSH_OPTS -i /tmp/e2e_key "root@$IP" 'bash -s' < /tmp/remote-configure.sh
+          date +%s > /tmp/t_started
+          rm -f /tmp/remote-configure.sh
+          echo "gateway started $(( $(date +%s) - $(cat /tmp/t_created) ))s after create"
+
+      # The assertion this whole workflow exists for.
+      - name: Poll until the gateway is CONNECTED
+        id: connect
+        env:
+          BEARER: ${{ secrets.EMPYRALIS_BEARER_TOKEN }}
+          SERVER_SIDE: ${{ steps.preflight.outputs.server_side_check }}
+        run: |
+          set -uo pipefail
+          IP="$(cat /tmp/droplet_ip)"
+          DEADLINE=$(( $(date +%s) + CONNECT_TIMEOUT ))
+
+          # Read the two files ws-client.ts writes on the way to "online". Both
+          # are root-owned JSON; python3 is on the image. Written to a local
+          # file first so the remote script is fed over stdin, and `ssh -n` is
+          # deliberately NOT used for that reason.
+          cat > /tmp/read-box-state.py <<'PY'
+          import json, os
+          state = "/var/lib/empyralis/agent-computer/gateway"
+          def load(name):
+              try:
+                  with open(os.path.join(state, name)) as fh:
+                      return json.load(fh)
+              except Exception:
+                  return {}
+          reg = load("registration.json")
+          ck = load("checkpoints.json")
+          print("gateway_id=%s" % (reg.get("gateway_id") or ""))
+          print("reg_status=%s" % (reg.get("status") or ""))
+          print("health=%s" % (ck.get("healthState") or ""))
+          print("session=%s" % (ck.get("sessionId") or ""))
+          print("disconnect_reason=%s" % (" ".join(str(ck.get("lastDisconnectReason") or "").split())))
+          PY
+
+          read_box_state() {
+            ssh $SSH_OPTS -i /tmp/e2e_key "root@$IP" 'python3 -' < /tmp/read-box-state.py 2>/dev/null
+          }
+
+          box_online=0
+          server_state="skipped"
+          gateway_id=""
+          health=""
+          session=""
+          reason=""
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            ELAPSED=$(( $(date +%s) - $(cat /tmp/t_started) ))
+            STATE="$(read_box_state)"
+            gateway_id="$(printf '%s' "$STATE" | sed -n 's/^gateway_id=//p')"
+            health="$(printf '%s' "$STATE" | sed -n 's/^health=//p')"
+            session="$(printf '%s' "$STATE" | sed -n 's/^session=//p')"
+            reason="$(printf '%s' "$STATE" | sed -n 's/^disconnect_reason=//p')"
+
+            if [ "$SERVER_SIDE" = "1" ]; then
+              CODE="$(curl -s -o /tmp/regs.json -w '%{http_code}' -m 20 \
+                -H "Authorization: Bearer $BEARER" \
+                "$API_URL/gateway/registrations?workspace_id=$WORKSPACE_ID")"
+              if [ "$CODE" = "200" ]; then
+                server_state="$(jq -r --arg name "$DROPLET_NAME" --arg gid "$gateway_id" \
+                  '[.items[]? | select((.display_name == $name) or ($gid != "" and .gateway_id == $gid))]
+                   | if length == 0 then "absent"
+                     else (.[0] | "\(.status)/\(.connection_status)") end' /tmp/regs.json)"
+              else
+                server_state="http_$CODE"
+              fi
+            fi
+
+            echo "t+${ELAPSED}s  registered=$( [ -n "$gateway_id" ] && echo yes || echo no )  health=${health:-none}  session=$( [ -n "$session" ] && echo yes || echo no )  server=${server_state}${reason:+  last_disconnect=$reason}"
+
+            if [ -n "$gateway_id" ] && [ "$health" = "online" ] && [ -n "$session" ]; then
+              box_online=1
+              if [ "$SERVER_SIDE" != "1" ] || [ "$server_state" = "active/online" ]; then
+                date +%s > /tmp/t_connected
+                echo "gateway_id=$gateway_id" >> "$GITHUB_OUTPUT"
+                echo "server_state=$server_state" >> "$GITHUB_OUTPUT"
+                echo "CONNECTED after ${ELAPSED}s (box=online, server=${server_state})"
+                exit 0
+              fi
+            fi
+            sleep 10
+          done
+
+          {
+            echo "::error::gateway did NOT reach connected within ${CONNECT_TIMEOUT}s."
+            echo "last box state: registered=$( [ -n "$gateway_id" ] && echo yes || echo no ) health=${health:-none} session=$( [ -n "$session" ] && echo yes || echo no )"
+            echo "last server state: ${server_state}"
+            echo "box_online=${box_online}"
+          } >&2
+          echo "gateway_id=$gateway_id" >> "$GITHUB_OUTPUT"
+          echo "server_state=$server_state" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      # The highest-value part of this workflow. The entire history of this bug
+      # is "it silently never connects" — this is the step that makes the box
+      # say why, in the job log AND the step summary, before it is destroyed.
+      - name: Capture failure diagnostics from the box
+        if: failure()
+        run: |
+          set -uo pipefail
+          if [ ! -f /tmp/droplet_ip ]; then
+            echo "no droplet IP — the failure happened before the box existed; nothing to capture."
+            exit 0
+          fi
+          IP="$(cat /tmp/droplet_ip)"
+          # The heredoc is quoted so nothing in it expands on THIS runner; the
+          # one value the box needs from here is prepended as a prologue line.
+          {
+          printf 'API_URL=%q\n' "$API_URL"
+          cat <<'REMOTE'
+          set -uo pipefail
+          sec() { printf '\n==================== %s ====================\n' "$1"; }
+
+          sec "systemctl status empyralis-gateway"
+          systemctl status empyralis-gateway.service --no-pager -l 2>&1 | head -n 60
+          echo "is-enabled: $(systemctl is-enabled empyralis-gateway.service 2>&1)"
+          echo "is-active:  $(systemctl is-active empyralis-gateway.service 2>&1)"
+          echo "n-restarts: $(systemctl show empyralis-gateway.service -p NRestarts --value 2>&1)"
+          echo "result:     $(systemctl show empyralis-gateway.service -p Result --value 2>&1)"
+
+          sec "journalctl -u empyralis-gateway --no-pager -n 200"
+          journalctl -u empyralis-gateway.service --no-pager -n 200 2>&1
+
+          sec "env file: KEY NAMES ONLY (values deliberately never printed)"
+          if [ -f /etc/empyralis/agent-computer.env ]; then
+            echo "mode: $(stat -c %a /etc/empyralis/agent-computer.env)  owner: $(stat -c %U:%G /etc/empyralis/agent-computer.env)"
+            cut -d= -f1 /etc/empyralis/agent-computer.env
+          else
+            echo "MISSING — empyralis-configure never wrote it, so the unit's ConditionPathExists skipped the start."
+          fi
+
+          sec "cloud-init status --long"
+          cloud-init status --long 2>&1 || echo "cloud-init not present / not run"
+
+          sec "tail -n 120 /var/log/cloud-init-output.log"
+          tail -n 120 /var/log/cloud-init-output.log 2>&1 || echo "no cloud-init-output.log"
+
+          sec "gateway state dir"
+          ls -la /var/lib/empyralis/agent-computer/gateway 2>&1 || echo "state dir missing"
+          for f in registration.json checkpoints.json; do
+            echo "--- $f ---"
+            cat "/var/lib/empyralis/agent-computer/gateway/$f" 2>&1 || echo "absent"
+            echo
+          done
+          # tokens.json holds the gateway credential: existence only, never content.
+          echo "--- tokens.json (existence only) ---"
+          ls -l /var/lib/empyralis/agent-computer/gateway/tokens.json 2>&1 || echo "absent"
+
+          sec "tail -n 60 journal.ndjson"
+          tail -n 60 /var/lib/empyralis/agent-computer/gateway/journal.ndjson 2>&1 || echo "no journal"
+
+          sec "egress: can the box reach the control plane at all?"
+          API_HOST="$(printf '%s' "$API_URL" | sed -E 's#^[a-z]+://##; s#/.*##')"
+          echo "$API_URL/health -> HTTP $(curl -s -o /dev/null -w '%{http_code}' -m 15 "$API_URL/health" 2>&1)"
+          getent hosts "$API_HOST" 2>&1 || echo "DNS resolution FAILED for $API_HOST"
+
+          sec "runtime"
+          echo "node: $(node --version 2>&1)"
+          echo "uptime: $(uptime 2>&1)"
+          echo "free: $(free -m 2>&1 | head -2 | tail -1)"
+          REMOTE
+          } | ssh $SSH_OPTS -i /tmp/e2e_key "root@$IP" 'bash -s' > /tmp/diag.raw 2>&1 || true
+
+          # Belt and braces on top of ::add-mask::: strip anything shaped like a
+          # pairing or gateway token out of the captured text before it is
+          # printed anywhere.
+          cat > /tmp/scrub.py <<'PY'
+          import re, sys
+          token = sys.argv[1] if len(sys.argv) > 1 else ""
+          text = open("/tmp/diag.raw", errors="replace").read()
+          if token:
+              text = text.replace(token, "[REDACTED_PAIRING_TOKEN]")
+          text = re.sub(r"(gpair_|ggt_)[A-Za-z0-9_\-]+", r"\1[REDACTED]", text)
+          sys.stdout.write(text)
+          PY
+          python3 /tmp/scrub.py "$(cat /tmp/pairing_token 2>/dev/null || true)" > /tmp/diag.txt
+
+          echo "########## DIAGNOSTICS FROM THE BOX ##########"
+          cat /tmp/diag.txt
+          {
+            echo "## Failure diagnostics from the droplet"
+            echo
+            echo '```text'
+            head -c 200000 /tmp/diag.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report timing
+        if: always()
+        run: |
+          set -uo pipefail
+          t0="$(cat /tmp/t_created 2>/dev/null || true)"
+          delta() {
+            if [ -n "${t0:-}" ] && [ -f "$1" ]; then echo "**$(( $(cat "$1") - t0 ))s**"; else echo "n/a"; fi
+          }
+          {
+            echo "## Agent Computer connect E2E"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`${{ steps.image.outputs.image_id }}\` |"
+            echo "| Region / size | \`${{ inputs.region }}\` / \`${{ inputs.size }}\` |"
+            echo "| API | \`${{ inputs.api_url }}\` |"
+            echo "| Pairing token source | \`${{ steps.preflight.outputs.token_source }}\` |"
+            echo "| Server-side assertion | \`${{ steps.preflight.outputs.server_side_check == '1' && 'enabled' || 'skipped (no EMPYRALIS_BEARER_TOKEN)' }}\` |"
+            echo "| Gateway id | \`${{ steps.connect.outputs.gateway_id || 'never registered' }}\` |"
+            echo "| Server registration state | \`${{ steps.connect.outputs.server_state || 'n/a' }}\` |"
+            echo
+            echo "### Timing (from droplet create)"
+            echo
+            echo "| Milestone | Elapsed |"
+            echo "|---|---|"
+            echo "| droplet active | $(delta /tmp/t_active) |"
+            echo "| SSH ready | $(delta /tmp/t_ssh) |"
+            echo "| gateway started | $(delta /tmp/t_started) |"
+            echo "| **CONNECTED** | $(delta /tmp/t_connected) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Runs even when an assertion above failed. A droplet left behind bills
+      # forever, so cleanup is never conditional on success.
+      - name: Destroy the droplet and the temporary key
+        if: always()
+        run: |
+          set -uo pipefail
+          rm -f /tmp/pairing_token /tmp/remote-configure.sh
+          if [ -n "${{ steps.droplet.outputs.droplet_id }}" ]; then
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+              -H "Authorization: Bearer $DO_TOKEN" "$DO_API/droplets/${{ steps.droplet.outputs.droplet_id }}")"
+            echo "destroy droplet ${{ steps.droplet.outputs.droplet_id }} -> HTTP $CODE"
+            [ "$CODE" = "204" ] || echo "::warning::droplet ${{ steps.droplet.outputs.droplet_id }} may still exist — check the DO console."
+          fi
+          if [ -n "${{ steps.sshkey.outputs.key_id }}" ]; then
+            CODE="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+              -H "Authorization: Bearer $DO_TOKEN" "$DO_API/account/keys/${{ steps.sshkey.outputs.key_id }}")"
+            echo "delete ssh key ${{ steps.sshkey.outputs.key_id }} -> HTTP $CODE"
+          fi
+
+      - name: Confirm nothing was left behind
+        if: always()
+        run: |
+          set -uo pipefail
+          LEFT="$(curl -s -H "Authorization: Bearer $DO_TOKEN" "$DO_API/droplets?per_page=200" \
+            | jq -r '[.droplets[]? | select(.name | startswith("empyralis-e2e-connect-")) | "\(.id) \(.name)"] | .[]' 2>/dev/null || true)"
+          if [ -n "$LEFT" ]; then
+            echo "::warning::e2e-connect droplets still present:"
+            echo "$LEFT"
+          else
+            echo "no e2e-connect droplets remain"
+          fi
+          KEYS="$(curl -s -H "Authorization: Bearer $DO_TOKEN" "$DO_API/account/keys?per_page=200" \
+            | jq -r '[.ssh_keys[]? | select(.name | startswith("empyralis-e2e-connect-")) | "\(.id) \(.name)"] | .[]' 2>/dev/null || true)"
+          if [ -n "$KEYS" ]; then
+            echo "::warning::e2e-connect SSH keys still present:"
+            echo "$KEYS"
+          else
+            echo "no e2e-connect SSH keys remain"
+          fi
