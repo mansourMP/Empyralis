@@ -129,8 +129,15 @@ jobs:
           test -f "$VERIFY/empyralis-gateway/package.json"
           test -d "$VERIFY/empyralis-gateway/node_modules"
 
+      # Best-effort: GitHub's attestation storage isn't available for
+      # user-owned private repos on the current plan ("Feature not available
+      # for user-owned private repositories" — confirmed 2026-07-29). That's
+      # a plan limitation, not a build problem, and it must never block the
+      # publish steps below — the artifact itself already passed the
+      # layout-verification step above regardless of whether this runs.
       - name: Attest gateway artifact provenance
         uses: actions/attest-build-provenance@v2
+        continue-on-error: true
         with:
           subject-path: ${{ runner.temp }}/out/${{ env.GATEWAY_TARBALL }}
 
