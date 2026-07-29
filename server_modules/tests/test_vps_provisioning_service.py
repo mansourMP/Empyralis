@@ -4390,3 +4390,16 @@ async def test_enforce_platform_vps_capacity_allows_below_the_cap(monkeypatch):
     monkeypatch.delenv(vps.VPS_MAX_ACTIVE_PER_WORKSPACE_ENV, raising=False)
 
     await vps.enforce_platform_vps_capacity(workspace_id="ws-1", tenant_id="t-1")
+
+
+def test_cloud_init_script_does_not_set_blanket_package_update():
+    """cloud-init's own `package_update: true` runs as a SEPARATE module
+    before runcmd — outside our script, with no DPkg::Lock::Timeout, no
+    timeout at all, and no way to beacon since nothing of ours has started
+    yet. A slow mirror or IPv6 hiccup hangs there SILENTLY forever, which is
+    exactly the invisible-failure class this file's beacon exists to kill
+    everywhere else. It is also redundant: apt_install_system_deps() in the
+    installer already runs its own (lock-timeout-guarded, beacon-covered)
+    apt-get update at the system_dependencies phase."""
+    script = vps.cloud_init_script("pair_test", api_url="https://api.example.com")
+    assert "package_update" not in script

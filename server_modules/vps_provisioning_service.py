@@ -1445,7 +1445,17 @@ def cloud_init_script(pairing_token: str, *, api_url: Optional[str] = None) -> s
     ]
     cloud_config_lines = [
         "#cloud-config",
-        "package_update: true",
+        # Deliberately NOT `package_update: true`. That runs as cloud-init's
+        # OWN apt-get update, as a separate module BEFORE runcmd — outside
+        # our script, with no DPkg::Lock::Timeout, no timeout at all, and no
+        # way to beacon since nothing of ours has started yet. A slow mirror
+        # or an IPv6 routing hiccup (droplets are created with ipv6=true)
+        # hangs here SILENTLY, forever, indistinguishable from a healthy
+        # install — exactly the "20 minutes of nothing" symptom this file's
+        # beacon exists to eliminate everywhere else. It is also pure
+        # redundancy: apt_install_system_deps() in the installer already runs
+        # `apt-get -o DPkg::Lock::Timeout=300 update`, at the system_dependencies
+        # phase, which DOES beacon.
         "runcmd:",
         "  - |",
         "    cat > /tmp/empyralis-bootstrap.sh <<'EMPYRALIS_BOOTSTRAP_EOF'",
