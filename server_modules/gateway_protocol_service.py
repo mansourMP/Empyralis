@@ -2773,42 +2773,48 @@ async def handle_gateway_websocket(
                 # (is_stale / has_recent_inbound_frame), which still updates on
                 # every frame — so dead-socket detection keeps the exact timing
                 # it has today. Only the persisted expiry write is throttled.
-                # A connection with no live object falls back to renewing every
-                # beat, i.e. to the previous behaviour.
-                renew_session_ttl = (
-                    connection.session_renewal_due(
-                        gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS
-                    )
-                    if connection is not None
-                    else True
+                # REVERTED 2026-07-29, same night it shipped. touch_gateway_session
+                # is what writes last_heartbeat_at, and last_heartbeat_at is the ONLY
+                # signal gateway_registry_service's online/degraded derivation reads
+                # (heartbeat_age_seconds <= 45s -> "online", else "degraded" for an
+                # otherwise-connected session — see _gateway_connection_payload).
+                # Throttling this call to once per ~10 minutes did not reduce row
+                # count at all (this is an UPDATE on the existing session_id row, not
+                # an INSERT — see the SQL in touch_gateway_session), it only reduced
+                # write FREQUENCY, while making every gateway report "degraded" for
+                # ~9 of every 10 minutes it was actually healthy and heartbeating
+                # normally underneath. Confirmed live: both "Mansur's Mac" and
+                # "Production Gateway" flipped to Degraded within a minute of this
+                # shipping. The actual 2GB/10k-session growth this was meant to fix
+                # is from RECONNECTS creating new session rows, not from this UPDATE
+                # — a real fix has to address that, not this. Back to renewing every
+                # heartbeat, exactly as before this change existed.
+                gateway_state_repository.touch_gateway_session(
+                    session_id=session_id,
+                    gateway_id=gateway_id,
+                    seq=frame_seq,
+                    ack=frame_ack,
+                    health_state=payload.get("health_state"),
+                    journal_cursor=payload.get("journal_cursor"),
+                    checkpoint_cursor=payload.get("checkpoint_cursor"),
+                    metadata={
+                        "capability_readiness": capability_readiness,
+                        "queue_depth_summary": payload.get("queue_depth_summary"),
+                        "service_inventory": service_inventory,
+                        "native_runtime": native_runtime,
+                        "resources": resources,
+                        "device_trust_state": str(binding["device_link"].get("trust_state") or "verified").strip()
+                        or "verified",
+                    },
+                    ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
                 )
-                if renew_session_ttl:
-                    gateway_state_repository.touch_gateway_session(
-                        session_id=session_id,
-                        gateway_id=gateway_id,
-                        seq=frame_seq,
-                        ack=frame_ack,
-                        health_state=payload.get("health_state"),
-                        journal_cursor=payload.get("journal_cursor"),
-                        checkpoint_cursor=payload.get("checkpoint_cursor"),
-                        metadata={
-                            "capability_readiness": capability_readiness,
-                            "queue_depth_summary": payload.get("queue_depth_summary"),
-                            "service_inventory": service_inventory,
-                            "native_runtime": native_runtime,
-                            "resources": resources,
-                            "device_trust_state": str(binding["device_link"].get("trust_state") or "verified").strip()
-                            or "verified",
-                        },
-                        ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
-                    )
-                    auth.touch_auth_session(
-                        session_id,
-                        ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
-                    )
-                    await session_service.extend_session(session_id)
-                    if connection is not None:
-                        connection.note_session_renewed()
+                auth.touch_auth_session(
+                    session_id,
+                    ttl_seconds=gateway_registry_service.DEFAULT_GATEWAY_SESSION_TTL_SECONDS,
+                )
+                await session_service.extend_session(session_id)
+                if connection is not None:
+                    connection.note_session_renewed()
                 heartbeat_response = _response_frame(
                     str(frame.get("id") or "heartbeat"),
                     ok=True,
