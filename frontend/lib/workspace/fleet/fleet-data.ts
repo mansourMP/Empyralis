@@ -1331,3 +1331,36 @@ export async function assignFleetTask(
     woke: Boolean(data?.wake_request) && !wakeError,
   };
 }
+
+/** The human->agent comment channel (routes_fleet.py's fleet_comment_task,
+ *  backed by project_tasks_service.add_human_task_comment). Same shape as
+ *  assignFleetTask above and for the same reason: posting can also
+ *  (best-effort, only when the task already has an assignee) wake the
+ *  agent, and a wake failure must not read as the comment itself having
+ *  failed -- `wakeError` lets the caller say so without pretending the
+ *  comment was lost. */
+export async function commentFleetTask(
+  workspaceId: string,
+  taskId: string,
+  body: string
+): Promise<{ task: FleetTask; wakeError: string | null; woke: boolean }> {
+  const res = await fetch(
+    `/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/comments`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+      body: JSON.stringify({ body }),
+    }
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not post comment (HTTP ${res.status})`));
+  }
+  const wakeError = data?.wake_error ? String(data.wake_error) : null;
+  return {
+    task: withNormalizedStatus(data.task as FleetTask),
+    wakeError,
+    woke: Boolean(data?.wake_request) && !wakeError,
+  };
+}

@@ -897,6 +897,70 @@ async def add_task_comment(
     return _row_to_task(row)
 
 
+async def add_human_task_comment(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    author_id: str,
+    body: str,
+    triggered_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The human->agent comment channel's write path (docs/design/
+    tasks-to-agents-research.md Section 4.5) -- structurally assign_task's
+    twin: ONE shared code path a route calls, comment-then-best-effort-wake
+    as two steps of the same call rather than two endpoints a caller could
+    invoke out of order.
+
+    Deliberately NOT a thin wrapper that lets every add_task_comment caller
+    opt into waking the agent -- add_task_comment is also how an AGENT
+    comments on its own task (mcp_server.empyralis_comment_on_task,
+    skills_service's project_task__comment) and an agent's own comment must
+    never wake itself. author_type is hardcoded to "human" here (never a
+    caller-supplied value) precisely so this function can only ever be the
+    human path, and the Activity feed can tell the two apart
+    (TaskDetailView.commentAuthorLabel already renders "human" as "Person").
+
+    Only attempts a wakeup when the task actually has an assignee -- an
+    unassigned task has no one to wake, and schedule_task_commented_wakeup
+    is never even called in that case (not called-then-swallowed: the hard
+    constraint is "don't attempt a wakeup", not "attempt one quietly").
+    Best-effort on the wakeup, identical in shape to assign_task: a
+    scheduler failure (including the debounce/ceiling backstops raising) is
+    reported in the return payload rather than raised, since the comment
+    itself -- the durable, addressable fact the human typed -- already
+    succeeded by that point."""
+    task = await add_task_comment(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        task_id=task_id,
+        author_type="human",
+        author_id=author_id,
+        body=body,
+    )
+    if task is None:
+        raise ValueError(f"Task {str(task_id or '').strip()} not found in this workspace.")
+    wake_request = None
+    wake_error = None
+    assignee_agent_id = str(task.get("assignee_agent_id") or "").strip()
+    if assignee_agent_id:
+        try:
+            from server_modules import bounded_scheduler_service
+
+            wake_request = await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_id=assignee_agent_id,
+                task_id=task_id,
+                title=task.get("title") or "",
+                comment_body=body,
+                triggered_by=str(triggered_by or author_id or "owner").strip() or "owner",
+            )
+        except Exception as exc:
+            wake_error = str(exc)
+    return {"task": task, "wake_request": wake_request, "wake_error": wake_error}
+
+
 async def update_task(
     *,
     tenant_id: str,

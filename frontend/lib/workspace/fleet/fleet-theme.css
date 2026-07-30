@@ -8145,10 +8145,52 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-secondary);
   white-space: pre-wrap;
 }
-.fleet-task-page-activity-note {
-  margin-top: 12px;
-  font-size: 12px;
+/* The optimistic entry (TaskDetailView's `pending`) painted the instant
+   Comment is clicked, before the write round-trips -- dimmed rather than
+   spinner'd, since it's gone (replaced by the real, refetched row or simply
+   dropped on failure) within one poll cycle either way. */
+.fleet-task-page-comment.is-pending {
+  opacity: 0.55;
+}
+
+/* The composer: a plain textarea straight on the page, same idiom as
+   .fleet-bugreport-textarea's "sheet of paper" treatment rather than a
+   boxed chat-style input -- this is a reading page, not a chat panel. */
+.fleet-task-page-comment-form {
+  margin-top: 16px;
+}
+.fleet-task-page-comment-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  resize: vertical;
+}
+.fleet-task-page-comment-input::placeholder {
   color: var(--text-muted);
+}
+.fleet-task-page-comment-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+.fleet-task-page-comment-input:disabled {
+  opacity: 0.6;
+}
+.fleet-task-page-comment-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--warning-text);
+}
+.fleet-task-page-comment-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
 }
 
 /* Properties column — part of the page, bordered off from the reading column

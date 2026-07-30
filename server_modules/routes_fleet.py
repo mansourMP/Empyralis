@@ -624,6 +624,52 @@ async def fleet_assign_task(
         return {"ok": False, "error": str(exc)}
 
 
+class FleetCommentTaskRequest(BaseModel):
+    # 4000 mirrors add_task_comment's own truncation (body_text[:4000]) --
+    # rejecting an over-length comment loudly here is more honest than
+    # silently accepting it and truncating it later without telling anyone.
+    body: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/api/w/{workspace_id}/fleet/tasks/{task_id}/comments")
+async def fleet_comment_task(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    body: FleetCommentTaskRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """The human->agent comment channel (docs/design/tasks-to-agents-
+    research.md §4.5): the first HTTP route that lets a PERSON post into
+    task.metadata.comments -- agents have had this since project_task__comment/
+    empyralis_comment_on_task, a human never has. Calls
+    project_tasks_service.add_human_task_comment, the ONE code path that
+    both writes the comment AND (best-effort, only when the task has an
+    assignee) schedules the task_commented wakeup -- exactly assign_task's
+    shape above, not a fork.
+
+    No approval gate: per this feature's hard constraint, a comment is an
+    inline message the agent picks up on its next turn, never something
+    that blocks or requires sign-off. A scheduler failure (including the
+    debounce/ceiling backstops in schedule_task_commented_wakeup correctly
+    declining to wake) is reported via wake_error without undoing the
+    comment itself, matching /assign's own contract."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        result = await tasks.add_human_task_comment(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            task_id=task_id,
+            author_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            body=body.body,
+        )
+        return {"ok": True, **result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 # ── Sub-tasks: a parent link on the task itself, not a new object. Exactly
 # ONE level of nesting -- a sub-task cannot have sub-tasks of its own. That
 # rule is enforced in project_tasks_service (it needs a lookup no CHECK can

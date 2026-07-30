@@ -29,17 +29,23 @@
  *    the surface isn't built. The side note at the bottom of the properties
  *    column says exactly that rather than the older, now-false claim that
  *    neither labels nor sub-tasks were stored at all.
- *  · A comment composer. Agents write comments today
- *    (project_tasks_service.add_task_comment, backing project_task__comment)
- *    into task.metadata.comments and the Activity feed below RENDERS THOSE
- *    REAL COMMENTS — but there is no HTTP route for a human to post one, so
- *    there is no box to type in. The feed says so rather than showing a dead
- *    input.
  *  · Rich text. `description` is a plain-text column; it is rendered with
  *    paragraph breaks preserved, not parsed as markdown it may not be.
+ *
+ * THE COMMENT COMPOSER (MAN-64/MAN-70's human->agent channel): agents have
+ * been able to write into task.metadata.comments since project_task__comment
+ * / empyralis_comment_on_task; a human could not until routes_fleet.py grew
+ * POST .../comments (project_tasks_service.add_human_task_comment). The
+ * composer below writes through that route, then asks the page to refetch
+ * (onCommentPosted) — same "write, then let the poll catch up" contract
+ * TaskLabelEditor already uses for this exact reason (this page has no
+ * private write channel of its own; task.metadata.comments only ever
+ * changes by going through the shared, polled task list). It also may wake
+ * the assigned agent (task_commented, bounded_scheduler_service) — best-
+ * effort, surfaced the same way assignment's wake failure already is.
  */
 
-import { useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import { Calendar, Clock3, FolderKanban, MessageSquare, SignalHigh, User } from "lucide-react";
 
@@ -55,7 +61,13 @@ import {
 } from "./task-status";
 import { TaskLabelChips, TaskLabelEditor, TaskLabelRowIcon } from "./task-labels";
 import { TINTS, tintForAgent, formatDateTime, timeAgo } from "./fleet-presentation";
-import { FLEET_TASK_STATUSES, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
+import {
+  commentFleetTask,
+  FLEET_TASK_STATUSES,
+  type FleetAgent,
+  type FleetTask,
+  type FleetTaskStatus,
+} from "./fleet-data";
 
 /** Minute precision, not the default's seconds — no decision on this page
  *  turns on a second, and the extra characters only cost the value column
@@ -87,13 +99,16 @@ export function TaskDetailView({
   onPriorityChange,
   onAssign,
   onLabelsChanged,
+  onCommentPosted,
 }: {
   task: FleetTask;
   /** Agents in this project — the only valid assignees. */
   agents: FleetAgent[];
   /** Scopes the label vocabulary — labels are per WORKSPACE, not per project
    *  (fleet-data's Labels section: "bug" means the same thing wherever the
-   *  work sits). Absent → the Labels row renders read-only chips. */
+   *  work sits). Absent → the Labels row renders read-only chips, and the
+   *  comment composer below is hidden the same way (POST .../comments needs
+   *  it too). */
   workspaceId?: string;
   projectName: string;
   projectHref: string;
@@ -104,6 +119,11 @@ export function TaskDetailView({
    *  PATCH — they are their own endpoints — so the editor writes directly and
    *  then asks the page to re-read. */
   onLabelsChanged?: () => void | Promise<void>;
+  /** Refetch after a human comment is posted. Same contract as
+   *  onLabelsChanged, same reason: POST .../comments is its own endpoint,
+   *  not part of the task PATCH, so the composer below writes directly and
+   *  then asks the page to re-read the (30s-polled) task list. */
+  onCommentPosted?: () => void | Promise<void>;
 }) {
   const router = useRouter();
   const headingRef = useRef<HTMLHeadingElement | null>(null);
@@ -138,6 +158,42 @@ export function TaskDetailView({
   const avatarStyle = (tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) as CSSProperties;
   const comments = useMemo(() => readComments(task), [task]);
 
+  // The composer: local state only, exactly TaskLabelEditor's shape
+  // (writes go straight out via commentFleetTask, painted optimistically
+  // first because the real comment only shows up once the caller's 30s-
+  // polled task list has refetched). `pending` is appended to the real
+  // list rather than replacing it, and dropped the moment the write settles
+  // either way — the refetch (success) or the reverted textarea (failure)
+  // is always what's left on screen, never a comment stuck mid-air.
+  const [draft, setDraft] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [commentNotice, setCommentNotice] = useState<string | null>(null);
+  const [pending, setPending] = useState<TaskComment | null>(null);
+  const displayComments = useMemo(() => (pending ? [...comments, pending] : comments), [comments, pending]);
+
+  async function submitComment() {
+    const body = draft.trim();
+    if (!body || posting || !workspaceId) return;
+    setPosting(true);
+    setCommentNotice(null);
+    setPending({ id: `pending-${Date.now()}`, author_type: "human", author_id: "You", body, created_at: new Date().toISOString() });
+    try {
+      const { wakeError } = await commentFleetTask(workspaceId, task.id, body);
+      setDraft("");
+      if (wakeError) {
+        setCommentNotice(
+          `Posted, but the agent could not be woken: ${wakeError}. It will see this the next time it runs.`,
+        );
+      }
+      await onCommentPosted?.();
+    } catch (e) {
+      setCommentNotice(e instanceof Error ? e.message : "Could not post comment.");
+    } finally {
+      setPosting(false);
+      setPending(null);
+    }
+  }
+
   return (
     <div className="fleet-task-page">
       <div className="fleet-task-page-main">
@@ -159,39 +215,77 @@ export function TaskDetailView({
 
           <section className="fleet-task-page-section" aria-label="Activity">
             <h2 className="fleet-task-page-section-title">Activity</h2>
-            {comments.length === 0 ? (
+            {displayComments.length === 0 ? (
               <div className="fleet-task-page-activity-empty">
                 <MessageSquare size={14} strokeWidth={1.75} />
                 <span>
-                  No comments yet. Agents working this task post here via{" "}
-                  <code>project_task__comment</code>; there is no route for a person to
-                  post one yet, so there is no composer.
+                  No comments yet. Post one below, or an agent working this task can
+                  post here via <code>project_task__comment</code>.
                 </span>
               </div>
             ) : (
-              <>
-                <ul className="fleet-task-page-comments">
-                  {comments.map((c, i) => (
-                    <li key={c.id || i} className="fleet-task-page-comment">
-                      <div className="fleet-task-page-comment-head">
-                        <span className="fleet-task-page-comment-author">
-                          {commentAuthorLabel(c, agents)}
+              <ul className="fleet-task-page-comments">
+                {displayComments.map((c, i) => (
+                  <li
+                    key={c.id || i}
+                    className={`fleet-task-page-comment${c === pending ? " is-pending" : ""}`}
+                  >
+                    <div className="fleet-task-page-comment-head">
+                      <span className="fleet-task-page-comment-author">
+                        {commentAuthorLabel(c, agents)}
+                      </span>
+                      {c.created_at ? (
+                        <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
+                          {timeAgo(c.created_at) || stamp(c.created_at)}
                         </span>
-                        {c.created_at ? (
-                          <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
-                            {timeAgo(c.created_at) || stamp(c.created_at)}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="fleet-task-page-comment-body">{c.body}</div>
-                    </li>
-                  ))}
-                </ul>
-                <div className="fleet-task-page-activity-note">
-                  Read-only: only agents can post comments today.
-                </div>
-              </>
+                      ) : null}
+                    </div>
+                    <div className="fleet-task-page-comment-body">{c.body}</div>
+                  </li>
+                ))}
+              </ul>
             )}
+
+            {workspaceId ? (
+              <form
+                className="fleet-task-page-comment-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submitComment();
+                }}
+              >
+                <textarea
+                  className="fleet-task-page-comment-input"
+                  placeholder="Leave a comment for whoever picks this up next…"
+                  value={draft}
+                  onChange={(event) => setDraft(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    // Enter sends, Shift+Enter (or any IME composition) makes
+                    // a newline — the same convention AgentChat's composer
+                    // uses, so a comment box and a chat box don't disagree
+                    // about what Enter does elsewhere in this app.
+                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      event.preventDefault();
+                      void submitComment();
+                    }
+                  }}
+                  rows={2}
+                  maxLength={4000}
+                  disabled={posting}
+                  aria-label="Add a comment"
+                />
+                {commentNotice ? <p className="fleet-task-page-comment-error">{commentNotice}</p> : null}
+                <div className="fleet-task-page-comment-form-actions">
+                  <button
+                    type="submit"
+                    className="fleet-btn fleet-btn--accent"
+                    disabled={!draft.trim() || posting}
+                  >
+                    {posting ? "Posting…" : "Comment"}
+                  </button>
+                </div>
+              </form>
+            ) : null}
           </section>
         </div>
       </div>

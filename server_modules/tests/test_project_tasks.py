@@ -861,6 +861,135 @@ class AddTaskCommentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(task)
 
 
+class AddHumanTaskCommentTests(unittest.IsolatedAsyncioTestCase):
+    """add_human_task_comment -- the human->agent comment channel's write
+    path (MAN-64/MAN-70; docs/design/tasks-to-agents-research.md §4.5).
+    Structurally assign_task's twin: ONE shared code path a route calls,
+    comment-then-best-effort-wake as two steps of the same call.
+
+    Deliberately NOT the same function agents call: add_task_comment (the
+    MCP tool's backing write, used by project_task__comment /
+    empyralis_comment_on_task) takes a caller-supplied author_type, which is
+    exactly what would let an agent's own comment on its own task
+    accidentally wake itself. add_human_task_comment hardcodes
+    author_type="human" and is the ONLY caller of
+    schedule_task_commented_wakeup, so a bare add_task_comment call (from an
+    agent, or system/run_service) can never trigger a wakeup by construction."""
+
+    async def test_persists_with_human_authorship_distinguishable_from_agent(self):
+        """The comment itself is written via the ordinary add_task_comment
+        path (same atomic jsonb-append UPDATE AddTaskCommentTests already
+        covers) but with author_type FORCED to "human" -- never a
+        caller-supplied value -- so it renders distinctly from an agent's
+        "agent"/"external_agent" comments in the Activity feed."""
+        pool = _QueuedFakePool(
+            fetchrow_results=[
+                _task_row(metadata={"comments": [{"author_type": "human", "author_id": "user-1", "body": "try approach B instead"}]}),
+            ]
+        )
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            result = await project_tasks_service.add_human_task_comment(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                author_id="user-1", body="try approach B instead",
+            )
+        self.assertEqual(result["task"]["metadata"]["comments"][0]["author_type"], "human")
+        self.assertEqual(result["task"]["metadata"]["comments"][0]["author_id"], "user-1")
+        # The append itself went through with author_type="human" regardless
+        # of what a caller might try to pass -- there is no author_type
+        # parameter on this function at all (see the signature).
+        query, args = pool.fetchrow_calls[0]
+        self.assertIn('"author_type": "human"', args[3])
+        self.assertIn('"author_id": "user-1"', args[3])
+
+    async def test_raises_when_task_missing(self):
+        pool = _QueuedFakePool(fetchrow_results=[None])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            with self.assertRaises(ValueError):
+                await project_tasks_service.add_human_task_comment(
+                    tenant_id="tenant-1", workspace_id="ws-1", task_id="ghost",
+                    author_id="user-1", body="hello",
+                )
+
+    async def test_wakes_the_assigned_agent(self):
+        """A task WITH an assignee gets a best-effort task_commented wake
+        scheduled, addressed to that exact assignee."""
+        pool = _QueuedFakePool(
+            fetchrow_results=[_task_row(assignee_agent_id="agent-1", title="Ship the widget")]
+        )
+        wake_mock = AsyncMock(return_value={"id": "wake-1", "status": "pending"})
+        with (
+            patch(
+                "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                new=AsyncMock(return_value=pool),
+            ),
+            patch("server_modules.bounded_scheduler_service.schedule_task_commented_wakeup", new=wake_mock),
+        ):
+            result = await project_tasks_service.add_human_task_comment(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                author_id="user-1", body="try approach B instead",
+            )
+        self.assertEqual(result["wake_request"], {"id": "wake-1", "status": "pending"})
+        self.assertIsNone(result["wake_error"])
+        wake_mock.assert_awaited_once_with(
+            tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-1", task_id="task-1",
+            title="Ship the widget", comment_body="try approach B instead", triggered_by="user-1",
+        )
+
+    async def test_unassigned_task_never_attempts_a_wakeup(self):
+        """The hard constraint: a comment on an unassigned task must not
+        attempt a wakeup at all -- not attempt-then-fail, not attempt-then-
+        swallow. schedule_task_commented_wakeup is configured to raise if it
+        is even called, proving this path never reaches it."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(assignee_agent_id=None)])
+        wake_mock = AsyncMock(side_effect=AssertionError("must never be called for an unassigned task"))
+        with (
+            patch(
+                "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                new=AsyncMock(return_value=pool),
+            ),
+            patch("server_modules.bounded_scheduler_service.schedule_task_commented_wakeup", new=wake_mock),
+        ):
+            result = await project_tasks_service.add_human_task_comment(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                author_id="user-1", body="any comment",
+            )
+        wake_mock.assert_not_awaited()
+        self.assertIsNone(result["wake_request"])
+        self.assertIsNone(result["wake_error"])
+        # The comment itself still landed even though nothing was woken.
+        self.assertEqual(result["task"]["assignee_agent_id"], None)
+
+    async def test_wake_error_reported_without_undoing_the_comment(self):
+        """Mirrors assign_task_reports_wake_error_without_undoing_assignment:
+        a scheduler failure (including the debounce/ceiling backstops
+        correctly declining) must not roll back the comment, which already
+        durably landed by that point."""
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(assignee_agent_id="agent-1")])
+        with (
+            patch(
+                "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                new=AsyncMock(return_value=pool),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.schedule_task_commented_wakeup",
+                new=AsyncMock(side_effect=RuntimeError("scheduler unavailable")),
+            ),
+        ):
+            result = await project_tasks_service.add_human_task_comment(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                author_id="user-1", body="hello",
+            )
+        self.assertIsNone(result["wake_request"])
+        self.assertIn("scheduler unavailable", result["wake_error"])
+        self.assertIsNotNone(result["task"])
+
+
 class AssignTaskTests(unittest.IsolatedAsyncioTestCase):
     """assign_task is the ONE shared code path (docs/design/tasks-to-agents-
     research.md §2 pitfall #2) -- the API and a future @-mention resolver
@@ -1095,6 +1224,190 @@ class ScheduleTaskAssignedWakeupTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(record, {"id": "wake-4", "status": "pending"})
         persist_mock.assert_awaited_once()
+
+
+def _scheduler_policy() -> "bounded_scheduler_service.SchedulerPolicyBounds":
+    return bounded_scheduler_service.SchedulerPolicyBounds(
+        quiet_hours_start=0,
+        quiet_hours_end=0,
+        max_event_triggers_per_hour=4,
+        max_self_proposed_per_hour=2,
+        max_runtime_seconds=20,
+        minimum_battery_percent=20,
+        require_network_online=False,
+        require_owner_approval_for_privileged_wakeups=True,
+        plan_tier="standard",
+    )
+
+
+class ScheduleTaskCommentedWakeupTests(unittest.IsolatedAsyncioTestCase):
+    """schedule_task_commented_wakeup -- the human->agent comment channel's
+    wake trigger (MAN-64/MAN-70; docs/design/tasks-to-agents-research.md
+    §4.5). Structurally schedule_task_assigned_wakeup's twin: same
+    _load_scheduler_scope/_persist_wakeup/_trigger_ambient_monitor seams,
+    new trigger_kind ("task_commented") -- PLUS its own short debounce
+    backstop stacked on top of the shared per-task daily ceiling, since a
+    human can comment far more often than a task gets (re-)assigned."""
+
+    async def test_requires_agent_task_id_and_title(self):
+        with self.assertRaises(bounded_scheduler_service.SchedulerPolicyError):
+            await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="", task_id="task-1", title="Do it",
+            )
+
+    async def test_persists_task_commented_wake_request_and_triggers_monitor(self):
+        with (
+            patch(
+                "server_modules.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=0),
+            ) as count_mock,
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, _scheduler_policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                new=AsyncMock(return_value={"id": "wake-5", "status": "pending"}),
+            ) as persist_mock,
+            patch(
+                "server_modules.bounded_scheduler_service._trigger_ambient_monitor",
+                return_value={"ok": True},
+            ) as trigger_mock,
+        ):
+            record = await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                agent_id="agent-1",
+                task_id="task-1",
+                title="Ship the widget",
+                comment_body="try approach B instead",
+                triggered_by="owner-user",
+            )
+
+        self.assertEqual(record, {"id": "wake-5", "status": "pending"})
+        self.assertEqual(persist_mock.await_args.kwargs["trigger_kind"], "task_commented")
+        self.assertEqual(persist_mock.await_args.kwargs["approval_required"], False)
+        self.assertEqual(persist_mock.await_args.kwargs["requested_by"], "owner-user")
+        payload = persist_mock.await_args.kwargs["payload"]
+        self.assertEqual(payload["agent_id"], "agent-1")
+        self.assertEqual(payload["task_id"], "task-1")
+        self.assertEqual(payload["task_title"], "Ship the widget")
+        self.assertEqual(payload["comment_body"], "try approach B instead")
+        trigger_mock.assert_called_once_with("ws-1")
+        # Two reads of the counter: the debounce window first, then the
+        # shared 24h ceiling -- the debounce check is trigger_kind-scoped,
+        # the ceiling check is not (it counts every trigger kind together).
+        self.assertEqual(count_mock.await_count, 2)
+        self.assertEqual(count_mock.await_args_list[0].kwargs["trigger_kind"], "task_commented")
+        self.assertIsNone(count_mock.await_args_list[1].kwargs.get("trigger_kind"))
+
+    async def test_debounce_suppresses_a_wake_already_logged_in_the_window(self):
+        """The debounce backstop on its own: a task_commented wake already
+        logged for this task_id inside the debounce window means this call
+        returns None -- not an error, since the comment itself was already
+        durably saved by add_task_comment before this function ever runs --
+        and must never reach _load_scheduler_scope/_persist_wakeup, exactly
+        like the daily ceiling's own "must not proceed" contract below."""
+        with (
+            patch(
+                "server_modules.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=1),
+            ) as count_mock,
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(side_effect=AssertionError("must not proceed past the debounce window")),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                new=AsyncMock(side_effect=AssertionError("must not persist a wake inside the debounce window")),
+            ),
+        ):
+            record = await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-1", task_id="task-1", title="Ship the widget",
+            )
+        self.assertIsNone(record)
+        count_mock.assert_awaited_once()
+        self.assertEqual(count_mock.await_args.kwargs["trigger_kind"], "task_commented")
+        self.assertEqual(count_mock.await_args.kwargs["task_id"], "task-1")
+
+    async def test_five_rapid_comments_produce_exactly_one_wake(self):
+        """The brief's own scenario: a human typing five comments in a row
+        must not wake the agent five times. `fake_count` mirrors what the
+        real rolling-window COUNT would return against an actual table --
+        0 before this task_id's first task_commented wake is persisted, 1
+        for every call after, inside the window."""
+        persisted: list[str] = []
+
+        async def fake_count(*, trigger_kind=None, task_id=None, **_kwargs):
+            if trigger_kind == "task_commented":
+                return 1 if persisted else 0
+            return 0  # the shared 24h ceiling never gets close in this test
+
+        async def fake_persist(*, trigger_kind, **_kwargs):
+            persisted.append(trigger_kind)
+            return {"id": f"wake-{len(persisted)}", "status": "pending"}
+
+        with (
+            patch(
+                "server_modules.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                side_effect=fake_count,
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, _scheduler_policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                side_effect=fake_persist,
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._trigger_ambient_monitor",
+                return_value={"ok": True},
+            ),
+        ):
+            results = [
+                await bounded_scheduler_service.schedule_task_commented_wakeup(
+                    tenant_id="tenant-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-1",
+                    task_id="task-1",
+                    title="Ship the widget",
+                    comment_body=f"comment {i}",
+                )
+                for i in range(5)
+            ]
+
+        self.assertEqual(len(persisted), 1, "five rapid comments must persist exactly one wake request")
+        self.assertEqual(sum(1 for r in results if r is not None), 1)
+        self.assertIsNotNone(results[0])
+        self.assertTrue(all(r is None for r in results[1:]))
+
+    async def test_task_wake_ceiling_still_applies_to_comments(self):
+        """The shared STEP 6 daily ceiling is not bypassed by
+        task_commented -- once this task_id has hit the rolling-24h cap
+        across ANY trigger kind (assignment, comments, ...), a comment wake
+        is refused just as loudly as schedule_task_assigned_wakeup's own
+        ceiling test proves for assignment."""
+        with (
+            patch(
+                "server_modules.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(side_effect=[0, bounded_scheduler_service.DEFAULT_MAX_WAKES_PER_TASK_PER_DAY]),
+            ) as count_mock,
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(side_effect=AssertionError("must not proceed past the wake ceiling")),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                new=AsyncMock(side_effect=AssertionError("must not persist a wake past the ceiling")),
+            ),
+        ):
+            with self.assertRaises(bounded_scheduler_service.SchedulerPolicyError) as raised:
+                await bounded_scheduler_service.schedule_task_commented_wakeup(
+                    tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-1", task_id="task-1", title="Ship the widget",
+                )
+        self.assertIn("wake ceiling", str(raised.exception))
+        self.assertEqual(count_mock.await_count, 2)
 
 
 class BuildHeartbeatTurnRequestTaskThreadingTests(unittest.TestCase):

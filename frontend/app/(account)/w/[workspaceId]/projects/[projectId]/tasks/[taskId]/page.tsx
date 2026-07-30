@@ -183,6 +183,9 @@ export default function TaskDetailPage() {
         // task PATCH, so the editor writes directly and asks for a re-read —
         // the same polled cache the board reads, so both agree immediately.
         onLabelsChanged={refresh}
+        // Comments are their own endpoint too (POST .../comments) — the
+        // composer writes directly and asks for the same re-read.
+        onCommentPosted={refresh}
       />
     </main>
   );
