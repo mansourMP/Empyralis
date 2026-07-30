@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" viewBox="0 0 24 24">
+  <title>Attio</title>
+  <!-- Placeholder mark: no verified official brand SVG available for this
+       connector (checked live — no "attio" slug exists in Simple Icons,
+       confirmed by a direct fetch of simple-icons@latest/icons/attio.svg
+       returning 404), a neutral monogram badge, not an attempt at the real
+       Attio wordmark or logo, matching this directory's one-file-per-connector
+       convention (see ahrefs.svg / fathom.svg / klaviyo.svg / mercury.svg for
+       the same treatment). -->
+  <rect width="24" height="24" rx="6" fill="#5B2E9E"/>
+  <text x="12" y="16.7" font-family="-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#FFFFFF" text-anchor="middle">A</text>
+</svg>
