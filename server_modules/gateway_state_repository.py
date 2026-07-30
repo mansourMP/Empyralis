@@ -122,6 +122,15 @@ CREATE TABLE IF NOT EXISTS gateway_sessions (
 CREATE INDEX IF NOT EXISTS gateway_sessions_gateway_idx
     ON gateway_sessions (gateway_id, status, expires_at);
 
+-- MAN-140: prune_gateway_state()'s session cleanup is a GLOBAL (no
+-- gateway_id filter) "terminal status + old updated_at" query, which the
+-- (gateway_id, status, expires_at) index above can't serve -- it always
+-- starts from a specific gateway_id. Without this, that DELETE degrades to
+-- a full table scan as gateway_sessions grows toward the row counts MAN-140
+-- was filed over.
+CREATE INDEX IF NOT EXISTS gateway_sessions_status_updated_idx
+    ON gateway_sessions (status, updated_at);
+
 CREATE TABLE IF NOT EXISTS gateway_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gateway_id TEXT NOT NULL,
@@ -137,6 +146,12 @@ CREATE TABLE IF NOT EXISTS gateway_events (
 
 CREATE INDEX IF NOT EXISTS gateway_events_gateway_idx
     ON gateway_events (gateway_id, created_at DESC);
+
+-- MAN-140: prune_gateway_state()'s event cleanup is a GLOBAL age-only
+-- DELETE (every gateway's events prune together, on one age cutoff) -- the
+-- index above is gateway_id-first so it can't serve that query either.
+CREATE INDEX IF NOT EXISTS gateway_events_created_at_idx
+    ON gateway_events (created_at);
 
 CREATE TABLE IF NOT EXISTS gateway_action_approvals (
     approval_id TEXT PRIMARY KEY,
@@ -2721,3 +2736,94 @@ def sweep_stale_gateway_sessions(
         finally:
             conn.close()
     return swept
+
+
+# MAN-140 defense-in-depth (per MAN-80's framing: "storage lifecycle -- 18 of
+# 21 stores uncapped, retention job built but never called"). gateway_sessions
+# and gateway_events are NOT among the stores that job (server_modules/
+# retention_enforcement_job.py + data_retention_service.DATA_STORE_CATALOG)
+# covers -- that job is a per-workspace, Postgres-backed system with its own
+# ttl_days-by-retention-class model, and these two SQLite tables were never
+# added to its catalog. sweep_stale_gateway_sessions() above IS already wired
+# up and called (gateway_health_service.py), but it only UPDATEs status to
+# 'expired' -- it never deletes a row, so it does nothing to bound file size.
+# There was no DELETE-based prune for either table anywhere in this codebase
+# before this function (verified: no `DELETE FROM gateway_events` or
+# `DELETE FROM gateway_sessions` existed prior). This is that prune, wired up
+# from shared.py's app_lifespan as a periodic background task (see there).
+DEFAULT_GATEWAY_EVENT_RETENTION_DAYS = 14
+DEFAULT_GATEWAY_SESSION_RETENTION_DAYS = 30
+_GATEWAY_SESSION_PRUNABLE_STATUSES = ("expired", "disconnected", "revoked")
+
+
+def prune_gateway_state(
+    *,
+    event_retention_days: int = DEFAULT_GATEWAY_EVENT_RETENTION_DAYS,
+    session_retention_days: int = DEFAULT_GATEWAY_SESSION_RETENTION_DAYS,
+    db_path: Optional[Path | str] = None,
+) -> Dict[str, int]:
+    """Deletes old rows from the two tables MAN-140 found growing unbounded
+    (10k gateway_sessions rows / 271k gateway_events rows / 2GB SQLite file
+    on the production disk, from one long-lived, reconnect-churning gateway).
+
+    gateway_events is pure append-only history -- every inbound/outbound
+    frame this gateway protocol ever sent or received (heartbeats, connect,
+    hello, presence, tool.invoke/response, ...). Nothing in this codebase
+    reads a gateway_events row after roughly the debugging/audit window, so
+    it is pruned purely by age, globally, with no per-gateway carve-out.
+
+    gateway_sessions is NOT pruned purely by age: a row in 'connected' or
+    'pending' status is a LIVE (or about-to-be-live) session and is never
+    deleted here no matter how old, since is_stale()/dead-socket detection
+    and _validate_gateway_binding() (gateway_protocol_service.py) both still
+    look sessions up by session_id and must never hit a row that vanished out
+    from under an actual connection. Only rows already in a TERMINAL status
+    (expired/disconnected/revoked) and past the retention window are removed.
+
+    Deliberately NOT routed through _enforce_gateway_state_decision() the way
+    every user/gateway-triggered mutation above it in this module is.
+    Checked against the actual Rust kernel source (empyralis-runtime-kernel/
+    src/gateway_state.rs): its "gateway-state-decision" handler is a fixed
+    match over a known operation allowlist (touch_session, sweep_stale_
+    sessions, ...) with an explicit catch-all -- `_ => block("gateway_state_
+    operation_unknown", ...)` -- so calling it with a brand-new operation
+    name like "prune_state" would not have been a no-op the way an unlisted
+    operation is on the PYTHON side's own expected_next_actions check above;
+    it would have made this function permanently fail closed in any
+    environment running the real kernel binary (i.e. production), the
+    opposite of "defense in depth". Extending the kernel's own allowlist to
+    recognize a new operation is a real change to security-critical policy
+    code and out of scope here. Matches the existing convention for this
+    kind of pure internal housekeeping elsewhere in the codebase: compare
+    runtime_state_store.py's _prune_run_history()/_prune_channel_events(),
+    neither of which goes through any rust-kernel gate either.
+    """
+    resolved_event_days = max(1, int(event_retention_days or 0))
+    resolved_session_days = max(1, int(session_retention_days or 0))
+    cutoff_events = (_utc_now() - timedelta(days=resolved_event_days)).isoformat()
+    cutoff_sessions = (_utc_now() - timedelta(days=resolved_session_days)).isoformat()
+    with _DB_LOCK:
+        conn = _connect(db_path)
+        try:
+            events_cursor = conn.execute(
+                "DELETE FROM gateway_events WHERE created_at < ?",
+                (cutoff_events,),
+            )
+            events_deleted = int(events_cursor.rowcount or 0)
+            status_placeholders = ", ".join("?" for _ in _GATEWAY_SESSION_PRUNABLE_STATUSES)
+            sessions_cursor = conn.execute(
+                f"""
+                DELETE FROM gateway_sessions
+                WHERE status IN ({status_placeholders})
+                  AND updated_at < ?
+                """,
+                (*_GATEWAY_SESSION_PRUNABLE_STATUSES, cutoff_sessions),
+            )
+            sessions_deleted = int(sessions_cursor.rowcount or 0)
+            conn.commit()
+        finally:
+            conn.close()
+    return {
+        "gateway_events_deleted": max(events_deleted, 0),
+        "gateway_sessions_deleted": max(sessions_deleted, 0),
+    }

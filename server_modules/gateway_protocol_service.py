@@ -2416,11 +2416,30 @@ async def handle_gateway_websocket(
             operation="mark_session_connected",
         )
         gateway_state_repository.mark_gateway_session_connected(session_id)
-        _enforce_gateway_session_mutation(
-            registration=registration,
-            session=session,
-            operation="touch_session",
-        )
+        # MAN-140: no separate _enforce_gateway_session_mutation(operation=
+        # "touch_session") pre-check here — touch_gateway_session() below
+        # already calls the IDENTICAL "gateway-state-decision" rust-kernel
+        # check internally (gateway_state_repository.py's own
+        # _enforce_gateway_state_decision("touch_session", ...), gated on the
+        # exact same _GATEWAY_SESSION_MUTATION_NEXT_ACTIONS["touch_session"]
+        # == expected_next_actions["touch_session"] == {"touch_gateway_session"}
+        # contract). Calling both spawned the "empyralis-runtime-kernel"
+        # subprocess (rust_runtime_kernel_client.run_runtime_kernel ->
+        # subprocess.run) twice for one decision, on literally every
+        # heartbeat/state.update/channel.inbound/connect frame this gateway
+        # ever sends, fully serialized behind gateway_state_repository's
+        # process-wide _DB_LOCK. See the MAN-140 investigation note atop this
+        # file's heartbeat handler for why that mattered: doubling the
+        # blocking work on this path made it that much more likely to push a
+        # heartbeat past the client's own ~20s per-attempt timeout under
+        # concurrent fleet load, which the client — correctly, by its own
+        # design — treats as a dead connection and reconnects, minting a new
+        # gateway_sessions row. Removing the duplicate halves the per-frame
+        # kernel-spawn + DB-lock cost without changing what gets enforced:
+        # the repository layer's check still runs, unconditionally, baked
+        # into touch_gateway_session() itself — so it stays in force for
+        # every current AND future caller with zero risk of a caller
+        # forgetting the separate pre-check this file used to require.
         gateway_state_repository.touch_gateway_session(
             session_id=session_id,
             gateway_id=gateway_id,
@@ -2660,11 +2679,10 @@ async def handle_gateway_websocket(
                         )
                     except Exception:
                         pass
-                _enforce_gateway_session_mutation(
-                    registration=registration,
-                    session=session,
-                    operation="touch_session",
-                )
+                # MAN-140: see the comment on the connect-path touch_gateway_
+                # session() call above — touch_gateway_session() already
+                # performs the identical "gateway-state-decision" rust-kernel
+                # check internally; no separate pre-check needed here.
                 gateway_state_repository.touch_gateway_session(
                     session_id=session_id,
                     gateway_id=gateway_id,
@@ -2678,11 +2696,10 @@ async def handle_gateway_websocket(
                             _handle_personal_channel_inbound_event(dict(payload)),
                         )
                     )
-                    _enforce_gateway_session_mutation(
-                        registration=registration,
-                        session=session,
-                        operation="touch_session",
-                    )
+                    # MAN-140: see the comment on the connect-path
+                    # touch_gateway_session() call above — no separate
+                    # pre-check needed; the repository call enforces the
+                    # identical decision internally.
                     gateway_state_repository.touch_gateway_session(
                         session_id=session_id,
                         gateway_id=gateway_id,
@@ -2748,11 +2765,6 @@ async def handle_gateway_websocket(
                 resources = gateway_inventory_service.sanitize_resources(
                     payload.get("resources")
                 )
-                _enforce_gateway_session_mutation(
-                    registration=registration,
-                    session=session,
-                    operation="touch_session",
-                )
                 # Root cause confirmed 2026-07-13: expires_at on all three
                 # session records was set once at connect and never renewed,
                 # so a live, heartbeating WS still expired at its original
@@ -2789,6 +2801,39 @@ async def handle_gateway_websocket(
                 # is from RECONNECTS creating new session rows, not from this UPDATE
                 # — a real fix has to address that, not this. Back to renewing every
                 # heartbeat, exactly as before this change existed.
+                #
+                # MAN-140 follow-up: that real fix. This heartbeat branch is the
+                # single hottest call site for touch_gateway_session() — one
+                # invocation per gateway per DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_
+                # SECONDS (10s), for every connected gateway, forever. It used to
+                # be preceded by its own _enforce_gateway_session_mutation(
+                # operation="touch_session") pre-check, which called the exact
+                # same "gateway-state-decision" rust-kernel command (subprocess
+                # spawn via rust_runtime_kernel_client.run_runtime_kernel) that
+                # touch_gateway_session() below ALSO performs internally, gated
+                # on the identical next_action contract
+                # (_GATEWAY_SESSION_MUTATION_NEXT_ACTIONS["touch_session"] ==
+                # gateway_state_repository.py's expected_next_actions["touch_
+                # session"] == {"touch_gateway_session"}) — two full subprocess
+                # forks, both serialized behind gateway_state_repository's
+                # process-wide _DB_LOCK, for one decision, on the highest-
+                # frequency path in the whole protocol. Removed: it was pure,
+                # provable duplication (see the identical removal + comment at
+                # this file's connect/response/channel.inbound/state.update
+                # touch_gateway_session() call sites), not a deliberate second
+                # layer of defense — touch_gateway_session() is currently only
+                # ever called from this file (verified: no other production
+                # module calls it), and its own internal enforcement call
+                # covers every one of those call sites unconditionally, so
+                # removing the redundant pre-check here does not weaken
+                # enforcement anywhere, only the doubled-up half of it. This
+                # does NOT touch how often
+                # touch_gateway_session() itself is called or what it writes —
+                # last_heartbeat_at is still set on every single heartbeat,
+                # exactly as the paragraphs above this one insist on. See
+                # server_modules/tests/test_gateway_routes.py::
+                # GatewayRoutesTests::test_heartbeats_over_one_connection_
+                # produce_exactly_one_session_row for the regression coverage.
                 gateway_state_repository.touch_gateway_session(
                     session_id=session_id,
                     gateway_id=gateway_id,
@@ -2863,11 +2908,9 @@ async def handle_gateway_websocket(
                     registration=registration,
                     payload=payload,
                 )
-                _enforce_gateway_session_mutation(
-                    registration=registration,
-                    session=session,
-                    operation="touch_session",
-                )
+                # MAN-140: see the comment on the heartbeat-branch
+                # touch_gateway_session() call above — no separate pre-check
+                # needed here either.
                 gateway_state_repository.touch_gateway_session(
                     session_id=session_id,
                     gateway_id=gateway_id,

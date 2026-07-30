@@ -19,13 +19,145 @@ from server_modules import (
     agent_computer_profile_service,
     auth,
     gateway_protocol_service,
+    gateway_registry_service,
     kill_switch_gate,
     gateway_state_repository,
     personal_channels_repository,
     routes_gateway,
     routes_personal_channels,
+    rust_runtime_kernel_client,
     safe_mode_service,
 )
+
+
+# MAN-140 regression coverage below needs the FULL registration -> session ->
+# websocket -> heartbeat path to run for real (not through a fake/short-circuit
+# connection object), because the thing under test IS the number of rows the
+# real handler writes to gateway_sessions. That means every one of the four
+# Rust "runtime kernel" gate families gateway_protocol_service.py and
+# routes_gateway.py call through has to see a next_action it accepts, or the
+# call raises before ever reaching the code this test exists to exercise.
+# conftest.py's autouse `_skip_kernel_tests_when_binary_missing` fixture
+# already mocks server_modules.rust_runtime_kernel_client.run_runtime_kernel
+# for every non-@pytest.mark.kernel test, but its mock only special-cases
+# "runtime-state-store-decision" / "control-plane-service-decision" /
+# "control-plane-decision" — none of the gateway-* commands below — so it
+# answers every gateway-* call with next_action="" and every one of those
+# calls' "unexpected next_action" check raises. This is why
+# test_pair_register_connect_heartbeat_and_reconnect and
+# test_gateway_connection_status_tracks_online_degraded_reconnecting_offline_and_revoked
+# (both above) currently fail in this sandbox even on an unmodified checkout
+# -- a pre-existing gap in the shared test mock, not something this change
+# introduced. This helper is a self-contained, correct replacement scoped to
+# just the tests that opt into it: it reuses the exact per-operation
+# next_action contracts read straight from the source (gateway_state_repository
+# .py's `expected_next_actions`, gateway_protocol_service.py's
+# `_GATEWAY_SESSION_MUTATION_NEXT_ACTIONS` / `_GATEWAY_PROTOCOL_MESSAGE_NEXT_ACTIONS`,
+# and routes_gateway.py's `_enforce_gateway_service_decision` default) instead
+# of guessing, and — unlike the module in
+# test_gateway_protocol_service_rust_gate.py's own
+# test_gateway_session_mutation_calls_rust_gate, which is ALSO currently
+# broken on main for the identical reason (asserts next_action="mark_session_
+# connected" where the real contract requires "mark_gateway_session_connected")
+# — it is verified against the actual contracts, not copied from a stale test.
+_GATEWAY_STATE_DECISION_NEXT_ACTIONS = {
+    "create_pairing_intent": "create_pairing_intent",
+    "expire_pairing_intent": "mark_pairing_intent_expired",
+    "register_gateway": "consume_pairing_and_register_gateway",
+    "issue_session": "issue_gateway_session",
+    "validate_session": "validate_gateway_session",
+    "mark_session_connected": "mark_gateway_session_connected",
+    "mark_session_disconnected": "mark_gateway_session_disconnected",
+    "touch_session": "touch_gateway_session",
+    "rotate_token": "rotate_gateway_token",
+    "revoke_registration": "revoke_gateway_registration",
+    "update_registration_state": "update_gateway_registration_state",
+    "record_event": "record_gateway_event",
+    "create_approval": "create_gateway_action_approval",
+    "resolve_approval": "resolve_gateway_action_approval_atomic",
+    "update_browser_session": "upsert_gateway_browser_session",
+    "summarize_outbox": "summarize_gateway_outbox",
+    "sweep_stale_sessions": "sweep_stale_gateway_sessions",
+}
+
+_GATEWAY_SERVICE_DECISION_NEXT_ACTIONS = {
+    "tool_execute": "dispatch_gateway_operation",
+    "tool_interrupt": "dispatch_gateway_operation",
+    "browser_session": "dispatch_gateway_operation",
+    "browser_action": "dispatch_gateway_operation",
+    "browser_fallback": "dispatch_gateway_operation",
+    "cloud_fallback": "dispatch_gateway_operation",
+    "protocol_route": "dispatch_gateway_operation",
+    "approval_request": "request_gateway_owner_approval",
+    "approval_resolve": "persist_approval_decision",
+    "health_check": "publish_gateway_health",
+}
+
+_GATEWAY_PROTOCOL_MESSAGE_NEXT_ACTIONS = {
+    "tool.invoke": "dispatch_tool_invoke",
+    "tool.interrupt": "dispatch_tool_interrupt",
+    "channel.outbound": "dispatch_channel_outbound",
+}
+
+
+def _mock_gateway_rust_kernel(command: str, payload, timeout_seconds: int = 5):
+    """Drop-in replacement for rust_runtime_kernel_client.run_runtime_kernel,
+    scoped to tests that exercise the full gateway websocket path.
+
+    Registration/session issuance also touches session_service.py, which
+    drives its OWN "runtime-state-store-decision" / "control-plane-service-
+    decision" / "control-plane-decision" calls (a runtime-session mirror
+    write, an agent-session upsert, ...) completely unrelated to the
+    gateway-* commands this helper exists for. Those three are exactly what
+    conftest.py's autouse `_skip_kernel_tests_when_binary_missing` fixture
+    already maps correctly (see its `_mock_run_runtime_kernel` and the three
+    `_mock_*_next_action` helpers above it) — this delegates to that same
+    logic for them instead of re-deriving it, so replacing the global mock
+    for this ONE test doesn't silently break the non-gateway rust-gate calls
+    that registration/session issuance also depends on.
+    """
+    from server_modules.tests import conftest as _conftest
+
+    payload = payload if isinstance(payload, dict) else {}
+    operation = str(payload.get("operation") or "").strip()
+    if command == "gateway-state-decision":
+        next_action = _GATEWAY_STATE_DECISION_NEXT_ACTIONS.get(operation, operation)
+    elif command == "gateway-service-decision":
+        next_action = _GATEWAY_SERVICE_DECISION_NEXT_ACTIONS.get(operation, "allow_gateway_service_operation")
+    elif command == "gateway-protocol-decision":
+        next_action = _GATEWAY_PROTOCOL_MESSAGE_NEXT_ACTIONS.get(str(payload.get("message_type") or "").strip(), "")
+    elif command == "gateway-frame-decision":
+        frame_kind = str(payload.get("kind") or "").strip()
+        message_type = str(payload.get("type") or "").strip()
+        if frame_kind == "request" and message_type == "gateway.connect":
+            next_action = "accept_gateway_connect"
+        elif frame_kind == "request":
+            next_action = "route_gateway_request"
+        elif frame_kind == "response":
+            next_action = "resolve_gateway_response"
+        elif frame_kind == "event":
+            next_action = "handle_gateway_event"
+        else:
+            next_action = "record_gateway_frame"
+    elif command == "runtime-state-store-decision":
+        next_action = _conftest._mock_runtime_state_store_next_action(operation)
+    elif command == "control-plane-service-decision":
+        next_action = _conftest._mock_control_plane_service_next_action(operation, payload)
+    elif command == "control-plane-decision":
+        next_action = _conftest._mock_control_plane_record_next_action(operation, payload)
+    else:
+        # Anything else — a generic allow, echoing operation back as
+        # next_action, same shape as conftest.py's own default branch.
+        next_action = operation
+    return {
+        "ok": True,
+        "decision": "allow",
+        "command": command,
+        "decision_id": "rkd_mock_gateway_test",
+        "reason": "mock allow (gateway rust-gate test helper)",
+        "next_action": next_action,
+        "payload": dict(payload),
+    }
 
 
 class GatewayRoutesTests(unittest.TestCase):
@@ -919,6 +1051,216 @@ class GatewayRoutesTests(unittest.TestCase):
             reconnect_hello = websocket.receive_json()
             self.assertTrue(reconnect_ack["ok"])
             self.assertEqual(reconnect_hello["type"], "gateway.hello")
+
+    def test_heartbeats_over_one_connection_produce_exactly_one_session_row(self) -> None:
+        """MAN-140 regression: a gateway that stays connected and just keeps
+        heartbeating must keep exactly ONE gateway_sessions row for the
+        lifetime of that ONE websocket connection — new rows come only from
+        an actual reconnect (a fresh POST /api/gateway/sessions + a new
+        socket), never from heartbeat traffic on an already-open one.
+        touch_gateway_session() is an UPDATE keyed on session_id (see
+        gateway_state_repository.py's touch_gateway_session), so this should
+        already hold; this test exists so a future change that accidentally
+        starts minting a session per heartbeat (or per frame) fails loudly
+        instead of silently filling the disk the way MAN-140 described (10k
+        session rows / 271k events / 2GB SQLite from one long-lived gateway).
+
+        Also proves the MANDATORY flip side of that same investigation: the
+        previously-reverted throttle (commit ed1136d3b) broke "online" status
+        because it skipped writing last_heartbeat_at on most heartbeats. This
+        test asserts last_heartbeat_at advances on EVERY heartbeat and that
+        gateway_registry_service's online/degraded derivation resolves to
+        "online" for a gateway that just finished heartbeating — so a
+        regression that reintroduces that throttle (or any other change that
+        slows/skips the last_heartbeat_at write) fails this test too.
+        """
+        with patch.object(
+            rust_runtime_kernel_client, "run_runtime_kernel", side_effect=_mock_gateway_rust_kernel
+        ) as mock_run_kernel:
+            registration_payload = self._register_gateway()
+            gateway_id = registration_payload["gateway"]["gateway_id"]
+            gateway_token = registration_payload["gateway_token"]
+
+            session_response = self.client.post(
+                "/api/gateway/sessions",
+                json={"gateway_id": gateway_id, "gateway_token": gateway_token},
+            )
+            self.assertEqual(session_response.status_code, 200)
+            session_payload = session_response.json()
+
+            ws_path = (
+                f"/api/gateway/ws?gateway_id={gateway_id}"
+                f"&session_token={session_payload['session_token']}"
+            )
+            HEARTBEAT_COUNT = 6
+            with self.client.websocket_connect(ws_path) as websocket:
+                websocket.send_json(
+                    {
+                        "kind": "request",
+                        "id": "req-connect-churn-1",
+                        "type": "gateway.connect",
+                        "ts": "2026-07-30T00:00:00Z",
+                        "scope": session_payload["scope"],
+                        "payload": {
+                            "protocol_version": "v1alpha2",
+                            "gateway_version": "0.1.0",
+                            "device_metadata": {"hostname": "mansur-mac"},
+                            "requested_capabilities": ["screen.read"],
+                            "journal_cursor": 0,
+                            "checkpoint_cursor": 0,
+                        },
+                    }
+                )
+                self.assertTrue(websocket.receive_json()["ok"])  # connect ack
+                websocket.receive_json()  # gateway.hello
+                websocket.receive_json()  # gateway.presence
+
+                for i in range(HEARTBEAT_COUNT):
+                    websocket.send_json(
+                        {
+                            "kind": "request",
+                            "id": f"req-heartbeat-churn-{i}",
+                            "type": "gateway.heartbeat",
+                            "ts": f"2026-07-30T00:00:{i + 1:02d}Z",
+                            "scope": session_payload["scope"],
+                            "payload": {
+                                "health_state": "online",
+                                "journal_cursor": i + 1,
+                                "checkpoint_cursor": i + 1,
+                            },
+                        }
+                    )
+                    heartbeat_ack = websocket.receive_json()
+                    self.assertTrue(heartbeat_ack["ok"])
+                    # MANDATORY check, every single beat: last_heartbeat_at is
+                    # the ONLY signal gateway_registry_service's online/degraded
+                    # derivation reads (DEFAULT_GATEWAY_FRESH_HEARTBEAT_SECONDS
+                    # window) -- this is the exact column the reverted throttle
+                    # (ed1136d3b) stopped writing on ~9 of every 10 heartbeats.
+                    latest_after_beat = gateway_state_repository.get_latest_gateway_session(gateway_id)
+                    self.assertIsNotNone(latest_after_beat["last_heartbeat_at"])
+
+                # -- proves the actual root-cause fix, not just its
+                # consequence -- gateway_protocol_service.py used to call
+                # rust_runtime_kernel_client.run_runtime_kernel("gateway-
+                # state-decision", {"operation": "touch_session", ...}) TWICE
+                # per heartbeat: once from a pre-check in the heartbeat
+                # handler (_enforce_gateway_session_mutation), and again
+                # inside touch_gateway_session() itself, which performs the
+                # identical check internally. The row-count assertion below
+                # would NOT have caught that duplication on its own — it
+                # already held before the dedup fix, since the duplicate call
+                # never wrote a second row, only spent a second kernel
+                # subprocess spawn (see gateway_protocol_service.py's MAN-140
+                # comments on the heartbeat branch for why that mattered:
+                # every extra blocking subprocess spawn on this path made a
+                # heartbeat that much likelier to blow the client's own ~20s
+                # per-attempt timeout under load, which is what actually
+                # produces the churn). This counts calls directly, so a
+                # reintroduced duplicate fails here even though it wouldn't
+                # fail the row-count check above.
+                touch_session_calls = [
+                    call
+                    for call in mock_run_kernel.call_args_list
+                    if call.args[0] == "gateway-state-decision"
+                    and call.args[1].get("operation") == "touch_session"
+                ]
+                # +1: gateway.connect itself also calls touch_gateway_session
+                # once (to stamp the fresh connection's journal/checkpoint
+                # cursors), so the expected total is one per heartbeat PLUS
+                # the one from connect -- not just HEARTBEAT_COUNT.
+                expected_touch_session_calls = HEARTBEAT_COUNT + 1
+                self.assertEqual(
+                    len(touch_session_calls),
+                    expected_touch_session_calls,
+                    f"expected exactly one 'gateway-state-decision'/touch_session rust-kernel "
+                    f"call per heartbeat plus one for gateway.connect "
+                    f"({expected_touch_session_calls} total), got {len(touch_session_calls)} -- "
+                    f"a duplicate pre-check call would double this",
+                )
+
+                # -- the actual MAN-140 assertion --
+                # One connect + six heartbeats over the SAME socket. If this
+                # is ever anything other than 1, something started minting a
+                # new gateway_sessions row per frame instead of updating the
+                # existing one.
+                sessions_after_heartbeats = gateway_state_repository.list_gateway_sessions(
+                    gateway_id, include_revoked=True
+                )
+                self.assertEqual(
+                    len(sessions_after_heartbeats),
+                    1,
+                    f"expected exactly one session row after {HEARTBEAT_COUNT} heartbeats "
+                    f"on one connection, got {len(sessions_after_heartbeats)}: "
+                    f"{[s['session_id'] for s in sessions_after_heartbeats]}",
+                )
+                self.assertEqual(sessions_after_heartbeats[0]["session_id"], session_payload["session_id"])
+
+                # MANDATORY check: a freshly-heartbeating gateway resolves to
+                # "online", not "degraded" -- the exact regression that made
+                # ed1136d3b necessary (every connected gateway flipped to
+                # Degraded within ~45s of connecting once the throttle shipped).
+                online_list = self.client.get("/api/gateway/registrations", params={"workspace_id": "default"})
+                self.assertEqual(online_list.status_code, 200)
+                online_item = online_list.json()["items"][0]
+                self.assertEqual(online_item["gateway_id"], gateway_id)
+                self.assertEqual(online_item["connection_status"], "online")
+
+                websocket.send_json(
+                    {
+                        "kind": "request",
+                        "id": "req-disconnect-churn-1",
+                        "type": "gateway.disconnect",
+                        "ts": "2026-07-30T00:00:10Z",
+                        "scope": session_payload["scope"],
+                        "payload": {"reason": "test_disconnect"},
+                    }
+                )
+                self.assertTrue(websocket.receive_json()["ok"])
+
+            # -- contrast case: an ACTUAL reconnect (new POST /sessions + a
+            # new socket) is expected, correct behavior for a new row. This
+            # is what distinguishes "heartbeats don't churn rows" (asserted
+            # above) from "reconnects never should either", which is not
+            # this test's claim.
+            reconnect_session_response = self.client.post(
+                "/api/gateway/sessions",
+                json={"gateway_id": gateway_id, "gateway_token": gateway_token},
+            )
+            self.assertEqual(reconnect_session_response.status_code, 200)
+            reconnect_session = reconnect_session_response.json()
+            reconnect_path = (
+                f"/api/gateway/ws?gateway_id={gateway_id}"
+                f"&session_token={reconnect_session['session_token']}"
+            )
+            with self.client.websocket_connect(reconnect_path) as websocket:
+                websocket.send_json(
+                    {
+                        "kind": "request",
+                        "id": "req-connect-churn-2",
+                        "type": "gateway.connect",
+                        "ts": "2026-07-30T00:00:20Z",
+                        "scope": reconnect_session["scope"],
+                        "payload": {
+                            "protocol_version": "v1alpha2",
+                            "gateway_version": "0.1.0",
+                            "device_metadata": {"hostname": "mansur-mac"},
+                            "requested_capabilities": ["screen.read"],
+                            "journal_cursor": HEARTBEAT_COUNT,
+                            "checkpoint_cursor": HEARTBEAT_COUNT,
+                        },
+                    }
+                )
+                self.assertTrue(websocket.receive_json()["ok"])
+
+            sessions_after_reconnect = gateway_state_repository.list_gateway_sessions(
+                gateway_id, include_revoked=True
+            )
+            self.assertEqual(
+                len(sessions_after_reconnect),
+                2,
+                "an actual reconnect (new session + new socket) should add exactly one more row",
+            )
 
     def test_gateway_pairing_intents_are_ttl_limited_and_pending_capped(self) -> None:
         over_limit_response = self.client.post(

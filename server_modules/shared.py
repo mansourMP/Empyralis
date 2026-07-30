@@ -1,3 +1,5 @@
+import asyncio
+import os
 import queue
 import threading
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -7,10 +9,81 @@ from server_modules.acp_manager import DEFAULT_ACP_MANAGER
 from server_modules.runtime_config import *
 
 
+# MAN-140 defense-in-depth: bound gateway_sessions/gateway_events growth.
+# See gateway_state_repository.prune_gateway_state()'s own docstring for why
+# this exists (neither table is covered by MAN-80's retention job, and
+# sweep_stale_gateway_sessions -- already wired up elsewhere -- only UPDATEs
+# status, never DELETEs). Tunable without a code change, same convention as
+# the rest of this module's env-overridable constants.
+_GATEWAY_STATE_PRUNE_INTERVAL_SECONDS = int(
+    os.environ.get("EMPYRALIS_GATEWAY_STATE_PRUNE_INTERVAL_SECONDS", "") or 6 * 60 * 60
+)
+_GATEWAY_STATE_PRUNE_EVENT_RETENTION_DAYS = int(
+    os.environ.get("EMPYRALIS_GATEWAY_EVENT_RETENTION_DAYS", "") or 14
+)
+_GATEWAY_STATE_PRUNE_SESSION_RETENTION_DAYS = int(
+    os.environ.get("EMPYRALIS_GATEWAY_SESSION_RETENTION_DAYS", "") or 30
+)
+
+
+async def _gateway_state_prune_loop() -> None:
+    import logging as _logging
+
+    from server_modules import gateway_state_repository
+
+    _log = _logging.getLogger("server_modules.gateway_state_repository")
+    while True:
+        try:
+            # prune_gateway_state() is synchronous stdlib sqlite3 I/O (see
+            # its own module for why every gateway_state_repository call is
+            # -- deliberately, today -- blocking rather than executor-
+            # offloaded). Run it via to_thread here specifically because
+            # this loop shares the SAME event loop as every live gateway
+            # websocket connection: a multi-hundred-thousand-row DELETE
+            # blocking that loop directly would itself be exactly the kind
+            # of heartbeat-response-latency hit MAN-140's root cause turned
+            # on (see gateway_protocol_service.py's heartbeat handler for
+            # that investigation) -- the fix for one blocking-I/O-on-the-
+            # shared-loop problem should not introduce a second one.
+            result = await asyncio.to_thread(
+                gateway_state_repository.prune_gateway_state,
+                event_retention_days=_GATEWAY_STATE_PRUNE_EVENT_RETENTION_DAYS,
+                session_retention_days=_GATEWAY_STATE_PRUNE_SESSION_RETENTION_DAYS,
+            )
+            if result.get("gateway_events_deleted") or result.get("gateway_sessions_deleted"):
+                _log.info("Gateway state prune: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("Gateway state prune failed")
+        await asyncio.sleep(max(60, _GATEWAY_STATE_PRUNE_INTERVAL_SECONDS))
+
+
 @asynccontextmanager
 async def app_lifespan(_: Any):
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(empyralist_mcp_lifespan())
+        # MAN-140 defense-in-depth: periodic gateway_sessions/gateway_events
+        # prune. Guarded the same way as the Telegram polling block below --
+        # a failure here must never block startup -- and cancelled cleanly
+        # on shutdown via the exit stack rather than left as a dangling
+        # fire-and-forget task.
+        try:
+            _gateway_prune_task = asyncio.create_task(_gateway_state_prune_loop())
+
+            async def _cancel_gateway_prune_task() -> None:
+                _gateway_prune_task.cancel()
+                try:
+                    await _gateway_prune_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            stack.push_async_callback(_cancel_gateway_prune_task)
+        except Exception as _prune_startup_exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Gateway state prune loop startup failed: %s", _prune_startup_exc
+            )
         # Start Telegram background polling for local dev
         try:
             from server_modules import sage_telegram_hosted_service as _hosted
