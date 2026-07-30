@@ -84,7 +84,7 @@ def shell_execute(
             "stderr": result.stderr or "",
             "exit_code": result.returncode,
             "command": command,
-            "status": "completed",
+            "status": "completed" if result.returncode == 0 else "failed",
         }
     except subprocess.TimeoutExpired:
         return {

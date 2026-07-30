@@ -252,24 +252,6 @@ def _candidate_model_attempts(
     return attempts or [str(CODEX_MODEL or "gpt-4o-mini").strip() or "gpt-4o-mini"]
 
 
-def requires_human_approval(context: Dict[str, Any], plan_text: str) -> tuple[bool, str]:
-    metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
-    if agent_machine_full_trust_enabled(str(metadata.get("owner_user_id") or "").strip()):
-        return False, ""
-    trust_mode = normalize_trust_mode(metadata.get("trust_mode"))
-    return plan_requires_human_approval(
-        trust_mode,
-        metadata,
-        context_text=" ".join(
-            [
-                str(context.get("user_goal") or ""),
-                str(context.get("business_plan") or ""),
-                str(plan_text or ""),
-            ]
-        ),
-    )
-
-
 def wait_for_human_response(
     run_id: str,
     prompt: str,
