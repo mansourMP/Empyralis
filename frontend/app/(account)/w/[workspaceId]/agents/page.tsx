@@ -184,6 +184,15 @@ export default function AgentsPage() {
 
   return (
     <main className="fleet-content fleet-content--with-panel">
+      {/* MAN-145 item 4: same fix as Hardware/Projects — the breadcrumb
+          ("Agents · N") is a `<nav>` landmark, not a heading, so this page
+          had zero heading roles for screen-reader H-key/rotor navigation.
+          Real page <h1>, existing `.fleet-title` weight, no new type
+          style. */}
+      <div className="fleet-header">
+        <h1 className="fleet-title">Agents</h1>
+      </div>
+
       {/* U3-H: two rows, not one — top row is breadcrumb (with its count,
           see the useBreadcrumbBadge call above) + primary action only,
           portaled into the shell topbar. The view-control cluster is its
@@ -192,8 +201,13 @@ export default function AgentsPage() {
           was wrong. FleetToolbar always renders here (even with 0 agents)
           so the Properties toggle stays reachable; filters/sort still hide
           themselves when there's nothing to filter/sort. */}
+      {/* MAN-145: one accent-fill per view. The empty state below (0 agents)
+          shows FirstAgentEmpty's own filled "Create your first agent" centre
+          button — the real call to action when the list is empty — so this
+          header action stays the quiet .fleet-btn--accent hairline rather
+          than a second solid fill competing with it. */}
       <HeaderAction>
-        <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
+        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
           <span className="fleet-btn-plus">+</span>
           New agent
         </button>

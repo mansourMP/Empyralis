@@ -289,23 +289,39 @@ export default function ProjectDetailPage() {
 
   return (
     <main className="fleet-content fleet-content--with-panel">
-      {/* No page-title header here — the breadcrumb (with the project's own
-          icon, see useBreadcrumbIcon above, and its count badge, see
-          useBreadcrumbBadge above) is the page identity. This stage matches
-          the Agents page exactly, all the way down to the two-row header
-          (U3-H): top row is breadcrumb + primary action only; the
+      {/* MAN-145 item 4: the breadcrumb (with the project's own icon, see
+          useBreadcrumbIcon above, and its count badge, see
+          useBreadcrumbBadge above) carries the project's IDENTITY, but a
+          `<nav>` landmark is not a heading — Overview/Agents/Tasks all
+          rendered zero heading roles for screen-reader H-key/rotor
+          navigation, on all three tabs, since this <h1> is shared chrome
+          above the tab strip. Existing `.fleet-title` weight, no new type
+          style — same fix as Hardware/Projects/Agents above. */}
+      <div className="fleet-header">
+        <h1 className="fleet-title">{project?.name || "Project"}</h1>
+      </div>
+
+      {/* U3-H: top row is breadcrumb + primary action only; the
           view-control cluster is its own row below, under the topbar's
           existing divider. FleetToolbar always renders here (even with 0
           agents) so the Properties toggle stays reachable; filters/sort
           still hide themselves when there's nothing to filter/sort (each is
           independently optional). */}
+      {/* MAN-145: one accent-FILL per view, never two. Each of these views can
+          also show its own empty state (FirstAgentEmpty's centre "Create your
+          first agent" for Agents; the Tasks empty state's centre "+ New task"
+          below) with a filled button of its own — that's the real call to
+          action when there's nothing else on screen. So the header action
+          here stays the quiet .fleet-btn--accent hairline (same restrained
+          treatment every other app-wide primary action uses), never the
+          saturated fill, so the two are never both shouting at once. */}
       <HeaderAction>
         {view === "agents" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
             <span className="fleet-btn-plus">+</span> New agent
           </button>
         ) : view === "tasks" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setComposer({})}>
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setComposer({})}>
             <span className="fleet-btn-plus">+</span> New task
           </button>
         ) : null}
@@ -407,7 +423,7 @@ export default function ProjectDetailPage() {
                 </div>
                 <div className="fleet-empty-title">No tasks yet</div>
                 <div className="fleet-empty-desc">
-                  Tasks live inside this project and can be assigned to an agent to work on.
+                  Tasks live inside this project and can be assigned to an agent or a person to work on.
                 </div>
                 <div className="fleet-empty-actions">
                   <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setComposer({})}>

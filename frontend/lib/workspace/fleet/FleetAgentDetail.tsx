@@ -1088,10 +1088,23 @@ function AgentTitle({
   }
 
   return (
-    <button type="button" className="fleet-overview-title" onClick={() => setEditing(true)} style={{ marginBottom: 12 }} aria-label={`Rename ${label || "this agent"}`}>
-      <span>{label || "Untitled agent"}</span>
-      <Pencil size={14} strokeWidth={1.75} className="fleet-overview-title-pencil" />
-    </button>
+    // MAN-145 item 4: the agent's name previously had zero heading role
+    // anywhere on the page — the breadcrumb is a `<nav>` landmark, and this
+    // was a bare <button>. Wrapping (not retagging — a <button> can't BE a
+    // heading) the button in a plain, unclassed <h1> keeps the rename
+    // control exactly as it was — same click target, same visual style, all
+    // of it off the button's own class/inline style, neither of which this
+    // wrapper touches — while giving the page a real top-level heading, same
+    // job the task detail page's h1 does for a task's title. No margin/font
+    // on the h1 itself, so `.fleet-root h1 { margin: 0; font-weight: 500 }`
+    // has nothing to silently override — none of the specificity trap that
+    // bit .fleet-task-page-title.
+    <h1>
+      <button type="button" className="fleet-overview-title" onClick={() => setEditing(true)} style={{ marginBottom: 12 }} aria-label={`Rename ${label || "this agent"}`}>
+        <span>{label || "Untitled agent"}</span>
+        <Pencil size={14} strokeWidth={1.75} className="fleet-overview-title-pencil" />
+      </button>
+    </h1>
   );
 }
 
@@ -2436,18 +2449,15 @@ function ToolsTab({
 
   return (
     <div className="fleet-config">
-      {/* Legibility primer (frontend-only, no logic change): the model
-          itself is unconditional and per-message (see
-          authority_mandate_service.py / triage_service.py) — every sender
-          who isn't positively the owner is "audience", regardless of which
-          agent they messaged. Shown above both branches below since the
-          badges on every tool row (Safe by default / Granted by you /
-          Owner only) apply the same way whether this is Sage or a
-          specialist. */}
-      <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Everyone who messages this agent is a customer at support-tier — they can request, not command.
-        You, the owner, keep full access.
-      </p>
+      {/* Founder feedback (copy discipline pass): this used to open with a
+          2-sentence policy paragraph explaining the audience model before
+          any control appeared — "a professional tool labels, it does not
+          lecture." The badge legend right below already IS the label: every
+          tool row wears one of these three badges, so what "customer" vs
+          "owner" access means is shown at the point of use, not read once
+          and forgotten above the fold. The `hint` tooltip on the Properties
+          panel's "Customer access" row (this file, PanelRow) still carries
+          the one-sentence version for whoever hovers it. */}
       <div
         className="fleet-subtitle"
         style={{ marginTop: 0, marginBottom: 12, display: "flex", flexWrap: "wrap", gap: "6px 16px", alignItems: "center" }}
@@ -2471,9 +2481,6 @@ function ToolsTab({
           <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>
             {enabledCount} of {tools.length} tools enabled
           </div>
-          <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-            By default customers can only use read/support tools; everything else is owner-only until you grant it.
-          </p>
         </>
       )}
       {tools.map((t) => {
@@ -2484,11 +2491,6 @@ function ToolsTab({
           <div style={{ minWidth: 0 }}>
             <div className="fleet-toggle-row-label">{t.label}</div>
             {t.description && <div className="fleet-toggle-row-desc">{t.description}</div>}
-            {connectorMissing && (
-              <div className="fleet-toggle-row-desc">
-                Needs {requiredConnector?.label || "a connector"} connected — this toggle has no effect until then.
-              </div>
-            )}
             {!connectorMissing && !t.enabled && (t.audience_safe || t.mandate_granted) && (
               <div className="fleet-toggle-row-desc">Enabled required to run</div>
             )}
@@ -2813,10 +2815,12 @@ function CapabilitiesTab({
 
   return (
     <div className="fleet-config">
-      <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Platform credits are the default for every capability below — nothing to set up, priced per use. The only key we ever ask you to paste is your own OpenAI key, and one covers image generation, text-to-speech, and speech-to-text together. Other providers here (Stability AI, ElevenLabs) don&apos;t offer a way to connect your own account, so they&apos;re platform-credits only.
-      </p>
-
+      {/* Founder feedback (copy discipline pass): dropped the 3-sentence
+          platform-credits/OpenAI-key primer that used to open this tab —
+          the OpenAI key section right below already states, at the one
+          input it's actually about, that it covers image/TTS/STT together
+          (see its own hint), and every other row's own label already says
+          what it costs. Nothing here needed a paragraph to say it twice. */}
       {openaiEligible.length > 0 && (
         <div className="fleet-channel-expand" style={{ marginBottom: 12 }}>
           <div className="fleet-toggle-row-label">Your OpenAI key</div>

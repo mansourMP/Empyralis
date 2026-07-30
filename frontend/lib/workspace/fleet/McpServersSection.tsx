@@ -448,7 +448,7 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
 
   return (
     <>
-      <div className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>MCP servers</div>
+      <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>MCP servers</h2>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
         Connect a remote MCP server by URL. Tools are enabled automatically once a server connects — only
         money-moving, destructive, or third-party-messaging actions need your explicit approval first.

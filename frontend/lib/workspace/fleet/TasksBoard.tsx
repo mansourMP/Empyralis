@@ -166,6 +166,37 @@ export function TasksBoard({
   // the roll-up above it cannot disagree about what a status means.
   const counts = countTasksByStatus(tasks);
 
+  // MAN-145: seven columns at 252px each is wider than any board viewport,
+  // so reaching the trailing columns (Blocked/In review/Done) depends on
+  // scrolling sideways. A trackpad's two-finger swipe already does this for
+  // free (.fleet-board is a plain overflow-x:auto box), but a PLAIN mouse
+  // wheel has no built-in horizontal axis, and whether a browser remaps a
+  // vertical wheel gesture onto a horizontal-only scroller is inconsistent
+  // across engines — the one input path every pointer device shares (a
+  // vertical wheel delta) should not silently do nothing here. This repoints
+  // that delta onto scrollLeft by hand rather than trusting the remap.
+  //
+  // Left alone deliberately: a gesture that already carries a horizontal
+  // component (deltaX !== 0 — a real trackpad pan) is native behaviour and
+  // is not intercepted. A wheel that starts over a column with its own
+  // vertical overflow (a tall stack of cards) is also left alone, so this
+  // never steals a column's own scroll before the column has anywhere left
+  // to go.
+  const boardRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const board = boardRef.current;
+    if (!board) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaX !== 0 || e.deltaY === 0) return;
+      const columnBody = (e.target as HTMLElement | null)?.closest<HTMLElement>(".fleet-board-column-body");
+      if (columnBody && columnBody.scrollHeight > columnBody.clientHeight) return;
+      board.scrollLeft += e.deltaY;
+      e.preventDefault();
+    };
+    board.addEventListener("wheel", onWheel, { passive: false });
+    return () => board.removeEventListener("wheel", onWheel);
+  }, []);
+
   function handleDrop(e: DragEvent<HTMLElement>, status: FleetTaskStatus) {
     e.preventDefault();
     setDragOverStatus(null);
@@ -180,7 +211,7 @@ export function TasksBoard({
   }
 
   return (
-    <div className="fleet-board" role="list" aria-label="Task board">
+    <div className="fleet-board" role="list" aria-label="Task board" ref={boardRef}>
       {visibleStatuses.map((status) => {
         const label = taskStatusLabel(status);
         const columnTasks = tasks.filter((t) => t.status === status);

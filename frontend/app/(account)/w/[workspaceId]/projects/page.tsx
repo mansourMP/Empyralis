@@ -206,6 +206,16 @@ export default function ProjectsPage() {
 
   return (
     <main className="fleet-content fleet-content--with-panel">
+      {/* MAN-145 item 4: the breadcrumb ("Projects · N") is a `<nav>` landmark,
+          not a heading, so this page had zero heading roles for a screen
+          reader's H-key/rotor navigation. Real page <h1>, same
+          `.fleet-title` weight as Hardware/FleetHome's own page titles —
+          no new type style, just the existing page-title class applied
+          here too. */}
+      <div className="fleet-header">
+        <h1 className="fleet-title">Projects</h1>
+      </div>
+
       {/* U3-H: top row is breadcrumb (with its count, see useBreadcrumbBadge
           above) + primary action only. The view-control cluster is its own
           row below, under the topbar's existing divider — same FleetToolbar

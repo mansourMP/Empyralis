@@ -121,7 +121,7 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
 
   return (
     <>
-      <div className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Members</div>
+      <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Members</h2>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
         Everyone with access to this workspace — and every project in it (there's no separate per-project
         membership yet). Invites are shared as a link; there's no email sender on this platform to send one through.
@@ -216,9 +216,9 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
 
       {!invitesLoading && invites.length > 0 ? (
         <>
-          <div className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)", fontSize: "var(--text-sm)" }}>
+          <h3 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)", fontSize: "var(--text-sm)" }}>
             Pending invites
-          </div>
+          </h3>
           <div className="fleet-list">
             {invites.map((inv) => {
               const createdAt = inviteCreatedAtDate(inv.created_at);

@@ -75,7 +75,7 @@ function WorkspaceNameSection({ workspaceId }: { workspaceId: string }) {
 
   return (
     <>
-      <div className="fleet-detail-section-title">Workspace name</div>
+      <h2 className="fleet-detail-section-title">Workspace name</h2>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
         Shown in the rail, breadcrumbs, and anywhere else this workspace is referenced.
       </p>
@@ -141,7 +141,7 @@ function StopAllAgentsSection({ workspaceId }: { workspaceId: string }) {
 
   return (
     <>
-      <div className="fleet-detail-section-title">Emergency stop</div>
+      <h2 className="fleet-detail-section-title">Emergency stop</h2>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
         Immediately stops every agent in this workspace from replying, on every channel. Nothing is deleted — resume
         at any time to pick back up where they left off.
@@ -280,7 +280,22 @@ export default function SettingsPage() {
 
   return (
     <main className="fleet-content">
-      {/* No page-title header — the breadcrumb already says "Settings". */}
+      {/* Founder feedback: with no real heading here, the tab strip's own
+          "Settings" label and the breadcrumb's "Settings" crumb sat directly
+          on top of each other with nothing else on the page to tell them
+          apart — the same word, twice, stacked, and neither one a real
+          heading. Hardware/Projects/Agents already carry this exact
+          `.fleet-header` + `.fleet-title` h1 (MAN-145 item 4) sitting BELOW
+          that same tab+breadcrumb chrome, and it reads fine there — a small
+          nav trail, then one real, larger page title — because the title is
+          the one place on the page an H-key/rotor screen-reader jump or a
+          glance actually lands. This brings Settings in line with its
+          siblings instead of being the one page with nothing under the
+          chrome. The breadcrumb itself is untouched — it's still how you
+          navigate back out, here and everywhere else. */}
+      <div className="fleet-header">
+        <h1 className="fleet-title">Settings</h1>
+      </div>
       <WorkspaceNameSection workspaceId={workspaceId} />
       <MembersSection workspaceId={workspaceId} />
 
@@ -296,7 +311,7 @@ export default function SettingsPage() {
       <StopAllAgentsSection workspaceId={workspaceId} />
 
       {/* Billing */}
-      <div className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Billing</div>
+      <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Billing</h2>
       <Link href={`/w/${workspaceId}/billing`} className="fleet-list-row" style={{ textDecoration: "none" }}>
         <span className="fleet-list-row-icon"><CreditCard size={16} strokeWidth={1.75} /></span>
         <span className="fleet-list-row-main">
@@ -310,7 +325,7 @@ export default function SettingsPage() {
       <McpServersSection workspaceId={workspaceId} />
 
       {/* Inbound: external MCP clients (Claude Desktop, etc.) connecting IN to this workspace. */}
-      <div className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>MCP API keys</div>
+      <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>MCP API keys</h2>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
         The other direction — give external MCP clients (Claude Desktop, etc.) scoped access to this workspace.
         Keys are shown once at creation.
