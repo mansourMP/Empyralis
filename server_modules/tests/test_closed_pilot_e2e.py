@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from server_modules import (
     kill_switch_gate,
     gateway_protocol_service,
-    gateway_approval_service,
     gateway_quota_enforcement,
     secret_redaction_service,
     gateway_browser_runtime,
@@ -228,19 +227,14 @@ class ClosedPilotE2ETests(unittest.TestCase):
         from server_modules.gateway_state_repository import resolve_gateway_action_approval_atomic
         self.assertTrue(callable(resolve_gateway_action_approval_atomic))
 
-    def test_22_approval_ttl_helper_exists(self):
-        # Verify the TTL helper exists
-        self.assertTrue(callable(gateway_approval_service._approval_expired))
-
-    def test_23_approval_expired_returns_true(self):
-        past = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
-        approval = {"requested_at": past}
-        self.assertTrue(gateway_approval_service._approval_expired(approval, 900))
-
-    def test_24_approval_recent_returns_false(self):
-        recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
-        approval = {"requested_at": recent}
-        self.assertFalse(gateway_approval_service._approval_expired(approval, 900))
+    # test_22_approval_ttl_helper_exists, test_23_approval_expired_returns_
+    # true, and test_24_approval_recent_returns_false deleted:
+    # gateway_approval_service._approval_expired no longer exists.
+    # 0820a732c ("Remove approval system — agent now acts on reasoning,
+    # not approval gates") removed the approval-gate implementation
+    # entirely (gateway_approval_service.py is a stub now -- see its
+    # module docstring), and the TTL/expiry concept these three tests
+    # existed to verify no longer applies to anything in the product.
 
     # ------------------------------------------------------------------
     # 7. Workspace scoping (browser runtime)
