@@ -45,7 +45,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CalendarDays, Check, Plus, X } from "lucide-react";
+import { CalendarDays, Check, MoreHorizontal, Plus, X } from "lucide-react";
 
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
@@ -141,6 +141,11 @@ export function TaskComposer({
   const [assignee, setAssignee] = useState<TaskAssigneeSelection | null>(null);
   const [labelIds, setLabelIds] = useState<string[]>([]);
   const [dueDate, setDueDate] = useState("");
+  // MAN-145 item 5: Labels/Due start collapsed behind the "⋯" overflow chip
+  // — revealed either by picking them from that menu (added here) or by
+  // already carrying a value (see labelsVisible/dueVisible below), so a
+  // chip the user has actually set never disappears back into the menu.
+  const [pinnedOverflow, setPinnedOverflow] = useState<Set<"labels" | "due">>(new Set());
   const [createMore, setCreateMore] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -157,6 +162,23 @@ export function TaskComposer({
     () => labelIds.map((id) => labels.find((l) => l.id === id)).filter(Boolean) as FleetLabel[],
     [labelIds, labels],
   );
+
+  // Six always-visible chips read as an application form; three plus
+  // whatever's actually been set reads as a sentence. Status/Priority/
+  // Assignee are the properties that decide whether an agent can pick a task
+  // up at all, so those stay inline unconditionally. Labels/Due start inside
+  // the "⋯" overflow and only surface in the row once they carry a real
+  // value OR the user has explicitly pulled them out of that menu.
+  const labelsVisible = chosenLabels.length > 0 || pinnedOverflow.has("labels");
+  const dueVisible = Boolean(dueDate) || pinnedOverflow.has("due");
+  // The project chip is static (never editable — see its own comment below)
+  // and its value is already stated a second time, at full strength, in the
+  // composer's own crumb header ("{projectName} › New task") — so tucking it
+  // into the overflow costs nothing a reader hasn't already seen. It's the
+  // one overflow entry that's never promoted out (there's nothing to pin —
+  // it never becomes "set," it always already is), which is also why the
+  // overflow trigger itself never disappears the way a plain "show more"
+  // toggle would once Labels/Due both had values.
 
   const requestClose = useCallback(() => {
     if (closing) return;
@@ -481,56 +503,110 @@ export function TaskComposer({
             )}
           </ChipMenu>
 
-          <LabelChip
-            workspaceId={workspaceId}
-            labels={labels}
-            chosen={chosenLabels}
-            selectedIds={labelIds}
-            onToggle={(id) =>
-              setLabelIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]))
-            }
-            onCreated={async (created) => {
-              await refreshLabels();
-              setLabelIds((cur) => (cur.includes(created.id) ? cur : [...cur, created.id]));
-            }}
-          />
+          {labelsVisible && (
+            <LabelChip
+              workspaceId={workspaceId}
+              labels={labels}
+              chosen={chosenLabels}
+              selectedIds={labelIds}
+              onToggle={(id) =>
+                setLabelIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]))
+              }
+              onCreated={async (created) => {
+                await refreshLabels();
+                setLabelIds((cur) => (cur.includes(created.id) ? cur : [...cur, created.id]));
+              }}
+            />
+          )}
 
+          {dueVisible && (
+            <ChipMenu
+              label={dueDate ? shortDate(dueDate) : "Due"}
+              set={Boolean(dueDate)}
+              icon={<CalendarDays size={13} strokeWidth={1.75} />}
+              menuLabel="Due date"
+            >
+              {(close) => (
+                <div className="fleet-composer-pop-pad">
+                  <input
+                    type="date"
+                    className="fleet-composer-date"
+                    value={dueDate}
+                    aria-label="Due date"
+                    onChange={(e) => setDueDate(e.currentTarget.value)}
+                  />
+                  <button
+                    type="button"
+                    className="fleet-composer-pop-item"
+                    onClick={() => {
+                      setDueDate("");
+                      close();
+                    }}
+                  >
+                    <span className="fleet-composer-pop-icon" />
+                    <span className="fleet-composer-pop-label">No due date</span>
+                  </button>
+                </div>
+              )}
+            </ChipMenu>
+          )}
+
+          {/* MAN-145 item 5: everything that isn't inline right now (Labels/
+              Due when unset, and the static project line always) lives one
+              click behind this — the row reads as "status, priority, who"
+              rather than a six-field form, and nothing here is unreachable,
+              just not shouting. Picking Labels/Due from this menu pins it
+              into the row (see pinnedOverflow) so the picker that opens next
+              is the normal inline chip, not a nested menu-in-a-menu. */}
           <ChipMenu
-            label={dueDate ? shortDate(dueDate) : "Due"}
-            set={Boolean(dueDate)}
-            icon={<CalendarDays size={13} strokeWidth={1.75} />}
-            menuLabel="Due date"
+            label=""
+            icon={<MoreHorizontal size={14} strokeWidth={2} />}
+            menuLabel="More properties"
+            ariaLabel="More properties"
           >
             {(close) => (
-              <div className="fleet-composer-pop-pad">
-                <input
-                  type="date"
-                  className="fleet-composer-date"
-                  value={dueDate}
-                  aria-label="Due date"
-                  onChange={(e) => setDueDate(e.currentTarget.value)}
-                />
-                <button
-                  type="button"
-                  className="fleet-composer-pop-item"
-                  onClick={() => {
-                    setDueDate("");
-                    close();
-                  }}
-                >
-                  <span className="fleet-composer-pop-icon" />
-                  <span className="fleet-composer-pop-label">No due date</span>
-                </button>
-              </div>
+              <>
+                {!labelsVisible && (
+                  <button
+                    type="button"
+                    className="fleet-composer-pop-item"
+                    onClick={() => {
+                      setPinnedOverflow((cur) => new Set(cur).add("labels"));
+                      close();
+                    }}
+                  >
+                    <span className="fleet-composer-pop-icon">
+                      <span className="fleet-label-dot" data-color="none" aria-hidden />
+                    </span>
+                    <span className="fleet-composer-pop-label">Labels</span>
+                  </button>
+                )}
+                {!dueVisible && (
+                  <button
+                    type="button"
+                    className="fleet-composer-pop-item"
+                    onClick={() => {
+                      setPinnedOverflow((cur) => new Set(cur).add("due"));
+                      close();
+                    }}
+                  >
+                    <span className="fleet-composer-pop-icon">
+                      <CalendarDays size={13} strokeWidth={1.75} />
+                    </span>
+                    <span className="fleet-composer-pop-label">Due date</span>
+                  </button>
+                )}
+                {/* Static, like the chip it replaces — this composer belongs
+                    to one project and cannot file elsewhere, so this states
+                    where the task lands rather than pretending to be a
+                    picker. Not a <button>: there is nothing to select. */}
+                <div className="fleet-composer-pop-item fleet-composer-pop-item--static">
+                  <span className="fleet-composer-pop-label">Project</span>
+                  <span className="fleet-composer-pop-meta">{projectName || "This project"}</span>
+                </div>
+              </>
             )}
           </ChipMenu>
-
-          {/* Static: this composer belongs to one project and cannot file
-              elsewhere, so the chip states where the task lands rather than
-              pretending to be a picker. */}
-          <span className="fleet-composer-chip fleet-composer-chip--static" title="This task's project">
-            {projectName || "This project"}
-          </span>
         </div>
 
         {error ? (
@@ -581,6 +657,7 @@ function ChipMenu({
   set,
   menuLabel,
   children,
+  ariaLabel,
 }: {
   label: string;
   icon: ReactNode;
@@ -590,6 +667,10 @@ function ChipMenu({
   set?: boolean;
   menuLabel: string;
   children: (close: () => void) => ReactNode;
+  /** Accessible name for the trigger button when `label` is empty (icon-only
+   *  chips — currently just the "⋯" overflow trigger). Every other chip's
+   *  visible text is its own accessible name, so this stays optional. */
+  ariaLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLSpanElement | null>(null);
@@ -640,6 +721,7 @@ function ChipMenu({
         className={`fleet-composer-chip${set ? " is-set" : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label={label ? undefined : ariaLabel}
         onClick={() => setOpen((v) => !v)}
       >
         <span className="fleet-composer-chip-icon">{icon}</span>

@@ -364,8 +364,8 @@ export function TaskDetailView({
               <div className="fleet-task-page-activity-empty">
                 <MessageSquare size={14} strokeWidth={1.75} />
                 <span>
-                  No comments yet. Post one below, or an agent working this task can
-                  post here via <code>project_task__comment</code>.
+                  No comments yet. Post one below — agents working this task can leave
+                  updates here too.
                 </span>
               </div>
             ) : (
@@ -621,12 +621,13 @@ export function TaskDetailView({
           {/* Sub-tasks: honest, and NARROWER than the note this replaces.
               That note said labels and sub-tasks were both unstored; labels
               now are (workspace_labels / project_task_labels, edited in the
-              row above), so repeating it would be a lie. `parent_task_id` is
-              real too — what's missing for sub-tasks is this UI, not a
-              column, and that's a different sentence. */}
+              row above), so repeating it would be a lie. The backend already
+              tracks task parentage — what's missing for sub-tasks is this UI,
+              not the data, and that's a different sentence. Product copy: say
+              what the user gets (nothing here, yet), not the column that
+              backs it. */}
           <div className="fleet-task-page-side-note">
-            Sub-tasks are stored (<code>parent_task_id</code>) but nothing here creates
-            or lists them yet.
+            Sub-tasks aren't supported in this view yet.
           </div>
         </div>
       </aside>

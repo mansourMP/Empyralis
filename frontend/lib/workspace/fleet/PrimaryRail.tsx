@@ -140,6 +140,20 @@ export function PrimaryRail({
   // straight to --rail-w during a drag and adds `.is-resizing` to .fleet-root,
   // which kills the transition for the duration.
   const lastWidthRef = useRef<number>(RAIL_WIDTH.def);
+  // Founder feedback: dragging an OPEN rail left used to be allowed to show
+  // widths all the way down to RAIL_WIDTH.collapsed (56px) before snapping
+  // shut on release — which meant every width between that floor and
+  // RAIL_WIDTH.min (200px) was a real, visible, mid-drag state: full nav
+  // labels rendered into a box too narrow for them, clipped and overlapping.
+  // The rail already has a dedicated, discoverable way to get out of the
+  // way (the "Toggle rail" collapse button below) — drag has no business
+  // reproducing that at a worse fidelity. So this no longer collapses on a
+  // release past the minimum at all: the OPEN-rail drag floor is
+  // RAIL_WIDTH.min itself, and handleRelease below only still special-cases
+  // the opposite gesture (reopening an already-collapsed rail by dragging
+  // its handle), which never passes through that degenerate zone in the
+  // first place — it starts at 56px and grows, rather than starting wide
+  // and being dragged down into it.
   const handleRelease = useCallback(
     (raw: number) => {
       if (collapsed) {
@@ -149,12 +163,6 @@ export function PrimaryRail({
           onToggleCollapsed();
           return Math.max(raw, RAIL_WIDTH.min);
         }
-        return lastWidthRef.current;
-      }
-      // Dragging left past the minimum is how you collapse — the rail snaps
-      // shut on release rather than being pinned at an unusable 200px.
-      if (raw < RAIL_WIDTH.min) {
-        onToggleCollapsed();
         return lastWidthRef.current;
       }
       return raw;
@@ -169,9 +177,14 @@ export function PrimaryRail({
     maxWidth: RAIL_WIDTH.max,
     cssVar: "--rail-w",
     edge: "right",
-    // Let the drag *show* widths down to the collapsed size so the snap
-    // reads as a destination, not a wall.
-    dragFloor: RAIL_WIDTH.collapsed,
+    // Collapsed rail (56px) dragged right needs to visibly grow from that
+    // floor to reach RAIL_WIDTH.restoreAt below — an OPEN rail dragged left
+    // must never show anything narrower than RAIL_WIDTH.min (200px, chosen
+    // as the floor that still keeps every rail label — "Conversations",
+    // the longest row — on one legible line; see RAIL_WIDTH's own comment).
+    // collapsed can change between renders, so this is read fresh each
+    // pointerdown rather than fixed at mount.
+    dragFloor: collapsed ? RAIL_WIDTH.collapsed : RAIL_WIDTH.min,
     onRelease: handleRelease,
   });
   useEffect(() => {

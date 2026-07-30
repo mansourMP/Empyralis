@@ -345,7 +345,7 @@ export function ProjectOverview({
           collapsing to an invisible sliver. */}
       <div className="fleet-overview-progress">
         <div className="fleet-overview-progress-head">
-          <span className="fleet-overview-progress-label">Status</span>
+          <h2 className="fleet-overview-progress-label">Status</h2>
           {totalTasks > 0 && (
             <span className="fleet-overview-progress-count">
               <span className="fleet-overview-num">{statusCounts.done}</span> of{" "}
@@ -402,7 +402,7 @@ export function ProjectOverview({
       </div>
 
       <div className="fleet-overview-section-head">
-        <span className="fleet-detail-section-title">Activity</span>
+        <h2 className="fleet-detail-section-title">Activity</h2>
         {items.length > 0 && (
           <span className="fleet-overview-section-meta">
             {items.length > FEED_DISPLAY_CAP
