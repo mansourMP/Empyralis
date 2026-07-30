@@ -965,11 +965,20 @@ export function useWorkspaceStatusStrip(workspaceId: string): WorkspaceStatusStr
 }
 
 /** A task on a project's shared board. Mirrors project_tasks_service.py's
- *  `_row_to_task` (:90-103) exactly — do not add fields the backend does not
- *  return. Assignment is AGENT-ONLY (`assignee_agent_id`); `created_by`
- *  records the human author and is not an assignee. A task with no
- *  `assignee_agent_id` is backlog: created but not yet handed to an agent,
- *  which the API models as two deliberate steps (create, then assign). */
+ *  `_row_to_task` exactly — do not add fields the backend does not return.
+ *
+ *  ASSIGNMENT (MAN-64/MAN-70): a task's assignee is either an AGENT
+ *  (`assignee_agent_id`) or a HUMAN (`assignee_user_id`), never both --
+ *  `project_tasks_single_assignee_check` backstops this at the database
+ *  layer. `assignee_type` is the backend's own derived read-side
+ *  convenience ("agent" | "user" | null) so nothing on this side has to
+ *  re-derive "which column is set" for itself; prefer it over checking
+ *  both id fields directly. `created_by` records the human AUTHOR (who
+ *  filed the task) and is never an assignee, even when it happens to equal
+ *  assignee_user_id (Alice can file a task and also be the one working it).
+ *  A task with neither assignee column set is backlog: created but not yet
+ *  handed to anyone, which the API models as two deliberate steps
+ *  (create, then assign). */
 export type FleetTask = {
   id: string;
   project_id?: string | null;
@@ -984,6 +993,13 @@ export type FleetTask = {
    *  (absent, null, a string, an out-of-range number) to 0. */
   priority?: number | null;
   assignee_agent_id?: string | null;
+  /** The human assignee's user_id (workspace_memberships), or null. See the
+   *  type-level note above -- mutually exclusive with assignee_agent_id. */
+  assignee_user_id?: string | null;
+  /** Derived by the backend, never both non-null at once. Prefer this over
+   *  inspecting the two id fields directly when you just need to know
+   *  "agent, human, or nobody". */
+  assignee_type?: "agent" | "user" | null;
   created_by?: string | null;
   due_at?: string | null;
   plan?: unknown;
@@ -1323,6 +1339,91 @@ export async function assignFleetTask(
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
     throw new Error(apiErrorMessage(data, `Could not assign task (HTTP ${res.status})`));
+  }
+  const wakeError = data?.wake_error ? String(data.wake_error) : null;
+  return {
+    task: withNormalizedStatus(data.task as FleetTask),
+    wakeError,
+    woke: Boolean(data?.wake_request) && !wakeError,
+  };
+}
+
+/** assign_task's human counterpart (MAN-64/MAN-70) -- project_tasks_service.
+ *  assign_task_to_user, reached through the SAME route (POST .../assign)
+ *  with `{user_id}` instead of `{agent_id}`. Deliberately a separate
+ *  function rather than assignFleetTask growing an optional third
+ *  parameter: the two calls are not interchangeable at the call site (a
+ *  caller must already know which kind of assignee it has in hand), and
+ *  keeping them separate makes "this call can never wake an agent" visible
+ *  at the call site rather than buried in a branch. No `wakeError`/`woke`
+ *  in the return shape -- assigning a task to a human never schedules a
+ *  wakeup, in any case, so a field that could only ever read
+ *  {wakeError: null, woke: false} would just invite a caller to check it
+ *  and draw the wrong conclusion. */
+export async function assignFleetTaskToUser(
+  workspaceId: string,
+  taskId: string,
+  userId: string
+): Promise<{ task: FleetTask }> {
+  const res = await fetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/assign`, {
+    method: "POST",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+    body: JSON.stringify({ user_id: userId }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not assign task (HTTP ${res.status})`));
+  }
+  return { task: withNormalizedStatus(data.task as FleetTask) };
+}
+
+/** Discriminates which of assignFleetTask/assignFleetTaskToUser a caller
+ *  should invoke -- the shared shape every assignee picker in this
+ *  directory (TaskDetailView, TasksList, TaskComposer) builds from an
+ *  agent's or a workspace member's id before calling one of the two
+ *  functions above. */
+export type TaskAssigneeSelection = { kind: "agent"; id: string } | { kind: "user"; id: string };
+
+/** A native <select>'s value can only be one string, so every assignee
+ *  picker built on one (TaskDetailView's Properties row, TasksList's inline
+ *  row picker) needs the SAME "agent:<id>" / "user:<id>" namespacing to
+ *  keep the two option groups from colliding -- shared here so the two
+ *  surfaces cannot drift onto two different schemes. */
+export function assigneeOptionValue(selection: TaskAssigneeSelection): string {
+  return `${selection.kind}:${selection.id}`;
+}
+
+export function parseAssigneeOptionValue(value: string): TaskAssigneeSelection | null {
+  if (value.startsWith("agent:")) return { kind: "agent", id: value.slice("agent:".length) };
+  if (value.startsWith("user:")) return { kind: "user", id: value.slice("user:".length) };
+  return null;
+}
+
+/** The human->agent comment channel (routes_fleet.py's fleet_comment_task,
+ *  backed by project_tasks_service.add_human_task_comment). Same shape as
+ *  assignFleetTask above and for the same reason: posting can also
+ *  (best-effort, only when the task already has an assignee) wake the
+ *  agent, and a wake failure must not read as the comment itself having
+ *  failed -- `wakeError` lets the caller say so without pretending the
+ *  comment was lost. */
+export async function commentFleetTask(
+  workspaceId: string,
+  taskId: string,
+  body: string
+): Promise<{ task: FleetTask; wakeError: string | null; woke: boolean }> {
+  const res = await fetch(
+    `/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/comments`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+      body: JSON.stringify({ body }),
+    }
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not post comment (HTTP ${res.status})`));
   }
   const wakeError = data?.wake_error ? String(data.wake_error) : null;
   return {

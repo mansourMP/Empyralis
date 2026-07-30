@@ -36,12 +36,15 @@ Linear's) live here too:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from server_modules import control_plane_repository
+
+LOGGER = logging.getLogger(__name__)
 # One-directional by design: a task CARRIES labels, so tasks may know about
 # labels. workspace_labels_service never imports this module at module
 # scope in return (it reaches for project_tasks_service lazily, inside the
@@ -207,7 +210,8 @@ MAX_SUBTASK_DEPTH = 1
 # un-migrated `priority` column break every read.
 _TASK_COLUMNS = (
     "id, tenant_id, workspace_id, project_id, title, description, status, priority, "
-    "parent_task_id, assignee_agent_id, created_by, due_at, plan, metadata, created_at, updated_at"
+    "parent_task_id, assignee_agent_id, assignee_user_id, created_by, due_at, plan, "
+    "metadata, created_at, updated_at"
 )
 
 # The rollup, computed IN THE SAME QUERY as the task itself -- never a
@@ -492,7 +496,24 @@ def _row_to_task(row: Any) -> Optional[Dict[str, Any]]:
         "subtask_count": int(r.get("subtask_count") or 0),
         "subtask_done_count": int(r.get("subtask_done_count") or 0),
         "labels": _coerce_labels(r.get("labels")),
+        # Human task assignability (MAN-64/MAN-70): a task's assignee is
+        # either a human user or an agent, never both (project_tasks_
+        # single_assignee_check backstops this at the storage layer;
+        # assign_task/assign_task_to_user each NULL out the other column on
+        # write). `assignee_type` is a pure read-side convenience -- derived,
+        # never stored -- so a caller (the HTTP payload, the frontend) never
+        # has to re-derive "which column is set" for itself. A database that
+        # has not yet had migrations/add_task_human_assignee.sql applied
+        # returns no `assignee_user_id` key at all, which reads as "no human
+        # assignee" rather than raising -- the same deploy-before-migrate
+        # posture `priority`/`parent_task_id` already take above.
         "assignee_agent_id": str(r.get("assignee_agent_id") or "").strip() or None,
+        "assignee_user_id": str(r.get("assignee_user_id") or "").strip() or None,
+        "assignee_type": (
+            "agent" if str(r.get("assignee_agent_id") or "").strip()
+            else "user" if str(r.get("assignee_user_id") or "").strip()
+            else None
+        ),
         "created_by": str(r.get("created_by") or "").strip() or None,
         "due_at": str(due_at) if due_at else None,
         "plan": _coerce_plan(r.get("plan")),
@@ -860,6 +881,34 @@ async def add_task_comment(
     a single statement), not a read-modify-write in application code, so two
     concurrent commenters (the owner dashboard and an agent, or two agents)
     can never clobber each other's comment under a race.
+
+    MAN-66 (@-mention parser): every comment, regardless of author, is
+    scanned for `@mentions` and resolved against this workspace's roster
+    (task_mention_service.resolve_task_mentions) BEFORE it is persisted, so
+    the resolved mentions ride along on the SAME comment object the
+    frontend already renders (Activity feed chips read `comment.mentions`,
+    no second fetch). This is deliberately the ONE shared place mention
+    resolution happens -- add_human_task_comment (the human path) and every
+    agent/system caller of this function (project_task__comment,
+    empyralis_comment_on_task, run_service's failure-note comment) all
+    funnel through here, so there is exactly one mention pipeline, not one
+    per author kind.
+
+    Dispatch (wake a mentioned AGENT, notify a mentioned HUMAN) happens
+    AFTER the comment durably lands, and is best-effort/fire-and-forget --
+    a dispatch failure is logged, never raised, and never undoes the
+    comment (mirrors add_human_task_comment's own wake_error contract,
+    which this file already established for the assignee-wake path).
+    task_mention_service.dispatch_resolved_mentions is what makes this safe
+    to run unconditionally for EVERY author, including an agent commenting
+    on its OWN task: it drops a mention of the author's own identity before
+    ever calling the scheduler, so an agent that mentions itself schedules
+    zero wakes (see that function's docstring and its own test coverage) --
+    this is a materially different, narrower guarantee than the reason
+    add_human_task_comment exists as a separate wrapper (that one is about
+    NEVER attempting the unconditional assignee-wake for a non-human
+    author; this one is about a specific, always-excluded target within an
+    otherwise-shared pipeline).
     """
     body_text = str(body or "").strip()
     if not body_text:
@@ -869,13 +918,36 @@ async def add_task_comment(
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
             "Postgres is required to comment on a task."
         )
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+    resolved_author_type = str(author_type or "").strip() or "unknown"
+    resolved_author_id = str(author_id or "").strip() or "unknown"
+
+    from server_modules import task_mention_service
+
+    try:
+        resolved_mentions = await task_mention_service.resolve_task_mentions(
+            tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, body=body_text, pool=pool,
+        )
+    except Exception:
+        LOGGER.warning("Mention resolution failed for task %s; posting as plain text", resolved_task_id, exc_info=True)
+        resolved_mentions = []
+    stored_body = body_text[:4000]
+    # A mention whose offsets fall past the 4000-char truncation point would
+    # be an out-of-bounds chip on the frontend -- drop it rather than store
+    # a dangling reference into text that no longer exists.
+    stored_mentions = [m for m in resolved_mentions if m.get("end", 0) <= len(stored_body)]
+
     comment = {
         "id": f"comment_{uuid.uuid4().hex[:12]}",
-        "author_type": str(author_type or "").strip() or "unknown",
-        "author_id": str(author_id or "").strip() or "unknown",
-        "body": body_text[:4000],
+        "author_type": resolved_author_type,
+        "author_id": resolved_author_id,
+        "body": stored_body,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if stored_mentions:
+        comment["mentions"] = stored_mentions
     row = await pool.fetchrow(
         """
         UPDATE project_tasks
@@ -889,12 +961,91 @@ async def add_task_comment(
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         RETURNING
         """ + _TASK_RETURNING_SQL,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
-        str(task_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_task_id,
         json.dumps([comment]),
     )
-    return _row_to_task(row)
+    task = _row_to_task(row)
+    if task is not None and stored_mentions:
+        try:
+            await task_mention_service.dispatch_resolved_mentions(
+                tenant_id=resolved_tenant_id,
+                workspace_id=resolved_workspace_id,
+                task_id=resolved_task_id,
+                task_title=str(task.get("title") or ""),
+                resolved_mentions=stored_mentions,
+                author_type=resolved_author_type,
+                author_id=resolved_author_id,
+                comment_body=body_text,
+            )
+        except Exception:
+            LOGGER.warning("Mention dispatch failed for task %s", resolved_task_id, exc_info=True)
+    return task
+
+
+async def add_human_task_comment(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    author_id: str,
+    body: str,
+    triggered_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The human->agent comment channel's write path (docs/design/
+    tasks-to-agents-research.md Section 4.5) -- structurally assign_task's
+    twin: ONE shared code path a route calls, comment-then-best-effort-wake
+    as two steps of the same call rather than two endpoints a caller could
+    invoke out of order.
+
+    Deliberately NOT a thin wrapper that lets every add_task_comment caller
+    opt into waking the agent -- add_task_comment is also how an AGENT
+    comments on its own task (mcp_server.empyralis_comment_on_task,
+    skills_service's project_task__comment) and an agent's own comment must
+    never wake itself. author_type is hardcoded to "human" here (never a
+    caller-supplied value) precisely so this function can only ever be the
+    human path, and the Activity feed can tell the two apart
+    (TaskDetailView.commentAuthorLabel already renders "human" as "Person").
+
+    Only attempts a wakeup when the task actually has an assignee -- an
+    unassigned task has no one to wake, and schedule_task_commented_wakeup
+    is never even called in that case (not called-then-swallowed: the hard
+    constraint is "don't attempt a wakeup", not "attempt one quietly").
+    Best-effort on the wakeup, identical in shape to assign_task: a
+    scheduler failure (including the debounce/ceiling backstops raising) is
+    reported in the return payload rather than raised, since the comment
+    itself -- the durable, addressable fact the human typed -- already
+    succeeded by that point."""
+    task = await add_task_comment(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        task_id=task_id,
+        author_type="human",
+        author_id=author_id,
+        body=body,
+    )
+    if task is None:
+        raise ValueError(f"Task {str(task_id or '').strip()} not found in this workspace.")
+    wake_request = None
+    wake_error = None
+    assignee_agent_id = str(task.get("assignee_agent_id") or "").strip()
+    if assignee_agent_id:
+        try:
+            from server_modules import bounded_scheduler_service
+
+            wake_request = await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_id=assignee_agent_id,
+                task_id=task_id,
+                title=task.get("title") or "",
+                comment_body=body,
+                triggered_by=str(triggered_by or author_id or "owner").strip() or "owner",
+            )
+        except Exception as exc:
+            wake_error = str(exc)
+    return {"task": task, "wake_request": wake_request, "wake_error": wake_error}
 
 
 async def update_task(
@@ -1115,14 +1266,27 @@ async def assign_task(
     agent_id: str,
     triggered_by: str = "owner",
 ) -> Dict[str, Any]:
-    """THE single code path for setting a task's assignee -- called by the
-    HTTP API today and, per the research doc's pitfall #2, must be the SAME
-    function a future @-mention resolver calls. Ownership semantics stay
-    identical regardless of trigger: this only ever sets assignee_agent_id
-    and fires the task_assigned wakeup; it never changes created_by (the
-    human stays the accountable owner of record, matching Linear's "the
-    human teammate remains the primary assignee and owner" rule cited in
-    the research doc Section 1.1/4.2).
+    """THE single code path for setting a task's AGENT assignee -- called by
+    the HTTP API today and, per the research doc's pitfall #2, must be the
+    SAME function a future @-mention resolver calls. Ownership semantics
+    stay identical regardless of trigger: this only ever sets
+    assignee_agent_id and fires the task_assigned wakeup; it never changes
+    created_by (the human stays the accountable owner of record, matching
+    Linear's "the human teammate remains the primary assignee and owner"
+    rule cited in the research doc Section 1.1/4.2).
+
+    MAN-64/MAN-70: a task's assignee is either a human or an agent, never
+    both (project_tasks_single_assignee_check), so this UPDATE also clears
+    assignee_user_id -- reassigning a task that a human previously held over
+    to an agent hands it over cleanly rather than leaving a stale human
+    assignee behind it. See assign_task_to_user just below for the human
+    counterpart; the two functions are deliberately NOT unified into one
+    "assign to either" entry point, because their side effects genuinely
+    differ (this one always fires a scheduler wakeup; assign_task_to_user
+    must NEVER fire one -- people are not woken by schedulers) and folding
+    them into one function with an internal branch is exactly how that
+    invariant gets accidentally broken by a future edit to "just the shared
+    part."
 
     Raises ValueError if the task or the agent don't exist in this
     workspace. Best-effort on the wakeup: a scheduler failure is reported in
@@ -1149,6 +1313,7 @@ async def assign_task(
         """
         UPDATE project_tasks
         SET assignee_agent_id = $4,
+            assignee_user_id = NULL,
             status = CASE WHEN status = ANY($5::text[]) THEN 'in_progress' ELSE status END,
             updated_at = NOW()
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
@@ -1181,3 +1346,101 @@ async def assign_task(
     except Exception as exc:
         wake_error = str(exc)
     return {"task": updated, "wake_request": wake_request, "wake_error": wake_error}
+
+
+async def _workspace_user_exists(
+    *, tenant_id: str, workspace_id: str, user_id: str,
+) -> bool:
+    """The human counterpart of _agent_install_exists just above -- is this
+    user an ACTIVE member of this workspace, not merely a row in `users`
+    somewhere. Mirrors that function's shape exactly (same tenant/workspace
+    scoping, same "row exists" return) so assign_task_to_user's validation
+    reads as the same kind of check assign_task already makes, just against
+    workspace_memberships instead of workspace_agent_installs."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return False
+    row = await pool.fetchrow(
+        """
+        SELECT user_id FROM workspace_memberships
+        WHERE user_id = $1 AND tenant_id = $2 AND workspace_id = $3 AND status = 'active'
+        """,
+        str(user_id or "").strip(),
+        str(tenant_id or "").strip(),
+        str(workspace_id or "").strip(),
+    )
+    return row is not None
+
+
+async def assign_task_to_user(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    user_id: str,
+    triggered_by: str = "owner",
+) -> Dict[str, Any]:
+    """THE single code path for setting a task's HUMAN assignee -- assign_
+    task's twin (MAN-64/MAN-70), structurally parallel on purpose: same
+    validation shape (task exists, assignee exists in this workspace), same
+    "clear the other assignee column" behavior, same {"task", "wake_request",
+    "wake_error"} return shape so a caller (routes_fleet.py, the frontend)
+    does not have to branch on which kind of assignment it just made to read
+    the result.
+
+    THE ONE DELIBERATE DIFFERENCE, and the entire reason this is a separate
+    function rather than assign_task growing an `assignee_type` branch:
+    this NEVER calls bounded_scheduler_service, in any branch, under any
+    condition. People are not woken by schedulers -- assigning a task to a
+    human is a fact you record, not an event that should page anyone.
+    wake_request/wake_error are always (None, None) here, kept in the return
+    shape only so a caller can use one unified "did this wake anyone"
+    check across both assignment paths without it ever firing for a human.
+
+    Also, unlike assign_task, this does NOT flip an unstarted task to
+    in_progress. That auto-flip exists because assigning an agent is
+    immediately followed by waking it -- the status change documents that
+    the agent is now actively working. A human assignee has no such
+    immediate-start guarantee (they see the task next time they look at the
+    board, not "right now"), so forcing in_progress here would be recording
+    something that has not actually happened yet.
+
+    Raises ValueError if the task or the user don't exist in this
+    workspace."""
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+    resolved_user_id = str(user_id or "").strip()
+    if not resolved_user_id:
+        raise ValueError("user_id is required to assign a task.")
+    task = await get_task(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, task_id=resolved_task_id)
+    if task is None:
+        raise ValueError(f"Task {resolved_task_id} not found in this workspace.")
+    if not await _workspace_user_exists(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, user_id=resolved_user_id):
+        raise ValueError(f"User {resolved_user_id} not found in this workspace.")
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
+            "Postgres is required to assign a task."
+        )
+    row = await pool.fetchrow(
+        """
+        UPDATE project_tasks
+        SET assignee_user_id = $4,
+            assignee_agent_id = NULL,
+            updated_at = NOW()
+        WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+        RETURNING
+        """ + _TASK_RETURNING_SQL,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_task_id,
+        resolved_user_id,
+    )
+    updated = _row_to_task(row)
+    if updated is None:
+        raise ValueError(f"Task {resolved_task_id} not found in this workspace.")
+    # No scheduler call here -- see the docstring above. This is not a
+    # try/except around a call that happens to always succeed; the call
+    # itself does not exist in this function, in any branch.
+    return {"task": updated, "wake_request": None, "wake_error": None}

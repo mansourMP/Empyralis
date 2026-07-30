@@ -93,6 +93,49 @@ async def _enforce_agent_project_access(
     )
 
 
+async def _enforce_task_project_access(
+    current_user: Dict[str, Any],
+    resolved_workspace_id: str,
+    tenant_id: str,
+    task_id: str,
+    *,
+    minimum_role: str = "viewer",
+) -> None:
+    """MAN-64/MAN-70 member-write rollout: the task-scoped counterpart of
+    _enforce_agent_project_access just above. Resolve the task this route is
+    about to read/mutate to its project and enforce MAN-115 access to it.
+
+    WHY THIS EXISTS NOW AND DIDN'T BEFORE: every task-mutation route in this
+    file used to be owner-only, and a workspace owner already bypasses the
+    per-project ACL entirely (auth_module.enforce_project_access's own
+    2026-07-28 ruling: an owner sees every project in their own workspace,
+    full stop). That made an explicit project check on these routes
+    redundant -- the workspace-level owner gate WAS the project gate, by
+    construction. Loosening those routes to `member` breaks that equivalence:
+    a member's workspace role no longer implies they can see every project,
+    so without this check a member with project_memberships access to
+    Project A could create/edit/assign/comment/label a task in Project B
+    purely by knowing its id -- an actual privilege escalation past MAN-115's
+    per-project ACL, not just a permissions nicety. This closes exactly that
+    gap for every task-scoped route this rollout moves to `member`.
+
+    If the task can't be resolved (doesn't exist in this workspace), this
+    deliberately does NOT raise -- same posture as _enforce_agent_project_
+    access: there is nothing to leak for a task that isn't there, and the
+    mutation the route makes right after this will itself return its own
+    normal "Task not found" result instead of a 403/404 that would reveal
+    whether the id exists at all."""
+    from server_modules import project_tasks_service as tasks
+
+    task = await tasks.get_task(tenant_id=tenant_id, workspace_id=resolved_workspace_id, task_id=task_id)
+    project_id = str((task or {}).get("project_id") or "").strip()
+    if not project_id:
+        return
+    await auth_module.enforce_project_access(
+        current_user, resolved_workspace_id, project_id, minimum_role=minimum_role,
+    )
+
+
 async def _channel_already_owned_message(
     subject: str, conflict: Dict[str, Any], *, tenant_id: str, workspace_id: str,
 ) -> str:
@@ -263,7 +306,19 @@ async def fleet_create_project(
     body: FleetCreateProjectRequest,
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """Create a project."""
+    """Create a project.
+
+    MAN-64/MAN-70 permission review: LEFT AT `owner`, DELIBERATELY, flagged
+    rather than loosened. The brief's member-write list is explicit about
+    the TASK surface (create/edit/status/priority/assign/comment/labels/
+    sub-tasks) and says nothing about creating the PROJECT container itself.
+    A real argument exists either way -- Linear itself lets ordinary
+    members create projects -- but that argument was not made in the brief,
+    and a new project is also a new unit of MAN-115 access control (its
+    creator becomes its first implicit member; every other member needs an
+    explicit grant via /members below, which stays owner-only). Guessing
+    permissive here is exactly the failure mode the brief warned against;
+    left at the pre-existing tier instead."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import projects_repository as projects
 
@@ -299,7 +354,14 @@ async def fleet_patch_project(
     body: FleetPatchProjectRequest,
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """Rename, edit, or archive/unarchive a project."""
+    """Rename, edit, or archive/unarchive a project.
+
+    MAN-64/MAN-70 permission review: LEFT AT `owner`, DELIBERATELY, flagged
+    rather than loosened -- same reasoning as fleet_create_project just
+    above (out of the brief's explicit member list, and archiving in
+    particular hides a project from every non-owner member's board at
+    once, which is a workspace-shaping decision closer to project-level
+    settings than to routine task upkeep)."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import projects_repository as projects
 
@@ -521,8 +583,16 @@ async def fleet_create_task(
     """Create a task inside a project. Unassigned (backlog) until assign_task
     is called separately -- creation and assignment are deliberately two
     steps, matching every product docs/design/tasks-to-agents-research.md
-    §2 surveyed (an issue can exist before anyone owns it)."""
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    §2 surveyed (an issue can exist before anyone owns it).
+
+    MAN-64/MAN-70: `member` is enough -- filing a task is exactly the kind
+    of ordinary teammate action the member tier exists for. Gated on the
+    NAMED project (body.project_id is already in hand, no task to resolve
+    it from) rather than just the workspace, so a member cannot create a
+    task in a project they have no project_memberships row for -- the same
+    MAN-115 boundary fleet_list_tasks already enforces on the read side."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    await auth_module.enforce_project_access(current_user, resolved_workspace_id, body.project_id, minimum_role="member")
     from server_modules import project_tasks_service as tasks
 
     try:
@@ -566,13 +636,22 @@ async def fleet_patch_task(
     are all reachable through this one endpoint; a "done" review gate is a
     later step (docs/design/tasks-to-agents-research.md §4.6 step 6), not
     this one. Assignment is NOT patchable here -- see /assign below, the one
-    shared code path for setting assignee_agent_id."""
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    shared code path for setting assignee_agent_id.
+
+    MAN-64/MAN-70: `member` is enough -- editing a task's own fields is
+    ordinary teammate work, the same tier Linear itself requires. Gated on
+    the task's OWN project via _enforce_task_project_access, mirroring
+    fleet_list_subtasks's "a task is exactly as visible as the project it
+    lives in" rule -- a member cannot edit a task in a project they have no
+    project_memberships row for just by knowing its task_id."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_task_project_access(current_user, resolved_workspace_id, tenant_id, task_id, minimum_role="member")
     from server_modules import project_tasks_service as tasks
 
     try:
         task = await tasks.update_task(
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             task_id=task_id,
             title=body.title,
@@ -590,7 +669,19 @@ async def fleet_patch_task(
 
 
 class FleetAssignTaskRequest(BaseModel):
-    agent_id: str = Field(min_length=1)
+    # MAN-64/MAN-70: a task's assignee is either an agent or a human, never
+    # both -- exactly ONE of these two must be set. Two optional fields
+    # rather than one polymorphic {type, id} pair, mirroring the schema
+    # decision in migrations/add_task_human_assignee.sql: it keeps this
+    # request body symmetric with the existing agent-only shape (an old
+    # client sending {"agent_id": ...} keeps working unchanged) instead of
+    # forcing every caller to learn a new envelope. Validated in the handler
+    # body (exactly one of the two, matching this file's established
+    # "raise ValueError -> {ok:false,error}" convention) rather than a
+    # pydantic validator, for the same reason the priority/status vocabularies
+    # are validated in project_tasks_service and not here.
+    agent_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 @router.post("/api/w/{workspace_id}/fleet/tasks/{task_id}/assign")
@@ -601,23 +692,114 @@ async def fleet_assign_task(
     body: FleetAssignTaskRequest,
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """Assign a task to an agent -- calls project_tasks_service.assign_task,
-    the ONE code path a future @-mention resolver must also call (docs/
-    design/tasks-to-agents-research.md §2 pitfall #2: assignment and mention
-    must never fork into two different code paths). Schedules the
-    task_assigned wakeup as a side effect; a scheduler failure is reported
-    in the response without undoing the assignment itself (see assign_task's
-    own docstring)."""
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    """Assign a task to an agent OR a human -- calls project_tasks_service.
+    assign_task (agent) or assign_task_to_user (human), the two sibling
+    single-purpose entry points (see assign_task_to_user's own docstring for
+    why they are deliberately not one function with an internal branch).
+
+    MAN-66 update: the @-mention resolver this docstring used to describe as
+    future work is now live (task_mention_service.py), and it deliberately
+    does NOT call assign_task -- per docs/design/tasks-to-agents-research.md
+    §2 pitfall #2, assignment and mention must differ ONLY in whether
+    `assignee_agent_id` changes, so a mention never reassigns the task. What
+    IS shared between the two entry points, per that same pitfall, is the
+    WAKE mechanism: assign_task calls schedule_task_assigned_wakeup,
+    mentions call schedule_task_commented_wakeup -- same scheduler, same
+    quiet-hours/battery/network policy gates, same per-task daily ceiling,
+    just a different trigger_kind. "One code path" refers to that shared
+    wake plumbing, not to this endpoint.
+
+    Assigning to an AGENT schedules the task_assigned wakeup as a side
+    effect; a scheduler failure is reported in the response without undoing
+    the assignment itself (see assign_task's own docstring). Assigning to a
+    HUMAN never does -- people are not woken by schedulers -- so
+    wake_request/wake_error always come back None/None on that path.
+
+    MAN-64/MAN-70: `member` is enough -- assigning/reassigning a task
+    (to yourself, another human, or an agent) is ordinary teammate work,
+    the same tier Linear itself requires. Gated on the task's OWN project,
+    same as /patch above -- a member cannot assign a task in a project they
+    have no project_memberships row for just by knowing its task_id."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_task_project_access(current_user, resolved_workspace_id, tenant_id, task_id, minimum_role="member")
+    agent_id = str(body.agent_id or "").strip()
+    user_id = str(body.user_id or "").strip()
     from server_modules import project_tasks_service as tasks
 
     try:
-        result = await tasks.assign_task(
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+        if agent_id and user_id:
+            return {"ok": False, "error": "Provide either agent_id or user_id, not both."}
+        if agent_id:
+            result = await tasks.assign_task(
+                tenant_id=tenant_id,
+                workspace_id=resolved_workspace_id,
+                task_id=task_id,
+                agent_id=agent_id,
+                triggered_by=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            )
+        elif user_id:
+            result = await tasks.assign_task_to_user(
+                tenant_id=tenant_id,
+                workspace_id=resolved_workspace_id,
+                task_id=task_id,
+                user_id=user_id,
+                triggered_by=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            )
+        else:
+            return {"ok": False, "error": "agent_id or user_id is required to assign a task."}
+        return {"ok": True, **result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+class FleetCommentTaskRequest(BaseModel):
+    # 4000 mirrors add_task_comment's own truncation (body_text[:4000]) --
+    # rejecting an over-length comment loudly here is more honest than
+    # silently accepting it and truncating it later without telling anyone.
+    body: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/api/w/{workspace_id}/fleet/tasks/{task_id}/comments")
+async def fleet_comment_task(
+    request: Request,
+    workspace_id: str,
+    task_id: str,
+    body: FleetCommentTaskRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """The human->agent comment channel (docs/design/tasks-to-agents-
+    research.md §4.5): the first HTTP route that lets a PERSON post into
+    task.metadata.comments -- agents have had this since project_task__comment/
+    empyralis_comment_on_task, a human never has. Calls
+    project_tasks_service.add_human_task_comment, the ONE code path that
+    both writes the comment AND (best-effort, only when the task has an
+    assignee) schedules the task_commented wakeup -- exactly assign_task's
+    shape above, not a fork.
+
+    No approval gate: per this feature's hard constraint, a comment is an
+    inline message the agent picks up on its next turn, never something
+    that blocks or requires sign-off. A scheduler failure (including the
+    debounce/ceiling backstops in schedule_task_commented_wakeup correctly
+    declining to wake) is reported via wake_error without undoing the
+    comment itself, matching /assign's own contract.
+
+    MAN-64/MAN-70: `member` is enough -- a teammate being unable to comment
+    on a task they can otherwise see and edit is the exact gap this whole
+    feature exists to close. Gated on the task's OWN project, same as
+    /patch and /assign above."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_task_project_access(current_user, resolved_workspace_id, tenant_id, task_id, minimum_role="member")
+    from server_modules import project_tasks_service as tasks
+
+    try:
+        result = await tasks.add_human_task_comment(
+            tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             task_id=task_id,
-            agent_id=body.agent_id,
-            triggered_by=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            author_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            body=body.body,
         )
         return {"ok": True, **result}
     except Exception as exc:
@@ -687,13 +869,21 @@ async def fleet_set_task_parent(
 
     Its own endpoint rather than a field on the PATCH above, for the same
     reason /assign is: this is a structural change with a validity question
-    attached (does it break the one-level rule?), not a plain field edit."""
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    attached (does it break the one-level rule?), not a plain field edit.
+
+    MAN-64/MAN-70: `member` is enough -- creating/managing sub-tasks is
+    ordinary teammate work. Gated on the task's OWN project, same as /patch
+    and /assign above; project_tasks_service.set_task_parent separately
+    enforces that a proposed PARENT lives in that same project, so this one
+    check covers both ends of the relationship."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_task_project_access(current_user, resolved_workspace_id, tenant_id, task_id, minimum_role="member")
     from server_modules import project_tasks_service as tasks
 
     try:
         task = await tasks.set_task_parent(
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             task_id=task_id,
             parent_task_id=body.parent_task_id,
@@ -755,8 +945,16 @@ async def fleet_create_label(
 ) -> Dict[str, Any]:
     """Add a label to the workspace vocabulary. A name that already exists
     (compared case-insensitively) is rejected with a message naming the
-    existing label, never silently merged."""
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    existing label, never silently merged.
+
+    MAN-64/MAN-70: `member` is enough -- minting a new label is low-risk,
+    purely additive (nothing existing changes), and is part of "manage
+    labels on tasks" actually being usable: a member who can attach labels
+    to a task but can never mint a new one has a crippled version of that
+    ability. No per-project check needed -- labels are workspace-wide by
+    design (see the section header above), so there is no project boundary
+    to enforce here the way there is on a task-scoped route."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
     from server_modules import workspace_labels_service as labels
 
     try:
@@ -787,8 +985,13 @@ async def fleet_patch_label(
 ) -> Dict[str, Any]:
     """Rename and/or recolour a label. One row changes and every task
     carrying it updates at once -- the property that made this a join table
-    rather than an array on the task."""
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    rather than an array on the task.
+
+    MAN-64/MAN-70: `member` is enough -- a rename/recolour is a non-
+    destructive metadata edit (nothing is removed, no attachment is lost),
+    the same risk class as editing a task's own title. No per-project check
+    -- see fleet_create_label just above; the vocabulary is workspace-wide."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
     from server_modules import workspace_labels_service as labels
 
     try:
@@ -815,7 +1018,23 @@ async def fleet_delete_label(
 ) -> Dict[str, Any]:
     """Remove a label from the workspace vocabulary. Its attachments go with
     it -- no task is deleted and no task field changes, the chip simply
-    stops being on the card."""
+    stops being on the card.
+
+    MAN-64/MAN-70 permission review: LEFT AT `owner`, DELIBERATELY, flagged
+    rather than loosened. Labels are workspace-wide (see the section header
+    above) but tasks are project-scoped under MAN-115's per-project ACL --
+    a member only has project_memberships rows for the projects they can
+    see. Deleting a label silently strips it off every task carrying it
+    ACROSS THE WHOLE WORKSPACE in one call, including tasks in projects that
+    member has no visibility into and no _enforce_task_project_access check
+    could gate (there is no single task_id here to resolve a project from --
+    the blast radius spans however many projects happen to use this label).
+    That is a real cross-project side effect a member cannot see the extent
+    of before triggering it, which reads closer to this rollout's
+    "anything destructive" owner-only bucket than to routine task upkeep.
+    create/patch (immediately above) do not have this problem -- creating is
+    purely additive and renaming/recolouring loses no data -- which is why
+    only delete stays owner-gated here."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import workspace_labels_service as labels
 
@@ -850,13 +1069,21 @@ async def fleet_attach_task_label(
     """Put a label on a task. Idempotent -- re-attaching an existing label
     succeeds and changes nothing. Does NOT create unknown labels: the
     vocabulary is curated, and an attach that mints a label on a typo turns
-    it into a junk drawer."""
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    it into a junk drawer.
+
+    MAN-64/MAN-70: `member` is enough -- "manage labels on tasks" is one of
+    the explicit teammate abilities this rollout exists to grant. Gated on
+    the task's OWN project (unlike the label-vocabulary routes above, this
+    one touches a specific task, so the MAN-115 project boundary applies
+    here exactly as it does on /patch, /assign, and /parent)."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_task_project_access(current_user, resolved_workspace_id, tenant_id, task_id, minimum_role="member")
     from server_modules import workspace_labels_service as labels
 
     try:
         attached = await labels.attach_label(
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             task_id=task_id,
             label=body.label,
@@ -876,13 +1103,19 @@ async def fleet_detach_task_label(
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
     """Take a label off a task. Idempotent, and the label itself survives --
-    this removes the link, never the vocabulary entry."""
-    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    this removes the link, never the vocabulary entry.
+
+    MAN-64/MAN-70: `member` is enough, same reasoning and same project gate
+    as /labels POST just above -- this is the other half of "manage labels
+    on tasks," scoped to one task in one project, not the shared vocabulary."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_task_project_access(current_user, resolved_workspace_id, tenant_id, task_id, minimum_role="member")
     from server_modules import workspace_labels_service as labels
 
     try:
         remaining = await labels.detach_label(
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             task_id=task_id,
             label=label,

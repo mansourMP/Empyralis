@@ -48,10 +48,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { CalendarDays, Check, Plus, X } from "lucide-react";
 
 import { AgentSigil } from "./fleet-indicators";
+import { MemberAvatar } from "./MemberAvatarStack";
+import type { WorkspaceMember } from "./members-data";
 import {
   FLEET_TASK_STATUSES,
   LABEL_COLORS,
   assignFleetTask,
+  assignFleetTaskToUser,
   attachFleetTaskLabel,
   createFleetLabel,
   createFleetTask,
@@ -60,6 +63,7 @@ import {
   type FleetAgent,
   type FleetLabel,
   type FleetTaskStatus,
+  type TaskAssigneeSelection,
 } from "./fleet-data";
 import {
   TASK_PRIORITIES,
@@ -109,6 +113,7 @@ export function TaskComposer({
   projectId,
   projectName,
   agents,
+  members,
   initialStatus,
   onClose,
   onCreated,
@@ -116,8 +121,11 @@ export function TaskComposer({
   workspaceId: string;
   projectId: string;
   projectName?: string;
-  /** Agents in this project — the only valid assignees. */
+  /** Agents in this project — valid AGENT assignees. */
   agents: FleetAgent[];
+  /** Workspace members (MAN-64/MAN-70) — valid HUMAN assignees. Absent →
+   *  the Assignee chip offers agents only. */
+  members?: WorkspaceMember[];
   /** Pre-set status: what the board column's `+` passes (MAN-127 FIX 3), so a
    *  task created in Todo starts as Todo. */
   initialStatus?: FleetTaskStatus;
@@ -130,7 +138,7 @@ export function TaskComposer({
   const [description, setDescription] = useState(() => draftsByProject.get(projectId)?.description || "");
   const [status, setStatus] = useState<FleetTaskStatus>(initialStatus || BORN_STATUS);
   const [priority, setPriority] = useState<TaskPriority>(0);
-  const [assigneeId, setAssigneeId] = useState<string | null>(null);
+  const [assignee, setAssignee] = useState<TaskAssigneeSelection | null>(null);
   const [labelIds, setLabelIds] = useState<string[]>([]);
   const [dueDate, setDueDate] = useState("");
   const [createMore, setCreateMore] = useState(false);
@@ -143,7 +151,8 @@ export function TaskComposer({
   const closeTimer = useRef<number | null>(null);
   const { labels, refresh: refreshLabels } = useFleetLabels(workspaceId);
 
-  const assignee = agents.find((a) => a.agent_id === assigneeId) || null;
+  const assignedAgent = assignee?.kind === "agent" ? agents.find((a) => a.agent_id === assignee.id) || null : null;
+  const assignedMember = assignee?.kind === "user" ? (members || []).find((m) => m.user_id === assignee.id) || null : null;
   const chosenLabels = useMemo(
     () => labelIds.map((id) => labels.find((l) => l.id === id)).filter(Boolean) as FleetLabel[],
     [labelIds, labels],
@@ -217,12 +226,21 @@ export function TaskComposer({
         }
       }
 
-      // Last on purpose: assigning fires a wake, so the agent should not start
-      // reading the task until its status and labels are already on it.
-      if (assigneeId) {
+      // Last on purpose: assigning an AGENT fires a wake, so it should not
+      // start reading the task until its status and labels are already on
+      // it. Assigning a HUMAN never wakes anyone (MAN-64/MAN-70) -- ordered
+      // last anyway, for the same "everything else is on the task first"
+      // reason, not because it has a wake to wait out.
+      if (assignee?.kind === "agent") {
         try {
-          const { wakeError } = await assignFleetTask(workspaceId, task.id, assigneeId);
+          const { wakeError } = await assignFleetTask(workspaceId, task.id, assignee.id);
           if (wakeError) problems.push(`the agent could not be woken (${wakeError})`);
+        } catch (e) {
+          problems.push(`it could not be assigned (${e instanceof Error ? e.message : "failed"})`);
+        }
+      } else if (assignee?.kind === "user") {
+        try {
+          await assignFleetTaskToUser(workspaceId, task.id, assignee.id);
         } catch (e) {
           problems.push(`it could not be assigned (${e instanceof Error ? e.message : "failed"})`);
         }
@@ -252,7 +270,7 @@ export function TaskComposer({
       setBusy(false);
     }
   }, [
-    assigneeId,
+    assignee,
     busy,
     createMore,
     description,
@@ -385,13 +403,25 @@ export function TaskComposer({
           </ChipMenu>
 
           <ChipMenu
-            label={assignee ? assignee.label || "Unnamed agent" : "Assignee"}
+            label={
+              assignedAgent
+                ? assignedAgent.label || "Unnamed agent"
+                : assignedMember
+                  ? assignedMember.display_name || assignedMember.email
+                  : "Assignee"
+            }
             set={Boolean(assignee)}
             icon={
-              assignee ? (
+              assignedAgent ? (
                 <span className="fleet-composer-sigil">
-                  <AgentSigil seed={assignee.agent_id} size={12} />
+                  <AgentSigil seed={assignedAgent.agent_id} size={12} />
                 </span>
+              ) : assignedMember ? (
+                <MemberAvatar
+                  name={assignedMember.display_name || assignedMember.email}
+                  role={assignedMember.role}
+                  size="xs"
+                />
               ) : (
                 <span className="fleet-composer-nobody" aria-hidden />
               )
@@ -403,12 +433,13 @@ export function TaskComposer({
                 <MenuItem
                   icon={<span className="fleet-composer-nobody" aria-hidden />}
                   label="No assignee"
-                  selected={!assigneeId}
+                  selected={!assignee}
                   onSelect={() => {
-                    setAssigneeId(null);
+                    setAssignee(null);
                     close();
                   }}
                 />
+                <div className="fleet-composer-pop-section-label">Agents</div>
                 {agents.length === 0 ? (
                   <div className="fleet-composer-pop-empty">No agents in this project yet.</div>
                 ) : (
@@ -421,9 +452,26 @@ export function TaskComposer({
                         </span>
                       }
                       label={a.label || "Unnamed agent"}
-                      selected={a.agent_id === assigneeId}
+                      selected={assignee?.kind === "agent" && assignee.id === a.agent_id}
                       onSelect={() => {
-                        setAssigneeId(a.agent_id);
+                        setAssignee({ kind: "agent", id: a.agent_id });
+                        close();
+                      }}
+                    />
+                  ))
+                )}
+                <div className="fleet-composer-pop-section-label">People</div>
+                {(members || []).length === 0 ? (
+                  <div className="fleet-composer-pop-empty">No other members in this workspace yet.</div>
+                ) : (
+                  (members || []).map((m) => (
+                    <MenuItem
+                      key={m.user_id}
+                      icon={<MemberAvatar name={m.display_name || m.email} role={m.role} size="xs" />}
+                      label={m.display_name || m.email}
+                      selected={assignee?.kind === "user" && assignee.id === m.user_id}
+                      onSelect={() => {
+                        setAssignee({ kind: "user", id: m.user_id });
                         close();
                       }}
                     />

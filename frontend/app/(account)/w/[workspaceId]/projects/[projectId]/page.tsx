@@ -10,10 +10,13 @@ import {
   useFleetProjects,
   useFleetTasks,
   assignFleetTask,
+  assignFleetTaskToUser,
   patchFleetTask,
   type FleetAgent,
   type FleetTaskStatus,
+  type TaskAssigneeSelection,
 } from "@/lib/workspace/fleet/fleet-data";
+import { useWorkspaceMembers } from "@/lib/workspace/fleet/members-data";
 import { TasksList } from "@/lib/workspace/fleet/TasksList";
 import { TasksBoard } from "@/lib/workspace/fleet/TasksBoard";
 import { TasksGroupedList } from "@/lib/workspace/fleet/TasksGroupedList";
@@ -66,6 +69,10 @@ export default function ProjectDetailPage() {
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
   const { agents, loading, refresh } = useFleetAgents(workspaceId);
+  // MAN-64/MAN-70: the pool of valid HUMAN assignees -- the same hook
+  // MemberAvatarStack already calls for this page's own roster stack, no
+  // new endpoint involved (GET /workspaces/{id}/members).
+  const { members } = useWorkspaceMembers(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
@@ -218,14 +225,23 @@ export default function ProjectDetailPage() {
     router.push(agentHref(agentId));
   };
 
-  const handleAssign = async (taskId: string, agentId: string) => {
+  // MAN-64/MAN-70: assignee is agent-or-human -- dispatch to whichever of
+  // assignFleetTask/assignFleetTaskToUser matches the picker's selection.
+  // Only the agent path can ever report a wake failure (assigning a human
+  // never schedules a wakeup at all), so `wakeError` only ever comes back
+  // non-null from that branch.
+  const handleAssign = async (taskId: string, selection: TaskAssigneeSelection) => {
     setTaskNotice(null);
     try {
-      const { wakeError } = await assignFleetTask(workspaceId, taskId, agentId);
-      if (wakeError) {
-        setTaskNotice(
-          `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`
-        );
+      if (selection.kind === "agent") {
+        const { wakeError } = await assignFleetTask(workspaceId, taskId, selection.id);
+        if (wakeError) {
+          setTaskNotice(
+            `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`
+          );
+        }
+      } else {
+        await assignFleetTaskToUser(workspaceId, taskId, selection.id);
       }
       await refreshTasks();
     } catch (e) {
@@ -404,6 +420,7 @@ export default function ProjectDetailPage() {
                 workspaceId={workspaceId}
                 tasks={boardTasks}
                 agents={inProject}
+                members={members}
                 taskHref={taskHref}
                 onSelect={openTask}
                 onStatusChange={handleStatusChange}
@@ -414,6 +431,7 @@ export default function ProjectDetailPage() {
                 workspaceId={workspaceId}
                 tasks={boardTasks}
                 agents={inProject}
+                members={members}
                 taskHref={taskHref}
                 onSelect={openTask}
                 onStatusChange={handleStatusChange}
@@ -423,6 +441,7 @@ export default function ProjectDetailPage() {
               <TasksList
                 tasks={boardTasks}
                 agents={inProject}
+                members={members}
                 taskHref={taskHref}
                 onAssign={handleAssign}
                 onSelect={openTask}
@@ -498,6 +517,7 @@ export default function ProjectDetailPage() {
           projectId={projectId}
           projectName={project?.name}
           agents={inProject}
+          members={members}
           initialStatus={composer.status}
           onClose={() => setComposer(null)}
           // Stays open when "Create more" is on — the composer decides that,

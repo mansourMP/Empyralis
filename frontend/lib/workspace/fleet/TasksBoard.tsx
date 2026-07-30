@@ -65,6 +65,8 @@ import { MoreHorizontal, Plus } from "lucide-react";
 import { dueLabel } from "./TasksList";
 import { TINTS, tintForAgent, timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
+import { MemberAvatar } from "./MemberAvatarStack";
+import type { WorkspaceMember } from "./members-data";
 import { TaskLabelChips } from "./task-labels";
 import { TaskStatusIcon, TaskPriorityIcon, taskStatusLabel, taskPriority, taskShortId, TASK_PRIORITY_LABELS } from "./task-status";
 import { FLEET_TASK_STATUSES, countTasksByStatus, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
@@ -103,6 +105,7 @@ export function TasksBoard({
   workspaceId,
   tasks,
   agents,
+  members,
   selectedTaskId,
   taskHref,
   onSelect,
@@ -113,8 +116,12 @@ export function TasksBoard({
    *  hide control is a within-session toggle only. */
   workspaceId?: string;
   tasks: FleetTask[];
-  /** Agents in this project — the only valid assignees. */
+  /** Agents in this project — valid AGENT assignees. */
   agents: FleetAgent[];
+  /** Workspace members (MAN-64/MAN-70) — resolves a HUMAN assignee's avatar
+   *  on a card. The board has no assignee PICKER (drag/status-select only),
+   *  so this is display-only here. */
+  members?: WorkspaceMember[];
   selectedTaskId?: string | null;
   /** The task's real route. Stamped on each card as `data-tab-href`, which is
    *  what makes ⌘/Ctrl+click and middle-click open it in a background content
@@ -234,6 +241,7 @@ export function TasksBoard({
                     key={task.id}
                     task={task}
                     agents={agents}
+                    members={members}
                     index={index}
                     selected={selectedTaskId === task.id}
                     dragging={draggingTaskId === task.id}
@@ -342,6 +350,7 @@ function ColumnMenu({
 function TaskCard({
   task,
   agents,
+  members,
   index,
   selected,
   dragging,
@@ -352,6 +361,7 @@ function TaskCard({
 }: {
   task: FleetTask;
   agents: FleetAgent[];
+  members?: WorkspaceMember[];
   index: number;
   selected: boolean;
   dragging: boolean;
@@ -361,6 +371,11 @@ function TaskCard({
   onDragStateChange: (taskId: string | null) => void;
 }) {
   const assignee = agents.find((a) => a.agent_id === task.assignee_agent_id) || null;
+  // The human half of MAN-64/MAN-70 -- only looked up when there is no
+  // agent assignee, matching the backend's mutual-exclusivity guarantee.
+  const assignedMember = !assignee && task.assignee_user_id
+    ? (members || []).find((m) => m.user_id === task.assignee_user_id) || null
+    : null;
   const due = dueLabel(task.due_at);
   const updated = timeAgo(task.updated_at || task.created_at);
   // Absent field → 0 ("no priority"), never a crash and never a blank slot.
@@ -464,6 +479,13 @@ function TaskCard({
           <span className="fleet-agent-avatar" style={avatarStyle} title={assignee.label || "Unnamed agent"}>
             <AgentSigil seed={assignee.agent_id} size={12} />
           </span>
+        ) : assignedMember ? (
+          <MemberAvatar
+            name={assignedMember.display_name || assignedMember.email}
+            role={assignedMember.role}
+            size="xs"
+            tintIndex={index}
+          />
         ) : (
           <span className="fleet-board-card-unassigned" title="Unassigned" aria-hidden />
         )}

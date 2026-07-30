@@ -746,6 +746,18 @@ CREATE TABLE IF NOT EXISTS project_tasks (
         CONSTRAINT project_tasks_parent_not_self_check
         CHECK (parent_task_id IS NULL OR parent_task_id <> id),
     assignee_agent_id TEXT NULL REFERENCES workspace_agent_installs(id) ON DELETE SET NULL,
+    -- Human assignability (MAN-64/MAN-70): a task's assignee is either a
+    -- human user or an agent, never both. Two nullable columns rather than
+    -- one polymorphic (assignee_type, assignee_id) pair -- see
+    -- migrations/add_task_human_assignee.sql for the full reasoning
+    -- (preserves assignee_agent_id's own FK integrity, needs no data
+    -- migration, keeps the agent-wakeup path untouched). ON DELETE SET NULL
+    -- mirrors assignee_agent_id's own orphaning behavior: a deleted user
+    -- clears their assignments back to "unassigned" rather than taking the
+    -- task down with them.
+    assignee_user_id TEXT NULL REFERENCES users(id) ON DELETE SET NULL
+        CONSTRAINT project_tasks_single_assignee_check
+        CHECK (assignee_agent_id IS NULL OR assignee_user_id IS NULL),
     created_by TEXT NULL,
     due_at TIMESTAMPTZ NULL,
     plan JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -4119,6 +4131,55 @@ async def ensure_control_plane_schema() -> Any:
                 "project_tasks parent_task_id migration not applied (%s); the table "
                 "may still lack the `parent_task_id` column, which will fail every "
                 "task read and write. Apply migrations/add_task_parent.sql manually.",
+                exc,
+            )
+        # ── Human task assignability (MAN-64/MAN-70): project_tasks.
+        # assignee_user_id. Same reasoning as the parent_task_id and priority
+        # blocks directly above — the CREATE TABLE declares the column, but
+        # it is `IF NOT EXISTS`, so a database provisioned before this change
+        # would never grow one and every task SELECT (which now names it
+        # explicitly) would fail outright. This is the self-heal that makes
+        # deploy order not matter. Same DDL as the standalone migrations/
+        # add_task_human_assignee.sql — see it for why two separate nullable
+        # columns rather than a polymorphic (assignee_type, assignee_id)
+        # pair, and for why this is safe against real rows (purely
+        # additive; every existing task lands on NULL, i.e. "no human
+        # assignee", which is what all of them already are — nothing before
+        # this migration could ever have set it).
+        #
+        # One atomic DO block, guarded so it can never crash bootstrap;
+        # idempotent (IF NOT EXISTS column add, drop-then-re-add of stably
+        # named constraints, IF NOT EXISTS index).
+        try:
+            await pool.execute(
+                """
+                DO $$
+                BEGIN
+                    ALTER TABLE project_tasks
+                        ADD COLUMN IF NOT EXISTS assignee_user_id TEXT NULL;
+                    ALTER TABLE project_tasks
+                        DROP CONSTRAINT IF EXISTS project_tasks_assignee_user_id_fkey;
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_assignee_user_id_fkey
+                        FOREIGN KEY (assignee_user_id) REFERENCES users(id)
+                        ON DELETE SET NULL;
+                    ALTER TABLE project_tasks
+                        DROP CONSTRAINT IF EXISTS project_tasks_single_assignee_check;
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_single_assignee_check
+                        CHECK (assignee_agent_id IS NULL OR assignee_user_id IS NULL);
+                    CREATE INDEX IF NOT EXISTS idx_project_tasks_assignee_user
+                        ON project_tasks(tenant_id, workspace_id, assignee_user_id)
+                        WHERE assignee_user_id IS NOT NULL;
+                END $$;
+                """
+            )
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.warning(
+                "project_tasks assignee_user_id migration not applied (%s); the table "
+                "may still lack the `assignee_user_id` column, which will fail every "
+                "task read and write. Apply migrations/add_task_human_assignee.sql "
+                "manually.",
                 exc,
             )
         # ── Labels: workspace_labels + project_task_labels. Unlike the three
@@ -13557,6 +13618,7 @@ async def count_agent_scheduler_wake_requests_since(
     since: Any,
     trigger_kind: Optional[str] = None,
     task_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> int:
     resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
     resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
@@ -13581,6 +13643,17 @@ async def count_agent_scheduler_wake_requests_since(
         # per the plan, the future wake-on-mention trigger too.
         params.append(str(task_id or "").strip())
         conditions.append(f"metadata->>'task_id' = ${len(params)}")
+    if agent_id:
+        # MAN-66: schedule_task_commented_wakeup's DEBOUNCE check (only --
+        # never the daily ceiling above, which stays deliberately task-wide
+        # across every agent) passes this so mentioning several DIFFERENT
+        # agents in one comment doesn't have the first agent's wake row
+        # debounce-suppress the others. Also fixes a pre-existing quirk:
+        # without this, reassigning a task then commenting again inside the
+        # debounce window would suppress the new assignee's wake because of
+        # the OLD assignee's still-recent wake row.
+        params.append(str(agent_id or "").strip())
+        conditions.append(f"metadata->>'agent_id' = ${len(params)}")
     async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
         if connection is None:
             return 0

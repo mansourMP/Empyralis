@@ -21,9 +21,18 @@ import { useState, type CSSProperties } from "react";
 
 import { timeAgo, TINTS, tintForAgent } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
+import { MemberAvatar } from "./MemberAvatarStack";
+import type { WorkspaceMember } from "./members-data";
 import { TaskStatusChip, TaskPriorityIcon, taskPriority, taskStatusLabel, TASK_PRIORITY_LABELS } from "./task-status";
 import { TaskLabelChips } from "./task-labels";
-import type { FleetAgent, FleetTask, FleetTaskStatus } from "./fleet-data";
+import {
+  assigneeOptionValue,
+  parseAssigneeOptionValue,
+  type FleetAgent,
+  type FleetTask,
+  type FleetTaskStatus,
+  type TaskAssigneeSelection,
+} from "./fleet-data";
 
 /* Status presentation moved WHOLESALE to ./task-status (taskStatusLabel /
    TaskStatusIcon / TaskStatusChip). The map that used to live here borrowed
@@ -44,17 +53,21 @@ export function dueLabel(dueAt: string | null | undefined): string {
 export function TasksList({
   tasks,
   agents,
+  members,
   taskHref,
   onAssign,
   onSelect,
 }: {
   tasks: FleetTask[];
-  /** Agents in this project — the only valid assignees. */
+  /** Agents in this project — valid AGENT assignees. */
   agents: FleetAgent[];
+  /** Workspace members (MAN-64/MAN-70) — valid HUMAN assignees. Absent →
+   *  the inline picker offers agents only. */
+  members?: WorkspaceMember[];
   /** The task's real route — stamped as `data-tab-href` so ⌘/Ctrl+click and
    *  middle-click open it in a background content tab (see FleetTabs). */
   taskHref?: (taskId: string) => string;
-  onAssign: (taskId: string, agentId: string) => void;
+  onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
 }) {
   return (
@@ -71,6 +84,7 @@ export function TasksList({
           key={task.id}
           task={task}
           agents={agents}
+          members={members}
           index={index}
           href={taskHref?.(task.id)}
           onAssign={onAssign}
@@ -84,6 +98,7 @@ export function TasksList({
 function TaskRow({
   task,
   agents,
+  members,
   index,
   href,
   onAssign,
@@ -91,14 +106,18 @@ function TaskRow({
 }: {
   task: FleetTask;
   agents: FleetAgent[];
+  members?: WorkspaceMember[];
   index: number;
   href?: string;
-  onAssign: (taskId: string, agentId: string) => void;
+  onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
 }) {
   const [assigning, setAssigning] = useState(false);
   const priority = taskPriority(task);
   const assignee = agents.find((a) => a.agent_id === task.assignee_agent_id) || null;
+  const assignedMember = !assignee && task.assignee_user_id
+    ? (members || []).find((m) => m.user_id === task.assignee_user_id) || null
+    : null;
   const due = dueLabel(task.due_at);
   const updated = timeAgo(task.created_at);
 
@@ -109,26 +128,45 @@ function TaskRow({
     ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg }
     : {}) as CSSProperties;
 
+  const currentAssigneeValue = assignee
+    ? assigneeOptionValue({ kind: "agent", id: assignee.agent_id })
+    : task.assignee_user_id
+      ? assigneeOptionValue({ kind: "user", id: task.assignee_user_id })
+      : "";
+
   const assigneeCell = assigning ? (
     <select
       className="fleet-wizard-input"
       autoFocus
-      defaultValue={task.assignee_agent_id || ""}
+      defaultValue={currentAssigneeValue}
       onBlur={() => setAssigning(false)}
       onChange={(e) => {
-        const next = e.target.value;
+        const next = parseAssigneeOptionValue(e.target.value);
         setAssigning(false);
-        if (next && next !== task.assignee_agent_id) onAssign(task.id, next);
+        if (next && assigneeOptionValue(next) !== currentAssigneeValue) onAssign(task.id, next);
       }}
       onClick={(e) => e.stopPropagation()}
       style={{ height: 28, padding: "0 6px", fontSize: 12 }}
     >
       <option value="">Unassigned</option>
-      {agents.map((a) => (
-        <option key={a.agent_id} value={a.agent_id}>
-          {a.label || "Unnamed agent"}
-        </option>
-      ))}
+      {agents.length > 0 ? (
+        <optgroup label="Agents">
+          {agents.map((a) => (
+            <option key={a.agent_id} value={assigneeOptionValue({ kind: "agent", id: a.agent_id })}>
+              {a.label || "Unnamed agent"}
+            </option>
+          ))}
+        </optgroup>
+      ) : null}
+      {(members || []).length > 0 ? (
+        <optgroup label="People">
+          {(members || []).map((m) => (
+            <option key={m.user_id} value={assigneeOptionValue({ kind: "user", id: m.user_id })}>
+              {m.display_name || m.email}
+            </option>
+          ))}
+        </optgroup>
+      ) : null}
     </select>
   ) : (
     <button
@@ -145,6 +183,16 @@ function TaskRow({
             <AgentSigil seed={assignee.agent_id} size={16} />
           </span>
           <span className="fleet-cell-secondary">{assignee.label || "Unnamed agent"}</span>
+        </>
+      ) : assignedMember ? (
+        <>
+          <MemberAvatar
+            name={assignedMember.display_name || assignedMember.email}
+            role={assignedMember.role}
+            size="xs"
+            tintIndex={index}
+          />
+          <span className="fleet-cell-secondary">{assignedMember.display_name || assignedMember.email}</span>
         </>
       ) : (
         <span className="fleet-cell-muted">Unassigned</span>
@@ -212,7 +260,11 @@ function TaskRow({
         </div>
         <div className="fleet-agent-row-mobile-line2">
           {[
-            assignee ? assignee.label || "Unnamed agent" : "Unassigned",
+            assignee
+              ? assignee.label || "Unnamed agent"
+              : assignedMember
+                ? assignedMember.display_name || assignedMember.email
+                : "Unassigned",
             due || "No due date",
             updated || "—",
           ].join(" · ")}

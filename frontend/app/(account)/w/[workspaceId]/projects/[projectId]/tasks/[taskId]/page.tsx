@@ -24,9 +24,12 @@ import {
   useFleetProjects,
   useFleetTasks,
   assignFleetTask,
+  assignFleetTaskToUser,
   patchFleetTask,
   type FleetTaskStatus,
+  type TaskAssigneeSelection,
 } from "@/lib/workspace/fleet/fleet-data";
+import { useWorkspaceMembers } from "@/lib/workspace/fleet/members-data";
 import { TaskDetailView } from "@/lib/workspace/fleet/TaskDetailView";
 import { useBreadcrumbLabel, useBreadcrumbIcon } from "@/lib/workspace/fleet/Breadcrumbs";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
@@ -43,6 +46,9 @@ export default function TaskDetailPage() {
   const projectHref = `${base}/projects/${encodeURIComponent(projectId)}`;
 
   const { agents } = useFleetAgents(workspaceId);
+  // MAN-64/MAN-70: the pool of valid HUMAN assignees, plus the lookup
+  // TaskDetailView uses to render a human commenter's real name.
+  const { members } = useWorkspaceMembers(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   const { tasks, loading, refresh } = useFleetTasks(workspaceId, projectId);
@@ -116,14 +122,21 @@ export default function TaskDetailPage() {
     }
   }, [workspaceId, refresh]);
 
-  const handleAssign = useCallback(async (id: string, agentId: string) => {
+  // MAN-64/MAN-70: assignee is agent-or-human -- dispatch to whichever of
+  // assignFleetTask/assignFleetTaskToUser matches the picker's selection.
+  // Only the agent path can ever report a wake failure.
+  const handleAssign = useCallback(async (id: string, selection: TaskAssigneeSelection) => {
     setNotice(null);
     try {
-      const { wakeError } = await assignFleetTask(workspaceId, id, agentId);
-      if (wakeError) {
-        setNotice(
-          `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`,
-        );
+      if (selection.kind === "agent") {
+        const { wakeError } = await assignFleetTask(workspaceId, id, selection.id);
+        if (wakeError) {
+          setNotice(
+            `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`,
+          );
+        }
+      } else {
+        await assignFleetTaskToUser(workspaceId, id, selection.id);
       }
       await refresh();
     } catch (e) {
@@ -173,6 +186,7 @@ export default function TaskDetailPage() {
       <TaskDetailView
         task={task}
         agents={inProject}
+        members={members}
         workspaceId={workspaceId}
         projectName={project?.name || "Project"}
         projectHref={projectHref}
@@ -183,6 +197,9 @@ export default function TaskDetailPage() {
         // task PATCH, so the editor writes directly and asks for a re-read —
         // the same polled cache the board reads, so both agree immediately.
         onLabelsChanged={refresh}
+        // Comments are their own endpoint too (POST .../comments) — the
+        // composer writes directly and asks for the same re-read.
+        onCommentPosted={refresh}
       />
     </main>
   );

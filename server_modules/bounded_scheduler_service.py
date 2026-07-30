@@ -19,18 +19,36 @@ DEFAULT_MAX_SELF_PROPOSED_PER_HOUR = 2
 # concurrency caps, AutoGen termination conditions, CrewAI iteration/RPM
 # limits) backstops agent reasoning with a hard numeric ceiling, never
 # reasoning alone -- see docs/design/multi-agent-coordination-research.md.
-# task_assigned wakeups (schedule_task_assigned_wakeup, below) are the one
-# per-task wake path that is live today; the wake-on-mention trigger lands
-# a future wave and will reuse the exact same per-task counter and error
-# shape rather than inventing its own. This constant is the ceiling for
-# BOTH: a single task_id can generate at most this many wake requests in a
-# rolling 24h window, regardless of how many distinct triggers (assignment,
-# future mentions, retries) fire it. Deliberately looser than the
+# task_assigned wakeups (schedule_task_assigned_wakeup, below) were the
+# first per-task wake path live in production; task_commented
+# (schedule_task_commented_wakeup, the human-comment-channel trigger) is the
+# second, and reuses the exact same per-task counter and error shape rather
+# than inventing its own. MAN-66's @-mention-driven wake
+# (task_mention_service.dispatch_resolved_mentions) is the third live
+# caller -- it also reuses schedule_task_commented_wakeup directly (one
+# trigger_kind, "task_commented", regardless of whether the wake was caused
+# by "any comment on my assigned task" or "a comment that named me
+# specifically"), so it draws on this exact same counter with no new code
+# path. This constant is the ceiling for ALL of them: a
+# single task_id can generate at most this many wake requests in a rolling
+# 24h window, regardless of how many distinct triggers (assignment, comments,
+# mentions, retries) fire it. Deliberately looser than the
 # workspace-wide hourly caps above it (4/hr event-triggers, 2/hr
 # self-proposed) -- this exists to stop ONE task from looping/re-triggering
 # itself into an unbounded wake storm, not to replace those broader caps.
 # Tunable via EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY without a code change.
 DEFAULT_MAX_WAKES_PER_TASK_PER_DAY = 24
+# task_commented's OWN, tighter bound on top of the shared daily ceiling
+# above: a human posting several comments in a quick back-and-forth (the
+# common case -- someone typing a thought across 3-4 short messages) must
+# coalesce into ONE wake, not one per comment. Any task_commented wake
+# already logged for this task_id inside this trailing window suppresses a
+# new one -- the comment itself is never lost (add_task_comment persists it
+# regardless), only the extra wake is. Deliberately much shorter than the
+# 24h ceiling: that one guards against a task looping/re-triggering itself
+# over a whole day; this one guards against a single human's own burst of
+# keystrokes. Tunable via EMPYRALIS_TASK_COMMENT_WAKE_DEBOUNCE_SECONDS.
+DEFAULT_TASK_COMMENT_WAKE_DEBOUNCE_SECONDS = 120
 DEFAULT_MAX_RUNTIME_SECONDS = 20
 DEFAULT_MINIMUM_BATTERY_PERCENT = 20
 DEFAULT_WAKE_BATCH_LIMIT = 5
@@ -750,6 +768,139 @@ async def schedule_task_assigned_wakeup(
     return record
 
 
+async def schedule_task_commented_wakeup(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    task_id: str,
+    title: str,
+    comment_body: str = "",
+    triggered_by: str = "owner",
+) -> Optional[Dict[str, Any]]:
+    """The human->agent comment channel's wake trigger (docs/design/
+    tasks-to-agents-research.md Section 4.5) -- structurally
+    schedule_task_assigned_wakeup's twin, one new trigger_kind
+    ("task_commented"), not a new execution engine or a new gate. Called by
+    project_tasks_service.add_human_task_comment right after the comment
+    itself is durably appended via add_task_comment, and ONLY when the task
+    already has an assignee -- an unassigned task has no one to wake, and
+    the caller must not reach this function for one (enforced there, not
+    re-checked here, since by the time a caller has an agent_id in hand the
+    question is already answered).
+
+    No approval gate here, matching schedule_task_assigned_wakeup and this
+    feature's own hard constraint ("No approval system"): a comment is an
+    inline message an agent picks up on its next turn, never something that
+    blocks or requires sign-off. Returns None (not an error) when a wake is
+    deliberately not scheduled -- a debounced burst is the expected, healthy
+    case, not a failure the caller needs to react to.
+
+    Bounding is two separate, stacked backstops:
+    1. DEBOUNCE (this function's own, short window): if a task_commented
+       wake was already logged for this task_id inside
+       max_task_comment_wake_debounce_seconds(), skip -- the comment is
+       already durably saved by the time this runs, so nothing is lost, and
+       the agent reads the full thread fresh whenever it does wake. This is
+       the piece that stops "five comments in a row" from becoming five
+       wakes.
+    2. DAILY CEILING (shared with schedule_task_assigned_wakeup, STEP 6):
+       the same max_wakes_per_task_per_day() rolling-24h cap on this
+       task_id, counting every trigger_kind together -- raised loudly as
+       SchedulerPolicyError, never a silent drop, exactly like the assigned
+       path. A human who keeps commenting across the whole day still can't
+       turn one task into an unbounded wake storm.
+    """
+    resolved_agent_id = str(agent_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+    resolved_title = str(title or "").strip()
+    if not resolved_agent_id or not resolved_task_id or not resolved_title:
+        raise SchedulerPolicyError(
+            "agent_id, task_id, and title are required to schedule a task-commented wakeup."
+        )
+    # Backstop 1: debounce. Checked before the daily ceiling since a
+    # debounced call never persists a row and so must never count against
+    # it either -- the two backstops compose, they don't share bookkeeping.
+    #
+    # Scoped to (task_id, agent_id), not task_id alone -- MAN-66 (mention-
+    # driven wakes): a comment mentioning several DIFFERENT agents calls
+    # this function once per mentioned agent, back to back, inside the same
+    # request. Debouncing on task_id alone would let the FIRST agent's
+    # freshly-persisted wake row suppress every other mentioned agent's
+    # wake in the same comment -- an accidental collision, not the
+    # intentional per-comment bound (see task_mention_service.py's own
+    # max_mentioned_agent_wakes_per_comment). Scoping by agent_id also fixes
+    # a pre-existing quirk for the single-assignee case: reassigning a task
+    # then commenting again inside the debounce window no longer gets
+    # suppressed by the OLD assignee's still-recent wake row.
+    _debounce_window = max_task_comment_wake_debounce_seconds()
+    _recent_comment_wake_count = await control_plane_repository.count_agent_scheduler_wake_requests_since(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        since=_utc_now() - timedelta(seconds=_debounce_window),
+        trigger_kind="task_commented",
+        task_id=resolved_task_id,
+        agent_id=resolved_agent_id,
+    )
+    if _recent_comment_wake_count >= 1:
+        return None
+    # Backstop 2: the shared per-task daily ceiling (STEP 6) -- identical
+    # check to schedule_task_assigned_wakeup's, deliberately not filtered to
+    # trigger_kind so assignment and comment wakes draw from one shared
+    # budget per task.
+    _daily_wake_cap = max_wakes_per_task_per_day()
+    _recent_task_wake_count = await control_plane_repository.count_agent_scheduler_wake_requests_since(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        since=_utc_now() - timedelta(hours=24),
+        task_id=resolved_task_id,
+    )
+    if _recent_task_wake_count >= _daily_wake_cap:
+        raise SchedulerPolicyError(
+            f"Task {resolved_task_id} has already reached its wake ceiling of "
+            f"{_daily_wake_cap} wake requests in the last 24 hours. Wait for the "
+            "window to roll over, or reduce how often this task re-triggers, "
+            "before requesting another wakeup."
+        )
+    workspace, master_install, policy = await _load_scheduler_scope(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    due_at, due_reason = _apply_policy_to_due_at(
+        due_at=_utc_now(),
+        policy=policy,
+        device_state=_device_state({}, workspace, master_install),
+    )
+    metadata: Dict[str, Any] = {"agent_id": resolved_agent_id, "task_id": resolved_task_id}
+    if due_reason:
+        metadata["policy_delay_reason"] = due_reason
+    record = await _persist_wakeup(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        master_install=master_install,
+        trigger_kind="task_commented",
+        source="project_tasks",
+        requested_by=str(triggered_by or "owner").strip().lower() or "owner",
+        reason="task_commented",
+        summary=f"New comment on: {resolved_title}",
+        payload={
+            "agent_id": resolved_agent_id,
+            "task_id": resolved_task_id,
+            "task_title": resolved_title,
+            "comment_body": str(comment_body or "").strip()[:500],
+        },
+        policy=policy,
+        due_at=due_at,
+        approval_required=False,
+        status="pending",
+        denial_reason=None,
+        metadata=metadata,
+    )
+    if due_at <= _utc_now() + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
+        _trigger_ambient_monitor(workspace_id)
+    return record
+
+
 async def propose_self_wakeup(
     *,
     tenant_id: str,
@@ -877,6 +1028,21 @@ def max_wakes_per_task_per_day() -> int:
     above. Env-overridable, floored at 1 so a misconfigured 0/negative value
     can never mean "unlimited"."""
     return max(1, config_int("EMPYRALIS_MAX_WAKES_PER_TASK_PER_DAY", DEFAULT_MAX_WAKES_PER_TASK_PER_DAY))
+
+
+def max_task_comment_wake_debounce_seconds() -> int:
+    """schedule_task_commented_wakeup's own debounce window -- see
+    DEFAULT_TASK_COMMENT_WAKE_DEBOUNCE_SECONDS above. Env-overridable,
+    floored at 1 so a misconfigured 0/negative value can never mean "no
+    debounce" (which would silently re-introduce the one-wake-per-comment
+    problem this exists to prevent)."""
+    return max(
+        1,
+        config_int(
+            "EMPYRALIS_TASK_COMMENT_WAKE_DEBOUNCE_SECONDS",
+            DEFAULT_TASK_COMMENT_WAKE_DEBOUNCE_SECONDS,
+        ),
+    )
 
 
 def _run_sync(coro: Any) -> Any:

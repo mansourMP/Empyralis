@@ -29,17 +29,23 @@
  *    the surface isn't built. The side note at the bottom of the properties
  *    column says exactly that rather than the older, now-false claim that
  *    neither labels nor sub-tasks were stored at all.
- *  · A comment composer. Agents write comments today
- *    (project_tasks_service.add_task_comment, backing project_task__comment)
- *    into task.metadata.comments and the Activity feed below RENDERS THOSE
- *    REAL COMMENTS — but there is no HTTP route for a human to post one, so
- *    there is no box to type in. The feed says so rather than showing a dead
- *    input.
  *  · Rich text. `description` is a plain-text column; it is rendered with
  *    paragraph breaks preserved, not parsed as markdown it may not be.
+ *
+ * THE COMMENT COMPOSER (MAN-64/MAN-70's human->agent channel): agents have
+ * been able to write into task.metadata.comments since project_task__comment
+ * / empyralis_comment_on_task; a human could not until routes_fleet.py grew
+ * POST .../comments (project_tasks_service.add_human_task_comment). The
+ * composer below writes through that route, then asks the page to refetch
+ * (onCommentPosted) — same "write, then let the poll catch up" contract
+ * TaskLabelEditor already uses for this exact reason (this page has no
+ * private write channel of its own; task.metadata.comments only ever
+ * changes by going through the shared, polled task list). It also may wake
+ * the assigned agent (task_commented, bounded_scheduler_service) — best-
+ * effort, surfaced the same way assignment's wake failure already is.
  */
 
-import { useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Calendar, Clock3, FolderKanban, MessageSquare, SignalHigh, User } from "lucide-react";
 
@@ -55,7 +61,18 @@ import {
 } from "./task-status";
 import { TaskLabelChips, TaskLabelEditor, TaskLabelRowIcon } from "./task-labels";
 import { TINTS, tintForAgent, formatDateTime, timeAgo } from "./fleet-presentation";
-import { FLEET_TASK_STATUSES, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
+import { MemberAvatar } from "./MemberAvatarStack";
+import type { WorkspaceMember } from "./members-data";
+import {
+  assigneeOptionValue,
+  commentFleetTask,
+  FLEET_TASK_STATUSES,
+  parseAssigneeOptionValue,
+  type FleetAgent,
+  type FleetTask,
+  type FleetTaskStatus,
+  type TaskAssigneeSelection,
+} from "./fleet-data";
 
 /** Minute precision, not the default's seconds — no decision on this page
  *  turns on a second, and the extra characters only cost the value column
@@ -64,7 +81,30 @@ function stamp(value: string): string {
   return formatDateTime(value, { dateStyle: "medium", timeStyle: "short" });
 }
 
-type TaskComment = { id?: string; author_type?: string; author_id?: string; body?: string; created_at?: string };
+/** A resolved @-mention (MAN-66) -- written by
+ *  project_tasks_service.add_task_comment/task_mention_service alongside
+ *  the comment it was found in. `start`/`end` are character offsets into
+ *  that SAME comment's `body` (including the leading `@`), so rendering is
+ *  a straight slice — never a second parse of the text on this side. Only
+ *  RESOLVED mentions are ever present here; an unknown or ambiguous
+ *  `@name` in the raw text has no entry and just renders as plain text. */
+type TaskMention = {
+  raw?: string;
+  start: number;
+  end: number;
+  kind: "agent" | "user";
+  id: string;
+  display_name?: string;
+};
+
+type TaskComment = {
+  id?: string;
+  author_type?: string;
+  author_id?: string;
+  body?: string;
+  created_at?: string;
+  mentions?: TaskMention[];
+};
 
 /** task.metadata.comments as written by add_task_comment. Defensive on the
  *  way in — this is free-form JSONB, so anything that is not an object with a
@@ -77,9 +117,102 @@ function readComments(task: FleetTask): TaskComment[] {
     .filter((c) => String(c.body || "").trim().length > 0);
 }
 
+/** A resolved mention, inline in a comment body — visually distinct from
+ *  surrounding text (a tinted pill, same tinted-circle identity treatment
+ *  as the Assignee row above: AgentSigil for an agent, MemberAvatar for a
+ *  person) and distinguishable from EACH OTHER (agent vs human), matching
+ *  this page's existing "agent and person are both team members, but never
+ *  drawn identically" convention. Deliberately styled inline rather than
+ *  via a new fleet-theme.css class -- that stylesheet is shared/load-
+ *  bearing across nearly every fleet surface (docs/AGENT-OPERATING-RULES.md
+ *  "All fleet UI shares files") and another agent may be editing it
+ *  concurrently; every color here is one of the same CSS custom properties
+ *  (--tile-bg/--tile-fg/--rail-active/--text-primary) the rest of this file
+ *  already reads, so it stays on-theme (light/dark) without a new rule. */
+function MentionChip({
+  mention,
+  agents,
+  members,
+}: {
+  mention: TaskMention;
+  agents: FleetAgent[];
+  members?: WorkspaceMember[];
+}) {
+  const chipStyle: CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    padding: "1px 7px 1px 3px",
+    borderRadius: 999,
+    background: "var(--rail-active)",
+    color: "var(--text-primary)",
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+  };
+
+  if (mention.kind === "agent") {
+    const agent = agents.find((a) => a.agent_id === mention.id);
+    const label = agent?.label || mention.display_name || "Agent";
+    const idx = agent ? agents.indexOf(agent) : 0;
+    const tint = agent ? TINTS[tintForAgent(agent, idx)] : null;
+    const style = { ...chipStyle, ...(tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) } as CSSProperties;
+    return (
+      <span className="fleet-mention-chip fleet-mention-chip--agent" style={style} title={`Agent: ${label}`}>
+        <AgentSigil seed={mention.id} size={13} />
+        {label}
+      </span>
+    );
+  }
+
+  const member = (members || []).find((m) => m.user_id === mention.id);
+  const memberIndex = member ? (members || []).indexOf(member) : 0;
+  const label = member?.display_name || member?.email || mention.display_name || "Person";
+  return (
+    <span className="fleet-mention-chip fleet-mention-chip--human" style={chipStyle} title={`${label}`}>
+      <MemberAvatar name={label} role={member?.role} size="xs" tintIndex={memberIndex} />
+      {label}
+    </span>
+  );
+}
+
+/** Splits a comment's body at its resolved mentions' stored offsets and
+ *  substitutes a MentionChip for each — the ONLY place `comment.mentions`
+ *  is read. Out-of-range/overlapping entries (should not happen; the
+ *  backend already drops anything past its own 4000-char truncation, see
+ *  add_task_comment) are defensively skipped rather than crashing the
+ *  Activity feed on a single malformed comment. No mentions -> returns the
+ *  plain body string unchanged, so a pre-MAN-66 comment renders exactly as
+ *  it always did. */
+function renderCommentBody(comment: TaskComment, agents: FleetAgent[], members?: WorkspaceMember[]): ReactNode {
+  const body = comment.body || "";
+  const mentions = (comment.mentions || [])
+    .filter(
+      (m) =>
+        Number.isFinite(m.start) &&
+        Number.isFinite(m.end) &&
+        m.start >= 0 &&
+        m.end > m.start &&
+        m.end <= body.length
+    )
+    .sort((a, b) => a.start - b.start);
+  if (mentions.length === 0) return body;
+
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  mentions.forEach((mention, i) => {
+    if (mention.start < cursor) return; // overlapping — defensive skip, never render garbage
+    if (mention.start > cursor) parts.push(body.slice(cursor, mention.start));
+    parts.push(<MentionChip key={`mention-${i}-${mention.id}`} mention={mention} agents={agents} members={members} />);
+    cursor = mention.end;
+  });
+  if (cursor < body.length) parts.push(body.slice(cursor));
+  return parts;
+}
+
 export function TaskDetailView({
   task,
   agents,
+  members,
   workspaceId,
   projectName,
   projectHref,
@@ -87,23 +220,38 @@ export function TaskDetailView({
   onPriorityChange,
   onAssign,
   onLabelsChanged,
+  onCommentPosted,
 }: {
   task: FleetTask;
-  /** Agents in this project — the only valid assignees. */
+  /** Agents in this project — valid AGENT assignees. */
   agents: FleetAgent[];
+  /** Workspace members (MAN-64/MAN-70) — valid HUMAN assignees, and the
+   *  lookup used to render a human commenter's real name. Absent → the
+   *  Assignee picker offers agents only (degrades to the pre-MAN-64
+   *  behavior) and human comments fall back to their raw author id. */
+  members?: WorkspaceMember[];
   /** Scopes the label vocabulary — labels are per WORKSPACE, not per project
    *  (fleet-data's Labels section: "bug" means the same thing wherever the
-   *  work sits). Absent → the Labels row renders read-only chips. */
+   *  work sits). Absent → the Labels row renders read-only chips, and the
+   *  comment composer below is hidden the same way (POST .../comments needs
+   *  it too). */
   workspaceId?: string;
   projectName: string;
   projectHref: string;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
   onPriorityChange?: (taskId: string, priority: number) => void;
-  onAssign: (taskId: string, agentId: string) => void;
+  /** Assignee is agent-or-human (MAN-64/MAN-70) — the caller dispatches to
+   *  assignFleetTask or assignFleetTaskToUser based on `selection.kind`. */
+  onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   /** Refetch after a label attach/detach. Labels are not part of the task
    *  PATCH — they are their own endpoints — so the editor writes directly and
    *  then asks the page to re-read. */
   onLabelsChanged?: () => void | Promise<void>;
+  /** Refetch after a human comment is posted. Same contract as
+   *  onLabelsChanged, same reason: POST .../comments is its own endpoint,
+   *  not part of the task PATCH, so the composer below writes directly and
+   *  then asks the page to re-read the (30s-polled) task list. */
+  onCommentPosted?: () => void | Promise<void>;
 }) {
   const router = useRouter();
   const headingRef = useRef<HTMLHeadingElement | null>(null);
@@ -136,7 +284,60 @@ export function TaskDetailView({
   const assigneeIndex = assignee ? agents.indexOf(assignee) : 0;
   const tint = assignee ? TINTS[tintForAgent(assignee, assigneeIndex)] : null;
   const avatarStyle = (tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) as CSSProperties;
+  // The human half of MAN-64/MAN-70 -- only looked up when there is no
+  // agent assignee, matching the backend's own mutual-exclusivity
+  // guarantee (project_tasks_single_assignee_check: at most one of the two
+  // is ever set).
+  const assignedMember = !assignee && task.assignee_user_id
+    ? (members || []).find((m) => m.user_id === task.assignee_user_id) || null
+    : null;
+  const assignedMemberIndex = assignedMember ? (members || []).indexOf(assignedMember) : 0;
+  const currentAssigneeValue = assignee
+    ? assigneeOptionValue({ kind: "agent", id: assignee.agent_id })
+    : assignedMember
+      ? assigneeOptionValue({ kind: "user", id: assignedMember.user_id })
+      : task.assignee_agent_id
+        ? assigneeOptionValue({ kind: "agent", id: task.assignee_agent_id })
+        : task.assignee_user_id
+          ? assigneeOptionValue({ kind: "user", id: task.assignee_user_id })
+          : "";
   const comments = useMemo(() => readComments(task), [task]);
+
+  // The composer: local state only, exactly TaskLabelEditor's shape
+  // (writes go straight out via commentFleetTask, painted optimistically
+  // first because the real comment only shows up once the caller's 30s-
+  // polled task list has refetched). `pending` is appended to the real
+  // list rather than replacing it, and dropped the moment the write settles
+  // either way — the refetch (success) or the reverted textarea (failure)
+  // is always what's left on screen, never a comment stuck mid-air.
+  const [draft, setDraft] = useState("");
+  const [posting, setPosting] = useState(false);
+  const [commentNotice, setCommentNotice] = useState<string | null>(null);
+  const [pending, setPending] = useState<TaskComment | null>(null);
+  const displayComments = useMemo(() => (pending ? [...comments, pending] : comments), [comments, pending]);
+
+  async function submitComment() {
+    const body = draft.trim();
+    if (!body || posting || !workspaceId) return;
+    setPosting(true);
+    setCommentNotice(null);
+    setPending({ id: `pending-${Date.now()}`, author_type: "human", author_id: "You", body, created_at: new Date().toISOString() });
+    try {
+      const { wakeError } = await commentFleetTask(workspaceId, task.id, body);
+      setDraft("");
+      if (wakeError) {
+        setCommentNotice(
+          `Posted, but the agent could not be woken: ${wakeError}. It will see this the next time it runs.`,
+        );
+      }
+      await onCommentPosted?.();
+    } catch (e) {
+      setCommentNotice(e instanceof Error ? e.message : "Could not post comment.");
+    } finally {
+      setPosting(false);
+      setPending(null);
+    }
+  }
 
   return (
     <div className="fleet-task-page">
@@ -159,39 +360,77 @@ export function TaskDetailView({
 
           <section className="fleet-task-page-section" aria-label="Activity">
             <h2 className="fleet-task-page-section-title">Activity</h2>
-            {comments.length === 0 ? (
+            {displayComments.length === 0 ? (
               <div className="fleet-task-page-activity-empty">
                 <MessageSquare size={14} strokeWidth={1.75} />
                 <span>
-                  No comments yet. Agents working this task post here via{" "}
-                  <code>project_task__comment</code>; there is no route for a person to
-                  post one yet, so there is no composer.
+                  No comments yet. Post one below, or an agent working this task can
+                  post here via <code>project_task__comment</code>.
                 </span>
               </div>
             ) : (
-              <>
-                <ul className="fleet-task-page-comments">
-                  {comments.map((c, i) => (
-                    <li key={c.id || i} className="fleet-task-page-comment">
-                      <div className="fleet-task-page-comment-head">
-                        <span className="fleet-task-page-comment-author">
-                          {commentAuthorLabel(c, agents)}
+              <ul className="fleet-task-page-comments">
+                {displayComments.map((c, i) => (
+                  <li
+                    key={c.id || i}
+                    className={`fleet-task-page-comment${c === pending ? " is-pending" : ""}`}
+                  >
+                    <div className="fleet-task-page-comment-head">
+                      <span className="fleet-task-page-comment-author">
+                        {commentAuthorLabel(c, agents, members)}
+                      </span>
+                      {c.created_at ? (
+                        <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
+                          {timeAgo(c.created_at) || stamp(c.created_at)}
                         </span>
-                        {c.created_at ? (
-                          <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
-                            {timeAgo(c.created_at) || stamp(c.created_at)}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="fleet-task-page-comment-body">{c.body}</div>
-                    </li>
-                  ))}
-                </ul>
-                <div className="fleet-task-page-activity-note">
-                  Read-only: only agents can post comments today.
-                </div>
-              </>
+                      ) : null}
+                    </div>
+                    <div className="fleet-task-page-comment-body">{renderCommentBody(c, agents, members)}</div>
+                  </li>
+                ))}
+              </ul>
             )}
+
+            {workspaceId ? (
+              <form
+                className="fleet-task-page-comment-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submitComment();
+                }}
+              >
+                <textarea
+                  className="fleet-task-page-comment-input"
+                  placeholder="Leave a comment for whoever picks this up next…"
+                  value={draft}
+                  onChange={(event) => setDraft(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    // Enter sends, Shift+Enter (or any IME composition) makes
+                    // a newline — the same convention AgentChat's composer
+                    // uses, so a comment box and a chat box don't disagree
+                    // about what Enter does elsewhere in this app.
+                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      event.preventDefault();
+                      void submitComment();
+                    }
+                  }}
+                  rows={2}
+                  maxLength={4000}
+                  disabled={posting}
+                  aria-label="Add a comment"
+                />
+                {commentNotice ? <p className="fleet-task-page-comment-error">{commentNotice}</p> : null}
+                <div className="fleet-task-page-comment-form-actions">
+                  <button
+                    type="submit"
+                    className="fleet-btn fleet-btn--accent"
+                    disabled={!draft.trim() || posting}
+                  >
+                    {posting ? "Posting…" : "Comment"}
+                  </button>
+                </div>
+              </form>
+            ) : null}
           </section>
         </div>
       </div>
@@ -250,10 +489,14 @@ export function TaskDetailView({
             </span>
           </div>
 
-          {/* Assignment is agent-only (fleet-data.FleetTask) and is not a plain
-              field write — assignFleetTask also wakes the agent — so this
-              hands the id to the caller's existing handler rather than
-              patching anything itself. */}
+          {/* Assignment is agent-OR-human (MAN-64/MAN-70) and is not a plain
+              field write — assignFleetTask/assignFleetTaskToUser also carry
+              their own side effects (a wake, for the agent path only) — so
+              this hands a {kind, id} selection to the caller's existing
+              handler rather than patching anything itself. The two option
+              groups keep agents and people visually and structurally
+              separate, exactly the "show human vs agent assignees
+              distinguishably" requirement the avatar below also serves. */}
           <div className="fleet-panel-row">
             <span className="fleet-panel-row-label">
               <span className="fleet-panel-row-icon"><User size={15} strokeWidth={1.75} /></span>
@@ -261,23 +504,45 @@ export function TaskDetailView({
             </span>
             <span className="fleet-task-detail-control">
               {assignee ? (
-                <span className="fleet-agent-avatar" style={avatarStyle}>
+                <span className="fleet-agent-avatar" style={avatarStyle} title="Agent">
                   <AgentSigil seed={assignee.agent_id} size={14} />
                 </span>
+              ) : assignedMember ? (
+                <MemberAvatar
+                  name={assignedMember.display_name || assignedMember.email}
+                  role={assignedMember.role}
+                  size="xs"
+                  tintIndex={assignedMemberIndex}
+                />
               ) : null}
               <select
                 className="fleet-task-detail-select"
-                value={task.assignee_agent_id || ""}
+                value={currentAssigneeValue}
                 aria-label="Task assignee"
                 onChange={(e) => {
-                  const next = e.currentTarget.value;
-                  if (next && next !== task.assignee_agent_id) onAssign(task.id, next);
+                  const next = parseAssigneeOptionValue(e.currentTarget.value);
+                  if (next && assigneeOptionValue(next) !== currentAssigneeValue) onAssign(task.id, next);
                 }}
               >
                 <option value="">Unassigned</option>
-                {agents.map((a) => (
-                  <option key={a.agent_id} value={a.agent_id}>{a.label || "Unnamed agent"}</option>
-                ))}
+                {agents.length > 0 ? (
+                  <optgroup label="Agents">
+                    {agents.map((a) => (
+                      <option key={a.agent_id} value={assigneeOptionValue({ kind: "agent", id: a.agent_id })}>
+                        {a.label || "Unnamed agent"}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
+                {(members || []).length > 0 ? (
+                  <optgroup label="People">
+                    {(members || []).map((m) => (
+                      <option key={m.user_id} value={assigneeOptionValue({ kind: "user", id: m.user_id })}>
+                        {m.display_name || m.email}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
               </select>
             </span>
           </div>
@@ -370,13 +635,17 @@ export function TaskDetailView({
 }
 
 /** Comment authors are stored as an opaque (author_type, author_id) pair.
- *  An agent id resolves to its real label when that agent is in this project;
- *  anything else falls back to the honest raw type. */
-function commentAuthorLabel(comment: TaskComment, agents: FleetAgent[]): string {
+ *  An agent id resolves to its real label when that agent is in this
+ *  project; a human ("user"/"human" author_type -- add_human_task_comment
+ *  hardcodes "human") resolves to their real name when they're a workspace
+ *  member; anything else falls back to the honest raw type. */
+function commentAuthorLabel(comment: TaskComment, agents: FleetAgent[], members?: WorkspaceMember[]): string {
   const id = String(comment.author_id || "").trim();
   const type = String(comment.author_type || "").trim();
   const agent = agents.find((a) => a.agent_id === id);
   if (agent) return agent.label || "Unnamed agent";
+  const member = (members || []).find((m) => m.user_id === id);
+  if (member) return member.display_name || member.email;
   if (type === "agent") return id || "Agent";
   if (type === "user" || type === "human") return id || "Person";
   return id || type || "Unknown";
