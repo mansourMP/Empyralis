@@ -62,8 +62,13 @@ const CONTROL_ICON = 16;
 // real per-turn costs are fractions of a cent, and this line sits directly
 // above the Agents list row that already shows the honest, unrounded figure.
 // Two decimals silently rounded any realistic per-turn spend to "$0.00",
-// contradicting the very row beneath it (Truth Map, 2026-07-10).
-const money = (n: number) => `$${n.toFixed(4)}`;
+// contradicting the very row beneath it (Truth Map, 2026-07-10). Zero is a
+// different case, not just a smaller number: there's no fraction-of-a-cent
+// precision to defend, so "$0.0000" only ever read as leaked debug output
+// (MAN-145) — an em dash, this codebase's existing convention for "nothing
+// to show" (see AgentsList/CreditsPanel/TaskDetailView), says the same thing
+// honestly.
+const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
 
 /**
  * Persistent primary rail — the app's spine. A populated workspace header
@@ -368,10 +373,17 @@ export function PrimaryRail({
         </div>
         {!effectiveCollapsed && (
           <div className="fleet-rail-quick-actions">
-            <button type="button" className="fleet-rail-search-btn" onClick={openCommandPalette}>
-              <Search size={13} strokeWidth={1.75} />
+            <button
+              type="button"
+              className="fleet-rail-search-btn"
+              aria-label="Search"
+              onClick={openCommandPalette}
+            >
+              <Search size={13} strokeWidth={1.75} aria-hidden="true" />
               <span>Search</span>
-              <kbd>⌘K</kbd>
+              {/* Hidden from the accessible name — a sighted-only shortcut
+                  hint, not part of what the button is called. */}
+              <kbd aria-hidden="true">⌘K</kbd>
             </button>
           </div>
         )}
@@ -392,11 +404,24 @@ export function PrimaryRail({
           return (
             <div key={item.key} className="fleet-rail-nav-group">
               <div className="fleet-rail-item-row">
-                <button
-                  type="button"
+                {/* Real <a href> (MAN-145 item 6), not a router.push() button —
+                    a plain left-click still behaves exactly like the old
+                    onClick (Next's Link does a client-side transition, same
+                    as router.push), but ⌘/Ctrl-click, middle-click, and
+                    right-click now get real browser behaviour for free,
+                    since they're native <a> semantics Link doesn't override.
+                    That's also why this is safe against the in-app tab strip
+                    (FleetTabs.tsx): its modifier-click interception is
+                    explicitly scoped to `.fleet-shell-main` and skips the
+                    rail on purpose ("the rail keeps native browser
+                    behaviour" — see FleetTabs.tsx's resolveHref) — there is
+                    nothing here for it to conflict with. */}
+                <Link
+                  href={hrefFor(item.segment)}
                   title={effectiveCollapsed ? item.label : undefined}
+                  aria-label={item.label}
+                  aria-current={active ? "page" : undefined}
                   className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
-                  onClick={() => router.push(hrefFor(item.segment))}
                 >
                   <span className="fleet-rail-item-icon">
                     <Icon size={RAIL_ICON} strokeWidth={1.75} />
@@ -405,9 +430,9 @@ export function PrimaryRail({
                   {!effectiveCollapsed && isInbox && inboxUnreadCount > 0 ? (
                     <span className="fleet-rail-item-count">{inboxUnreadLabel}</span>
                   ) : !effectiveCollapsed ? (
-                    <kbd className="fleet-rail-item-chord">G {item.chord.toUpperCase()}</kbd>
+                    <kbd className="fleet-rail-item-chord" aria-hidden="true">G {item.chord.toUpperCase()}</kbd>
                   ) : null}
-                </button>
+                </Link>
                 {showToggle && (
                   <button
                     type="button"
@@ -608,6 +633,10 @@ function AccountMenu({
         className="fleet-rail-owner-trigger"
         aria-haspopup="menu"
         aria-expanded={open}
+        // Same unnamed-button pattern as the rail's other icon+text controls
+        // (MAN-145 item 5) — found while re-verifying the a11y tree after
+        // that pass, not in the original list, but the identical bug.
+        aria-label={`Account menu — ${ownerName}`}
         onClick={() => { setOpen((v) => !v); setError(null); }}
       >
         <div className="fleet-rail-owner-avatar">{(ownerName || "O").charAt(0).toUpperCase()}</div>

@@ -450,7 +450,17 @@ a.fleet-breadcrumb:hover {
   flex-direction: column;
   gap: 10px;
 }
-.fleet-rail-collapse-top {
+/* Qualified with its parent, not just `.fleet-rail-collapse-top` alone:
+   `.fleet-rail-control-btn` (shared by every icon control in this rail,
+   including this button) sets `flex: 1` at a LATER point in this file. Both
+   selectors are a single class (equal specificity), so source order alone
+   decided the winner — the shared `flex: 1` silently beat this `flex: none`,
+   and the toggle button ballooned to ~50% of the header row's width instead
+   of staying pinned at 26px. That stole the space `.fleet-rail-workspace-name`
+   needed and is why even a short name (item 8's "Empyralis" → "Empy…") was
+   truncating well inside the rail's actual width. Qualifying bumps this
+   rule's specificity above the shared class regardless of source order. */
+.fleet-rail-header-top .fleet-rail-collapse-top {
   flex: none;
   width: 26px;
   height: 26px;
@@ -3945,6 +3955,24 @@ a.fleet-breadcrumb:hover {
   font-weight: 500;
   color: var(--text-muted);
   margin: 24px 0 8px;
+}
+
+/* MAN-145 a11y pass: several .fleet-detail-section-title/.fleet-hw-group-title
+   callers now render a real <h2>/<h3> for screen-reader structure instead of
+   a bare <div> — but `.fleet-root h1/h2/h3 { margin: 0 }` above is a type
+   selector plus a class (0,1,1), which beats a single class selector like
+   `.fleet-detail-section-title` (0,1,0) regardless of source order, so the
+   heading reset silently ate this class's own vertical rhythm. Requalifying
+   with the tag restores it (each rule repeats its own class's un-reset
+   margin exactly, not the other one's) without touching the div-only call
+   sites, which don't match either selector and are unaffected. */
+.fleet-root h2.fleet-detail-section-title,
+.fleet-root h3.fleet-detail-section-title {
+  margin: 24px 0 8px;
+}
+.fleet-root h2.fleet-hw-group-title,
+.fleet-root h3.fleet-hw-group-title {
+  margin: var(--space-4) 0 var(--space-2);
 }
 
 /* One-line role subtitle under a detail tab's own content (Channels vs.

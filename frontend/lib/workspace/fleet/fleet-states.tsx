@@ -47,7 +47,12 @@ export function FleetListSkeleton({
 
 export function FleetSurfaceError({
   title = "Couldn’t load this",
-  message,
+  // No hardcoded "it'll keep trying" suffix — that's only true for a
+  // surface that actually auto-retries in the background, which isn't every
+  // caller. Say exactly what happened and let `onRetry` be the recovery
+  // path; a caller can still opt back into the old, softer copy by passing
+  // its own message.
+  message = "Something went wrong on our side. Try again.",
   onRetry,
 }: {
   title?: string;
@@ -58,9 +63,7 @@ export function FleetSurfaceError({
     <div className="fleet-page-state" role="alert">
       <AlertCircle size={22} strokeWidth={1.75} />
       <div className="fleet-page-state-title">{title}</div>
-      <div className="fleet-page-state-body">
-        {message || "Something went wrong on our side."} It’ll keep trying — refresh if it doesn’t clear.
-      </div>
+      <div className="fleet-page-state-body">{message}</div>
       {onRetry && (
         <div className="fleet-empty-actions">
           <button type="button" className="fleet-btn" onClick={onRetry}>Try again</button>
