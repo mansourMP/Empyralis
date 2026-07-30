@@ -73,6 +73,28 @@ only the table privileges a real app connection would have, and drops it in
 tearDown -- the DATABASE_URL connection is used only for admin setup/teardown
 (seeding rows, creating/dropping the throwaway role), never for the read
 that is actually being tested.
+
+MAN-109 follow-up update: the gap this file's own docstring above predicted
+("investigating whether those six tables could safely get the same RLS
+treatment... found that they CANNOT, not without a broader refactor first")
+has since been closed -- all 43 call sites were converted to the scoped
+rls_fetch/rls_fetchrow/rls_execute helpers and migrations/enable_rls.sql now
+covers `project_tasks` and `projects` (plus `project_memberships`,
+`workspace_labels`, `bug_reports`, `mcp_external_agent_roster`) too. Per
+this file's own prior instruction -- "This test is EXPECTED TO START
+FAILING the moment a future change finishes the call-site refactor and
+lands the migration for these six tables... whoever lands that follow-up
+should replace test_projects_and_project_tasks_have_no_database_level_
+tenant_isolation_yet with an isolation proof shaped like class
+AgentThreadsRlsIsolationTests above it, not just delete it" -- the
+`ProjectsAndProjectTasksRlsGapTests` class that asserted the gap has been
+removed. Its replacement isolation proof already exists:
+test_rls_six_tables_isolation_man109.py's `SixTableRlsIsolationTests` class
+runs the exact same methodology (AgentThreadsRlsIsolationTests' own
+throwaway-non-superuser-role approach) against all six tables, including
+`projects` and `project_tasks`; that file's `ServiceLayerRegressionTests`
+and `AuthBootstrapBypassTests` cover the two other real risks the
+call-site conversion carried. See that file for the current proof.
 """
 
 from __future__ import annotations
@@ -325,103 +347,35 @@ class AgentThreadsRlsIsolationTests(_RlsProbeRoleFixture):
         self.assertTrue(row["rls_forced"])
 
 
-class ProjectsAndProjectTasksRlsGapTests(_RlsProbeRoleFixture):
-    """Proof #3: the honest characterization of the current gap. `projects`
-    and `project_tasks` have NO RLS policy today, so a query scoped to
-    tenant A can read tenant B's rows straight out of these tables with no
-    WHERE-clause filter at all -- the exact structural risk MAN-109 flags
-    ("one future query that forgets the WHERE leaks across tenants
-    silently"), demonstrated rather than asserted.
-
-    This test is SUPPOSED to start failing once a future change finishes
-    converting project_tasks_service.py / projects_repository.py's 26
-    combined unscoped call sites to the rls_fetch/rls_fetchrow/rls_execute
-    helpers and lands the enable_rls.sql-style migration for these two
-    tables -- at that point, replace this test with an isolation proof
-    shaped like AgentThreadsRlsIsolationTests above, not just delete it.
-    """
-
-    GRANT_TABLES = ("projects", "project_tasks")
-
-    async def async_setup(self):
-        await super().async_setup()
-        if not hasattr(self, "admin_conn"):
-            return
-        self.project_a_id = f"proj_a_{self.tenant_a}"
-        self.project_b_id = f"proj_b_{self.tenant_b}"
-        self.task_a_id = f"task_a_{self.tenant_a}"
-        self.task_b_id = f"task_b_{self.tenant_b}"
-        await self.admin_conn.execute(
-            """
-            INSERT INTO projects (id, tenant_id, workspace_id, name, slug)
-            VALUES ($1, $2, $3, 'Tenant A project', $1), ($4, $5, $6, 'Tenant B project', $4)
-            ON CONFLICT (id) DO NOTHING
-            """,
-            self.project_a_id, self.tenant_a, self.ws_a,
-            self.project_b_id, self.tenant_b, self.ws_b,
-        )
-        await self.admin_conn.execute(
-            """
-            INSERT INTO project_tasks (id, tenant_id, workspace_id, project_id, title, status)
-            VALUES ($1, $2, $3, $4, 'Tenant A task', 'todo'), ($5, $6, $7, $8, 'Tenant B task', 'todo')
-            ON CONFLICT (id) DO NOTHING
-            """,
-            self.task_a_id, self.tenant_a, self.ws_a, self.project_a_id,
-            self.task_b_id, self.tenant_b, self.ws_b, self.project_b_id,
-        )
-
-    async def _cleanup_rows(self, conn) -> None:
-        await conn.execute(
-            "DELETE FROM project_tasks WHERE tenant_id IN ($1, $2)",
-            self.tenant_a, self.tenant_b,
-        )
-        await conn.execute(
-            "DELETE FROM projects WHERE tenant_id IN ($1, $2)",
-            self.tenant_a, self.tenant_b,
-        )
-
-    async def test_projects_and_project_tasks_have_no_database_level_tenant_isolation_yet(self) -> None:
-        project_rows = await self._scoped_probe_read(
-            self.tenant_a, self.ws_a,
-            "SELECT id, tenant_id FROM projects WHERE id = ANY($1)",
-            [self.project_a_id, self.project_b_id],
-        )
-        task_rows = await self._scoped_probe_read(
-            self.tenant_a, self.ws_a,
-            "SELECT id, tenant_id FROM project_tasks WHERE id = ANY($1)",
-            [self.task_a_id, self.task_b_id],
-        )
-        project_ids_seen = {row["id"] for row in project_rows}
-        task_ids_seen = {row["id"] for row in task_rows}
-        # This is the GAP, demonstrated: tenant A's session can read tenant
-        # B's row from both tables at the database level. If this assertion
-        # ever fails, someone has fixed MAN-109 for these tables -- replace
-        # this test with an isolation proof, don't just delete it.
-        self.assertEqual(
-            project_ids_seen, {self.project_a_id, self.project_b_id},
-            "projects now isolates tenants at the database level — update this "
-            "characterization test into an isolation proof (see AgentThreadsRlsIsolationTests).",
-        )
-        self.assertEqual(
-            task_ids_seen, {self.task_a_id, self.task_b_id},
-            "project_tasks now isolates tenants at the database level — update this "
-            "characterization test into an isolation proof (see AgentThreadsRlsIsolationTests).",
-        )
-
-    async def test_catalog_confirms_no_rls_policy_on_either_table(self) -> None:
-        rows = await self.admin_conn.fetch(
-            """
-            SELECT c.relname AS table_name, c.relrowsecurity AS rls_enabled,
-                   c.relforcerowsecurity AS rls_forced
-            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE n.nspname = 'public' AND c.relname IN ('projects', 'project_tasks')
-            """
-        )
-        state = {row["table_name"]: row for row in rows}
-        for table in ("projects", "project_tasks"):
-            with self.subTest(table=table):
-                self.assertFalse(state[table]["rls_enabled"])
-                self.assertFalse(state[table]["rls_forced"])
+# Proof #3 used to live here as `ProjectsAndProjectTasksRlsGapTests`: the
+# honest characterization that `projects`/`project_tasks` had NO RLS policy
+# yet, demonstrated (not just asserted) by a throwaway non-superuser role
+# reading straight across tenants with no WHERE-clause filter at all. That
+# class's own docstring called its outcome in advance -- "This test is
+# SUPPOSED to start failing once a future change finishes converting
+# project_tasks_service.py / projects_repository.py's ... call sites to the
+# rls_fetch/rls_fetchrow/rls_execute helpers and lands the enable_rls.sql-
+# style migration for these two tables -- at that point, replace this test
+# with an isolation proof shaped like AgentThreadsRlsIsolationTests above,
+# not just delete it."
+#
+# MAN-109 landed that follow-up (all 43 call sites across five services
+# converted, migration extended to all six previously-excluded tables,
+# projects/project_tasks included). Both of this class's assertions are now
+# false -- `test_projects_and_project_tasks_have_no_database_level_tenant_
+# isolation_yet` and `test_catalog_confirms_no_rls_policy_on_either_table`
+# would fail because the gap they characterized no longer exists, which is
+# success, not a regression. Per the docstring's own instruction, the class
+# is removed rather than left red or reduced to weaker assertions.
+#
+# Its replacement lives in test_rls_six_tables_isolation_man109.py:
+#   - `SixTableRlsIsolationTests` -- the AgentThreadsRlsIsolationTests-shaped
+#     isolation proof for all six tables (including projects/project_tasks),
+#     same throwaway-non-superuser-role methodology this file established.
+#   - `ServiceLayerRegressionTests` -- proves the 43 converted call sites
+#     still behave correctly end-to-end through the real service functions.
+#   - `AuthBootstrapBypassTests` -- proves the one bypass_rls=True this
+#     change added both works and is actually necessary.
 
 
 if __name__ == "__main__":

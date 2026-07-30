@@ -20,6 +20,55 @@ from unittest.mock import AsyncMock, patch
 from server_modules import mcp_external_agent_roster_service as roster
 
 
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeConnection:
+    """acquire() target the rls_* helpers open (mcp_external_agent_roster is
+    now FORCE RLS -- MAN-109). Delegates fetchrow/fetch/execute straight back
+    to the owning _RosterFakePool's own query-parsing methods, so the
+    business logic that lives there (ON CONFLICT idempotency, revoke
+    mutating rows_by_hash, execute_calls bookkeeping) keeps running exactly
+    as before. The one exception is _apply_connection_scope's
+    set_config(...) SET call issued at the top of every rls_* helper --
+    swallowed here rather than routed into the pool's query parser, which
+    has no case for it and would otherwise mis-record it as a real
+    business execute() call."""
+
+    def __init__(self, pool: "_RosterFakePool") -> None:
+        self._pool = pool
+
+    async def fetchrow(self, query, *args):
+        return await self._pool.fetchrow(query, *args)
+
+    async def fetch(self, query, *args):
+        return await self._pool.fetch(query, *args)
+
+    async def execute(self, query, *args):
+        if "set_config(" in query:
+            return "SELECT 1"
+        return await self._pool.execute(query, *args)
+
+    def transaction(self):
+        return _FakeTransaction()
+
+
+class _FakeAcquire:
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _RosterFakePool:
     """Minimal fake pool that actually enforces the UNIQUE(key_hash)
     constraint's ON CONFLICT DO NOTHING semantics, since that's exactly the
@@ -29,6 +78,9 @@ class _RosterFakePool:
         self.rows_by_hash: dict = {}
         self.insert_attempts = 0
         self.execute_calls: list = []
+
+    def acquire(self):
+        return _FakeAcquire(_FakeConnection(self))
 
     async def fetchrow(self, query, *args):
         q = " ".join(query.split())
@@ -166,7 +218,9 @@ class GetAndRevokeTests(unittest.IsolatedAsyncioTestCase):
         pool = _RosterFakePool()
         with _patch_pool(pool), _patch_no_platform_installs():
             await roster.register_external_agent(tenant_id="tenant-1", workspace_id="ws-1", key_hash="hash-g")
-            await roster.set_external_agent_revoked(key_hash="hash-g", revoked=True)
+            await roster.set_external_agent_revoked(
+                tenant_id="tenant-1", workspace_id="ws-1", key_hash="hash-g", revoked=True,
+            )
             fetched = await roster.get_external_agent_by_key_hash(key_hash="hash-g")
         self.assertTrue(fetched["revoked"])
 
@@ -175,7 +229,13 @@ class GetAndRevokeTests(unittest.IsolatedAsyncioTestCase):
             "server_modules.mcp_external_agent_roster_service.control_plane_repository.ensure_control_plane_schema",
             new=AsyncMock(return_value=None),
         ):
-            await roster.set_external_agent_revoked(key_hash="hash-h", revoked=True)  # must not raise
+            # tenant_id/workspace_id are required (RLS scoping, MAN-109) --
+            # non-blank values so the call still reaches (and exercises) the
+            # `pool is None` postgres-unavailable branch instead of
+            # short-circuiting on the earlier blank-scope guard.
+            await roster.set_external_agent_revoked(
+                tenant_id="tenant-1", workspace_id="ws-1", key_hash="hash-h", revoked=True,
+            )  # must not raise
 
 
 class ListUnifiedRosterTests(unittest.IsolatedAsyncioTestCase):
@@ -200,7 +260,9 @@ class ListUnifiedRosterTests(unittest.IsolatedAsyncioTestCase):
         pool = _RosterFakePool()
         with _patch_pool(pool), _patch_no_platform_installs():
             await roster.register_external_agent(tenant_id="tenant-1", workspace_id="ws-1", key_hash="hash-j")
-            await roster.set_external_agent_revoked(key_hash="hash-j", revoked=True)
+            await roster.set_external_agent_revoked(
+                tenant_id="tenant-1", workspace_id="ws-1", key_hash="hash-j", revoked=True,
+            )
             unified = await roster.list_unified_roster(tenant_id="tenant-1", workspace_id="ws-1")
         self.assertEqual([row for row in unified if row["kind"] == "external"], [])
 

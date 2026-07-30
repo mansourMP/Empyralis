@@ -54,6 +54,51 @@ HUMAN_ASSIGNEE_MIGRATION = REPO_ROOT / "migrations" / "add_task_human_assignee.s
 # two files are independent test suites and this keeps this file runnable on
 # its own, matching test_task_subtasks_and_labels.py's own "self-contained"
 # convention). ────────────────────────────────────────────────────────────
+#
+# MAN-109 follow-up: project_tasks is now FORCE RLS, so project_tasks_
+# service.py's call sites (including assign_task_to_user) go through
+# control_plane_repository.rls_fetchrow/rls_fetch, which open a scoped
+# connection via pool.acquire() instead of calling pool.fetchrow/fetch
+# directly. _FakeConnection is the acquire() target those helpers need --
+# see test_project_tasks.py's identical copy for the full rationale.
+
+
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeConnection:
+    def __init__(self, pool: "_QueuedFakePool") -> None:
+        self._pool = pool
+
+    async def fetchrow(self, query, *args):
+        return await self._pool.fetchrow(query, *args)
+
+    async def fetch(self, query, *args):
+        return await self._pool.fetch(query, *args)
+
+    async def execute(self, query, *args):
+        if "set_config(" in query:
+            return "SELECT 1"
+        return await self._pool.execute(query, *args)
+
+    def transaction(self):
+        return _FakeTransaction()
+
+
+class _FakeAcquire:
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class _QueuedFakePool:
@@ -79,6 +124,9 @@ class _QueuedFakePool:
     async def execute(self, query, *args):
         self.execute_calls.append((query, args))
         return "UPDATE 1"
+
+    def acquire(self):
+        return _FakeAcquire(_FakeConnection(self))
 
 
 def _task_row(**overrides) -> dict:
