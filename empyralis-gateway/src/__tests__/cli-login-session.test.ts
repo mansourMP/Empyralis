@@ -469,6 +469,97 @@ test("Claude Code's paste-back prompt is unaffected: no follow-up line is mis-ca
   assert.match(codePromptEvents[0].text, /Paste code here/);
 });
 
+// ---- Real Claude Code output: the client_id-truncation lead, checked ------
+// A reported bug: the browser showed Anthropic's own "Invalid OAuth Request
+// — Missing client_id parameter" error page after opening the URL the
+// Gateway relayed. The leading hypothesis was that `claude`'s own stdout
+// wraps the long authorize URL across two terminal lines, and because
+// extraction ran per-line, only the first fragment matched — truncating
+// right before client_id.
+//
+// That hypothesis was checked against REAL ground truth, not assumed: live
+// `claude auth login --claudeai` (v2.1.220) was spawned exactly the way this
+// module spawns it (stdbuf -oL -eL prefix, piped/non-TTY stdio, via Node's
+// child_process.spawn) and its raw stdout was captured byte-for-byte, both
+// against an already-authenticated HOME and a from-scratch empty HOME (no
+// existing credentials) — same result both times. The CLI does NOT wrap the
+// URL: "If the browser didn't open, visit: <url>" prints as one single,
+// uncolored, un-decorated line, arriving in one single stdout `data` chunk,
+// terminated by one `\n`. The client_id parameter is present, verified
+// end-to-end by feeding this exact captured line through the real (not
+// mocked) extraction path.
+//
+// This fixture is that real capture (the OAuth `code`/`state`/
+// `code_challenge` values were single-use, already expired by the time this
+// test was written, and are not a live credential). It's here so a FUTURE
+// regression in URL_PATTERN, the ANSI-stripping, or the line-buffering logic
+// that clips anything from this specific, realistic shape gets caught — not
+// because line-wrapping was the actual root cause here (it wasn't).
+test("real Claude Code output (claude auth login --claudeai, v2.1.220, piped/non-TTY): the full authorize URL including client_id is captured intact from one single-line chunk", async () => {
+  const fake = makeFakeChild();
+  const { events, publish } = collectingPublisher();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    commandExists: () => "/usr/bin/claude",
+  });
+  manager.setEventPublisher(publish);
+
+  await manager.start({ runId: "run-claude-real-url", runtime: "claude_code" });
+  // Byte-for-byte real captured stdout chunk (single `data` event, single
+  // line) from `claude auth login --claudeai` under stdbuf -oL -eL, piped,
+  // non-TTY stdio — the exact conditions this module spawns under.
+  fake.emitStdout(
+    "Opening browser to sign in…\n" +
+      "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=KSABa9o7wSJ36-_SRnqjWpMfZEs5fL2woZmqATA-R98&code_challenge_method=S256&state=Z_BGje3CVadCKYjt31FG83plFQb7nzXEagdpsLg29e4\n" +
+      "Paste code here if prompted > ",
+  );
+
+  const urlEvents = events.filter((e): e is CliLoginOutputEvent => e.event === "output" && e.kind === "url");
+  assert.equal(urlEvents.length, 1, "exactly one url event — the banner line above it must not spuriously match");
+  assert.equal(
+    urlEvents[0].text,
+    "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=KSABa9o7wSJ36-_SRnqjWpMfZEs5fL2woZmqATA-R98&code_challenge_method=S256&state=Z_BGje3CVadCKYjt31FG83plFQb7nzXEagdpsLg29e4",
+    "the full URL, byte-for-byte, must reach the event publisher",
+  );
+  assert.ok(urlEvents[0].text.includes("client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e"), "client_id must not be dropped");
+});
+
+// A second, adversarial variant of the same fixture: what the ORIGINAL
+// line-wrap hypothesis described, even though live evidence shows the real
+// CLI doesn't actually do this. Kept as a belt-and-suspenders regression: IF
+// a future `claude` version (or a differently-configured terminal) ever DOES
+// split this line across two stdout `data` chunks — mid-parameter, before
+// client_id is fully written — extractSafeLines' persistent `state.
+// lineBuffer` must still reassemble it before matching, per its own doc
+// comment ("Chunk-boundary handling").
+test("a hypothetical mid-URL chunk split (before client_id is fully written) is still reassembled and captured intact", async () => {
+  const fake = makeFakeChild();
+  const { events, publish } = collectingPublisher();
+  const manager = new CliLoginSessionManager({
+    spawnImpl: spawnImplReturning(fake),
+    commandExists: () => "/usr/bin/claude",
+  });
+  manager.setEventPublisher(publish);
+
+  await manager.start({ runId: "run-claude-split-chunk", runtime: "claude_code" });
+  // Split mid-way through "client_id=..." itself, across two separate
+  // stdout `data` events, with NO newline in the first fragment.
+  fake.emitStdout(
+    "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c25",
+  );
+  fake.emitStdout(
+    "0a-e61b-44d9-88ed-5944d1962f5e&response_type=code&state=Z_BGje3CVadCKYjt31FG83plFQb7nzXEagdpsLg29e4\n",
+  );
+
+  const urlEvents = events.filter((e): e is CliLoginOutputEvent => e.event === "output" && e.kind === "url");
+  assert.equal(urlEvents.length, 1);
+  assert.equal(
+    urlEvents[0].text,
+    "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&state=Z_BGje3CVadCKYjt31FG83plFQb7nzXEagdpsLg29e4",
+    "the URL split across two chunks, mid-client_id, must still be reassembled whole before matching",
+  );
+});
+
 // ---- xAI Grok Build (device-code flow) ------------------------------------
 // docs.x.ai/build's authentication guide (fetched live 2026-07-24): `grok
 // login --device-auth` "prints a URL and code to the terminal... Grok polls
