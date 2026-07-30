@@ -53,6 +53,11 @@ enforced without asking.
 
 - **One agent = one worktree = one branch.** Never two agents editing the same
   working tree. See `docs/AGENT-OPERATING-RULES.md`.
+- **Never `git stash` when other agents are running.** Worktrees share one
+  `.git`, so they share one stash stack — a `stash pop` can silently pull in a
+  *different* agent's uncommitted work. This happened 2026-07-31 and was caught
+  only because the agent inspected what it popped. To revert temporarily, use
+  `git diff > /tmp/x.patch` + `git checkout --`, then `git apply`.
 - Never weaken a test assertion to make it pass. A green suite that asserts
   nothing is worse than a red one.
 - Never commit `frontend/next-env.d.ts` or `frontend/tsconfig.json` — a dev
