@@ -999,6 +999,17 @@ a.fleet-breadcrumb:hover {
   position: relative;
   padding: 16px 8px 0;
   border-top: 1px solid var(--border);
+  /* Same z-index heritage as .fleet-sage-launcher / .fleet-health-float /
+     .fleet-bugreport-float / .fleet-help-float above: position:relative
+     alone doesn't create a stacking context (z-index stays "auto"), so
+     without an explicit value here .fleet-rail-account-popover's own
+     z-index:10 was being compared against THOSE wrappers' z-index:20 one
+     level up — and losing. The popover's fill is opaque (var(--bg-card)),
+     but those rail controls painted on top of it, which read as the menu
+     itself being transparent. Matching the same z-index:20 here gives the
+     popover its own stacking context to win in, same as every other rail
+     popover already does. */
+  z-index: 20;
 }
 
 .fleet-rail--collapsed .fleet-rail-owner {
