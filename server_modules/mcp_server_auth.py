@@ -243,9 +243,17 @@ async def revoke_workspace_mcp_api_key(
     # revoked above regardless of whether this side-channel succeeds — auth
     # never depends on the roster row.
     try:
+        from server_modules import control_plane_repository as cpr
         from server_modules import mcp_external_agent_roster_service as roster
 
-        await roster.set_external_agent_revoked(key_hash=str(entry.get("hash") or ""), revoked=True)
+        entry_workspace_id = str(entry.get("workspace_id") or "").strip()
+        entry_tenant_id = await cpr.resolve_tenant_id_for_workspace(entry_workspace_id, default="default")
+        await roster.set_external_agent_revoked(
+            tenant_id=entry_tenant_id,
+            workspace_id=entry_workspace_id,
+            key_hash=str(entry.get("hash") or ""),
+            revoked=True,
+        )
     except Exception:
         LOGGER.warning("Failed to mirror MCP key revoke into external-agent roster", exc_info=True)
 

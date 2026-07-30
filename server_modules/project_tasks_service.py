@@ -554,15 +554,20 @@ async def _resolve_parent_task(
     resolved_child_id = str(child_task_id or "").strip()
     if resolved_child_id and resolved_parent_id == resolved_child_id:
         raise ValueError("A task cannot be its own sub-task.")
-    parent_row = await pool.fetchrow(
+    _scope_tenant_id = str(tenant_id or "").strip()
+    _scope_workspace_id = str(workspace_id or "").strip()
+    parent_row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         SELECT id, project_id, parent_task_id
         FROM project_tasks
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        _scope_tenant_id,
+        _scope_workspace_id,
         resolved_parent_id,
+        tenant_id=_scope_tenant_id,
+        workspace_id=_scope_workspace_id,
     )
     if parent_row is None:
         raise ValueError(f"Parent task {resolved_parent_id} not found in this workspace.")
@@ -581,15 +586,18 @@ async def _resolve_parent_task(
             f"top-level task."
         )
     if resolved_child_id:
-        child_of_child = await pool.fetchrow(
+        child_of_child = await control_plane_repository.rls_fetchrow(
+            pool,
             """
             SELECT id FROM project_tasks
             WHERE tenant_id = $1 AND workspace_id = $2 AND parent_task_id = $3
             LIMIT 1
             """,
-            str(tenant_id or "").strip(),
-            str(workspace_id or "").strip(),
+            _scope_tenant_id,
+            _scope_workspace_id,
             resolved_child_id,
+            tenant_id=_scope_tenant_id,
+            workspace_id=_scope_workspace_id,
         )
         if child_of_child is not None:
             raise ValueError(
@@ -656,7 +664,8 @@ async def create_task(
             project_id=project_id,
         )
     tid = str(task_id or "").strip() or _new_task_id()
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         INSERT INTO project_tasks (id, tenant_id, workspace_id, project_id, title, description, created_by, due_at, priority, parent_task_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10)
@@ -672,6 +681,8 @@ async def create_task(
         _coerce_due_at(due_at),
         resolved_priority,
         resolved_parent_id,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     return _row_to_task(row)
 
@@ -685,7 +696,10 @@ async def get_task(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         SELECT {_TASK_COLUMNS},
                {_TASK_ROLLUP_COLUMNS}
@@ -693,9 +707,11 @@ async def get_task(
 {_TASK_ROLLUP_JOINS}
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(task_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_task(row)
 
@@ -730,7 +746,9 @@ async def list_tasks(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    params: List[Any] = [str(tenant_id or "").strip(), str(workspace_id or "").strip()]
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    params: List[Any] = [resolved_tenant_id, resolved_workspace_id]
     clauses = ["tenant_id = $1", "workspace_id = $2"]
     if project_id:
         params.append(str(project_id).strip())
@@ -754,7 +772,9 @@ async def list_tasks(
         WHERE {' AND '.join(clauses)}
         ORDER BY {_order_by_clause(sort)}
     """
-    rows = await pool.fetch(query, *params)
+    rows = await control_plane_repository.rls_fetch(
+        pool, query, *params, tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id,
+    )
     return [t for t in (_row_to_task(r) for r in rows) if t]
 
 
@@ -831,7 +851,9 @@ async def list_my_tasks(
     if pool is None:
         return []
     caller_id = str(external_agent_id or agent_id or "").strip()
-    params: List[Any] = [str(tenant_id or "").strip(), str(workspace_id or "").strip()]
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    params: List[Any] = [resolved_tenant_id, resolved_workspace_id]
     clauses = ["tenant_id = $1", "workspace_id = $2"]
     if caller_id:
         params.append(caller_id)
@@ -853,7 +875,9 @@ async def list_my_tasks(
         WHERE {' AND '.join(clauses)}
         ORDER BY {_order_by_clause(sort, prefix=_MINE_FIRST_SORT_SQL)}
     """
-    rows = await pool.fetch(query, *params)
+    rows = await control_plane_repository.rls_fetch(
+        pool, query, *params, tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id,
+    )
     return [t for t in (_row_to_task(r) for r in rows) if t]
 
 
@@ -948,7 +972,8 @@ async def add_task_comment(
     }
     if stored_mentions:
         comment["mentions"] = stored_mentions
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         UPDATE project_tasks
         SET metadata = jsonb_set(
@@ -965,6 +990,8 @@ async def add_task_comment(
         resolved_workspace_id,
         resolved_task_id,
         json.dumps([comment]),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     task = _row_to_task(row)
     if task is not None and stored_mentions:
@@ -1087,7 +1114,10 @@ async def update_task(
         if resolved_priority is None:
             raise ValueError(_invalid_priority_message(priority))
     resolved_due_at = None if clear_due_at else _coerce_due_at(due_at)
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         UPDATE project_tasks
         SET title = COALESCE(NULLIF($4, ''), title),
@@ -1099,8 +1129,8 @@ async def update_task(
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         RETURNING
         """ + _TASK_RETURNING_SQL,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(task_id or "").strip(),
         str(title or "").strip(),
         None if description is None else str(description).strip(),
@@ -1108,6 +1138,8 @@ async def update_task(
         bool(clear_due_at),
         resolved_due_at,
         resolved_priority,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_task(row)
 
@@ -1158,7 +1190,8 @@ async def set_task_parent(
             project_id=existing.get("project_id"),
             child_task_id=resolved_task_id,
         )
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         UPDATE project_tasks
         SET parent_task_id = $4,
@@ -1170,6 +1203,8 @@ async def set_task_parent(
         resolved_workspace_id,
         resolved_task_id,
         resolved_parent_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_task(row)
 
@@ -1202,7 +1237,10 @@ async def set_task_plan(
     if pool is None:
         return None
     normalized_plan = [dict(item) for item in (plan or []) if isinstance(item, dict)]
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         UPDATE project_tasks
         SET plan = $4::jsonb,
@@ -1210,10 +1248,12 @@ async def set_task_plan(
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         RETURNING
         """ + _TASK_RETURNING_SQL,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(task_id or "").strip(),
         json.dumps(normalized_plan),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_task(row)
 
@@ -1224,11 +1264,16 @@ async def _agent_install_exists(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return False
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         "SELECT id FROM workspace_agent_installs WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
         str(agent_id or "").strip(),
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return row is not None
 
@@ -1247,11 +1292,16 @@ async def agent_project_id(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         "SELECT project_id FROM workspace_agent_installs WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
         str(agent_id or "").strip(),
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     if row is None:
         return None
@@ -1309,7 +1359,8 @@ async def assign_task(
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
             "Postgres is required to assign a task."
         )
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         UPDATE project_tasks
         SET assignee_agent_id = $4,
@@ -1324,6 +1375,8 @@ async def assign_task(
         resolved_task_id,
         resolved_agent_id,
         list(UNSTARTED_TASK_STATUSES),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     updated = _row_to_task(row)
     if updated is None:
@@ -1360,14 +1413,19 @@ async def _workspace_user_exists(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return False
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         SELECT user_id FROM workspace_memberships
         WHERE user_id = $1 AND tenant_id = $2 AND workspace_id = $3 AND status = 'active'
         """,
         str(user_id or "").strip(),
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return row is not None
 
@@ -1423,7 +1481,8 @@ async def assign_task_to_user(
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
             "Postgres is required to assign a task."
         )
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         UPDATE project_tasks
         SET assignee_user_id = $4,
@@ -1436,6 +1495,8 @@ async def assign_task_to_user(
         resolved_workspace_id,
         resolved_task_id,
         resolved_user_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     updated = _row_to_task(row)
     if updated is None:

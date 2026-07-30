@@ -92,7 +92,8 @@ async def create_report(
             "Postgres is required to save a bug report."
         )
     rid = str(report_id or "").strip() or _new_report_id()
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         INSERT INTO bug_reports
             (id, tenant_id, workspace_id, reported_by_user_id, title, description,
@@ -110,6 +111,8 @@ async def create_report(
         str(page_path or "").strip()[:MAX_PAGE_PATH_LENGTH],
         str(user_agent or "").strip()[:MAX_USER_AGENT_LENGTH],
         json.dumps(dict(metadata or {})),
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     report = _row_to_report(row)
     if report is None:
@@ -127,7 +130,10 @@ async def list_reports(
     if pool is None:
         return []
     capped_limit = max(1, min(int(limit or 100), 500))
-    rows = await pool.fetch(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT id, tenant_id, workspace_id, reported_by_user_id, title, description,
                page_path, user_agent, status, metadata, created_at
@@ -136,8 +142,10 @@ async def list_reports(
         ORDER BY created_at DESC
         LIMIT $3
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         capped_limit,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return [r for r in (_row_to_report(row) for row in rows) if r]

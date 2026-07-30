@@ -134,7 +134,8 @@ async def register_external_agent(
         name = agent_name_pool.assign_agent_name(existing_names)
 
     new_id = _new_external_agent_id()
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         INSERT INTO mcp_external_agent_roster (id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id)
         VALUES ($1, $2, $3, $4, $5, $6)
@@ -147,18 +148,27 @@ async def register_external_agent(
         name,
         hashed,
         str(mcp_key_id or "").strip() or None,
+        tenant_id=tenant,
+        workspace_id=ws,
     )
     if row is None:
         # Conflict — another writer already registered this key_hash (mint
         # + backfill race, or a re-registration attempt). Return the
-        # existing row rather than a second identity.
-        row = await pool.fetchrow(
+        # existing row rather than a second identity. Scoped to the SAME
+        # (tenant, ws) this call was invoked with -- a key_hash collision
+        # under a DIFFERENT tenant is not "the same key re-registering", it
+        # is a hash collision, and this must not silently hand back another
+        # tenant's roster row just because RLS was asked to bypass here.
+        row = await control_plane_repository.rls_fetchrow(
+            pool,
             """
             SELECT id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
             FROM mcp_external_agent_roster
             WHERE key_hash = $1
             """,
             hashed,
+            tenant_id=tenant,
+            workspace_id=ws,
         )
     entry = _row_to_roster_entry(row)
     if entry is None:
@@ -169,41 +179,71 @@ async def register_external_agent(
 async def get_external_agent_by_key_hash(*, key_hash: str) -> Optional[Dict[str, Any]]:
     """Look up the roster entry for a bearer key's hash — the read side of
     the identity rule, called on every MCP request that resolves a bearer
-    key (see mcp_server_auth.resolve_workspace_from_api_key)."""
+    key (see mcp_server_auth.resolve_workspace_from_api_key).
+
+    THE ONE GENUINE bypass_rls IN THIS MODULE. This is auth bootstrap: the
+    whole point of the call is to discover which tenant/workspace a bearer
+    key belongs to, which means no tenant/workspace scope can exist yet at
+    call time — there is nothing to pass to rls_fetchrow's tenant_id/
+    workspace_id that would not be circular. key_hash is a SHA-256 digest of
+    a cryptographically random bearer token (mcp_server_auth._hash_key) and
+    is UNIQUE in the schema (mcp_external_agent_roster.key_hash), so the
+    WHERE clause is exactly as selective with the bypass as it would be
+    scoped — the tenant isolation this row needs comes from "you cannot
+    produce this hash without the plaintext key," not from a WHERE filter.
+    Matches the same pattern control_plane_repository.py documents for
+    self-hosted node auth (bearer-token-keyed lookups before a tenant is
+    known)."""
     hashed = str(key_hash or "").strip()
     if not hashed:
         return None
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         SELECT id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
         FROM mcp_external_agent_roster
         WHERE key_hash = $1
         """,
         hashed,
+        bypass_rls=True,
     )
     return _row_to_roster_entry(row)
 
 
-async def set_external_agent_revoked(*, key_hash: str, revoked: bool = True) -> None:
+async def set_external_agent_revoked(
+    *, tenant_id: str, workspace_id: str, key_hash: str, revoked: bool = True,
+) -> None:
     """Mirror a bearer key's revoke/un-revoke into the roster row (best
     effort — the actual authorization check lives in mcp_api_keys.json;
     this only keeps the roster's "who's currently active" listing honest).
     Never raises: called from revoke_workspace_mcp_api_key, which must not
-    fail because this side-channel failed."""
+    fail because this side-channel failed.
+
+    Unlike get_external_agent_by_key_hash, this is NOT an auth-bootstrap
+    call -- the caller already knows which workspace's key it is revoking
+    (mcp_server_auth.revoke_workspace_mcp_api_key reads it straight off the
+    matched JSON key entry before calling this) and can resolve tenant_id
+    from it, so real scope is threaded here rather than reaching for
+    bypass_rls."""
     hashed = str(key_hash or "").strip()
-    if not hashed:
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    if not hashed or not resolved_tenant_id or not resolved_workspace_id:
         return
     try:
         pool = await control_plane_repository.ensure_control_plane_schema()
         if pool is None:
             return
-        await pool.execute(
+        await control_plane_repository.rls_execute(
+            pool,
             "UPDATE mcp_external_agent_roster SET revoked = $2, updated_at = NOW() WHERE key_hash = $1",
             hashed,
             bool(revoked),
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
         )
     except Exception:
         LOGGER.warning("Failed to mirror MCP key revoke into external-agent roster", exc_info=True)
@@ -220,7 +260,8 @@ async def list_workspace_external_agents(
     tenant = str(tenant_id or "").strip()
     ws = str(workspace_id or "").strip()
     if include_revoked:
-        rows = await pool.fetch(
+        rows = await control_plane_repository.rls_fetch(
+            pool,
             """
             SELECT id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
             FROM mcp_external_agent_roster
@@ -228,9 +269,11 @@ async def list_workspace_external_agents(
             ORDER BY created_at ASC
             """,
             tenant, ws,
+            tenant_id=tenant, workspace_id=ws,
         )
     else:
-        rows = await pool.fetch(
+        rows = await control_plane_repository.rls_fetch(
+            pool,
             """
             SELECT id, tenant_id, workspace_id, display_name, key_hash, mcp_key_id, revoked, created_at, updated_at
             FROM mcp_external_agent_roster
@@ -238,6 +281,7 @@ async def list_workspace_external_agents(
             ORDER BY created_at ASC
             """,
             tenant, ws,
+            tenant_id=tenant, workspace_id=ws,
         )
     return [e for e in (_row_to_roster_entry(r) for r in rows) if e]
 

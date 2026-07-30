@@ -269,4 +269,72 @@ CREATE POLICY empyralis_security_control_events_scope ON security_control_events
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- MAN-109 follow-up: the six tables that previously relied entirely on
+-- hand-written `WHERE tenant_id = $1 AND workspace_id = $2` filters in
+-- project_tasks_service.py / projects_repository.py / workspace_labels_
+-- service.py / bug_report_service.py / mcp_external_agent_roster_service.py.
+-- Safe to enable now -- and only now -- because every one of those services'
+-- 43 combined pool.fetch/fetchrow/fetchval/execute call sites against these
+-- tables has been converted to the scoped rls_fetch/rls_fetchrow/rls_fetchval/
+-- rls_execute helpers (control_plane_repository.py), which set the
+-- app.current_tenant_id / app.current_workspace_id session GUCs this policy
+-- reads before every statement. The one exception, mcp_external_agent_roster_
+-- service.get_external_agent_by_key_hash, is the auth-bootstrap lookup that
+-- resolves which tenant a bearer key belongs to before any tenant is known --
+-- it carries an explicit, individually-justified bypass_rls=True rather than
+-- a tenant filter that cannot exist yet. Turning this on BEFORE that
+-- conversion landed would have made every one of those call sites start
+-- silently returning zero rows on reads and raising WITH CHECK violations on
+-- writes -- see server_modules/tests/test_rls_database_level_isolation_man109.py
+-- for the proof this gap was real, and the new isolation tests this change
+-- ships for the regression guard.
+
+ALTER TABLE project_tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_tasks FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_project_tasks_scope ON project_tasks;
+CREATE POLICY empyralis_project_tasks_scope ON project_tasks
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE projects FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_projects_scope ON projects;
+CREATE POLICY empyralis_projects_scope ON projects
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
+ALTER TABLE project_memberships ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_memberships FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_project_memberships_scope ON project_memberships;
+CREATE POLICY empyralis_project_memberships_scope ON project_memberships
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
+ALTER TABLE workspace_labels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_labels FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_workspace_labels_scope ON workspace_labels;
+CREATE POLICY empyralis_workspace_labels_scope ON workspace_labels
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
+ALTER TABLE bug_reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bug_reports FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_bug_reports_scope ON bug_reports;
+CREATE POLICY empyralis_bug_reports_scope ON bug_reports
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
+ALTER TABLE mcp_external_agent_roster ENABLE ROW LEVEL SECURITY;
+ALTER TABLE mcp_external_agent_roster FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_mcp_external_agent_roster_scope ON mcp_external_agent_roster;
+CREATE POLICY empyralis_mcp_external_agent_roster_scope ON mcp_external_agent_roster
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;
