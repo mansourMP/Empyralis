@@ -13,6 +13,9 @@ import {
   providerLabel,
   modelsForProvider,
   defaultModelForProvider,
+  isRecommendedModel,
+  isLargeModel,
+  LARGE_MODEL_WARNING,
   runtimeForProvider,
   normalizeCliRuntime,
   type CliSubscriptionRuntime,
@@ -182,7 +185,11 @@ export function FleetCreateAgentWizard({
   // an empty platformProvider ("Platform default") must NOT re-default
   // selectedModel, or every plain create would silently overwrite the
   // seeded model default (seed_specialist_metadata's "deepseek-reasoner").
-  const activeModelProvider = providerMode === "byok" ? byokProvider : providerMode === "local" ? (localProvider || "ollama") : providerMode === "platform" ? platformProvider : "";
+  // "subscription" joined this 2026-07-30 — the wizard's "Which model?" step
+  // used to have no case at all for it (see the submit handler below for the
+  // matching PATCH-body half of that same bug), so a cli_subscription agent
+  // created here could never end up with an explicit model either.
+  const activeModelProvider = providerMode === "byok" ? byokProvider : providerMode === "local" ? (localProvider || "ollama") : providerMode === "subscription" ? subscriptionProvider : providerMode === "platform" ? platformProvider : "";
   useEffect(() => {
     if (!activeModelProvider) return;
     setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(activeModelProvider) ? "" : defaultModelForProvider(activeModelProvider));
@@ -382,13 +389,19 @@ export function FleetCreateAgentWizard({
         // silently accepted the user's subscription choice and left the
         // agent on the platform-credits default, forcing users to redo
         // the entire selection on the Model tab afterward. Every BYO-brain
-        // agent created via the wizard hit this bug.
+        // agent created via the wizard hit this bug. `model` joined this
+        // patch 2026-07-30 (same root cause FleetAgentDetail.tsx's
+        // saveAgentModelConfig had: cli_subscription was excluded from the
+        // "which fields does this mode actually save" list) — confirmed live
+        // against production that an agent saved without it, "Compass"
+        // (ws_c4601e47c95a), had model_config with no `model` key at all.
         await patchAgent(agentId, {
           model_config: {
             mode: "cli_subscription",
             provider: subscriptionProvider,
             runtime: runtimeForProvider(subscriptionProvider),
             gateway_binding: gatewayBinding.trim(),
+            model: selectedModel.trim() || undefined,
           },
         });
       }
@@ -714,8 +727,49 @@ export function FleetCreateAgentWizard({
                   <>
                     <label className="fleet-wizard-label">Model</label>
                     <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => setSelectedModel(e.currentTarget.value)}>
-                      {modelsForProvider(byokProvider).map((m) => <option key={m} value={m}>{m}</option>)}
+                      {modelsForProvider(byokProvider).map((m) => (
+                        <option key={m} value={m}>{isRecommendedModel(byokProvider, m) ? `${m} (Recommended)` : m}</option>
+                      ))}
                     </select>
+                    {isLargeModel(byokProvider, selectedModel) && (
+                      <p className="fleet-channel-expand-error" style={{ margin: "4px 0 0" }}>{LARGE_MODEL_WARNING}</p>
+                    )}
+                  </>
+                )
+              )}
+              {/* Model picker for "Your subscription" (2026-07-30 fix): this
+                  block didn't exist at all before — the wizard went straight
+                  from "which CLI" to step 3 with no way to name a model, and
+                  the submit handler above didn't even patch one if it had
+                  one. See MODELS_BY_PROVIDER's doc comment in
+                  fleet-provider-constants.ts for how each runtime's catalog
+                  (or the deliberate lack of one, for xai_grok_cli/cursor_cli)
+                  was sourced. */}
+              {providerMode === "subscription" && (
+                FREEFORM_MODEL_PROVIDERS.has(subscriptionProvider) ? (
+                  <>
+                    <label className="fleet-wizard-label">Model ID (optional)</label>
+                    <input
+                      className="fleet-wizard-input"
+                      value={selectedModel}
+                      onChange={(e) => setSelectedModel(e.currentTarget.value)}
+                      placeholder="Leave blank to use the CLI's own default"
+                    />
+                    <p className="fleet-wizard-hint">
+                      {providerLabel(subscriptionProvider)} has no published model-id catalog — enter one only if you know it accepts it.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <label className="fleet-wizard-label">Model</label>
+                    <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => setSelectedModel(e.currentTarget.value)}>
+                      {modelsForProvider(subscriptionProvider).map((m) => (
+                        <option key={m} value={m}>{isRecommendedModel(subscriptionProvider, m) ? `${m} (Recommended)` : m}</option>
+                      ))}
+                    </select>
+                    {isLargeModel(subscriptionProvider, selectedModel) && (
+                      <p className="fleet-channel-expand-error" style={{ margin: "4px 0 0" }}>{LARGE_MODEL_WARNING}</p>
+                    )}
                   </>
                 )
               )}

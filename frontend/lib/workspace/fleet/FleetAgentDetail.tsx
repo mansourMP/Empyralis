@@ -2874,6 +2874,7 @@ import {
   BYOK_PROVIDERS, SUBSCRIPTION_PROVIDERS, LOCAL_PROVIDERS, MODE_LABELS,
   COMING_SOON_MODES, COMING_SOON_NOTE, runtimeForProvider, normalizeCliRuntime, type ProviderMode,
   FREEFORM_MODEL_PROVIDERS, modelsForProvider, defaultModelForProvider,
+  isRecommendedModel, isLargeModel, LARGE_MODEL_WARNING,
   REASONING_EFFORT_OPTIONS, REASONING_EFFORT_SUPPORTED_MODES, reasoningEffortLabel,
   CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME, type CliSubscriptionRuntime,
 } from "./fleet-provider-constants";
@@ -2893,6 +2894,36 @@ function resolveDisplayMode(config: Record<string, any>): ProviderMode {
   if (mode === "cli_subscription") return "cli_subscription";
   if (mode === "local") return "local";
   return "platform_credits";
+}
+
+/** Label for a <select> model option — appends "(Recommended)" to the
+ *  balanced/mid-tier pick every provider's picker pre-selects (see
+ *  DEFAULT_MODEL_BY_PROVIDER's own doc comment for how that pick is chosen),
+ *  so the reason it's already selected is visible, not just implicit. */
+function modelOptionLabel(provider: string, modelId: string): string {
+  return isRecommendedModel(provider, modelId) ? `${modelId} (Recommended)` : modelId;
+}
+
+/** Founder's rule (2026-07-30): warn — don't block — when the user manually
+ *  picks a model this mirror knows is the large/premium tier for its
+ *  provider, so a routine turn doesn't silently burn a subscription's daily
+ *  limit. Renders nothing when the provider has no evidenced large-tier set
+ *  (isLargeModel) or the current pick isn't in it. */
+function ModelSizeWarning({ provider, model }: { provider: string; model: string }) {
+  if (!isLargeModel(provider, model)) return null;
+  return <p className="fleet-channel-expand-error" style={{ margin: 0 }}>{LARGE_MODEL_WARNING}</p>;
+}
+
+/** What `selectedModel` should start as for a given mode+provider+saved value
+ *  — the saved value always wins; otherwise the provider's Recommended pick,
+ *  or "" for a freeform provider (never fabricate a value the CLI/API
+ *  wouldn't recognize) or a mode with no model concept (platform_credits). */
+function seedSelectedModel(mode: ProviderMode, provider: string, savedModel: string): string {
+  if (savedModel) return savedModel;
+  if (mode !== "byok_api" && mode !== "cli_subscription" && mode !== "local") return "";
+  const effectiveProvider = provider || (mode === "local" ? "ollama" : "");
+  if (!effectiveProvider || FREEFORM_MODEL_PROVIDERS.has(effectiveProvider)) return "";
+  return defaultModelForProvider(effectiveProvider);
 }
 
 // Phase 7B: preset / hardware-lock / context-policy / today's cost, shown at
@@ -3099,7 +3130,16 @@ async function saveAgentModelConfig(
     if (mode === "byok_api" || mode === "cli_subscription" || mode === "local") {
       patch.provider = provider;
     }
-    if ((mode === "byok_api" || mode === "local") && selectedModel.trim()) {
+    // BUG FIX (2026-07-30): this used to read `mode === "byok_api" ||
+    // mode === "local"` — cli_subscription was silently excluded, so even
+    // when the picker above collected a model choice, Save never included it
+    // in the PATCH body. Confirmed live: agent "Compass" (production,
+    // ws_c4601e47c95a) has mode: cli_subscription, a real gateway_binding,
+    // and no `model` key at all — this is why "I can't choose a model" was
+    // reported. The Gateway side (cli-runner.ts buildInvocation) has always
+    // forwarded model_config.model into each CLI's real --model flag; this
+    // was purely a frontend gap between "collected" and "saved".
+    if ((mode === "byok_api" || mode === "cli_subscription" || mode === "local") && selectedModel.trim()) {
       patch.model = selectedModel.trim();
     }
     // BYO-brain Phase 0: forward-wire which box + runtime.
@@ -3202,7 +3242,9 @@ function AgentModelPickerRow({
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
   const [provider, setProvider] = useState<string>(config.provider || "");
-  const [selectedModel, setSelectedModel] = useState<string>(config.model || "");
+  const [selectedModel, setSelectedModel] = useState<string>(() =>
+    seedSelectedModel(resolveDisplayMode(config), config.provider || "", config.model || ""),
+  );
   const [apiKey, setApiKey] = useState("");
   const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
   const [reasoningEffort, setReasoningEffort] = useState<string>(config.reasoning_effort || "");
@@ -3220,9 +3262,10 @@ function AgentModelPickerRow({
   useEffect(() => {
     if (!open) return;
     const fresh = agent?.model_config || {};
-    setMode(resolveDisplayMode(fresh));
+    const freshMode = resolveDisplayMode(fresh);
+    setMode(freshMode);
     setProvider(fresh.provider || "");
-    setSelectedModel(fresh.model || "");
+    setSelectedModel(seedSelectedModel(freshMode, fresh.provider || "", fresh.model || ""));
     setApiKey("");
     setGatewayBinding(fresh.gateway_binding || "");
     setReasoningEffort(fresh.reasoning_effort || "");
@@ -3253,15 +3296,25 @@ function AgentModelPickerRow({
   function onModeChange(next: ProviderMode) {
     setMode(next);
     setError(null);
-    if (next === "byok_api") setProvider(provider || "anthropic");
-    else if (next === "cli_subscription") setProvider(provider || "claude_code_cli");
-    else if (next === "local") setProvider(provider || "ollama");
+    if (next === "byok_api") {
+      const p = provider || "anthropic";
+      setProvider(p);
+      setSelectedModel(seedSelectedModel(next, p, ""));
+    } else if (next === "cli_subscription") {
+      const p = provider || "claude_code_cli";
+      setProvider(p);
+      setSelectedModel(seedSelectedModel(next, p, ""));
+    } else if (next === "local") {
+      const p = provider || "ollama";
+      setProvider(p);
+      setSelectedModel(seedSelectedModel(next, p, ""));
+    }
   }
 
   function onProviderChange(next: string) {
     setProvider(next);
     setError(null);
-    if (mode === "byok_api") {
+    if (mode === "byok_api" || mode === "cli_subscription") {
       setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(next) ? "" : defaultModelForProvider(next));
     } else if (mode === "local") {
       setSelectedModel(defaultModelForProvider(next || "ollama"));
@@ -3362,9 +3415,10 @@ function AgentModelPickerRow({
                   value={selectedModel}
                   onChange={(e) => setSelectedModel(e.currentTarget.value)}
                 >
-                  {modelsForProvider(provider).map((m) => <option key={m} value={m}>{m}</option>)}
+                  {modelsForProvider(provider).map((m) => <option key={m} value={m}>{modelOptionLabel(provider, m)}</option>)}
                 </select>
               )}
+              <ModelSizeWarning provider={provider} model={selectedModel} />
               <input
                 className="fleet-wizard-input"
                 type="password"
@@ -3392,6 +3446,23 @@ function AgentModelPickerRow({
                   <option key={p.id} value={p.id}>{p.label}</option>
                 ))}
               </select>
+              {FREEFORM_MODEL_PROVIDERS.has(provider) ? (
+                <input
+                  className="fleet-wizard-input"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
+                  placeholder="Model id (optional — blank uses the CLI's own default)"
+                />
+              ) : (
+                <select
+                  className="fleet-wizard-input"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
+                >
+                  {modelsForProvider(provider).map((m) => <option key={m} value={m}>{modelOptionLabel(provider, m)}</option>)}
+                </select>
+              )}
+              <ModelSizeWarning provider={provider} model={selectedModel} />
               <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>{cliSubscriptionHint(cliGateways)}</p>
               <GatewayBoxPicker
                 workspaceId={workspaceId}
@@ -3480,17 +3551,21 @@ function ModelTab({
   const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
   const { gateways: cliGateways } = useWorkspaceGateways(workspaceId);
   const cliRuntime = normalizeCliRuntime(runtimeForProvider(provider));
-  const [selectedModel, setSelectedModel] = useState<string>(config.model || "");
+  const [selectedModel, setSelectedModel] = useState<string>(() =>
+    seedSelectedModel(resolveDisplayMode(config), config.provider || "", config.model || ""),
+  );
   const [apiKey, setApiKey] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState<string>(config.reasoning_effort || "");
   // Re-default the model choice when the provider changes AFTER mount (so an
   // id from the previous provider doesn't linger in a <select> that no longer
   // has it) — but never on first render, which would clobber the agent's
-  // actual current model.
+  // actual current model. cli_subscription joined this in the same pass that
+  // gave it a model picker at all (2026-07-30) — see seedSelectedModel's own
+  // doc comment for what it defaults to per provider.
   const skipNextModelReset = useRef(true);
   useEffect(() => {
     if (skipNextModelReset.current) { skipNextModelReset.current = false; return; }
-    if (mode === "byok_api") {
+    if (mode === "byok_api" || mode === "cli_subscription") {
       setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(provider) ? "" : defaultModelForProvider(provider));
     } else if (mode === "local") {
       setSelectedModel(defaultModelForProvider(provider || "ollama"));
@@ -3523,10 +3598,11 @@ function ModelTab({
     hydratedFromAgent.current = true;
     const freshConfig = agent.model_config || {};
     skipNextModelReset.current = true;
-    setMode(resolveDisplayMode(freshConfig));
+    const freshMode = resolveDisplayMode(freshConfig);
+    setMode(freshMode);
     setProvider(freshConfig.provider || "");
     setGatewayBinding(freshConfig.gateway_binding || "");
-    setSelectedModel(freshConfig.model || "");
+    setSelectedModel(seedSelectedModel(freshMode, freshConfig.provider || "", freshConfig.model || ""));
     setReasoningEffort(freshConfig.reasoning_effort || "");
   }, [agent]);
   // COMING_SOON_MODES is empty today (cli_subscription and local both
@@ -3792,8 +3868,9 @@ function ModelTab({
             <>
               <label className="fleet-wizard-label">Model</label>
               <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
-                {modelsForProvider(provider).map((m) => <option key={m} value={m}>{m}</option>)}
+                {modelsForProvider(provider).map((m) => <option key={m} value={m}>{modelOptionLabel(provider, m)}</option>)}
               </select>
+              <ModelSizeWarning provider={provider} model={selectedModel} />
             </>
           )}
           {renderReasoningEffortPicker()}
@@ -3809,6 +3886,34 @@ function ModelTab({
             ))}
           </select>
           <p className="fleet-channel-expand-hint">{SUBSCRIPTION_PROVIDERS.find((p) => p.id === provider)?.detail}</p>
+          {/* Model picker (2026-07-30 fix): this whole block used to jump
+              straight from "which CLI" to reasoning effort — there was no way
+              to choose a model at all, so cli_subscription agents always ran
+              on whatever the CLI's own default happened to be. See
+              MODELS_BY_PROVIDER's doc comment in fleet-provider-constants.ts
+              for how each runtime's catalog (or lack of one) was sourced. */}
+          {FREEFORM_MODEL_PROVIDERS.has(provider) ? (
+            <>
+              <label className="fleet-wizard-label">Model ID (optional)</label>
+              <input
+                className="fleet-wizard-input"
+                value={selectedModel}
+                onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}
+                placeholder="Leave blank to use the CLI's own default"
+              />
+              <p className="fleet-channel-expand-hint">
+                {RUNTIME_LABELS[cliRuntime]} has no published model-id catalog — enter one only if you know it accepts it.
+              </p>
+            </>
+          ) : (
+            <>
+              <label className="fleet-wizard-label">Model</label>
+              <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
+                {modelsForProvider(provider).map((m) => <option key={m} value={m}>{modelOptionLabel(provider, m)}</option>)}
+              </select>
+              <ModelSizeWarning provider={provider} model={selectedModel} />
+            </>
+          )}
           {renderCliReasoningEffortPicker()}
           <div className="fleet-detail-section-title" style={{ marginTop: 16 }}>Brain runs on</div>
           <GatewayBoxPicker

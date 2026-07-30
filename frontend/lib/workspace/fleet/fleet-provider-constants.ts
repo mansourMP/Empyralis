@@ -97,6 +97,29 @@ export const MODELS_BY_PROVIDER: Record<string, string[]> = {
     "claude-sonnet-4-20250514", "claude-opus-4-1-20250805",
     "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022",
   ],
+  // cli_subscription model catalogs — the bug this fixes (2026-07-30): the
+  // Model tab/picker had a "Subscription" (which CLI) select and a
+  // reasoning-effort select, but NO model select at all for cli_subscription
+  // mode, and saveAgentModelConfig's patchModelConfig() explicitly excluded
+  // `model` from the PATCH body even when mode === "cli_subscription" —
+  // confirmed live against production: agent "Compass"
+  // (ainstall_22dd7e89cd6f4e88, workspace ws_c4601e47c95a) has mode:
+  // cli_subscription, a real gateway_binding to a Gateway with claude_code
+  // ready+authenticated, and literally no `model` key at all. The Gateway
+  // side (cli-runner.ts buildInvocation) has supported `--model <value>` for
+  // every runtime since before this fix — it was purely a frontend gap.
+  //
+  // claude_code_cli: mirrors provider_profiles.py PROVIDER_CATALOG's own
+  // "claude_code_cli" entry (default_model: "sonnet", alias_for: "anthropic")
+  // — short aliases, not full versioned ids, since that's the one value
+  // already verified/established in this codebase as what the Claude CLI's
+  // own --model flag accepts for this entry.
+  claude_code_cli: ["sonnet", "opus", "haiku"],
+  // openai-codex (Codex CLI subscription — same provider id PROVIDER_CATALOG
+  // uses): mirrors that catalog's "models" list verbatim.
+  "openai-codex": ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2"],
+  // xai_grok_cli (Grok Build CLI) and cursor_cli are intentionally ABSENT
+  // here, not just empty — see FREEFORM_MODEL_PROVIDERS below for why.
   openai: [
     "gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano",
     "gpt-5.2", "gpt-5-mini", "gpt-5-nano", "gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini",
@@ -121,26 +144,86 @@ export const MODELS_BY_PROVIDER: Record<string, string[]> = {
   ollama: ["llama3.2", "llama3", "mistral", "gemma", "phi3"],
 };
 
+// This is also the "Recommended" pick every model picker pre-selects and
+// labels (see isRecommendedModel / LARGE_MODEL_WARNING below) — the
+// founder's rule (2026-07-30): default to a balanced mid-tier model, never
+// silently to the biggest/priciest one just because it's first in a list, so
+// a routine turn doesn't burn a subscription's daily limit for no reason.
+// Picks are grounded in server_modules/provider_profiles.py's own
+// PROVIDER_MODEL_CATALOG capability_labels ("Balanced" tag) wherever that
+// catalog has an entry — NOT always the same as that same file's
+// PROVIDER_CATALOG.default_model, which is a technical "what to assume when
+// nothing was ever saved" fallback and is sometimes a frontier/premium model
+// (e.g. openai's default_model is "gpt-5.4", tagged "Frontier" — the
+// "Balanced" one there is "gpt-5.4-mini"). Providers with no "Balanced"-
+// tagged entry in that catalog keep their prior pick unchanged (already a
+// reasonable mid-tier choice, e.g. gemini's Flash over Pro).
 export const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
   anthropic: "claude-sonnet-4-6",
-  openai: "gpt-5.4",
+  openai: "gpt-5.4-mini",
   gemini: "gemini-2.5-flash",
   deepseek: "deepseek-chat",
   groq: "llama-3.3-70b-versatile",
   openrouter: "openai/gpt-5.2",
   xai: "grok-4",
   qwen: "qwen-plus",
-  mistral: "mistral-large-latest",
+  mistral: "mistral-medium-latest",
   bedrock: "anthropic.claude-3-5-sonnet-20241022-v2:0",
   ollama_cloud: "gpt-oss:120b",
   ollama: "llama3.2",
+  // cli_subscription — same "Balanced"-tag sourcing as above. claude_code_cli
+  // additionally matches PROVIDER_CATALOG's own default_model ("sonnet") —
+  // no divergence there. openai-codex DOES diverge from that catalog's
+  // default_model ("gpt-5.4", tagged "High quality") in favor of the
+  // "Balanced"-tagged "gpt-5.2" — a deliberate call for this same
+  // daily-limit-protection reason, flagged here since it's a real, visible
+  // deviation from the backend's own stated default.
+  claude_code_cli: "sonnet",
+  "openai-codex": "gpt-5.2",
+  // xai_grok_cli / cursor_cli have no default here — see
+  // FREEFORM_MODEL_PROVIDERS: no verified model-id vocabulary to recommend
+  // from, so the field starts empty (CLI's own default) rather than guessing.
 };
 
-/** Providers with no fixed model catalog (deployment-scoped or fully custom) —
- *  the Model step renders a free-text field instead of a <select> for these. */
+/** Model ids classified as the large/premium tier for a provider — mirrors
+ *  PROVIDER_MODEL_CATALOG's "Highest quality"/"Frontier" capability_labels
+ *  tags (the only two tags that unambiguously mean "flagship, not routine").
+ *  Deliberately NOT populated for providers where the backend catalog has no
+ *  such tag (gemini, xai, deepseek, mistral, groq, qwen, ollama*, openrouter,
+ *  bedrock, openai-codex, cursor_cli, xai_grok_cli) — no warning is better
+ *  than a fabricated one for a tier this mirror has no real evidence for. */
+export const LARGE_MODEL_IDS_BY_PROVIDER: Record<string, ReadonlySet<string>> = {
+  anthropic: new Set(["claude-opus-4-8", "claude-fable-5", "claude-opus-4-7", "claude-opus-4-1-20250805"]),
+  claude_code_cli: new Set(["opus"]),
+  openai: new Set(["gpt-5.5", "gpt-5.5-pro", "gpt-5.4"]),
+};
+
+export function isRecommendedModel(providerId: string, modelId: string): boolean {
+  const rec = DEFAULT_MODEL_BY_PROVIDER[providerId];
+  return Boolean(rec) && Boolean(modelId) && rec === modelId;
+}
+
+export function isLargeModel(providerId: string, modelId: string): boolean {
+  return LARGE_MODEL_IDS_BY_PROVIDER[providerId]?.has(modelId) ?? false;
+}
+
+export const LARGE_MODEL_WARNING =
+  "This is a large model — it will use your daily limit faster. Consider switching to a smaller model for routine tasks.";
+
+/** Providers with no fixed model catalog (deployment-scoped or fully custom,
+ *  OR — xai_grok_cli/cursor_cli — a real CLI --model flag whose accepted
+ *  value vocabulary isn't documented anywhere this codebase has verified;
+ *  provider_profiles.py's own PROVIDER_CATALOG leaves cursor_cli's
+ *  default_model/models empty for exactly this reason: "no fixed catalog
+ *  published"). The Model step renders a free-text field instead of a
+ *  <select> for these — inventing a dropdown of guessed model ids risks
+ *  passing the CLI a value it doesn't recognize (see cli-runner.ts's own
+ *  "never fabricate a model name the CLI wouldn't recognize" convention). */
 export const FREEFORM_MODEL_PROVIDERS: ReadonlySet<string> = new Set([
   "custom_openai_compatible",
   "azure_openai",
+  "xai_grok_cli",
+  "cursor_cli",
 ]);
 
 export function modelsForProvider(providerId: string): string[] {
