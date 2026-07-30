@@ -376,6 +376,173 @@ def _mock_control_plane_record_next_action(operation: str, payload: dict) -> str
     return _CONTROL_PLANE_RECORD_NEXT_ACTIONS.get(op, "")
 
 
+# ---------------------------------------------------------------------------
+# Gateway command family (MAN-139). Until this section was added, NONE of the
+# five "gateway-*" commands below were handled by this mock at all -- every
+# gateway-service/-action/-protocol/-frame/-state call silently fell through
+# to next_action="" (the same default the mock used for anything unrecognized),
+# which never equals what the real caller checks for. That gap looked like
+# protection (the autouse mock runs for every non-kernel test) but provided
+# none: it silently killed 39 of test_gateway_routes.py's 42 tests at the very
+# first kernel call (gateway-service-decision's pairing_bootstrap), including
+# the heartbeat/reconnect coverage for the exact subsystem MAN-140 (2GB disk
+# fill from reconnect churn) turned out to have a real bug in. Ported from the
+# Rust kernel the same way the tables above are: allow-path next_action only,
+# per-command citations to the rust source below.
+# ---------------------------------------------------------------------------
+
+# empyralis-runtime-kernel/src/gateway_service.rs gateway_service_decision_command(),
+# lines 51-238 (allow-path next_action only, lines 224-238 -- like the mocks
+# above, this never produces block/require_approval).
+_GATEWAY_SERVICE_TOOL_OR_BROWSER_OPERATIONS = {  # rust lines 29-37
+    "protocol_route",
+    "tool_execute",
+    "tool_interrupt",
+    "browser_session",
+    "browser_action",
+    "browser_fallback",
+    "cloud_fallback",
+}
+
+
+def _mock_gateway_service_next_action(operation: str) -> str:
+    op = str(operation or "").strip()
+    if op == "approval_request":  # rust line 226 (checked ahead of approval_required)
+        return "request_gateway_owner_approval"
+    if op == "health_check":  # rust line 230
+        return "publish_gateway_health"
+    if op == "approval_resolve":  # rust line 232
+        return "persist_approval_decision"
+    if op in _GATEWAY_SERVICE_TOOL_OR_BROWSER_OPERATIONS:  # rust line 234
+        return "dispatch_gateway_operation"
+    return "allow_gateway_service_operation"  # rust line 237
+
+
+# empyralis-runtime-kernel/src/gateway_action.rs gateway_action_decision_command(),
+# lines 51-131 dispatch by operation; each per-operation handler's allow() call
+# supplies the next_action literal cited per entry below.
+_GATEWAY_ACTION_NEXT_ACTIONS = {
+    "health_check": "return_health",  # line 55
+    "websocket_connect": "accept_websocket",  # line 153
+    "tool_execute": "dispatch_tool_invoke",  # line 205
+    "browser_session_start": "start_browser_session",  # line 289
+    "browser_action": "dispatch_browser_action",  # line 297
+    "browser_session_stop": "stop_browser_session",  # line 291
+    "browser_session_resume": "resume_browser_session",  # line 293
+    "browser_session_takeover": "takeover_browser_session",  # line 295
+    "approval_resolve": "resolve_gateway_approval",  # line 330
+    "acp_turn": "route_acp_turn",  # line 362
+    "diagnostics_export": "export_diagnostics_bundle",  # line 390
+}
+
+
+def _mock_gateway_action_next_action(operation: str) -> str:
+    op = str(operation or "").strip()
+    return _GATEWAY_ACTION_NEXT_ACTIONS.get(op, "")
+
+
+# empyralis-runtime-kernel/src/gateway.rs gateway_protocol_decision_command(),
+# lines 59-238 (allow-path next_action only). Keys off "message_type", falling
+# back to "method"/"operation" the same way the rust side
+# (protocol::string_field chain) and every Python caller do.
+_GATEWAY_PROTOCOL_NEXT_ACTIONS = {
+    "health_check": "health",  # line 64
+    "session_create": "create_session",  # line 80
+    "session_close": "close_session",  # line 97
+    "agent_turn": "route_to_agent",  # line 117
+    "tool_result": "attach_tool_result",  # line 134
+    "tool_invoke": "dispatch_tool_invoke",  # line 154
+    "tool_interrupt": "dispatch_tool_interrupt",  # line 174
+    "channel_outbound": "dispatch_channel_outbound",  # line 194
+    "tool_use": "route_tool_use",  # line 228 (privileged-tool approval branch omitted -- allow-path only)
+}
+
+
+def _mock_gateway_protocol_next_action(payload: dict) -> str:
+    message_type = str(
+        payload.get("message_type") or payload.get("method") or payload.get("operation") or ""
+    ).strip()
+    return _GATEWAY_PROTOCOL_NEXT_ACTIONS.get(message_type, "")
+
+
+# empyralis-runtime-kernel/src/gateway_frame.rs gateway_frame_decision_command(),
+# lines 106-112 -- the allow-path next_action is a pure function of (kind,
+# message_type); there is no block/require_approval branch to omit here, and
+# the two tests that exercise oversized/over-deep frames never reach the
+# kernel at all (gateway_protocol_service.py rejects those in Python before
+# calling gateway-frame-decision), so this mock's allow-path fidelity is the
+# whole story for frame tests.
+def _mock_gateway_frame_next_action(payload: dict) -> str:
+    kind = str(payload.get("kind") or payload.get("frame_kind") or "").strip().lower()
+    message_type = str(payload.get("type") or payload.get("message_type") or "").strip()
+    if kind == "request" and message_type == "gateway.connect":
+        return "accept_gateway_connect"
+    if kind == "request":
+        return "route_gateway_request"
+    if kind == "response":
+        return "resolve_gateway_response"
+    if kind == "event":
+        return "handle_gateway_event"
+    return "record_gateway_frame"
+
+
+# empyralis-runtime-kernel/src/gateway_state.rs gateway_state_decision_command(),
+# lines 27-55 dispatch by operation; each handler's allow() next_action is
+# cited per entry below. This table is cross-checked against (not re-derived
+# from) the *expected* next_action sets gateway_state_repository.py's own
+# _enforce_gateway_state_decision() already hardcodes for production use -- a
+# drift between the two would be a real bug, not a mock bug.
+_GATEWAY_STATE_NEXT_ACTIONS = {
+    "create_pairing_intent": "create_pairing_intent",  # line 86
+    "expire_pairing_intent": "mark_pairing_intent_expired",  # line 119
+    "register_gateway": "consume_pairing_and_register_gateway",  # line 144
+    "issue_session": "issue_gateway_session",  # line 171
+    "validate_session": "validate_gateway_session",  # line 203
+    "mark_session_connected": "mark_gateway_session_connected",  # line 228
+    "mark_session_disconnected": "mark_gateway_session_disconnected",  # line 37
+    "touch_session": "touch_gateway_session",  # line 283
+    "rotate_token": "rotate_gateway_token",  # line 42
+    "revoke_registration": "revoke_gateway_registration",  # line 333 (allow path; reason present)
+    "update_registration_state": "update_gateway_registration_state",  # line 379 (allow path; reason present)
+    "record_event": "record_gateway_event",  # line 406
+    "create_approval": "create_gateway_action_approval",  # line 427
+    "resolve_approval": "resolve_gateway_action_approval_atomic",  # line 456
+    "update_browser_session": "upsert_gateway_browser_session",  # line 513 (allow path; no unconfirmed manual_takeover)
+    "summarize_outbox": "summarize_gateway_outbox",  # line 51
+}
+
+
+def _mock_gateway_state_next_action(operation: str, payload: dict) -> str:
+    op = str(operation or "").strip()
+    if op == "sweep_stale_sessions":  # rust lines 541-548 -- the one operation whose
+        # allow-path next_action is NOT a constant; it depends on stale_count.
+        raw_stale_count = payload.get("stale_count", payload.get("candidate_count", 0))
+        try:
+            stale_count = int(raw_stale_count or 0)
+        except (TypeError, ValueError):
+            stale_count = 0
+        return "noop" if stale_count == 0 else "sweep_stale_gateway_sessions"
+    return _GATEWAY_STATE_NEXT_ACTIONS.get(op, "")
+
+
+# empyralis-runtime-kernel/src/session.rs session_lifecycle_decision_command().
+# Not a "gateway-*" command itself, but directly on the gateway
+# heartbeat/reconnect test path (session_service.py's create_session /
+# terminate_session both go through this), so it was equally silently
+# unhandled and equally necessary to fix here. create_decision (lines
+# 141-177) and close_decision (lines 371-394) are the only two operations
+# session_service.py's _enforce_session_lifecycle_mutation actually checks
+# next_action for -- both are the identity of the operation name.
+_SESSION_LIFECYCLE_NEXT_ACTIONS = {
+    "create": "create",  # line 166
+    "close": "close",  # line 383
+}
+
+
+def _mock_session_lifecycle_next_action(operation: str) -> str:
+    return _SESSION_LIFECYCLE_NEXT_ACTIONS.get(str(operation or "").strip(), "")
+
+
 @pytest.fixture(autouse=True)
 def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """Skip @pytest.mark.kernel tests when the Rust kernel binary is absent.
@@ -403,12 +570,15 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
         # Several Rust kernel commands derive `next_action` from the
         # requested `operation` on an "allow" decision, but the mapping is
         # NOT always the identity function — callers (memory_service.py,
-        # sage_memory_service.py, control_plane_repository.py, etc.)
-        # compare next_action against the real kernel's per-operation
-        # contract before they'll persist state, so a blanket echo produces
-        # false gate failures for every non-identity operation. Each branch
-        # below reproduces the real kernel source it's named after; see the
-        # per-command helper functions above for file:line citations.
+        # sage_memory_service.py, control_plane_repository.py,
+        # gateway_pairing_service.py, gateway_state_repository.py,
+        # routes_gateway.py, etc.) compare next_action against the real
+        # kernel's per-operation contract before they'll persist state or
+        # let a request through, so a blanket echo (or an unhandled command
+        # family, which is what left the five "gateway-*" commands returning
+        # next_action="" until MAN-139) produces false gate failures. Each
+        # branch below reproduces the real kernel source it's named after;
+        # see the per-command helper functions above for file:line citations.
         next_action = ""
         if command == "runtime-state-store-decision":
             next_action = _mock_runtime_state_store_next_action(normalized_payload.get("operation"))
@@ -420,6 +590,20 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
             next_action = _mock_control_plane_record_next_action(
                 normalized_payload.get("operation"), normalized_payload
             )
+        elif command == "gateway-service-decision":
+            next_action = _mock_gateway_service_next_action(normalized_payload.get("operation"))
+        elif command == "gateway-action-decision":
+            next_action = _mock_gateway_action_next_action(normalized_payload.get("operation"))
+        elif command == "gateway-protocol-decision":
+            next_action = _mock_gateway_protocol_next_action(normalized_payload)
+        elif command == "gateway-frame-decision":
+            next_action = _mock_gateway_frame_next_action(normalized_payload)
+        elif command == "gateway-state-decision":
+            next_action = _mock_gateway_state_next_action(
+                normalized_payload.get("operation"), normalized_payload
+            )
+        elif command == "session-lifecycle-decision":
+            next_action = _mock_session_lifecycle_next_action(normalized_payload.get("operation"))
 
         return {
             "ok": True,
