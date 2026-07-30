@@ -104,7 +104,6 @@ from server_modules.runs_engine import (
     format_agent_summary,
     generate_with_candidate_failover,
     record_run_tool_signature,
-    requires_human_approval,
     wait_for_human_response,
     resolve_run_execution_context,
     wait_for_human_decision,

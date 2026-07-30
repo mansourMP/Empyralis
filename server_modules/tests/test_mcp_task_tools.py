@@ -35,6 +35,52 @@ def _resolved(workspace_id="ws-A", external_agent_id="ext_agent_aaa", writes_ena
     }
 
 
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeConnection:
+    """acquire() target control_plane_repository.rls_fetchrow/rls_fetch open
+    now that project_tasks is FORCE RLS (MAN-109). Delegates straight back
+    to the owning _WorkspaceScopedFakePool's own scoping-aware fetchrow/fetch
+    so the (tenant_id, workspace_id) boundary logic these tests exist to
+    prove keeps running unchanged. The RLS scope-setting execute() call is
+    swallowed here rather than recorded -- unlike skills_service's own
+    dispatcher, mcp_server.py's activity-ledger write
+    (mcp_server._ledger_mcp_call) is already patched out by _patched() above,
+    so there is no shared-queue collision to guard against here."""
+
+    def __init__(self, pool: "_WorkspaceScopedFakePool") -> None:
+        self._pool = pool
+
+    async def fetchrow(self, query, *args):
+        return await self._pool.fetchrow(query, *args)
+
+    async def fetch(self, query, *args):
+        return await self._pool.fetch(query, *args)
+
+    async def execute(self, query, *args):
+        return "SELECT 1"
+
+    def transaction(self):
+        return _FakeTransaction()
+
+
+class _FakeAcquire:
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _WorkspaceScopedFakePool:
     """Fake pool that enforces (tenant_id, workspace_id) scoping the way the
     real SQL WHERE clauses do, so these tests prove the boundary itself --
@@ -42,6 +88,9 @@ class _WorkspaceScopedFakePool:
 
     def __init__(self, rows):
         self._rows = [dict(r) for r in rows]
+
+    def acquire(self):
+        return _FakeAcquire(_FakeConnection(self))
 
     async def fetchrow(self, query, *args):
         # get_task / update_task / add_task_comment all take
@@ -308,6 +357,9 @@ class _InsertingFakePool:
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
         return dict(self._inserted_row)
+
+    def acquire(self):
+        return _FakeAcquire(_FakeConnection(self))
 
 
 class CreateTaskTests(unittest.IsolatedAsyncioTestCase):

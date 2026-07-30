@@ -33,6 +33,58 @@ from server_modules import runtime_heartbeat_service
 # _FakePool/_FakeConnection pattern: plain pool.fetch/fetchrow/execute,
 # queued per call so a single fake pool instance can stand in for the
 # several sequential DB round-trips assign_task makes) ─────────────────────
+#
+# MAN-109 follow-up: project_tasks is now FORCE RLS, so project_tasks_
+# service.py's call sites go through control_plane_repository.rls_fetchrow/
+# rls_fetch, which open a scoped connection via pool.acquire() ->
+# connection.transaction() -> connection.execute(SET session GUCs) ->
+# connection.fetchrow/fetch/execute(...) instead of calling pool.fetchrow/
+# fetch/execute directly. _FakeConnection is the acquire() target those
+# helpers need; it delegates straight back to this same pool's own queued
+# fetchrow/fetch/execute so every existing pool.fetchrow_calls/fetch_calls/
+# execute_calls assertion in this file keeps observing the exact real query
+# and args it always did. The RLS scope-setting execute() call itself
+# (_apply_connection_scope's set_config(...)) is recorded separately so it
+# never pollutes those lists.
+
+
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeConnection:
+    def __init__(self, pool: "_QueuedFakePool") -> None:
+        self._pool = pool
+
+    async def fetchrow(self, query, *args):
+        return await self._pool.fetchrow(query, *args)
+
+    async def fetch(self, query, *args):
+        return await self._pool.fetch(query, *args)
+
+    async def execute(self, query, *args):
+        if "set_config(" in query:
+            self._pool.scope_calls.append((query, args))
+            return "SELECT 1"
+        return await self._pool.execute(query, *args)
+
+    def transaction(self):
+        return _FakeTransaction()
+
+
+class _FakeAcquire:
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class _QueuedFakePool:
@@ -42,6 +94,7 @@ class _QueuedFakePool:
         self.fetchrow_calls: list[tuple] = []
         self.fetch_calls: list[tuple] = []
         self.execute_calls: list[tuple] = []
+        self.scope_calls: list[tuple] = []
 
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
@@ -58,6 +111,9 @@ class _QueuedFakePool:
     async def execute(self, query, *args):
         self.execute_calls.append((query, args))
         return "UPDATE 1"
+
+    def acquire(self):
+        return _FakeAcquire(_FakeConnection(self))
 
 
 def _task_row(**overrides) -> dict:

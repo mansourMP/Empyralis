@@ -365,6 +365,52 @@ class DispatchResolvedMentionsTests(unittest.IsolatedAsyncioTestCase):
 # ── 4. End-to-end through project_tasks_service.add_task_comment ────────
 
 
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeConnection:
+    """acquire() target control_plane_repository.rls_fetchrow/rls_fetch open
+    now that project_tasks is FORCE RLS (MAN-109). Delegates straight back
+    to the owning _QueuedFakePool's own queued fetchrow/fetch so its
+    fetchrow_calls assertions keep observing the exact real query and args
+    they always did; the RLS scope-setting execute() call is swallowed here
+    rather than recorded, since nothing in this file asserts on it. (These
+    tests call project_tasks_service.add_task_comment directly, never
+    skills_service.execute_single_direct_tool_call, so there is no
+    activity-ledger dispatcher noise to guard against here.)"""
+
+    def __init__(self, pool: "_QueuedFakePool") -> None:
+        self._pool = pool
+
+    async def fetchrow(self, query, *args):
+        return await self._pool.fetchrow(query, *args)
+
+    async def fetch(self, query, *args):
+        return await self._pool.fetch(query, *args)
+
+    async def execute(self, query, *args):
+        return "SELECT 1"
+
+    def transaction(self):
+        return _FakeTransaction()
+
+
+class _FakeAcquire:
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _QueuedFakePool:
     """Mirrors test_project_tasks.py's own _QueuedFakePool exactly."""
 
@@ -388,6 +434,9 @@ class _QueuedFakePool:
 
     async def execute(self, query, *args):
         return "UPDATE 1"
+
+    def acquire(self):
+        return _FakeAcquire(_FakeConnection(self))
 
 
 def _task_row(**overrides) -> dict:

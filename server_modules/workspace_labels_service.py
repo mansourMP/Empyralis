@@ -210,7 +210,8 @@ async def create_label(
             f"Label names are unique per workspace and compared case-insensitively, "
             f"so '{resolved_name}' and '{existing['name']}' are the same label."
         )
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         INSERT INTO workspace_labels (id, tenant_id, workspace_id, name, color, created_by)
         VALUES ($1, $2, $3, $4, $5, $6)
@@ -222,6 +223,8 @@ async def create_label(
         resolved_name,
         resolved_color,
         str(created_by or "").strip() or None,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_label(row)
 
@@ -238,7 +241,10 @@ async def list_labels(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    rows = await pool.fetch(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         f"""
         SELECT {_LABEL_COLUMNS},
                COALESCE(usage.task_count, 0) AS task_count
@@ -253,8 +259,10 @@ async def list_labels(
         WHERE tenant_id = $1 AND workspace_id = $2
         ORDER BY lower(name) ASC
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return [label for label in (_row_to_label(r) for r in rows) if label]
 
@@ -268,15 +276,20 @@ async def get_label(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         SELECT {_LABEL_COLUMNS}
         FROM workspace_labels
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(label_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_label(row)
 
@@ -296,15 +309,20 @@ async def find_label_by_name(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         SELECT {_LABEL_COLUMNS}
         FROM workspace_labels
         WHERE tenant_id = $1 AND workspace_id = $2 AND lower(name) = lower($3)
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         resolved_name,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_label(row)
 
@@ -372,7 +390,8 @@ async def update_label(
                 f"A label named '{clash['name']}' already exists in this workspace. "
                 f"Label names are unique per workspace and compared case-insensitively."
             )
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         f"""
         UPDATE workspace_labels
         SET name = COALESCE($4, name),
@@ -386,6 +405,8 @@ async def update_label(
         resolved_label_id,
         resolved_name,
         resolved_color,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_label(row)
 
@@ -408,15 +429,20 @@ async def delete_label(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return False
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         DELETE FROM workspace_labels
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         RETURNING id
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(label_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return row is not None
 
@@ -485,7 +511,8 @@ async def attach_label(
             f"No label '{label}' in this workspace. Existing labels: {names}. "
             f"Attaching does not create labels -- ask an owner to add it first."
         )
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         INSERT INTO project_task_labels (task_id, label_id, tenant_id, workspace_id, added_by)
         VALUES ($1, $2, $3, $4, $5)
@@ -496,6 +523,8 @@ async def attach_label(
         resolved_tenant_id,
         resolved_workspace_id,
         str(added_by or "").strip() or None,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return await list_task_labels(
         tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, task_id=resolved_task_id,
@@ -528,7 +557,8 @@ async def detach_label(
     )
     if resolved_label is None:
         raise ValueError(f"No label '{label}' in this workspace.")
-    await pool.execute(
+    await control_plane_repository.rls_execute(
+        pool,
         """
         DELETE FROM project_task_labels
         WHERE tenant_id = $1 AND workspace_id = $2 AND task_id = $3 AND label_id = $4
@@ -537,6 +567,8 @@ async def detach_label(
         resolved_workspace_id,
         resolved_task_id,
         resolved_label["id"],
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return await list_task_labels(
         tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, task_id=resolved_task_id,
@@ -557,7 +589,10 @@ async def list_task_labels(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    rows = await pool.fetch(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT l.id, l.tenant_id, l.workspace_id, l.name, l.color,
                l.created_by, l.created_at, l.updated_at
@@ -566,8 +601,10 @@ async def list_task_labels(
         WHERE tl.tenant_id = $1 AND tl.workspace_id = $2 AND tl.task_id = $3
         ORDER BY lower(l.name) ASC
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(task_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return [label for label in (_row_to_label(r) for r in rows) if label]

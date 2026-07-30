@@ -33,9 +33,33 @@ def _all_good_rows(tables):
 
 class MigrationParserTests(unittest.TestCase):
     def test_parses_tenant_tables_from_migration(self):
+        """MAN-109 follow-up: this used to assert `len(tables) == 29`, which
+        broke the moment migrations/enable_rls.sql grew to 35 tables (the six
+        MAN-109 closed the RLS gap on: project_tasks, projects,
+        project_memberships, workspace_labels, bug_reports,
+        mcp_external_agent_roster). An exact count is also the wrong shape of
+        test for this function on its own terms --
+        _tenant_scoped_tables_from_migration's own docstring says it is
+        "Parsed (not hardcoded) so the check tracks the migration
+        automatically — a table added to the migration is verified without
+        editing this file." A hardcoded count assertion fights that design:
+        every future table added to the migration (which is the whole point
+        of parsing it live) would force an unrelated edit here. Asserting
+        membership of the specific tables that matter -- the original
+        spot-check plus the six MAN-109 just added -- proves the same thing
+        (the parser actually found them) without re-coupling this test to a
+        number that is expected to keep changing. A generous lower bound
+        stays as a sanity check that the parser did not regress to
+        returning nothing/near-nothing.
+        """
         tables = preflight._tenant_scoped_tables_from_migration()
-        self.assertEqual(len(tables), 29)
-        for expected in ("tenants", "workspaces", "users", "workspace_agent_installs"):
+        self.assertGreaterEqual(len(tables), 35)
+        for expected in (
+            "tenants", "workspaces", "users", "workspace_agent_installs",
+            # MAN-109: the six tables this follow-up's RLS gap closure covers.
+            "project_tasks", "projects", "project_memberships",
+            "workspace_labels", "bug_reports", "mcp_external_agent_roster",
+        ):
             self.assertIn(expected, tables)
 
 

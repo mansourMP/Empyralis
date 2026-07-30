@@ -106,10 +106,13 @@ def _row_to_project(row: Any) -> Optional[Dict[str, Any]]:
 
 async def _unique_slug(pool: Any, tenant_id: str, workspace_id: str, base: str) -> str:
     """Return a slug unique within (tenant, workspace), suffixing -2, -3, ... on clash."""
-    rows = await pool.fetch(
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         "SELECT slug FROM projects WHERE tenant_id = $1 AND workspace_id = $2",
         tenant_id,
         workspace_id,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     existing = {str(r["slug"] or "").strip() for r in (rows or [])}
     if base not in existing:
@@ -129,7 +132,10 @@ async def list_projects(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    rows = await pool.fetch(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
                is_default, archived, metadata, created_at, updated_at
@@ -139,9 +145,11 @@ async def list_projects(
           AND ($3::bool OR archived = FALSE)
         ORDER BY is_default DESC, name ASC, created_at ASC
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         bool(include_archived),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return [p for p in (_row_to_project(r) for r in rows) if p]
 
@@ -155,16 +163,21 @@ async def get_project(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
                is_default, archived, metadata, created_at, updated_at
         FROM projects
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(project_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_project(row)
 
@@ -202,7 +215,8 @@ async def create_project(
         if is_default
         else _deterministic_project_identity(pid)
     )
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         INSERT INTO projects (id, tenant_id, workspace_id, name, slug, description, is_default, metadata)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
@@ -217,6 +231,8 @@ async def create_project(
         str(description or "").strip(),
         bool(is_default),
         json.dumps(identity),
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     project = _row_to_project(row)
     # MAN-115: the creator gets an explicit project_memberships row so they
@@ -257,7 +273,8 @@ async def ensure_default_project(
         )
     tenant_id = str(tenant_id or "").strip()
     workspace_id = str(workspace_id or "").strip()
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
                is_default, archived, metadata, created_at, updated_at
@@ -268,6 +285,8 @@ async def ensure_default_project(
         """,
         tenant_id,
         workspace_id,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     if row is not None:
         return _row_to_project(row)
@@ -291,7 +310,10 @@ async def rename_project(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         UPDATE projects
         SET name = COALESCE(NULLIF($4, ''), name),
@@ -301,11 +323,13 @@ async def rename_project(
         RETURNING id, tenant_id, workspace_id, name, slug, description,
                   is_default, archived, metadata, created_at, updated_at
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(project_id or "").strip(),
         str(name or "").strip(),
         None if description is None else str(description).strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_project(row)
 
@@ -484,7 +508,8 @@ async def add_project_member(
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
             "Postgres is required to add a project member."
         )
-    row = await pool.fetchrow(
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         INSERT INTO project_memberships (id, tenant_id, workspace_id, project_id, user_id, role, added_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -500,6 +525,8 @@ async def add_project_member(
         user_id,
         str(role or "member").strip().lower() or "member",
         str(added_by or "").strip() or None,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
     )
     member = _row_to_member(row)
     if member is None:
@@ -517,15 +544,20 @@ async def remove_project_member(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return False
-    result = await pool.execute(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    result = await control_plane_repository.rls_execute(
+        pool,
         """
         DELETE FROM project_memberships
         WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3 AND user_id = $4
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(project_id or "").strip(),
         str(user_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return str(result or "").endswith(" 1") or str(result or "").endswith("-1")
 
@@ -547,7 +579,10 @@ async def list_project_members(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    rows = await pool.fetch(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT pm.id, pm.project_id, pm.user_id, pm.role, pm.added_by, pm.created_at,
                u.email, u.display_name, u.avatar_url
@@ -556,9 +591,11 @@ async def list_project_members(
         WHERE pm.tenant_id = $1 AND pm.workspace_id = $2 AND pm.project_id = $3
         ORDER BY pm.created_at ASC, pm.user_id ASC
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(project_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return [m for m in (_row_to_member(r) for r in rows) if m]
 
@@ -579,15 +616,20 @@ async def is_project_member(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return False
-    row = await pool.fetchrow(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
         """
         SELECT 1 FROM project_memberships
         WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3 AND user_id = $4
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(project_id or "").strip(),
         str(user_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return row is not None
 
@@ -605,13 +647,18 @@ async def list_member_project_ids(
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return []
-    rows = await pool.fetch(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT project_id FROM project_memberships
         WHERE tenant_id = $1 AND workspace_id = $2 AND user_id = $3
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
         str(user_id or "").strip(),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return [str(r["project_id"]).strip() for r in (rows or []) if str(r["project_id"] or "").strip()]

@@ -643,32 +643,6 @@ ELEVATED_FULL_DEFAULT_ACTION_TYPES = {
     ACTION_TYPE_REVERSIBLE_WRITE,
 }
 
-PLAN_EXTERNAL_ACTION_KEYWORDS = {
-    "send",
-    "email",
-    "message",
-    "reply",
-    "post",
-    "publish",
-    "submit",
-    "invoice",
-    "charge",
-    "refund",
-    "transfer",
-    "purchase",
-}
-PLAN_DESTRUCTIVE_ACTION_KEYWORDS = {
-    "delete",
-    "remove",
-    "terminate",
-    "credential",
-    "password",
-    "security",
-    "revoke",
-    "wipe",
-    "erase",
-}
-
 CUSTOMER_OPS_PACK_ID = "customer-ops-autopilot"
 WEEKLY_CONTENT_PACK_ID = "weekly-content-studio"
 COMPETITOR_BRIEF_PACK_ID = "competitor-brief-digest"
@@ -1963,44 +1937,6 @@ def decide_runtime_action_execution(
         "runtime_trust_zone": runtime_trust_zone,
         "elevated": elevated,
     }
-
-
-def plan_requires_human_approval(
-    trust_mode: str,
-    metadata: Optional[Dict[str, Any]],
-    *,
-    context_text: str,
-) -> tuple[bool, str]:
-    normalized_trust_mode = normalize_trust_mode(trust_mode)
-    elevated = resolve_elevated_access(metadata)
-    raw = str(context_text or "").strip().lower()
-    external_matches = sorted({kw for kw in PLAN_EXTERNAL_ACTION_KEYWORDS if kw in raw})
-    destructive_matches = sorted({kw for kw in PLAN_DESTRUCTIVE_ACTION_KEYWORDS if kw in raw})
-
-    if normalized_trust_mode == TRUST_MODE_STRICT and elevated.get("mode") != ELEVATED_MODE_FULL:
-        return True, "Strict mode requires explicit confirmation before execution."
-
-    if elevated.get("mode") == ELEVATED_MODE_FULL and bool(elevated.get("active")):
-        if destructive_matches:
-            return True, f"Elevated mode blocks destructive actions ({', '.join(destructive_matches[:4])})."
-        if external_matches:
-            return True, f"Elevated mode blocks external actions ({', '.join(external_matches[:4])})."
-        return False, ""
-
-    matched = [kw for kw in RISKY_ACTION_KEYWORDS if kw in raw]
-    if normalized_trust_mode == TRUST_MODE_AUTO:
-        return False, ""
-    if normalized_trust_mode == TRUST_MODE_SENSITIVE_GUARD:
-        if matched:
-            return True, f"Sensitive Guard detected sensitive actions ({', '.join(sorted(set(matched))[:4])})."
-        return False, ""
-    if normalized_trust_mode == TRUST_MODE_COST_GUARD:
-        if len(matched) >= 2:
-            return True, f"Cost Guard detected multiple potentially expensive actions ({', '.join(sorted(set(matched))[:4])})."
-        return False, ""
-    if matched:
-        return True, f"Potentially risky actions detected ({', '.join(sorted(set(matched))[:4])})."
-    return False, ""
 
 
 def resolve_runtime_policy_mode(

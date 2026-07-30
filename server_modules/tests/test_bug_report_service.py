@@ -3,6 +3,18 @@ bug" rail control (MAN-106, frontend/lib/workspace/fleet/BugReportButton.tsx).
 
 Mirrors test_project_tasks.py's _QueuedFakePool harness: plain
 pool.fetch/fetchrow/execute, queued per call.
+
+MAN-109 follow-up: bug_report_service.py's two call sites now go through
+control_plane_repository.rls_fetchrow/rls_fetch, which open a scoped
+connection via `pool.acquire()` -> `connection.transaction()` ->
+`connection.execute(SET session GUCs)` -> `connection.fetchrow/fetch(...)`
+instead of calling `pool.fetchrow/fetch` directly (bug_reports now runs
+under FORCE ROW LEVEL SECURITY). `_FakeConnection` below is the acquire()
+target the rls_* helpers need; it delegates fetchrow/fetch straight back to
+the pool's own queued methods so `pool.fetchrow_calls`/`pool.fetch_calls`
+keep observing the exact real query and args they always did, and records
+the RLS scope-setting `execute()` call separately (`pool.scope_calls`) so it
+never pollutes those assertions.
 """
 
 from __future__ import annotations
@@ -13,12 +25,53 @@ from unittest.mock import AsyncMock, patch
 from server_modules import bug_report_service
 
 
+class _FakeTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeConnection:
+    def __init__(self, pool: "_QueuedFakePool") -> None:
+        self._pool = pool
+
+    async def fetchrow(self, query, *args):
+        return await self._pool.fetchrow(query, *args)
+
+    async def fetch(self, query, *args):
+        return await self._pool.fetch(query, *args)
+
+    async def execute(self, query, *args):
+        # This is _apply_connection_scope's set_config(...) call, not the
+        # business query -- record it separately so it never shows up in
+        # pool.fetchrow_calls/pool.fetch_calls.
+        self._pool.scope_calls.append((query, args))
+        return "SELECT 1"
+
+    def transaction(self):
+        return _FakeTransaction()
+
+
+class _FakeAcquire:
+    def __init__(self, connection: _FakeConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _QueuedFakePool:
     def __init__(self, *, fetchrow_results=None, fetch_results=None):
         self._fetchrow_results = list(fetchrow_results or [])
         self._fetch_results = list(fetch_results or [])
         self.fetchrow_calls: list[tuple] = []
         self.fetch_calls: list[tuple] = []
+        self.scope_calls: list[tuple] = []
 
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
@@ -31,6 +84,9 @@ class _QueuedFakePool:
         if not self._fetch_results:
             return []
         return self._fetch_results.pop(0)
+
+    def acquire(self):
+        return _FakeAcquire(_FakeConnection(self))
 
 
 def _report_row(**overrides) -> dict:

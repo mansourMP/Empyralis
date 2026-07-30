@@ -19,6 +19,7 @@ from server_modules import (
     machine_capability_check,
     rust_runtime_kernel_client,
     secret_redaction_service,
+    tool_result_status,
 )
 from server_modules import execution_mode_policy
 from server_modules.gateway_contracts import DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS
@@ -660,13 +661,25 @@ async def execute_tool_via_gateway(
                 trace_id=_tid or None,
             )
         raise
+    # MAN-125: dispatch not raising only means the RPC envelope round-tripped
+    # (gateway_protocol_service.dispatch_tool_invoke* raises only when the
+    # envelope's own `ok` flag is false) — it says nothing about whether the
+    # TOOL itself succeeded. A tool that runs and returns e.g. {"exit_code": 1}
+    # or {"status": "error"} inside `result` used to render as "completed" at
+    # all three emission sites below because none of them looked at `result`.
+    # Classify once, off the same structural rules used by the direct-chat
+    # tool loop (tool_result_status), and drive every emission from that one
+    # verdict so the activity ledger, the transparency feed, and the hardware
+    # activity row can never disagree with each other or with the truth.
+    _tool_outcome = tool_result_status.classify_tool_result(result)
+    _dispatch_status = "failed" if _tool_outcome.failed else "completed"
     if emit_hardware_activity:
         hardware_activity_event_service.emit_hardware_action_event(
             workspace_id=_ws,
             tenant_id=str(registration.get("tenant_id") or "default").strip() or "default",
             gateway_id=_gw,
             capability=_cap,
-            status="completed",
+            status=_dispatch_status,
             duration_ms=int(max(0, (time.time() - dispatch_started) * 1000)),
             run_id=str(response.get("run_id") or run_id).strip() or None,
             trace_id=_tid or None,
@@ -678,13 +691,19 @@ async def execute_tool_via_gateway(
         "run_id": str(response.get("run_id") or run_id).strip(),
         "result": result,
     }
+    if _tool_outcome.failed and _tool_outcome.error_text:
+        activity_payload["error"] = _tool_outcome.error_text
     try:
         await gateway_activity_service.append_gateway_activity(
             registration,
             action="gateway_tool_executed",
-            title="Gateway tool executed",
-            summary=f"Executed {capability_id} through the paired local gateway.",
-            status="completed",
+            title="Gateway tool executed" if not _tool_outcome.failed else "Gateway tool failed",
+            summary=(
+                f"Executed {capability_id} through the paired local gateway."
+                if not _tool_outcome.failed
+                else f"{capability_id} failed through the paired local gateway: {_tool_outcome.error_text or _tool_outcome.reason}."
+            ),
+            status=_dispatch_status,
             payload=secret_redaction_service.sanitize_mapping(activity_payload),
             trace_id=str(trace_id or "").strip() or None,
         )
@@ -693,9 +712,13 @@ async def execute_tool_via_gateway(
     try:
         gateway_transparency_service.emit_gateway_action_event(
             event_type="gateway_action_completed",
-            title=f"Gateway action completed: {_cap}",
-            summary=f"Completed {_cap} through gateway {_gw}",
-            status="completed",
+            title=f"Gateway action completed: {_cap}" if not _tool_outcome.failed else f"Gateway action failed: {_cap}",
+            summary=(
+                f"Completed {_cap} through gateway {_gw}"
+                if not _tool_outcome.failed
+                else f"{_cap} failed through gateway {_gw}: {_tool_outcome.error_text or _tool_outcome.reason}"
+            ),
+            status=_dispatch_status,
             trace_id=_tid,
             workspace_id=_ws,
             gateway_id=_gw,
