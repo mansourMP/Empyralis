@@ -3,7 +3,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, Cpu, Gpu, Loader2, MemoryStick, Server, ServerOff, Thermometer } from "lucide-react";
+import {
+  ArrowLeft,
+  Brain,
+  Container,
+  Cpu,
+  Database,
+  Gpu,
+  Loader2,
+  LogIn,
+  MemoryStick,
+  Server,
+  ServerOff,
+  Thermometer,
+} from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
@@ -29,14 +42,16 @@ import {
 } from "@/lib/workspace/fleet/gateway-box-picker";
 import { type CliSubscriptionRuntime } from "@/lib/workspace/fleet/fleet-provider-constants";
 
-/** Non-subscription capabilities read straight off the raw heartbeat
- *  inventory (metadata.service_inventory) — already flowing in the same
- *  /gateway/registrations response the box picker uses, just never rendered
- *  anywhere before this page. claude_cli/codex_cli/grok_cli/cursor_cli are
- *  handled separately below via gatewayRuntimeState, since their generic
- *  `status` field can't by itself tell "missing" apart from "installed, not
- *  signed in". */
-const CAPABILITY_ORDER = ["claude_cli", "codex_cli", "grok_cli", "cursor_cli", "docker", "ollama", "postgres", "gpu"] as const;
+/** The right-hand panel used to render one flat list mixing two fundamentally
+ *  different kinds of thing: actionable installable tools (buttons, per-item
+ *  install/sign-in state) and read-only detected services ("Not detected"
+ *  sitting right next to those buttons, which reads as a broken control
+ *  rather than an observation). Split into two explicit groups so each gets
+ *  its own visual treatment below — INSTALLABLE_TOOL_ORDER always renders
+ *  through CliSetupControl (real actions), DETECTED_SERVICE_ORDER always
+ *  renders as plain status readouts (no button, ever). */
+const INSTALLABLE_TOOL_ORDER = ["claude_cli", "codex_cli", "grok_cli", "cursor_cli"] as const;
+const DETECTED_SERVICE_ORDER = ["docker", "ollama", "postgres", "gpu"] as const;
 const CAPABILITY_LABEL: Record<string, string> = {
   claude_cli: "Claude Code",
   codex_cli: "Codex",
@@ -48,8 +63,19 @@ const CAPABILITY_LABEL: Record<string, string> = {
   gpu: "GPU",
 };
 
+/** Small leading glyph per detected service — the same icon+label pattern
+ *  the resource gauges above already use (fleet-hw-dash-gauge-head), reused
+ *  here so a read-only row visually reads as "information" rather than
+ *  borrowing the installable tools' bare-text row shape. */
+const SERVICE_ICON: Record<string, ReactNode> = {
+  docker: <Container size={13} strokeWidth={1.75} />,
+  ollama: <Brain size={13} strokeWidth={1.75} />,
+  postgres: <Database size={13} strokeWidth={1.75} />,
+  gpu: <Gpu size={13} strokeWidth={1.75} />,
+};
+
 /** Maps a service_inventory row id to its cli_subscription runtime key —
- *  the one place this mapping lives, so CAPABILITY_ORDER's isCli branch below
+ *  the one place this mapping lives, so INSTALLABLE_TOOL_ORDER's rows below
  *  and CliSetupControl's runtime prop never drift apart. */
 const CLI_ROW_RUNTIME: Record<string, CliSubscriptionRuntime> = {
   claude_cli: "claude_code",
@@ -58,12 +84,58 @@ const CLI_ROW_RUNTIME: Record<string, CliSubscriptionRuntime> = {
   cursor_cli: "cursor_cli",
 };
 
-function serviceItemPresentation(status: string | undefined): { tone: AgentStatusTone; label: string } {
-  const s = (status || "").toLowerCase();
-  if (s === "ready") return { tone: "ready", label: "Ready" };
-  if (s === "degraded") return { tone: "degraded", label: "Degraded" };
-  if (s === "missing" || s === "offline") return { tone: "unknown", label: "Not detected" };
-  return { tone: "unknown", label: "Unknown" };
+/** Ollama's own documented floor is ~8 GB of RAM to run even its smallest
+ *  (7B-class) models — below that it cannot serve real inference regardless
+ *  of whether the binary happens to be installed. Without this, a 1 GB box
+ *  just shows "Not detected" next to Docker/Postgres/GPU's own "Not
+ *  detected" — reading as one more thing that failed to install, instead of
+ *  the truth: this box physically cannot run it, full stop. Deliberately a
+ *  single flat threshold, not a per-model curve — this is a UI hint about
+ *  whether pursuing Ollama here is worth the owner's time at all, not a
+ *  guarantee about any specific quantized model. */
+const OLLAMA_MIN_MEMORY_GB = 8;
+
+/** Reason string for the memory gate above, or null when this box clears the
+ *  bar (or reports no memory total at all, in which case we say nothing
+ *  rather than guess). */
+function ollamaMemoryShortfallReason(resources: GatewayResources | null | undefined): string | null {
+  const totalBytes = resources?.memory_total_bytes;
+  if (typeof totalBytes !== "number" || !Number.isFinite(totalBytes) || totalBytes <= 0) return null;
+  const totalGB = totalBytes / 1_000_000_000;
+  if (totalGB >= OLLAMA_MIN_MEMORY_GB) return null;
+  const haveLabel = totalGB < 1 ? `${totalGB.toFixed(1)} GB` : `${Math.round(totalGB)} GB`;
+  return `needs ~${OLLAMA_MIN_MEMORY_GB} GB memory, this machine has ${haveLabel}`;
+}
+
+type ServicePresentation = { tone: AgentStatusTone; label: string; reason: string | null };
+
+/** Detected-service row presentation — tone + label + an optional plain-
+ *  language reason. A reason is shown for every non-ready state EXCEPT plain
+ *  "missing" (the binary/service simply isn't there — self-explanatory, no
+ *  elaboration needed); "degraded"/"offline"/"blocked" get the gateway's own
+ *  probe summary inline instead of a generic red line, and Ollama gets the
+ *  resource-gate reason above whenever this box can't run it regardless of
+ *  what the probe itself reports — a box that's somehow ready anyway is
+ *  trusted over this heuristic, never overridden by it. */
+function serviceItemPresentation(
+  id: string,
+  item: ServiceInventoryItem | undefined,
+  resources: GatewayResources | null | undefined,
+): ServicePresentation {
+  const status = (item?.status || "").toLowerCase();
+  if (status === "ready") return { tone: "ready", label: "Ready", reason: null };
+
+  if (id === "ollama") {
+    const shortfall = ollamaMemoryShortfallReason(resources);
+    if (shortfall) return { tone: "unknown", label: "Unavailable", reason: shortfall };
+  }
+
+  const reason = status && status !== "missing" ? item?.summary || null : null;
+  if (status === "degraded") return { tone: "degraded", label: "Degraded", reason };
+  if (status === "offline") return { tone: "degraded", label: "Not responding", reason };
+  if (status === "blocked") return { tone: "error", label: "Blocked", reason };
+  if (status === "missing") return { tone: "unknown", label: "Not detected", reason: null };
+  return { tone: "unknown", label: "Unknown", reason };
 }
 
 /** Right-aligned header status pill's honest tail — connPresentation already
@@ -367,6 +439,57 @@ const CLI_AUTH_METHODS: Record<CliSubscriptionRuntime, CliAuthMethod[]> = {
   ],
 };
 
+/** Frontend-only serialization for CLI installs. Before this, clicking
+ *  Install on all four tools fired four concurrent installer processes on
+ *  the SAME box — on a small machine that pins it at 100% CPU and everything
+ *  hangs, including the very heartbeat this page polls for progress. This
+ *  queues the install *request*, not any backend state — the Gateway's
+ *  cli.install endpoint is untouched; this only decides WHEN the frontend is
+ *  allowed to call it. One runtime installs at a time; the rest read
+ *  "Queued" until it's their turn. A runtime's turn ends (see the release
+ *  effect inside CliSetupControl) when its install either genuinely
+ *  succeeds (gatewayRuntimeState moves off "missing"), fails outright, or
+ *  its own verify-poll times out — any of which means nothing is still
+ *  running on the box for it, so the next queued runtime is safe to start. */
+type InstallQueueController = {
+  activeRuntime: CliSubscriptionRuntime | null;
+  queuedRuntimes: CliSubscriptionRuntime[];
+  requestTurn: (runtime: CliSubscriptionRuntime) => void;
+  release: (runtime: CliSubscriptionRuntime) => void;
+};
+
+function useInstallQueue(): InstallQueueController {
+  const [state, setState] = useState<{ active: CliSubscriptionRuntime | null; queue: CliSubscriptionRuntime[] }>({
+    active: null,
+    queue: [],
+  });
+
+  const requestTurn = useCallback((runtime: CliSubscriptionRuntime) => {
+    setState((prev) => {
+      if (prev.active === runtime || prev.queue.includes(runtime)) return prev;
+      if (prev.active === null) return { active: runtime, queue: prev.queue };
+      return { active: prev.active, queue: [...prev.queue, runtime] };
+    });
+  }, []);
+
+  const release = useCallback((runtime: CliSubscriptionRuntime) => {
+    setState((prev) => {
+      if (prev.active !== runtime) {
+        // Not the active runtime (already released, or was only ever
+        // queued) — defensively drop it from the queue so a stale request
+        // can never get stuck waiting for a turn nothing will grant.
+        return prev.queue.includes(runtime)
+          ? { active: prev.active, queue: prev.queue.filter((r) => r !== runtime) }
+          : prev;
+      }
+      const [next, ...rest] = prev.queue;
+      return { active: next ?? null, queue: rest };
+    });
+  }, []);
+
+  return { activeRuntime: state.active, queuedRuntimes: state.queue, requestTurn, release };
+}
+
 /** Real install + sign-in for one subscription CLI, wired to Build F's
  *  cli.install / cli.login.* routes — replaces the SSH copy-paste guidance
  *  this build shipped before. Reuses the same verify-poll pattern (refresh()
@@ -385,12 +508,17 @@ function CliSetupControl({
   workspaceId,
   refresh,
   isCloud,
+  installQueue,
 }: {
   runtime: CliSubscriptionRuntime;
   state: RuntimeState;
   gatewayId: string;
   workspaceId: string;
   refresh: (opts?: { silent?: boolean }) => Promise<FleetGateway[]>;
+  /** Shared across all four CliSetupControl instances on this page — see
+   *  useInstallQueue's own doc comment for why installs must be serialized
+   *  here instead of each row firing independently. */
+  installQueue: InstallQueueController;
   /** Cloud VPS (Ubuntu, systemd) vs this-device (macOS, launchd) — used only
    *  to default the long-lived-token guide's instructions to the right OS.
    *  The guide itself never assumes; it's presented as a toggle so an
@@ -482,6 +610,35 @@ function CliSetupControl({
       setInstallError(err instanceof Error ? err.message : "Install failed.");
     }
   }, [gatewayId, runtime, workspaceId, verifyUntil]);
+
+  // ---- install queue wiring ----
+  // Install button clicks never call runInstall() directly — they call
+  // installQueue.requestTurn(), which either makes this runtime the active
+  // one immediately (queue was empty) or parks it in "Queued" state. Actual
+  // install only fires here, the instant this runtime BECOMES the active
+  // one (edge-triggered, not level-triggered, so a re-render while already
+  // active never re-fires it).
+  const isActiveInstallTurn = installQueue.activeRuntime === runtime;
+  const isQueuedForInstall = installQueue.queuedRuntimes.includes(runtime);
+  const wasActiveInstallTurnRef = useRef(false);
+  useEffect(() => {
+    if (isActiveInstallTurn && !wasActiveInstallTurnRef.current) {
+      void runInstall();
+    }
+    wasActiveInstallTurnRef.current = isActiveInstallTurn;
+  }, [isActiveInstallTurn, runInstall]);
+
+  // Release this runtime's turn the moment nothing is still running on the
+  // box for it: the real state moved off "missing" (success — verifyUntil
+  // caught the change), the install call itself failed outright, or the
+  // verify-poll gave up waiting. Whichever it is, the next queued runtime
+  // (if any) is safe to start.
+  useEffect(() => {
+    if (!isActiveInstallTurn) return;
+    if (state !== "missing" || installState === "error" || verifyTimedOut) {
+      installQueue.release(runtime);
+    }
+  }, [isActiveInstallTurn, state, installState, verifyTimedOut, installQueue, runtime]);
 
   // ---- sign-in ----
   const [loginPhase, setLoginPhase] = useState<CliLoginPhase>("idle");
@@ -675,19 +832,36 @@ function CliSetupControl({
   // the expansion area below.
   let primaryAction: React.ReactNode = null;
   if (state === "missing") {
-    const installBusy = installState === "installing" || verifying;
+    // Busy only counts while THIS runtime actually holds the install turn —
+    // a queued runtime is never "busy" (nothing is running for it yet), it's
+    // just waiting. See useInstallQueue's doc comment above.
+    const installBusy = isActiveInstallTurn && (installState === "installing" || verifying);
+    const label2 = isQueuedForInstall
+      ? "Queued"
+      : installState === "installing"
+        ? "Installing…"
+        : installBusy
+          ? "Checking…"
+          : installState === "error"
+            ? "Retry"
+            : `Install ${label}`;
     primaryAction = (
       <button
         type="button"
         className="fleet-btn fleet-btn--accent-fill"
-        onClick={runInstall}
-        disabled={installBusy}
+        onClick={() => installQueue.requestTurn(runtime)}
+        disabled={installBusy || isQueuedForInstall}
       >
         {installBusy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-        {installState === "installing" ? "Installing…" : verifying ? "Checking…" : installState === "error" ? "Retry" : `Install ${label}`}
+        {label2}
       </button>
     );
   } else if (state === "unauthenticated" && loginPhase === "idle") {
+    // The single most important action on this page once a tool is
+    // installed — an accent-filled button with a leading icon so it doesn't
+    // read as just another text row, on top of now sitting in a section
+    // that's exclusively actionable tools (no more "Not detected" siblings
+    // to get lost next to).
     primaryAction = (
       <button
         type="button"
@@ -695,8 +869,8 @@ function CliSetupControl({
         onClick={openPicker}
         disabled={verifying}
       >
-        {verifying ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-        {verifying ? "Checking…" : "Sign in ▾"}
+        {verifying ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <LogIn size={14} strokeWidth={2} />}
+        {verifying ? "Checking…" : "Sign in"}
       </button>
     );
   } else if (state === "unauthenticated" && loginPhase !== "idle") {
@@ -1393,6 +1567,10 @@ export default function GatewayDetailPage() {
   const [destroyOpen, setDestroyOpen] = useState(false);
   const [destroying, setDestroying] = useState(false);
   const [destroyError, setDestroyError] = useState<string | null>(null);
+  // Shared across every CliSetupControl row below (one queue per page, not
+  // per tool) so an install click on tool B while tool A is still installing
+  // enqueues instead of firing a second concurrent install on the same box.
+  const installQueue = useInstallQueue();
 
   const gateway = useMemo(() => gateways.find((g) => idOf(g) === targetGatewayId), [gateways, targetGatewayId]);
   useBreadcrumbLabel(targetGatewayId, gateway ? gatewayLabel(gateway) : null);
@@ -1479,7 +1657,11 @@ export default function GatewayDetailPage() {
   const statusSuffix = connectionHealthSuffix(connPresentation.tone);
   const statusPillLabel = statusSuffix ? `${connPresentation.label} · ${statusSuffix}` : connPresentation.label;
 
-  const gaugeCards = buildGaugeCards(gateway.metadata?.resources ?? gateway.resources);
+  // Real resource snapshot (CPU/GPU/memory/temp) this box last heartbeated —
+  // feeds both the gauge cards above and the Ollama memory gate below, so
+  // the two never quote a different number for the same box.
+  const resources = gateway.metadata?.resources ?? gateway.resources;
+  const gaugeCards = buildGaugeCards(resources);
 
   // Channels through this box — derived from the SAME boundAgents this
   // page already resolves for "Agents running on this computer" (see
@@ -1633,57 +1815,90 @@ export default function GatewayDetailPage() {
         </div>
 
         <div className="fleet-hw-dash-panel">
-          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Capabilities</div>
+          {/* Split from the old flat "Capabilities" list, which mixed
+              actionable installable tools with read-only detected services
+              in one list — "Not detected" sitting right next to Install
+              buttons read as a broken control, not an observation. These
+              are now two distinct sections with two distinct visual
+              treatments: real actions with real per-item state below, vs.
+              a plain status readout further down. */}
+          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>AI coding tools</div>
+          <p className="fleet-tab-subtitle" style={{ margin: "0 0 10px" }}>
+            Install a coding CLI on this computer, then sign it in — signing in is what actually lets an
+            agent use it.
+          </p>
           <div className="fleet-hw-card">
-            {CAPABILITY_ORDER.map((id) => {
+            {INSTALLABLE_TOOL_ORDER.map((id) => {
               const runtime = CLI_ROW_RUNTIME[id];
-              const isCli = Boolean(runtime);
-              if (isCli) {
-                const state = gatewayRuntimeState(gateway, runtime);
-                // A CLI row with state==="ready" collapses to nothing extra —
-                // the CliSetupControl returns null and we render just the
-                // label + status chip like every other row.
-                if (state === "ready") {
-                  return (
-                    <div className="fleet-hw-row" key={id}>
-                      <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
-                      <span className="fleet-hw-value">
-                        <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />
-                      </span>
-                    </div>
-                  );
-                }
-                // CliSetupControl now OWNS the row layout for missing /
-                // unauthenticated states — label, status chip, primary action
-                // button all sit on ONE flex row, with the expansion area
-                // (chooser / URL+code / input / error) rendered below only
-                // when non-empty. See the memo at
-                // https://claude.ai/code/artifact/d3280431-5697-49e7-89bc-cad15f013af2
+              const state = gatewayRuntimeState(gateway, runtime);
+              // A CLI row with state==="ready" collapses to nothing extra —
+              // the CliSetupControl returns null and we render just the
+              // label + status chip like every other row.
+              if (state === "ready") {
                 return (
-                  <div
-                    className="fleet-hw-row"
-                    key={id}
-                    style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", gap: 4 }}
-                  >
-                    <CliSetupControl
-                      runtime={runtime}
-                      state={state}
-                      gatewayId={targetGatewayId}
-                      workspaceId={workspaceId}
-                      refresh={refresh}
-                      isCloud={isCloud}
-                    />
+                  <div className="fleet-hw-row" key={id}>
+                    <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
+                    <span className="fleet-hw-value">
+                      <StatusChip tone={runtimeStateTone(state)} label={runtimeStateLabel(state)} />
+                    </span>
                   </div>
                 );
               }
-              const item = byId.get(id);
-              const presentation = serviceItemPresentation(item?.status);
+              // CliSetupControl now OWNS the row layout for missing /
+              // unauthenticated states — label, status chip, primary action
+              // button all sit on ONE flex row, with the expansion area
+              // (chooser / URL+code / input / error) rendered below only
+              // when non-empty. See the memo at
+              // https://claude.ai/code/artifact/d3280431-5697-49e7-89bc-cad15f013af2
               return (
-                <div className="fleet-hw-row" key={id}>
-                  <span className="fleet-hw-label">{CAPABILITY_LABEL[id]}</span>
-                  <span className="fleet-hw-value">
+                <div
+                  className="fleet-hw-row"
+                  key={id}
+                  style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", gap: 4 }}
+                >
+                  <CliSetupControl
+                    runtime={runtime}
+                    state={state}
+                    gatewayId={targetGatewayId}
+                    workspaceId={workspaceId}
+                    refresh={refresh}
+                    isCloud={isCloud}
+                    installQueue={installQueue}
+                  />
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="fleet-detail-section-title">Detected on this machine</div>
+          <p className="fleet-tab-subtitle" style={{ margin: "0 0 10px" }}>
+            Read-only — background services this computer already has. Nothing to install here.
+          </p>
+          <div className="fleet-hw-card">
+            {DETECTED_SERVICE_ORDER.map((id) => {
+              const item = byId.get(id);
+              const presentation = serviceItemPresentation(id, item, resources);
+              return (
+                <div
+                  className="fleet-hw-row"
+                  key={id}
+                  style={presentation.reason ? { flexDirection: "column", alignItems: "stretch", gap: 4 } : undefined}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                    <span className="fleet-hw-label" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      {SERVICE_ICON[id]}
+                      {CAPABILITY_LABEL[id]}
+                    </span>
                     <StatusChip tone={presentation.tone} label={presentation.label} />
-                  </span>
+                  </div>
+                  {presentation.reason && (
+                    <span
+                      className="fleet-list-row-desc"
+                      style={{ whiteSpace: "normal", overflow: "visible", textOverflow: "clip" }}
+                    >
+                      {presentation.reason}
+                    </span>
+                  )}
                 </div>
               );
             })}
