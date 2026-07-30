@@ -9,7 +9,7 @@
 // is forced to fetch the new URL fresh instead of reusing the poisoned entry.
 // This is why a channel logo could stay broken for a user across normal
 // refreshes even after the file went live — the fix is a new URL, not a reload.
-const ASSET_VERSION = "20260722";
+const ASSET_VERSION = "20260731";
 
 const withVersion = (map: Record<string, string>): Record<string, string> =>
   Object.fromEntries(
@@ -117,6 +117,22 @@ const RAW_CONNECTOR_ICONS: Record<string, string> = {
   clay: "/brand-assets/apps/clay.svg",
   fireflies: "/brand-assets/apps/fireflies.svg",
   fathom: "/brand-assets/apps/fathom.svg",
+  // 2026-07-31 connector-picker logo audit (MAN-145 founder feedback: "some
+  // apps doesnt even have image logo"). Cross-checked the full 76-item
+  // work_app_connector lane in connection_catalog_service.py against this
+  // map — these five ids were the only gaps left, closing coverage to
+  // 76/76. Real Simple Icons brand SVGs (verified live against
+  // simple-icons@latest) for paypal/sentry/cloudflare; "attio" has no
+  // verified slug in Simple Icons (checked live, 404) so it gets the same
+  // neutral monogram placeholder treatment as ahrefs/fathom/klaviyo/mercury
+  // above, not a guessed logo. "email" (the generic OAuth-mailbox
+  // connector, distinct from "smtp") reuses the same generic mail glyph
+  // "smtp" already does — there's no brand to represent, it's a mail icon.
+  paypal: "/brand-assets/apps/paypal.svg",
+  sentry: "/brand-assets/apps/sentry.svg",
+  cloudflare: "/brand-assets/apps/cloudflare.svg",
+  attio: "/brand-assets/apps/attio.svg",
+  email: "/brand-assets/generic/email.svg",
 };
 
 // Versioned public exports — see ASSET_VERSION above. Every render site
