@@ -420,7 +420,12 @@ class RunStateRepositoryArchiveRunRecordRustGateTests(unittest.IsolatedAsyncioTe
                     "trace-1",
                 )
 
-        run_state_repository._require_pool.assert_not_awaited()
+            # Must run inside the patch.object block above -- once it exits,
+            # run_state_repository._require_pool reverts to the real
+            # function, which has no assert_not_awaited (that's only on the
+            # AsyncMock patched.object installed for the duration of the
+            # `with`).
+            run_state_repository._require_pool.assert_not_awaited()
 
     async def test_archive_run_blocks_on_wrong_run_record_action_before_pool(self) -> None:
         pool = AsyncMock()
@@ -462,7 +467,7 @@ class RunStateRepositoryArchiveRunRecordRustGateTests(unittest.IsolatedAsyncioTe
                     "trace-1",
                 )
 
-        run_state_repository._require_pool.assert_not_awaited()
+            run_state_repository._require_pool.assert_not_awaited()
 
     async def test_append_local_queue_dead_letter_calls_queue_kernel_first(self) -> None:
         calls = []
@@ -474,6 +479,16 @@ class RunStateRepositoryArchiveRunRecordRustGateTests(unittest.IsolatedAsyncioTe
                 "decision": "allow",
                 "reason": "queue_dead_letter_allowed",
                 "operation": payload["operation"],
+                # Missing before this fix: _enforce_queue_claim_transition_
+                # decision() (run_state_repository.py) checks next_action
+                # against _QUEUE_CLAIM_TRANSITION_NEXT_ACTIONS["dead_letter"]
+                # == {"dead_letter_queue_item"} -- without it the call always
+                # raised "unexpected next_action ... <missing>" before ever
+                # reaching the assertions below. The sibling test right below
+                # (test_upsert_fleet_worker_calls_runtime_state_store_kernel_
+                # first) already includes next_action in its own fake_rust;
+                # this one just didn't.
+                "next_action": "dead_letter_queue_item",
                 "next_status": "failed",
                 "terminal": True,
             }
@@ -702,7 +717,7 @@ class RunStateRepositoryArchiveRunRecordRustGateTests(unittest.IsolatedAsyncioTe
                     "trace-1",
                 )
 
-        run_state_repository._require_pool.assert_not_awaited()
+            run_state_repository._require_pool.assert_not_awaited()
 
     async def test_persist_outbox_event_blocks_on_wrong_outbox_action(self) -> None:
         pool = AsyncMock()
@@ -738,7 +753,7 @@ class RunStateRepositoryArchiveRunRecordRustGateTests(unittest.IsolatedAsyncioTe
                     payload={"hello": "world"},
                 )
 
-        run_state_repository._require_pool.assert_not_awaited()
+            run_state_repository._require_pool.assert_not_awaited()
 
     async def test_claim_run_blocks_on_wrong_queue_claim_action(self) -> None:
         pool = AsyncMock()
@@ -770,7 +785,7 @@ class RunStateRepositoryArchiveRunRecordRustGateTests(unittest.IsolatedAsyncioTe
                     lease_id="lease-1",
                 )
 
-        run_state_repository._require_pool.assert_not_awaited()
+            run_state_repository._require_pool.assert_not_awaited()
 
 
 if __name__ == "__main__":
