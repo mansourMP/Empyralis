@@ -43,14 +43,17 @@ class _FakePool:
 
 
 class RunStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
-        self._rust_gate = patch.object(
-            run_state_repository.rust_runtime_kernel_client,
-            "run_runtime_kernel_enforced",
-            return_value={"decision": "allow"},
-        )
-        self._rust_gate.start()
-        self.addCleanup(self._rust_gate.stop)
+    # No local rust-gate mock here (there used to be a blanket
+    # patch.object(..., "run_runtime_kernel_enforced", return_value=
+    # {"decision": "allow"}) in setUp): it stubbed out next_action entirely,
+    # so every _enforce_*_decision() call in run_state_repository.py that
+    # checks next_action against an expected value (e.g.
+    # _RUNTIME_STATE_STORE_NEXT_ACTIONS, _RUN_RECORD_NEXT_ACTIONS) failed
+    # with "unexpected next_action: <missing>" regardless of what the test
+    # itself was trying to verify -- a local shadow mock silently defeating
+    # conftest.py's shared, per-operation-correct autouse mock (MAN-139).
+    # Removed so this file uses the same shared mock every other test file
+    # in this suite does.
 
     async def test_create_live_run_initial_returns_version_zero_registration(self):
         pool = _FakePool(fetchrow_result={"version": 0, "registered_at": "2026-04-12T00:00:00Z"})

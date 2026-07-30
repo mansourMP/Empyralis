@@ -201,7 +201,7 @@ class TestIdleSurvival:
         gateway_id = conn.gateway_id
 
         # Register connection + registration so dispatch works
-        gateway_protocol_service._register_live_connection(conn)
+        await gateway_protocol_service._register_live_connection(conn)
 
         reg = _dummy_registration(gateway_id=gateway_id)
         with patch.object(
@@ -353,7 +353,16 @@ class TestMidTaskDisconnect:
     def test_unregister_live_connection_fails_pending(self) -> None:
         """Unregistering a live connection fails its pending requests."""
         conn = _build_connection_raw()
-        gateway_protocol_service._register_live_connection(conn)
+        # _register_live_connection is async, but the rest of this test
+        # deliberately drives its own throwaway event loop below (to pump
+        # call_soon_threadsafe callbacks in isolation) rather than running
+        # as a pytest-asyncio test -- asyncio.run() here uses a separate,
+        # already-torn-down-before-the-next-line loop, so it can't conflict
+        # with that one the way awaiting inside an async test body would
+        # (asyncio.new_event_loop() below is a second, driven loop; you
+        # cannot run_until_complete() one loop while another is running in
+        # the same thread).
+        asyncio.run(gateway_protocol_service._register_live_connection(conn))
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -430,10 +439,11 @@ class TestReconnectWithoutManualIntervention:
       c) A new tool dispatch works through the new connection.
     """
 
-    def test_old_connection_unregisters_cleanly(self) -> None:
+    @pytest.mark.asyncio
+    async def test_old_connection_unregisters_cleanly(self) -> None:
         """After unregister, the connection is removed from both registries."""
         conn = _build_connection_raw(gateway_id="gw_reconnect", session_id="sess_old")
-        gateway_protocol_service._register_live_connection(conn)
+        await gateway_protocol_service._register_live_connection(conn)
 
         assert gateway_protocol_service.gateway_connection_is_live("gw_reconnect")
 
@@ -445,16 +455,17 @@ class TestReconnectWithoutManualIntervention:
 
         assert not gateway_protocol_service.gateway_connection_is_live("gw_reconnect")
 
-    def test_new_connection_registers_after_old_removed(self) -> None:
+    @pytest.mark.asyncio
+    async def test_new_connection_registers_after_old_removed(self) -> None:
         """A new connection for the same gateway registers after the old is gone."""
         old = _build_connection_raw(gateway_id="gw_reconnect", session_id="sess_old")
-        gateway_protocol_service._register_live_connection(old)
+        await gateway_protocol_service._register_live_connection(old)
         gateway_protocol_service._unregister_live_connection(
             gateway_id="gw_reconnect", session_id="sess_old", reason="blip"
         )
 
         new = _build_connection_raw(gateway_id="gw_reconnect", session_id="sess_new")
-        gateway_protocol_service._register_live_connection(new)
+        await gateway_protocol_service._register_live_connection(new)
 
         assert gateway_protocol_service.gateway_connection_is_live("gw_reconnect")
         live = gateway_protocol_service._get_live_connection("gw_reconnect")

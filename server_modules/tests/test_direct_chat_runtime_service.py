@@ -8,6 +8,18 @@ from server_modules import direct_chat_response_service
 from server_modules import direct_chat_runtime_service
 from server_modules import no_provider_service
 
+# MAN-139: every `prepared = SimpleNamespace(...)` fixture below stands in
+# for direct_chat_entry_service's real PreparedDirectChatRequest, which has
+# a `tool_registry: List[Any]` field (direct_chat_entry_service.py line
+# ~144). direct_chat_runtime_service.build_direct_operator_reply reads
+# `prepared.tool_registry` unconditionally and passes it straight through
+# to stream_provider_backed_direct_chat -- none of these fakes had the
+# attribute at all, so every test in this file failed on
+# AttributeError before its own assertions ever ran. No test here inspects
+# tool_registry's contents (grep confirms zero references outside the
+# fixtures themselves), so `tool_registry=[]` is a safe, minimal default
+# everywhere it's added.
+
 
 class DirectChatRuntimeServiceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -108,6 +120,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_returns_empty_message_payload(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -149,6 +162,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_hosted_tier_forces_platform_runtime_credentials(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello",
             normalized_workspace_id="ws-1",
             normalized_thread_id="thread-1",
@@ -239,6 +253,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
     def test_build_direct_operator_reply_uses_session_turn_request_fallback(self) -> None:
         captured: dict[str, object] = {}
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello from turn",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -291,6 +306,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
     def test_build_direct_operator_reply_hydrates_prior_messages_from_thread_store(self) -> None:
         captured: dict[str, object] = {}
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello from turn",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -462,6 +478,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_returns_explicit_provider_unavailable_when_provider_changes(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -504,6 +521,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_does_not_keyword_block_offline_my_computer_text(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="find this file on my laptop",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -581,6 +599,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_collect_direct_operator_reply_keeps_generic_capability_question_as_sage_chat(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="what can you do here right now?",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -663,6 +682,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_returns_explicit_provider_unavailable_when_not_ready(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -707,6 +727,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_locks_default_hosted_provider(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -774,6 +795,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_keeps_obvious_tool_intent_provider_backed_when_provider_ready(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="List the files on my desktop.",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -835,6 +857,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_keeps_local_tools_for_assistant_plan_interception(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="what about now?",
             normalized_workspace_id="ws-1",
             normalized_thread_id="thread-1",
@@ -896,6 +919,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_exposes_web_tools_for_web_lookup_when_provider_ready(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="do some web search!",
             normalized_workspace_id="ws-1",
             normalized_thread_id="thread-1",
@@ -967,6 +991,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_requires_agent_computer_for_browser_request(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="open https://example.com in the browser",
             normalized_workspace_id="ws-1",
             normalized_thread_id="thread-1",
@@ -1019,6 +1044,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_blocks_browser_request_when_selected_agent_computer_offline(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="open https://example.com in the browser",
             normalized_workspace_id="ws-1",
             normalized_thread_id="thread-1",
@@ -1067,6 +1093,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_forces_explicit_tool_request_even_when_provider_ready(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="Use the local shell tool to run ls ~/Desktop and return the result exactly.",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -1128,6 +1155,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_forces_working_directory_request_even_when_provider_ready(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="what folder are you in ?",
             normalized_workspace_id="ws-1",
             normalized_thread_id="thread-1",
@@ -1187,6 +1215,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_orders_system_identity_and_workspace_context(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -1250,6 +1279,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_calls_rust_stream_chat_gate_before_preview(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",
@@ -1299,6 +1329,7 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
 
     def test_build_direct_operator_reply_wrong_rust_action_blocks_before_route_planning(self) -> None:
         prepared = SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
             normalized_message="hello",
             normalized_workspace_id="default",
             normalized_thread_id="thread-1",

@@ -19,7 +19,6 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from server_modules import (
     kill_switch_gate,
     gateway_protocol_service,
-    gateway_approval_service,
     gateway_quota_enforcement,
     secret_redaction_service,
     gateway_browser_runtime,
@@ -141,11 +140,13 @@ class ProductE2ETests(unittest.TestCase):
         self.assertNotEqual(safe_payload.get("api_key"), "sk-sensitive-key-123")
         self.assertEqual(safe_payload["url"], "https://github.com/empyralis/pulls/42")
 
-        # Verify TTL helper
-        recent = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
-        self.assertFalse(gateway_approval_service._approval_expired(
-            {"requested_at": recent}, 900
-        ))
+        # Approval TTL expiry used to be verified here via
+        # gateway_approval_service._approval_expired, which no longer
+        # exists -- 0820a732c ("Remove approval system — agent now acts on
+        # reasoning, not approval gates") deleted the whole approval-gate
+        # module's real implementation (it's a stub now, see
+        # gateway_approval_service.py's module docstring). There is no TTL
+        # concept left to verify.
 
         # ── Step 9: Gateway executes safe action ──
         # Validate browser URL safety
@@ -235,18 +236,19 @@ class ProductE2ETests(unittest.TestCase):
         )
         self.assertIn("unable to reach", sage_fallback.lower())
 
-    def test_neg02_approval_denied_does_not_execute(self):
-        """When approval is denied, the action must not execute."""
-        # Verify TTL expiry detection works
-        old = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat()
-        self.assertTrue(gateway_approval_service._approval_expired(
-            {"requested_at": old}, 900
-        ))
-
-        # Atomic resolution: once denied, it stays denied
-        self.assertTrue(callable(
-            gateway_approval_service._approval_expired
-        ))
+    # test_neg02_approval_denied_does_not_execute deleted: despite its
+    # docstring ("When approval is denied, the action must not execute"),
+    # every assertion in it only exercised
+    # gateway_approval_service._approval_expired, a TTL helper that no
+    # longer exists -- 0820a732c ("Remove approval system — agent now acts
+    # on reasoning, not approval gates") removed the whole approval-gate
+    # implementation gateway_approval_service.py used to have (it's a
+    # stub now: request_gateway_tool_approval always returns approved,
+    # capability_requires_owner_approval always returns False). There is
+    # no "approval denied" state left in the product for this test to
+    # exercise, and nothing in the deleted body actually tested
+    # "does not execute" even before that removal -- it never invoked an
+    # execution path at all.
 
     def test_neg03_unsafe_browser_url_blocked(self):
         """file://, localhost, private IPs are all blocked."""

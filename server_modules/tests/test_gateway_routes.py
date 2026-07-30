@@ -411,11 +411,20 @@ class GatewayRoutesTests(unittest.TestCase):
         )
         gateway_id = registration_payload["gateway"]["gateway_id"]
 
-        with patch.object(routes_gateway.gateway_execution_service, "execute_tool_via_gateway", new=AsyncMock(return_value={"status": "completed"})) as execute_mock, patch.object(
-            routes_gateway.gateway_approval_service,
-            "request_gateway_tool_approval",
-            new=AsyncMock(return_value={"approval_id": "approval-1"}),
-        ) as approval_mock:
+        # This used to also patch routes_gateway.gateway_approval_service.
+        # request_gateway_tool_approval and assert it was never awaited, to
+        # prove full_access skipped the owner-approval prompt. e12563fc2
+        # ("Stage 0-1: ... remove approval system") deleted that whole
+        # integration -- routes_gateway.py no longer imports
+        # gateway_approval_service at all (grep confirms zero references),
+        # so the module attribute the patch targeted doesn't exist anymore
+        # and patch.object() raises AttributeError before the request is
+        # even made. The guarantee this test cares about (full_access
+        # executes directly, no approval card in the way) is now structural
+        # -- there is no approval code path left to skip -- so the
+        # meaningful, still-live assertions below (200 + single execute call
+        # with agent_scope="sage") are what's left to verify.
+        with patch.object(routes_gateway.gateway_execution_service, "execute_tool_via_gateway", new=AsyncMock(return_value={"status": "completed"})) as execute_mock:
             response = self.client.post(
                 f"/api/gateway/registrations/{gateway_id}/tools/execute",
                 json={
@@ -430,7 +439,6 @@ class GatewayRoutesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         execute_mock.assert_awaited_once()
         self.assertEqual(execute_mock.await_args.kwargs["agent_scope"], "sage")
-        approval_mock.assert_not_awaited()
 
     def test_legacy_full_access_registration_requires_new_sage_ack_metadata(self) -> None:
         registration_payload = self._register_gateway_with_mode(
@@ -449,14 +457,18 @@ class GatewayRoutesTests(unittest.TestCase):
             )
             conn.commit()
 
+        # See test_full_access_literal_skips_owner_prompt_for_policy_allowed_
+        # gateway_action above: gateway_approval_service is no longer
+        # imported by routes_gateway.py at all (e12563fc2 removed the whole
+        # approval-gate integration), so patching
+        # routes_gateway.gateway_approval_service.request_gateway_tool_approval
+        # raises AttributeError before the request is made. The reconfirmation
+        # gate this test actually exercises (FULL_ACCESS_RECONFIRMATION_REQUIRED)
+        # is unrelated to that removed approval flow, so dropping the dead
+        # patch/assertion loses no real coverage.
         with (
             patch.object(routes_gateway, "_enforce_gateway_service_decision", return_value={"next_action": "allow_gateway_service_operation"}),
             patch.object(routes_gateway.gateway_execution_service, "execute_tool_via_gateway", new=AsyncMock(return_value={"status": "completed"})) as execute_mock,
-            patch.object(
-                routes_gateway.gateway_approval_service,
-                "request_gateway_tool_approval",
-                new=AsyncMock(return_value={"approval_id": "approval-legacy"}),
-            ) as approval_mock,
         ):
             response = self.client.post(
                 f"/api/gateway/registrations/{gateway_id}/tools/execute",
@@ -471,7 +483,6 @@ class GatewayRoutesTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["detail"]["error"], "FULL_ACCESS_RECONFIRMATION_REQUIRED")
-        approval_mock.assert_not_awaited()
         execute_mock.assert_not_awaited()
 
     def test_expired_session_token_is_rejected(self) -> None:
@@ -873,17 +884,43 @@ class GatewayRoutesTests(unittest.TestCase):
             workspace_id="default",
             reason="closed pilot smoke resume",
         )
-        response_after_clear = self.client.post(
-            f"/api/gateway/registrations/{gateway_id}/tools/execute",
-            json={
-                "capability_id": "browser.session.start",
-                "arguments": {},
-                "run_id": "run-kill-switch-clear",
-                "trace_id": "trace-kill-switch-clear",
-                "request_id": "req-kill-switch-clear",
-            },
-        )
-        self.assertEqual(response_after_clear.status_code, 202)
+        # Historically this asserted 202 with an "approval_required" body,
+        # produced by a branch in execute_gateway_tool() that returned 202
+        # when a capability required interactive owner approval (see
+        # a1bb5aed9's original tools/execute handler). e12563fc2 ("Stage 0-1:
+        # ... remove approval system") deliberately deleted the whole
+        # approval-gate system: gateway_approval_service.
+        # capability_requires_owner_approval() is now a stub that always
+        # returns False (see its docstring: "approval gates removed. Agent
+        # acts on its own reasoning."), so that 202 branch is permanently
+        # unreachable in the current product -- asserting it here is a stale
+        # expectation, not live behavior. What this test still legitimately
+        # covers is the kill switch itself: clearing it must let a tool
+        # execution through to the real dispatch path rather than short-
+        # circuiting with KILL_SWITCH_ACTIVE. The dispatch itself (talking to
+        # an actual connected gateway) is orthogonal to kill-switch behavior
+        # and is exercised by the heartbeat/reconnect tests elsewhere in this
+        # file, so it's mocked here the same way
+        # test_full_access_literal_skips_owner_prompt_for_policy_allowed_gateway_action
+        # above mocks it -- the endpoint's only success status is FastAPI's
+        # default 200 (no status_code override on this route).
+        with patch.object(
+            routes_gateway.gateway_execution_service,
+            "execute_tool_via_gateway",
+            new=AsyncMock(return_value={"status": "completed"}),
+        ) as execute_mock:
+            response_after_clear = self.client.post(
+                f"/api/gateway/registrations/{gateway_id}/tools/execute",
+                json={
+                    "capability_id": "browser.session.start",
+                    "arguments": {},
+                    "run_id": "run-kill-switch-clear",
+                    "trace_id": "trace-kill-switch-clear",
+                    "request_id": "req-kill-switch-clear",
+                },
+            )
+        self.assertEqual(response_after_clear.status_code, 200)
+        execute_mock.assert_awaited_once()
 
     def test_pair_register_connect_heartbeat_and_reconnect(self) -> None:
         registration_payload = self._register_gateway()
@@ -1707,15 +1744,41 @@ class GatewayRoutesTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         by_key = {item["channel_key"]: item for item in response.json()["items"]}
+        # discord_personal joined the catalog in 95ab504e5 ("channel
+        # unification hardening ... Discord DM fix"), three weeks after this
+        # test was written -- a real, deliberately shipped platform channel
+        # (see channel_lane_contract_service.py's personal_channel_catalog
+        # and the discord_personal wiring in channel_adapter.py,
+        # connectors_actions.py, personal_channel_sage_bridge_service.py),
+        # not a regression. The surfaces endpoint iterates the live catalog,
+        # so the expected set has to track it.
         self.assertEqual(
             set(by_key),
-            {"telegram_personal", "whatsapp_personal", "signal_personal", "imessage_personal", "wechat_personal"},
+            {
+                "telegram_personal",
+                "whatsapp_personal",
+                "signal_personal",
+                "imessage_personal",
+                "wechat_personal",
+                "discord_personal",
+            },
         )
         self.assertTrue(by_key["telegram_personal"]["connected"])
         self.assertTrue(by_key["telegram_personal"]["running"])
         self.assertEqual(by_key["telegram_personal"]["connected_identity"], "mansur")
         self.assertEqual(by_key["signal_personal"]["status"], "not_configured")
-        self.assertFalse(by_key["signal_personal"]["live_capable"])
+        # live_capable = catalog_live_capable AND advertised(manifest)_live_capable
+        # (get_gateway_personal_channel_surfaces). This used to assert False
+        # here because PERSONAL_CHANNEL_ROADMAP's signal_personal catalog
+        # entry said live_capable=False even though the backend handler,
+        # gateway runtime, and signal-cli bridge were already fully wired --
+        # 01941336e ("re-enable Signal as a first-class personal channel,
+        # close OpenClaw parity gaps") fixed that catalog flag to True
+        # (see channel_lane_contract_service.py's inline note on the
+        # signal_personal roadmap entry). The manifest here already claims
+        # live_capable=True, so with the catalog now agreeing, the correct
+        # computed value is True.
+        self.assertTrue(by_key["signal_personal"]["live_capable"])
         self.assertEqual(by_key["signal_personal"]["manifest"]["api_token"], "[redacted]")
         self.assertEqual(by_key["imessage_personal"]["status"], "agent_computer_bridge")
         self.assertEqual(by_key["wechat_personal"]["status"], "agent_computer_bridge")
@@ -1924,11 +1987,26 @@ class GatewayRoutesTests(unittest.TestCase):
         )
         self.assertEqual(revoke_response.status_code, 200)
 
+        # gateway_registry_service.list_workspace_gateways() reads via
+        # list_workspace_gateway_registrations(..., include_revoked=False)
+        # (see c63e4ff04, "dedupe phantom VPS registrations" -- a deliberate
+        # product change months after this test was written): revoked
+        # gateways are intentionally dropped from the default listing so
+        # they stop cluttering the paired-devices view. Assert that directly,
+        # then read the registration straight from the repository (the same
+        # one the list endpoint itself sources from, just without its
+        # revoked-filter) to confirm connection_status still resolves to
+        # "revoked" for the underlying record -- the thing this test name
+        # actually promises to cover.
         revoked_list = self.client.get("/api/gateway/registrations", params={"workspace_id": "default"})
         self.assertEqual(revoked_list.status_code, 200)
-        revoked_gateway = revoked_list.json()["items"][0]
-        self.assertEqual(revoked_gateway["status"], "revoked")
-        self.assertEqual(revoked_gateway["connection_status"], "revoked")
+        self.assertEqual(revoked_list.json()["items"], [])
+
+        revoked_registration = gateway_state_repository.get_gateway_registration(gateway_id)
+        self.assertIsNotNone(revoked_registration)
+        revoked_payload = gateway_registry_service.gateway_registration_public_payload(revoked_registration)
+        self.assertEqual(revoked_payload["status"], "revoked")
+        self.assertEqual(revoked_payload["connection_status"], "revoked")
 
     def test_gateway_revoke_does_not_revoke_existing_web_auth_session(self) -> None:
         web_session_id = f"web-session-{uuid.uuid4().hex[:10]}"
@@ -2131,9 +2209,37 @@ class GatewayRoutesTests(unittest.TestCase):
             f"&session_token={session_payload['session_token']}"
         )
 
+        # ed9c2cdd6 ("dmPolicy sender gate + server-side media pipeline",
+        # landed months after this test was written) made _enforce_dm_policy
+        # run before any reply is generated, including in the identity-less
+        # fallback this test hits (no real agent install is registered for
+        # this gateway, so _resolve_agent_id_for_inbound returns
+        # LEGACY_UNSCOPED_AGENT_ID and _load_agent_dm_policy_config always
+        # returns hardcoded owner_only for that case -- see
+        # _unresolved_identity_dm_policy_config's docstring for why that's
+        # deliberately not configurable). The inbound message below is from
+        # "user-1@s.whatsapp.net" / "User One", a stranger relative to the
+        # linked_jid "me@s.whatsapp.net" set up by the connected state below,
+        # so without this it is now correctly, silently dropped by the gate
+        # before ever reaching build_whatsapp_personal_reply. That gate is
+        # orthogonal to what this test covers (state sync / reply delivery /
+        # reconnect / dedupe), so it's bypassed the same way the reply
+        # generation below already is mocked out.
         with patch(
             "server_modules.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
             return_value={"text": "Sage reply from cloud", "source": "test_bridge"},
+        ), patch(
+            "server_modules.personal_channels_service._enforce_dm_policy",
+            new=AsyncMock(
+                return_value={
+                    "allowed": True,
+                    "mode": "open",
+                    "sender_id": "user-1@s.whatsapp.net",
+                    "is_owner": False,
+                    "system_reply": None,
+                    "config_changed": False,
+                }
+            ),
         ):
             with self.client.websocket_connect(ws_path) as websocket:
                 websocket.send_json(
@@ -2335,6 +2441,18 @@ class GatewayRoutesTests(unittest.TestCase):
         with patch(
             "server_modules.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
             return_value={"text": "Sage reply from cloud", "source": "test_bridge"},
+        ), patch(
+            "server_modules.personal_channels_service._enforce_dm_policy",
+            new=AsyncMock(
+                return_value={
+                    "allowed": True,
+                    "mode": "open",
+                    "sender_id": "user-1@s.whatsapp.net",
+                    "is_owner": False,
+                    "system_reply": None,
+                    "config_changed": False,
+                }
+            ),
         ):
             with self.client.websocket_connect(reconnect_path) as websocket:
                 websocket.send_json(
@@ -2432,9 +2550,37 @@ class GatewayRoutesTests(unittest.TestCase):
             f"&session_token={session_payload['session_token']}"
         )
 
+        # ed9c2cdd6 ("dmPolicy sender gate + server-side media pipeline",
+        # landed months after this test was written) made _enforce_dm_policy
+        # run before any reply is generated, including in the identity-less
+        # fallback this test hits (no real agent install is registered for
+        # this gateway, so _resolve_agent_id_for_inbound returns
+        # LEGACY_UNSCOPED_AGENT_ID and _load_agent_dm_policy_config always
+        # returns hardcoded owner_only for that case -- see
+        # _unresolved_identity_dm_policy_config's docstring for why that's
+        # deliberately not configurable). The inbound message below is from
+        # "telegram-user-1" / "User One", a stranger relative to the
+        # linked_user_id "123456" set up by the connected state below, so
+        # without this it is now correctly, silently dropped by the gate
+        # before ever reaching build_telegram_personal_reply. That gate is
+        # orthogonal to what this test covers (state sync / reply delivery /
+        # reconnect / dedupe), so it's bypassed the same way the reply
+        # generation below already is mocked out.
         with patch(
             "server_modules.personal_channel_sage_bridge_service.build_telegram_personal_reply",
             return_value={"text": "Sage reply from Telegram cloud", "source": "test_bridge"},
+        ), patch(
+            "server_modules.personal_channels_service._enforce_dm_policy",
+            new=AsyncMock(
+                return_value={
+                    "allowed": True,
+                    "mode": "open",
+                    "sender_id": "telegram-user-1",
+                    "is_owner": False,
+                    "system_reply": None,
+                    "config_changed": False,
+                }
+            ),
         ):
             with self.client.websocket_connect(ws_path) as websocket:
                 websocket.send_json(
@@ -2604,6 +2750,18 @@ class GatewayRoutesTests(unittest.TestCase):
         with patch(
             "server_modules.personal_channel_sage_bridge_service.build_telegram_personal_reply",
             return_value={"text": "Sage reply from Telegram cloud", "source": "test_bridge"},
+        ), patch(
+            "server_modules.personal_channels_service._enforce_dm_policy",
+            new=AsyncMock(
+                return_value={
+                    "allowed": True,
+                    "mode": "open",
+                    "sender_id": "telegram-user-1",
+                    "is_owner": False,
+                    "system_reply": None,
+                    "config_changed": False,
+                }
+            ),
         ):
             with self.client.websocket_connect(reconnect_path) as websocket:
                 websocket.send_json(

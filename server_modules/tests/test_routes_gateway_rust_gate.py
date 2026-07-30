@@ -6,6 +6,11 @@ from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
 from server_modules import routes_gateway
+# routes_gateway.py only imports DECISION_BLOCK from
+# capability_risk_classifier_service (it never needed DECISION_ALLOW at
+# module scope), so `routes_gateway.DECISION_ALLOW` was never a real
+# attribute -- pull the constant from its actual source instead.
+from server_modules.agent_computer_policy_service import DECISION_ALLOW
 
 
 def _route_dependencies(path: str) -> list[str]:
@@ -828,7 +833,7 @@ def test_execute_gateway_browser_action_wrong_rust_action_blocks_before_dispatch
             "reviewed_approval_required": False,
             "reviewed_approved": False,
         }
-        risk_decision = type("RiskDecision", (), {"decision": routes_gateway.DECISION_ALLOW})()
+        risk_decision = type("RiskDecision", (), {"decision": DECISION_ALLOW})()
         with (
             patch.object(
                 routes_gateway,
@@ -858,7 +863,15 @@ def test_execute_gateway_browser_action_wrong_rust_action_blocks_before_dispatch
                 return_value={},
             ),
             patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
-            patch.object(routes_gateway, "_gateway_policy_from_registration", return_value=object()),
+            # execute_gateway_browser_action reads gateway_policy.policy_id
+            # when consuming approval memory (see routes_gateway.py's
+            # _consume_gateway_approval_memory call) -- a plain object()
+            # doesn't have one.
+            patch.object(
+                routes_gateway,
+                "_gateway_policy_from_registration",
+                return_value=type("GatewayPolicy", (), {"policy_id": "policy-1"})(),
+            ),
             patch.object(
                 routes_gateway,
                 "classify_gateway_browser_action_risk",
@@ -902,115 +915,16 @@ def test_execute_gateway_browser_action_wrong_rust_action_blocks_before_dispatch
     asyncio.run(run_test())
 
 
-def test_gateway_approval_required_response_wrong_rust_action_blocks_before_approval_creation():
-    class _RiskDecision:
-        decision = "requires_approval"
-
-        def as_dict(self):
-            return {"decision": self.decision}
-
-    async def run_test():
-        registration = {"gateway_id": "gw-1", "workspace_id": "ws-1"}
-        with (
-            patch.object(routes_gateway, "_latest_gateway_session_id", return_value="session-1"),
-            patch.object(
-                routes_gateway.rust_runtime_kernel_client,
-                "run_runtime_kernel_enforced",
-                return_value={
-                    "ok": True,
-                    "decision": "requires_approval",
-                    "reason": "gateway_approval_required",
-                    "operation": "approval_request",
-                    "next_action": "allow_gateway_service_operation",
-                },
-            ),
-            patch.object(
-                routes_gateway.gateway_approval_service,
-                "request_gateway_tool_approval",
-                new=AsyncMock(side_effect=AssertionError("should not create approval")),
-            ) as approval_mock,
-        ):
-            with pytest.raises(HTTPException) as raised:
-                await routes_gateway._gateway_approval_required_response(
-                    registration=registration,
-                    gateway_id="gw-1",
-                    tenant_id="tenant-1",
-                    actor_id="owner-1",
-                    capability_id="computer_control.click",
-                    arguments={"x": 1, "y": 2},
-                    run_id="run-1",
-                    trace_id="trace-1",
-                    request_id="req-1",
-                    risk_decision=_RiskDecision(),
-                )
-
-        assert raised.value.status_code == 423
-        assert "unexpected next_action" in str(raised.value.detail)
-        approval_mock.assert_not_awaited()
-
-    asyncio.run(run_test())
-
-
-def test_resolve_gateway_registration_approval_wrong_rust_action_blocks_before_resolution():
-    class _Body:
-        decision = "approved"
-        note = "looks safe"
-        timeout_seconds = 30
-        remember_for_seconds = None
-
-    async def run_test():
-        current_user = {"user_id": "owner-1"}
-        registration = {"gateway_id": "gw-1", "tenant_id": "tenant-1"}
-        approval = {
-            "approval_id": "approval-1",
-            "capability_id": "computer_control.click",
-            "run_id": "run-1",
-            "trace_id": "trace-1",
-            "request_id": "req-1",
-        }
-        with (
-            patch.object(
-                routes_gateway,
-                "_accessible_gateway_registration",
-                return_value=(registration, "ws-1"),
-            ),
-            patch.object(routes_gateway, "_enforce_gateway_safety_gates", return_value=None),
-            patch.object(
-                routes_gateway.gateway_state_repository,
-                "get_gateway_action_approval",
-                return_value=approval,
-            ),
-            patch.object(routes_gateway, "_latest_gateway_session_id", return_value="session-1"),
-            patch.object(
-                routes_gateway.rust_runtime_kernel_client,
-                "run_runtime_kernel_enforced",
-                return_value={
-                    "ok": True,
-                    "decision": "allow",
-                    "reason": "gateway_approval_resolution_allowed",
-                    "operation": "approval_resolve",
-                    "next_action": "allow_gateway_service_operation",
-                },
-            ),
-            patch.object(
-                routes_gateway.gateway_approval_service,
-                "resolve_gateway_tool_approval",
-                new=AsyncMock(side_effect=AssertionError("should not resolve approval")),
-            ) as resolve_mock,
-        ):
-            with pytest.raises(HTTPException) as raised:
-                await routes_gateway.resolve_gateway_registration_approval(
-                    gateway_id="gw-1",
-                    approval_id="approval-1",
-                    body=_Body(),
-                    current_user=current_user,
-                )
-
-        assert raised.value.status_code == 423
-        assert "unexpected next_action" in str(raised.value.detail)
-        resolve_mock.assert_not_awaited()
-
-    asyncio.run(run_test())
+# test_gateway_approval_required_response_wrong_rust_action_blocks_before_
+# approval_creation and
+# test_resolve_gateway_registration_approval_wrong_rust_action_blocks_
+# before_resolution deleted: both called routes_gateway.
+# _gateway_approval_required_response and routes_gateway.
+# resolve_gateway_registration_approval, neither of which exists anymore --
+# 0820a732c ("Remove approval system — agent now acts on reasoning, not
+# approval gates") removed both route handlers along with the rest of the
+# approval-gate system. Not a mock gap to patch; the functions under test
+# are gone.
 
 
 def test_start_gateway_browser_session_cloud_fallback_wrong_rust_action_blocks_before_builder():
@@ -1031,8 +945,12 @@ def test_start_gateway_browser_session_cloud_fallback_wrong_rust_action_blocks_b
     async def run_test():
         current_user = {"user_id": "member-1"}
         registration = {"gateway_id": "gw-1"}
-        gateway_policy = object()
-        risk_decision = type("RiskDecision", (), {"decision": routes_gateway.DECISION_ALLOW})()
+        # start_gateway_browser_session reads gateway_policy.policy_id when
+        # consuming approval memory (see routes_gateway.py's
+        # _consume_gateway_approval_memory call) -- a plain object()
+        # doesn't have one.
+        gateway_policy = type("GatewayPolicy", (), {"policy_id": "policy-1"})()
+        risk_decision = type("RiskDecision", (), {"decision": DECISION_ALLOW})()
         with (
             patch.object(
                 routes_gateway,
@@ -1312,106 +1230,16 @@ def test_takeover_gateway_browser_session_wrong_rust_action_blocks_before_dispat
     asyncio.run(run_test())
 
 
-def test_gateway_approval_memory_consume_accepts_allow_gateway_service_operation():
-    class _RiskDecision:
-        capability = "computer_control.click"
-        decision = "requires_approval"
-
-    with (
-        patch.object(
-            routes_gateway.agent_approval_memory_service,
-            "find_matching_approval_memory_rule",
-            return_value=object(),
-        ),
-        patch.object(
-            routes_gateway.agent_approval_memory_service,
-            "consume_matching_approval_memory_rule",
-            return_value="rule-1",
-        ) as consume_mock,
-        patch.object(routes_gateway, "_emit_gateway_approval_memory_used", return_value=None),
-        patch.object(routes_gateway, "_latest_gateway_session_id", return_value="session-1"),
-        patch.object(
-            routes_gateway.rust_runtime_kernel_client,
-            "run_runtime_kernel_enforced",
-            return_value={
-                "ok": True,
-                "decision": "allow",
-                "reason": "gateway_approval_memory_allowed",
-                "operation": "approval_memory_consume",
-                "next_action": "allow_gateway_service_operation",
-            },
-        ) as rust_mock,
-    ):
-        rule = routes_gateway._consume_gateway_approval_memory(
-            registration={"gateway_id": "gw-1"},
-            workspace_id="ws-1",
-            tenant_id="tenant-1",
-            actor_user_id="owner-1",
-            policy_id="policy-1",
-            risk_decision=_RiskDecision(),
-            payload={"x": 1},
-            run_id="run-1",
-            trace_id="trace-1",
-            request_id="req-1",
-        )
-
-    assert rule == "rule-1"
-    assert rust_mock.call_args.args[0] == "gateway-service-decision"
-    assert rust_mock.call_args.args[1]["operation"] == "approval_memory_consume"
-    assert rust_mock.call_args.args[1]["approval_provided"] is True
-    assert rust_mock.call_args.args[1]["approval_memory_hit"] is True
-    consume_mock.assert_called_once()
-
-
-def test_gateway_approval_memory_consume_wrong_rust_action_blocks_before_consume():
-    class _RiskDecision:
-        capability = "computer_control.click"
-        decision = "requires_approval"
-
-    with (
-        patch.object(
-            routes_gateway.agent_approval_memory_service,
-            "find_matching_approval_memory_rule",
-            return_value=object(),
-        ),
-        patch.object(
-            routes_gateway.agent_approval_memory_service,
-            "consume_matching_approval_memory_rule",
-            side_effect=AssertionError("should not consume approval memory"),
-        ) as consume_mock,
-        patch.object(
-            routes_gateway,
-            "_emit_gateway_approval_memory_used",
-            side_effect=AssertionError("should not emit approval memory usage"),
-        ) as emit_mock,
-        patch.object(routes_gateway, "_latest_gateway_session_id", return_value="session-1"),
-        patch.object(
-            routes_gateway.rust_runtime_kernel_client,
-            "run_runtime_kernel_enforced",
-            return_value={
-                "ok": True,
-                "decision": "allow",
-                "reason": "gateway_approval_memory_allowed",
-                "operation": "approval_memory_consume",
-                "next_action": "dispatch_gateway_operation",
-            },
-        ),
-    ):
-        with pytest.raises(HTTPException) as raised:
-            routes_gateway._consume_gateway_approval_memory(
-                registration={"gateway_id": "gw-1"},
-                workspace_id="ws-1",
-                tenant_id="tenant-1",
-                actor_user_id="owner-1",
-                policy_id="policy-1",
-                risk_decision=_RiskDecision(),
-                payload={"x": 1},
-                run_id="run-1",
-                trace_id="trace-1",
-                request_id="req-1",
-            )
-
-    assert raised.value.status_code == 423
-    assert "unexpected next_action" in str(raised.value.detail)
-    consume_mock.assert_not_called()
-    emit_mock.assert_not_called()
+# test_gateway_approval_memory_consume_accepts_allow_gateway_service_operation
+# and test_gateway_approval_memory_consume_wrong_rust_action_blocks_before_
+# consume deleted: both patched routes_gateway.agent_approval_memory_service,
+# a module reference that no longer exists on routes_gateway (0820a732c,
+# "Remove approval system", stripped the import), and both asserted
+# behavior for routes_gateway._consume_gateway_approval_memory that
+# contradicts what the function actually does now -- it's a hardcoded
+# `return None` stub ("# Phase 4: approval memory system removed", see its
+# one-line body in routes_gateway.py). The first test asserted a real rule
+# gets returned and consumed; the second asserted the function raises
+# HTTPException on a bad kernel decision. Neither is true of a function
+# that unconditionally returns None before ever calling the kernel gate it
+# mocks.
