@@ -36,12 +36,15 @@ Linear's) live here too:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from server_modules import control_plane_repository
+
+LOGGER = logging.getLogger(__name__)
 # One-directional by design: a task CARRIES labels, so tasks may know about
 # labels. workspace_labels_service never imports this module at module
 # scope in return (it reaches for project_tasks_service lazily, inside the
@@ -878,6 +881,34 @@ async def add_task_comment(
     a single statement), not a read-modify-write in application code, so two
     concurrent commenters (the owner dashboard and an agent, or two agents)
     can never clobber each other's comment under a race.
+
+    MAN-66 (@-mention parser): every comment, regardless of author, is
+    scanned for `@mentions` and resolved against this workspace's roster
+    (task_mention_service.resolve_task_mentions) BEFORE it is persisted, so
+    the resolved mentions ride along on the SAME comment object the
+    frontend already renders (Activity feed chips read `comment.mentions`,
+    no second fetch). This is deliberately the ONE shared place mention
+    resolution happens -- add_human_task_comment (the human path) and every
+    agent/system caller of this function (project_task__comment,
+    empyralis_comment_on_task, run_service's failure-note comment) all
+    funnel through here, so there is exactly one mention pipeline, not one
+    per author kind.
+
+    Dispatch (wake a mentioned AGENT, notify a mentioned HUMAN) happens
+    AFTER the comment durably lands, and is best-effort/fire-and-forget --
+    a dispatch failure is logged, never raised, and never undoes the
+    comment (mirrors add_human_task_comment's own wake_error contract,
+    which this file already established for the assignee-wake path).
+    task_mention_service.dispatch_resolved_mentions is what makes this safe
+    to run unconditionally for EVERY author, including an agent commenting
+    on its OWN task: it drops a mention of the author's own identity before
+    ever calling the scheduler, so an agent that mentions itself schedules
+    zero wakes (see that function's docstring and its own test coverage) --
+    this is a materially different, narrower guarantee than the reason
+    add_human_task_comment exists as a separate wrapper (that one is about
+    NEVER attempting the unconditional assignee-wake for a non-human
+    author; this one is about a specific, always-excluded target within an
+    otherwise-shared pipeline).
     """
     body_text = str(body or "").strip()
     if not body_text:
@@ -887,13 +918,36 @@ async def add_task_comment(
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
             "Postgres is required to comment on a task."
         )
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+    resolved_author_type = str(author_type or "").strip() or "unknown"
+    resolved_author_id = str(author_id or "").strip() or "unknown"
+
+    from server_modules import task_mention_service
+
+    try:
+        resolved_mentions = await task_mention_service.resolve_task_mentions(
+            tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, body=body_text, pool=pool,
+        )
+    except Exception:
+        LOGGER.warning("Mention resolution failed for task %s; posting as plain text", resolved_task_id, exc_info=True)
+        resolved_mentions = []
+    stored_body = body_text[:4000]
+    # A mention whose offsets fall past the 4000-char truncation point would
+    # be an out-of-bounds chip on the frontend -- drop it rather than store
+    # a dangling reference into text that no longer exists.
+    stored_mentions = [m for m in resolved_mentions if m.get("end", 0) <= len(stored_body)]
+
     comment = {
         "id": f"comment_{uuid.uuid4().hex[:12]}",
-        "author_type": str(author_type or "").strip() or "unknown",
-        "author_id": str(author_id or "").strip() or "unknown",
-        "body": body_text[:4000],
+        "author_type": resolved_author_type,
+        "author_id": resolved_author_id,
+        "body": stored_body,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    if stored_mentions:
+        comment["mentions"] = stored_mentions
     row = await pool.fetchrow(
         """
         UPDATE project_tasks
@@ -907,12 +961,27 @@ async def add_task_comment(
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         RETURNING
         """ + _TASK_RETURNING_SQL,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
-        str(task_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_task_id,
         json.dumps([comment]),
     )
-    return _row_to_task(row)
+    task = _row_to_task(row)
+    if task is not None and stored_mentions:
+        try:
+            await task_mention_service.dispatch_resolved_mentions(
+                tenant_id=resolved_tenant_id,
+                workspace_id=resolved_workspace_id,
+                task_id=resolved_task_id,
+                task_title=str(task.get("title") or ""),
+                resolved_mentions=stored_mentions,
+                author_type=resolved_author_type,
+                author_id=resolved_author_id,
+                comment_body=body_text,
+            )
+        except Exception:
+            LOGGER.warning("Mention dispatch failed for task %s", resolved_task_id, exc_info=True)
+    return task
 
 
 async def add_human_task_comment(

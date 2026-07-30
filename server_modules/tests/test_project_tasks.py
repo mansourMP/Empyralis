@@ -1409,6 +1409,86 @@ class ScheduleTaskCommentedWakeupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("wake ceiling", str(raised.exception))
         self.assertEqual(count_mock.await_count, 2)
 
+    async def test_debounce_check_is_scoped_to_the_specific_agent(self):
+        """MAN-66: the debounce count query must be scoped to (task_id,
+        agent_id), not task_id alone -- otherwise a comment mentioning
+        several different agents would have the first agent's freshly
+        persisted wake row debounce-suppress every other mentioned agent."""
+        with (
+            patch(
+                "server_modules.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=0),
+            ) as count_mock,
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, _scheduler_policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                new=AsyncMock(return_value={"id": "wake-6", "status": "pending"}),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._trigger_ambient_monitor",
+                return_value={"ok": True},
+            ),
+        ):
+            await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-42", task_id="task-1", title="Ship it",
+            )
+        self.assertEqual(count_mock.await_args_list[0].kwargs.get("agent_id"), "agent-42")
+
+    async def test_mentioning_two_different_agents_wakes_both_not_debounce_collided(self):
+        """The bug this fix rules out, proven at the scheduler level: two
+        DIFFERENT agents, both freshly wake-requested for the SAME task
+        inside the SAME debounce window (exactly what happens when one
+        comment mentions two teammates), must both go through -- the first
+        agent's wake row must not debounce-suppress the second agent's."""
+        persisted: list[dict] = []
+
+        async def fake_count(*, trigger_kind=None, task_id=None, agent_id=None, **_kwargs):
+            if trigger_kind == "task_commented":
+                return 1 if any(p["agent_id"] == agent_id for p in persisted) else 0
+            return 0  # the shared 24h ceiling never gets close in this test
+
+        async def fake_persist(*, trigger_kind, metadata, **_kwargs):
+            persisted.append({"trigger_kind": trigger_kind, "agent_id": metadata.get("agent_id")})
+            return {"id": f"wake-{len(persisted)}", "status": "pending"}
+
+        with (
+            patch(
+                "server_modules.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                side_effect=fake_count,
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, _scheduler_policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                side_effect=fake_persist,
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._trigger_ambient_monitor",
+                return_value={"ok": True},
+            ),
+        ):
+            result_a = await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-A", task_id="task-1", title="Ship it",
+            )
+            result_b = await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-B", task_id="task-1", title="Ship it",
+            )
+            # A THIRD call for the SAME agent-A, still inside the window,
+            # must still be debounced -- the fix is agent-scoped, not a
+            # blanket "never debounce" regression.
+            result_a_again = await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-A", task_id="task-1", title="Ship it",
+            )
+        self.assertIsNotNone(result_a)
+        self.assertIsNotNone(result_b)
+        self.assertIsNone(result_a_again)
+        self.assertEqual(len(persisted), 2)
+
 
 class BuildHeartbeatTurnRequestTaskThreadingTests(unittest.TestCase):
     """runtime_heartbeat_service.build_heartbeat_turn_request threading a

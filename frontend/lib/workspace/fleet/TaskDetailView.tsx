@@ -45,7 +45,7 @@
  * effort, surfaced the same way assignment's wake failure already is.
  */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { Calendar, Clock3, FolderKanban, MessageSquare, SignalHigh, User } from "lucide-react";
 
@@ -81,7 +81,30 @@ function stamp(value: string): string {
   return formatDateTime(value, { dateStyle: "medium", timeStyle: "short" });
 }
 
-type TaskComment = { id?: string; author_type?: string; author_id?: string; body?: string; created_at?: string };
+/** A resolved @-mention (MAN-66) -- written by
+ *  project_tasks_service.add_task_comment/task_mention_service alongside
+ *  the comment it was found in. `start`/`end` are character offsets into
+ *  that SAME comment's `body` (including the leading `@`), so rendering is
+ *  a straight slice — never a second parse of the text on this side. Only
+ *  RESOLVED mentions are ever present here; an unknown or ambiguous
+ *  `@name` in the raw text has no entry and just renders as plain text. */
+type TaskMention = {
+  raw?: string;
+  start: number;
+  end: number;
+  kind: "agent" | "user";
+  id: string;
+  display_name?: string;
+};
+
+type TaskComment = {
+  id?: string;
+  author_type?: string;
+  author_id?: string;
+  body?: string;
+  created_at?: string;
+  mentions?: TaskMention[];
+};
 
 /** task.metadata.comments as written by add_task_comment. Defensive on the
  *  way in — this is free-form JSONB, so anything that is not an object with a
@@ -92,6 +115,98 @@ function readComments(task: FleetTask): TaskComment[] {
   return raw
     .filter((c): c is TaskComment => Boolean(c) && typeof c === "object")
     .filter((c) => String(c.body || "").trim().length > 0);
+}
+
+/** A resolved mention, inline in a comment body — visually distinct from
+ *  surrounding text (a tinted pill, same tinted-circle identity treatment
+ *  as the Assignee row above: AgentSigil for an agent, MemberAvatar for a
+ *  person) and distinguishable from EACH OTHER (agent vs human), matching
+ *  this page's existing "agent and person are both team members, but never
+ *  drawn identically" convention. Deliberately styled inline rather than
+ *  via a new fleet-theme.css class -- that stylesheet is shared/load-
+ *  bearing across nearly every fleet surface (docs/AGENT-OPERATING-RULES.md
+ *  "All fleet UI shares files") and another agent may be editing it
+ *  concurrently; every color here is one of the same CSS custom properties
+ *  (--tile-bg/--tile-fg/--rail-active/--text-primary) the rest of this file
+ *  already reads, so it stays on-theme (light/dark) without a new rule. */
+function MentionChip({
+  mention,
+  agents,
+  members,
+}: {
+  mention: TaskMention;
+  agents: FleetAgent[];
+  members?: WorkspaceMember[];
+}) {
+  const chipStyle: CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    padding: "1px 7px 1px 3px",
+    borderRadius: 999,
+    background: "var(--rail-active)",
+    color: "var(--text-primary)",
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+  };
+
+  if (mention.kind === "agent") {
+    const agent = agents.find((a) => a.agent_id === mention.id);
+    const label = agent?.label || mention.display_name || "Agent";
+    const idx = agent ? agents.indexOf(agent) : 0;
+    const tint = agent ? TINTS[tintForAgent(agent, idx)] : null;
+    const style = { ...chipStyle, ...(tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) } as CSSProperties;
+    return (
+      <span className="fleet-mention-chip fleet-mention-chip--agent" style={style} title={`Agent: ${label}`}>
+        <AgentSigil seed={mention.id} size={13} />
+        {label}
+      </span>
+    );
+  }
+
+  const member = (members || []).find((m) => m.user_id === mention.id);
+  const memberIndex = member ? (members || []).indexOf(member) : 0;
+  const label = member?.display_name || member?.email || mention.display_name || "Person";
+  return (
+    <span className="fleet-mention-chip fleet-mention-chip--human" style={chipStyle} title={`${label}`}>
+      <MemberAvatar name={label} role={member?.role} size="xs" tintIndex={memberIndex} />
+      {label}
+    </span>
+  );
+}
+
+/** Splits a comment's body at its resolved mentions' stored offsets and
+ *  substitutes a MentionChip for each — the ONLY place `comment.mentions`
+ *  is read. Out-of-range/overlapping entries (should not happen; the
+ *  backend already drops anything past its own 4000-char truncation, see
+ *  add_task_comment) are defensively skipped rather than crashing the
+ *  Activity feed on a single malformed comment. No mentions -> returns the
+ *  plain body string unchanged, so a pre-MAN-66 comment renders exactly as
+ *  it always did. */
+function renderCommentBody(comment: TaskComment, agents: FleetAgent[], members?: WorkspaceMember[]): ReactNode {
+  const body = comment.body || "";
+  const mentions = (comment.mentions || [])
+    .filter(
+      (m) =>
+        Number.isFinite(m.start) &&
+        Number.isFinite(m.end) &&
+        m.start >= 0 &&
+        m.end > m.start &&
+        m.end <= body.length
+    )
+    .sort((a, b) => a.start - b.start);
+  if (mentions.length === 0) return body;
+
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  mentions.forEach((mention, i) => {
+    if (mention.start < cursor) return; // overlapping — defensive skip, never render garbage
+    if (mention.start > cursor) parts.push(body.slice(cursor, mention.start));
+    parts.push(<MentionChip key={`mention-${i}-${mention.id}`} mention={mention} agents={agents} members={members} />);
+    cursor = mention.end;
+  });
+  if (cursor < body.length) parts.push(body.slice(cursor));
+  return parts;
 }
 
 export function TaskDetailView({
@@ -270,7 +385,7 @@ export function TaskDetailView({
                         </span>
                       ) : null}
                     </div>
-                    <div className="fleet-task-page-comment-body">{c.body}</div>
+                    <div className="fleet-task-page-comment-body">{renderCommentBody(c, agents, members)}</div>
                   </li>
                 ))}
               </ul>

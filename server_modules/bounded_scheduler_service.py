@@ -23,11 +23,16 @@ DEFAULT_MAX_SELF_PROPOSED_PER_HOUR = 2
 # first per-task wake path live in production; task_commented
 # (schedule_task_commented_wakeup, the human-comment-channel trigger) is the
 # second, and reuses the exact same per-task counter and error shape rather
-# than inventing its own. The wake-on-mention trigger is still future work
-# and will do the same. This constant is the ceiling for ALL of them: a
+# than inventing its own. MAN-66's @-mention-driven wake
+# (task_mention_service.dispatch_resolved_mentions) is the third live
+# caller -- it also reuses schedule_task_commented_wakeup directly (one
+# trigger_kind, "task_commented", regardless of whether the wake was caused
+# by "any comment on my assigned task" or "a comment that named me
+# specifically"), so it draws on this exact same counter with no new code
+# path. This constant is the ceiling for ALL of them: a
 # single task_id can generate at most this many wake requests in a rolling
 # 24h window, regardless of how many distinct triggers (assignment, comments,
-# future mentions, retries) fire it. Deliberately looser than the
+# mentions, retries) fire it. Deliberately looser than the
 # workspace-wide hourly caps above it (4/hr event-triggers, 2/hr
 # self-proposed) -- this exists to stop ONE task from looping/re-triggering
 # itself into an unbounded wake storm, not to replace those broader caps.
@@ -816,6 +821,18 @@ async def schedule_task_commented_wakeup(
     # Backstop 1: debounce. Checked before the daily ceiling since a
     # debounced call never persists a row and so must never count against
     # it either -- the two backstops compose, they don't share bookkeeping.
+    #
+    # Scoped to (task_id, agent_id), not task_id alone -- MAN-66 (mention-
+    # driven wakes): a comment mentioning several DIFFERENT agents calls
+    # this function once per mentioned agent, back to back, inside the same
+    # request. Debouncing on task_id alone would let the FIRST agent's
+    # freshly-persisted wake row suppress every other mentioned agent's
+    # wake in the same comment -- an accidental collision, not the
+    # intentional per-comment bound (see task_mention_service.py's own
+    # max_mentioned_agent_wakes_per_comment). Scoping by agent_id also fixes
+    # a pre-existing quirk for the single-assignee case: reassigning a task
+    # then commenting again inside the debounce window no longer gets
+    # suppressed by the OLD assignee's still-recent wake row.
     _debounce_window = max_task_comment_wake_debounce_seconds()
     _recent_comment_wake_count = await control_plane_repository.count_agent_scheduler_wake_requests_since(
         tenant_id=tenant_id,
@@ -823,6 +840,7 @@ async def schedule_task_commented_wakeup(
         since=_utc_now() - timedelta(seconds=_debounce_window),
         trigger_kind="task_commented",
         task_id=resolved_task_id,
+        agent_id=resolved_agent_id,
     )
     if _recent_comment_wake_count >= 1:
         return None

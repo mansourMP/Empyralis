@@ -244,9 +244,23 @@ async def list_workspace_external_agents(
 
 async def list_unified_roster(*, tenant_id: str, workspace_id: str) -> List[Dict[str, Any]]:
     """THE one roster view: every addressable agent in the workspace, platform
-    and external, each tagged ``kind``. A future @-mention resolver reads
-    this — and only this — function; it must never need to know that
-    platform and external identities live in two different tables.
+    and external, each tagged ``kind``. Written for a future @-mention
+    resolver to read; it must never need to know that platform and external
+    identities live in two different tables.
+
+    MAN-66 update: the task-comment @-mention resolver that landed
+    (``task_mention_service.py``) does NOT read this function for agent
+    identity, and that is a deliberate scope decision, not an oversight --
+    see that module's own docstring for the full reasoning. Short version:
+    mention-driven WAKING must only ever target an agent
+    ``project_tasks_service.assign_task`` could also address, and
+    ``assign_task`` validates only against ``workspace_agent_installs``
+    (``_agent_install_exists``) -- an external agent cannot be a task
+    assignee today. Routing mention resolution through this function would
+    mean resolving an external agent's name only to then have no scheduler
+    that can actually wake it. Extending mention support to external
+    agents (chip rendering without waking) is legitimate future work and
+    WOULD read this function when it happens.
     """
     tenant = str(tenant_id or "").strip()
     ws = str(workspace_id or "").strip()

@@ -696,9 +696,18 @@ async def fleet_assign_task(
     assign_task (agent) or assign_task_to_user (human), the two sibling
     single-purpose entry points (see assign_task_to_user's own docstring for
     why they are deliberately not one function with an internal branch).
-    assign_task is the ONE code path a future @-mention resolver must also
-    call for agents (docs/design/tasks-to-agents-research.md §2 pitfall #2:
-    assignment and mention must never fork into two different code paths).
+
+    MAN-66 update: the @-mention resolver this docstring used to describe as
+    future work is now live (task_mention_service.py), and it deliberately
+    does NOT call assign_task -- per docs/design/tasks-to-agents-research.md
+    §2 pitfall #2, assignment and mention must differ ONLY in whether
+    `assignee_agent_id` changes, so a mention never reassigns the task. What
+    IS shared between the two entry points, per that same pitfall, is the
+    WAKE mechanism: assign_task calls schedule_task_assigned_wakeup,
+    mentions call schedule_task_commented_wakeup -- same scheduler, same
+    quiet-hours/battery/network policy gates, same per-task daily ceiling,
+    just a different trigger_kind. "One code path" refers to that shared
+    wake plumbing, not to this endpoint.
 
     Assigning to an AGENT schedules the task_assigned wakeup as a side
     effect; a scheduler failure is reported in the response without undoing

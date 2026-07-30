@@ -13618,6 +13618,7 @@ async def count_agent_scheduler_wake_requests_since(
     since: Any,
     trigger_kind: Optional[str] = None,
     task_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> int:
     resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
     resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
@@ -13642,6 +13643,17 @@ async def count_agent_scheduler_wake_requests_since(
         # per the plan, the future wake-on-mention trigger too.
         params.append(str(task_id or "").strip())
         conditions.append(f"metadata->>'task_id' = ${len(params)}")
+    if agent_id:
+        # MAN-66: schedule_task_commented_wakeup's DEBOUNCE check (only --
+        # never the daily ceiling above, which stays deliberately task-wide
+        # across every agent) passes this so mentioning several DIFFERENT
+        # agents in one comment doesn't have the first agent's wake row
+        # debounce-suppress the others. Also fixes a pre-existing quirk:
+        # without this, reassigning a task then commenting again inside the
+        # debounce window would suppress the new assignee's wake because of
+        # the OLD assignee's still-recent wake row.
+        params.append(str(agent_id or "").strip())
+        conditions.append(f"metadata->>'agent_id' = ${len(params)}")
     async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
         if connection is None:
             return 0
