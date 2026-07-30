@@ -877,6 +877,73 @@ def _mock_run_routing_next_action(operation: str, payload: dict) -> str:
     return ""
 
 
+# empyralis-runtime-kernel/src/deployed_agent.rs / deployed_agent_service.rs
+# (allow-path next_action only). Ported directly from two independently-
+# declared Python tables that agree on every operation both cover:
+# server_modules/deployed_agent_service.py's own
+# _DEPLOYED_AGENT_SERVICE_NEXT_ACTIONS (the more complete one -- 20
+# operations, single-value sets, i.e. flat/unconditional on the allow path)
+# and server_modules/routes_deployed_agents.py's inline dict (15 operations,
+# a subset, plus business_insight_review/business_insight_apply which
+# deployed_agent_service.py's table doesn't cover). Not independently
+# re-derived from the rust source line-by-line the way run-routing/
+# run-record above were -- lower confidence than those two, flagged as such
+# in this session's report.
+_DEPLOYED_AGENT_DECISION_NEXT_ACTIONS = {
+    "create_draft": "create_draft",
+    "list": "read_agent",
+    "read": "read_agent",
+}
+
+_DEPLOYED_AGENT_SERVICE_NEXT_ACTIONS = {
+    "telegram_readiness": "read_telegram_readiness",
+    "analytics_read": "read_deployed_agent_analytics",
+    "admin_dashboard": "read_deployed_agent_admin_dashboard",
+    "audit_export": "export_deployed_agent_audit_logs",
+    "memory_list": "list_deployed_agent_memory",
+    "activity_list": "list_deployed_agent_activity",
+    "conversation_list": "list_deployed_agent_conversations",
+    "conversation_detail": "read_deployed_agent_conversation_detail",
+    "external_user_delete": "delete_deployed_agent_external_user_data",
+    "knowledge_verify": "verify_deployed_agent_knowledge",
+    "knowledge_upload": "upload_deployed_agent_knowledge_reference",
+    "business_insight_review": "review_deployed_agent_business_insight",
+    "business_insight_apply": "apply_deployed_agent_business_insight",
+    "shop_evaluate": "evaluate_shop_assistant",
+    "test_turn": "execute_deployed_agent_test_turn",
+    "deploy": "deploy_deployed_agent",
+    "pause": "pause_deployed_agent",
+    "kill": "kill_deployed_agent",
+    "recover": "recover_deployed_agent",
+    "archive": "archive_deployed_agent",
+    "recovery_action": "apply_deployed_agent_recovery_action",
+    "runtime_session_kill": "kill_deployed_agent_runtime_session",
+    "emergency_stop": "emergency_stop_workspace_deployed_agents",
+}
+
+
+def _mock_deployed_agent_decision_next_action(operation: str) -> str:
+    return _DEPLOYED_AGENT_DECISION_NEXT_ACTIONS.get(str(operation or "").strip(), "")
+
+
+def _mock_deployed_agent_service_next_action(operation: str) -> str:
+    return _DEPLOYED_AGENT_SERVICE_NEXT_ACTIONS.get(str(operation or "").strip(), "")
+
+
+# empyralis-runtime-kernel/src/deployed_readiness.rs deployed_readiness_
+# decision_command(), dispatches by a "stage" field (not "operation" like
+# every other command above). Only "stage": "test_turn" is actually called
+# from Python (server_modules/deployed_agent_test_turn_service.py's
+# _enforce_deployed_test_turn_readiness) even though the rust command
+# handles other stages too -- rust line 271 confirms the allow-path
+# next_action for test_turn.
+def _mock_deployed_readiness_next_action(payload: dict) -> str:
+    stage = str(payload.get("stage") or "").strip()
+    if stage == "test_turn":
+        return "execute_studio_test_turn"
+    return ""
+
+
 @pytest.fixture(autouse=True)
 def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """Skip @pytest.mark.kernel tests when the Rust kernel binary is absent.
@@ -958,6 +1025,12 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
             next_action = _mock_run_routing_next_action(
                 normalized_payload.get("operation"), normalized_payload
             )
+        elif command == "deployed-agent-decision":
+            next_action = _mock_deployed_agent_decision_next_action(normalized_payload.get("operation"))
+        elif command == "deployed-agent-service-decision":
+            next_action = _mock_deployed_agent_service_next_action(normalized_payload.get("operation"))
+        elif command == "deployed-readiness-decision":
+            next_action = _mock_deployed_readiness_next_action(normalized_payload)
 
         return {
             "ok": True,
