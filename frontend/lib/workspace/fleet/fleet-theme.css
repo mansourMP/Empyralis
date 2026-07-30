@@ -8665,6 +8665,18 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   line-height: 1.45;
   color: var(--text-muted);
 }
+/* MAN-64/MAN-70: the Assignee chip's menu splits into "Agents" / "People"
+   groups once a task can be handed to either. A plain label, not a full
+   divider — the menu is already short enough that a rule line would read
+   as more structure than two five-item groups need. */
+.fleet-composer-pop-section-label {
+  padding: 6px 8px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
 .fleet-composer-pop-search {
   padding: 2px 4px 6px;
   margin-bottom: 4px;

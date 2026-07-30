@@ -55,7 +55,12 @@ function roleLabel(role: WorkspaceRole): string {
   return "Viewer";
 }
 
-const SIZE_PX = { sm: 26, md: 32, lg: 40 } as const;
+// "xs" (18px) added for MAN-64/MAN-70's human-assignee avatars, which sit
+// beside the 12-16px AgentSigil tiles on task cards/rows (TasksBoard,
+// TasksList, TasksGroupedList) -- "sm" (26px) reads oversized next to those,
+// where every existing caller here (the member roster stack, tooltips) has
+// room for the larger sizes.
+const SIZE_PX = { xs: 18, sm: 26, md: 32, lg: 40 } as const;
 
 export function MemberAvatar({
   name,
@@ -66,7 +71,7 @@ export function MemberAvatar({
 }: {
   name: string;
   role?: WorkspaceRole;
-  size?: "sm" | "md" | "lg";
+  size?: "xs" | "sm" | "md" | "lg";
   tintIndex?: number;
   className?: string;
 }) {
@@ -78,7 +83,7 @@ export function MemberAvatar({
   const style = {
     width: px,
     height: px,
-    fontSize: size === "lg" ? 15 : size === "md" ? 13 : 11,
+    fontSize: size === "lg" ? 15 : size === "md" ? 13 : size === "sm" ? 11 : 9,
     "--tile-bg": tint.bg,
     "--tile-fg": tint.fg,
   } as CSSProperties;

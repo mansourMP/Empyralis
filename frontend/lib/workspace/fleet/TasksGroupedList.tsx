@@ -44,6 +44,8 @@ import { ChevronRight, Plus } from "lucide-react";
 import { dueLabel } from "./TasksList";
 import { TINTS, tintForAgent, timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
+import { MemberAvatar } from "./MemberAvatarStack";
+import type { WorkspaceMember } from "./members-data";
 import { TaskLabelChips } from "./task-labels";
 import {
   TaskStatusIcon,
@@ -103,6 +105,7 @@ export function TasksGroupedList({
   workspaceId,
   tasks,
   agents,
+  members,
   taskHref,
   onSelect,
   onStatusChange,
@@ -111,8 +114,13 @@ export function TasksGroupedList({
   /** Scopes the collapse preference. Absent → collapse is session-only. */
   workspaceId?: string;
   tasks: FleetTask[];
-  /** Agents in this project — the only valid assignees. */
+  /** Agents in this project — valid AGENT assignees. */
   agents: FleetAgent[];
+  /** Workspace members (MAN-64/MAN-70) — resolves a HUMAN assignee's avatar
+   *  on a row. Without this a human-assigned task would render as
+   *  "unassigned" here, which is exactly the display bug this rollout
+   *  closes. */
+  members?: WorkspaceMember[];
   /** The task's real route, stamped on each row as `data-tab-href` so
    *  ⌘/Ctrl+click and middle-click open a background content tab (FleetTabs). */
   taskHref?: (taskId: string) => string;
@@ -250,6 +258,7 @@ export function TasksGroupedList({
                         key={task.id}
                         task={task}
                         agents={agents}
+                        members={members}
                         index={index}
                         href={taskHref?.(task.id)}
                         onSelect={onSelect}
@@ -277,6 +286,7 @@ export function TasksGroupedList({
 function GroupedRow({
   task,
   agents,
+  members,
   index,
   href,
   onSelect,
@@ -284,6 +294,7 @@ function GroupedRow({
 }: {
   task: FleetTask;
   agents: FleetAgent[];
+  members?: WorkspaceMember[];
   index: number;
   href?: string;
   onSelect: (taskId: string) => void;
@@ -291,6 +302,9 @@ function GroupedRow({
 }) {
   const priority = taskPriority(task);
   const assignee = agents.find((a) => a.agent_id === task.assignee_agent_id) || null;
+  const assignedMember = !assignee && task.assignee_user_id
+    ? (members || []).find((m) => m.user_id === task.assignee_user_id) || null
+    : null;
   const due = dueLabel(task.due_at);
   const updated = timeAgo(task.updated_at || task.created_at);
 
@@ -379,6 +393,15 @@ function GroupedRow({
       {assignee ? (
         <span className="fleet-agent-avatar fleet-glist-cell-assignee" style={avatarStyle} title={assignee.label || "Unnamed agent"}>
           <AgentSigil seed={assignee.agent_id} size={12} />
+        </span>
+      ) : assignedMember ? (
+        <span className="fleet-glist-cell-assignee">
+          <MemberAvatar
+            name={assignedMember.display_name || assignedMember.email}
+            role={assignedMember.role}
+            size="xs"
+            tintIndex={index}
+          />
         </span>
       ) : (
         // An empty slot rather than a dash: a column of "—" where the avatars

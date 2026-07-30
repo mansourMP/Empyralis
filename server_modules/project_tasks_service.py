@@ -207,7 +207,8 @@ MAX_SUBTASK_DEPTH = 1
 # un-migrated `priority` column break every read.
 _TASK_COLUMNS = (
     "id, tenant_id, workspace_id, project_id, title, description, status, priority, "
-    "parent_task_id, assignee_agent_id, created_by, due_at, plan, metadata, created_at, updated_at"
+    "parent_task_id, assignee_agent_id, assignee_user_id, created_by, due_at, plan, "
+    "metadata, created_at, updated_at"
 )
 
 # The rollup, computed IN THE SAME QUERY as the task itself -- never a
@@ -492,7 +493,24 @@ def _row_to_task(row: Any) -> Optional[Dict[str, Any]]:
         "subtask_count": int(r.get("subtask_count") or 0),
         "subtask_done_count": int(r.get("subtask_done_count") or 0),
         "labels": _coerce_labels(r.get("labels")),
+        # Human task assignability (MAN-64/MAN-70): a task's assignee is
+        # either a human user or an agent, never both (project_tasks_
+        # single_assignee_check backstops this at the storage layer;
+        # assign_task/assign_task_to_user each NULL out the other column on
+        # write). `assignee_type` is a pure read-side convenience -- derived,
+        # never stored -- so a caller (the HTTP payload, the frontend) never
+        # has to re-derive "which column is set" for itself. A database that
+        # has not yet had migrations/add_task_human_assignee.sql applied
+        # returns no `assignee_user_id` key at all, which reads as "no human
+        # assignee" rather than raising -- the same deploy-before-migrate
+        # posture `priority`/`parent_task_id` already take above.
         "assignee_agent_id": str(r.get("assignee_agent_id") or "").strip() or None,
+        "assignee_user_id": str(r.get("assignee_user_id") or "").strip() or None,
+        "assignee_type": (
+            "agent" if str(r.get("assignee_agent_id") or "").strip()
+            else "user" if str(r.get("assignee_user_id") or "").strip()
+            else None
+        ),
         "created_by": str(r.get("created_by") or "").strip() or None,
         "due_at": str(due_at) if due_at else None,
         "plan": _coerce_plan(r.get("plan")),
@@ -1179,14 +1197,27 @@ async def assign_task(
     agent_id: str,
     triggered_by: str = "owner",
 ) -> Dict[str, Any]:
-    """THE single code path for setting a task's assignee -- called by the
-    HTTP API today and, per the research doc's pitfall #2, must be the SAME
-    function a future @-mention resolver calls. Ownership semantics stay
-    identical regardless of trigger: this only ever sets assignee_agent_id
-    and fires the task_assigned wakeup; it never changes created_by (the
-    human stays the accountable owner of record, matching Linear's "the
-    human teammate remains the primary assignee and owner" rule cited in
-    the research doc Section 1.1/4.2).
+    """THE single code path for setting a task's AGENT assignee -- called by
+    the HTTP API today and, per the research doc's pitfall #2, must be the
+    SAME function a future @-mention resolver calls. Ownership semantics
+    stay identical regardless of trigger: this only ever sets
+    assignee_agent_id and fires the task_assigned wakeup; it never changes
+    created_by (the human stays the accountable owner of record, matching
+    Linear's "the human teammate remains the primary assignee and owner"
+    rule cited in the research doc Section 1.1/4.2).
+
+    MAN-64/MAN-70: a task's assignee is either a human or an agent, never
+    both (project_tasks_single_assignee_check), so this UPDATE also clears
+    assignee_user_id -- reassigning a task that a human previously held over
+    to an agent hands it over cleanly rather than leaving a stale human
+    assignee behind it. See assign_task_to_user just below for the human
+    counterpart; the two functions are deliberately NOT unified into one
+    "assign to either" entry point, because their side effects genuinely
+    differ (this one always fires a scheduler wakeup; assign_task_to_user
+    must NEVER fire one -- people are not woken by schedulers) and folding
+    them into one function with an internal branch is exactly how that
+    invariant gets accidentally broken by a future edit to "just the shared
+    part."
 
     Raises ValueError if the task or the agent don't exist in this
     workspace. Best-effort on the wakeup: a scheduler failure is reported in
@@ -1213,6 +1244,7 @@ async def assign_task(
         """
         UPDATE project_tasks
         SET assignee_agent_id = $4,
+            assignee_user_id = NULL,
             status = CASE WHEN status = ANY($5::text[]) THEN 'in_progress' ELSE status END,
             updated_at = NOW()
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
@@ -1245,3 +1277,101 @@ async def assign_task(
     except Exception as exc:
         wake_error = str(exc)
     return {"task": updated, "wake_request": wake_request, "wake_error": wake_error}
+
+
+async def _workspace_user_exists(
+    *, tenant_id: str, workspace_id: str, user_id: str,
+) -> bool:
+    """The human counterpart of _agent_install_exists just above -- is this
+    user an ACTIVE member of this workspace, not merely a row in `users`
+    somewhere. Mirrors that function's shape exactly (same tenant/workspace
+    scoping, same "row exists" return) so assign_task_to_user's validation
+    reads as the same kind of check assign_task already makes, just against
+    workspace_memberships instead of workspace_agent_installs."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return False
+    row = await pool.fetchrow(
+        """
+        SELECT user_id FROM workspace_memberships
+        WHERE user_id = $1 AND tenant_id = $2 AND workspace_id = $3 AND status = 'active'
+        """,
+        str(user_id or "").strip(),
+        str(tenant_id or "").strip(),
+        str(workspace_id or "").strip(),
+    )
+    return row is not None
+
+
+async def assign_task_to_user(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    user_id: str,
+    triggered_by: str = "owner",
+) -> Dict[str, Any]:
+    """THE single code path for setting a task's HUMAN assignee -- assign_
+    task's twin (MAN-64/MAN-70), structurally parallel on purpose: same
+    validation shape (task exists, assignee exists in this workspace), same
+    "clear the other assignee column" behavior, same {"task", "wake_request",
+    "wake_error"} return shape so a caller (routes_fleet.py, the frontend)
+    does not have to branch on which kind of assignment it just made to read
+    the result.
+
+    THE ONE DELIBERATE DIFFERENCE, and the entire reason this is a separate
+    function rather than assign_task growing an `assignee_type` branch:
+    this NEVER calls bounded_scheduler_service, in any branch, under any
+    condition. People are not woken by schedulers -- assigning a task to a
+    human is a fact you record, not an event that should page anyone.
+    wake_request/wake_error are always (None, None) here, kept in the return
+    shape only so a caller can use one unified "did this wake anyone"
+    check across both assignment paths without it ever firing for a human.
+
+    Also, unlike assign_task, this does NOT flip an unstarted task to
+    in_progress. That auto-flip exists because assigning an agent is
+    immediately followed by waking it -- the status change documents that
+    the agent is now actively working. A human assignee has no such
+    immediate-start guarantee (they see the task next time they look at the
+    board, not "right now"), so forcing in_progress here would be recording
+    something that has not actually happened yet.
+
+    Raises ValueError if the task or the user don't exist in this
+    workspace."""
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_task_id = str(task_id or "").strip()
+    resolved_user_id = str(user_id or "").strip()
+    if not resolved_user_id:
+        raise ValueError("user_id is required to assign a task.")
+    task = await get_task(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, task_id=resolved_task_id)
+    if task is None:
+        raise ValueError(f"Task {resolved_task_id} not found in this workspace.")
+    if not await _workspace_user_exists(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, user_id=resolved_user_id):
+        raise ValueError(f"User {resolved_user_id} not found in this workspace.")
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
+            "Postgres is required to assign a task."
+        )
+    row = await pool.fetchrow(
+        """
+        UPDATE project_tasks
+        SET assignee_user_id = $4,
+            assignee_agent_id = NULL,
+            updated_at = NOW()
+        WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+        RETURNING
+        """ + _TASK_RETURNING_SQL,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_task_id,
+        resolved_user_id,
+    )
+    updated = _row_to_task(row)
+    if updated is None:
+        raise ValueError(f"Task {resolved_task_id} not found in this workspace.")
+    # No scheduler call here -- see the docstring above. This is not a
+    # try/except around a call that happens to always succeed; the call
+    # itself does not exist in this function, in any branch.
+    return {"task": updated, "wake_request": None, "wake_error": None}

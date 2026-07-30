@@ -61,12 +61,17 @@ import {
 } from "./task-status";
 import { TaskLabelChips, TaskLabelEditor, TaskLabelRowIcon } from "./task-labels";
 import { TINTS, tintForAgent, formatDateTime, timeAgo } from "./fleet-presentation";
+import { MemberAvatar } from "./MemberAvatarStack";
+import type { WorkspaceMember } from "./members-data";
 import {
+  assigneeOptionValue,
   commentFleetTask,
   FLEET_TASK_STATUSES,
+  parseAssigneeOptionValue,
   type FleetAgent,
   type FleetTask,
   type FleetTaskStatus,
+  type TaskAssigneeSelection,
 } from "./fleet-data";
 
 /** Minute precision, not the default's seconds — no decision on this page
@@ -92,6 +97,7 @@ function readComments(task: FleetTask): TaskComment[] {
 export function TaskDetailView({
   task,
   agents,
+  members,
   workspaceId,
   projectName,
   projectHref,
@@ -102,8 +108,13 @@ export function TaskDetailView({
   onCommentPosted,
 }: {
   task: FleetTask;
-  /** Agents in this project — the only valid assignees. */
+  /** Agents in this project — valid AGENT assignees. */
   agents: FleetAgent[];
+  /** Workspace members (MAN-64/MAN-70) — valid HUMAN assignees, and the
+   *  lookup used to render a human commenter's real name. Absent → the
+   *  Assignee picker offers agents only (degrades to the pre-MAN-64
+   *  behavior) and human comments fall back to their raw author id. */
+  members?: WorkspaceMember[];
   /** Scopes the label vocabulary — labels are per WORKSPACE, not per project
    *  (fleet-data's Labels section: "bug" means the same thing wherever the
    *  work sits). Absent → the Labels row renders read-only chips, and the
@@ -114,7 +125,9 @@ export function TaskDetailView({
   projectHref: string;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
   onPriorityChange?: (taskId: string, priority: number) => void;
-  onAssign: (taskId: string, agentId: string) => void;
+  /** Assignee is agent-or-human (MAN-64/MAN-70) — the caller dispatches to
+   *  assignFleetTask or assignFleetTaskToUser based on `selection.kind`. */
+  onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   /** Refetch after a label attach/detach. Labels are not part of the task
    *  PATCH — they are their own endpoints — so the editor writes directly and
    *  then asks the page to re-read. */
@@ -156,6 +169,23 @@ export function TaskDetailView({
   const assigneeIndex = assignee ? agents.indexOf(assignee) : 0;
   const tint = assignee ? TINTS[tintForAgent(assignee, assigneeIndex)] : null;
   const avatarStyle = (tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) as CSSProperties;
+  // The human half of MAN-64/MAN-70 -- only looked up when there is no
+  // agent assignee, matching the backend's own mutual-exclusivity
+  // guarantee (project_tasks_single_assignee_check: at most one of the two
+  // is ever set).
+  const assignedMember = !assignee && task.assignee_user_id
+    ? (members || []).find((m) => m.user_id === task.assignee_user_id) || null
+    : null;
+  const assignedMemberIndex = assignedMember ? (members || []).indexOf(assignedMember) : 0;
+  const currentAssigneeValue = assignee
+    ? assigneeOptionValue({ kind: "agent", id: assignee.agent_id })
+    : assignedMember
+      ? assigneeOptionValue({ kind: "user", id: assignedMember.user_id })
+      : task.assignee_agent_id
+        ? assigneeOptionValue({ kind: "agent", id: task.assignee_agent_id })
+        : task.assignee_user_id
+          ? assigneeOptionValue({ kind: "user", id: task.assignee_user_id })
+          : "";
   const comments = useMemo(() => readComments(task), [task]);
 
   // The composer: local state only, exactly TaskLabelEditor's shape
@@ -232,7 +262,7 @@ export function TaskDetailView({
                   >
                     <div className="fleet-task-page-comment-head">
                       <span className="fleet-task-page-comment-author">
-                        {commentAuthorLabel(c, agents)}
+                        {commentAuthorLabel(c, agents, members)}
                       </span>
                       {c.created_at ? (
                         <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
@@ -344,10 +374,14 @@ export function TaskDetailView({
             </span>
           </div>
 
-          {/* Assignment is agent-only (fleet-data.FleetTask) and is not a plain
-              field write — assignFleetTask also wakes the agent — so this
-              hands the id to the caller's existing handler rather than
-              patching anything itself. */}
+          {/* Assignment is agent-OR-human (MAN-64/MAN-70) and is not a plain
+              field write — assignFleetTask/assignFleetTaskToUser also carry
+              their own side effects (a wake, for the agent path only) — so
+              this hands a {kind, id} selection to the caller's existing
+              handler rather than patching anything itself. The two option
+              groups keep agents and people visually and structurally
+              separate, exactly the "show human vs agent assignees
+              distinguishably" requirement the avatar below also serves. */}
           <div className="fleet-panel-row">
             <span className="fleet-panel-row-label">
               <span className="fleet-panel-row-icon"><User size={15} strokeWidth={1.75} /></span>
@@ -355,23 +389,45 @@ export function TaskDetailView({
             </span>
             <span className="fleet-task-detail-control">
               {assignee ? (
-                <span className="fleet-agent-avatar" style={avatarStyle}>
+                <span className="fleet-agent-avatar" style={avatarStyle} title="Agent">
                   <AgentSigil seed={assignee.agent_id} size={14} />
                 </span>
+              ) : assignedMember ? (
+                <MemberAvatar
+                  name={assignedMember.display_name || assignedMember.email}
+                  role={assignedMember.role}
+                  size="xs"
+                  tintIndex={assignedMemberIndex}
+                />
               ) : null}
               <select
                 className="fleet-task-detail-select"
-                value={task.assignee_agent_id || ""}
+                value={currentAssigneeValue}
                 aria-label="Task assignee"
                 onChange={(e) => {
-                  const next = e.currentTarget.value;
-                  if (next && next !== task.assignee_agent_id) onAssign(task.id, next);
+                  const next = parseAssigneeOptionValue(e.currentTarget.value);
+                  if (next && assigneeOptionValue(next) !== currentAssigneeValue) onAssign(task.id, next);
                 }}
               >
                 <option value="">Unassigned</option>
-                {agents.map((a) => (
-                  <option key={a.agent_id} value={a.agent_id}>{a.label || "Unnamed agent"}</option>
-                ))}
+                {agents.length > 0 ? (
+                  <optgroup label="Agents">
+                    {agents.map((a) => (
+                      <option key={a.agent_id} value={assigneeOptionValue({ kind: "agent", id: a.agent_id })}>
+                        {a.label || "Unnamed agent"}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
+                {(members || []).length > 0 ? (
+                  <optgroup label="People">
+                    {(members || []).map((m) => (
+                      <option key={m.user_id} value={assigneeOptionValue({ kind: "user", id: m.user_id })}>
+                        {m.display_name || m.email}
+                      </option>
+                    ))}
+                  </optgroup>
+                ) : null}
               </select>
             </span>
           </div>
@@ -464,13 +520,17 @@ export function TaskDetailView({
 }
 
 /** Comment authors are stored as an opaque (author_type, author_id) pair.
- *  An agent id resolves to its real label when that agent is in this project;
- *  anything else falls back to the honest raw type. */
-function commentAuthorLabel(comment: TaskComment, agents: FleetAgent[]): string {
+ *  An agent id resolves to its real label when that agent is in this
+ *  project; a human ("user"/"human" author_type -- add_human_task_comment
+ *  hardcodes "human") resolves to their real name when they're a workspace
+ *  member; anything else falls back to the honest raw type. */
+function commentAuthorLabel(comment: TaskComment, agents: FleetAgent[], members?: WorkspaceMember[]): string {
   const id = String(comment.author_id || "").trim();
   const type = String(comment.author_type || "").trim();
   const agent = agents.find((a) => a.agent_id === id);
   if (agent) return agent.label || "Unnamed agent";
+  const member = (members || []).find((m) => m.user_id === id);
+  if (member) return member.display_name || member.email;
   if (type === "agent") return id || "Agent";
   if (type === "user" || type === "human") return id || "Person";
   return id || type || "Unknown";
