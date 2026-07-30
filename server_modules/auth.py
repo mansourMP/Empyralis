@@ -2825,6 +2825,39 @@ def accept_workspace_invites_for_user(user_id: str, email: str) -> list[dict[str
             continue
         role = normalize_rbac_role(invite.get("role"), default="member")
         upsert_workspace_membership(clean_user_id, workspace_id, role)
+
+        # MAN-70/MAN-114 follow-up: this auto-accept-at-login path used to be
+        # the trap -- accept_workspace_invite_route (the emailed /join/{token}
+        # link) is not the only way an invite gets accepted. Whoever happens
+        # to log in with the invited email BEFORE clicking the link gets
+        # their workspace membership granted right here, silently, with no
+        # trip through that route at all. A fix that only patched the route
+        # would work via the link and quietly keep no-op'ing for this path.
+        # grant_invite_project_access is the SAME shared helper the route
+        # calls -- see its docstring in projects_repository.py -- so both
+        # paths validate and grant identically rather than by hand-duplicated
+        # (and driftable) logic in each file. Guarded on project_id being
+        # present before even calling _control_plane_call: the overwhelming
+        # common case is an invite with no project attached, and skipping the
+        # call entirely (rather than letting the no-op happen inside the
+        # coroutine) avoids constructing/awaiting a coroutine for nothing on
+        # every plain workspace invite accepted via login.
+        invite_metadata = invite.get("metadata") if isinstance(invite.get("metadata"), dict) else {}
+        invite_project_id = str(invite_metadata.get("project_id") or "").strip()
+        if invite_project_id:
+            invite_tenant_id = str(invite.get("tenant_id") or "").strip() or workspace_id
+            from server_modules import projects_repository
+
+            _control_plane_call(
+                projects_repository.grant_invite_project_access(
+                    tenant_id=invite_tenant_id,
+                    workspace_id=workspace_id,
+                    user_id=clean_user_id,
+                    metadata=invite_metadata,
+                    added_by=str(invite.get("invited_by_user_id") or "").strip() or None,
+                )
+            )
+
         invite_id = str(invite.get("id") or "").strip()
         if invite_id:
             # Stamp auto_accepted_at_login=True so accept_workspace_invite_route

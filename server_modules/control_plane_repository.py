@@ -5508,6 +5508,7 @@ async def create_workspace_invite(
     invited_by_user_id: str,
     invited_by_role: str,
     ttl_seconds: int = 7 * 24 * 60 * 60,
+    project_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """INSERTs a pending workspace_member_invites row and returns it together
     with a signed, expiring `token` the caller turns into a shareable link.
@@ -5516,6 +5517,20 @@ async def create_workspace_invite(
     this function still independently refuses to mint a token for a role
     above the inviter's own, so the guarantee holds even if a future caller
     forgets the gate.
+
+    `project_id`, when given, is stored on the invite's `metadata` (no schema
+    change -- the column already exists and both acceptance paths already
+    read it back). It is NOT validated here -- the route layer is expected to
+    confirm the project exists in this same tenant/workspace before calling
+    this (see create_workspace_invite_route); this repository function stays
+    a dumb store so it does not need a second Postgres round trip just to
+    re-check what the caller already checked. Both acceptance paths
+    (accept_workspace_invite_route, auth.accept_workspace_invites_for_user)
+    independently re-validate the project against the invite's own
+    tenant_id/workspace_id before granting membership -- belt and suspenders
+    against a project_id that pointed at a different tenant by the time the
+    invite is actually accepted (e.g. the project was deleted, or -- were
+    the create-time check ever skipped or bypassed -- crafted).
     """
     clean_workspace_id = str(workspace_id or "").strip()
     clean_tenant_id = str(tenant_id or "").strip()
@@ -5523,6 +5538,8 @@ async def create_workspace_invite(
     clean_role = str(role or "").strip().lower()
     clean_inviter_role = str(invited_by_role or "").strip().lower()
     clean_inviter_id = str(invited_by_user_id or "").strip()
+    clean_project_id = str(project_id or "").strip() or None
+    invite_metadata: Dict[str, Any] = {"project_id": clean_project_id} if clean_project_id else {}
 
     if not clean_workspace_id:
         raise ValueError("workspace_id is required.")
@@ -5573,7 +5590,7 @@ async def create_workspace_invite(
                             clean_email,
                             clean_role,
                             clean_inviter_id or None,
-                            _to_json({}, default={}),
+                            _to_json(invite_metadata, default={}),
                             now_ts,
                             now_ts,
                         ),
@@ -5587,7 +5604,7 @@ async def create_workspace_invite(
                     id, tenant_id, workspace_id, email, role, status,
                     invited_by_user_id, accepted_by_user_id, metadata, created_at, updated_at
                 ) VALUES (
-                    $1, $2, $3, $4, $5, 'pending', $6, NULL, '{}'::jsonb, $7::timestamptz, $7::timestamptz
+                    $1, $2, $3, $4, $5, 'pending', $6, NULL, $7::jsonb, $8::timestamptz, $8::timestamptz
                 )
                 """,
                 invite_id,
@@ -5596,6 +5613,7 @@ async def create_workspace_invite(
                 clean_email,
                 clean_role,
                 clean_inviter_id or None,
+                _to_json(invite_metadata, default={}),
                 now,
             )
 
@@ -5619,6 +5637,8 @@ async def create_workspace_invite(
         "role": clean_role,
         "status": "pending",
         "invited_by_user_id": clean_inviter_id or None,
+        "project_id": clean_project_id,
+        "metadata": invite_metadata,
         "created_at": now_ts,
         "updated_at": now_ts,
         "token": token,
@@ -5782,7 +5802,18 @@ async def list_pending_workspace_invites_for_email(email: str) -> List[Dict[str,
             """,
             email_token,
         )
-    return [dict(row) for row in rows]
+    # asyncpg returns jsonb columns as raw text (no codec registered on this
+    # pool) -- decode "metadata" into a real dict here so callers (namely
+    # auth.accept_workspace_invites_for_user, which reads metadata["project_id"]
+    # off this list to grant project access on login-triggered auto-accept)
+    # get the same shape get_workspace_member_invite already normalizes to,
+    # instead of a raw JSON string.
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["metadata"] = _decode_json_object(item.get("metadata"))
+        result.append(item)
+    return result
 
 
 async def accept_workspace_invite(
