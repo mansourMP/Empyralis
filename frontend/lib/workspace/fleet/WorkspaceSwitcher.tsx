@@ -126,7 +126,11 @@ export function WorkspaceSwitcher({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={collapsed ? `Switch workspace (current: ${workspaceName})` : undefined}
+        // Was conditional on `collapsed` — expanded relied on the visible
+        // "{brandLetter}{workspaceName}" content to name the button, which
+        // the live a11y tree (MAN-145 item 5) showed coming through empty.
+        // Unconditional aria-label is the unambiguous fix in both states.
+        aria-label={`Switch workspace (current: ${workspaceName})`}
         title={collapsed ? workspaceName : undefined}
       >
         <span className="fleet-rail-brand-mark">{brandLetter}</span>

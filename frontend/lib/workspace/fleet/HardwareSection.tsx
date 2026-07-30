@@ -19,6 +19,7 @@ import { GatewayPairPanel } from "@/lib/gateway/GatewayPairPanel";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
 import { PlatformNotification } from "@/lib/ui/platform-notification";
+import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { StatusChip, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
@@ -227,7 +228,31 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
       const res = await fetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, {
         credentials: "include",
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // GET /gateway/registrations 403s via enforce_workspace_access
+        // (server_modules/auth.py) whenever the signed-in user isn't a
+        // member of this workspace, or holds a role below "viewer" — e.g. a
+        // stale bookmark/shared link for a workspace they've since lost
+        // access to. That check always sets a real, human `detail` sentence
+        // ("Viewer role required for workspace '…'.", "Workspace is not
+        // accessible for this user.") — read it instead of ever putting the
+        // bare status code in front of the reader (a raw "HTTP 403" is
+        // exactly the kind of debug-output leak this fetch used to produce).
+        let detail: string | null = null;
+        try {
+          const body = await res.json();
+          if (typeof body?.detail === "string" && body.detail.trim()) detail = body.detail.trim();
+          else if (typeof body?.error === "string" && body.error.trim()) detail = body.error.trim();
+        } catch {
+          // Non-JSON (or empty) error body — nothing to extract.
+        }
+        throw new Error(
+          detail ||
+            (res.status === 403
+              ? "You don’t have access to this workspace’s hardware."
+              : "Couldn’t reach the server."),
+        );
+      }
       const d = await res.json();
       const list = d?.items || d?.registrations || (Array.isArray(d) ? d : []);
       if (requestIdRef.current === requestId) setRegs(Array.isArray(list) ? list : []);
@@ -513,7 +538,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
     <>
       {heading ? (
         <>
-          <div className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Hardware</div>
+          <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Hardware</h2>
           <p className="fleet-subtitle" style={{ marginTop: 0 }}>
             The computers your agents run on — a cloud server provisioned here, or your own machine
             connected over SSH. Set up once; each agent then picks which box it runs on from its own
@@ -527,7 +552,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
           everything, no right panel" note. That note ruled out a side PANEL
           on this page; a dedicated detail page is a different shape, not a
           reversal of it. */}
-      <div className="fleet-detail-section-title">Connect a cloud server</div>
+      <h2 className="fleet-detail-section-title">Connect a cloud server</h2>
           <div className="fleet-provider-grid">
             {CLOUD_VPS_PROVIDER_IDS.map((providerId) => {
               const provider = CLOUD_VPS_PROVIDERS[providerId];
@@ -536,6 +561,13 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
                   key={providerId}
                   type="button"
                   className="fleet-provider-card"
+                  // The badge sits ABOVE the title in the DOM (top-right of
+                  // the card, laid out via .fleet-provider-card-top), which
+                  // would otherwise flatten into an oddly-ordered accessible
+                  // name ("OAuth or API token DigitalOcean Simplest setup").
+                  // aria-label states it in the order a person would actually
+                  // say it — matches item 5 of the MAN-145 UI pass.
+                  aria-label={`${provider.label} — ${provider.accountMethod}. ${provider.tagline}.`}
                   onClick={() => openProviderPanel(providerId)}
                 >
                   <span className="fleet-provider-card-top">
@@ -547,9 +579,18 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
                 </button>
               );
             })}
-            <button type="button" className="fleet-provider-card" onClick={() => setSshPanelOpen(true)}>
+            <button
+              type="button"
+              className="fleet-provider-card"
+              aria-label="Your own server — SSH key or password. Connect over SSH, host, port, and a password or key."
+              onClick={() => setSshPanelOpen(true)}
+            >
               <span className="fleet-provider-card-top">
                 <Terminal size={26} strokeWidth={1.5} aria-hidden="true" />
+                {/* Badge parity with the three cloud-provider cards above
+                    (item 7) — otherwise this card's title sits one row
+                    higher than its siblings', breaking the grid's rhythm. */}
+                <span className="fleet-provider-card-badge">SSH key or password</span>
               </span>
               <span className="fleet-provider-card-title">Your own server</span>
               <span className="fleet-provider-card-desc">Connect over SSH — host, port, and a password or key.</span>
@@ -563,9 +604,9 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
               (Settings and /hardware) because it lives in this component. */}
           {pendingProvision ? (
             <>
-              <div className="fleet-hw-group-title">
+              <h2 className="fleet-hw-group-title">
                 {pendingProvision.stage === "failed" ? "Needs attention" : "Setting up"}
-              </div>
+              </h2>
               <div className="fleet-list">
                 <ProvisionPendingRow
                   watch={pendingProvision}
@@ -583,26 +624,39 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
               </div>
             </div>
           ) : error ? (
-            <div className="fleet-page-state-body">{error}</div>
+            <FleetSurfaceError
+              title="Couldn’t load your connected servers."
+              message={error}
+              onRetry={() => void loadRegistrations()}
+            />
           ) : regs.length === 0 && !pendingProvision ? (
             <div className="fleet-empty">
               <div className="fleet-empty-icon">
                 <Server size={20} strokeWidth={1.75} />
               </div>
-              <div className="fleet-empty-title">No computers connected yet</div>
-              <div className="fleet-empty-desc">Connect a cloud server above to give agents hardware access.</div>
+              <h2 className="fleet-empty-title">No computers connected yet</h2>
+              {/* Instructive, not just descriptive (MAN-102 Linear-style empty
+                  states): says what a connected computer actually gives an
+                  agent — the same "shell, filesystem, and browser" framing
+                  HardwareTab.tsx already uses for the per-agent access picker
+                  — rather than only restating "connect one above". */}
+              <div className="fleet-empty-desc">
+                Agents can’t touch a real computer until one is connected — no shell, no files, no
+                browser. Connect a cloud server above, or your own machine over SSH, and any agent can
+                use it.
+              </div>
             </div>
           ) : (
             <>
               {cloudServers.length > 0 && (
                 <>
-                  <div className="fleet-hw-group-title">Cloud servers</div>
+                  <h2 className="fleet-hw-group-title">Cloud servers</h2>
                   <div className="fleet-list">{cloudServers.map(renderRow)}</div>
                 </>
               )}
               {devices.length > 0 && (
                 <>
-                  <div className="fleet-hw-group-title">Your devices</div>
+                  <h2 className="fleet-hw-group-title">Your devices</h2>
                   <div className="fleet-list">{devices.map(renderRow)}</div>
                 </>
               )}
@@ -612,7 +666,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
           <div style={{ marginTop: "var(--space-6)" }}>
             {showManualPairing ? (
               <>
-                <div className="fleet-detail-section-title">Add your own computer</div>
+                <h2 className="fleet-detail-section-title">Add your own computer</h2>
                 <GatewayPairPanel workspaceId={workspaceId} compact onPaired={() => void loadRegistrations()} />
               </>
             ) : (
