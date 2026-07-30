@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,6 +24,7 @@ from server_modules.workspace_bootstrap_service import build_workspace_bootstrap
 
 router = APIRouter()
 get_current_user = auth_module.get_current_user
+LOGGER = logging.getLogger(__name__)
 
 VALID_WORKSPACE_TYPES = {"personal", "professional", "team"}
 VALID_SHELL_PROFILES = {
@@ -306,6 +308,15 @@ class WorkspaceAiRouteDefaultUpdateRequest(BaseModel):
 class WorkspaceInviteCreateRequest(BaseModel):
     email: str
     role: str = "member"
+    # Optional: which project this invite grants access to (MAN-70 follow-up
+    # -- previously accepting a workspace invite granted zero project
+    # access; project_memberships rows were only ever created by project
+    # creation itself or the UI-less /fleet/projects/{id}/members route, so
+    # an invited teammate saw no projects until someone separately made them
+    # a workspace owner). None means "no project" -- see
+    # create_workspace_invite_route's docstring for why that stays the
+    # explicit default rather than granting some implicit set.
+    project_id: Optional[str] = None
 
 
 class WorkspaceInviteAcceptRequest(BaseModel):
@@ -898,9 +909,22 @@ async def upsert_workspace_identity_link(
 # ── Members & Invites (Multiplayer Projects Phase 1) ─────────────────────────
 # Invite-link only -- the platform has no outbound email sender anywhere, so
 # create_workspace_invite mints a signed, expiring token and returns it for
-# the owner to copy/share however they like. "Project member" == "workspace
-# member" for now; there is no per-project ACL table yet.
-
+# the owner to copy/share however they like. The MAN-70 placeholder ruling
+# ("project member" == "workspace member", no per-project ACL) is superseded:
+# MAN-115 added the real project_memberships table, and this route can now
+# carry an optional project_id on the invite so acceptance (both paths --
+# see accept_workspace_invite_route below and auth.accept_workspace_invites_
+# for_user) can grant that specific project too, not just workspace access.
+#
+# project_id is intentionally optional with no implicit default. An invite
+# with no project_id grants workspace membership only -- the invitee sees no
+# projects until an owner explicitly grants one (via a future invite carrying
+# project_id, or the existing /fleet/projects/{id}/members route). This is a
+# deliberate choice, not a gap: silently defaulting to "every project" would
+# be a bigger blast radius than a workspace owner asked for, and defaulting
+# to "the workspace's default project only" is a policy call this repository
+# layer shouldn't make unilaterally -- the caller (route/UI) can always pass
+# project_id explicitly when it knows what it wants granted.
 @router.post("/workspaces/{workspace_id}/invites")
 async def create_workspace_invite_route(
     workspace_id: str,
@@ -928,6 +952,24 @@ async def create_workspace_invite_route(
         raise HTTPException(status_code=403, detail="Cannot invite a role above your own.")
 
     tenant_id = _control_plane_tenant_id(current_user, resolved_workspace_id, user)
+
+    clean_project_id = str(body.project_id or "").strip() or None
+    if clean_project_id:
+        # Validate up front, scoped to THIS workspace's own tenant_id -- an
+        # owner can only tag an invite with a project that actually lives in
+        # the workspace they're inviting into. get_project's WHERE clause is
+        # tenant_id AND workspace_id AND id, so a cross-tenant/cross-workspace
+        # project_id returns None here rather than silently getting stored.
+        from server_modules import projects_repository
+
+        target_project = await projects_repository.get_project(
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            project_id=clean_project_id,
+        )
+        if target_project is None:
+            raise HTTPException(status_code=400, detail="Project not found in this workspace.")
+
     try:
         invite = await control_plane_repository.create_workspace_invite(
             workspace_id=resolved_workspace_id,
@@ -936,6 +978,7 @@ async def create_workspace_invite_route(
             role=requested_role,
             invited_by_user_id=_control_plane_actor_id(current_user, user),
             invited_by_role=inviter_role,
+            project_id=clean_project_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -948,6 +991,7 @@ async def create_workspace_invite_route(
             "email": invite.get("email"),
             "role": invite.get("role"),
             "status": invite.get("status"),
+            "project_id": invite.get("project_id"),
             "created_at": invite.get("created_at"),
         },
         "token": invite.get("token"),
@@ -1074,6 +1118,32 @@ async def accept_workspace_invite_route(
 
     invite_role = auth_module.normalize_rbac_role(invite.get("role"), default="viewer")
     auth_module.upsert_workspace_membership(user_id, invite_workspace_id, invite_role)
+
+    # MAN-70/MAN-114 follow-up: grant the project this invite carries, if
+    # any -- see projects_repository.grant_invite_project_access's docstring
+    # for why this call is shared with auth.accept_workspace_invites_for_user
+    # rather than duplicated. Uses the invite's own tenant_id (falling back
+    # to workspace_id, matching _control_plane_tenant_id's convention) --
+    # never the accepting caller's -- so this always resolves to the project
+    # in the workspace the invite actually belongs to.
+    invite_tenant_id = str(invite.get("tenant_id") or "").strip() or invite_workspace_id
+    from server_modules import projects_repository
+
+    try:
+        await projects_repository.grant_invite_project_access(
+            tenant_id=invite_tenant_id,
+            workspace_id=invite_workspace_id,
+            user_id=user_id,
+            metadata=invite_metadata,
+            added_by=str(invite.get("invited_by_user_id") or "").strip() or None,
+        )
+    except Exception:
+        LOGGER.exception(
+            "Failed to grant invite project access for invite_id=%s user_id=%s",
+            invite_id,
+            user_id,
+        )
+
     accepted = await control_plane_repository.accept_workspace_invite(
         invite_id=invite_id,
         accepted_by_user_id=user_id,

@@ -534,6 +534,73 @@ async def add_project_member(
     return member
 
 
+async def grant_invite_project_access(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: str,
+    metadata: Optional[Dict[str, Any]],
+    added_by: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Grant the project membership a workspace invite's metadata carries, if
+    any (MAN-70/MAN-114 follow-up). Before this, accepting a workspace invite
+    granted zero project access -- add_project_member's only two callers were
+    create_project (auto-adding the creator) and the UI-less
+    /fleet/projects/{id}/members grant route -- so an invited teammate saw no
+    projects at all until someone separately made them a workspace owner.
+
+    Shared by BOTH acceptance paths (routes_workspaces.
+    accept_workspace_invite_route's /join/{token} flow, and
+    auth.accept_workspace_invites_for_user's auto-accept-at-login path) so
+    the validate-then-grant behavior exists exactly once. That matters here
+    specifically: this repo has two independent ways an invite gets accepted,
+    and a hand-duplicated version of this logic in both files is exactly how
+    a fix like this quietly ends up working through the emailed link while
+    still no-op'ing for whoever happens to log in before clicking it.
+
+    Re-validates the project against tenant_id/workspace_id via get_project
+    even though create_workspace_invite_route already validated project_id
+    at invite-creation time -- defense in depth against the project having
+    since been deleted, or a project_id that pointed at a different tenant/
+    workspace than the one this invite actually belongs to (get_project's
+    WHERE clause is tenant_id AND workspace_id AND id, so a mismatched
+    project_id resolves to None here rather than granting access to a
+    project in someone else's tenant).
+
+    No-ops (returns None) rather than raising when metadata carries no
+    project_id, when the project doesn't resolve in this tenant/workspace,
+    or on any unexpected failure -- granting workspace membership must not
+    be blocked or rolled back just because a secondary project grant hit a
+    problem. Idempotent via add_project_member's own ON CONFLICT handling:
+    calling this twice for the same user/project is safe.
+    """
+    project_id = str((metadata or {}).get("project_id") or "").strip()
+    if not project_id:
+        return None
+    clean_tenant_id = str(tenant_id or "").strip()
+    clean_workspace_id = str(workspace_id or "").strip()
+    clean_user_id = str(user_id or "").strip()
+    if not clean_tenant_id or not clean_workspace_id or not clean_user_id:
+        return None
+    try:
+        project = await get_project(
+            tenant_id=clean_tenant_id,
+            workspace_id=clean_workspace_id,
+            project_id=project_id,
+        )
+        if project is None:
+            return None
+        return await add_project_member(
+            tenant_id=clean_tenant_id,
+            workspace_id=clean_workspace_id,
+            project_id=project_id,
+            user_id=clean_user_id,
+            added_by=added_by,
+        )
+    except Exception:
+        return None
+
+
 async def remove_project_member(
     *,
     tenant_id: str,
