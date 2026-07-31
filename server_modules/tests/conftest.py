@@ -465,6 +465,42 @@ def _mock_control_plane_service_next_action(operation: str, payload: dict) -> st
     return "allow_control_plane_read"
 
 
+# next_action values control_plane_service_decision_command() (rust lines
+# 517-537) produces for a request this mock does NOT treat as a mutation --
+# every other next_action corresponds to `mutating_operation=true` on the
+# allow path (rust lines 561-565). Mirrors the "mutation_plan" object rust
+# lines 574-585 attach to every response (not just next_action) -- several
+# non-test callers (workspace_admin_service.py, billing_service.py,
+# routes_workspaces.py, workspace_ai_route_service.py) read
+# decision["mutation_plan"]["apply"] directly and 423 with
+# "missing_rust_mutation_plan" if it isn't exactly True, so a mock that only
+# set top-level next_action (and never mutation_plan at all) silently failed
+# every one of those callers even on an "allow" decision -- MAN-139 phase 2.
+_CONTROL_PLANE_SERVICE_NON_MUTATING_NEXT_ACTIONS = {
+    "return_control_plane_dry_run",
+    "return_existing_control_plane_record",
+    "allow_control_plane_read",
+    "return_entitlement_snapshot",
+}
+
+
+def _mock_control_plane_service_mutation_plan(operation: str, payload: dict, next_action: str) -> dict:
+    op = str(operation or "").strip()
+    mutating = next_action not in _CONTROL_PLANE_SERVICE_NON_MUTATING_NEXT_ACTIONS
+    return {
+        "operation": op,
+        "record_type": payload.get("record_type"),
+        "apply": mutating and not payload.get("dry_run"),  # rust line 578
+        "next_action": next_action,
+        "idempotency_key": payload.get("idempotency_key"),
+        "target_status": payload.get("target_status") or "active",
+        "mutating": mutating,
+        "destructive": op in _CONTROL_PLANE_SERVICE_DESTRUCTIVE_OPERATIONS,
+        "external_write": op in _CONTROL_PLANE_SERVICE_EXTERNAL_WRITE_OPERATIONS,
+        "billing_gated": False,
+    }
+
+
 # empyralis-runtime-kernel/src/control_plane.rs control_plane_decision_command(),
 # lines 22-213. Identity-ish but with a "_record" suffix (and a
 # read/status_transition special case) — not a blanket echo either.
@@ -753,10 +789,32 @@ _QUEUE_TRANSITION_NEXT_ACTIONS = {
     "release": "release_queue_item",
     "dead_letter": "dead_letter_queue_item",
 }
+_QUEUE_TRANSITION_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}  # rust line 283
 
 
-def _mock_queue_transition_next_action(operation: str) -> str:
-    return _QUEUE_TRANSITION_NEXT_ACTIONS.get(str(operation or "").strip(), "")
+def _mock_queue_transition_next_action(operation: str, payload: dict | None = None) -> tuple[str, str]:
+    """Returns (next_action, reason). "fail" isn't a static lookup like every
+    other operation here -- machine_lease_service.py's
+    _enforce_queue_transition_decision() derives ITS expected next_action
+    for "fail" from decision["retryable"]/decision["next_status"] rather
+    than a fixed table (rust fail_decision(), lines 272-330+): an
+    already-terminal item is idempotently re-reported as "fail_queue_item"
+    (reason "queue_item_already_terminal", same shape as the state-
+    transition "already_terminal" case above), an active item that hasn't
+    hit max_attempts gets "schedule_queue_retry", and one that has gets
+    "fail_queue_item" for real."""
+    op = str(operation or "").strip()
+    if op != "fail":
+        return _QUEUE_TRANSITION_NEXT_ACTIONS.get(op, ""), ""
+    data = payload or {}
+    status = str(data.get("status") or data.get("current_status") or "").strip().lower()
+    if status in _QUEUE_TRANSITION_TERMINAL_STATUSES:
+        return "fail_queue_item", "queue_item_already_terminal"
+    attempts = int(data.get("attempts") or 0)
+    max_attempts = max(1, int(data.get("max_attempts") or 1))
+    if attempts + 1 < max_attempts:
+        return "schedule_queue_retry", "queue_failure_retry_scheduled"
+    return "fail_queue_item", "queue_failure_terminal"
 
 
 # empyralis-runtime-kernel/src/outbox_delivery.rs, allow-path next_action
@@ -944,6 +1002,200 @@ def _mock_deployed_readiness_next_action(payload: dict) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# "run-api-decision" and "run-service-decision" (MAN-139 phase 2). Neither
+# command had a branch in the mock below at all -- same shape of gap the
+# five "gateway-*" commands had before MAN-139 phase 1 (see the block
+# comment above _mock_gateway_service_next_action): every caller
+# (~12 for run-api-decision -- runtime_runs_api.py, turn_ingress_service.py,
+# runtime_run_replay_service.py, runtime_usage_service.py,
+# runtime_history_service.py, runtime_run_query_service.py,
+# runtime_run_entry_service.py, runtime_run_resume_service.py,
+# runtime_route_registry_service.py; run_service.py for run-service-decision)
+# silently got next_action="" and rejected every non-kernel test that
+# exercised it. Allow-path only, per the same convention as every mock
+# above; both are ported from the cited rust sources.
+# ---------------------------------------------------------------------------
+
+# empyralis-runtime-kernel/src/run_api.rs run_api_decision_command(), allow()
+# call sites only (lines 106-266) -- block()/require_approval() branches
+# intentionally omitted, same as every other mock in this file.
+_RUN_API_NEXT_ACTIONS = {
+    "list_runs": "list_runs",
+    "get_run": "get_run",
+    "start_turn": "start_turn",
+    "start_run": "start_run",
+    "stream_chat": "start_chat_stream",
+    "cancel_run": "cancel_run",
+    "pause_run": "pause_run",
+    "retry_run": "retry_run",
+    "resume_run": "resume_run",
+    "approve_run": "resolve_run_approval",
+    "webhook_trigger": "trigger_webhook_run",
+}
+
+
+def _mock_run_api_next_action(operation: str) -> str:
+    return _RUN_API_NEXT_ACTIONS.get(str(operation or "").strip(), "")
+
+
+# empyralis-runtime-kernel/src/run_service.rs run_service_decision_command(),
+# allow-path next_action derivation only (rust lines 272-304 minus the
+# blocked/approval_required arms, which this mock never produces).
+def _mock_run_service_next_action(operation: str, payload: dict) -> str:
+    op = str(operation or "").strip()
+    trigger_source = str(payload.get("trigger_source") or "user").strip()
+    external_trigger = trigger_source == "webhook" or op == "webhook_trigger"
+    if payload.get("duplicate_request"):
+        return "return_idempotent_run_result"
+    if op == "create":
+        return "create_run_record"
+    if op in ("start", "dispatch", "lane_route"):
+        return "dispatch_run_to_runtime"
+    if op == "turn":
+        return "append_run_turn"
+    if op in ("stream_open", "stream_event"):
+        return "open_or_forward_run_stream"
+    if op == "cancel":
+        return "cancel_run"
+    if op == "retry":
+        return "retry_run"
+    if op == "resume":
+        return "resume_run"
+    if op in ("approve", "reject"):
+        return "persist_run_approval_decision"
+    if op in ("finalize_success", "finalize_failure"):
+        return "finalize_run"
+    if external_trigger:
+        return "create_run_from_webhook"
+    if op == "child_run_create":
+        return "create_child_run"
+    if op == "delegation_merge":
+        return "merge_delegated_run"
+    return "return_run_status"
+
+
+# empyralis-runtime-kernel/src/local_worker.rs local_worker_decision_command(),
+# allow-path next_action only (block()/require_approval() branches
+# intentionally omitted, same convention as every mock above). Also missing
+# from this mock entirely until MAN-139 phase 2 -- worker_dispatch_service.py
+# calls "local-worker-decision" for claim_run/worker_heartbeat/run_heartbeat/
+# complete_run/pause_run/fail_run/control_state/get_queue/cleanup_queue/
+# execute_command, none of which this mock recognized, so every one of those
+# non-kernel tests got next_action="" and either an unexpected-next-action
+# 423 or (for claim_local_run, which swallows that 423 into a plain None
+# return) a silent wrong-result failure.
+_LOCAL_WORKER_TERMINAL_RUN_STATUSES = {  # rust lines 3-11
+    "completed",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "canceled",
+    "timeout",
+    "timed_out",
+}
+
+
+def _mock_local_worker_next_action(operation: str, payload: dict) -> str:
+    op = str(operation or "").strip()
+    if op == "get_queue":
+        return "read_local_queue"  # rust line 158
+    if op == "cleanup_queue":  # rust lines 168-208
+        if not payload.get("dry_run", True) and not payload.get("operator_confirmed", False):
+            return "request_cleanup_confirmation"
+        return "cleanup_stale_local_queue"
+    if op == "worker_status":
+        return "read_worker_status"  # rust line 69
+    if op in ("worker_heartbeat", "runtime_heartbeat"):  # rust lines 232-236
+        return "record_runtime_heartbeat" if op == "runtime_heartbeat" else "record_worker_heartbeat"
+    if op == "claim_run":  # rust lines 259-282
+        return "return_backpressure" if payload.get("queue_empty") else "claim_local_run"
+    if op == "run_heartbeat":
+        return "record_run_heartbeat"  # rust line 306
+    if op == "control_state":  # rust lines 331-354
+        run_status = str(payload.get("run_status") or payload.get("status") or "").strip().lower()
+        if run_status in _LOCAL_WORKER_TERMINAL_RUN_STATUSES:
+            return "return_terminal_control_state"
+        return "read_run_control_state"
+    if op == "complete_run":
+        return "complete_local_run"  # rust line 384
+    if op == "pause_run":
+        return "pause_local_run"  # rust line 418
+    if op == "fail_run":
+        return "fail_local_run"  # rust line 452
+    if op == "execute_command":
+        return "execute_hardware_command"  # rust line 642
+    return ""
+
+
+# empyralis-runtime-kernel/src/state.rs state_transition_decision_command(),
+# "complete"/"fail" arms only -- the only two operations
+# worker_dispatch_service.py's _enforce_run_state_transition_decision()
+# actually calls ("state-transition-decision" was, like "local-worker-
+# decision" above, entirely unhandled by this mock until MAN-139 phase 2).
+# Mirrors complete_decision()/fail_decision()'s already-terminal short
+# circuit (rust lines 175-237) and next_action()'s operation/next_state
+# derivation (rust lines 410-419): "complete" always resolves to
+# "complete_state_transition", but "fail" only resolves to
+# "fail_state_transition" when the run is already failed or freshly
+# transitioning to failed -- any OTHER already-terminal state (completed,
+# cancelled, archived) resolves to "review_state_transition" instead, since
+# the kernel refuses to silently relabel a completed/cancelled run as
+# failed.
+#
+# Returns (next_action, reason) -- worker_dispatch_service.py's idempotent-
+# terminal short circuit (complete_local_run/fail_local_run, "...already_
+# terminal" checks) keys off decision["reason"] == "state_already_terminal",
+# not next_action (next_action is identical whether this is a fresh
+# transition or a no-op replay of an already-terminal state), so the mock
+# has to reproduce the real "reason" string here too, not just next_action
+# like every other mock in this file gets away with.
+_STATE_TRANSITION_TERMINAL_STATES = {"completed", "failed", "cancelled", "archived"}  # rust line 5
+
+
+def _mock_state_transition_next_action(operation: str, payload: dict) -> tuple[str, str]:
+    op = str(operation or "").strip()
+    current_state = str(payload.get("current_state") or "").strip().lower()
+    already_terminal = current_state in _STATE_TRANSITION_TERMINAL_STATES
+    reason = "state_already_terminal" if already_terminal else ""  # rust lines 184/216
+    if op == "complete":
+        return "complete_state_transition", reason
+    if op == "fail":
+        next_state = current_state if already_terminal else "failed"
+        next_action = "fail_state_transition" if next_state == "failed" else "review_state_transition"
+        return next_action, reason
+    return "", ""
+
+
+# empyralis-runtime-kernel/src/authorization.rs authorize_request_command(),
+# execution_authorization.rs authorize_execution_command(), and
+# execution_plan.rs execution_plan_command() -- three separate commands
+# policy_service.py's evaluate_tool_policy_decision() calls (only "authorize-
+# execution"/"execution-plan" for tool_id == "shell.execute" with a raw
+# command; "authorize-request" for every other tool, which is most of them).
+# None were handled by this mock at all until MAN-139 phase 2, so EVERY
+# workflow-graph tool node (runs_execution.py) and every direct/skill tool
+# call that goes through evaluate_tool_policy_decision() got next_action=""
+# and hit "Tool node '...' is blocked by runtime policy." on an otherwise
+# uneventful allow.
+#
+# Each of these three commands' rust source is a multi-stage pipeline
+# (safe-mode gate -> policy-context gate -> capability/domain/path policy
+# rules -> risk classification -> approval-requirement check, each its own
+# ~200-450 line module: policy.rs, risk.rs, approvals.rs, safe_mode.rs) --
+# genuinely not worth hand-porting into this mock the way the simpler
+# operation-keyed commands above are, especially since none of the three
+# tests it would need to pass a specific block/require_approval scenario
+# rely on the AUTOUSE mock for that (they patch run_runtime_kernel_enforced
+# directly, same as every other block/require_approval test in this file).
+# All three commands resolve to the exact same next_action on their allow
+# path regardless of which one is called (rust authorization.rs line 137,
+# execution_authorization.rs, execution_plan.rs's `expected_plan_next_
+# action` counterpart), so this only needs to cover that one shared value.
+_TOOL_AUTHORIZATION_COMMANDS = {"authorize-request", "authorize-execution", "execution-plan"}
+_TOOL_AUTHORIZATION_ALLOW_NEXT_ACTION = "allow_tool_execution"
+
+
 @pytest.fixture(autouse=True)
 def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """Skip @pytest.mark.kernel tests when the Rust kernel binary is absent.
@@ -981,6 +1233,7 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
         # branch below reproduces the real kernel source it's named after;
         # see the per-command helper functions above for file:line citations.
         next_action = ""
+        reason_override = ""
         if command == "runtime-state-store-decision":
             next_action = _mock_runtime_state_store_next_action(normalized_payload.get("operation"))
         elif command == "control-plane-service-decision":
@@ -1014,7 +1267,9 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
         elif command == "machine-lease-decision":
             next_action = _mock_machine_lease_next_action(normalized_payload.get("operation"))
         elif command == "queue-transition-decision":
-            next_action = _mock_queue_transition_next_action(normalized_payload.get("operation"))
+            next_action, reason_override = _mock_queue_transition_next_action(
+                normalized_payload.get("operation"), normalized_payload
+            )
         elif command == "outbox-delivery-decision":
             next_action = _mock_outbox_delivery_next_action(normalized_payload.get("operation"))
         elif command == "run-record-decision":
@@ -1031,22 +1286,121 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
             next_action = _mock_deployed_agent_service_next_action(normalized_payload.get("operation"))
         elif command == "deployed-readiness-decision":
             next_action = _mock_deployed_readiness_next_action(normalized_payload)
+        elif command == "run-api-decision":
+            next_action = _mock_run_api_next_action(normalized_payload.get("operation"))
+        elif command == "run-service-decision":
+            next_action = _mock_run_service_next_action(
+                normalized_payload.get("operation"), normalized_payload
+            )
+        elif command == "local-worker-decision":
+            next_action = _mock_local_worker_next_action(
+                normalized_payload.get("operation"), normalized_payload
+            )
+        elif command == "state-transition-decision":
+            next_action, reason_override = _mock_state_transition_next_action(
+                normalized_payload.get("operation"), normalized_payload
+            )
+        elif command in _TOOL_AUTHORIZATION_COMMANDS:
+            next_action = _TOOL_AUTHORIZATION_ALLOW_NEXT_ACTION
 
-        return {
+        result = {
             "ok": True,
             "decision": "allow",
             "command": command,
             "decision_id": "rkd_mock_non_kernel_test",
-            "reason": "mock allow (non-kernel test fixture)",
+            "reason": reason_override or "mock allow (non-kernel test fixture)",
             "next_action": next_action,
             "payload": copy.deepcopy(normalized_payload),
         }
+        # See _mock_control_plane_service_mutation_plan's docstring comment
+        # above: several non-test callers read decision["mutation_plan"]
+        # directly (not just top-level next_action) and 423 if it's absent.
+        # Only control-plane-service-decision's consumers were found to
+        # require this; every other command's real "mutation_plan" shape (if
+        # it has one at all) differs enough that a one-size mock would be
+        # wrong, so this is deliberately scoped to the one command that
+        # needed it rather than added to every branch above.
+        if command == "control-plane-service-decision":
+            result["mutation_plan"] = _mock_control_plane_service_mutation_plan(
+                normalized_payload.get("operation"), normalized_payload, next_action
+            )
+        return result
 
     try:
         from server_modules import rust_runtime_kernel_client as _rk
     except Exception:
         return
     monkeypatch.setattr(_rk, "run_runtime_kernel", _mock_run_runtime_kernel)
+
+
+# A handful of tests (test_auth.py, test_channel_pairing.py,
+# test_cross_surface_continuity_phase80.py) call importlib.reload() on
+# server_modules.auth and a few modules it depends on, to get genuinely
+# fresh module-level state for env-var-driven behavior (JWT secret file
+# path, DSN caching, rate-limit buckets). reload() mutates the SAME module
+# object's __dict__ in place -- every OTHER module that already did
+# `from server_modules import auth as auth_module` and baked
+# `Depends(auth_module.get_current_user)` into a FastAPI route (at that
+# module's own first import, during collection, long before any test body
+# runs) keeps pointing at the pre-reload function object forever after,
+# for the rest of the pytest session. A test elsewhere in the suite that
+# does `app.dependency_overrides[routes_x.auth_module.get_current_user] =
+# ...` reads the CURRENT (reloaded) function as its override key, which no
+# longer matches what's baked into the route's dependant tree -- FastAPI
+# falls through to the REAL get_current_user, and an unrelated test many
+# files away starts getting a real 401/403 instead of what it mocked.
+#
+# Confirmed responsible for 56 of the 613 MAN-139 failures: diffing a full
+# run against one with only those three files excluded via --ignore drops
+# 613 -> 557, and none of the 56 are in the three excluded files
+# themselves (their own tests all pass) -- pure collateral damage on test
+# order. Reproducible directly too: test_routes_fleet_member_rbac.py's 30
+# tests all pass standalone or as a file, and all fail when the full
+# ordered suite reaches them, because test_auth.py already ran and
+# reloaded auth.py by then.
+#
+# Snapshotting + restoring these modules' __dict__ around every test
+# (not just the three offending files, so this is self-healing regardless
+# of which file reloads what and regardless of collection order) fixes it
+# without touching those three files' own reload-based test strategy --
+# they still get a genuinely fresh module for the duration of their own
+# test, they just stop leaking that fresh module to everyone downstream.
+_RELOAD_SENSITIVE_MODULE_NAMES = (
+    "server_modules.auth",
+    "server_modules.db",
+    "server_modules.control_plane_repository",
+    "server_modules.jwt_secret",
+    "server_modules.channel_pairing_service",
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_reload_sensitive_modules():
+    import sys
+
+    snapshots: dict[str, dict] = {}
+    for module_name in _RELOAD_SENSITIVE_MODULE_NAMES:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            snapshots[module_name] = dict(vars(module))
+    yield
+    for module_name, snapshot in snapshots.items():
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        current = vars(module)
+        for key, value in snapshot.items():
+            if current.get(key) is not value:
+                try:
+                    setattr(module, key, value)
+                except Exception:
+                    pass
+        for key in list(current):
+            if key not in snapshot and not key.startswith("__"):
+                try:
+                    delattr(module, key)
+                except Exception:
+                    pass
 
 
 @pytest.fixture(autouse=True)

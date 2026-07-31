@@ -141,26 +141,91 @@ class ResolveMentionCandidatesTests(unittest.TestCase):
 # ── 2. Roster loading / workspace scoping ────────────────────────────────
 
 
+class _ScopedFakeTransaction:
+    """No-op transaction context manager -- matches asyncpg's Connection.transaction()
+    shape (used by control_plane_repository._scoped_connection / rls_fetch)."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _ScopedFakeConnection:
+    """Fake asyncpg connection returned by `_ScopedFakePool.acquire()`.
+
+    `.execute()` is the RLS session-scope SQL control_plane_repository.
+    rls_fetch() issues (`_apply_connection_scope`) before every query --
+    it's recorded but otherwise a no-op here, since this fake enforces
+    scoping the same way it always did: by which (tenant_id, workspace_id)
+    key `.fetch()` is given, not by a real Postgres session variable. That
+    is deliberate -- these tests exist to prove task_mention_service.py's
+    CALLERS pass the right scope, not to reimplement Postgres RLS.
+    """
+
+    def __init__(self, pool: "_ScopedFakePool") -> None:
+        self._pool = pool
+
+    async def execute(self, query, *args):
+        self._pool.execute_calls.append((query, args))
+        return None
+
+    def transaction(self):
+        return _ScopedFakeTransaction()
+
+    async def fetch(self, query, *args):
+        self._pool.fetch_calls.append((query, args))
+        tenant_id, workspace_id = args[0], args[1]
+        if "workspace_agent_installs" in query:
+            return self._pool.agents_by_scope.get((tenant_id, workspace_id), [])
+        if "workspace_memberships" in query:
+            return self._pool.members_by_scope.get((tenant_id, workspace_id), [])
+        return []
+
+
+class _ScopedFakeAcquire:
+    def __init__(self, connection: _ScopedFakeConnection) -> None:
+        self._connection = connection
+
+    async def __aenter__(self):
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 class _ScopedFakePool:
     """A fake pool whose .fetch() results depend on the (tenant_id,
     workspace_id) bound params actually passed in -- a much stronger proof
     of workspace isolation than a pool that always returns the same rows
     regardless of scope. `agents_by_scope`/`members_by_scope` are keyed by
-    (tenant_id, workspace_id)."""
+    (tenant_id, workspace_id).
+
+    Exposes BOTH `.fetch()` directly (the interface task_mention_service.py
+    used to call) AND `.acquire()` (MAN-152: task_mention_service.py's
+    roster queries now go through control_plane_repository.rls_fetch,
+    which acquires a connection and sets RLS session-scope GUCs on it
+    before querying -- RLS session variables must be set on the same
+    physical connection that runs the query, so rls_fetch cannot do this
+    with a bare pool.fetch() call). Both paths append to the SAME
+    `fetch_calls` list, off the single shared `_ScopedFakeConnection`, so
+    scoping assertions and call-count assertions work identically
+    regardless of which interface the caller uses.
+    """
 
     def __init__(self, *, agents_by_scope=None, members_by_scope=None):
         self.agents_by_scope = agents_by_scope or {}
         self.members_by_scope = members_by_scope or {}
         self.fetch_calls: list[tuple] = []
+        self.execute_calls: list[tuple] = []
+        self._connection = _ScopedFakeConnection(self)
 
     async def fetch(self, query, *args):
-        self.fetch_calls.append((query, args))
-        tenant_id, workspace_id = args[0], args[1]
-        if "workspace_agent_installs" in query:
-            return self.agents_by_scope.get((tenant_id, workspace_id), [])
-        if "workspace_memberships" in query:
-            return self.members_by_scope.get((tenant_id, workspace_id), [])
-        return []
+        return await self._connection.fetch(query, *args)
+
+    def acquire(self):
+        return _ScopedFakeAcquire(self._connection)
 
 
 class LoadMentionRosterScopingTests(unittest.IsolatedAsyncioTestCase):
