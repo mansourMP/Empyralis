@@ -4134,13 +4134,16 @@ a.fleet-breadcrumb:hover {
   align-items: flex-start;
   gap: 10px;
   margin-top: 16px;
-  /* FLAT, 2026-08-01. This used to carry a full border, a radius, a card
-     background and a drop shadow — the only elevated element on an
-     otherwise completely flat page, so it read as a 3D box floating above
-     everything around it. The left amber rule alone is enough of an
-     interruption; the shadow was the part that looked wrong. */
-  padding: 2px 0 2px 12px;
-  border-left: 2px solid var(--warning-text);
+  /* FLAT AND UNRULED, 2026-08-01. This carried a full border, a radius, a
+     card background, a drop shadow AND a 2px amber left rule — the only
+     elevated element on an otherwise completely flat page, so it read as a
+     3D box floating above everything around it. All of it is gone now,
+     including the rule: the amber warning glyph beside the text already
+     signals "this needs you", so the rule was a second, louder instance of
+     the same colour saying the same thing, and a non-accent colour used as
+     page structure violates the one-accent-colour rule outright. Icon
+     carries the signal; the text carries the message. */
+  padding: 0;
 }
 
 .fleet-overview-callout-icon {
