@@ -1,0 +1,117 @@
+/* GroupedRail — a second, in-content vertical nav. Deliberately NOT styled
+   like PrimaryRail.tsx (the app's permanent left rail): no background fill,
+   no accent-colored active indicator, narrower, and it lives inside a
+   page's own content column instead of pinned to the shell edge. The two
+   need to read as clearly different things sitting side by side, not as one
+   rail that grew a sibling. See theme-tokens.css's own rule that --accent is
+   reserved for the single primary action per view, focus rings, and
+   selected-row tint — NOT nav items — which is exactly why active state here
+   is a neutral wash + weight bump (--rail-active), never --accent. */
+
+.grouped-rail {
+  width: 176px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding-top: 2px;
+}
+
+.grouped-rail-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.grouped-rail-group-label {
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0 var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+.grouped-rail-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.grouped-rail-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 30px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  text-decoration: none;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+
+.grouped-rail-item:hover {
+  background: var(--rail-active);
+  color: var(--text-primary);
+}
+
+.grouped-rail-item.is-active {
+  background: var(--rail-active);
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+
+.grouped-rail-item-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+}
+
+/* Narrow content columns (Settings' 176px rail + 820px reading cap leaves
+   little room below ~720px): the rail collapses to a horizontal, scrollable
+   strip above the content instead of a second column. Group labels drop —
+   there's no vertical room to justify a header over one item — and items
+   sit inline. Mirrors .fleet-detail-toptabs' own no-visible-scrollbar
+   horizontal strip so a page that has both (an agent detail tab bar, later)
+   stays visually consistent. */
+@media (max-width: 720px) {
+  .grouped-rail {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-4);
+    overflow-x: auto;
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--space-2);
+    scrollbar-width: none;
+  }
+  .grouped-rail::-webkit-scrollbar {
+    display: none;
+  }
+  .grouped-rail-group {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-1);
+    flex-shrink: 0;
+  }
+  .grouped-rail-group-label {
+    display: none;
+  }
+  .grouped-rail-list {
+    flex-direction: row;
+    gap: var(--space-1);
+  }
+  .grouped-rail-item {
+    white-space: nowrap;
+  }
+}

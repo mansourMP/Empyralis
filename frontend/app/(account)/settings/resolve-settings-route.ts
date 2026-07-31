@@ -16,5 +16,5 @@ export async function redirectToWorkspaceSettings(section: AccountSettingsSectio
     redirect('/workspaces/new');
   }
 
-  redirect(`/w/${encodeURIComponent(workspaceId)}/settings?section=${encodeURIComponent(section)}`);
+  redirect(`/w/${encodeURIComponent(workspaceId)}/settings/${encodeURIComponent(section)}`);
 }
