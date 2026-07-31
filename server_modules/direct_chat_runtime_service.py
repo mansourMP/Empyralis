@@ -1076,7 +1076,7 @@ def build_direct_operator_reply(
     raw_system_prompt = services.build_direct_chat_system_prompt(
         workspace_id=normalized_workspace_id,
         availability=availability_payload,
-        tools=provider_chat_tools,
+        tools=generation_tools,
     )
     system_prompt = raw_system_prompt or None
     workspace_context_text = services.direct_chat_workspace_context_text(
