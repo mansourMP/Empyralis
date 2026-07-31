@@ -54,8 +54,8 @@ const APP_LOGOS: LogoItem[] = [
   { name: 'GitHub', src: '/brand-assets/apps/github.svg', invertInDark: true },
   { name: 'Notion', src: '/brand-assets/apps/notion.svg', invertInDark: true },
   { name: 'Gmail', src: '/brand-assets/apps/gmail.svg' },
-  { name: 'Stripe', src: '/brand-assets/apps/stripe.ico' },
-  { name: 'Salesforce', src: '/brand-assets/apps/salesforce.ico' },
+  { name: 'Stripe', src: '/brand-assets/apps/stripe.svg' },
+  { name: 'Salesforce', src: '/brand-assets/apps/salesforce.svg' },
   { name: 'Linear', src: '/brand-assets/apps/linear.svg' },
 ];
 

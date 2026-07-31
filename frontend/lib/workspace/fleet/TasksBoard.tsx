@@ -9,6 +9,12 @@
  * place you can actually look at, which is the whole reason the vocabulary
  * grew.
  *
+ * A column with zero tasks renders nothing at all — not even its header —
+ * per the founder's direct call: "if it doesn't exist, it's not shown by
+ * default." Manual hiding (below) is a separate, independent layer on top
+ * of this; a column reappears the instant it gets its first task, since
+ * visibility is derived from `counts` live on every render, not cached.
+ *
  * PRESENTATION — Linear's board, not a card-in-a-tray kanban:
  *   · The columns have NO container. No background, no border, no rounded
  *     tray. A column is a header row and a stack of cards floating on the
@@ -160,12 +166,15 @@ export function TasksBoard({
     [workspaceId],
   );
 
-  const visibleStatuses = FLEET_TASK_STATUSES.filter((s) => !hidden.includes(s));
-
   // Counts come from the one shared helper (fleet-data.countTasksByStatus),
   // the same one the Overview tab's stat grid reads — so a column header and
   // the roll-up above it cannot disagree about what a status means.
   const counts = countTasksByStatus(tasks);
+
+  // Two independent filters: manual hide (persisted, a human decision) and
+  // zero-count (automatic, recomputed every render). Order doesn't matter —
+  // a column absent from either reason is absent from the board.
+  const visibleStatuses = FLEET_TASK_STATUSES.filter((s) => !hidden.includes(s) && counts[s] > 0);
 
   // MAN-145: seven columns at 252px each is wider than any board viewport,
   // so reaching the trailing columns (Blocked/In review/Done) depends on
@@ -209,6 +218,32 @@ export function TasksBoard({
     // write — otherwise every mis-aimed drag bumps updated_at for nothing.
     if (!task || task.status === status) return;
     onStatusChange(taskId, status);
+  }
+
+  // Every column is either manually hidden or genuinely empty — this can
+  // only mean the project has zero tasks anywhere (canHide below already
+  // blocks hiding the last VISIBLE column, so manual hiding alone can't
+  // reach zero while a real task exists in a hidden one). A blank
+  // horizontal strip would say nothing here; say it plainly instead.
+  if (visibleStatuses.length === 0) {
+    return (
+      <div className="fleet-empty" style={{ marginTop: "var(--space-3)" }}>
+        <div className="fleet-empty-icon">
+          <TaskStatusIcon status="todo" size={20} />
+        </div>
+        <div className="fleet-empty-title">No tasks yet</div>
+        {onCreateTask ? (
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--accent-fill"
+            style={{ marginTop: "var(--space-3)" }}
+            onClick={() => onCreateTask("backlog")}
+          >
+            Create the first one
+          </button>
+        ) : null}
+      </div>
+    );
   }
 
   return (
