@@ -7,12 +7,16 @@ import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useAppTheme } from "@/lib/ui/app-theme";
 
 export type FleetTheme = "light" | "dark";
-export type FleetSectionKey = "projects" | "agents";
+// "agents" was dropped (MAN-146): the rail no longer renders an agents
+// sub-list, so there is nothing left to expand/collapse under that key. A
+// stored `{"agents": false}` from before this change is harmless — it's
+// simply ignored on read, see the spread in useFleetPreferences below.
+export type FleetSectionKey = "projects";
 type SectionMap = Record<FleetSectionKey, boolean>;
 
 const COLLAPSED_KEY = "fleet:rail-collapsed";
 const SECTIONS_KEY = "fleet:rail-sections";
-const DEFAULT_SECTIONS: SectionMap = { projects: true, agents: true };
+const DEFAULT_SECTIONS: SectionMap = { projects: true };
 
 /* ── Resizable panel widths (MAN-126) ──────────────────────────────────────
    Geometry for the two resizable edges. Collapsed rail width and the two
