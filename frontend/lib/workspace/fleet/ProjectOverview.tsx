@@ -1,108 +1,94 @@
 "use client";
 
 /**
- * Project Overview — MAN-110 Phase 1 (a scoped first pass at "Project tab
- * needs Linear-level polish"; the Filter/Board-config/Analytics/real-time
- * co-editing panels MAN-110 also asks for are explicitly deferred to a
- * later phase, see the Linear comment on that issue).
+ * Project Overview — rebuilt around "who is doing what" (MAN-145 follow-up).
  *
- * Two things live here, both built from data this platform already
- * collects — nothing here is invented or mocked:
+ * Founder verdict on the prior version (four counters + a status
+ * distribution bar + a raw activity feed): it showed things he didn't need
+ * ("Configured · Lark · fleet_control · 3h ago" — an internal event name and
+ * an internal subsystem name, repeated) and omitted the thing he actually
+ * asked for: "I must see what people I have, who's doing what."
  *
- *  1. A status roll-up (agents in this project, task counts by status,
- *     recent activity volume) — reusing useFleetTasks/useFleetAgents
- *     (already fetched by the caller, page.tsx) and the project's own cost
- *     rollup (GET /fleet/usage?scope=project, also already fetched by the
- *     caller).
+ * Rebuilt around four questions, in priority order, every one of them
+ * answerable from data this platform already collects — nothing here is
+ * invented or mocked:
  *
- *     SHAPE OF THAT ROLL-UP (2026-07-29 redesign). It used to be six
- *     identical bordered tiles, each a big number over a caption — the most
- *     generic dashboard pattern there is, and one that spent a sixth of the
- *     page telling you "Done: 0". Linear's own project overview has no stat
- *     tiles at all: a quiet inline properties row, then content. This follows
- *     that, and the numbers are ranked by how actionable they actually are:
+ *  1. WHO IS ON THIS PROJECT — the new "Team" roster. Every agent already
+ *     scoped to this project (the `agents` prop) plus every workspace member
+ *     (`members` — "project member" == "workspace member" today, no
+ *     per-project ACL table yet, same MAN-70 ruling page.tsx's own
+ *     MemberAvatarStack call already relies on), each paired with its most
+ *     relevant ACTIVE task in this project via `assignee_agent_id` /
+ *     `assignee_user_id` (project_tasks_single_assignee_check backstops the
+ *     "one or the other, never both" invariant this reads). A row with no
+ *     active task says so honestly rather than going quiet.
+ *  2. WHAT NEEDS THE OWNER — the existing "needs you" callout, unchanged in
+ *     substance (awaiting_input/blocked/in_review — the three states that
+ *     mean a human decision is required), just moved up to sit directly
+ *     under the roster instead of buried under a properties line.
+ *  3. WHAT IS IN FLIGHT — deliberately NOT a third section. An in_progress
+ *     task is the highest-ranked "active task" a roster row can show (see
+ *     ACTIVE_TASK_RANK below), so "who's working on what right now" already
+ *     answers "what's in flight and who holds it" — a dedicated list would
+ *     just repeat the same {avatar, name, task title} rows twice on one
+ *     page, which is exactly the surface-for-its-own-sake this platform's
+ *     own doctrine ("best, not most") rules out.
+ *  4. RECENT ACTIVITY, MADE HUMAN — kept, but: consecutive duplicate rows
+ *     collapse into one with a ×N count (the "four consecutive Configured
+ *     rows" the founder screenshotted), event_class ("fleet_control") never
+ *     renders — it's an internal subsystem identifier, not something a
+ *     human asked to read — and a channel key humanizes via the same
+ *     CHANNEL_LABELS map AgentsList/FleetAgentDetail already use. Any row
+ *     whose title still doesn't read as human (a legacy pre-humanization
+ *     write) is dropped rather than shown — "if an event can't be phrased
+ *     for a human, don't show it."
  *
- *       · A properties LINE (agents · tasks · cost this month · last
- *         activity) — reference figures, inline, unboxed, one line. Cost in
- *         particular is reference information, not a headline.
- *       · A "needs you" CALLOUT that only exists when the count is non-zero.
- *         A permanent tile reading 0 is noise; a box that appears only when
- *         there is something to do is a signal.
- *       · A single stacked STATUS BAR over all seven statuses, plus a legend.
- *         One element answers "where is the work" — which six separate
- *         numbers genuinely could not. Colour and the ring glyphs both come
- *         from task-status.tsx (the --task-* tokens + TaskStatusIcon), the
- *         same vocabulary the board columns and task rows use, so a segment
- *         and its column are recognisably the same thing. No new colours.
+ * REMOVED FROM THE PRIOR VERSION: the six-status stacked distribution bar +
+ * legend + review-attribution caveat. It answered none of the four questions
+ * above on its own — "where is the work across all seven states" is exactly
+ * the kind of aggregate the founder's own "shows things he shouldn't need to
+ * see" verdict was about, and every number it carried is now reachable
+ * either from the roster (in-flight), the needs-you callout (blocked/
+ * awaiting_input/in_review), or the Tasks tab's own board (the real place to
+ * see full distribution). This is a deliberate cut, flagged here rather than
+ * silently dropped — reintroducing it is one section, not a redesign, if
+ * that call is wrong.
  *
- *  2. A chronological activity feed merging THREE real sources:
- *       a. The workspace activity ledger (GET /api/activity/timeline,
- *          activity_ledger_service.list_activity_timeline_payload) — the
- *          same ledger the Inbox page already reads — filtered client-side
- *          to rows whose install_id belongs to one of this project's own
- *          agents. There is no project_id column on activity_ledger_events
- *          today (verified: runtime_events_api.py's get_activity_timeline
- *          takes workspace_id/actor_id/install_id/... filters, no
- *          project_id), so agent-authored rows are scoped to this project
- *          the only honest way available: by which agent did it.
- *       b. Task-created facts off the real project_tasks rows already on
- *          screen (created_at + created_by). project_tasks_service itself
- *          never writes to the activity ledger (grepped
- *          project_tasks_service.py + routes_fleet.py — no
- *          append_activity_event call exists there), so this is otherwise
- *          the only visible trace a task was ever created. created_at is
- *          set once and never mutated, so this timestamp is exact.
- *       c. Real task comments, off task.metadata.comments — a genuine,
- *          already-live commenting mechanism (project_tasks_service.py's
- *          add_task_comment, backing the project_task__comment tool wired
- *          in skills_service.py 2026-07-25) with no UI surface anywhere
- *          today; add_task_comment's own docstring calls a first-class
- *          comment table + UI feed "real future work". Each comment object
- *          carries its own immutable created_at/author_type/author_id, so
- *          — unlike a task's single mutable `updated_at` — this is a true
- *          per-event timestamp. Only ever agent-authored today: the only
- *          caller of add_task_comment is the project_task__comment tool: no
- *          HTTP route or frontend control lets a human post one.
- *     Deliberately NOT synthesized: "assigned" / "completed" events off a
- *     task's `updated_at`. `updated_at` is a single last-write pointer that
- *     assign_task, update_task, AND add_task_comment all bump (each sets
- *     `updated_at = NOW()` in its own UPDATE) — so once a task has had more
- *     than one of those happen to it, `updated_at` no longer safely
- *     identifies which one happened when. Rather than show a
- *     timestamp that might be wrong, this feed leaves current status/
- *     assignee to the stat grid + Tasks view (both are correct as
- *     present-state, not history) and only feeds the chronological list
- *     with facts that have their own real, immutable timestamp.
+ * Kept, unchanged in shape: the properties line (agents · tasks · cost this
+ * month · last activity) — compact reference figures, not the substance, but
+ * still useful enough to earn their one line at the top.
  *
- * Review attribution (the third MAN-110 Phase 1 ask): project_tasks has no
- * `reviewed_by` / `completed_by` column, so a task's status carries no
- * record of WHO set it. Until the kanban board landed, "done" could only
- * ever be project_task__update(status="done") called BY AN AGENT — the
- * frontend's own patchFleetTask had zero callers and no control in the UI
- * set a status at all. A person can now move a card (TasksBoard, and the
- * task detail drawer's Status row), which makes the actor genuinely
- * ambiguous rather than merely unrecorded: agent-self-closing,
- * agent-closing-a-teammate, and human-approving are indistinguishable after
- * the fact. That's what the note under the status legend says out loud,
- * rather than drawing a reviewer chip with no real actor behind it. It sits
- * directly under the legend on purpose: that legend is where the Done count
- * is now stated, so the caveat is attached to the number it qualifies.
+ * Every avatar/row shape here is reused, not invented: `.fleet-agent-avatar`
+ * / AgentSigil and `.fleet-member-avatar` / MemberAvatar are the exact same
+ * identity marks AgentsList/TasksList/MemberAvatarStack already draw, and
+ * roster rows reuse `.fleet-activity-item`'s row shell (avatar + title line
+ * + meta line, hairline border-bottom) — the same shape the activity feed
+ * below it uses for a different kind of row. The only new CSS is
+ * project-overview.css, a handful of rules making that row a real
+ * (clickable-when-there's-something-to-open) Link — fleet-theme.css and
+ * theme-tokens.css are untouched (owned by a parallel dark-mode pass).
  */
 
 import { useMemo } from "react";
-import { Bot, ListChecks, AlertTriangle, CircleDollarSign, Clock3, Activity as ActivityIcon } from "lucide-react";
+import Link from "next/link";
+import { Bot, ListChecks, AlertTriangle, CircleDollarSign, Clock3, Activity as ActivityIcon, Users } from "lucide-react";
+
+import "./project-overview.css";
 
 import {
   countTasksByStatus,
+  normalizeTaskStatus,
   useWorkspaceActivity,
-  FLEET_TASK_STATUSES,
   type FleetAgent,
   type FleetTask,
   type FleetTaskStatus,
   type WorkspaceActivityEvent,
 } from "./fleet-data";
-import { TaskStatusIcon, taskStatusLabel, taskStatusVisual } from "./task-status";
-import { useWorkspaceMembers } from "./members-data";
+import { TaskStatusIcon, taskStatusLabel } from "./task-status";
+import { MemberAvatar } from "./MemberAvatarStack";
+import { AgentSigil } from "./fleet-indicators";
+import type { WorkspaceMember } from "./members-data";
+import { CHANNEL_LABELS } from "./fleet-icons";
 import { timeAgo, formatDate } from "./fleet-presentation";
 import { FleetListSkeleton } from "./fleet-states";
 
@@ -114,6 +100,21 @@ import { FleetListSkeleton } from "./fleet-states";
 const LEDGER_FETCH_LIMIT = 150;
 const FEED_DISPLAY_CAP = 40;
 
+// Legacy rows written before the 2026-07-09 fleet_control-title
+// humanization fix (fleet_tools.py's _humanize_fleet_action) still carry a
+// raw "Fleet: {action} → {id}" shape, or a bare install/workspace id as the
+// title — the same guard AgentsList.tsx's activityPreviewText applies to an
+// agent's own preview line. An event that still looks like this after the
+// server-side fix is old enough to just skip: showing raw plumbing to a
+// human is worse than showing one fewer row.
+const RAW_INTERNAL_TITLE = /^Fleet:\s|ainstall_[a-z0-9]|(?:^|[\s:])ws_[a-z0-9]/i;
+
+function humanChannel(channel: string | null): string | null {
+  const key = (channel || "").trim();
+  if (!key) return null;
+  return CHANNEL_LABELS[key] || key.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 type ActivityItem = {
   id: string;
   ts: string;
@@ -122,7 +123,29 @@ type ActivityItem = {
   meta: string;
   actorLabel: string;
   isWarn?: boolean;
+  /** How many consecutive, otherwise-identical events this one row stands
+   *  in for — see dedupeConsecutive below. 1 for a row with no repeats. */
+  count: number;
 };
+
+/** Four consecutive "Configured · Lark · fleet_control · 3h ago" rows told a
+ *  reader nothing four times over. Collapses consecutive (already
+ *  time-sorted) events that share a title+actor+meta into one row carrying
+ *  a ×N count and the most recent of the run's timestamps — a repeat two
+ *  days apart is still two separate, worth-seeing rows; only genuinely
+ *  back-to-back repeats collapse. */
+function dedupeConsecutive(items: Omit<ActivityItem, "count">[]): ActivityItem[] {
+  const out: ActivityItem[] = [];
+  for (const item of items) {
+    const prev = out[out.length - 1];
+    if (prev && prev.kind === item.kind && prev.title === item.title && prev.actorLabel === item.actorLabel && prev.meta === item.meta) {
+      prev.count += 1;
+      continue;
+    }
+    out.push({ ...item, count: 1 });
+  }
+  return out;
+}
 
 function buildActivityItems(
   ledgerEvents: WorkspaceActivityEvent[],
@@ -130,17 +153,23 @@ function buildActivityItems(
   agentNameByInstall: Map<string, string>,
   memberNameByUserId: Map<string, string>,
 ): ActivityItem[] {
-  const items: ActivityItem[] = [];
+  const items: Omit<ActivityItem, "count">[] = [];
 
   for (const e of ledgerEvents) {
     if (!e.install_id || !agentNameByInstall.has(e.install_id)) continue;
     if (!e.created_at) continue;
+    const title = (e.title || e.action || "").trim();
+    // Never surface an internal subsystem identifier (event_class, e.g.
+    // "fleet_control") or an unhumanized legacy title — if this event can't
+    // be phrased for a human, skip it rather than show plumbing.
+    if (!title || RAW_INTERNAL_TITLE.test(title)) continue;
+    const channel = humanChannel(e.channel);
     items.push({
       id: e.id || `ledger-${e.install_id}-${e.created_at}`,
       ts: e.created_at,
       kind: "agent",
-      title: e.title || e.action || "Agent activity",
-      meta: [e.event_class, e.channel ? `via ${e.channel}` : null].filter(Boolean).join(" · "),
+      title,
+      meta: channel ? `via ${channel}` : "",
       actorLabel: agentNameByInstall.get(e.install_id) || "Agent",
       isWarn: e.review_required,
     });
@@ -161,8 +190,8 @@ function buildActivityItems(
 
     // Real comments — task.metadata.comments, written by the
     // project_task__comment agent tool (project_tasks_service.add_task_comment).
-    // Only ever agent-authored today (see file header), but resolved
-    // generically in case a future write path adds a human author_type.
+    // Only ever agent-authored today, but resolved generically in case a
+    // future write path adds a human author_type.
     const rawComments = task.metadata?.comments;
     if (Array.isArray(rawComments)) {
       for (const c of rawComments) {
@@ -186,7 +215,7 @@ function buildActivityItems(
   }
 
   items.sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
-  return items;
+  return dedupeConsecutive(items);
 }
 
 function dayHeading(iso: string): string {
@@ -212,12 +241,60 @@ function groupByDay(items: ActivityItem[]): { day: string; items: ActivityItem[]
   return groups;
 }
 
+// Which of a person/agent's own active (non-done) tasks is the one worth
+// showing in a single roster-row slot — in_progress ranks first because
+// that IS "in flight, who holds it" (see file header, point 3): the
+// roster's top-ranked task doubles as that answer without a second section.
+// awaiting_input/blocked tie (both are "the agent stopped, a human is
+// needed" per FLEET_TASK_NEEDS_HUMAN in fleet-data.ts) and rank just under
+// in_progress; in_review (finished, parked for approval) and todo trail.
+const ACTIVE_TASK_RANK: Partial<Record<FleetTaskStatus, number>> = {
+  in_progress: 0,
+  awaiting_input: 1,
+  blocked: 1,
+  in_review: 2,
+  todo: 3,
+  backlog: 4,
+};
+
+function pickCurrentTask(tasks: FleetTask[]): { task: FleetTask | null; extra: number } {
+  const active = tasks.filter((t) => normalizeTaskStatus(t.status) !== "done");
+  if (active.length === 0) return { task: null, extra: 0 };
+  const sorted = [...active].sort((a, b) => {
+    const ra = ACTIVE_TASK_RANK[normalizeTaskStatus(a.status)] ?? 5;
+    const rb = ACTIVE_TASK_RANK[normalizeTaskStatus(b.status)] ?? 5;
+    if (ra !== rb) return ra - rb;
+    // Most recently touched first — ISO 8601 timestamps sort correctly as
+    // plain strings, no Date parsing needed for a simple compare.
+    return (b.updated_at || b.created_at || "").localeCompare(a.updated_at || a.created_at || "");
+  });
+  return { task: sorted[0], extra: sorted.length - 1 };
+}
+
+type RosterEntry = {
+  key: string;
+  kind: "agent" | "member";
+  id: string;
+  name: string;
+  role?: WorkspaceMember["role"];
+  task: FleetTask | null;
+  extraActiveCount: number;
+  /** Where clicking this row goes. A member with no active task has nowhere
+   *  honest to send you (no per-person profile page exists), so `null` — a
+   *  dead link is worse than a plain row. An agent always has its own
+   *  detail page, so it's never null there. */
+  href: string | null;
+};
+
 export function ProjectOverview({
   workspaceId,
   agents,
   tasks,
   tasksLoading,
   rollup,
+  members,
+  taskHref,
+  agentHref,
 }: {
   workspaceId: string;
   /** Agents already scoped to this project by the caller. */
@@ -226,9 +303,20 @@ export function ProjectOverview({
   tasks: FleetTask[];
   tasksLoading: boolean;
   rollup: { usd_cost: number; total_tokens: number; events: number } | null;
+  /** Workspace members — "project member" == "workspace member" today, same
+   *  data page.tsx's own MemberAvatarStack call already fetches; passed
+   *  down rather than re-fetched here so the two never show a different
+   *  roster for a heartbeat after either poll ticks. */
+  members: WorkspaceMember[];
+  /** Where a task's own page lives, for the roster row + needs-you callout
+   *  to link straight into it — same builder page.tsx hands TasksBoard/
+   *  TasksList/TasksGroupedList. */
+  taskHref: (taskId: string) => string;
+  /** Where an agent's own Overview tab lives, for a roster row with no
+   *  active task to still go somewhere real. */
+  agentHref: (agentId: string) => string;
 }) {
   const { events: ledgerEvents, loading: activityLoading } = useWorkspaceActivity(workspaceId, LEDGER_FETCH_LIMIT);
-  const { members } = useWorkspaceMembers(workspaceId);
 
   const agentNameByInstall = useMemo(
     () => new Map(agents.map((a) => [a.agent_id, a.label || "Unnamed agent"])),
@@ -241,7 +329,7 @@ export function ProjectOverview({
 
   // One shared counter (fleet-data.countTasksByStatus) for this roll-up AND
   // the board's per-column header counts, so the two can never disagree
-  // about what a status means or how a legacy `open` row is bucketed.
+  // about what a status means.
   const statusCounts = useMemo(() => countTasksByStatus(tasks), [tasks]);
 
   const items = useMemo(
@@ -249,42 +337,80 @@ export function ProjectOverview({
     [ledgerEvents, tasks, agentNameByInstall, memberNameByUserId],
   );
   const dayGroups = useMemo(() => groupByDay(items.slice(0, FEED_DISPLAY_CAP)), [items]);
-  const hasDoneTasks = statusCounts.done > 0;
   const loading = tasksLoading || activityLoading;
 
   const totalTasks = tasks.length;
-  const donePct = totalTasks > 0 ? Math.round((statusCounts.done / totalTasks) * 100) : 0;
-  // Only statuses that actually have tasks get a bar segment AND a legend
-  // entry — the two are built from the same list so a stripe and its label
-  // always correspond one-to-one. A status with nothing in it is not news.
-  const presentStatuses = useMemo(
-    () => FLEET_TASK_STATUSES.filter((s) => statusCounts[s] > 0),
-    [statusCounts],
-  );
-  // "Waiting on a person", same definition the old Needs-you tile used:
-  // blocked + awaiting_input are the agent-has-stopped states, and in_review
-  // is finished work that has NOT left the board — the reader of this page is
-  // exactly who it is parked on. Listed review-first because that is the
-  // cheapest of the three to clear.
+  const lastActivityAt = items.length > 0 ? items[0].ts : null;
+
+  // "Waiting on a person" — blocked + awaiting_input are the agent-stopped
+  // states, and in_review is finished work that hasn't left the board. The
+  // reader of this page is exactly who all three are parked on.
   const needsYouStatuses: FleetTaskStatus[] = ["in_review", "awaiting_input", "blocked"];
   const needsYouCount = needsYouStatuses.reduce((n, s) => n + statusCounts[s], 0);
-  const lastActivityAt = items.length > 0 ? items[0].ts : null;
-  // Built as one plain string, not mixed JSX text/expressions across lines —
-  // JSX's per-line whitespace trimming drops the leading space of a text
-  // node that starts a new source line right after an expression container
-  // (verified live: an earlier version of this string rendered "wasclosed"
-  // with no space), so this sidesteps that entirely.
-  const reviewCaption = hasDoneTasks
-    ? `Review attribution isn't tracked yet: nothing records who moved ${statusCounts.done === 1 ? "the task" : `the ${statusCounts.done} tasks`} ` +
-      `marked Done above. project_tasks has no reviewed_by or completed_by column, so an agent closing its own work, ` +
-      `another agent closing a teammate's, and a person moving the card on the board all look identical afterwards.`
-    : "";
+
+  // The roster — every agent already scoped to this project, plus every
+  // workspace member, each paired with its own most-relevant active task.
+  const tasksByAgent = useMemo(() => {
+    const m = new Map<string, FleetTask[]>();
+    for (const t of tasks) {
+      if (!t.assignee_agent_id) continue;
+      const arr = m.get(t.assignee_agent_id) || [];
+      arr.push(t);
+      m.set(t.assignee_agent_id, arr);
+    }
+    return m;
+  }, [tasks]);
+  const tasksByMember = useMemo(() => {
+    const m = new Map<string, FleetTask[]>();
+    for (const t of tasks) {
+      if (!t.assignee_user_id) continue;
+      const arr = m.get(t.assignee_user_id) || [];
+      arr.push(t);
+      m.set(t.assignee_user_id, arr);
+    }
+    return m;
+  }, [tasks]);
+
+  const roster = useMemo(() => {
+    const entries: RosterEntry[] = [];
+    for (const a of agents) {
+      const { task, extra } = pickCurrentTask(tasksByAgent.get(a.agent_id) || []);
+      entries.push({
+        key: `agent-${a.agent_id}`,
+        kind: "agent",
+        id: a.agent_id,
+        name: a.label || "Unnamed agent",
+        task,
+        extraActiveCount: extra,
+        href: task ? taskHref(task.id) : agentHref(a.agent_id),
+      });
+    }
+    for (const m of members) {
+      const { task, extra } = pickCurrentTask(tasksByMember.get(m.user_id) || []);
+      entries.push({
+        key: `member-${m.user_id}`,
+        kind: "member",
+        id: m.user_id,
+        name: m.display_name || m.email,
+        role: m.role,
+        task,
+        extraActiveCount: extra,
+        href: task ? taskHref(task.id) : null,
+      });
+    }
+    entries.sort((a, b) => {
+      const ra = a.task ? (ACTIVE_TASK_RANK[normalizeTaskStatus(a.task.status)] ?? 5) : 9;
+      const rb = b.task ? (ACTIVE_TASK_RANK[normalizeTaskStatus(b.task.status)] ?? 5) : 9;
+      if (ra !== rb) return ra - rb;
+      return a.name.localeCompare(b.name);
+    });
+    return entries;
+  }, [agents, members, tasksByAgent, tasksByMember, taskHref, agentHref]);
 
   return (
     <div className="fleet-detail-overview">
-      {/* Properties line — Linear's inline chip row. Reference figures, not
-          headlines: unboxed, one line, and quiet enough that the callout and
-          the bar below own the page. */}
+      {/* Properties line — compact reference figures, not the substance
+          (see file header). Unboxed, one line. */}
       <div className="fleet-overview-props">
         <span className="fleet-overview-prop">
           <Bot size={13} strokeWidth={1.75} />
@@ -314,9 +440,72 @@ export function ProjectOverview({
         </span>
       </div>
 
+      {/* The headline: who is on this project, and what each is doing right
+          now. Agents first-class alongside people — both are "who's doing
+          what" to the owner of this project. */}
+      <div className="fleet-overview-section-head">
+        <h2 className="fleet-detail-section-title">Team</h2>
+        <span className="fleet-overview-section-meta">
+          {agents.length} {agents.length === 1 ? "agent" : "agents"} · {members.length} {members.length === 1 ? "person" : "people"}
+        </span>
+      </div>
+      {roster.length === 0 ? (
+        <div className="fleet-empty">
+          <div className="fleet-empty-icon">
+            <Users size={20} strokeWidth={1.75} />
+          </div>
+          <div className="fleet-empty-title">Nobody here yet</div>
+          <div className="fleet-empty-desc">Add an agent to this project to see it here.</div>
+        </div>
+      ) : (
+        <div className="fleet-activity fleet-activity--flush">
+          {roster.map((entry) => {
+            const avatar =
+              entry.kind === "agent" ? (
+                <span className="fleet-agent-avatar">
+                  <AgentSigil seed={entry.id} size={16} />
+                </span>
+              ) : (
+                <MemberAvatar name={entry.name} role={entry.role} size="sm" />
+              );
+            const body = (
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="fleet-activity-title">{entry.name}</div>
+                <div className="fleet-activity-meta">
+                  {entry.task ? (
+                    <>
+                      <TaskStatusIcon status={entry.task.status} size={12} />
+                      <span>{entry.task.title || "Untitled task"}</span>
+                      {entry.extraActiveCount > 0 && (
+                        <span style={{ color: "var(--text-muted)" }}>
+                          +{entry.extraActiveCount} more
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span>{entry.kind === "agent" ? "No active task" : "No active task in this project"}</span>
+                  )}
+                </div>
+              </div>
+            );
+            return entry.href ? (
+              <Link key={entry.key} href={entry.href} className="fleet-activity-item fleet-overview-roster-row">
+                {avatar}
+                {body}
+              </Link>
+            ) : (
+              <div key={entry.key} className="fleet-activity-item fleet-overview-roster-row fleet-overview-roster-row--static">
+                {avatar}
+                {body}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* The one number worth interrupting for — and only when there IS one.
-          A permanent tile reading "0 needs you" is noise; this box existing at
-          all is the signal. */}
+          A permanent tile reading "0 needs you" is noise; this box existing
+          at all is the signal. */}
       {needsYouCount > 0 && (
         <div className="fleet-overview-callout">
           <AlertTriangle className="fleet-overview-callout-icon" size={15} strokeWidth={1.75} />
@@ -339,68 +528,6 @@ export function ProjectOverview({
         </div>
       )}
 
-      {/* Where the work actually sits, in one element. Segment widths are
-          flex-grow ratios off the raw counts, so the bar IS the distribution
-          rather than a picture of it; min-width keeps a 1-of-40 status from
-          collapsing to an invisible sliver. */}
-      <div className="fleet-overview-progress">
-        <div className="fleet-overview-progress-head">
-          <h2 className="fleet-overview-progress-label">Status</h2>
-          {totalTasks > 0 && (
-            <span className="fleet-overview-progress-count">
-              <span className="fleet-overview-num">{statusCounts.done}</span> of{" "}
-              <span className="fleet-overview-num">{totalTasks}</span> done · {donePct}%
-            </span>
-          )}
-        </div>
-
-        {totalTasks > 0 ? (
-          <div
-            className="fleet-status-bar"
-            role="img"
-            aria-label={presentStatuses
-              .map((s) => `${taskStatusLabel(s)}: ${statusCounts[s]}`)
-              .join(", ")}
-          >
-            {presentStatuses.map((s) => (
-              <span
-                key={s}
-                className={`fleet-status-bar-seg${s === "backlog" ? " fleet-status-bar-seg--backlog" : ""}`}
-                style={{ flexGrow: statusCounts[s], background: `var(${taskStatusVisual(s).colorVar})` }}
-                title={`${taskStatusLabel(s)} — ${statusCounts[s]}`}
-              />
-            ))}
-          </div>
-        ) : (
-          // Empty AND loading both render the same flat track, so the block
-          // never changes height when tasks arrive — only what sits under it
-          // does. An empty project gets an explanation, not a row of zeroes.
-          <div className="fleet-status-bar fleet-status-bar--empty" aria-hidden />
-        )}
-
-        {totalTasks > 0 ? (
-          <div className="fleet-overview-legend">
-            {presentStatuses.map((s) => (
-              <span key={s} className="fleet-overview-legend-item">
-                <TaskStatusIcon status={s} size={13} />
-                <span className="fleet-overview-num">{statusCounts[s]}</span>
-                {taskStatusLabel(s)}
-              </span>
-            ))}
-          </div>
-        ) : (
-          <p className="fleet-overview-note">
-            {tasksLoading
-              ? "Loading tasks…"
-              : "No tasks in this project yet. Once there are, this bar shows how they sit across backlog, todo, in progress, needs input, blocked, in review and done."}
-          </p>
-        )}
-
-        {/* Attached to the legend, which is where the Done count is now
-            stated — the caveat belongs next to the number it qualifies. */}
-        {hasDoneTasks && <p className="fleet-overview-note">{reviewCaption}</p>}
-      </div>
-
       <div className="fleet-overview-section-head">
         <h2 className="fleet-detail-section-title">Activity</h2>
         {items.length > 0 && (
@@ -415,8 +542,8 @@ export function ProjectOverview({
         // rowHeight matches .fleet-activity-item's real height (12px top/bottom
         // padding + a 13px title, 4px gap and an 11px meta line + the 1px
         // divider = ~64px) — see FleetListSkeleton's MAN-113 note. This is the
-        // project's default landing tab, so an un-pinned 37px skeleton row made
-        // the whole activity ledger jump the moment the real items swapped in.
+        // project's default landing tab, so an un-pinned 37px skeleton row
+        // made the whole activity ledger jump the moment the real items swapped in.
         <FleetListSkeleton rows={4} rowHeight={64} />
       ) : items.length === 0 ? (
         <div className="fleet-empty">
@@ -437,7 +564,12 @@ export function ProjectOverview({
                 <div key={item.id} className="fleet-activity-item">
                   <div className={`fleet-activity-dot${item.isWarn ? " is-warn" : ""}`} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="fleet-activity-title">{item.title}</div>
+                    <div className="fleet-activity-title">
+                      {item.title}
+                      {item.count > 1 && (
+                        <span style={{ color: "var(--text-muted)", fontWeight: 400 }}> · ×{item.count}</span>
+                      )}
+                    </div>
                     <div className="fleet-activity-meta">
                       <span>{item.actorLabel}</span>
                       {item.meta && (

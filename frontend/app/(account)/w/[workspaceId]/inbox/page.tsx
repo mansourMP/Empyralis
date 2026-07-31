@@ -151,7 +151,15 @@ export default function InboxPage() {
                   <ChevronLeft size={16} strokeWidth={2} />
                   Inbox
                 </button>
-                <h1 className="fleet-inbox-detail-title">{selected.title || selected.action || "Event"}</h1>
+                {/* MAN-145 title-dedup follow-up: the breadcrumb's current
+                    crumb ("Inbox") is this page's real <h1> now (see
+                    Breadcrumbs.tsx) — a second <h1> here, for the selected
+                    EVENT's own title, would be a second top-level heading on
+                    the page (different text, but still two h1s). Demoted to
+                    <h2>: this is the detail pane's own document header (the
+                    master-detail analog of TaskDetailView's task title), a
+                    real heading one rank below the page's, not chrome. */}
+                <h2 className="fleet-inbox-detail-title">{selected.title || selected.action || "Event"}</h2>
                 <div className="fleet-inbox-detail-meta">
                   {[
                     selected.install_id ? agentNameByInstall.get(selected.install_id) || null : null,

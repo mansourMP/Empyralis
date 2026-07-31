@@ -18,20 +18,18 @@
  *     from the frontend.
  *
  * `heading={false}` is still passed to HardwareSection — the breadcrumb
- * already says "Hardware" on this line, and HardwareSection's own internal
- * "Hardware" title (the one it also renders inside Settings, at 12px/muted,
- * a SECTION style) would just repeat that a second time in the page body.
- * What was actually missing (MAN-145 item 4) was a real page <h1> — the
- * breadcrumb is a `<nav>` landmark, not a heading, so a page whose only
- * "Hardware" was a breadcrumb crumb had zero heading roles for a screen
- * reader's H-key/rotor navigation. This header block gives it one, at the
- * same `.fleet-title`/`.fleet-subtitle` weight FleetHome's "Your fleet" uses
- * for the same job — no new type style, just the existing page-title pair
- * applied here too. The subtitle copy is HardwareSection's own (the one its
- * `heading={true}` branch shows inside Settings) so the two mounts describe
- * hardware identically; it doubles as MAN-102 empty-state instruction here,
- * since this route is the one a fresh, computer-less workspace actually
- * lands on.
+ * already says "Hardware" on this line (and IS the page's <h1> now, see
+ * Breadcrumbs.tsx's MAN-145 title-dedup follow-up), so HardwareSection's own
+ * internal "Hardware" h2 (the one it also renders inside Settings, at
+ * 12px/muted, a SECTION style) would just repeat that a second time in the
+ * page body — this route only ever has the one section, so unlike Settings
+ * (several differently-named sections, "Hardware" among them) that second
+ * "Hardware" would read as the exact stutter this whole pass exists to cut.
+ * The onboarding subtitle survives as plain instructional copy (no heading
+ * of its own) directly under the breadcrumb — MAN-102 empty-state
+ * instruction for the fresh, computer-less workspace that actually lands on
+ * this route, same copy HardwareSection's own `heading={true}` branch shows
+ * inside Settings so the two mounts still describe hardware identically.
  */
 
 import { useParams } from "next/navigation";
@@ -44,16 +42,11 @@ export default function HardwarePage() {
 
   return (
     <main className="fleet-content fleet-content--wide">
-      <div className="fleet-header">
-        <div>
-          <h1 className="fleet-title">Hardware</h1>
-          <p className="fleet-subtitle">
-            The computers your agents run on — a cloud server provisioned here, or your own machine
-            connected over SSH. Set up once; each agent then picks which box it runs on from its own
-            Hardware tab.
-          </p>
-        </div>
-      </div>
+      <p className="fleet-subtitle" style={{ marginBottom: 24 }}>
+        The computers your agents run on — a cloud server provisioned here, or your own machine
+        connected over SSH. Set up once; each agent then picks which box it runs on from its own
+        Hardware tab.
+      </p>
       <HardwareSection workspaceId={workspaceId} heading={false} />
     </main>
   );
