@@ -264,9 +264,14 @@ export function TasksBoard({
             </header>
             <div className="fleet-board-column-body">
               {columnTasks.length === 0 ? (
-                <div className="fleet-board-column-empty" aria-hidden>
-                  {dragOverStatus === status ? "Drop here" : "—"}
-                </div>
+                // Nothing to say about an empty column that its own "0" hasn't
+                // already said, so idle renders nothing at all. The body keeps
+                // its height from `flex: 1`, so the drop target is unchanged.
+                dragOverStatus === status ? (
+                  <div className="fleet-board-column-empty" aria-hidden>
+                    Drop here
+                  </div>
+                ) : null
               ) : (
                 columnTasks.map((task, index) => (
                   <TaskCard
