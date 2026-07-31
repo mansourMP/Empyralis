@@ -45,7 +45,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CalendarDays, Check, MoreHorizontal, Plus, X } from "lucide-react";
+import { CalendarDays, Check, MoreHorizontal, X } from "lucide-react";
 
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
@@ -73,6 +73,7 @@ import {
   taskStatusLabel,
   type TaskPriority,
 } from "./task-status";
+import { LabelColorSwatches } from "./task-labels";
 
 /** The status a task is actually born with (project_tasks.status DEFAULT).
  *  Anything else costs a follow-up PATCH, so this is also the default the
@@ -789,6 +790,10 @@ function LabelChip({
   const [query, setQuery] = useState("");
   const [minting, setMinting] = useState(false);
   const [mintError, setMintError] = useState<string | null>(null);
+  // A human's explicit swatch pick for the label about to be minted,
+  // overriding the round-robin default just below. Reset after every create
+  // so the next one rotates again instead of repeating the override.
+  const [mintColorOverride, setMintColorOverride] = useState<string | null>(null);
 
   const q = query.trim().toLowerCase();
   const shown = q ? labels.filter((l) => l.name.toLowerCase().includes(q)) : labels;
@@ -801,19 +806,23 @@ function LabelChip({
         ? chosen[0].name
         : `${chosen[0].name} +${chosen.length - 1}`;
 
+  // Round-robin off the palette so consecutive new labels differ by default —
+  // same rule task-labels.TaskLabelEditor follows. PRE-selected rather than
+  // silently applied: Enter still creates it without ever touching the
+  // swatches, but the choice is now visible and changeable before that.
+  const mintColorDefault = LABEL_COLORS[labels.length % LABEL_COLORS.length];
+  const mintColor = mintColorOverride ?? mintColorDefault;
+
   async function mint() {
     const name = query.trim();
     if (!name || minting) return;
     setMinting(true);
     setMintError(null);
     try {
-      // Colour is assigned round-robin from the palette rather than asked for:
-      // a colour picker on the way to filing a task is a decision nobody wants
-      // to make at that moment, and the label can be recoloured later.
-      const color = LABEL_COLORS[labels.length % LABEL_COLORS.length];
-      const created = await createFleetLabel(workspaceId, { name, color });
+      const created = await createFleetLabel(workspaceId, { name, color: mintColor });
       await onCreated(created);
       setQuery("");
+      setMintColorOverride(null);
     } catch (e) {
       setMintError(e instanceof Error ? e.message : "Could not create that label.");
     } finally {
@@ -872,14 +881,17 @@ function LabelChip({
               </button>
             ))}
             {query.trim() && !exact ? (
-              <button type="button" className="fleet-composer-pop-item" onClick={() => void mint()} disabled={minting}>
-                <span className="fleet-composer-pop-icon">
-                  <Plus size={13} strokeWidth={2} />
-                </span>
-                <span className="fleet-composer-pop-label">
-                  {minting ? "Creating…" : `Create label “${query.trim()}”`}
-                </span>
-              </button>
+              <>
+                <LabelColorSwatches value={mintColor} onChange={setMintColorOverride} />
+                <button type="button" className="fleet-composer-pop-item" onClick={() => void mint()} disabled={minting}>
+                  <span className="fleet-composer-pop-icon">
+                    <span className="fleet-label-dot" data-color={mintColor} aria-hidden />
+                  </span>
+                  <span className="fleet-composer-pop-label">
+                    {minting ? "Creating…" : `Create label “${query.trim()}”`}
+                  </span>
+                </button>
+              </>
             ) : null}
             {shown.length === 0 && !query.trim() ? (
               <div className="fleet-composer-pop-empty">

@@ -41,6 +41,7 @@ import {
   attachFleetTaskLabel,
   createFleetLabel,
   detachFleetTaskLabel,
+  patchFleetLabel,
   useFleetLabels,
   type FleetLabel,
 } from "./fleet-data";
@@ -53,6 +54,44 @@ export function TaskLabelChip({ label }: { label: FleetLabel }) {
       <span className="fleet-label-dot" data-color={label.color || "grey"} aria-hidden />
       <span className="fleet-label-chip-name">{label.name}</span>
     </span>
+  );
+}
+
+/**
+ * The ten palette tokens as clickable swatches — Linear's "pick a name, pick
+ * a colour, done." Shared by every surface that MINTS a label (this file's
+ * TaskLabelEditor, and TaskComposer.LabelChip) so the picker looks and
+ * behaves identically wherever a human is naming a new label.
+ *
+ * Each swatch is just the standalone --label-* dot, larger and clickable —
+ * no new colour values, the same ten tokens the chips already render.
+ * Selection is a ring, not a size or fill change, so the row doesn't reflow
+ * as the choice moves.
+ */
+export function LabelColorSwatches({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (color: string) => void;
+}) {
+  return (
+    <div className="fleet-label-swatches" role="radiogroup" aria-label="Label colour">
+      {LABEL_COLORS.map((c) => (
+        <button
+          key={c}
+          type="button"
+          role="radio"
+          aria-checked={value === c}
+          aria-label={c}
+          title={c}
+          className={`fleet-label-swatch${value === c ? " is-selected" : ""}`}
+          onClick={() => onChange(c)}
+        >
+          <span className="fleet-label-dot" data-color={c} aria-hidden />
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -134,6 +173,13 @@ export function TaskLabelEditor({
   const [error, setError] = useState<string | null>(null);
   // Non-null only while a write is in flight — see the note above.
   const [optimistic, setOptimistic] = useState<FleetLabel[] | null>(null);
+  // The colour a human has explicitly clicked for the label about to be
+  // MINTED, overriding the round-robin default below. Cleared on every
+  // successful create so the rotation resumes for the next one.
+  const [mintColorOverride, setMintColorOverride] = useState<string | null>(null);
+  // Which EXISTING label's swatch row is open for recolouring, or null.
+  // Exactly one at a time — opening a second closes the first.
+  const [recolorId, setRecolorId] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
   // The workspace vocabulary is only fetched once the picker is actually
@@ -163,6 +209,15 @@ export function TaskLabelEditor({
       document.removeEventListener("mousedown", onDown, true);
       document.removeEventListener("keydown", onKey, true);
     };
+  }, [open]);
+
+  // Closing the whole picker must not leave a swatch row silently open for
+  // the next time it's reopened.
+  useEffect(() => {
+    if (!open) {
+      setRecolorId(null);
+      setMintColorOverride(null);
+    }
   }, [open]);
 
   const write = useCallback(
@@ -207,24 +262,47 @@ export function TaskLabelEditor({
   const shown = q ? vocabulary.filter((l) => l.name.toLowerCase().includes(q)) : vocabulary;
   const exact = vocabulary.some((l) => l.name.toLowerCase() === q);
 
+  // Round-robin off the palette so consecutive new labels differ by default —
+  // the same rule the composer's LabelChip follows — but PRE-SELECTS rather
+  // than silently applies: a human on the way to filing a task can still hit
+  // Enter without ever looking at the swatches, but one who cares can click a
+  // different one first. "Recolour it later" stopped being the only option
+  // once there was somewhere to make the choice at all.
+  const mintColorDefault = LABEL_COLORS[vocabulary.length % LABEL_COLORS.length];
+  const mintColor = mintColorOverride ?? mintColorDefault;
+
   async function mint() {
     const name = query.trim();
     if (!name || busy) return;
     setError(null);
     setBusy(true);
     try {
-      // Round-robin off the palette, same as the composer: a colour picker on
-      // the way to filing a task is a decision nobody wants at that moment.
-      const color = LABEL_COLORS[vocabulary.length % LABEL_COLORS.length];
-      const created = await createFleetLabel(workspaceId, { name, color });
+      const created = await createFleetLabel(workspaceId, { name, color: mintColor });
       await attachFleetTaskLabel(workspaceId, taskId, created.id);
       setQuery("");
+      setMintColorOverride(null);
       await refreshVocabulary();
       await onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create that label.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Recolour an EXISTING label (fleet_patch_label). Distinct from mint's
+  // colour choice: this is a metadata edit on a label that may already sit on
+  // other tasks, not a decision made once at creation.
+  async function recolor(label: FleetLabel, color: string) {
+    setRecolorId(null);
+    if (color === (label.color || "grey") || busy) return;
+    setError(null);
+    try {
+      await patchFleetLabel(workspaceId, label.id, { color });
+      await refreshVocabulary();
+      await onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not recolour that label.");
     }
   }
 
@@ -273,7 +351,10 @@ export function TaskLabelEditor({
               autoFocus
               placeholder="Filter or create…"
               aria-label="Filter or create a label"
-              onChange={(e) => setQuery(e.currentTarget.value)}
+              onChange={(e) => {
+                setQuery(e.currentTarget.value);
+                setRecolorId(null);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !exact && query.trim()) {
                   e.preventDefault();
@@ -284,38 +365,68 @@ export function TaskLabelEditor({
           </div>
           <div className="fleet-composer-pop-list">
             {shown.map((l) => (
-              <button
-                key={l.id}
-                type="button"
-                className="fleet-composer-pop-item"
-                role="menuitemcheckbox"
-                aria-checked={currentIds.has(l.id)}
-                disabled={busy}
-                onClick={() => toggle(l)}
-              >
-                <span className="fleet-composer-pop-icon">
+              <div key={l.id} className="fleet-label-vocab-row">
+                {/* The dot is its OWN button, pulled out of the name button
+                    below rather than nested in it (a <button> cannot legally
+                    contain another) — this is the recolour affordance, the
+                    only place in the app one exists. Clicking it opens the
+                    same ten swatches mint() uses; picking one PATCHes
+                    fleet_patch_label and every task carrying this label
+                    updates at once. */}
+                <button
+                  type="button"
+                  className="fleet-label-swatch-trigger"
+                  aria-label={`Change colour for ${l.name}`}
+                  aria-haspopup="menu"
+                  aria-expanded={recolorId === l.id}
+                  disabled={busy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRecolorId((cur) => (cur === l.id ? null : l.id));
+                  }}
+                >
                   <span className="fleet-label-dot" data-color={l.color || "grey"} aria-hidden />
-                </span>
-                <span className="fleet-composer-pop-label">{l.name}</span>
-                {currentIds.has(l.id) ? (
-                  <Check size={13} strokeWidth={2} className="fleet-composer-pop-check" />
+                </button>
+                <button
+                  type="button"
+                  className="fleet-composer-pop-item fleet-label-vocab-name"
+                  role="menuitemcheckbox"
+                  aria-checked={currentIds.has(l.id)}
+                  disabled={busy}
+                  onClick={() => toggle(l)}
+                >
+                  <span className="fleet-composer-pop-label">{l.name}</span>
+                  {currentIds.has(l.id) ? (
+                    <Check size={13} strokeWidth={2} className="fleet-composer-pop-check" />
+                  ) : null}
+                </button>
+                {recolorId === l.id ? (
+                  <div className="fleet-label-recolor-pop">
+                    <LabelColorSwatches
+                      value={l.color || "grey"}
+                      onChange={(c) => void recolor(l, c)}
+                    />
+                  </div>
                 ) : null}
-              </button>
+              </div>
             ))}
             {query.trim() && !exact ? (
-              <button
-                type="button"
-                className="fleet-composer-pop-item"
-                disabled={busy}
-                onClick={() => void mint()}
-              >
-                <span className="fleet-composer-pop-icon">
-                  <Plus size={13} strokeWidth={2} />
-                </span>
-                <span className="fleet-composer-pop-label">
-                  {busy ? "Working…" : `Create label “${query.trim()}”`}
-                </span>
-              </button>
+              <>
+                <LabelColorSwatches value={mintColor} onChange={setMintColorOverride} />
+                <button
+                  type="button"
+                  className="fleet-composer-pop-item"
+                  disabled={busy}
+                  onClick={() => void mint()}
+                >
+                  <span className="fleet-composer-pop-icon">
+                    <span className="fleet-label-dot" data-color={mintColor} aria-hidden />
+                  </span>
+                  <span className="fleet-composer-pop-label">
+                    {busy ? "Working…" : `Create label “${query.trim()}”`}
+                  </span>
+                </button>
+              </>
             ) : null}
             {shown.length === 0 && !query.trim() ? (
               <div className="fleet-composer-pop-empty">
