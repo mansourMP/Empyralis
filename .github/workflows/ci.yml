@@ -59,7 +59,7 @@ jobs:
             server_modules/tests/test_workspace_bootstrap_service.py
 
   shell-typecheck:
-    name: Frontend and mobile typecheck
+    name: Frontend and gateway typecheck
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -73,16 +73,16 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
 
-      - name: Install mobile dependencies
-        run: npm ci --prefix mobile
+      - name: Install gateway dependencies
+        run: npm ci --prefix empyralis-gateway
 
       - name: Typecheck frontend
         run: ./node_modules/.bin/tsc --noEmit
         working-directory: frontend
 
-      - name: Typecheck mobile
-        run: ./node_modules/.bin/tsc --noEmit
-        working-directory: mobile
+      - name: Typecheck gateway
+        run: ./node_modules/.bin/tsc -p tsconfig.json --noEmit
+        working-directory: empyralis-gateway
 
   # ARCHIVED (Phase U1): supervisor-build job removed.
   # The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
