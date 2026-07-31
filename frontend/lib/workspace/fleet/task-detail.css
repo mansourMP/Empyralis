@@ -1,0 +1,244 @@
+/**
+ * Task detail page — MAN-145 Linear-grade polish pass.
+ *
+ * A SEPARATE FILE, not an addition to fleet-theme.css. Four agents are live
+ * against this repo right now (docs/AGENT-OPERATING-RULES.md's collision
+ * protocol); fleet-theme.css itself is mid-flight under a concurrent
+ * dark-mode-tokens pass, so this agent's assignment (TaskDetailView.tsx +
+ * task-labels.tsx + new files, per the MAN-145 task-detail brief) gets its
+ * own stylesheet rather than a hunk in the middle of someone else's diff.
+ *
+ * Every rule below is one of two shapes:
+ *   (a) an OVERRIDE of an existing fleet-theme.css rule, written as a
+ *       higher-specificity compound selector (".fleet-task-page.fleet-task-
+ *       detail-page …", two classes on the same element = (0,2,0) or more,
+ *       beating fleet-theme.css's single-class (0,1,0) rules outright). This
+ *       wins regardless of which file the bundler concatenates first, so it
+ *       does not depend on import order between this file and fleet-theme.css.
+ *   (b) a BRAND-NEW class fleet-theme.css has no rule for at all.
+ * Nothing here redefines a selector fleet-theme.css owns outright, and
+ * nothing here is a color/token change — every value below is one of the
+ * existing --* custom properties from lib/ui/theme-tokens.css, so light/dark
+ * both resolve correctly without this file taking a position on either.
+ *
+ * Imported directly by TaskDetailView.tsx. The app router allows a global
+ * CSS import from any client component, not just the root layout —
+ * FleetShell.tsx already imports fleet-theme.css this same way.
+ */
+
+/* ── 1. No hard divider between the reading column and Properties ──────────
+   Founder's note: "Linear separates those regions with spacing and
+   alignment, not a drawn line." fleet-theme.css's `.fleet-task-page-side`
+   drew a full-height 1px border-left; removed here in favour of a flex
+   column-gap on the two-column row, which reads as intentional whitespace
+   instead of a ruled-off boundary. */
+.fleet-task-page.fleet-task-detail-page {
+  column-gap: 48px;
+}
+.fleet-task-page.fleet-task-detail-page .fleet-task-page-side {
+  border-left: none;
+}
+/* The gap replaces the border, but the side column's own inner padding
+   (fleet-theme.css: 32px 20px 48px) would otherwise stack on top of it,
+   pushing Properties nearly 70px from the reading column. Trimmed to the
+   same 4px every .fleet-panel-row already carries as its own horizontal
+   padding, so a row's icon lines up with the gap edge instead of floating
+   deeper into the column. */
+.fleet-task-page.fleet-task-detail-page .fleet-task-page-side-inner {
+  padding-left: 4px;
+}
+/* Same "spacing, not a drawn line" instinct applied one level down: the
+   hairline between the description and the Activity section is the same
+   kind of rule the founder called out for the page-level divider, just
+   smaller. Extra top margin carries the separation instead. */
+.fleet-task-page.fleet-task-detail-page .fleet-task-page-section {
+  border-top: none;
+  margin-top: 44px;
+}
+@media (max-width: 1000px) {
+  /* Narrow layout stacks Properties under the reading column; fleet-
+     theme.css uses a border-top there instead of border-left for the same
+     divider. Same override, same reasoning, just the other edge. */
+  .fleet-task-page.fleet-task-detail-page .fleet-task-page-side {
+    border-top: none;
+    margin-top: 8px;
+  }
+  .fleet-task-page.fleet-task-detail-page .fleet-task-page-side-inner {
+    padding-left: 20px;
+  }
+}
+
+/* ── 2. Prev/next task navigation ("1 / 8", ↑/↓) ────────────────────────────
+   Wired to the exact array TasksList/TasksBoard/TasksGroupedList render
+   from (useFleetTasks(workspaceId, projectId) — see TaskDetailView.tsx's
+   own note on why re-calling that hook here is the SAME shared-cache read,
+   not a second, possibly-differently-ordered one). Hidden entirely rather
+   than guessed at when that array isn't available or doesn't contain this
+   task. */
+.fleet-task-detail-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.fleet-task-detail-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.fleet-task-detail-nav-count {
+  margin-right: 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.fleet-task-detail-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+a.fleet-task-detail-nav-btn:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+.fleet-task-detail-nav-btn.is-disabled {
+  color: var(--text-muted);
+  opacity: 0.4;
+}
+
+/* ── 3. "Sub-task of …" — a relationship, so it lives beside the title in
+   the reading column (where Linear puts it) rather than as a scalar row in
+   Properties, which is otherwise Status/Priority/Assignee/Labels/Project/
+   Due/Created/Updated — all single values, not a link to another task. ─── */
+.fleet-task-detail-parent-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+.fleet-task-detail-parent-link:hover {
+  color: var(--text-primary);
+}
+.fleet-task-detail-parent-link-title {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+.fleet-task-detail-parent-link:hover .fleet-task-detail-parent-link-title {
+  text-decoration: underline;
+}
+
+/* ── 4. Sub-tasks — compact, scannable rows with a status icon, the same
+   visual language TasksList/TasksBoard already use for a task row. Only
+   the fields genuinely available (status, title, short id) — no fabricated
+   assignee/due/priority columns just to look busier. ───────────────────── */
+.fleet-task-detail-subtask-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fleet-task-detail-subtask-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  text-decoration: none;
+  font-size: var(--text-sm);
+}
+.fleet-task-detail-subtask-row:hover {
+  background: var(--bg-card-hover);
+}
+.fleet-task-detail-subtask-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-task-detail-subtask-id {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* ── 5. The comment composer — a designed surface, not a bare textarea plus
+   a button. Deliberately the same idiom as AgentChat's own
+   .fleet-sage-chat-composer (bordered card, borderless auto-growing
+   textarea, circular accent send button that mutes when there's nothing to
+   send) so the app has ONE composer language, not two. See
+   TaskDetailView.tsx for why there is no attachment control here: there is
+   no upload endpoint behind a task comment today, and a paperclip that
+   fails on click is worse than no paperclip (CLAUDE.md: no dead controls). */
+.fleet-task-detail-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  transition: border-color var(--dur-1) var(--ease-out);
+}
+.fleet-task-detail-composer:focus-within {
+  border-color: var(--border-strong);
+}
+.fleet-task-detail-composer-input {
+  flex: 1;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  max-height: 200px;
+  padding: 4px 6px;
+}
+.fleet-task-detail-composer-input::placeholder {
+  color: var(--text-muted);
+}
+.fleet-task-detail-composer-input:disabled {
+  opacity: 0.6;
+}
+.fleet-task-detail-composer-send {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  cursor: pointer;
+  transition: transform var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.fleet-task-detail-composer-send:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+.fleet-task-detail-composer-send:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.fleet-task-detail-composer-send:disabled {
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  cursor: default;
+}
