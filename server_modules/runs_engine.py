@@ -3,6 +3,7 @@ from server_modules import run_service
 from server_modules import shared as shared
 from server_modules import runtime_common as common
 from server_modules import credential_rotation_service
+from server_modules import config_defaults_service
 # Phase 3 stubs: approval system removed — these were from runs_history
 def _approval_correlation_id(approval_id: str, run_id: str | None = None, event_id: str | None = None) -> str:
     return f"corr-{approval_id or run_id or event_id or 'unknown'}"
@@ -28,6 +29,18 @@ RUN_TOOL_LOOP_REPEAT_LIMIT = 3
 RUN_TOOL_LOOP_REPLY = "A tool loop was detected. Please rephrase the request or break it into smaller steps."
 _RUN_TOOL_LOOP_STATE: Dict[str, Dict[str, Any]] = {}
 
+# MAN-144: per-run cost ledger, keyed by run_id -- NOT the `state` dict
+# threaded through DAG-node execution, because that dict is recreated fresh
+# per node (and per loop iteration) for the workflow_graph_execute path (see
+# _resolve_agent_generation_state / the loop-node's iteration_state in
+# runs_execution.py), so it cannot carry a running total across an entire
+# run's model calls. run_id is the one identifier stable across every node,
+# loop iteration, and retry within a single run. Mirrors the existing
+# _RUN_TOOL_LOOP_STATE pattern immediately above -- same lifecycle, same
+# cleanup hook (clear_run_tool_signature_state, called at every run-terminal
+# point in run_orion_mission).
+_RUN_COST_LEDGERS: Dict[str, Dict[str, float]] = {}
+
 
 def build_tool_call_signature(tool_name: str, arguments: Any) -> str:
     normalized_name = str(tool_name or "").strip()
@@ -51,6 +64,11 @@ def record_run_tool_signature(session_key: str, tool_name: str, arguments: Any) 
 
 def clear_run_tool_signature_state(session_key: str) -> None:
     _RUN_TOOL_LOOP_STATE.pop(session_key, None)
+    # MAN-144: run_orion_mission calls this at every terminal point of a run
+    # (success and every failure/cancellation branch) with session_key ==
+    # run_id, so it doubles as the cost ledger's cleanup hook rather than
+    # adding a second call at each of those call sites.
+    _RUN_COST_LEDGERS.pop(session_key, None)
 
 
 def format_agent_summary(agents: Any) -> str:
@@ -96,14 +114,79 @@ def resolve_run_execution_context(context: Dict[str, Any]):
     return provider, str(selected_model), candidates, metadata
 
 
+# MAN-144: substring every "stopped deliberately, not crashed" run halt in
+# this file is matched on (see is_non_retryable_runtime_error below and the
+# dedicated branch in runs_execution.run_orion_mission that turns this into
+# a "cancelled" run status, exactly like the pre-existing "stopped by human
+# decision" halt). Keep this string and that branch's substring check in
+# sync if either changes.
+RUN_COST_CEILING_ERROR_MARKER = "run cost ceiling reached"
+
+
+def _run_cost_ceiling_usd(context: Dict[str, Any]) -> float:
+    """Resolve the enforced per-run spend ceiling for the run this `context`
+    belongs to. Reuses deployed_agent_cost_cap_service's config precedence
+    (per-agent commerce_policy override -> platform default) when a caller
+    has already resolved and stashed a value onto
+    context["metadata"]["deployed_agent_run_cost_ceiling_usd"] (a plain
+    float -- deliberately NOT a DB lookup here: this function runs deep
+    inside a background run thread, not an async request context, so it
+    cannot safely await a repository call). Absent that, every run still
+    gets the platform default -- never unbounded.
+    """
+    metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
+    override = metadata.get("deployed_agent_run_cost_ceiling_usd")
+    if override is not None:
+        try:
+            parsed = float(override)
+        except (TypeError, ValueError):
+            parsed = 0.0
+        if parsed > 0:
+            return parsed
+    return config_defaults_service.default_run_cost_ceiling_usd()
+
+
 def generate_with_candidate_failover(
     state: Dict[str, Any],
     context: Dict[str, Any],
     log_queue: queue.Queue,
     system_prompt: str,
     user_input: str,
+    *,
+    run_id: Optional[str] = None,
 ) -> str:
     from server_modules.runs_core import emit_log
+
+    # MAN-144: enforced mid-run ceiling, checked before every single call
+    # this function makes on behalf of a run -- not just the first. A run
+    # that makes N model calls (one plan_generate + one result_generate
+    # node, or one call per workflow "agent" node, possibly repeated across
+    # loop iterations) gets checked before each one.
+    #
+    # Keyed by run_id (see _RUN_COST_LEDGERS above) rather than the `state`
+    # dict passed in here: for the workflow_graph_execute path, callers pass
+    # a fresh per-node/per-loop-iteration state object on every call (see
+    # _resolve_agent_generation_state and the loop node's iteration_state in
+    # runs_execution.py), so accumulating on `state` would silently reset to
+    # zero on every node -- a ceiling that resets itself is not a ceiling.
+    # run_id is stable for the whole run; when it's not supplied (a caller
+    # this change didn't update, or a direct unit-test call) this falls back
+    # to accumulating on `state` itself so nothing breaks, but that fallback
+    # only actually accumulates correctly for callers that reuse the same
+    # `state` object across calls (true for the plan_generate/result_generate
+    # DAG path today).
+    cost_ledger = _RUN_COST_LEDGERS.setdefault(run_id, {}) if run_id else state
+    if "_run_cost_ceiling_usd" not in cost_ledger:
+        cost_ledger["_run_cost_ceiling_usd"] = _run_cost_ceiling_usd(context)
+        cost_ledger["_run_cost_accumulated_usd"] = 0.0
+    ceiling_usd = float(cost_ledger.get("_run_cost_ceiling_usd") or 0.0)
+    accumulated_usd = float(cost_ledger.get("_run_cost_accumulated_usd") or 0.0)
+    if ceiling_usd > 0 and accumulated_usd >= ceiling_usd:
+        raise RuntimeError(
+            f"Run stopped: {RUN_COST_CEILING_ERROR_MARKER} "
+            f"(spent ${accumulated_usd:.4f} of a ${ceiling_usd:.4f} per-run ceiling "
+            f"before this call would have been made)."
+        )
 
     provider = str(state.get("provider") or "openai").strip().lower()
     default_model = str(state.get("selected_model") or CODEX_MODEL).strip() or CODEX_MODEL
@@ -142,6 +225,24 @@ def generate_with_candidate_failover(
             try:
                 resolved_provider, adapter_key, adapter = resolve_provider_adapter(provider, credentials)
                 text = adapter.generate(system_prompt, user_input, model, credentials)
+                # MAN-144: ProviderAdapter.generate() returns text only, no
+                # usage -- so, exactly like this run's own existing telemetry
+                # a few lines below (and pack_finalize/usage_finalize's
+                # build_masked_usage calls elsewhere in this run system),
+                # reuse usage_accounting_service's masked/estimated-token
+                # costing rather than inventing a second estimator. Counted
+                # against the ceiling even if this call's answer is later
+                # discarded by a failover/retry higher up -- the money was
+                # still spent.
+                call_cost_usd = float(
+                    build_masked_usage(resolved_provider, model, f"{system_prompt}\n{user_input}", text).get(
+                        "estimated_cost_usd"
+                    )
+                    or 0.0
+                )
+                cost_ledger["_run_cost_accumulated_usd"] = (
+                    float(cost_ledger.get("_run_cost_accumulated_usd") or 0.0) + call_cost_usd
+                )
                 if profile_id:
                     _mark_profile_success(profile_id)
                 if credential_id:

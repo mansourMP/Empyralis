@@ -21,6 +21,7 @@ KNOWN_OWNER_METADATA_KEYS = frozenset(
         "health_safety_enabled",
         "health_safety_assistant_name",
         "monthly_cost_cap_usd",
+        "per_run_cost_ceiling_usd",
         "public_intro",
         "public_core_value",
         "platform_cta_label",
@@ -214,6 +215,14 @@ class DeployedAgentCommercePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     monthly_cost_cap_usd: Optional[float] = None
+    # MAN-144: enforced mid-run ceiling, checked before each model call inside
+    # a single run (see deployed_agent_cost_cap_service.deployed_agent_run_cost_ceiling_usd
+    # and generate_with_candidate_failover in runs_engine.py). Distinct from
+    # monthly_cost_cap_usd above, which is a post-hoc monthly settlement that
+    # pauses FUTURE runs after this one already spent the money — this field
+    # bounds a SINGLE run while it is still executing. None = use the platform
+    # default (config_defaults_service.default_run_cost_ceiling_usd()).
+    per_run_cost_ceiling_usd: Optional[float] = None
 
 
 class DeployedAgentToolPolicy(BaseModel):
@@ -522,6 +531,12 @@ def deployed_agent_config_from_record(
                     else metadata.get("monthly_cost_cap_usd"),
                     label="monthly_cost_cap_usd",
                 ),
+                "per_run_cost_ceiling_usd": _normalize_positive_usd(
+                    commerce_policy_payload.get("per_run_cost_ceiling_usd")
+                    if "per_run_cost_ceiling_usd" in commerce_policy_payload
+                    else metadata.get("per_run_cost_ceiling_usd"),
+                    label="per_run_cost_ceiling_usd",
+                ),
             },
             "tool_policy": {
                 "enabled_tools": _normalize_tool_ids(
@@ -602,6 +617,8 @@ def metadata_from_deployed_agent_config(
         payload["platform_cta_url"] = config.customer_policy.public_start_cta_url
     if config.commerce_policy.monthly_cost_cap_usd is not None:
         payload["monthly_cost_cap_usd"] = round(float(config.commerce_policy.monthly_cost_cap_usd), 6)
+    if config.commerce_policy.per_run_cost_ceiling_usd is not None:
+        payload["per_run_cost_ceiling_usd"] = round(float(config.commerce_policy.per_run_cost_ceiling_usd), 6)
     if config.safety_policy.assistant_name:
         payload["health_safety_assistant_name"] = config.safety_policy.assistant_name
     if config.escalation_policy.owner_notification_destination:

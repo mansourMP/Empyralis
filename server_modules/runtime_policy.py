@@ -3526,6 +3526,7 @@ def is_non_retryable_runtime_error(exc: Exception) -> bool:
         "requires local companion execution",
         "approval timeout",
         "stopped by human decision",
+        "run cost ceiling reached",
     ]
     return any(marker in raw for marker in non_retryable_markers)
 
