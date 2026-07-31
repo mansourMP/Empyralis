@@ -65,9 +65,16 @@ export function SettingsShell({
 
   return (
     <main className="fleet-content fleet-content--wide">
-      <div className="fleet-header">
-        <h1 className="fleet-title">Settings</h1>
-      </div>
+      {/* MAN-145 title-dedup follow-up: this used to render "Settings" three
+          times (tab strip, breadcrumb, and this block's own <h1>) — same bug
+          as every other top-level page, just newly reintroduced here when
+          Settings became a routed [section] page. The breadcrumb's current
+          crumb IS the page's <h1> now (see Breadcrumbs.tsx), and since the
+          URL is /settings/{section}, that crumb reads the ACTIVE section
+          name ("Account"/"Workspace"/"Connections" — see STATIC_LABELS) —
+          more specific than a static "Settings" would have been anyway. This
+          block is gone, not replaced with a styled div: the heading role
+          lives one layer up, it isn't lost. */}
       <div className="settings-shell-body">
         <GroupedRail groups={groups} activeId={section} ariaLabel="Settings sections" />
         <div className="settings-shell-content">

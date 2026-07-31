@@ -161,6 +161,15 @@ export const STATIC_LABELS: Record<string, string> = {
   hardware: "Hardware",
   billing: "Usage",
   settings: "Settings",
+  // Settings' own [section] children (settings/[section]/page.tsx,
+  // SettingsShell.tsx) — named here so the breadcrumb's current crumb (now
+  // this page's <h1>, see the MAN-145 title-dedup note below) reads the
+  // actual active section instead of falling through to humanize()'s
+  // generic capitalization, which happens to produce the same words today
+  // but shouldn't be relied on by coincidence.
+  account: "Account",
+  workspace: "Workspace",
+  connections: "Connections",
   overview: "Overview",
   chat: "Chat",
   memory: "Memory",
