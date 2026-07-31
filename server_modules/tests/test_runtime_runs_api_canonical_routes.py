@@ -783,169 +783,12 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
             else:
                 sys.modules["server"] = previous_server
 
-    def test_list_approvals_filters_resolved_items_and_projects_visibility_fields(self):
-        fake_server = types.ModuleType("server")
-        fake_server.require_api_key = object()
-        fake_server.require_admin_api_key = object()
-        fake_server.ORION_SINGLE_AGENT_MODE = False
-        fake_server.runs = {}
-        fake_server.iter_logs_for_run = lambda run_id: []
-        fake_server._get_replay_payload = lambda run_id: {}
-
-        previous_server = sys.modules.get("server")
-        sys.modules["server"] = fake_server
-        original_register = runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api
-        original_refresh = runtime_runs_api._refresh_server_exports
-        original_privileged = runtime_runs_api._current_user_is_privileged
-        original_extract_owner = runtime_runs_api._extract_run_owner_user_id
-        original_list_pending_approvals = runtime_runs_api.run_state_repository.sync_list_pending_approvals
-        original_list_pending_approvals_page = runtime_runs_api.run_state_repository.sync_list_pending_approvals_page
-        try:
-            runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = lambda *args, **kwargs: None
-            runtime_runs_api._refresh_server_exports = lambda: fake_server
-            runtime_runs_api._current_user_is_privileged = lambda current_user: False
-            runtime_runs_api._extract_run_owner_user_id = lambda item: str(item.get("owner_user_id") or "")
-            runtime_runs_api.run_state_repository.sync_list_pending_approvals = lambda limit=100: [
-                {
-                    "approval_id": "approval-1",
-                    "run_id": "run-pending",
-                    "owner_user_id": "user-1",
-                    "workspace_id": "default",
-                    "status": "requested",
-                    "prompt": "Approve sending the summary by email.",
-                    "requested_at": "2026-04-06T10:00:00Z",
-                    "expires_at": "2026-04-06T10:05:00Z",
-                    "correlation_id": "corr-1",
-                    "target": "email",
-                    "actions": ["send_email"],
-                    "labels": ["email"],
-                    "capabilities": ["smtp.send"],
-                    "agent_role": "sage",
-                    "email_preview": {
-                        "recipient": "demo@example.com",
-                        "subject": "AI summary",
-                        "body_preview": "Top three paper findings.",
-                    },
-                    "metadata": {
-                        "kind": "email_review",
-                        "target": "email",
-                        "approval_actions": ["send_email"],
-                        "approval_labels": ["email"],
-                        "approval_capabilities": ["smtp.send"],
-                        "browser_session_profile": "qa-browser",
-                        "browser_immutable_plan_hash": "hash-1",
-                        "browser_reviewed_approval_required": True,
-                        "browser_interactive_actions": ["click"],
-                        "email_preview": {
-                            "recipient": "demo@example.com",
-                            "subject": "AI summary",
-                            "body_preview": "Top three paper findings.",
-                        },
-                    },
-                },
-                {
-                    "approval_id": "approval-2",
-                    "run_id": "run-resolved",
-                    "owner_user_id": "user-1",
-                    "workspace_id": "default",
-                    "status": "resolved",
-                    "prompt": "Already handled.",
-                },
-            ]
-            runtime_runs_api.run_state_repository.sync_list_pending_approvals_page = (
-                lambda limit=100, offset=0, workspace_id=None: [
-                    item
-                    for item in runtime_runs_api.run_state_repository.sync_list_pending_approvals(limit=100)
-                    if (not workspace_id or str(item.get("workspace_id") or "") == str(workspace_id))
-                ][offset : offset + limit]
-            )
-
-            app = _FakeApp()
-            runtime_runs_api.register_run_routes(app)
-
-            with patch(
-                "server_modules.runtime_runs_api.entitlements_service.workspace_entitlement_payload_for_workspace_id",
-                return_value={"capabilities": {"approvals_enabled": True}},
-            ):
-                payload = self._run_async(
-                    app.routes[("GET", "/approvals")](
-                        workspace_id="default",
-                        current_user=self._current_user(),
-                    )
-                )
-        finally:
-            runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = original_register
-            runtime_runs_api._refresh_server_exports = original_refresh
-            runtime_runs_api._current_user_is_privileged = original_privileged
-            runtime_runs_api._extract_run_owner_user_id = original_extract_owner
-            runtime_runs_api.run_state_repository.sync_list_pending_approvals = original_list_pending_approvals
-            runtime_runs_api.run_state_repository.sync_list_pending_approvals_page = original_list_pending_approvals_page
-            if previous_server is None:
-                sys.modules.pop("server", None)
-            else:
-                sys.modules["server"] = previous_server
-
-        self.assertEqual(payload["count"], 1)
-        item = payload["items"][0]
-        self.assertEqual(item["approval_id"], "approval-1")
-        self.assertEqual(item["owner_user_id"], "user-1")
-        self.assertEqual(item["prompt"], "Approve sending the summary by email.")
-        self.assertEqual(item["scope"], "once")
-        self.assertFalse(item["reusable"])
-        self.assertEqual(item["target"], "email")
-        self.assertEqual(item["actions"], ["send_email"])
-        self.assertEqual(item["labels"], ["email"])
-        self.assertEqual(item["capabilities"], ["smtp.send"])
-        self.assertEqual(item["agent_role"], "sage")
-        self.assertEqual(item["email_preview"]["recipient"], "demo@example.com")
-        self.assertEqual(item["email_preview"]["subject"], "AI summary")
-        self.assertEqual(item["target"], "email")
-        self.assertEqual(item["browser"]["session_profile"], "qa-browser")
-        self.assertEqual(item["browser"]["immutable_plan_hash"], "hash-1")
-        self.assertTrue(item["browser"]["reviewed_approval_required"])
-
-    def test_list_approvals_rejects_free_workspace_plan(self):
-        fake_server = types.ModuleType("server")
-        fake_server.require_api_key = object()
-        fake_server.require_admin_api_key = object()
-        fake_server.ORION_SINGLE_AGENT_MODE = False
-        fake_server.runs = {}
-        fake_server.iter_logs_for_run = lambda run_id: []
-        fake_server._get_replay_payload = lambda run_id: {}
-
-        previous_server = sys.modules.get("server")
-        sys.modules["server"] = fake_server
-        original_register = runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api
-        original_refresh = runtime_runs_api._refresh_server_exports
-        try:
-            runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = lambda *args, **kwargs: None
-            runtime_runs_api._refresh_server_exports = lambda: fake_server
-
-            app = _FakeApp()
-            runtime_runs_api.register_run_routes(app)
-            handler = app.routes[("GET", "/approvals")]
-
-            with unittest.mock.patch(
-                "server_modules.runtime_runs_api.entitlements_service.workspace_entitlement_payload_for_workspace_id",
-                return_value={"capabilities": {"approvals_enabled": False}},
-            ):
-                with self.assertRaises(HTTPException) as exc:
-                    self._run_async(
-                        handler(
-                            workspace_id="default",
-                            current_user=self._current_user(),
-                        )
-                    )
-        finally:
-            runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = original_register
-            runtime_runs_api._refresh_server_exports = original_refresh
-            if previous_server is None:
-                sys.modules.pop("server", None)
-            else:
-                sys.modules["server"] = previous_server
-
-        self.assertEqual(exc.exception.status_code, 403)
-        self.assertEqual(exc.exception.detail, "Approvals are not included in this workspace plan.")
+    # test_list_approvals_filters_resolved_items_and_projects_visibility_fields
+    # and test_list_approvals_rejects_free_workspace_plan deleted (MAN-139
+    # phase 2): both exercised GET /approvals, deleted along with the whole
+    # approval system by 0820a732c ("Remove approval system -- agent now acts
+    # on reasoning, not approval gates"). runtime_runs_api.register_run_routes
+    # no longer registers a /approvals route at all.
 
     def test_list_runs_applies_workspace_history_window(self):
         fake_server = types.ModuleType("server")
@@ -1032,7 +875,15 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
         fake_server.iter_logs_for_run = lambda run_id: []
         fake_server._get_replay_payload = lambda run_id: {}
 
-        async def _fake_list_threads(*, workspace_id, tenant_id=None, owner_user_id=None, include_turns=False, limit=50):
+        async def _fake_list_threads(
+            *,
+            workspace_id,
+            tenant_id=None,
+            owner_user_id=None,
+            active_agent_install_id=None,
+            include_turns=False,
+            limit=50,
+        ):
             turns_new = [
                 {
                     "id": "turn-old",
@@ -1423,7 +1274,16 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
     async def _fake_terminate_session(self, session_id):
         return None
 
-    async def _fake_list_threads(self, *, workspace_id, tenant_id=None, owner_user_id=None, include_turns=False, limit=50):
+    async def _fake_list_threads(
+        self,
+        *,
+        workspace_id,
+        tenant_id=None,
+        owner_user_id=None,
+        active_agent_install_id=None,
+        include_turns=False,
+        limit=50,
+    ):
         return [
             {
                 "id": "thread-1",

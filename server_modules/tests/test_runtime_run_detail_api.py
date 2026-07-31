@@ -79,7 +79,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             run_auto_delegation_request_class=_RunAutoDelegationRequest,
             run_delegation_retry_request_class=_RunDelegationRetryRequest,
             decision_payload_class=_DecisionPayload,
-            approval_resolve_payload_class=_ApprovalResolvePayload,
             workspace_memory_snapshot=lambda workspace_id: {},
             delete_memory=lambda workspace_id, key: {},
             read_workspace_context_files=lambda: [],
@@ -105,8 +104,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             usage_snapshots_for_user_fn=lambda current_user: [],
             aggregate_usage_summary_fn=lambda snapshots: {},
             list_usage_runs_fn=lambda snapshots, **kwargs: {},
-            submit_run_decision_callbacks={},
-            resolve_run_approval_callbacks={},
             resume_waiting_run_callbacks={},
             pause_run_callbacks={},
             enforce_run_owner_access=lambda current_user, payload: None,
@@ -161,11 +158,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             runtime_run_replay_service=types.SimpleNamespace(
                 replay_item_response_for_run=lambda *args, **kwargs: {},
                 replay_run_from_run_id=lambda *args, **kwargs: {},
-            ),
-            runtime_run_approval_service=types.SimpleNamespace(
-                submit_run_decision=lambda *args, **kwargs: {},
-                resolve_run_approval=lambda *args, **kwargs: {},
-                resolve_standalone_approval=lambda *args, **kwargs: {},
             ),
             runtime_run_control_service=types.SimpleNamespace(
                 resume_waiting_run=lambda *args, **kwargs: {},
@@ -227,7 +219,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             run_auto_delegation_request_class=_RunAutoDelegationRequest,
             run_delegation_retry_request_class=_RunDelegationRetryRequest,
             decision_payload_class=_DecisionPayload,
-            approval_resolve_payload_class=_ApprovalResolvePayload,
             workspace_memory_snapshot=lambda workspace_id: {},
             delete_memory=lambda workspace_id, key: {},
             read_workspace_context_files=lambda: [],
@@ -253,8 +244,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             usage_snapshots_for_user_fn=lambda current_user: [],
             aggregate_usage_summary_fn=lambda snapshots: {},
             list_usage_runs_fn=lambda snapshots, **kwargs: {},
-            submit_run_decision_callbacks={},
-            resolve_run_approval_callbacks={},
             resume_waiting_run_callbacks={},
             pause_run_callbacks={},
             enforce_run_owner_access=lambda current_user, payload: None,
@@ -303,11 +292,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             runtime_run_replay_service=types.SimpleNamespace(
                 replay_item_response_for_run=lambda *args, **kwargs: {},
                 replay_run_from_run_id=lambda *args, **kwargs: {},
-            ),
-            runtime_run_approval_service=types.SimpleNamespace(
-                submit_run_decision=lambda *args, **kwargs: {},
-                resolve_run_approval=lambda *args, **kwargs: {},
-                resolve_standalone_approval=lambda *args, **kwargs: {},
             ),
             runtime_run_control_service=types.SimpleNamespace(
                 resume_waiting_run=lambda *args, **kwargs: {},
@@ -369,7 +353,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             run_auto_delegation_request_class=_RunAutoDelegationRequest,
             run_delegation_retry_request_class=_RunDelegationRetryRequest,
             decision_payload_class=_DecisionPayload,
-            approval_resolve_payload_class=_ApprovalResolvePayload,
             workspace_memory_snapshot=lambda workspace_id: {},
             delete_memory=lambda workspace_id, key: {},
             read_workspace_context_files=lambda: [],
@@ -395,8 +378,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             usage_snapshots_for_user_fn=lambda current_user: [],
             aggregate_usage_summary_fn=lambda snapshots: {},
             list_usage_runs_fn=lambda snapshots, **kwargs: {},
-            submit_run_decision_callbacks={},
-            resolve_run_approval_callbacks={},
             resume_waiting_run_callbacks={},
             pause_run_callbacks={},
             enforce_run_owner_access=lambda current_user, payload: None,
@@ -418,9 +399,11 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
                 ingest_webhook_response=lambda *args, **kwargs: {},
             ),
             runtime_route_run_handlers_service=types.SimpleNamespace(
-                get_run_browser_checkpoint_route_response=lambda run_id, **kwargs: captured.setdefault("run_id", str(run_id)) or {"run_id": str(run_id)},
-                get_run_browser_session_route_response=lambda *args, **kwargs: {},
-                **runtime_route_run_handlers_service.__dict__,
+                **{
+                    **runtime_route_run_handlers_service.__dict__,
+                    "get_run_browser_checkpoint_route_response": lambda run_id, **kwargs: captured.setdefault("run_id", str(run_id)) or {"run_id": str(run_id)},
+                    "get_run_browser_session_route_response": lambda *args, **kwargs: {},
+                },
             ),
             runtime_request_service=types.SimpleNamespace(
                 read_json_object_payload=lambda *args, **kwargs: {},
@@ -451,11 +434,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             runtime_run_replay_service=types.SimpleNamespace(
                 replay_item_response_for_run=lambda *args, **kwargs: {},
                 replay_run_from_run_id=lambda *args, **kwargs: {},
-            ),
-            runtime_run_approval_service=types.SimpleNamespace(
-                submit_run_decision=lambda *args, **kwargs: {},
-                resolve_run_approval=lambda *args, **kwargs: {},
-                resolve_standalone_approval=lambda *args, **kwargs: {},
             ),
             runtime_run_control_service=types.SimpleNamespace(
                 resume_waiting_run=lambda *args, **kwargs: {},
@@ -517,7 +495,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             run_auto_delegation_request_class=_RunAutoDelegationRequest,
             run_delegation_retry_request_class=_RunDelegationRetryRequest,
             decision_payload_class=_DecisionPayload,
-            approval_resolve_payload_class=_ApprovalResolvePayload,
             workspace_memory_snapshot=lambda workspace_id: {},
             delete_memory=lambda workspace_id, key: {},
             read_workspace_context_files=lambda: [],
@@ -543,8 +520,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             usage_snapshots_for_user_fn=lambda current_user: [],
             aggregate_usage_summary_fn=lambda snapshots: {},
             list_usage_runs_fn=lambda snapshots, **kwargs: {},
-            submit_run_decision_callbacks={},
-            resolve_run_approval_callbacks={},
             resume_waiting_run_callbacks={},
             pause_run_callbacks={},
             enforce_run_owner_access=lambda current_user, payload: None,
@@ -598,11 +573,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
                 replay_item_response_for_run=lambda *args, **kwargs: {},
                 replay_run_from_run_id=lambda *args, **kwargs: {},
             ),
-            runtime_run_approval_service=types.SimpleNamespace(
-                submit_run_decision=lambda *args, **kwargs: {},
-                resolve_run_approval=lambda *args, **kwargs: {},
-                resolve_standalone_approval=lambda *args, **kwargs: {},
-            ),
             runtime_run_control_service=types.SimpleNamespace(
                 resume_waiting_run=lambda *args, **kwargs: {},
                 pause_run_for_takeover=lambda *args, **kwargs: {},
@@ -651,7 +621,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             run_auto_delegation_request_class=_RunAutoDelegationRequest,
             run_delegation_retry_request_class=_RunDelegationRetryRequest,
             decision_payload_class=_DecisionPayload,
-            approval_resolve_payload_class=_ApprovalResolvePayload,
             workspace_memory_snapshot=lambda workspace_id: {},
             delete_memory=lambda workspace_id, key: {},
             read_workspace_context_files=lambda: [],
@@ -677,8 +646,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             usage_snapshots_for_user_fn=lambda current_user: [],
             aggregate_usage_summary_fn=lambda snapshots: {},
             list_usage_runs_fn=lambda snapshots, **kwargs: {},
-            submit_run_decision_callbacks={},
-            resolve_run_approval_callbacks={},
             resume_waiting_run_callbacks={},
             pause_run_callbacks={},
             enforce_run_owner_access=lambda current_user, payload: None,
@@ -700,9 +667,11 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
                 ingest_webhook_response=lambda *args, **kwargs: {},
             ),
             runtime_route_run_handlers_service=types.SimpleNamespace(
-                get_run_browser_checkpoint_route_response=lambda *args, **kwargs: {},
-                get_run_browser_session_route_response=lambda run_id, **kwargs: captured.setdefault("run_id", str(run_id)) or {"run_id": str(run_id)},
-                **runtime_route_run_handlers_service.__dict__,
+                **{
+                    **runtime_route_run_handlers_service.__dict__,
+                    "get_run_browser_checkpoint_route_response": lambda *args, **kwargs: {},
+                    "get_run_browser_session_route_response": lambda run_id, **kwargs: captured.setdefault("run_id", str(run_id)) or {"run_id": str(run_id)},
+                },
             ),
             runtime_request_service=types.SimpleNamespace(
                 read_json_object_payload=lambda *args, **kwargs: {},
@@ -733,11 +702,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             runtime_run_replay_service=types.SimpleNamespace(
                 replay_item_response_for_run=lambda *args, **kwargs: {},
                 replay_run_from_run_id=lambda *args, **kwargs: {},
-            ),
-            runtime_run_approval_service=types.SimpleNamespace(
-                submit_run_decision=lambda *args, **kwargs: {},
-                resolve_run_approval=lambda *args, **kwargs: {},
-                resolve_standalone_approval=lambda *args, **kwargs: {},
             ),
             runtime_run_control_service=types.SimpleNamespace(
                 resume_waiting_run=lambda *args, **kwargs: {},
@@ -799,7 +763,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             run_auto_delegation_request_class=_RunAutoDelegationRequest,
             run_delegation_retry_request_class=_RunDelegationRetryRequest,
             decision_payload_class=_DecisionPayload,
-            approval_resolve_payload_class=_ApprovalResolvePayload,
             workspace_memory_snapshot=lambda workspace_id: {},
             delete_memory=lambda workspace_id, key: {},
             read_workspace_context_files=lambda: [],
@@ -825,8 +788,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             usage_snapshots_for_user_fn=lambda current_user: [],
             aggregate_usage_summary_fn=lambda snapshots: {},
             list_usage_runs_fn=lambda snapshots, **kwargs: {},
-            submit_run_decision_callbacks={},
-            resolve_run_approval_callbacks={},
             resume_waiting_run_callbacks={},
             pause_run_callbacks={},
             enforce_run_owner_access=lambda current_user, payload: None,
@@ -879,11 +840,6 @@ class RuntimeRunDetailApiTests(unittest.TestCase):
             runtime_run_replay_service=types.SimpleNamespace(
                 replay_item_response_for_run=lambda *args, **kwargs: {},
                 replay_run_from_run_id=lambda *args, **kwargs: {},
-            ),
-            runtime_run_approval_service=types.SimpleNamespace(
-                submit_run_decision=lambda *args, **kwargs: {},
-                resolve_run_approval=lambda *args, **kwargs: {},
-                resolve_standalone_approval=lambda *args, **kwargs: {},
             ),
             runtime_run_control_service=types.SimpleNamespace(
                 resume_waiting_run=lambda *args, **kwargs: {},

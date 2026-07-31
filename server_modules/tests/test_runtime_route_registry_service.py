@@ -67,47 +67,26 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
         self.assertNotIn(("POST", "/runs/start"), app.routes)
         self.assertIn(("POST", "/admin/kill-switch"), app.routes)
         self.assertIn(("POST", "/admin/safe-mode"), app.routes)
-        self.assertIn(("POST", "/approvals/{approval_id}/resolve"), app.routes)
+        # The standalone approval-resolve route was deleted along with the
+        # whole approval system (0820a732c, "Remove approval system --
+        # agent now acts on reasoning, not approval gates"); asserting it
+        # is present would be asserting a route this app deliberately no
+        # longer registers.
+        self.assertNotIn(("POST", "/approvals/{approval_id}/resolve"), app.routes)
         self.assertIn(("GET", "/runs/{run_id}/browser-checkpoint"), app.routes)
         self.assertIn(("GET", "/runs/{run_id}/browser-session"), app.routes)
         self.assertIn(("POST", "/runs/{run_id}/resume"), app.routes)
         self.assertIn(("POST", "/runs/{run_id}/pause"), app.routes)
 
-    def test_standalone_approval_route_reads_json_object_payload_with_invalid_detail(self):
-        captured = {}
-        app = _FakeApp()
-
-        async def _read_json_object_payload(request, *, invalid_detail):
-            captured["invalid_detail"] = invalid_detail
-            return {"approval_id": "approval-1", "resolution": "approved"}
-
-        runtime_route_registry_service.register_runtime_run_routes(
-            app,
-            **self._registry_kwargs(
-                refresh_server_exports=lambda: None,
-                runtime_request_service=types.SimpleNamespace(
-                    read_json_object_payload=_read_json_object_payload,
-                    require_authenticated_user=lambda current_user: current_user,
-                    read_json_payload=lambda *args, **kwargs: {},
-                ),
-                runtime_run_approval_service=types.SimpleNamespace(
-                    submit_run_decision=lambda *args, **kwargs: {},
-                    resolve_run_approval=lambda *args, **kwargs: {},
-                    resolve_standalone_approval=lambda *args, **kwargs: {"ok": True, "approval_id": "approval-1"},
-                ),
-            ),
-        )
-
-        payload = self._run_async(
-            app.routes[("POST", "/approvals/{approval_id}/resolve")](
-                approval_id="approval-1",
-                request=object(),
-                current_user={"user_id": "user-1"},
-            )
-        )
-
-        self.assertEqual(payload["approval_id"], "approval-1")
-        self.assertEqual(captured["invalid_detail"], "Approval resolution body must be an object.")
+    # test_standalone_approval_route_reads_json_object_payload_with_invalid_detail
+    # deleted (MAN-139 phase 2): it exercised the standalone
+    # POST /approvals/{approval_id}/resolve route and the
+    # runtime_run_approval_service collaborator, both deleted by 0820a732c
+    # ("Remove approval system -- agent now acts on reasoning, not approval
+    # gates"). register_runtime_run_routes() no longer accepts a
+    # runtime_run_approval_service kwarg at all -- the route this test
+    # called simply does not exist to test. See the assertNotIn above for
+    # the route-is-gone assertion that replaces it.
 
     def test_admin_kill_switch_route_awaits_json_object_payload_with_invalid_detail(self):
         captured = {}
@@ -216,7 +195,7 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
                 "next_action": "pause_run",
             },
         ):
-            with self.assertRaises(HTTPException) as raised:
+            with self.assertRaises(runtime_route_registry_service.HTTPException) as raised:
                 runtime_route_registry_service._enforce_registered_run_api_decision(
                     operation="approve_run",
                     run_id="run-1",
@@ -276,29 +255,12 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
 
         self.assertEqual(decision["next_action"], "pause_run")
 
-    def test_registered_run_approval_unexpected_next_action_blocks(self):
-        with mock.patch.object(
-            runtime_route_registry_service.rust_runtime_kernel_client,
-            "run_runtime_kernel_enforced",
-            return_value={
-                "ok": True,
-                "decision": "allow",
-                "operation": "resolve_approval",
-                "next_action": "record_approval_resolution",
-            },
-        ):
-            with self.assertRaises(HTTPException) as raised:
-                runtime_route_registry_service._enforce_registered_run_approval_decision(
-                    operation="resolve_approval",
-                    approval_id="approval-1",
-                    current_user={"user_id": "user-1"},
-                    payload={"decision": "approved"},
-                    run={"workspace_id": "ws-1", "tenant_id": "tenant-1", "run_id": "run-1"},
-                    run_record=None,
-                )
-
-        self.assertEqual(raised.exception.status_code, 423)
-        self.assertIn("unexpected next_action", str(raised.exception.detail))
+    # test_registered_run_approval_unexpected_next_action_blocks deleted
+    # (MAN-139 phase 2): it exercised
+    # runtime_route_registry_service._enforce_registered_run_approval_decision,
+    # deleted along with the whole approval system by 0820a732c ("Remove
+    # approval system -- agent now acts on reasoning, not approval gates").
+    # The function no longer exists in server_modules/runtime_route_registry_service.py.
 
     def test_pause_run_route_unexpected_next_action_blocks_before_handler(self):
         app = _FakeApp()
@@ -317,8 +279,13 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
                     }
                 },
                 runtime_route_run_handlers_service=types.SimpleNamespace(
-                    pause_run_route_response=lambda *args, **kwargs: captured.setdefault("handler_called", True) or {},
-                    **runtime_route_run_handlers_service.__dict__,
+                    **{
+                        **runtime_route_run_handlers_service.__dict__,
+                        "pause_run_route_response": lambda *args, **kwargs: captured.setdefault(
+                            "handler_called", True
+                        )
+                        or {},
+                    },
                 ),
             ),
         )
@@ -372,8 +339,13 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
                     }
                 },
                 runtime_route_run_handlers_service=types.SimpleNamespace(
-                    stream_run_route_response=lambda *args, **kwargs: captured.setdefault("handler_called", True) or {},
-                    **runtime_route_run_handlers_service.__dict__,
+                    **{
+                        **runtime_route_run_handlers_service.__dict__,
+                        "stream_run_route_response": lambda *args, **kwargs: captured.setdefault(
+                            "handler_called", True
+                        )
+                        or {},
+                    },
                 ),
             ),
         )
@@ -425,8 +397,13 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
                     "status": "completed",
                 },
                 runtime_route_run_handlers_service=types.SimpleNamespace(
-                    get_run_replay_route_response=lambda *args, **kwargs: captured.setdefault("handler_called", True) or {},
-                    **runtime_route_run_handlers_service.__dict__,
+                    **{
+                        **runtime_route_run_handlers_service.__dict__,
+                        "get_run_replay_route_response": lambda *args, **kwargs: captured.setdefault(
+                            "handler_called", True
+                        )
+                        or {},
+                    },
                 ),
             ),
         )
@@ -468,8 +445,13 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
                     "status": "completed",
                 },
                 runtime_route_run_handlers_service=types.SimpleNamespace(
-                    replay_run_route_response=lambda *args, **kwargs: captured.setdefault("handler_called", True) or {},
-                    **runtime_route_run_handlers_service.__dict__,
+                    **{
+                        **runtime_route_run_handlers_service.__dict__,
+                        "replay_run_route_response": lambda *args, **kwargs: captured.setdefault(
+                            "handler_called", True
+                        )
+                        or {},
+                    },
                 ),
             ),
         )
@@ -515,7 +497,6 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
             run_auto_delegation_request_class=_RunAutoDelegationRequest,
             run_delegation_retry_request_class=_RunDelegationRetryRequest,
             decision_payload_class=_DecisionPayload,
-            approval_resolve_payload_class=_ApprovalResolvePayload,
             workspace_memory_snapshot=lambda workspace_id: {},
             delete_memory=lambda workspace_id, key: {},
             read_workspace_context_files=lambda: [],
@@ -571,10 +552,6 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
                 replay_item_response_for_run=lambda *args, **kwargs: {},
                 replay_run_from_run_id=lambda *args, **kwargs: {},
             ),
-            runtime_run_approval_service=types.SimpleNamespace(
-                submit_run_decision=lambda *args, **kwargs: {},
-                resolve_run_approval=lambda *args, **kwargs: {},
-            ),
             runtime_run_control_service=types.SimpleNamespace(
                 resume_waiting_run=lambda *args, **kwargs: {},
                 pause_run_for_takeover=lambda *args, **kwargs: {},
@@ -603,8 +580,6 @@ class RuntimeRouteRegistryServiceTests(unittest.TestCase):
             usage_snapshots_for_user_fn=lambda current_user: [],
             aggregate_usage_summary_fn=lambda snapshots: {},
             list_usage_runs_fn=lambda snapshots, **kwargs: {},
-            submit_run_decision_callbacks={},
-            resolve_run_approval_callbacks={},
             resume_waiting_run_callbacks={},
             pause_run_callbacks={},
             enforce_run_owner_access=lambda current_user, payload: None,

@@ -13,7 +13,7 @@ class WorkerDispatchServiceTests(unittest.TestCase):
         seen = []
         pending = ["run-1"]
         claimed = {}
-        runs_by_id = {"run-1": {"status": "queued_local"}}
+        runs_by_id = {"run-1": {"status": "queued_local", "workspace_id": "ws-1"}}
         worker_registry = {"worker-1": {"capabilities": ["browser_automation"]}}
 
         claimed_run_id = worker_dispatch_service.claim_local_run(
@@ -92,7 +92,7 @@ class WorkerDispatchServiceTests(unittest.TestCase):
         seen = []
         pending = ["run-1"]
         claimed = {}
-        runs_by_id = {"run-1": {"status": "queued_local"}}
+        runs_by_id = {"run-1": {"status": "queued_local", "workspace_id": "ws-1"}}
         worker_registry = {"worker-1": {"capabilities": ["browser_automation"], "control_state": "suspended"}}
 
         claimed_run_id = worker_dispatch_service.claim_local_run(
