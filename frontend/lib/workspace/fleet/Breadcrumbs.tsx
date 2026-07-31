@@ -219,6 +219,30 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     // visible h1" even though the words don't match.
     if (segments.length === 1 && segments[0] === "fleet") segments = [];
 
+    // Agent detail's own sub-tab (…/projects/{id}/agents/{agentId}/{tab} —
+    // AgentDetailPage's VALID_TABS) is a URL segment, unlike the project
+    // detail page's Overview/Agents/Tasks (client-side state, never in the
+    // path) — mirrored here rather than imported, since VALID_TABS lives in
+    // a route page.tsx, not an importable module. MAN-145 title-dedup
+    // follow-up: without folding this, the breadcrumb's current crumb (now
+    // the page's <h1>, see below) would be the generic tab word
+    // ("Overview") instead of the agent's own name — correct term-for-term
+    // ("exactly one visible h1"), but the one heading on the page would no
+    // longer say WHICH agent, which defeats the point of it being a
+    // heading at all. Folded the same way "agents"/"tasks" already are
+    // (dropped from the chain entirely, not just skipped as current) so
+    // the agent's own crumb — one segment back — becomes the last, current
+    // one instead.
+    const AGENT_DETAIL_TABS = new Set([
+      "overview", "work", "channels", "connectors", "tools", "capabilities", "hardware", "model", "memory", "chat",
+    ]);
+    const lastSeg = segments[segments.length - 1];
+    const isAgentDetailTrailingTab =
+      segments.length >= 3 &&
+      AGENT_DETAIL_TABS.has(lastSeg) &&
+      segments[segments.length - 3] === "agents";
+    const effectiveLastIndex = isAgentDetailTrailingTab ? segments.length - 2 : segments.length - 1;
+
     // No synthetic workspace-root crumb — crumbs start at the section
     // (Projects, Agents, Inbox, …). The "agents/{id}" pair inside a project
     // is a routed agent detail — the bare "agents" segment there is
@@ -236,6 +260,9 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       const isStructuralChild =
         (seg === "agents" || seg === "tasks") && prev !== undefined && segments[i - 2] === "projects";
       if (isStructuralChild) return;
+      // Drop the trailing tab segment itself (see isAgentDetailTrailingTab
+      // above) — the agent's own crumb one step back becomes current.
+      if (i === segments.length - 1 && isAgentDetailTrailingTab) return;
       const registered = labels[seg] || STATIC_LABELS[seg];
       const pending = !registered && looksLikeOpaqueId(seg);
       const label = registered || (pending ? "" : humanize(seg));
@@ -243,7 +270,7 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
         key: `${seg}-${i}`,
         label,
         href: acc,
-        current: i === segments.length - 1,
+        current: i === effectiveLastIndex,
         pending,
         badge: badges[seg] ?? null,
         icon: icons[seg] ?? null,
