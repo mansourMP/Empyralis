@@ -145,8 +145,7 @@ export const BOX_KIND_COPY: Record<
     noun: "cloud server",
     pickerLabel: "Which cloud server?",
     emptyTitle: "No cloud server yet.",
-    emptyBody:
-      "You picked Cloud VPS, and this workspace has no cloud server connected. Create one (or connect your own over SSH) on the Hardware page, then choose it here.",
+    emptyBody: "Create one, or connect over SSH, from the Hardware page.",
     emptyCta: "Go to Hardware →",
     anyLabel: "Any cloud server",
     noneLabel: "No cloud server yet",
@@ -157,8 +156,7 @@ export const BOX_KIND_COPY: Record<
     noun: "paired computer",
     pickerLabel: "Which computer runs it?",
     emptyTitle: "No paired computers yet.",
-    emptyBody:
-      "You picked Paired computer, and this workspace has no computer paired. Pair one on the Hardware page, then choose it here.",
+    emptyBody: "Pair one from the Hardware page.",
     emptyCta: "Go to Hardware →",
     anyLabel: "Any paired computer",
     noneLabel: "No computer paired yet",

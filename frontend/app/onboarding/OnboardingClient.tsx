@@ -109,7 +109,7 @@ export function OnboardingClient({
             </h1>
             <p className="app-auth-subtitle">
             {requestedWorkspaceId
-              ? 'The requested workspace was not found in your current account shell. Choose another workspace from account home instead of silently retargeting onboarding.'
+              ? 'The requested workspace was not found. Choose another workspace from account home.'
               : 'The requested workspace was not found in your account shell. Create a new workspace to continue.'}
             </p>
           </div>

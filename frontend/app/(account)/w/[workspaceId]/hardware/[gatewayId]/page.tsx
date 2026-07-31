@@ -361,6 +361,8 @@ type CliAuthMethod = {
   key: "device_auth" | "api_key" | "access_token" | "claudeai" | "console" | "login";
   label: string;
   description: string;
+  /** Fallback/edge-case caveat — shown as a tooltip on the option, not in the visible description. */
+  note?: string;
   inputKind: null | "api_key" | "access_token";
   recommended?: boolean;
 };
@@ -432,7 +434,8 @@ const CLI_AUTH_METHODS: Record<CliSubscriptionRuntime, CliAuthMethod[]> = {
     {
       key: "login",
       label: "Your Cursor subscription (Pro / Pro+ / Ultra)",
-      description: "Uses your Cursor plan quota. Sign in on any browser — if this doesn't complete over a remote connection, set CURSOR_API_KEY on the Gateway's own machine instead.",
+      description: "Uses your Cursor plan quota. Sign in on any browser.",
+      note: "If this doesn't complete over a remote connection, set CURSOR_API_KEY on the Gateway's own machine instead.",
       inputKind: null,
       recommended: true,
     },
@@ -921,6 +924,7 @@ function CliSetupControl({
           return (
             <label
               key={m.key}
+              title={m.note}
               style={{
                 display: "flex",
                 gap: 12,

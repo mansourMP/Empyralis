@@ -463,18 +463,13 @@ export function FleetCreateAgentWizard({
                     type="button"
                     className={`fleet-wizard-option${purposePreset === p.value ? " is-selected" : ""}`}
                     onClick={() => setPurposePreset(p.value)}
+                    title="Sets a starting point for its instructions — edit anytime from Overview."
                   >
                     <span className="fleet-wizard-option-label">{p.label}</span>
                     <span className="fleet-wizard-option-body">{p.body}</span>
                   </button>
                 ))}
               </div>
-              <p className="fleet-wizard-hint" style={{ marginTop: 8 }}>
-                A starting point for its instructions — edit them anytime from Overview. It also marks
-                this agent as yours or your customers' to talk to, so Customer Support agents stay off
-                your private accounts. What it's allowed to do during a conversation is still decided
-                per-message, the same way for every agent, not by this pick.
-              </p>
 
               {/* Same three placements as the Hardware tab's own picker
                   (none/gateway/vps as "Cloud only"/"Paired computer"/"Cloud
@@ -593,11 +588,6 @@ export function FleetCreateAgentWizard({
                   )}
                 </div>
               )}
-
-              <p className="fleet-wizard-hint" style={{ marginTop: 16 }}>
-                Placement is where the agent works. What it may do there is set by you, the owner —
-                people who message it can request, not command.
-              </p>
             </div>
           )}
 
@@ -648,21 +638,26 @@ export function FleetCreateAgentWizard({
               </div>
               {placement === "cloud" && (
                 <p className="fleet-wizard-hint" style={{ marginTop: 6 }}>
-                  Want to run on your own Claude/Codex subscription or a local model? Put this agent on a paired computer or a VPS in step 1 — those need a machine to run on.
+                  Want your own subscription or a local model? Pick a paired computer or VPS in step 1.
                 </p>
               )}
               {providerMode === "platform" && (
                 <div className="fleet-channel-expand">
                   <label className="fleet-wizard-label">Provider</label>
-                  <select className="fleet-wizard-input" value={platformProvider} onChange={(e) => setPlatformProvider(e.currentTarget.value)}>
+                  <select
+                    className="fleet-wizard-input"
+                    value={platformProvider}
+                    onChange={(e) => setPlatformProvider(e.currentTarget.value)}
+                    title="Leave on Platform default to track the workspace's shared provider instead of locking to one."
+                  >
                     <option value="">Platform default</option>
                     {BYOK_PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
                   </select>
-                  <p className="fleet-wizard-hint">
-                    {platformProvider
-                      ? `This agent always uses ${providerLabel(platformProvider)}, billed to your Empyralis credits — independent of any other agent or a workspace-wide setting change.`
-                      : "Tracks your workspace's shared default provider (DeepSeek, unless changed workspace-wide). Pick a specific provider above to lock this agent to it permanently, independent of every other agent."}
-                  </p>
+                  {platformProvider && (
+                    <p className="fleet-wizard-hint">
+                      Locked to {providerLabel(platformProvider)}, billed to your Empyralis credits.
+                    </p>
+                  )}
                 </div>
               )}
               {providerMode === "byok" && (
@@ -780,9 +775,7 @@ export function FleetCreateAgentWizard({
                     {modelsForProvider("ollama").map((m) => <option key={m} value={m}>{m}</option>)}
                   </select>
                   <p className="fleet-wizard-hint">
-                    This is a suggested list — the turn will only work if this model is actually pulled on
-                    the computer you chose. Not sure? Run <code>ollama pull {selectedModel || "llama3.2"}</code> on
-                    that box first.
+                    Works only once pulled on that computer — run <code>ollama pull {selectedModel || "llama3.2"}</code> there first.
                   </p>
                 </>
               )}

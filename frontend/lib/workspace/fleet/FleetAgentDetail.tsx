@@ -1322,7 +1322,7 @@ function PersonaEditor({
         className={`fleet-persona-textarea${expanded ? " fleet-persona-textarea--expanded" : ""}`}
         value={draft}
         onChange={(e) => { setDraft(e.currentTarget.value); setSaved(false); }}
-        placeholder="What this agent is and how it should behave — e.g. “You handle customer refund requests. Be concise, and always confirm the order number before acting.”"
+        placeholder="What this agent is and how it should behave — e.g. “You handle customer refund requests. Be concise and confirm the order number first.”"
         spellCheck
       />
       <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 12 }}>
@@ -1516,7 +1516,7 @@ function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId
         agentInstallId={agentId}
         emptyIcon={MessageSquare}
         emptyTitle={`Message ${label}`}
-        emptyBody={`Your owner test chat with ${label} — full access, not what a real customer would see (this tab always runs at owner tier). It replies as itself, using whatever's configured on the Model and Tools tabs.`}
+        emptyBody={`Your owner test chat with ${label} — full access, not what a real customer would see.`}
         placeholder={`Message ${label}…`}
         sourceTag="fleet_agent_chat"
       />
@@ -1571,19 +1571,19 @@ const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
     { key: "oauth", label: "App", body: "Connect a Slack workspace — signed mentions and DMs route to your AI.", real: true },
   ],
   discord_bot: [
-    { key: "byo_bot", label: "Bot", body: "Give this agent its own Discord bot — paste the token from Discord's developer portal. Discord's Terms forbid automating a real user account, so this is the only path.", real: true },
+    { key: "byo_bot", label: "Bot", body: "Give this agent its own Discord bot — paste the token from Discord's developer portal.", real: true },
   ],
   whatsapp_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number — scan a QR code or use a pairing code — running on this agent's own gateway. There is no chatbot/business-API mode.", real: true, requiresHardware: true },
+    { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number, on its own gateway — scan a QR code or use a pairing code. No chatbot/business-API mode.", real: true, requiresHardware: true },
   ],
   signal_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own Signal, via a signal-cli bridge running on hardware you control as this agent's gateway. Requires a real signal-cli install — there is no cloud path for Signal.", real: true, requiresHardware: true },
+    { key: "full_account", label: "Full account", body: "This agent's own Signal, via a signal-cli bridge on its gateway. Requires a real signal-cli install — no cloud path.", real: true, requiresHardware: true },
   ],
   imessage_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own iMessage, via imsg — a small CLI that talks to Messages.app directly on a Mac running as this agent's gateway. Requires a real Mac — there is no cloud path for iMessage. Setup (installing imsg, checking Full Disk Access) happens right here, no terminal required.", real: true, requiresHardware: true },
+    { key: "full_account", label: "Full account", body: "This agent's own iMessage, via imsg — a small CLI that talks to Messages.app on a Mac running as its gateway. Requires a real Mac — no cloud path.", real: true, requiresHardware: true },
   ],
   wechat_official: [
-    { key: "app_credential_pair", label: "Official Account / WeCom", body: "This agent's own WeChat Official Account or WeChat Work (WeCom) bot — paste the AppID/AppSecret (or CorpID/CorpSecret/AgentId) from your own WeChat/WeCom admin console. Bidirectional: inbound messages route to this agent, replies send as this bot.", real: true },
+    { key: "app_credential_pair", label: "Official Account / WeCom", body: "This agent's own WeChat Official Account or WeChat Work (WeCom) bot — paste the AppID/AppSecret (or CorpID/CorpSecret/AgentId) from your own admin console.", real: true },
   ],
 };
 
@@ -2435,7 +2435,7 @@ function ConnectorsTab({
         <EmptyState
           icon={Plug}
           title="No project assigned"
-          body="This agent has no project — connectors are shared per project. Assign a project before connecting apps."
+          body="Connectors are shared per project — assign one before connecting apps."
         />
       </div>
     );

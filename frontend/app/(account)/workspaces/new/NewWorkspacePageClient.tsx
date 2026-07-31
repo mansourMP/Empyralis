@@ -92,7 +92,7 @@ export function NewWorkspacePageClient() {
           workspaceId={NEW_WORKSPACE_FORM_ID}
           routeMode="relative"
           title="Create a workspace"
-          description="Every additional workspace needs an explicit shell profile and default route before it becomes part of the account shell."
+          description="Name it and set where it opens."
           submitLabel="Create workspace"
           initialValues={createDefaultWorkspaceSetupValues(NEW_WORKSPACE_FORM_ID, {}, 'relative')}
           submitting={submitting}
