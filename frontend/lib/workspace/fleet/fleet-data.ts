@@ -1288,6 +1288,32 @@ export async function createFleetLabel(
   return data.label as FleetLabel;
 }
 
+/** Rename and/or recolour a label. routes_fleet.py:fleet_patch_label — one
+ *  row changes and every task carrying the label updates at once. Only
+ *  `color` is wired from the UI today (task-labels.TaskLabelEditor); `name`
+ *  is accepted here because the route takes it, not because anything calls
+ *  it yet. */
+export async function patchFleetLabel(
+  workspaceId: string,
+  labelId: string,
+  patch: { name?: string; color?: string },
+): Promise<FleetLabel> {
+  const res = await fetch(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/labels/${encodeURIComponent(labelId)}`,
+    {
+      method: "PATCH",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+      body: JSON.stringify(patch),
+    },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not update label (HTTP ${res.status})`));
+  }
+  return data.label as FleetLabel;
+}
+
 /** Put an existing label on a task. Idempotent server-side; takes an id OR a
  *  name. Never creates the label — the vocabulary is curated on purpose. */
 export async function attachFleetTaskLabel(

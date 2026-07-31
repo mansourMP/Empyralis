@@ -9154,6 +9154,79 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--warning-text);
 }
 
+/* ── Colour swatches (task-labels.LabelColorSwatches) ────────────────────────
+   The ten --label-* tokens as clickable circles — shown once a human is
+   naming a new label (both LabelChip.mint and TaskLabelEditor.mint) and
+   again, standalone, when recolouring an existing one. Selection is a ring,
+   never a size or fill change, so the row's width never shifts as the
+   choice moves — the one motion allowed is that ring fading in
+   (var(--dur-1), state-change-only, per this file's motion rule). */
+.fleet-label-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+}
+.fleet-label-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+.fleet-label-swatch .fleet-label-dot { width: 12px; height: 12px; }
+.fleet-label-swatch.is-selected {
+  box-shadow:
+    0 0 0 2px var(--bg-card),
+    0 0 0 3.5px var(--text-secondary);
+  transition: box-shadow var(--dur-1) var(--ease-out);
+}
+.fleet-label-swatch:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+
+/* ── Recolouring an existing label (TaskLabelEditor's vocabulary list) ──────
+   The only place a label's colour can be changed after creation. The dot is
+   pulled out of the name button into its own trigger — a <button> cannot
+   legally contain another — so the row is a small flex group instead of the
+   single .fleet-composer-pop-item every other menu row is. */
+.fleet-label-vocab-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.fleet-label-swatch-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+.fleet-label-swatch-trigger:hover:not(:disabled),
+.fleet-label-swatch-trigger:focus-visible { background: var(--rail-active); }
+.fleet-label-swatch-trigger:disabled { cursor: default; opacity: 0.5; }
+.fleet-label-swatch-trigger:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+/* Overrides .fleet-composer-pop-item's width:100% — inside this row the name
+   button shares space with the swatch trigger next to it. */
+.fleet-label-vocab-name { width: auto; flex: 1; min-width: 0; }
+/* Indented to align under the row's name text, past the swatch trigger. */
+.fleet-label-recolor-pop { flex-basis: 100%; padding: 0 8px 6px 28px; }
+
 /* A property row whose value can't share a line with its caption — today only
    Labels, whose chips wrap. Everything else in the column stays the normal
    caption-left/value-right .fleet-panel-row. */
