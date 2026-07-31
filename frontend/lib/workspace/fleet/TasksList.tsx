@@ -17,9 +17,9 @@
  * own Status column already has.
  */
 
-import { useState, type CSSProperties } from "react";
+import { useState } from "react";
 
-import { timeAgo, TINTS, tintForAgent } from "./fleet-presentation";
+import { timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
@@ -121,13 +121,6 @@ function TaskRow({
   const due = dueLabel(task.due_at);
   const updated = timeAgo(task.created_at);
 
-  // Tint keyed off the assignee via the same helper the Agents list uses, so
-  // one agent reads the same colour here as it does everywhere else.
-  const tint = assignee ? TINTS[tintForAgent(assignee, index)] : null;
-  const avatarStyle = (tint
-    ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg }
-    : {}) as CSSProperties;
-
   const currentAssigneeValue = assignee
     ? assigneeOptionValue({ kind: "agent", id: assignee.agent_id })
     : task.assignee_user_id
@@ -179,7 +172,7 @@ function TaskRow({
     >
       {assignee ? (
         <>
-          <span className="fleet-agent-avatar" style={avatarStyle}>
+          <span className="fleet-agent-avatar">
             <AgentSigil seed={assignee.agent_id} size={16} />
           </span>
           <span className="fleet-cell-secondary">{assignee.label || "Unnamed agent"}</span>

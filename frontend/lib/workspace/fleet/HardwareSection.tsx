@@ -469,7 +469,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
           }
         }}
       >
-        <TintTile tint={isCloud ? "blue" : "teal"}>
+        <TintTile>
           {isCloud ? <Server size={15} strokeWidth={1.75} /> : <Cpu size={15} strokeWidth={1.75} />}
         </TintTile>
         <span className="fleet-list-row-main">
@@ -768,7 +768,7 @@ function ProvisionPendingRow({
   const specLine = [watch.planLabel, watch.regionLabel].filter(Boolean).join(" · ");
   return (
     <div className="fleet-list-row fleet-list-row--hw">
-      <TintTile tint={failed ? "rose" : "blue"}>
+      <TintTile danger={failed}>
         {failed ? (
           <TriangleAlert size={15} strokeWidth={1.75} />
         ) : (

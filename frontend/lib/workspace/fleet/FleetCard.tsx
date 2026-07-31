@@ -1,11 +1,10 @@
 "use client";
 
-import type { CSSProperties, KeyboardEvent } from "react";
+import type { KeyboardEvent } from "react";
 import { MessageSquare, Settings2 } from "lucide-react";
 
 import {
   type AgentSummary,
-  TINTS,
   deriveStatus,
 } from "./fleet-presentation";
 import { StatusChip } from "./fleet-indicators";
@@ -31,12 +30,6 @@ export function FleetCard({
 }) {
   const status = deriveStatus(agent.hardwareStatus, agent.stopped?.active);
   const placement = resolveHardwarePlacement(agent.hardwareAccess, agent.preferredGatewayId, gateways, agent.modelConfig);
-  const tint = TINTS[agent.tint];
-
-  const tileStyle: CSSProperties = {
-    ["--tile-bg" as string]: tint.bg,
-    ["--tile-fg" as string]: tint.fg,
-  };
 
   const handleKey = (e: KeyboardEvent<HTMLDivElement>) => {
     // Enter/Space bubbles up from the nested Configure/chat buttons below —
@@ -87,7 +80,7 @@ export function FleetCard({
 
       <div className="fleet-card-top">
         <div className="fleet-card-id">
-          <div className="fleet-card-tile" style={tileStyle}>
+          <div className="fleet-card-tile">
             {agent.name.charAt(0).toUpperCase()}
           </div>
           <span className="fleet-card-name">{agent.name}</span>

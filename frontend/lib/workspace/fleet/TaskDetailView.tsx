@@ -60,7 +60,7 @@ import {
   TASK_PRIORITY_LABELS,
 } from "./task-status";
 import { TaskLabelChips, TaskLabelEditor, TaskLabelRowIcon } from "./task-labels";
-import { TINTS, tintForAgent, formatDateTime, timeAgo } from "./fleet-presentation";
+import { formatDateTime, timeAgo } from "./fleet-presentation";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
 import {
@@ -118,17 +118,19 @@ function readComments(task: FleetTask): TaskComment[] {
 }
 
 /** A resolved mention, inline in a comment body — visually distinct from
- *  surrounding text (a tinted pill, same tinted-circle identity treatment
- *  as the Assignee row above: AgentSigil for an agent, MemberAvatar for a
+ *  surrounding text (a neutral pill, same circular identity treatment as
+ *  the Assignee row above: AgentSigil for an agent, MemberAvatar for a
  *  person) and distinguishable from EACH OTHER (agent vs human), matching
  *  this page's existing "agent and person are both team members, but never
- *  drawn identically" convention. Deliberately styled inline rather than
- *  via a new fleet-theme.css class -- that stylesheet is shared/load-
- *  bearing across nearly every fleet surface (docs/AGENT-OPERATING-RULES.md
- *  "All fleet UI shares files") and another agent may be editing it
- *  concurrently; every color here is one of the same CSS custom properties
- *  (--tile-bg/--tile-fg/--rail-active/--text-primary) the rest of this file
- *  already reads, so it stays on-theme (light/dark) without a new rule. */
+ *  drawn identically" convention. No per-agent tint (colour-discipline
+ *  pass) — AgentSigil's own generated shape plus the "Agent: <name>" title
+ *  already tell mentions apart; a hash-derived hue added nothing. Deliberately
+ *  styled inline rather than via a new fleet-theme.css class -- that
+ *  stylesheet is shared/load-bearing across nearly every fleet surface
+ *  (docs/AGENT-OPERATING-RULES.md "All fleet UI shares files") and another
+ *  agent may be editing it concurrently; every color here is one of the same
+ *  CSS custom properties (--rail-active/--text-primary) the rest of this
+ *  file already reads, so it stays on-theme (light/dark) without a new rule. */
 function MentionChip({
   mention,
   agents,
@@ -153,11 +155,8 @@ function MentionChip({
   if (mention.kind === "agent") {
     const agent = agents.find((a) => a.agent_id === mention.id);
     const label = agent?.label || mention.display_name || "Agent";
-    const idx = agent ? agents.indexOf(agent) : 0;
-    const tint = agent ? TINTS[tintForAgent(agent, idx)] : null;
-    const style = { ...chipStyle, ...(tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) } as CSSProperties;
     return (
-      <span className="fleet-mention-chip fleet-mention-chip--agent" style={style} title={`Agent: ${label}`}>
+      <span className="fleet-mention-chip fleet-mention-chip--agent" style={chipStyle} title={`Agent: ${label}`}>
         <AgentSigil seed={mention.id} size={13} />
         {label}
       </span>
@@ -281,9 +280,6 @@ export function TaskDetailView({
 
   const priority = taskPriority(task);
   const assignee = agents.find((a) => a.agent_id === task.assignee_agent_id) || null;
-  const assigneeIndex = assignee ? agents.indexOf(assignee) : 0;
-  const tint = assignee ? TINTS[tintForAgent(assignee, assigneeIndex)] : null;
-  const avatarStyle = (tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) as CSSProperties;
   // The human half of MAN-64/MAN-70 -- only looked up when there is no
   // agent assignee, matching the backend's own mutual-exclusivity
   // guarantee (project_tasks_single_assignee_check: at most one of the two
@@ -504,7 +500,7 @@ export function TaskDetailView({
             </span>
             <span className="fleet-task-detail-control">
               {assignee ? (
-                <span className="fleet-agent-avatar" style={avatarStyle} title="Agent">
+                <span className="fleet-agent-avatar" title="Agent">
                   <AgentSigil seed={assignee.agent_id} size={14} />
                 </span>
               ) : assignedMember ? (

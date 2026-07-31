@@ -16,8 +16,9 @@
  *     the tray is what made this read boxed-in and dated.
  *   · Status is a progressively-filled RING (task-status.TaskStatusIcon),
  *     not a flat dot — see that file for why.
- *   · The per-agent identity tint is still the shared TINTS/tintForAgent
- *     helper the Agents list and the flat task list use.
+ *   · Assignee avatars are neutral (colour-discipline pass) — no per-agent
+ *     identity tint. AgentSigil's own generated shape is what makes one
+ *     card's assignee glance-distinguishable from another's, not hue.
  *
  * MOVING A TASK — two paths, both hitting the same handler:
  *   1. Drag a card into another column. Native HTML5 drag-and-drop only
@@ -59,11 +60,11 @@
  * re-laying out — a real mobile board is separate, later work.
  */
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { MoreHorizontal, Plus } from "lucide-react";
 
 import { dueLabel } from "./TasksList";
-import { TINTS, tintForAgent, timeAgo } from "./fleet-presentation";
+import { timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
@@ -413,9 +414,6 @@ function TaskCard({
   // See task-status.taskPriority for why nothing reads task.priority raw.
   const priority = taskPriority(task);
 
-  const tint = assignee ? TINTS[tintForAgent(assignee, index)] : null;
-  const avatarStyle = (tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) as CSSProperties;
-
   return (
     <article
       className={`fleet-board-card${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
@@ -507,7 +505,7 @@ function TaskCard({
         </span>
 
         {assignee ? (
-          <span className="fleet-agent-avatar" style={avatarStyle} title={assignee.label || "Unnamed agent"}>
+          <span className="fleet-agent-avatar" title={assignee.label || "Unnamed agent"}>
             <AgentSigil seed={assignee.agent_id} size={12} />
           </span>
         ) : assignedMember ? (

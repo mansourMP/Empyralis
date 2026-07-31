@@ -25,15 +25,17 @@
 // photo anywhere in this platform yet. This mirrors the existing identity-
 // avatar convention exactly: PrimaryRail.tsx's owner avatar
 // (`.fleet-rail-owner-avatar`, first-letter-of-name in a circle) and
-// TasksList.tsx's tinted `.fleet-agent-avatar`. `.fleet-member-avatar` here
-// is the same circular treatment, tinted per member via the same
-// TINTS/tintKeyForIndex identity-color helper agents and projects already
-// use.
+// TasksList.tsx's `.fleet-agent-avatar`. `.fleet-member-avatar` here is the
+// same circular treatment. It used to be tinted per member via the
+// TINTS/tintKeyForIndex identity-color helper agents and projects also used
+// — colour-discipline pass dropped that (the initials inside the circle
+// already carry the "which member" information the hue duplicated;
+// `tintIndex` is kept as a prop so every existing caller stays unchanged,
+// it just no longer drives a colour).
 
 import { useMemo, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "motion/react";
 
-import { TINTS, tintKeyForIndex } from "@/lib/workspace/fleet/fleet-presentation";
 import { APP_MOTION_TRANSITIONS } from "@/lib/ui/motion";
 import { useWorkspaceMembers, type WorkspaceMember, type WorkspaceRole } from "@/lib/workspace/fleet/members-data";
 import type { FleetTask } from "@/lib/workspace/fleet/fleet-data";
@@ -66,7 +68,9 @@ export function MemberAvatar({
   name,
   role,
   size = "md",
-  tintIndex = 0,
+  // Kept for API stability (every caller still passes a per-position
+  // index) but unused — see the file banner: the circle is neutral now.
+  tintIndex: _tintIndex = 0,
   className,
 }: {
   name: string;
@@ -75,18 +79,12 @@ export function MemberAvatar({
   tintIndex?: number;
   className?: string;
 }) {
-  const tint = TINTS[tintKeyForIndex(tintIndex)];
   const px = SIZE_PX[size];
-  // Same "--tile-bg"/"--tile-fg" custom-property + cast pattern
-  // TasksList.tsx's avatarStyle already uses for the identical tinted-circle
-  // treatment on agent avatars.
-  const style = {
+  const style: CSSProperties = {
     width: px,
     height: px,
     fontSize: size === "lg" ? 15 : size === "md" ? 13 : size === "sm" ? 11 : 9,
-    "--tile-bg": tint.bg,
-    "--tile-fg": tint.fg,
-  } as CSSProperties;
+  };
   return (
     <span
       className={joinClassNames("fleet-member-avatar", className)}
