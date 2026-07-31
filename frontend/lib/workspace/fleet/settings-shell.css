@@ -1,0 +1,25 @@
+/* SettingsShell — the two-column body (GroupedRail + active section) that
+   sits below Settings' own page header. Layout only; GroupedRail's own
+   look lives in grouped-rail.css, and every section component keeps its
+   existing fleet-theme.css classes untouched. */
+
+.settings-shell-body {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-8);
+}
+
+.settings-shell-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Same breakpoint as grouped-rail.css's own collapse — below it the rail is
+   a horizontal strip above the content, so the body stacks instead of
+   sitting side by side. */
+@media (max-width: 720px) {
+  .settings-shell-body {
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+}
