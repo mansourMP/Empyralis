@@ -7991,15 +7991,15 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    old ~115px, so roughly half again as many cards fit a column. */
 /* Scaled back up 2026-08-01: the compression above went too far — against
    Linear's own board side by side, these read as cramped chips rather than
-   cards. Padding 8/9 → 13/14 and gap 5 → 8, which lands a two-line card
-   near Linear's own card height without giving back the deleted status
-   line that caused the original bloat. */
+   cards. Padding 8/9 → 13/14 → 16, gap 5 → 8 → 10 (two passes; the first
+   was still short of Linear's card height). No content added back, so the
+   status line that caused the original bloat stays deleted. */
 .fleet-board-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   flex-shrink: 0;
-  padding: 13px 14px;
+  padding: 16px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
@@ -8023,9 +8023,12 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-board-card.is-dragging { opacity: 0.4; }
 
 .fleet-board-card-title {
-  font-size: var(--text-base);
+  /* 15px is deliberately off-token: --text-base (14) still read small
+     against Linear's own card titles and --text-md (16) overshot them.
+     The one place in this file a literal beats a token. */
+  font-size: 15px;
   font-weight: var(--weight-medium);
-  line-height: 1.35;
+  line-height: 1.4;
   color: var(--text-primary);
   /* Two lines, then ellipsis: a card is a scannable handle, not the task. */
   display: -webkit-box;
