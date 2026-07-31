@@ -49,6 +49,19 @@ enforced without asking.
   above a group of controls is a signal the design is wrong. Empty states that
   teach are the exception — they have nothing else to show.
 
+## Testing the UI
+
+**Seed your own data. Never ask for the founder's account, and never copy secrets.**
+An agent testing a UI at scale should sign up a fresh local account and create
+what it needs — 20 agents, 40 projects, a task with 50 comments — then look at
+the real screen. It takes minutes, needs no credentials, and exercises the
+actual render path. A static reproduction proves the mock renders, not the app.
+
+Python tests passing is not evidence the UI works. A test asserting a function
+returns a dict does not notice that the button calling it fires no request.
+Anything user-facing gets driven in a real browser: click it, watch the network
+tab, read the console.
+
 ## Working agreements
 
 - **One agent = one worktree = one branch.** Never two agents editing the same
