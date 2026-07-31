@@ -21,6 +21,24 @@ class CapabilityRiskClassifierServiceTests(unittest.TestCase):
         self._kernel_patch.stop()
 
     def _fake_rust_classifier(self, command: str, payload: dict, **kwargs):
+        # capability_risk_classifier_service.normalize_capability_for_risk
+        # now routes every capability through agent_computer_policy_service.
+        # evaluate_agent_computer_request first, which makes its own real
+        # kernel call ("validate-policy") to confirm the capability is in
+        # policy scope before classify-risk is ever reached -- a gate this
+        # fixture predates entirely. Policy scope and risk classification
+        # are different questions (this fixture's whole existing body below
+        # already tests risk outcomes -- block/require_approval/allow -- for
+        # specific capabilities), so validate-policy is always allowed here;
+        # a capability that shouldn't even be in scope is out of scope for
+        # this file's tests.
+        if command == "validate-policy":
+            return {
+                "ok": True,
+                "decision": "allow",
+                "reason": "policy_allowed",
+                "next_action": "allow_agent_computer_request",
+            }
         self.assertEqual(command, "classify-risk")
         self.assertTrue(kwargs.get("allow_approval_required"))
         capability = str(payload.get("capability") or "").strip()

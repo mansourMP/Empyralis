@@ -677,7 +677,7 @@ class SkillsServiceTests(unittest.TestCase):
                     workspace_id="workspace-1",
                     thread_id="thread-1",
                     callbacks=callbacks,
-                    session_ctx={"tenant_id": "tenant-1"},
+                    session_ctx={"tenant_id": "tenant-1", "authority_tier": "owner"},
                 )
                 entry_raw = skills_service.execute_single_direct_tool_call(
                     tool_call={
@@ -695,7 +695,7 @@ class SkillsServiceTests(unittest.TestCase):
                     workspace_id="workspace-1",
                     thread_id="thread-1",
                     callbacks=callbacks,
-                    session_ctx={"tenant_id": "tenant-1"},
+                    session_ctx={"tenant_id": "tenant-1", "authority_tier": "owner"},
                 )
                 state_raw = skills_service.execute_single_direct_tool_call(
                     tool_call={
@@ -705,7 +705,7 @@ class SkillsServiceTests(unittest.TestCase):
                     workspace_id="workspace-1",
                     thread_id="thread-1",
                     callbacks=callbacks,
-                    session_ctx={"tenant_id": "tenant-1"},
+                    session_ctx={"tenant_id": "tenant-1", "authority_tier": "owner"},
                 )
 
         profile_payload = json.loads(profile_raw)
@@ -746,7 +746,7 @@ class SkillsServiceTests(unittest.TestCase):
                 workspace_id="default",
                 thread_id="thread-1",
                 index=1,
-                session_ctx={"runtime_id": "gw-1", "request_id": "chat-request-2"},
+                session_ctx={"runtime_id": "gw-1", "request_id": "chat-request-2", "authority_tier": "owner"},
                 callbacks=callbacks,
             )
 
@@ -812,7 +812,7 @@ class SkillsServiceTests(unittest.TestCase):
                 workspace_id="default",
                 thread_id="thread-1",
                 index=1,
-                session_ctx={"request_id": "chat-request-2"},
+                session_ctx={"request_id": "chat-request-2", "authority_tier": "owner"},
                 callbacks=callbacks,
             )
 
@@ -847,7 +847,7 @@ class SkillsServiceTests(unittest.TestCase):
                 workspace_id="default",
                 thread_id="thread-1",
                 index=1,
-                session_ctx={"request_id": "chat-request-2"},
+                session_ctx={"request_id": "chat-request-2", "authority_tier": "owner"},
                 callbacks=callbacks,
             )
 
@@ -929,7 +929,7 @@ class SkillsServiceTests(unittest.TestCase):
                 workspace_id="default",
                 thread_id="thread-1",
                 index=1,
-                session_ctx={"runtime_id": "gw-1", "request_id": "chat-request-3"},
+                session_ctx={"runtime_id": "gw-1", "request_id": "chat-request-3", "authority_tier": "owner"},
                 callbacks=callbacks,
             )
 
