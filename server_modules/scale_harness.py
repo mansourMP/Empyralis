@@ -306,36 +306,40 @@ async def run_control_plane_registry_benchmark(
         raise RuntimeError("Control-plane pool unavailable for scale harness.")
 
     async with pool.acquire() as connection:
-        specialist_rows = await connection.fetch(
-            """
-            SELECT
-                ad.id AS definition_id,
-                adv.id AS version_id,
-                ad.slug AS definition_slug,
-                ad.name AS definition_name
-            FROM agent_definitions ad
-            INNER JOIN agent_definition_versions adv
-                ON adv.id = COALESCE(ad.published_version_id, ad.current_version_id)
-            WHERE ad.tenant_id = $1
-              AND ad.workspace_id = $2
-              AND COALESCE(ad.agent_kind, 'specialist') <> 'master'
-            ORDER BY ad.slug ASC
-            """,
-            tenant_id,
-            workspace_id,
-        )
-        runtime_row = await connection.fetchrow(
-            """
-            SELECT id
-            FROM runtime_profiles
-            WHERE tenant_id = $1
-              AND workspace_id = $2
-              AND slug = 'empyralis-cloud'
-            LIMIT 1
-            """,
-            tenant_id,
-            workspace_id,
-        )
+        async with connection.transaction():
+            await control_plane_repository.apply_connection_scope(
+                connection, tenant_id=tenant_id, workspace_id=workspace_id
+            )
+            specialist_rows = await connection.fetch(
+                """
+                SELECT
+                    ad.id AS definition_id,
+                    adv.id AS version_id,
+                    ad.slug AS definition_slug,
+                    ad.name AS definition_name
+                FROM agent_definitions ad
+                INNER JOIN agent_definition_versions adv
+                    ON adv.id = COALESCE(ad.published_version_id, ad.current_version_id)
+                WHERE ad.tenant_id = $1
+                  AND ad.workspace_id = $2
+                  AND COALESCE(ad.agent_kind, 'specialist') <> 'master'
+                ORDER BY ad.slug ASC
+                """,
+                tenant_id,
+                workspace_id,
+            )
+            runtime_row = await connection.fetchrow(
+                """
+                SELECT id
+                FROM runtime_profiles
+                WHERE tenant_id = $1
+                  AND workspace_id = $2
+                  AND slug = 'empyralis-cloud'
+                LIMIT 1
+                """,
+                tenant_id,
+                workspace_id,
+            )
     if not specialist_rows or runtime_row is None:
         raise RuntimeError("Scale harness could not resolve seeded specialist definitions or runtime profile.")
 
@@ -388,6 +392,9 @@ async def run_control_plane_registry_benchmark(
     insert_started = time.perf_counter()
     async with pool.acquire() as connection:
         async with connection.transaction():
+            await control_plane_repository.apply_connection_scope(
+                connection, tenant_id=tenant_id, workspace_id=workspace_id
+            )
             for batch in _chunked(install_rows, config.batch_size):
                 await connection.executemany(insert_query, batch)
     insert_seconds = time.perf_counter() - insert_started

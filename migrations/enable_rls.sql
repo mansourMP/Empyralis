@@ -337,4 +337,26 @@ CREATE POLICY empyralis_mcp_external_agent_roster_scope ON mcp_external_agent_ro
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- project_task_labels was not part of the six-tables pass above -- it is
+-- the labels<->tasks join table added by migrations/add_task_labels.sql,
+-- which shipped after that pass and was missed. Same real-tenant-data,
+-- no-database-level-protection gap the six tables had, closed the same way
+-- and only after the same verification: every query against this table
+-- (server_modules/workspace_labels_service.py's attach_label/detach_label/
+-- list_task_labels/list_labels, and the inline LATERAL joins in
+-- server_modules/project_tasks_service.py's _TASK_ROLLUP_JOINS /
+-- _TASK_ROLLUP_RETURNING, used by every task read/write in that file) was
+-- confirmed to already route through control_plane_repository.rls_fetch/
+-- rls_fetchrow/rls_execute rather than a raw pool call -- workspace_labels_
+-- service.py's own module docstring claim that this table "carries no RLS
+-- policy" was stale (written before the six-tables pass added RLS to its
+-- sibling workspace_labels) but its code was never actually unscoped.
+ALTER TABLE project_task_labels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_task_labels FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_project_task_labels_scope ON project_task_labels;
+CREATE POLICY empyralis_project_task_labels_scope ON project_task_labels
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;

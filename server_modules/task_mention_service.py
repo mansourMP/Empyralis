@@ -287,14 +287,19 @@ async def _load_agent_roster(pool: Any, *, tenant_id: str, workspace_id: str) ->
     itself could also address. See module docstring for why this does not
     route through `list_unified_roster` (which also includes EXTERNAL
     agents -- not valid wake targets, see `assign_task`'s own validation)."""
-    rows = await pool.fetch(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT id, label
         FROM workspace_agent_installs
         WHERE tenant_id = $1 AND workspace_id = $2
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     out: List[Dict[str, str]] = []
     for row in rows or []:
@@ -311,15 +316,20 @@ async def _load_member_roster(pool: Any, *, tenant_id: str, workspace_id: str) -
     """Mirrors `_workspace_user_exists`'s exact scope (tenant_id +
     workspace_id + status='active' against `workspace_memberships` joined
     to `users`)."""
-    rows = await pool.fetch(
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    rows = await control_plane_repository.rls_fetch(
+        pool,
         """
         SELECT wm.user_id, u.email, u.display_name
         FROM workspace_memberships wm
         JOIN users u ON u.id = wm.user_id
         WHERE wm.tenant_id = $1 AND wm.workspace_id = $2 AND wm.status = 'active'
         """,
-        str(tenant_id or "").strip(),
-        str(workspace_id or "").strip(),
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     out: List[Dict[str, str]] = []
     for row in rows or []:
