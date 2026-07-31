@@ -8014,8 +8014,9 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-board-card.is-dragging { opacity: 0.4; }
 
 .fleet-board-card-title {
-  font-size: var(--text-sm);
-  line-height: 1.3;
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  line-height: 1.35;
   color: var(--text-primary);
   /* Two lines, then ellipsis: a card is a scannable handle, not the task. */
   display: -webkit-box;
