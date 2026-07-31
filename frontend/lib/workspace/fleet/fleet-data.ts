@@ -992,6 +992,19 @@ export type FleetTask = {
    *  go through task-status.taskPriority(), which coerces anything unexpected
    *  (absent, null, a string, an out-of-range number) to 0. */
   priority?: number | null;
+  /** Sub-tasks (MAN-145's parent/sub-task rendering; migrations/
+   *  add_task_parent.sql -- see that file for the single-level, same-project
+   *  rules the backend enforces). `parent_task_id` is null on a top-level
+   *  task -- every task before that migration, and every task since that
+   *  nobody has parented. The two rollup counts are computed by the same
+   *  query that fetched this row (project_tasks_service._row_to_task's own
+   *  LATERAL join), never a per-task follow-up read. A server predating the
+   *  migration returns no key for any of the three, which reads as "no
+   *  parent, 0 sub-tasks" rather than raising -- the same deploy-before-
+   *  migrate posture `priority` above already takes. */
+  parent_task_id?: string | null;
+  subtask_count?: number | null;
+  subtask_done_count?: number | null;
   assignee_agent_id?: string | null;
   /** The human assignee's user_id (workspace_memberships), or null. See the
    *  type-level note above -- mutually exclusive with assignee_agent_id. */

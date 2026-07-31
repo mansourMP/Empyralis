@@ -21,16 +21,25 @@
  * columns scroll independently.
  *
  * WHAT IS NOT HERE, on purpose:
- *  · Sub-issues. The COLUMN exists now (migrations/add_task_parent.sql —
- *    `parent_task_id`, plus the subtask_count / subtask_done_count rollup
- *    project_tasks_service returns on every read), but nothing in this UI
- *    creates, lists or links one. A sub-issues section would therefore be a
- *    drawn promise for a different reason than before: the storage is real,
- *    the surface isn't built. The side note at the bottom of the properties
- *    column says exactly that rather than the older, now-false claim that
- *    neither labels nor sub-tasks were stored at all.
+ *  · Sub-issue CREATION or re-parenting. The column and the rollup are real
+ *    (migrations/add_task_parent.sql — `parent_task_id`, plus the
+ *    subtask_count / subtask_done_count project_tasks_service returns on
+ *    every read) and MAN-145 wires this page up to READ them — a "Sub-task
+ *    of …" link when this task has a parent, a Sub-tasks list when it has
+ *    children (both looked up from the same sibling-task read prev/next
+ *    below already does — see that note). What's still missing is a way to
+ *    CREATE that relationship from here; that stays a drawn promise for a
+ *    narrower reason than before; the storage and the reading surface are
+ *    both real now, only the write surface isn't built.
  *  · Rich text. `description` is a plain-text column; it is rendered with
  *    paragraph breaks preserved, not parsed as markdown it may not be.
+ *  · An attachment/image control on the comment composer. Linear's has one;
+ *    ours doesn't, because there is no upload endpoint behind a task
+ *    comment — task.metadata.comments stores plain text
+ *    (project_tasks_service.add_task_comment), nothing multipart. A
+ *    paperclip that fails the moment someone clicks it is worse than no
+ *    paperclip (CLAUDE.md: no dead controls); this is a reported backend
+ *    gap, not a missed frontend affordance.
  *
  * THE COMMENT COMPOSER (MAN-64/MAN-70's human->agent channel): agents have
  * been able to write into task.metadata.comments since project_task__comment
@@ -43,11 +52,45 @@
  * changes by going through the shared, polled task list). It also may wake
  * the assigned agent (task_commented, bounded_scheduler_service) — best-
  * effort, surfaced the same way assignment's wake failure already is.
+ * MAN-145 restyled it as a bordered, auto-growing surface (the same idiom
+ * AgentChat's .fleet-sage-chat-composer already uses) instead of a bare
+ * textarea + wide button, but the write path and the optimistic-then-
+ * refetch contract are unchanged.
+ *
+ * PREV/NEXT NAVIGATION AND RELATED TASKS (MAN-145 items 4/5) share one read:
+ * this component calls useFleetTasks(workspaceId, projectId) itself, the
+ * SAME hook with the SAME cache key page.tsx already calls to find `task`
+ * in the first place (fleet-data.ts's useSharedPolledResource keys on
+ * `fleet-tasks:${workspaceId}:${projectId}` — a second caller with the same
+ * key subscribes to the existing polled entry, it does not issue a second
+ * request). That matters for correctness, not just efficiency: it is
+ * PROVABLY the same array, in the same order, that TasksList renders
+ * unmodified and TasksBoard/TasksGroupedList group without re-sorting (see
+ * that page's `boardTasks` — no client-side sort is ever applied to tasks,
+ * unlike the agents view). So "N / total" and the ↑/↓ targets are not a
+ * best-effort guess at what the user saw — they ARE what the user saw. The
+ * one thing this page cannot know is which of the three layouts (board /
+ * grouped / list) or which filter the user was actually looking at, since
+ * that state lives in the project page's URL query string, not in this
+ * task's own payload — the nav is hidden outright (not shown with a wrong
+ * count) if this task can't be found in that read, rather than guessing.
  */
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
-import { Calendar, Clock3, FolderKanban, MessageSquare, SignalHigh, User } from "lucide-react";
+import {
+  ArrowUp,
+  Calendar,
+  ChevronDown,
+  ChevronUp,
+  Clock3,
+  CornerDownRight,
+  FolderKanban,
+  Loader2,
+  MessageSquare,
+  SignalHigh,
+  User,
+} from "lucide-react";
 
 import { AgentSigil } from "./fleet-indicators";
 import {
@@ -68,11 +111,13 @@ import {
   commentFleetTask,
   FLEET_TASK_STATUSES,
   parseAssigneeOptionValue,
+  useFleetTasks,
   type FleetAgent,
   type FleetTask,
   type FleetTaskStatus,
   type TaskAssigneeSelection,
 } from "./fleet-data";
+import "./task-detail.css";
 
 /** Minute precision, not the default's seconds — no decision on this page
  *  turns on a second, and the extra characters only cost the value column
@@ -299,6 +344,50 @@ export function TaskDetailView({
           : "";
   const comments = useMemo(() => readComments(task), [task]);
 
+  // Prev/next (MAN-145 item 4) and the Parent/Sub-tasks reads (item 5) all
+  // ride the SAME sibling-task array — see the file header note on why
+  // re-calling useFleetTasks here with the project page's own (workspaceId,
+  // projectId) is a subscribe to its existing shared-cache entry, not a
+  // second request, and why its ordering is provably what TasksList shows.
+  // `project_id` is on `task` itself when the server has migrations/
+  // add_task_parent.sql applied; falling back to parsing it out of
+  // `projectHref` (always `{base}/projects/{projectId}`, per page.tsx) means
+  // this still works against an older row that omits the field.
+  const projectId = useMemo(() => {
+    const own = String(task.project_id || "").trim();
+    if (own) return own;
+    const match = /\/projects\/([^/?#]+)/.exec(projectHref);
+    return match ? decodeURIComponent(match[1]) : "";
+  }, [task.project_id, projectHref]);
+  const { tasks: siblingTasks } = useFleetTasks(
+    workspaceId || "",
+    workspaceId && projectId ? projectId : null,
+  );
+  const taskDetailHref = useCallback(
+    (id: string) => `${projectHref}/tasks/${encodeURIComponent(id)}`,
+    [projectHref],
+  );
+  const siblingIndex = useMemo(
+    () => siblingTasks.findIndex((t) => t.id === task.id),
+    [siblingTasks, task.id],
+  );
+  // Hidden outright (not shown with a wrong or single-item count) unless
+  // this task was actually found in the read and there is somewhere to go
+  // -- an arrow pair that jumps somewhere unexpected is worse than none.
+  const showTaskNav = siblingIndex >= 0 && siblingTasks.length > 1;
+  const prevTask = siblingIndex > 0 ? siblingTasks[siblingIndex - 1] : null;
+  const nextTask = siblingIndex >= 0 && siblingIndex < siblingTasks.length - 1
+    ? siblingTasks[siblingIndex + 1]
+    : null;
+  const parentTask = useMemo(
+    () => (task.parent_task_id ? siblingTasks.find((t) => t.id === task.parent_task_id) || null : null),
+    [siblingTasks, task.parent_task_id],
+  );
+  const subtasks = useMemo(
+    () => siblingTasks.filter((t) => t.parent_task_id === task.id),
+    [siblingTasks, task.id],
+  );
+
   // The composer: local state only, exactly TaskLabelEditor's shape
   // (writes go straight out via commentFleetTask, painted optimistically
   // first because the real comment only shows up once the caller's 30s-
@@ -312,6 +401,17 @@ export function TaskDetailView({
   const [pending, setPending] = useState<TaskComment | null>(null);
   const displayComments = useMemo(() => (pending ? [...comments, pending] : comments), [comments, pending]);
 
+  // MAN-145: the composer textarea auto-grows with its content instead of
+  // sitting at a fixed 2 rows or exposing a manual resize handle — same
+  // idiom, same cap (200px), as AgentChat's .fleet-sage-chat-input.
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const autoGrow = useCallback(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, []);
+
   async function submitComment() {
     const body = draft.trim();
     if (!body || posting || !workspaceId) return;
@@ -321,6 +421,7 @@ export function TaskDetailView({
     try {
       const { wakeError } = await commentFleetTask(workspaceId, task.id, body);
       setDraft("");
+      requestAnimationFrame(autoGrow);
       if (wakeError) {
         setCommentNotice(
           `Posted, but the agent could not be woken: ${wakeError}. It will see this the next time it runs.`,
@@ -336,10 +437,52 @@ export function TaskDetailView({
   }
 
   return (
-    <div className="fleet-task-page">
+    <div className="fleet-task-page fleet-task-detail-page">
       <div className="fleet-task-page-main">
         <div className="fleet-task-page-body">
-          <div className="fleet-task-page-eyebrow">{taskShortId(task.id)}</div>
+          <div className="fleet-task-detail-topbar">
+            <div className="fleet-task-page-eyebrow">{taskShortId(task.id)}</div>
+            {showTaskNav ? (
+              <div className="fleet-task-detail-nav" aria-label="Task navigation">
+                <span className="fleet-task-detail-nav-count">
+                  {siblingIndex + 1} / {siblingTasks.length}
+                </span>
+                <TaskNavArrow
+                  direction="prev"
+                  target={prevTask}
+                  href={prevTask ? taskDetailHref(prevTask.id) : null}
+                  router={router}
+                />
+                <TaskNavArrow
+                  direction="next"
+                  target={nextTask}
+                  href={nextTask ? taskDetailHref(nextTask.id) : null}
+                  router={router}
+                />
+              </div>
+            ) : null}
+          </div>
+
+          {parentTask ? (
+            <a
+              className="fleet-task-detail-parent-link"
+              href={taskDetailHref(parentTask.id)}
+              data-tab-title={parentTask.title || "Untitled task"}
+              onClick={(event) => {
+                if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+                event.preventDefault();
+                router.push(taskDetailHref(parentTask.id));
+              }}
+            >
+              <CornerDownRight size={12} strokeWidth={2} />
+              <TaskStatusIcon status={parentTask.status} size={12} />
+              Sub-task of{" "}
+              <span className="fleet-task-detail-parent-link-title">
+                {parentTask.title || "Untitled task"}
+              </span>
+            </a>
+          ) : null}
+
           <h1 className="fleet-task-page-title" tabIndex={-1} ref={headingRef}>
             {task.title || "Untitled task"}
           </h1>
@@ -353,6 +496,34 @@ export function TaskDetailView({
           ) : (
             <p className="fleet-task-page-desc fleet-cell-muted">No description.</p>
           )}
+
+          {subtasks.length > 0 ? (
+            <section className="fleet-task-page-section" aria-label="Sub-tasks">
+              <h2 className="fleet-task-page-section-title">
+                Sub-tasks · {subtasks.filter((t) => t.status === "done").length}/{subtasks.length}
+              </h2>
+              <ul className="fleet-task-detail-subtask-list">
+                {subtasks.map((st) => (
+                  <li key={st.id}>
+                    <a
+                      className="fleet-task-detail-subtask-row"
+                      href={taskDetailHref(st.id)}
+                      data-tab-title={st.title || "Untitled task"}
+                      onClick={(event) => {
+                        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+                        event.preventDefault();
+                        router.push(taskDetailHref(st.id));
+                      }}
+                    >
+                      <TaskStatusIcon status={st.status} size={13} />
+                      <span className="fleet-task-detail-subtask-title">{st.title || "Untitled task"}</span>
+                      <span className="fleet-task-detail-subtask-id">{taskShortId(st.id)}</span>
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
 
           <section className="fleet-task-page-section" aria-label="Activity">
             <h2 className="fleet-task-page-section-title">Activity</h2>
@@ -388,44 +559,53 @@ export function TaskDetailView({
             )}
 
             {workspaceId ? (
-              <form
-                className="fleet-task-page-comment-form"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void submitComment();
-                }}
-              >
-                <textarea
-                  className="fleet-task-page-comment-input"
-                  placeholder="Leave a comment for whoever picks this up next…"
-                  value={draft}
-                  onChange={(event) => setDraft(event.currentTarget.value)}
-                  onKeyDown={(event) => {
-                    // Enter sends, Shift+Enter (or any IME composition) makes
-                    // a newline — the same convention AgentChat's composer
-                    // uses, so a comment box and a chat box don't disagree
-                    // about what Enter does elsewhere in this app.
-                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                      event.preventDefault();
-                      void submitComment();
-                    }
+              <>
+                <form
+                  className="fleet-task-detail-composer"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void submitComment();
                   }}
-                  rows={2}
-                  maxLength={4000}
-                  disabled={posting}
-                  aria-label="Add a comment"
-                />
-                {commentNotice ? <p className="fleet-task-page-comment-error">{commentNotice}</p> : null}
-                <div className="fleet-task-page-comment-form-actions">
+                >
+                  <textarea
+                    ref={composerRef}
+                    className="fleet-task-detail-composer-input"
+                    placeholder="Leave a comment for whoever picks this up next…"
+                    value={draft}
+                    onChange={(event) => {
+                      setDraft(event.currentTarget.value);
+                      autoGrow();
+                    }}
+                    onKeyDown={(event) => {
+                      // Enter sends, Shift+Enter (or any IME composition) makes
+                      // a newline — the same convention AgentChat's composer
+                      // uses, so a comment box and a chat box don't disagree
+                      // about what Enter does elsewhere in this app.
+                      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                        event.preventDefault();
+                        void submitComment();
+                      }
+                    }}
+                    rows={1}
+                    maxLength={4000}
+                    disabled={posting}
+                    aria-label="Add a comment"
+                  />
                   <button
                     type="submit"
-                    className="fleet-btn fleet-btn--accent"
+                    className="fleet-task-detail-composer-send"
                     disabled={!draft.trim() || posting}
+                    aria-label={posting ? "Posting comment" : "Post comment"}
                   >
-                    {posting ? "Posting…" : "Comment"}
+                    {posting ? (
+                      <Loader2 size={15} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
+                    ) : (
+                      <ArrowUp size={15} strokeWidth={2} />
+                    )}
                   </button>
-                </div>
-              </form>
+                </form>
+                {commentNotice ? <p className="fleet-task-page-comment-error">{commentNotice}</p> : null}
+              </>
             ) : null}
           </section>
         </div>
@@ -614,20 +794,65 @@ export function TaskDetailView({
             </span>
           </div>
 
-          {/* Sub-tasks: honest, and NARROWER than the note this replaces.
-              That note said labels and sub-tasks were both unstored; labels
-              now are (workspace_labels / project_task_labels, edited in the
-              row above), so repeating it would be a lie. The backend already
-              tracks task parentage — what's missing for sub-tasks is this UI,
-              not the data, and that's a different sentence. Product copy: say
-              what the user gets (nothing here, yet), not the column that
-              backs it. */}
-          <div className="fleet-task-page-side-note">
-            Sub-tasks aren't supported in this view yet.
-          </div>
+          {/* The "sub-tasks aren't supported in this view yet" note this
+              replaced is gone because it's no longer true: MAN-145 reads
+              `parent_task_id` and the subtask rollup for real now (the
+              "Sub-task of …" link above the title, the Sub-tasks list
+              between the description and Activity). Nothing renders here
+              when a task has neither relationship — matching every other
+              empty-state convention on this page (TaskLabelChips, the
+              Activity empty state) — rather than a permanent caption saying
+              so, which is CLAUDE.md's "a professional tool labels, it does
+              not lecture" applied to the one spot that used to lecture. */}
         </div>
       </aside>
     </div>
+  );
+}
+
+/** One ↑/↓ nav control (MAN-145 item 4). A real `<a href>` when there is a
+ *  target — so ⌘/Ctrl-click and middle-click open it in a background content
+ *  tab exactly like every other task link on this page (FleetTabs reads
+ *  `a[href]` directly; no `data-tab-href` needed) — and a plain, inert
+ *  `<span>` at a boundary (no previous/no next), never a `disabled` anchor
+ *  (anchors don't support that attribute) and never a live link to nowhere. */
+function TaskNavArrow({
+  direction,
+  target,
+  href,
+  router,
+}: {
+  direction: "prev" | "next";
+  target: FleetTask | null;
+  href: string | null;
+  router: { push: (href: string) => void };
+}) {
+  const Icon = direction === "prev" ? ChevronUp : ChevronDown;
+  const label = direction === "prev" ? "Previous task" : "Next task";
+
+  if (!target || !href) {
+    return (
+      <span className="fleet-task-detail-nav-btn is-disabled" aria-hidden="true">
+        <Icon size={14} strokeWidth={2} />
+      </span>
+    );
+  }
+
+  return (
+    <a
+      className="fleet-task-detail-nav-btn"
+      href={href}
+      aria-label={label}
+      title={target.title ? `${label}: ${target.title}` : label}
+      data-tab-title={target.title || "Untitled task"}
+      onClick={(event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        event.preventDefault();
+        router.push(href);
+      }}
+    >
+      <Icon size={14} strokeWidth={2} />
+    </a>
   );
 }
 
