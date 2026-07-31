@@ -88,8 +88,8 @@ jobs:
       - name: Audit frontend dependencies
         run: npm audit --prefix frontend --audit-level=high --omit=dev
 
-      - name: Install mobile dependencies
-        run: npm ci --prefix mobile --ignore-scripts
+      - name: Install gateway dependencies
+        run: npm ci --prefix empyralis-gateway --ignore-scripts
 
-      - name: Audit mobile dependencies
-        run: npm audit --prefix mobile --audit-level=high --omit=dev
+      - name: Audit gateway dependencies
+        run: npm audit --prefix empyralis-gateway --audit-level=high --omit=dev
