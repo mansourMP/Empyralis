@@ -69,8 +69,8 @@ def _enforce_local_worker_decision(**payload: Any) -> Dict[str, Any]:
             )
         return decision
     except rust_runtime_kernel_client.RustKernelDecisionError as exc:
-        if allow_block_result and isinstance(exc.result, dict):
-            return dict(exc.result)
+        if allow_block_result and isinstance(exc.decision, dict):
+            return dict(exc.decision)
         reason = str(getattr(exc, "reason", "") or "local_worker_denied").strip()
         raise HTTPException(
             status_code=423,
