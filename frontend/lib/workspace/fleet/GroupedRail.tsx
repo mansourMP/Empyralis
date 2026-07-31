@@ -23,28 +23,40 @@ export type GroupedRailGroup = {
 
 /**
  * A second, in-content vertical nav made of labelled groups of real links —
- * NOT the app's permanent left rail (PrimaryRail.tsx). Settings is the
+ * NOT the app's permanent left rail (PrimaryRail.tsx). Settings was the
  * first caller (one implicit group, three items: Account/Workspace/
- * Connections); the shape is generic on purpose so agent detail's nine flat
- * top tabs (FleetAgentDetail.tsx's TABS) can collapse into this same
- * component later instead of a bespoke rail being built twice.
+ * Connections); agent detail's Configure sheet (FleetAgentDetail.tsx) is the
+ * second — the nine-tab page collapsed to three you watch (Overview/Work/
+ * Memory) plus this same rail, grouped Brain/Reach/Compute, for the other
+ * six. Same component both places, per the whole point of building it
+ * generic the first time instead of a bespoke rail per caller.
  *
  * Every item is a real <Link>, never an onClick-only button, per the
  * "primary navigation is real links" rule — cmd-click and middle-click must
  * open a new tab. `activeId` is read from the URL by the routed caller on
  * every render, never copied into local state here: see
  * FleetAgentDetail.tsx's comment (~line 281) on why that specific copy was
- * a real bug for the sibling top-tabs nav this component is meant to
- * eventually replace.
+ * a real bug for the top-tabs nav this component now also drives.
  */
 export function GroupedRail({
   groups,
   activeId,
   ariaLabel,
+  replace,
 }: {
   groups: GroupedRailGroup[];
   activeId: string;
   ariaLabel: string;
+  /** Settings' sections are real destinations — Next's default push (each
+   *  click is a back-button stop) is correct there and stays the default
+   *  (omit/false). The agent-detail Configure sheet passes `replace: true`:
+   *  its items are sections of a page you're already on, not places you'd
+   *  expect "back" to step through one at a time — same replace-not-push
+   *  contract the sheet's own top-tab strip and [tab]/page.tsx redirect
+   *  already use. Generic prop rather than a fork of this component, since
+   *  the only actual difference between the two callers is this one Link
+   *  option. */
+  replace?: boolean;
 }) {
   return (
     <nav className="grouped-rail" aria-label={ariaLabel}>
@@ -59,6 +71,7 @@ export function GroupedRail({
                 <li key={item.id}>
                   <Link
                     href={item.href}
+                    replace={replace}
                     className={`grouped-rail-item${active ? " is-active" : ""}`}
                     aria-current={active ? "page" : undefined}
                   >

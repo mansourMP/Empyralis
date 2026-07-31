@@ -153,29 +153,37 @@ export function HardwareTab({
 
   return (
     <div className="fleet-detail-pad fleet-hw">
-      <div className="fleet-detail-section-title">{brainBound ? "Brain runs on" : "Running on"}</div>
-      <div className="fleet-hw-card">
-        <div className="fleet-hw-row">
-          <span className="fleet-hw-label">Placement</span>
-          <span className="fleet-hw-value">
-            <span className={`fleet-detail-dot ${dotClass(placement.tone)}`} aria-hidden />
-            {gatewaysLoading ? "Loading…" : placement.label}
-          </span>
-        </div>
-      </div>
-      {/* This preview and the hardware-access picker below can legitimately
-          disagree: a cli_subscription/local agent's brain is bound to a
-          computer via the Model tab, independent of this tab's own
-          hardware_access control (see hardwarePlacementIsBrainBound). Say so
-          explicitly instead of leaving two controls that read like the same
-          setting silently pointing at different answers. */}
-      <p className="fleet-hw-note" style={{ marginTop: 6 }}>
-        {brainBound
-          ? "Bound to this agent's subscription/local model connection, set on the Model tab — independent of the hardware access below, which only controls what its tools can reach."
-          : "This agent's brain runs via API call, not on specific hardware — placement here mirrors the hardware access you set below."}
-      </p>
+      {/* Placement preview — kept ONLY for the brainBound case, where it
+          genuinely disambiguates: a cli_subscription/local agent's brain is
+          bound to a computer via the Model tab, independent of this tab's
+          own hardware_access control below (see hardwarePlacementIsBrainBound),
+          so the two controls can legitimately disagree and this says so
+          explicitly. For a plain API-model agent there's nothing to
+          disambiguate — this row used to just restate whichever option is
+          already highlighted in the picker directly beneath it (its own copy
+          admitted as much: "placement here mirrors the hardware access you
+          set below"), plus a "Loading…" flash while gateways fetch for a
+          fact the picker already shows instantly. Removed for that case
+          rather than kept as a redundant, briefly-wrong echo. */}
+      {brainBound && (
+        <>
+          <div className="fleet-detail-section-title">Brain runs on</div>
+          <div className="fleet-hw-card">
+            <div className="fleet-hw-row">
+              <span className="fleet-hw-label">Placement</span>
+              <span className="fleet-hw-value">
+                <span className={`fleet-detail-dot ${dotClass(placement.tone)}`} aria-hidden />
+                {gatewaysLoading ? "Loading…" : placement.label}
+              </span>
+            </div>
+          </div>
+          <p className="fleet-hw-note" style={{ marginTop: 6 }}>
+            Bound to this agent&apos;s subscription/local model connection, set on the Model tab — independent of the hardware access below, which only controls what its tools can reach.
+          </p>
+        </>
+      )}
 
-      <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Hardware access</div>
+      <div className="fleet-detail-section-title" style={brainBound ? { marginTop: 20 } : undefined}>Hardware access</div>
       {/* Read-only — surfaces the existing audience_safe=False truth
           (authority_mandate_service.py / triage_service.py), adds no new
           enforcement. Whatever's picked below, it's reachable by the owner

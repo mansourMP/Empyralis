@@ -1,0 +1,148 @@
+/* Agent detail's Configure sheet — collapses the nine flat top tabs down to
+   three you actually watch day to day (Overview/Work/Memory) plus a
+   "Configure" trigger that opens the other six (Model, Capabilities,
+   Channels, Connectors, Tools, Hardware) in this overlay. Nothing was
+   deleted or rewritten: GroupedRail.tsx (built for Settings) supplies the
+   nav, grouped Brain/Reach/Compute, and each section's existing tab
+   component renders completely unchanged inside .agent-configure-content —
+   same props, same markup, just a different parent element.
+
+   Deliberately a SHEET, not a second permanent column — the app already has
+   one permanent left rail (PrimaryRail.tsx); a second always-visible
+   vertical nav would compete with it for the same job. This is a centered
+   overlay over a dimmed, blurred backdrop that covers the full viewport
+   (including the primary rail, which is what "dims the rail" means here),
+   deliberately echoing fleet-theme.css's own .fleet-detail-backdrop/
+   .fleet-detail numbers (80vw, 16px radius, the same 32px/80px shadow) —
+   the "ChatGPT-settings, centered modal" language this app already
+   established for the agent-detail page before it became a routed page —
+   rather than inventing a new modal vocabulary. New file, not
+   fleet-theme.css: fleet-theme.css is owned by a concurrent dark-mode pass
+   this branch must not touch, so every color here is a var(--…) read from
+   theme-tokens.css (untouched, read-only) and both themes fall out of that
+   for free. */
+
+.agent-configure-backdrop {
+  position: fixed;
+  inset: 0;
+  /* Above the primary rail (fleet-theme.css: 70) and its mobile scrim (65),
+     below the command palette (100) — Cmd+K opening over an open Configure
+     sheet should still win, same as it wins over every other in-page
+     dialog. */
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(12px);
+  animation: fleet-fade var(--dur-2) var(--ease-out);
+}
+
+.agent-configure-sheet {
+  position: relative;
+  width: 80vw;
+  max-width: 1040px;
+  height: 80vh;
+  max-height: 780px;
+  min-height: 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fleet-modal-in var(--dur-2) var(--ease-out);
+}
+
+@media (max-width: 720px) {
+  .agent-configure-sheet {
+    width: 100%;
+    max-width: calc(100vw - 24px);
+    height: 88vh;
+    max-height: none;
+  }
+
+  /* GroupedRail collapses to a horizontal strip below 720px on its own
+     (grouped-rail.css) — but that only changes ITS internal layout. Left
+     as a plain flex row, .agent-configure-body still sat the strip and
+     the content pane SIDE BY SIDE, squeezing both into slivers (verified
+     in-browser at 390px: the strip floated mid-sheet and the tab content
+     was pushed out of view entirely). Stacking to a column here is the
+     other half of that same breakpoint — strip on top, content below,
+     each full width. */
+  .agent-configure-body {
+    flex-direction: column;
+    padding: 16px;
+    gap: 12px;
+    overflow-y: auto;
+  }
+
+  .agent-configure-content {
+    height: auto;
+    overflow: visible;
+    padding: 4px 0 0;
+  }
+}
+
+.agent-configure-header {
+  position: relative;
+  flex-shrink: 0;
+  padding: 20px 52px 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-configure-title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+.agent-configure-subtitle {
+  margin: 2px 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.agent-configure-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  padding: 20px 24px;
+  gap: 24px;
+}
+
+/* Mirrors .fleet-detail-body's own box model exactly (fleet-theme.css) so a
+   tab moved in here looks pixel-identical to how it looked as a top-level
+   tab — same 28px pad, same reading-measure cap on its one root child, same
+   scroll behavior. Tabs that bring their own inner scroll region
+   (HardwareTab's .fleet-detail-pad) nest inside this unchanged, same as
+   they already do inside .fleet-detail-body today. */
+.agent-configure-content {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 28px;
+}
+
+.agent-configure-content > * {
+  max-width: var(--content-max);
+  margin-inline: auto;
+}
+
+/* Trigger button in the top-tab strip — plain .fleet-btn plus a quiet
+   "this is currently open" state, same neutral-wash language as every
+   other active-state in this file (.fleet-detail-toptab.is-active,
+   .grouped-rail-item.is-active) — never --accent, which stays reserved for
+   the single primary action per view. */
+.agent-configure-trigger[aria-expanded="true"] {
+  background: var(--rail-active);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}

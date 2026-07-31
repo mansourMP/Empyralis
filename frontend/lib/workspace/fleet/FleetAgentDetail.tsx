@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useRouter, usePathname } from "next/navigation";
 import {
   Brain,
   Check,
@@ -20,6 +21,7 @@ import {
   Play,
   Plug,
   Radio,
+  Settings,
   Sparkles,
   Square,
   Trash2,
@@ -33,6 +35,7 @@ import { WorkTab } from "./tabs/WorkTab";
 import { HardwareTab } from "./tabs/HardwareTab";
 import { MemoryTab } from "./tabs/MemoryTab";
 import { AgentChat } from "./AgentChat";
+import { GroupedRail, type GroupedRailGroup } from "./GroupedRail";
 
 import {
   resumeFleetAgent,
@@ -64,6 +67,8 @@ import { ConnectorPicker } from "./ConnectorPicker";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { providerLabel } from "./fleet-provider-constants";
 import { RUNTIME_LABELS } from "./gateway-box-picker";
+
+import "./agent-configure-sheet.css";
 
 /** Single source of truth for "what should this agent's Model summary say" —
  *  used by both the sidebar's permanent one-line Model row and the Model
@@ -163,13 +168,15 @@ function isChannelConnected(
 
 type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "capabilities" | "chat";
 
-// "model" sits right after "overview" (was 7th of 8, second-to-last) — a
-// live complaint was "where is the button that says choose the model and
-// its reasoning??" .fleet-detail-toptabs scrolls horizontally with NO
-// visible scrollbar (fleet-theme.css — only a fade cue on mobile), so a tab
-// this far right was easy to miss entirely, not just easy to overlook.
-// Model/brain choice is foundational setup, not a deep-cut settings page —
-// it belongs near the front, same tier as Overview.
+// Single source of id/label/icon truth for every one of the nine sections —
+// both the permanent top strip (three of these, TOP_TAB_IDS below) and the
+// Configure sheet's GroupedRail groups (the other six, CONFIGURE_GROUPS
+// below) read labels/icons from here so neither surface can drift from the
+// other. Nine ids remain valid [tab] route segments regardless of which
+// surface renders them (VALID_TABS, [tab]/page.tsx) — collapsing the tab
+// BAR from nine to three is a rendering change, not a routing one. Order
+// here no longer drives on-screen order (each surface picks its own
+// members/grouping explicitly by id below), so it's just declaration order.
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
   { id: "model", label: "Model", icon: Sparkles },
@@ -181,6 +188,26 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "hardware", label: "Hardware", icon: Cpu },
   { id: "memory", label: "Memory", icon: Brain },
 ];
+
+// The three you actually watch day to day — permanent top strip. Everything
+// else (six ids below) moved into the Configure sheet, opened by the
+// trigger button next to this strip; nothing was deleted (founder: "the
+// rest must not be deleted"), it just isn't equal-billing top-level nav
+// anymore (UI-CONTRACT: "a surface must earn its place").
+const TOP_TAB_IDS = new Set<TabId>(["overview", "work", "memory"]);
+
+// Configure sheet groups — BRAIN (what it thinks with) / REACH (how it's
+// reached, and what it can reach out to) / COMPUTE (what it runs on).
+// Rendered via GroupedRail, the same component Settings uses, per the
+// design's whole point: one rail component, two callers, not a rail built
+// twice. Order within each group is the order the old flat tab strip had
+// them in.
+const CONFIGURE_GROUPS: { id: string; label: string; tabs: TabId[] }[] = [
+  { id: "brain", label: "Brain", tabs: ["model", "capabilities"] },
+  { id: "reach", label: "Reach", tabs: ["channels", "connectors", "tools"] },
+  { id: "compute", label: "Compute", tabs: ["hardware"] },
+];
+const CONFIGURE_TAB_IDS = new Set<TabId>(CONFIGURE_GROUPS.flatMap((g) => g.tabs));
 
 // Same localStorage-persisted-collapse idiom as the primary rail's
 // COLLAPSED_KEY (fleet-preferences.ts) — a distinct key because this is a
@@ -425,6 +452,25 @@ export function FleetAgentDetail({
     [onTabChange],
   );
 
+  // Whether the Configure sheet is open — derived from the URL's own
+  // activeTab on every render, same rule as activeTab itself (see the
+  // comment above it, ~line 296): no local open/closed state to desync.
+  // Cold-loading /agents/{id}/tools lands here with initialTab="tools"
+  // already resolved, so this is true on first paint, not after a second
+  // click — the sheet opens on the right section immediately.
+  const sheetOpen = CONFIGURE_TAB_IDS.has(activeTab);
+
+  // This route is always .../agents/[agentId]/[tab] (the only place this
+  // component is mounted) — the last path segment IS the tab id, so a link
+  // to a different tab is a plain string-swap of that last segment, no
+  // projectId prop-threading needed to reconstruct
+  // /w/{ws}/projects/{proj}/agents/{id}/{tab} from scratch. Used for both
+  // the (now three) top tabs and the Configure sheet's GroupedRail items —
+  // real hrefs so cmd-click/middle-click open a new tab, per the "primary
+  // navigation is real links" rule GroupedRail.tsx itself already follows.
+  const pathname = usePathname();
+  const tabHref = useCallback((tab: TabId) => pathname.replace(/\/[^/]+$/, `/${tab}`), [pathname]);
+
   // Esc returns to wherever the user came from (browser back) — not a
   // hardcoded destination, so the flat /agents list, a project's list, or
   // any other referrer all restore correctly. Skipped while typing (so it
@@ -447,8 +493,10 @@ export function FleetAgentDetail({
   // it on <body> — the active tab pill, since it's already the natural next
   // stop for arrow/tab navigation. Only on first mount, not on every tab
   // switch (activeTab already tracks the URL; native click/router
-  // navigation already handles focus for those).
-  const activeTabRef = useRef<HTMLButtonElement | null>(null);
+  // navigation already handles focus for those). Now a <Link> (real anchor),
+  // not a <button> — same "primary navigation is real links" move as the
+  // Configure sheet's GroupedRail items, so the ref target is an anchor.
+  const activeTabRef = useRef<HTMLAnchorElement | null>(null);
   useEffect(() => {
     activeTabRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -462,6 +510,15 @@ export function FleetAgentDetail({
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeTab]);
+
+  // Configure sheet's own mount focus — the cold-load-into-a-grouped-tab
+  // case (/agents/{id}/tools) never assigns activeTabRef above (none of the
+  // three top tabs is active), so without this, focus would fall through to
+  // <body> instead of landing somewhere deliberate inside the sheet.
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (sheetOpen) sheetRef.current?.focus();
+  }, [sheetOpen]);
 
   // Permanent — space is ALWAYS reserved, a real flex sibling of the tab
   // body, never an overlay/toggle (that pattern stays on LIST pages only;
@@ -585,25 +642,47 @@ export function FleetAgentDetail({
             right edge, before the toggle button starts. */}
         <div className="fleet-detail-toptabs-wrap">
           <nav className="fleet-detail-toptabs" aria-label="Agent sections">
-            {TABS.map((tab) => {
+            {/* The three you actually watch day to day — TOP_TAB_IDS. Real
+                <Link>s (not onClick buttons) with `replace` so cmd-click/
+                middle-click open a new tab while ordinary clicks keep the
+                existing no-history-entry-per-tab behavior (router.replace,
+                same as onTabChange always did). */}
+            {TABS.filter((tab) => TOP_TAB_IDS.has(tab.id)).map((tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
               return (
-                <button
+                <Link
                   key={tab.id}
+                  href={tabHref(tab.id)}
+                  replace
                   ref={isActive ? activeTabRef : undefined}
-                  type="button"
                   className={`fleet-detail-toptab${isActive ? " is-active" : ""}`}
-                  onClick={() => selectTab(tab.id)}
                   aria-current={isActive ? "page" : undefined}
                 >
                   <Icon size={15} strokeWidth={1.75} />
                   <span>{tab.label}</span>
-                </button>
+                </Link>
               );
             })}
           </nav>
         </div>
+        {/* Opens the Configure sheet (below) on the other six sections —
+            Model, Capabilities, Channels, Connectors, Tools, Hardware —
+            grouped Brain/Reach/Compute via the same GroupedRail Settings
+            uses. Real link: closed, it goes to the first Brain item
+            (Model); already open, it points at whatever section is active,
+            so a second click/cmd-click is a same-URL no-op rather than a
+            jump back to Model. */}
+        <Link
+          href={tabHref(sheetOpen ? activeTab : CONFIGURE_GROUPS[0].tabs[0])}
+          replace
+          className="fleet-btn agent-configure-trigger"
+          aria-haspopup="dialog"
+          aria-expanded={sheetOpen}
+        >
+          <Settings size={14} strokeWidth={1.75} />
+          <span className="fleet-btn-label">Configure</span>
+        </Link>
         <button
           type="button"
           className="fleet-icon-btn fleet-detail-properties-rail-toggle"
@@ -635,6 +714,11 @@ export function FleetAgentDetail({
           see propertiesContent above). */}
       <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
+          {/* Only the three top-level tabs (plus Chat, reached via
+              onChat/"Chat with this agent" rather than this bar) render
+              here now. The other six render inside the Configure sheet
+              below — configureSheet — same components, same props, moved
+              rather than duplicated. */}
           {activeTab === "overview" && (
             <OverviewTab
               workspaceId={workspaceId}
@@ -649,22 +733,6 @@ export function FleetAgentDetail({
             />
           )}
           {activeTab === "work" && <WorkTab workspaceId={workspaceId} agentId={agentId} agent={agent} onAgentChanged={onRenamed} />}
-          {activeTab === "channels" && (
-            <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} />
-          )}
-          {activeTab === "connectors" && (
-            <ConnectorsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
-          )}
-          {activeTab === "tools" && (
-            <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
-          )}
-          {activeTab === "capabilities" && (
-            <CapabilitiesTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
-          )}
-          {activeTab === "hardware" && (
-            <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
-          )}
-          {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />}
           {activeTab === "memory" && (
             <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
           )}
@@ -679,6 +747,90 @@ export function FleetAgentDetail({
       </div>
     </>
   );
+
+  // Configure sheet — the other six sections (Model, Capabilities,
+  // Channels, Connectors, Tools, Hardware). Same tab components as the
+  // switch above used to render directly, completely unchanged (same
+  // props, same markup) — just called from here instead, since activeTab
+  // being one of these six is exactly what CONFIGURE_TAB_IDS/sheetOpen
+  // means. GroupedRail is the same component Settings uses (SettingsShell.
+  // tsx); `replace` (see GroupedRail.tsx) keeps switching sections inside
+  // the sheet from piling up back-button stops, matching the top tabs'
+  // own replace-not-push navigation just above.
+  const configureGroups: GroupedRailGroup[] = CONFIGURE_GROUPS.map((group) => ({
+    id: group.id,
+    label: group.label,
+    items: group.tabs.map((id) => {
+      const def = TABS.find((t) => t.id === id)!;
+      return { id: def.id, label: def.label, icon: def.icon, href: tabHref(def.id) };
+    }),
+  }));
+
+  // Closing goes to Overview — the natural top-level default — mirroring
+  // [tab]/page.tsx's own convention of coercing an unresolved/invalid tab to
+  // "overview" (see its rawTab comment). Same selectTab→onTabChange→
+  // router.replace path every other tab switch in this file already uses,
+  // not a one-off router call.
+  const closeSheet = () => selectTab("overview");
+
+  const configureSheet = sheetOpen ? (
+    <div className="agent-configure-backdrop" onClick={closeSheet}>
+      <div
+        ref={sheetRef}
+        className="agent-configure-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Configure ${agent?.label || "agent"}`}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          // Every keydown here stops before it reaches `window` — not just
+          // Escape — so it can never reach PrimaryRail's global g-then-key
+          // chord listener or this page's own onPageKeyDown (Esc-returns-
+          // to-referrer) above. Typing in a text field inside the sheet, or
+          // just having focus land on a button in here, must not fire rail
+          // navigation. Same stopPropagation-on-the-dialog-root convention
+          // this file's other nested dialogs already use (.fleet-channel-
+          // banner below) and TasksBoard.tsx/TasksGroupedList.tsx use for
+          // their own popovers.
+          e.stopPropagation();
+          if (e.key === "Escape") {
+            e.preventDefault();
+            closeSheet();
+          }
+        }}
+      >
+        <div className="agent-configure-header">
+          <h2 className="agent-configure-title">Configure</h2>
+          <p className="agent-configure-subtitle">{agent?.label || "Agent"}</p>
+          <button type="button" className="fleet-detail-close" onClick={closeSheet} aria-label="Close">
+            <X size={16} strokeWidth={1.75} />
+          </button>
+        </div>
+        <div className="agent-configure-body">
+          <GroupedRail groups={configureGroups} activeId={activeTab} ariaLabel="Configure agent" replace />
+          <div className="agent-configure-content">
+            {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />}
+            {activeTab === "capabilities" && (
+              <CapabilitiesTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
+            )}
+            {activeTab === "channels" && (
+              <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} />
+            )}
+            {activeTab === "connectors" && (
+              <ConnectorsTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
+            )}
+            {activeTab === "tools" && (
+              <ToolsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
+            )}
+            {activeTab === "hardware" && (
+              <HardwareTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <>
@@ -710,6 +862,7 @@ export function FleetAgentDetail({
       >
         {inner}
       </div>
+      {configureSheet}
     </>
   );
 }
