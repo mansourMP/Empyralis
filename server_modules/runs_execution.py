@@ -5540,6 +5540,109 @@ def _resolve_dag_order(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [node_map[nid] for nid in ordered_ids]
 
 
+def _execute_orion_result_via_agent_engine(
+    *,
+    run_id: str,
+    context: Dict[str, Any],
+    log_queue: queue.Queue,
+    user_goal: str,
+    plan_text: str,
+) -> tuple[str, List[Dict[str, Any]], str]:
+    """MAN-129/MAN-135: the 'standard' Orion DAG (no workflow_id, no
+    outcome_pack -- the shape _compile_orion_dag falls back to for any bare
+    open-ended goal, which is EVERY scheduler-woken heartbeat/wake-request
+    turn, since build_heartbeat_turn_request never sets workflow_id or
+    outcome_pack) used to generate this node's result with a second,
+    independent generate_with_candidate_failover call -- a raw text
+    completion with no tool list, no connector access, nothing -- whose own
+    prompt told the model to report "What Empyralis did". An agent woken by
+    the scheduler could not act, and then narrated action it never took.
+    That's MAN-129: worse than a failure, because a failure is honest.
+
+    Fix (MAN-135): route this node's generation through the SAME
+    tool-capable engine every channel (Telegram/WhatsApp/Slack/Discord/...)
+    and console/web chat already use for real work --
+    execute_sage_turn -> handle_sage_chat -> _run_sage_action_loop_v3 ->
+    direct_chat_generation_service.stream_provider_backed_direct_chat --
+    instead of a second context-free text completion. That engine has a
+    real tool loop (MCP/connector/memory/hardware tools), enforces the
+    platform's authority-tier tool gating, applies its own MAN-144 per-run
+    cost ceiling, and -- unlike generate_with_candidate_failover -- runs
+    tool_honesty_guard against its own tool trace before returning a reply,
+    so a claim of work with no matching trace entry is caught and corrected
+    right there, not just reported after the fact.
+
+    plan_generate/plan_approval upstream are UNCHANGED: this node still
+    only runs after the plan text has been generated and (if the action
+    policy required it) a human has already approved via
+    wait_for_human_decision -- only what happens once execution is actually
+    authorized has changed, not the gate itself.
+
+    Scope: this fixes every run that reaches the 'standard' DAG shape (bare
+    goal, no workflow_id, no outcome_pack) -- heartbeat ticks, task_assigned
+    wakeups, and any other explicit background run started with just a goal
+    string. It does NOT touch workflow_graph_execute (already tool-capable
+    via its own declarative node executors) or outcome_pack runs (already
+    tool-capable via execute_outcome_pack), and it does not touch
+    direct_chat_service.py / turn_runtime.py at all, so console/web chat and
+    every channel are unaffected.
+    """
+    from server_modules.sage_agent_runtime_contract import SAGE_MODE
+    from server_modules.sage_turn_adapter import execute_sage_turn
+
+    workspace_id = _workflow_tool_workspace_id(context)
+    tenant_id = _workflow_tool_tenant_id(context) or ""
+    execute_input = (
+        f"User Goal: {user_goal}\n\n"
+        f"Execution Plan:\n{plan_text}\n\n"
+        "Execute this now using whatever tools you actually have available. "
+        "When you are done (or if you determine no tool action is needed or "
+        "possible), report back concisely and operationally:\n"
+        "1) What you actually did this turn (only real actions you took --"
+        " never describe something you did not do)\n"
+        "2) What you need from the user, if anything\n"
+        "3) Next immediate steps"
+    )
+    # Scoped to this run, not "sage-main" -- an autonomous background run's
+    # execution turn must not interleave with (or silently borrow history
+    # from) the owner's live console/channel conversation thread.
+    thread_id = f"orion-run:{run_id}"
+    sage_result = asyncio.run(
+        execute_sage_turn(
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            message=execute_input,
+            surface="chat",
+            mode=SAGE_MODE,
+            channel_origin="orion_run",
+            thread_id=thread_id,
+            request_id=run_id,
+        )
+    )
+    reply_text = str(getattr(sage_result, "message", "") or "").strip()
+    error_text = str(getattr(sage_result, "error", "") or "").strip()
+    tool_calls = [
+        dict(entry) for entry in list(getattr(sage_result, "tool_calls", None) or []) if isinstance(entry, dict)
+    ]
+    if not reply_text and error_text:
+        # Same principle as _honest_no_provider_error elsewhere in this
+        # file: a failure here must raise, not fabricate a plausible-looking
+        # success. run_orion_mission's existing retry/failure handling picks
+        # this up exactly like a generate_with_candidate_failover failure
+        # used to.
+        raise RuntimeError(f"Empyralis run's execution turn failed: {error_text}")
+    for entry in tool_calls:
+        emit_log(
+            log_queue,
+            "info",
+            f"Tool used: {entry.get('name') or 'tool'} ({entry.get('status') or 'unknown'})",
+            event="orion_tool_call",
+            data=entry,
+        )
+    emit_log(log_queue, "info", reply_text, event="orion_result")
+    return reply_text, tool_calls, execute_input
+
+
 def _execute_orion_dag_node(
     run_id: str,
     context: Dict[str, Any],
@@ -5810,20 +5913,13 @@ def _execute_orion_dag_node(
 
     if kind == "result_generate":
         plan_text = str(state.get("plan_text") or "")
-        execute_input = (
-            f"User Goal: {user_goal}\n\n"
-            f"Execution Plan:\n{plan_text}\n\n"
-            "Now return:\n"
-            "1) What Empyralis did\n"
-            "2) What Empyralis needs from user\n"
-            "3) Next immediate steps\n"
-            "Keep the response concise and operational."
+        result_text, tool_calls, execute_input = _execute_orion_result_via_agent_engine(
+            run_id=run_id,
+            context=context,
+            log_queue=log_queue,
+            user_goal=user_goal,
+            plan_text=plan_text,
         )
-        execute_prompt = ORION_OPERATOR_SYSTEM_PROMPT
-        result_text = generate_with_candidate_failover(
-            state, context, log_queue, execute_prompt, execute_input, run_id=run_id
-        )
-        emit_log(log_queue, "info", result_text, event="orion_result")
         final_text = (
             "Execution Plan\n"
             f"{plan_text}\n\n"
@@ -5833,7 +5929,8 @@ def _execute_orion_dag_node(
         state["execute_input"] = execute_input
         state["result_text"] = result_text
         state["final_text"] = final_text
-        return {"chars": len(final_text)}
+        state["result_tool_calls"] = tool_calls
+        return {"chars": len(final_text), "tool_calls": len(tool_calls)}
 
     if kind == "usage_finalize":
         provider = str(state.get("provider") or "openai")
@@ -5857,7 +5954,16 @@ def _execute_orion_dag_node(
         )
         emit_log(log_queue, "info", "Empyralis run completed.", event="run_complete")
         state["final_result_text"] = final_text
-        state["final_result_data"] = None
+        # MAN-129/MAN-135: surface the real tool trace (if result_generate
+        # ran through the tool-capable agent engine) onto the run's public
+        # result_data, so "did this run actually use a tool" is answerable
+        # from run["result_data"]["tool_calls"] without grepping logs. None
+        # (unchanged) for any run that never populated result_tool_calls --
+        # e.g. pack/workflow-graph DAGs, which set their own result_data.
+        result_tool_calls = state.get("result_tool_calls")
+        state["final_result_data"] = (
+            {"tool_calls": list(result_tool_calls)} if result_tool_calls else None
+        )
         state["final_usage"] = usage
         return {"done": True}
 
