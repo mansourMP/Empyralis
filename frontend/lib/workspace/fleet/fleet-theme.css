@@ -7567,32 +7567,45 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    Two shapes, picked per dialog, never mixed (contract rule: "pick one
    shape per dialog; don't mix a sheet's silhouette with a dialog's
    footer"):
-     - The wizard is substantial (4 steps, "steps navigable" in the spec)
-       → full-screen sheet, fixed height so a short step (Placement, 3
-       options) doesn't read as "mostly empty backdrop" — the CTA row
-       still pins to the sheet's own true bottom edge either way, but a
-       fixed (not content-hugging) sheet height keeps that edge in a
-       consistent place step to step.
-     - New-project and the channel-connect banner are one screen each (a
-       name field; a token field) → centered floating dialog, full width
-       within a comfortable margin, rounded on all four corners. Forcing
-       these into a sheet shell left a tall dead gap of backdrop above a
-       small card — the exact failure mode this section exists to name. */
+     - Substantial content (the wizard's 4 navigable steps; the project
+       composer's heading-sized name + dominant description body)
+       → full-screen sheet, fixed height so a short screen doesn't read as
+       "mostly empty backdrop" — the CTA row still pins to the sheet's own
+       true bottom edge either way, but a fixed (not content-hugging) sheet
+       height keeps that edge in a consistent place screen to screen.
+     - The channel-connect banner is one screen (a single token field) →
+       centered floating dialog, full width within a comfortable margin,
+       rounded on all four corners. Forcing it into a sheet shell would
+       leave a tall dead gap of backdrop above a small card — the exact
+       failure mode this section exists to name. (The project composer used
+       to be this shape too, back when it was just a name field — now that
+       it's a full "paper" composer it belongs with the wizard above.) */
 @media (max-width: 768px) {
   .fleet-detail-backdrop {
     align-items: center;
     padding: 20px;
   }
-  .fleet-detail-backdrop:has(.fleet-wizard) {
+  .fleet-detail-backdrop:has(.fleet-wizard),
+  .fleet-detail-backdrop:has(.fleet-project-composer) {
     align-items: flex-end;
     padding: 0;
   }
 
-  .fleet-wizard {
+  .fleet-wizard,
+  .fleet-project-composer {
     width: 100%;
     max-width: 100%;
     height: 88dvh;
     border-radius: 16px 16px 0 0;
+  }
+  .fleet-project-composer-name {
+    font-size: 26px;
+    padding: 18px 0 8px;
+  }
+  .fleet-project-composer-body,
+  .fleet-project-composer-error {
+    padding-left: 20px;
+    padding-right: 20px;
   }
   .fleet-small-dialog,
   .fleet-channel-banner {
@@ -8884,6 +8897,96 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   transition: transform var(--dur-1) var(--ease-out);
 }
 .fleet-composer-switch.is-on .fleet-composer-switch-knob { transform: translateX(9px); }
+
+/* Visually hidden, screen-reader-only — for a real h1/h2 that a visual
+   design deliberately doesn't render as text (CLAUDE.md craft doctrine:
+   "real heading structure, not styled divs" — this is the escape hatch for
+   when the heading's own text is communicated some other way, e.g. a big
+   placeholder input standing in for it visually). Generic, not scoped to
+   one component. */
+.fleet-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Project composer — full-panel "paper" composer ───────────────────────
+   Same paper philosophy as the task composer just above (.fleet-composer-*:
+   bare text entry, no box, placeholder as the only label) but scaled up to
+   a near-full-viewport panel — Linear's own "New project" composer is a
+   page-sized surface, not a popover, and a project is a bigger, rarer
+   commitment than a task. Reuses .fleet-detail-backdrop (blur + centered
+   scrim, already shared by the agent-detail modal) and every
+   .fleet-composer-* piece that doesn't need a bigger size (head/crumb/
+   close/title/desc-base/foot-via-.fleet-small-dialog-footer/error-base) —
+   only the panel's own dimensions and the name/description type scale are
+   new here.
+
+   No property-chips row: FleetCreateProjectRequest (routes_fleet.py)
+   accepts exactly name + description, so unlike the task composer there is
+   nothing real to put in a chips row (see NewProjectDialog's own comment
+   in projects/page.tsx for the full accounting). */
+.fleet-project-composer {
+  width: min(92vw, 1180px);
+  height: min(88vh, 900px);
+  max-width: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 32px 80px -32px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  animation: fleet-modal-in var(--dur-2) var(--ease-out);
+}
+
+.fleet-project-composer-head {
+  padding: 20px 20px 0 24px;
+}
+
+.fleet-project-composer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 40px 8px;
+}
+
+/* Name — the heading. Placeholder ("Project name") IS the label, exactly
+   like the task composer's title, just a full step up in size: this is the
+   one and only heading-weight element on the panel. */
+.fleet-project-composer-name {
+  font-size: 32px;
+  font-weight: var(--weight-semibold);
+  line-height: 1.3;
+  padding: 24px 0 10px;
+}
+
+/* Description — the dominant body, not an afterthought textarea. Grows to
+   fill whatever room the panel has above the footer. */
+.fleet-project-composer-desc {
+  flex: 1;
+  min-height: 220px;
+  font-size: 14px;
+  line-height: 1.6;
+  padding: 6px 0 24px;
+}
+
+.fleet-project-composer-error {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 40px 12px;
+  font-size: 12px;
+  color: var(--offline-text);
+}
 
 /* ── Label dots ─────────────────────────────────────────────────────────────
    `color` on a label is a palette TOKEN NAME from the server

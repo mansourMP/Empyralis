@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { Bot, Loader2 } from "lucide-react";
+import { Bot, Loader2, X } from "lucide-react";
 
-import { useFleetAgents, useFleetProjects, type FleetProject } from "@/lib/workspace/fleet/fleet-data";
+import { useFleetAgents, useFleetProjects, useFleetWorkspace, type FleetProject } from "@/lib/workspace/fleet/fleet-data";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { breadcrumbCount, deriveStatus, findSageAgent, formatNumber, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
@@ -365,6 +365,30 @@ function sortProjects(projects: FleetProject[], sort: SortMode, stats: Map<strin
   return list;
 }
 
+/**
+ * Full-panel project composer (replaces the old label-over-input small
+ * dialog — founder's read: "mine looks like a table that I have to fill").
+ * Same "paper, not a form" philosophy TaskComposer already established
+ * (.fleet-composer-title/-desc: bare text entry, no border, placeholder as
+ * the only label — see TaskComposer.tsx's own header comment for the full
+ * rationale), just scaled to a near-full-viewport panel instead of a 640px
+ * popover: a project is a bigger, rarer commitment than a task, and
+ * Linear's own composer reads as a page, not a card.
+ *
+ * FleetCreateProjectRequest (server_modules/routes_fleet.py) accepts
+ * exactly two fields: name and description. The `projects` table
+ * (server_modules/control_plane_repository.py) has no status/priority/
+ * lead/members/start/target/labels/dependencies/milestones column — icon
+ * and tint exist but are assigned deterministically from the new row's id
+ * server-side and were deliberately never made user-choosable (see
+ * fleet-project-identity.ts's own comment on why the tint picker was
+ * removed: "There is no picker anywhere for a human to choose it, so the
+ * hue was never a decision"). So unlike TaskComposer there is no
+ * property-chips row here — building chips for fields the backend
+ * silently drops would be exactly the "control whose own label admits it
+ * does nothing" CLAUDE.md rules out. Name (the heading) and description
+ * (the dominant body) are the whole surface.
+ */
 function NewProjectDialog({
   workspaceId,
   onClose,
@@ -378,9 +402,12 @@ function NewProjectDialog({
   const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  const { workspace } = useFleetWorkspace(workspaceId);
 
-  async function create() {
-    if (!name.trim()) return;
+  const create = useCallback(async () => {
+    const clean = name.trim();
+    if (!clean || busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -388,7 +415,7 @@ function NewProjectDialog({
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ name: name.trim(), description: description.trim() }),
+        body: JSON.stringify({ name: clean, description: description.trim() }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
@@ -398,40 +425,80 @@ function NewProjectDialog({
     } finally {
       setBusy(false);
     }
-  }
+  }, [busy, description, name, onCreated, workspaceId]);
 
   return (
-    <div className="fleet-detail-backdrop" onClick={onClose}>
-      <div className="fleet-small-dialog" role="dialog" aria-modal="true" aria-label="New project" onClick={(e) => e.stopPropagation()}>
-        <div className="fleet-small-dialog-header">
-          <div className="fleet-detail-section-title">New project</div>
+    <div
+      className="fleet-detail-backdrop"
+      onClick={onClose}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          onClose();
+        } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          void create();
+        }
+      }}
+    >
+      <div
+        className="fleet-project-composer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="New project"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="fleet-composer-head fleet-project-composer-head">
+          <span className="fleet-composer-crumb">
+            {workspace?.name ? <span className="fleet-composer-crumb-project">{workspace.name}</span> : null}
+            {workspace?.name ? <span aria-hidden>›</span> : null}
+            <span>New project</span>
+          </span>
+          <button type="button" className="fleet-composer-close" onClick={onClose} aria-label="Close">
+            <X size={16} strokeWidth={2} />
+          </button>
         </div>
-        <div className="fleet-small-dialog-body">
-          <div>
-            <label className="fleet-wizard-label">Name</label>
-            <input
-              className="fleet-wizard-input"
-              value={name}
-              onChange={(e) => setName(e.currentTarget.value)}
-              placeholder="e.g. Customer Support"
-              autoFocus
-            />
-          </div>
-          <div>
-            <label className="fleet-wizard-label">Description (optional)</label>
-            <input
-              className="fleet-wizard-input"
-              value={description}
-              onChange={(e) => setDescription(e.currentTarget.value)}
-              placeholder="What lives in this project?"
-            />
-          </div>
-          {error && <p className="fleet-channel-expand-error">{error}</p>}
+
+        <div className="fleet-project-composer-body">
+          {/* Real heading structure per CLAUDE.md craft doctrine — visually
+              hidden because the big name input directly below IS the
+              heading visually (its placeholder communicates intent exactly
+              like Linear's "Project name" gray placeholder), but a
+              dialog's accessible name still deserves a real h2, not just
+              aria-label on the wrapping div. */}
+          <h2 className="fleet-sr-only">New project</h2>
+          <input
+            ref={nameRef}
+            className="fleet-composer-title fleet-project-composer-name"
+            value={name}
+            onChange={(e) => setName(e.currentTarget.value)}
+            placeholder="Project name"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+                e.preventDefault();
+                void create();
+              }
+            }}
+          />
+          <textarea
+            className="fleet-composer-desc fleet-project-composer-desc"
+            value={description}
+            onChange={(e) => setDescription(e.currentTarget.value)}
+            placeholder="Write a description, a project brief, or collect ideas…"
+          />
         </div>
+
+        {error ? (
+          <p className="fleet-project-composer-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+
         <div className="fleet-small-dialog-footer">
           <button type="button" className="fleet-btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={create} disabled={busy || !name.trim()}>
-            {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Create"}
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => void create()} disabled={busy || !name.trim()}>
+            {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : "Create project"}
           </button>
         </div>
       </div>
