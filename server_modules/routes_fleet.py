@@ -660,6 +660,12 @@ async def fleet_patch_task(
             priority=body.priority,
             due_at=body.due_at,
             clear_due_at=body.clear_due_at,
+            # Review attribution (pure stamp, never a gate): this route is
+            # the board-drag / detail-view status row, always a human
+            # acting through the authenticated session -- never an agent,
+            # which reaches update_task through the project_task__update
+            # tool in skills_service.py instead.
+            actor_user_id=str((current_user or {}).get("user_id") or "").strip() or None,
         )
         if task is None:
             return {"ok": False, "error": "Task not found."}
@@ -802,6 +808,83 @@ async def fleet_comment_task(
             body=body.body,
         )
         return {"ok": True, **result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ── Per-user notifications (MAN-146): a NEW, additive surface -- NOT the
+# same thing as GET /notifications (runtime_events_api.py), which is a
+# SQLite-backed, workspace-wide activity feed spanning many unrelated event
+# types (machine events, channel deliveries, etc.) with its own SSE
+# streaming and read-state machinery. Retrofitting recipient scoping onto
+# that endpoint would mean understanding and safely modifying a much
+# larger, differently-architected, currently-live subsystem outside a
+# single safe pass. This route is scoped from day one -- every query
+# carries `recipient_user_id = current_user` IN ADDITION TO the workspace
+# scoping every other route in this file already enforces (see
+# task_notification_service.py's own module docstring for why that
+# doubling matters: RLS alone only proves tenant/workspace isolation, not
+# that member A can't read member B's inbox). A future frontend
+# consolidation pass is the right place to decide whether the legacy feed
+# is retired in favor of this one -- see task_notification_service.py's
+# docstring for the three existing unread mechanisms it should pick one
+# of.
+@router.get("/api/w/{workspace_id}/fleet/notifications")
+async def fleet_list_notifications(
+    request: Request,
+    workspace_id: str,
+    limit: int = Query(50, description="Max notifications to return (newest first)"),
+    unread_only: bool = Query(False, description="Only notifications with no read_at"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """The caller's OWN notification feed -- mentions, assignments, and
+    comments on tasks they own, newest first. `viewer` is enough: reading
+    your own inbox is not a privileged action, the same tier fleet_list_
+    tasks itself uses for reads."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    from server_modules import task_notification_service
+
+    try:
+        items = await task_notification_service.list_notifications(
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            recipient_user_id=str((current_user or {}).get("user_id") or "").strip(),
+            limit=limit,
+            unread_only=unread_only,
+        )
+        return {"ok": True, "notifications": items}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "notifications": []}
+
+
+@router.post("/api/w/{workspace_id}/fleet/notifications/{notification_id}/read")
+async def fleet_mark_notification_read(
+    request: Request,
+    workspace_id: str,
+    notification_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Marks exactly one of the CALLER's own notifications read.
+    task_notification_service.mark_notification_read's own WHERE clause
+    requires recipient_user_id = the caller, so this route cannot be used
+    to mark someone else's notification read even by guessing/reusing an
+    id -- there is no separate ownership check needed here beyond passing
+    the authenticated caller's own user_id through."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    from server_modules import task_notification_service
+
+    try:
+        notification = await task_notification_service.mark_notification_read(
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            recipient_user_id=str((current_user or {}).get("user_id") or "").strip(),
+            notification_id=notification_id,
+        )
+        if notification is None:
+            return {"ok": False, "error": "Notification not found."}
+        return {"ok": True, "notification": notification}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 

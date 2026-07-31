@@ -759,6 +759,24 @@ CREATE TABLE IF NOT EXISTS project_tasks (
         CONSTRAINT project_tasks_single_assignee_check
         CHECK (assignee_agent_id IS NULL OR assignee_user_id IS NULL),
     created_by TEXT NULL,
+    -- Review attribution: WHO closed this task, a pure stamp -- never a
+    -- gate (CLAUDE.md's "no approval system" law: an agent may still
+    -- self-close; this only records that it did). Two nullable columns,
+    -- same shape decision as assignee_user_id/assignee_agent_id just above
+    -- and for the identical reasons (a polymorphic id column cannot be
+    -- FK'd to two tables at once). project_tasks_service.update_task is
+    -- the ONE writer, and only ever on a genuine todo/in_review -> done
+    -- TRANSITION (never a no-op re-patch of an already-done task); it
+    -- clears all three the moment status leaves 'done' again. No backfill
+    -- -- every row that is 'done' today gets NULL/NULL/NULL, the honest
+    -- fact that nothing before this could ever have recorded it. See
+    -- migrations/add_task_completion_attribution.sql for the full
+    -- reasoning.
+    completed_by_user_id TEXT NULL REFERENCES users(id) ON DELETE SET NULL,
+    completed_by_agent_id TEXT NULL REFERENCES workspace_agent_installs(id) ON DELETE SET NULL
+        CONSTRAINT project_tasks_completed_by_single_actor_check
+        CHECK (completed_by_agent_id IS NULL OR completed_by_user_id IS NULL),
+    completed_at TIMESTAMPTZ NULL,
     due_at TIMESTAMPTZ NULL,
     plan JSONB NOT NULL DEFAULT '[]'::jsonb,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -808,6 +826,43 @@ CREATE TABLE IF NOT EXISTS project_task_labels (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (task_id, label_id)
 );
+
+-- Per-user notifications (MAN-146): a recipient-addressed record of
+-- "someone @-mentioned you", "a task was assigned to you", or "someone
+-- commented on a task you own" -- the three events outbox_service.emit_
+-- notification_event's tenant/workspace-only OutboxEvent cannot address to
+-- a specific person, which is why GET /notifications broadcasts every
+-- mention to the whole workspace today. See migrations/add_task_
+-- notifications.sql for the full reasoning (why Postgres and not the
+-- SQLite runtime_state_store notification machinery, why recipient_user_id
+-- is NOT NULL + CASCADE, why RLS is safe to enable in the same migration
+-- that creates this table, and why read_at is the ONE unread mechanism a
+-- future frontend pass should consolidate onto).
+CREATE TABLE IF NOT EXISTS task_notifications (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_event_type TEXT NOT NULL
+        CONSTRAINT task_notifications_source_event_type_check CHECK (source_event_type IN (
+            'task_mention', 'task_assigned', 'task_comment'
+        )),
+    task_id TEXT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+    comment_id TEXT NULL,
+    actor_type TEXT NOT NULL DEFAULT 'system',
+    actor_id TEXT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    deep_link TEXT NULL,
+    read_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_notifications_recipient_feed
+    ON task_notifications(tenant_id, workspace_id, recipient_user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_task_notifications_recipient_unread
+    ON task_notifications(tenant_id, workspace_id, recipient_user_id)
+    WHERE read_at IS NULL;
 
 -- Bug reports (MAN-106): a small, honest "report an issue" entry point
 -- reachable from anywhere in the product via a rail icon button (see
@@ -4180,6 +4235,62 @@ async def ensure_control_plane_schema() -> Any:
                 "may still lack the `assignee_user_id` column, which will fail every "
                 "task read and write. Apply migrations/add_task_human_assignee.sql "
                 "manually.",
+                exc,
+            )
+        # ── Review attribution: project_tasks.completed_by_user_id /
+        # completed_by_agent_id / completed_at. Same reasoning as the
+        # assignee_user_id block directly above — the CREATE TABLE declares
+        # the columns, but it is `IF NOT EXISTS`, so a database provisioned
+        # before this change would never grow them and every task SELECT
+        # (which now names them explicitly via _TASK_COLUMNS) would fail
+        # outright. Same DDL as the standalone migrations/add_task_
+        # completion_attribution.sql — see it for why two separate nullable
+        # columns rather than a polymorphic pair, and for why this is safe
+        # against real rows (purely additive; every existing task lands on
+        # NULL/NULL/NULL, i.e. "no recorded completion", which is what all
+        # of them already are — nothing before this migration could ever
+        # have set it, even a row that is 'done' today).
+        #
+        # One atomic DO block, guarded so it can never crash bootstrap;
+        # idempotent (IF NOT EXISTS column adds, drop-then-re-add of stably
+        # named constraints).
+        try:
+            await pool.execute(
+                """
+                DO $$
+                BEGIN
+                    ALTER TABLE project_tasks
+                        ADD COLUMN IF NOT EXISTS completed_by_user_id TEXT NULL;
+                    ALTER TABLE project_tasks
+                        ADD COLUMN IF NOT EXISTS completed_by_agent_id TEXT NULL;
+                    ALTER TABLE project_tasks
+                        ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ NULL;
+                    ALTER TABLE project_tasks
+                        DROP CONSTRAINT IF EXISTS project_tasks_completed_by_user_id_fkey;
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_completed_by_user_id_fkey
+                        FOREIGN KEY (completed_by_user_id) REFERENCES users(id)
+                        ON DELETE SET NULL;
+                    ALTER TABLE project_tasks
+                        DROP CONSTRAINT IF EXISTS project_tasks_completed_by_agent_id_fkey;
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_completed_by_agent_id_fkey
+                        FOREIGN KEY (completed_by_agent_id) REFERENCES workspace_agent_installs(id)
+                        ON DELETE SET NULL;
+                    ALTER TABLE project_tasks
+                        DROP CONSTRAINT IF EXISTS project_tasks_completed_by_single_actor_check;
+                    ALTER TABLE project_tasks
+                        ADD CONSTRAINT project_tasks_completed_by_single_actor_check
+                        CHECK (completed_by_agent_id IS NULL OR completed_by_user_id IS NULL);
+                END $$;
+                """
+            )
+        except Exception as exc:  # noqa: BLE001 — never let this crash bootstrap
+            LOGGER.warning(
+                "project_tasks completed_by_* migration not applied (%s); the table "
+                "may still lack the completion-attribution columns, which will fail "
+                "every task read and write. Apply migrations/add_task_completion_"
+                "attribution.sql manually.",
                 exc,
             )
         # ── Labels: workspace_labels + project_task_labels. Unlike the three

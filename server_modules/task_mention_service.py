@@ -490,7 +490,7 @@ async def dispatch_resolved_mentions(
                 )
 
     if human_targets:
-        from server_modules import outbox_service
+        from server_modules import outbox_service, task_notification_service
 
         for mention in human_targets[:human_cap]:
             target_user_id = str(mention["id"])
@@ -513,6 +513,32 @@ async def dispatch_resolved_mentions(
                 notify_errors.append({"user_id": target_user_id, "error": str(exc)})
                 LOGGER.warning(
                     "Mention notification failed for user %s on task %s: %s", target_user_id, resolved_task_id, exc,
+                )
+            # MAN-146: the new recipient-addressed row, ALONGSIDE the
+            # workspace-broadcast emit_notification_event call above, not
+            # instead of it (see task_notification_service.py's own module
+            # docstring for why the broadcast is not removed here). Its own
+            # independent try/except -- a failure writing this row must
+            # never affect notified_user_ids/notify_errors' existing
+            # meaning, which some callers already depend on. Inherits this
+            # loop's own human_cap bound automatically; no second cap is
+            # invented for it.
+            try:
+                await task_notification_service.create_notification(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    recipient_user_id=target_user_id,
+                    source_event_type=task_notification_service.SOURCE_EVENT_MENTION,
+                    task_id=resolved_task_id,
+                    actor_type=resolved_author_type,
+                    actor_id=resolved_author_id,
+                    body=f'You were mentioned on "{resolved_title or resolved_task_id}"',
+                    deep_link=task_notification_service.task_deep_link(resolved_task_id),
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Recipient-addressed mention notification failed for user %s on task %s",
+                    target_user_id, resolved_task_id, exc_info=True,
                 )
 
     return {
