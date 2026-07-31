@@ -37,6 +37,16 @@ ceremony every customer leaves empty.
 **Non-owners never see personal or self-chat threads.** Conservative default,
 enforced without asking.
 
+**Conversations are private. Work is shared.** Multiplayer means teammates share
+issues, tasks, status and outcomes — never each other's agent transcripts. How a
+person talks to their agent is like their terminal scrollback: nobody reviews it
+and nobody wants it watched. Decided 2026-08-01 after looking at Conductor
+(YC, $22M Series A), which runs many agents per developer and still routes all
+collaboration through PRs and a Linear integration — no shared-chat surface
+exists in the funded competitor either. Anything that would put one person's
+agent conversation in front of a teammate is out of scope; put the artifact in
+the task instead.
+
 ## Craft doctrine
 
 - One accent colour, spent on the single primary action in a view. Everything
