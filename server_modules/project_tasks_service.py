@@ -210,7 +210,8 @@ MAX_SUBTASK_DEPTH = 1
 # un-migrated `priority` column break every read.
 _TASK_COLUMNS = (
     "id, tenant_id, workspace_id, project_id, title, description, status, priority, "
-    "parent_task_id, assignee_agent_id, assignee_user_id, created_by, due_at, plan, "
+    "parent_task_id, assignee_agent_id, assignee_user_id, created_by, "
+    "completed_by_user_id, completed_by_agent_id, completed_at, due_at, plan, "
     "metadata, created_at, updated_at"
 )
 
@@ -515,6 +516,18 @@ def _row_to_task(row: Any) -> Optional[Dict[str, Any]]:
             else None
         ),
         "created_by": str(r.get("created_by") or "").strip() or None,
+        # Review attribution -- a pure stamp, never a gate (CLAUDE.md's "no
+        # approval system" law). At most one of the two id columns is ever
+        # set (project_tasks_completed_by_single_actor_check backstops this
+        # at the storage layer; update_task's transition-detecting UPDATE
+        # never writes both). All three read as None on a database that has
+        # not yet had migrations/add_task_completion_attribution.sql
+        # applied, and on any task nothing has ever completed through this
+        # machinery -- the same deploy-before-migrate / no-backfill posture
+        # every sibling column on this row already takes.
+        "completed_by_user_id": str(r.get("completed_by_user_id") or "").strip() or None,
+        "completed_by_agent_id": str(r.get("completed_by_agent_id") or "").strip() or None,
+        "completed_at": str(r.get("completed_at") or "") or None,
         "due_at": str(due_at) if due_at else None,
         "plan": _coerce_plan(r.get("plan")),
         "metadata": _coerce_metadata(r.get("metadata")),
@@ -1086,6 +1099,8 @@ async def update_task(
     priority: Optional[Any] = None,
     due_at: Optional[Any] = None,
     clear_due_at: bool = False,
+    actor_user_id: Optional[str] = None,
+    actor_agent_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Generic patch -- title/description/status/priority/due_at only.
     Assignment has its own dedicated entry point (assign_task, below) since
@@ -1098,7 +1113,42 @@ async def update_task(
     urgent. Note that `priority=0` is a real, meaningful patch ("clear the
     priority") and is applied -- only `priority=None` means "leave it
     alone", which is why the parameter is None-defaulted rather than
-    0-defaulted."""
+    0-defaulted.
+
+    REVIEW ATTRIBUTION (a pure stamp, never a gate -- CLAUDE.md's "no
+    approval system" law: an agent may still self-close its own task, this
+    only ever records that it did). `actor_user_id`/`actor_agent_id` name
+    WHO is making this call -- routes_fleet.fleet_patch_task passes the
+    authenticated human's user_id, skills_service's `project_task__update`
+    tool passes the calling agent's install id, at most one of the two,
+    same shape as assign_task/assign_task_to_user's own mutual exclusivity.
+    A caller that omits both (an internal/system patch, e.g.
+    run_service.py's failure-path status flip to 'blocked') simply records
+    no identity -- honest, since none is known.
+
+    This function is the ONE place a `done` TRANSITION is detected, not a
+    blind "status == done => stamp it" rule: a caller can PATCH any subset
+    of fields at any time (a title edit, a priority bump), and most of
+    those calls never touch status at all. The UPDATE below compares the
+    incoming status against the row's own PRE-UPDATE status (every SET
+    expression in one UPDATE statement sees the same pre-statement row, the
+    same semantics `status = COALESCE($6, status)` already relies on) to
+    tell an actual not-done -> done transition apart from a no-op re-patch
+    of a task that was already done (which must not re-stamp a different
+    actor over the original one), and clears all three columns the instant
+    status moves AWAY from 'done' again -- reopening a task must not leave
+    a stale "completed by X" sitting on a task that is, right now, not
+    complete."""
+    # Actor-kind validation is pure input shape (no DB state involved) and
+    # deliberately checked before the pool fetch below -- same "fail fast
+    # regardless of database availability" posture assign_task_to_user's
+    # own user_id-required check takes, and it means a caller bug (naming
+    # both a human and an agent actor) is never masked by a DB-unavailable
+    # environment silently returning None first.
+    resolved_actor_user_id = str(actor_user_id or "").strip() or None
+    resolved_actor_agent_id = str(actor_agent_id or "").strip() or None
+    if resolved_actor_user_id and resolved_actor_agent_id:
+        raise ValueError("Provide at most one of actor_user_id/actor_agent_id.")
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
@@ -1116,8 +1166,8 @@ async def update_task(
     resolved_due_at = None if clear_due_at else _coerce_due_at(due_at)
     resolved_tenant_id = str(tenant_id or "").strip()
     resolved_workspace_id = str(workspace_id or "").strip()
-    row = await control_plane_repository.rls_fetchrow(
-        pool,
+    resolved_status = _normalize_status(status, default="") or None if status is not None else None
+    update_sql = (
         """
         UPDATE project_tasks
         SET title = COALESCE(NULLIF($4, ''), title),
@@ -1125,22 +1175,99 @@ async def update_task(
             status = COALESCE($6, status),
             due_at = CASE WHEN $7 THEN NULL WHEN $8::timestamptz IS NOT NULL THEN $8::timestamptz ELSE due_at END,
             priority = COALESCE($9::smallint, priority),
+            -- Review attribution: stamp on a genuine transition INTO
+            -- 'done' ($6 is the new status, bare `status` on the right of
+            -- IS DISTINCT FROM is the pre-update row's status -- see the
+            -- docstring), clear on any transition AWAY from 'done', leave
+            -- untouched otherwise (status not part of this patch, or a
+            -- redundant done -> done re-patch that must not steal
+            -- attribution from whoever completed it first).
+            completed_by_user_id = CASE
+                WHEN $6 = 'done' AND status IS DISTINCT FROM 'done' THEN $10
+                WHEN $6 IS NOT NULL AND $6 <> 'done' THEN NULL
+                ELSE completed_by_user_id
+            END,
+            completed_by_agent_id = CASE
+                WHEN $6 = 'done' AND status IS DISTINCT FROM 'done' THEN $11
+                WHEN $6 IS NOT NULL AND $6 <> 'done' THEN NULL
+                ELSE completed_by_agent_id
+            END,
+            completed_at = CASE
+                WHEN $6 = 'done' AND status IS DISTINCT FROM 'done' THEN NOW()
+                WHEN $6 IS NOT NULL AND $6 <> 'done' THEN NULL
+                ELSE completed_at
+            END,
             updated_at = NOW()
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         RETURNING
-        """ + _TASK_RETURNING_SQL,
+        """
+        + _TASK_RETURNING_SQL
+    )
+    update_args = (
         resolved_tenant_id,
         resolved_workspace_id,
         str(task_id or "").strip(),
         str(title or "").strip(),
         None if description is None else str(description).strip(),
-        _normalize_status(status, default="") or None if status is not None else None,
+        resolved_status,
         bool(clear_due_at),
         resolved_due_at,
         resolved_priority,
-        tenant_id=resolved_tenant_id,
-        workspace_id=resolved_workspace_id,
     )
+    try:
+        row = await control_plane_repository.rls_fetchrow(
+            pool,
+            update_sql,
+            *update_args,
+            resolved_actor_user_id,
+            resolved_actor_agent_id,
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+        )
+    except Exception as exc:
+        # LAST-RESORT backstop, not the primary guarantee: in real traffic
+        # a completed_by_* FK can never actually fire here -- every live
+        # caller (routes_fleet.fleet_patch_task's authenticated session;
+        # skills_service's project_task__update, which already resolved
+        # the calling agent via agent_project_id's own workspace_agent_
+        # installs lookup before update_task is ever reached) has already
+        # proven the actor exists. This exists for the one case that can
+        # still slip past that -- a stale/concurrently-deleted actor id --
+        # and retries ONCE with both completed_by_* columns nulled out, so
+        # an attribution technicality never blocks an ordinary status
+        # write. Deliberately string-matched on the constraint name rather
+        # than importing asyncpg's exception classes: this must degrade
+        # gracefully even when Postgres is fronted by something that
+        # doesn't raise asyncpg's own types, and every sibling FK on this
+        # table (assignee_user_id/assignee_agent_id) is validated with an
+        # app-level exists-check BEFORE the write for exactly this reason
+        # -- completed_by_* cannot take that same approach without adding
+        # an unconditional extra round trip to every single 'done'
+        # transition, which is not worth paying on every real close to
+        # guard against a case that -- by construction above -- an actual
+        # caller can never hit.
+        constraint_names = (
+            "project_tasks_completed_by_user_id_fkey",
+            "project_tasks_completed_by_agent_id_fkey",
+        )
+        if (resolved_actor_user_id or resolved_actor_agent_id) and any(
+            name in str(exc) for name in constraint_names
+        ):
+            LOGGER.warning(
+                "update_task: completed_by_* actor id rejected by FK on task %s (%s); "
+                "retrying without a completed_by stamp.", task_id, exc,
+            )
+            row = await control_plane_repository.rls_fetchrow(
+                pool,
+                update_sql,
+                *update_args,
+                None,
+                None,
+                tenant_id=resolved_tenant_id,
+                workspace_id=resolved_workspace_id,
+            )
+        else:
+            raise
     return _row_to_task(row)
 
 

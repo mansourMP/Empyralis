@@ -660,6 +660,12 @@ async def fleet_patch_task(
             priority=body.priority,
             due_at=body.due_at,
             clear_due_at=body.clear_due_at,
+            # Review attribution (pure stamp, never a gate): this route is
+            # the board-drag / detail-view status row, always a human
+            # acting through the authenticated session -- never an agent,
+            # which reaches update_task through the project_task__update
+            # tool in skills_service.py instead.
+            actor_user_id=str((current_user or {}).get("user_id") or "").strip() or None,
         )
         if task is None:
             return {"ok": False, "error": "Task not found."}

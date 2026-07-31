@@ -6004,6 +6004,12 @@ def execute_single_direct_tool_call(
                         priority=argument_payload.get("priority"),
                         due_at=argument_payload.get("due_at"),
                         clear_due_at=bool(argument_payload.get("clear_due_at")),
+                        # Review attribution (pure stamp, never a gate): the
+                        # agent tool path -- _caller_agent_id is already the
+                        # resolved, validated calling agent's install id
+                        # (see the connector_id == "project_task" block
+                        # above).
+                        actor_agent_id=_caller_agent_id,
                     )
                 )
             except ValueError as exc:
