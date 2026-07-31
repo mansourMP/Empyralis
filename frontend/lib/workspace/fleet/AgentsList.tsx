@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, KeyboardEvent } from "react";
+import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Play, Square, Trash2 } from "lucide-react";
@@ -8,7 +8,7 @@ import { Play, Square, Trash2 } from "lucide-react";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
 import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
-import { timeAgo, tintForAgent, TINTS } from "./fleet-presentation";
+import { timeAgo } from "./fleet-presentation";
 import { StatusChip, StatusDot, AgentSigil } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
 import { CHANNEL_ICONS, CHANNEL_LABELS } from "./fleet-icons";
@@ -269,8 +269,7 @@ function DeleteAgentDialog({
           </button>
           <button
             type="button"
-            className="fleet-btn"
-            style={{ color: "#fff", background: "var(--offline-dot)", borderColor: "var(--offline-dot)" }}
+            className="fleet-btn fleet-btn--danger"
             onClick={onConfirm}
             disabled={busy}
           >
@@ -562,11 +561,6 @@ function AgentRow({
   // both problems.
   const presetRaw = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
   const preset = presetRaw ? presetRaw.charAt(0).toUpperCase() + presetRaw.slice(1) : "";
-  const tint = tintForAgent(agent, index);
-  const avatarStyle = {
-    "--tile-bg": TINTS[tint].bg,
-    "--tile-fg": TINTS[tint].fg,
-  } as CSSProperties;
   const brain = brainLabel(agent.model_config);
   const channel = (agent.channel || "").trim();
   const placement = resolvePlacementBadge(agent, gateways);
@@ -672,7 +666,7 @@ function AgentRow({
       onKeyDown={handleKey}
     >
       <span className="fleet-agent-cell-agent">
-        <span className="fleet-agent-avatar" style={avatarStyle}>
+        <span className="fleet-agent-avatar">
           <AgentSigil seed={agent.agent_id} size={16} />
         </span>
         <span className="fleet-agent-cell-agent-text">

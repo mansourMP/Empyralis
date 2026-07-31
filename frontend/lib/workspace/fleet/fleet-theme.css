@@ -2221,13 +2221,27 @@ a.fleet-breadcrumb:hover {
   background: var(--accent-soft);
   color: var(--accent);
 }
+/* Genuine error/failed state (e.g. a VPS provision that failed) — the
+   destructive token, not one of the arbitrary identity TINTS. A failure is
+   semantic; it belongs in the same red vocabulary as every other error in
+   the app, not the decorative per-entity palette. */
+.fleet-tile--danger {
+  background: var(--destructive-soft);
+  color: var(--destructive);
+}
 
-/* A tiny per-identity color pip for the cost-by-agent rows. */
+/* A tiny bullet dot. Neutral by default (the project page's "Cost by
+   agent" panel — a plain labelled list, not a chart). The Billing page's
+   usage legend (billing/page.tsx) overrides `background` inline per row to
+   match that row's line color on the chart directly above it — there the
+   color is load-bearing (it's the only way to tell which line is which
+   agent); everywhere else this stays the default neutral dot. */
 .fleet-tint-pip {
   width: 8px;
   height: 8px;
   border-radius: 999px;
   flex-shrink: 0;
+  background: var(--text-muted);
 }
 
 .fleet-panel-empty {

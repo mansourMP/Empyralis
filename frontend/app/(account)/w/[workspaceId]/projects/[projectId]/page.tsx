@@ -24,7 +24,7 @@ import { TaskComposer } from "@/lib/workspace/fleet/TaskComposer";
 import { ProjectOverview } from "@/lib/workspace/fleet/ProjectOverview";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
-import { breadcrumbCount, tintKeyForIndex, TINTS, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
+import { breadcrumbCount, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
@@ -512,11 +512,17 @@ export default function ProjectDetailPage() {
             ) : costByAgent.length === 0 ? (
               <div className="fleet-panel-empty">No agents yet.</div>
             ) : (
-              costByAgent.map((a, i) => (
+              costByAgent.map((a) => (
                 <PanelRow
                   key={a.id}
                   label={a.label}
-                  icon={<span className="fleet-tint-pip" style={{ background: TINTS[tintKeyForIndex(i)].fg }} />}
+                  // A neutral bullet, not the per-agent identity hue this used
+                  // to render (TINTS[tintKeyForIndex(i)]) — this is a plain
+                  // list of PanelRows, each already labelled by name, not a
+                  // chart with a legend to key against. Unlike the Usage page
+                  // (billing/page.tsx), there's no colored line here for the
+                  // dot to match, so the hue was pure decoration.
+                  icon={<span className="fleet-tint-pip" />}
                   value={a.cost > 0 ? money(a.cost) : "—"}
                   tone={a.cost > 0 ? "default" : "muted"}
                 />

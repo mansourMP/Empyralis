@@ -38,11 +38,11 @@
  * collapsed rows cost nothing to keep collapsed.
  */
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronRight, Plus } from "lucide-react";
 
 import { dueLabel } from "./TasksList";
-import { TINTS, tintForAgent, timeAgo } from "./fleet-presentation";
+import { timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
@@ -308,9 +308,6 @@ function GroupedRow({
   const due = dueLabel(task.due_at);
   const updated = timeAgo(task.updated_at || task.created_at);
 
-  const tint = assignee ? TINTS[tintForAgent(assignee, index)] : null;
-  const avatarStyle = (tint ? { "--tile-bg": tint.bg, "--tile-fg": tint.fg } : {}) as CSSProperties;
-
   return (
     <div
       className="fleet-glist-row"
@@ -391,7 +388,7 @@ function GroupedRow({
       </span>
 
       {assignee ? (
-        <span className="fleet-agent-avatar fleet-glist-cell-assignee" style={avatarStyle} title={assignee.label || "Unnamed agent"}>
+        <span className="fleet-agent-avatar fleet-glist-cell-assignee" title={assignee.label || "Unnamed agent"}>
           <AgentSigil seed={assignee.agent_id} size={12} />
         </span>
       ) : assignedMember ? (

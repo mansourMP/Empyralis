@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 
-import { TINTS, type AgentStatusTone, type TintKey } from "./fleet-presentation";
+import type { AgentStatusTone } from "./fleet-presentation";
 
 /**
  * The fleet's shared visual-indicator vocabulary. One place so a status dot in
@@ -136,27 +136,39 @@ export function AgentSigil({
   );
 }
 
-/** A rounded, tinted leading icon/initial tile — gives a list row a colored
- *  anchor instead of a bare gray glyph. `tint` picks a per-identity hue;
- *  omit for the neutral surface fill. `accent` uses the brand accent tint. */
+/** A rounded leading icon/initial tile for a list row. Neutral by default
+ *  (`--rail-active` fill, `--text-secondary` glyph — the fallback baked into
+ *  `.fleet-tile` itself). `accent` uses the brand accent tint; `danger` uses
+ *  the destructive tint, for a tile that stands in for a real error/failed
+ *  state rather than decoration.
+ *
+ *  There used to be a `tint` prop here too — a per-identity hue (`TintKey`)
+ *  picked by hashing an id, applied to project icons, agent avatars, and
+ *  task-assignee avatars. Removed in the colour-discipline pass: an
+ *  auto-assigned hue that sits directly beside the entity's own name/label
+ *  told the reader nothing they couldn't already read off the text, and
+ *  eight arbitrary hues scattered across every list is exactly the "colour
+ *  that means nothing" the pass exists to cut (see fleet-theme.css's file
+ *  banner). The colour-as-legend use case (multiple agents' cost lines on
+ *  one chart, where hue is the ONLY way to tell a line from its label) is
+ *  unaffected — that still reads TINTS/tintKeyForIndex directly
+ *  (fleet-sparkline.tsx's MultiSeriesChart, billing/page.tsx) since a
+ *  chart's colour genuinely carries information a static tile's doesn't. */
 export function TintTile({
-  tint,
   accent,
+  danger,
   size = 28,
   children,
 }: {
-  tint?: TintKey;
   accent?: boolean;
+  danger?: boolean;
   size?: number;
   children: ReactNode;
 }) {
   const style: CSSProperties = { width: size, height: size };
-  if (tint) {
-    (style as Record<string, string>)["--tile-bg"] = TINTS[tint].bg;
-    (style as Record<string, string>)["--tile-fg"] = TINTS[tint].fg;
-  }
+  const variant = accent ? " fleet-tile--accent" : danger ? " fleet-tile--danger" : "";
   return (
-    <span className={`fleet-tile${accent ? " fleet-tile--accent" : ""}`} style={style}>
+    <span className={`fleet-tile${variant}`} style={style}>
       {children}
     </span>
   );
