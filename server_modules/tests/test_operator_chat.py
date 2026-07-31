@@ -2,9 +2,10 @@ import unittest
 import importlib.util
 import sys
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from server_modules import direct_chat_operator_binding_service
+from server_modules import sage_agent_runtime_service
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT_DIR / "server_modules" / "direct_chat_runtime_exports.py"
@@ -220,8 +221,31 @@ class OperatorChatTests(unittest.TestCase):
             side_effect=lambda provider, credentials: bool(credentials) or bool(operator_chat.provider_has_key(provider)),
         )
         self._supports_direct_message_patch.start()
+        # direct_chat_runtime_service.build_direct_operator_reply /
+        # collect_direct_operator_reply (the real implementation this file's
+        # whole DI-rebuild scaffolding above ultimately calls into) now does
+        # a lazy in-function import of sage_agent_runtime_service.
+        # _resolve_cloud_provider ("ONE AI ROAD, NO FALLBACK" -- see that
+        # function's own docstring) and hard-compares its result against
+        # requested_provider before ever reaching anything these tests
+        # inject via operator_chat.__dict__. None of the DI plumbing above
+        # reaches this call at all -- it is not part of the injected
+        # "services" surface. Patched here (not per-test) because it's a
+        # lazy `from module import name` re-evaluated fresh on every call,
+        # so a single class-level patch reaches every test in this file;
+        # almost all of them request "openai", so that's the default here.
+        # Tests that need a different resolved provider (or want to exercise
+        # the mismatch/"provider unavailable" path itself) override this
+        # with their own @patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", ...).
+        self._resolve_cloud_provider_patch = patch.object(
+            sage_agent_runtime_service,
+            "_resolve_cloud_provider",
+            new=AsyncMock(return_value=("openai", {})),
+        )
+        self._resolve_cloud_provider_patch.start()
 
     def tearDown(self) -> None:
+        self._resolve_cloud_provider_patch.stop()
         self._supports_direct_message_patch.stop()
         self._semantic_model_patch.stop()
 
@@ -643,6 +667,11 @@ class OperatorChatTests(unittest.TestCase):
         self.assertEqual(payload["actions"], [])
 
     @patch.dict("operator_chat_under_test.os.environ", {"ORION_AUTH_MODE": "codex"}, clear=False)
+    # This test's whole point is requested != effective provider, so it
+    # needs its own _resolve_cloud_provider override -- setUp's class-wide
+    # default ("openai") would otherwise make requested == effective and
+    # never exercise the override-tracking path this test is named for.
+    @patch.object(sage_agent_runtime_service, "_resolve_cloud_provider", new=AsyncMock(return_value=("codex_cli", {"provider": "codex_cli"})))
     @patch(
         "operator_chat_under_test.generate_chat_reply_with_provider_fallback",
         return_value=("Hello.", {"provider": "codex_cli", "model": "gpt-5.4"}, "codex_cli", ""),
@@ -697,7 +726,10 @@ class OperatorChatTests(unittest.TestCase):
             availability={"ai_ready": True},
         )
 
-        self.assertIn("temporary error", payload["reply"])
+        # 2b626e335 ("replace hardcoded I/my/you've strings with
+        # PlatformEvent system") replaced the old ad hoc "temporary error"
+        # copy with platform_event.PROVIDER_UNREACHABLE's standardized text.
+        self.assertIn("unreachable right now", payload["reply"])
         self.assertEqual(payload.get("interventions") or [], [])
 
     @patch(
@@ -879,7 +911,21 @@ class OperatorChatTests(unittest.TestCase):
             availability={"ai_ready": True},
         )
 
-        self.assertIn("temporary error", payload["reply"])
+        # 2b626e335 ("replace hardcoded I/my/you've strings with
+        # PlatformEvent system") replaced the old ad hoc "temporary error"
+        # copy with a canonical PlatformEvent message. This mock's error
+        # string ("temporary backend error") doesn't match any of
+        # direct_chat_generation_service._public_generation_error_code's
+        # specific prefixes (rate-limited / transport-unavailable / payment-
+        # required), so it falls into the generic "unclassified failure"
+        # bucket -- platform_event.py's generic-failure event, "Something
+        # went wrong. Try again." -- rather than PROVIDER_UNREACHABLE's
+        # transport-specific text (which the sibling test
+        # test_transport_unavailable_reply_is_explicit already covers with
+        # a "direct_chat_transport_unavailable:"-prefixed error). Still an
+        # honest, non-empty fallback reply, which is what this test's name
+        # promises to verify.
+        self.assertIn("Something went wrong", payload["reply"])
         self.assertEqual(payload.get("interventions") or [], [])
 
     @patch("operator_chat_under_test.direct_chat_run_snapshot")
