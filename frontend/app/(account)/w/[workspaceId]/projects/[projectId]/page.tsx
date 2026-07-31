@@ -289,17 +289,15 @@ export default function ProjectDetailPage() {
 
   return (
     <main className="fleet-content fleet-content--with-panel">
-      {/* MAN-145 item 4: the breadcrumb (with the project's own icon, see
-          useBreadcrumbIcon above, and its count badge, see
-          useBreadcrumbBadge above) carries the project's IDENTITY, but a
-          `<nav>` landmark is not a heading — Overview/Agents/Tasks all
-          rendered zero heading roles for screen-reader H-key/rotor
-          navigation, on all three tabs, since this <h1> is shared chrome
-          above the tab strip. Existing `.fleet-title` weight, no new type
-          style — same fix as Hardware/Projects/Agents above. */}
-      <div className="fleet-header">
-        <h1 className="fleet-title">{project?.name || "Project"}</h1>
-      </div>
+      {/* MAN-145 title-dedup follow-up: this used to render the project's
+          name three times (tab strip, breadcrumb, and this block's own
+          shared <h1> above the Overview/Agents/Tasks tabs). The breadcrumb's
+          current crumb IS the page's <h1> now, on all three tabs (see
+          Breadcrumbs.tsx) — it already carries the project's own icon
+          (useBreadcrumbIcon above) and its "· N agents" count
+          (useBreadcrumbBadge above), context a plain title never had. This
+          block is gone, not replaced with a styled div: the heading role
+          lives one layer up, it isn't lost. */}
 
       {/* U3-H: top row is breadcrumb + primary action only; the
           view-control cluster is its own row below, under the topbar's
@@ -409,6 +407,9 @@ export default function ProjectDetailPage() {
               tasks={tasks}
               tasksLoading={tasksLoading}
               rollup={rollup}
+              members={members}
+              taskHref={taskHref}
+              agentHref={agentHref}
             />
           ) : view === "tasks" ? (
             tasksLoading && tasks.length === 0 ? (

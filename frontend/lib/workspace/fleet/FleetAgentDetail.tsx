@@ -1088,23 +1088,19 @@ function AgentTitle({
   }
 
   return (
-    // MAN-145 item 4: the agent's name previously had zero heading role
-    // anywhere on the page — the breadcrumb is a `<nav>` landmark, and this
-    // was a bare <button>. Wrapping (not retagging — a <button> can't BE a
-    // heading) the button in a plain, unclassed <h1> keeps the rename
-    // control exactly as it was — same click target, same visual style, all
-    // of it off the button's own class/inline style, neither of which this
-    // wrapper touches — while giving the page a real top-level heading, same
-    // job the task detail page's h1 does for a task's title. No margin/font
-    // on the h1 itself, so `.fleet-root h1 { margin: 0; font-weight: 500 }`
-    // has nothing to silently override — none of the specificity trap that
-    // bit .fleet-task-page-title.
-    <h1>
-      <button type="button" className="fleet-overview-title" onClick={() => setEditing(true)} style={{ marginBottom: 12 }} aria-label={`Rename ${label || "this agent"}`}>
-        <span>{label || "Untitled agent"}</span>
-        <Pencil size={14} strokeWidth={1.75} className="fleet-overview-title-pencil" />
-      </button>
-    </h1>
+    // MAN-145 title-dedup follow-up: this used to be wrapped in its own <h1>
+    // (a real heading was missing entirely before that) — but the agent's
+    // name is ALSO the breadcrumb's current crumb (useBreadcrumbLabel(agentId,
+    // agent?.label) two levels up in the routed page), which is the page's
+    // <h1> now (see Breadcrumbs.tsx). Two headings both reading the agent's
+    // name would be the exact triplication this pass exists to cut — so this
+    // is unwrapped back to a plain button, not retagged: the heading role
+    // lives one layer up, the rename affordance (click-to-edit, same click
+    // target, same visual style) is entirely unchanged.
+    <button type="button" className="fleet-overview-title" onClick={() => setEditing(true)} style={{ marginBottom: 12 }} aria-label={`Rename ${label || "this agent"}`}>
+      <span>{label || "Untitled agent"}</span>
+      <Pencil size={14} strokeWidth={1.75} className="fleet-overview-title-pencil" />
+    </button>
   );
 }
 

@@ -197,7 +197,18 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     const base = `/w/${encodeURIComponent(workspaceId)}`;
     // Everything after /w/{ws}
     const rest = pathname.startsWith(base) ? pathname.slice(base.length) : "";
-    const segments = rest.split("/").filter(Boolean);
+    let segments = rest.split("/").filter(Boolean);
+
+    // "/fleet" is a legacy alias of the bare workspace root — both render the
+    // exact same FleetHome component (see fleet/page.tsx vs. the bare
+    // page.tsx), and FleetHome carries its own <h1> ("Your fleet") as real
+    // page content, not chrome. The root itself gets no crumb at all (see the
+    // comment below) precisely so it doesn't compete with that h1; a lone
+    // "fleet" segment needs the same treatment; MAN-145 title-dedup follow-up
+    // — a "Home" breadcrumb-h1 above FleetHome's own "Your fleet" h1 would be
+    // two headings with different text, which still fails "exactly one
+    // visible h1" even though the words don't match.
+    if (segments.length === 1 && segments[0] === "fleet") segments = [];
 
     // No synthetic workspace-root crumb — crumbs start at the section
     // (Projects, Agents, Inbox, …). The "agents/{id}" pair inside a project
@@ -253,14 +264,21 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
             <span className="fleet-breadcrumb-mobile-back-label">{parent.label}</span>
           </Link>
         )}
+        {/* MAN-145 title-dedup follow-up: the mobile-collapsed current-page
+            label IS the page's <h1> now — see the desktop chain's matching
+            comment below for the full rationale. No font-size fix needed
+            here (unlike the desktop h1 below): the 768px media query already
+            sets `.fleet-breadcrumb-mobile-current` to an explicit 15px, which
+            — being an author rule — already beats the UA h1 default with no
+            help from this component. */}
         {current.pending ? (
-          <span className="fleet-breadcrumb-mobile-current" aria-label="Loading name…">
+          <h1 className="fleet-breadcrumb-mobile-current" aria-label="Loading name…">
             <span className="fleet-breadcrumb-skeleton" aria-hidden />
-          </span>
+          </h1>
         ) : (
-          <span className="fleet-breadcrumb-mobile-current" aria-current="page">
+          <h1 className="fleet-breadcrumb-mobile-current" aria-current="page">
             {current.icon}{current.label}
-          </span>
+          </h1>
         )}
         {current.badge}
       </span>
@@ -268,13 +286,41 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       {crumbs.map((c, i) => (
         <span key={c.key} className="fleet-breadcrumb-seg">
           {i > 0 && <ChevronRight size={13} strokeWidth={1.75} className="fleet-breadcrumb-sep" aria-hidden />}
-          {c.pending ? (
-            <span className={`fleet-breadcrumb${c.current ? " fleet-breadcrumb--current" : ""}`} aria-label="Loading name…">
+          {c.current ? (
+            // MAN-145 title-dedup follow-up: every routed page used to render
+            // its own name three times — the tab strip, this breadcrumb's own
+            // current-page crumb, AND a separate `.fleet-header`/<h1> block
+            // below it (added for real heading structure, but nobody accounted
+            // for the breadcrumb already BEING the page title). The breadcrumb
+            // is the better survivor: it already carries context a bare title
+            // never did (the "· 3"/"· 10 agents" badge, a project's own icon
+            // via useBreadcrumbIcon) and it's genuinely the page's identity,
+            // not chrome bolted next to it. So the LAST crumb — and only the
+            // last one; "Projects" in "Projects › General" stays a plain link
+            // crumb — IS the page's one real <h1> now, and every routed page's
+            // own `.fleet-header`/<h1> block is gone (see each page.tsx).
+            //
+            // `style={{ fontSize: "inherit" }}`: nothing here (`.fleet-breadcrumb`
+            // itself has no font-size of its own — it inherits `.fleet-breadcrumbs`'
+            // var(--text-sm)) — inheritance is CSS's fallback ONLY when no rule
+            // for that property targets the element itself, and the browser's
+            // own UA stylesheet DOES supply an explicit h1 font-size (scaled
+            // for nesting inside a <nav>) that would otherwise win over
+            // inheriting from an ancestor. This one inline declaration
+            // restores the exact pixel size the old plain <span> always had —
+            // nothing else about `.fleet-breadcrumb`'s look changes.
+            c.pending ? (
+              <h1 className="fleet-breadcrumb fleet-breadcrumb--current" style={{ fontSize: "inherit" }} aria-label="Loading name…">
+                <span className="fleet-breadcrumb-skeleton" aria-hidden />
+              </h1>
+            ) : (
+              <h1 className="fleet-breadcrumb fleet-breadcrumb--current" style={{ fontSize: "inherit" }} aria-current="page">
+                {c.icon}{c.label}
+              </h1>
+            )
+          ) : c.pending ? (
+            <span className="fleet-breadcrumb" aria-label="Loading name…">
               <span className="fleet-breadcrumb-skeleton" aria-hidden />
-            </span>
-          ) : c.current ? (
-            <span className="fleet-breadcrumb fleet-breadcrumb--current" aria-current="page">
-              {c.icon}{c.label}
             </span>
           ) : (
             <Link className="fleet-breadcrumb" href={c.href}>{c.icon}{c.label}</Link>

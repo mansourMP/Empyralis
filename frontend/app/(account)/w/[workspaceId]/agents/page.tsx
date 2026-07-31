@@ -184,14 +184,12 @@ export default function AgentsPage() {
 
   return (
     <main className="fleet-content fleet-content--with-panel">
-      {/* MAN-145 item 4: same fix as Hardware/Projects — the breadcrumb
-          ("Agents · N") is a `<nav>` landmark, not a heading, so this page
-          had zero heading roles for screen-reader H-key/rotor navigation.
-          Real page <h1>, existing `.fleet-title` weight, no new type
-          style. */}
-      <div className="fleet-header">
-        <h1 className="fleet-title">Agents</h1>
-      </div>
+      {/* MAN-145 title-dedup follow-up: this used to render "Agents" three
+          times (tab strip, breadcrumb, and this block's own <h1>). The
+          breadcrumb's current crumb IS the page's <h1> now (see
+          Breadcrumbs.tsx) — it already carries the "· N" count the plain
+          title never did. This block is gone, not replaced with a styled
+          div: the heading role lives one layer up, it isn't lost. */}
 
       {/* U3-H: two rows, not one — top row is breadcrumb (with its count,
           see the useBreadcrumbBadge call above) + primary action only,
