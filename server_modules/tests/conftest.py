@@ -1167,6 +1167,35 @@ def _mock_state_transition_next_action(operation: str, payload: dict) -> tuple[s
     return "", ""
 
 
+# empyralis-runtime-kernel/src/authorization.rs authorize_request_command(),
+# execution_authorization.rs authorize_execution_command(), and
+# execution_plan.rs execution_plan_command() -- three separate commands
+# policy_service.py's evaluate_tool_policy_decision() calls (only "authorize-
+# execution"/"execution-plan" for tool_id == "shell.execute" with a raw
+# command; "authorize-request" for every other tool, which is most of them).
+# None were handled by this mock at all until MAN-139 phase 2, so EVERY
+# workflow-graph tool node (runs_execution.py) and every direct/skill tool
+# call that goes through evaluate_tool_policy_decision() got next_action=""
+# and hit "Tool node '...' is blocked by runtime policy." on an otherwise
+# uneventful allow.
+#
+# Each of these three commands' rust source is a multi-stage pipeline
+# (safe-mode gate -> policy-context gate -> capability/domain/path policy
+# rules -> risk classification -> approval-requirement check, each its own
+# ~200-450 line module: policy.rs, risk.rs, approvals.rs, safe_mode.rs) --
+# genuinely not worth hand-porting into this mock the way the simpler
+# operation-keyed commands above are, especially since none of the three
+# tests it would need to pass a specific block/require_approval scenario
+# rely on the AUTOUSE mock for that (they patch run_runtime_kernel_enforced
+# directly, same as every other block/require_approval test in this file).
+# All three commands resolve to the exact same next_action on their allow
+# path regardless of which one is called (rust authorization.rs line 137,
+# execution_authorization.rs, execution_plan.rs's `expected_plan_next_
+# action` counterpart), so this only needs to cover that one shared value.
+_TOOL_AUTHORIZATION_COMMANDS = {"authorize-request", "authorize-execution", "execution-plan"}
+_TOOL_AUTHORIZATION_ALLOW_NEXT_ACTION = "allow_tool_execution"
+
+
 @pytest.fixture(autouse=True)
 def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """Skip @pytest.mark.kernel tests when the Rust kernel binary is absent.
@@ -1271,6 +1300,8 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
             next_action, reason_override = _mock_state_transition_next_action(
                 normalized_payload.get("operation"), normalized_payload
             )
+        elif command in _TOOL_AUTHORIZATION_COMMANDS:
+            next_action = _TOOL_AUTHORIZATION_ALLOW_NEXT_ACTION
 
         result = {
             "ok": True,
