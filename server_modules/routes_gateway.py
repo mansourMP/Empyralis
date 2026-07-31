@@ -509,44 +509,59 @@ def _emit_gateway_risk_decision(
     tenant_id: str,
     risk_decision,
 ) -> None:
-    # Accept both CapabilityRiskDecision (old, has .as_dict()/.decision)
-    # and plain dict from unified gate's risk_decision field
+    # Accept both CapabilityRiskDecision (old, has .as_dict()/.decision) and
+    # plain dict from the unified gate's risk_decision field. `decision_label`
+    # / `capability_label` are resolved ONCE, here, from whichever shape this
+    # call got -- every reference below must use these, never re-read
+    # `risk_decision.decision`/`.capability` directly, since that attribute
+    # access raises AttributeError on the dict-shaped branch (a dict has no
+    # `.decision` attribute) and used to be swallowed by the bare `except`
+    # below, silently dropping the audit trail on every dict-shaped call
+    # without ever surfacing as a request failure.
     if isinstance(risk_decision, dict):
         payload = risk_decision
-        decision_label = risk_decision.get("decision", "unknown")
+        decision_label = str(risk_decision.get("decision") or "unknown")
+        capability_label = str(risk_decision.get("capability") or "unknown")
     elif callable(getattr(risk_decision, "as_dict", None)):
         payload = risk_decision.as_dict()
         decision_label = str(getattr(risk_decision, "decision", "unknown") or "unknown")
+        capability_label = str(getattr(risk_decision, "capability", "unknown") or "unknown")
     else:
+        LOGGER.warning(
+            "Gateway risk decision audit skipped for %s: unrecognized risk_decision "
+            "type %s (expected dict or an object with .as_dict()).",
+            gateway_id,
+            type(risk_decision).__name__,
+        )
         return  # unknown format, skip audit
     try:
         security_audit_service.emit_security_audit_event(
             action=f"gateway.risk_decision.{decision_label}",
-            status="blocked" if risk_decision.decision == DECISION_BLOCK else "logged",
+            status="blocked" if decision_label == DECISION_BLOCK else "logged",
             tenant_id=tenant_id,
             workspace_id=workspace_id,
-            detail=f"Gateway risk decision {risk_decision.decision} for {risk_decision.capability}.",
+            detail=f"Gateway risk decision {decision_label} for {capability_label}.",
             metadata={
                 "gateway_id": gateway_id,
                 "risk_decision": payload,
             },
         )
     except Exception as exc:
-        LOGGER.warning("Failed to emit gateway risk decision audit for %s: %s", gateway_id, exc)
+        LOGGER.warning("Failed to emit gateway risk decision audit for %s: %s", gateway_id, exc, exc_info=True)
     try:
         gateway_state_repository.record_gateway_event(
             gateway_id=gateway_id,
             session_id=None,
             direction="server",
             frame_kind="audit",
-            message_type=f"gateway.risk_decision.{risk_decision.decision}",
+            message_type=f"gateway.risk_decision.{decision_label}",
             payload={
                 "workspace_id": workspace_id,
                 "risk_decision": payload,
             },
         )
     except Exception as exc:
-        LOGGER.warning("Failed to record gateway risk decision event for %s: %s", gateway_id, exc)
+        LOGGER.warning("Failed to record gateway risk decision event for %s: %s", gateway_id, exc, exc_info=True)
 
 
 def _block_gateway_risk_decision(*, risk_decision) -> None:

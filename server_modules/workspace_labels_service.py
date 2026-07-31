@@ -24,12 +24,13 @@ hex picked against the dark theme is routinely unreadable on the light one
 statuses for exactly that reason) and there is no way to validate its
 contrast.
 
-Same direct-pool access pattern as project_tasks_service.py: plain
-pool.fetch/fetchrow/execute with explicit tenant_id/workspace_id WHERE
-filters (`workspace_labels` and `project_task_labels` carry no RLS policy,
-scoped like `projects`/`project_tasks`). Postgres-first -- when Postgres is
-unavailable reads return empty and writes raise, rather than falling back to
-SQLite.
+Same access pattern as project_tasks_service.py: every query below goes
+through control_plane_repository.rls_fetch/rls_fetchrow/rls_execute with an
+explicit tenant_id/workspace_id scope, never a raw pool call -- both
+`workspace_labels` and `project_task_labels` now carry FORCE RLS (see
+migrations/enable_rls.sql), and RLS on a non-superuser role only sees rows
+that scope was set for. Postgres-first -- when Postgres is unavailable reads
+return empty and writes raise, rather than falling back to SQLite.
 
 Imports project_tasks_service LAZILY, inside the one function that needs it,
 so the dependency between the two modules stays a DAG: a task carries

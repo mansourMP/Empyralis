@@ -208,6 +208,17 @@ def _enforce_runtime_state_store_decision(
             state_class = "run_archive"
         elif operation == "upsert_runtime_registration":
             state_class = "runtime_registrations"
+        elif operation in (
+            "create_or_update_approval_request",
+            "resolve_approval_if_pending",
+            "record_approval_resolution",
+        ):
+            # Must match the Rust kernel's own default_state_class()
+            # (empyralis-runtime-kernel/src/runtime_state_store.rs) exactly --
+            # that function is authoritative. Falling through to "live_runs"
+            # here made Python and Rust disagree about what these three
+            # approval operations are.
+            state_class = "run_approvals"
         else:
             state_class = "live_runs"
     request = {
