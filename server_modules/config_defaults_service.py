@@ -21,6 +21,7 @@ DEFAULT_HOSTED_SAGE_AI_POLICY = "enabled_with_cap"
 
 
 DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = billing_credit_config.DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD
+DEFAULT_RUN_COST_CEILING_USD = billing_credit_config.DEFAULT_RUN_COST_CEILING_USD
 
 
 def config_schema_version() -> int:
@@ -77,3 +78,7 @@ def default_hosted_sage_ai_policy() -> str:
 
 def default_hosted_sage_ai_monthly_cap_usd() -> float:
     return float(DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD)
+
+
+def default_run_cost_ceiling_usd() -> float:
+    return float(DEFAULT_RUN_COST_CEILING_USD)

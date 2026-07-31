@@ -11,6 +11,7 @@ import uuid
 
 from server_modules import agent_trace_service
 from server_modules import compaction_service
+from server_modules import config_defaults_service
 from server_modules import direct_chat_tool_catalog_service
 from server_modules import direct_tool_execution_service
 from server_modules import empyralis_model_tier_contract
@@ -1212,6 +1213,36 @@ def _persist_direct_chat_hosted_usage_with_reservation_guard(
                 services.capture_exception(release_exc)
 
 
+# MAN-144: enforced per-run (per-turn) cost ceiling for the direct-chat tool
+# loop below. Distinct from the durable-run ceiling in runs_engine.py's
+# generate_with_candidate_failover -- this loop has no `run_id`/run-status
+# object at all (direct chat is not tracked by run_service.py), so "stopped
+# at ceiling" is instead surfaced the exact same way this loop already
+# surfaces its OTHER non-crash deliberate stop (tool_loop_detected, a few
+# hundred lines below): an intervention in the final payload plus
+# _finish_trace(outcome="partial"), never a silent failure.
+_RUN_COST_CEILING_INTERVENTION_KIND = "run_cost_ceiling_reached"
+
+
+def _resolve_run_cost_ceiling_usd(metadata: Dict[str, Any]) -> float:
+    """Per-turn spend ceiling for this direct-chat loop. `metadata` may carry
+    a caller-resolved override (metadata["run_cost_ceiling_usd"], a plain
+    positive float -- see deployed_agent_cost_cap_service
+    .deployed_agent_run_cost_ceiling_usd for the per-agent config this can be
+    sourced from); absent that, every turn still gets the platform default,
+    never an unbounded one.
+    """
+    override = metadata.get("run_cost_ceiling_usd") if isinstance(metadata, dict) else None
+    if override is not None:
+        try:
+            parsed = float(override)
+        except (TypeError, ValueError):
+            parsed = 0.0
+        if parsed > 0:
+            return parsed
+    return config_defaults_service.default_run_cost_ceiling_usd()
+
+
 def stream_provider_backed_direct_chat(
     *,
     services: DirectChatGenerationServices,
@@ -1295,6 +1326,14 @@ def stream_provider_backed_direct_chat(
     llm_error = ""
     actual_provider: Optional[str] = str(metadata.get("provider") or "").strip() or None
     actual_model: Optional[str] = str(metadata.get("model") or "").strip() or None
+    # MAN-144: real per-call cost, summed across every model call this turn
+    # makes (each tool-loop iteration below is one call), checked before the
+    # next call is attempted. usage_masked's estimated_cost_usd (assigned per
+    # iteration a few hundred lines down, in the `event_type == "result"`
+    # handling) is already usage_accounting_service's real-usage-based cost
+    # projection -- reused here, not re-derived.
+    _turn_cost_ceiling_usd = _resolve_run_cost_ceiling_usd(metadata)
+    _turn_accumulated_cost_usd = 0.0
     
     # Reasoning effort logic
     if normalized_reasoning_effort:
@@ -1592,6 +1631,118 @@ def stream_provider_backed_direct_chat(
     # away in the event_type == "failure" handling below.
     _compaction_retry_used = False
     while True:
+        # MAN-144: enforced per-run cost ceiling, checked before the model
+        # call this iteration is about to make -- so a turn that has already
+        # spent up to (or past, from a single expensive final call) its
+        # ceiling stops HERE, before making another one, rather than after.
+        # Mirrors the tool_loop_detected halt immediately below in shape
+        # (same intervention/trace/persist/return pattern) precisely so the
+        # owner sees "stopped at its ceiling," never an unlabeled empty
+        # reply or a silent failure.
+        if _turn_cost_ceiling_usd > 0 and _turn_accumulated_cost_usd >= _turn_cost_ceiling_usd:
+            print(
+                f"[DG_COST_CEILING] iteration={iteration} accumulated={_turn_accumulated_cost_usd:.4f} "
+                f"ceiling={_turn_cost_ceiling_usd:.4f} — halting before next model call",
+                flush=True,
+            )
+            trace_failed = _emit_trace_event(
+                trace_context,
+                event_type="trace.failed",
+                data={
+                    "code": _RUN_COST_CEILING_INTERVENTION_KIND,
+                    "message": "This run reached its per-run cost ceiling and was stopped.",
+                    "retryable": False,
+                    "failed_item_id": planning_item_id,
+                },
+                persisted=True,
+                item_id=planning_item_id,
+            )
+            if trace_failed is not None:
+                yield trace_failed
+            _persist_assigned_task_plan(
+                tenant_id=_assigned_task_tenant_id,
+                workspace_id=normalized_workspace_id,
+                task_id=_assigned_task_id,
+                plan=current_plan,
+            )
+            _finish_trace(trace_context, outcome="partial", final_message_id=None)
+            yield {
+                "type": "final",
+                "payload": {
+                    "reply": (
+                        f"Stopped: this run reached its ${_turn_cost_ceiling_usd:.2f} per-run spend "
+                        f"ceiling (spent ${_turn_accumulated_cost_usd:.2f} across {iteration} model "
+                        "call(s)) and was halted before making another. Nothing after this point ran."
+                    ),
+                    "actions": [],
+                    "interventions": [
+                        build_intervention(
+                            _RUN_COST_CEILING_INTERVENTION_KIND,
+                            "Stopped at run cost ceiling",
+                            detail=(
+                                f"Spent ${_turn_accumulated_cost_usd:.2f} of a ${_turn_cost_ceiling_usd:.2f} "
+                                "per-run ceiling across this turn's model calls. Execution was halted before "
+                                "the next call rather than allowed to keep spending."
+                            ),
+                            severity="warning",
+                            status="failed",
+                            code=_RUN_COST_CEILING_INTERVENTION_KIND,
+                            metadata={
+                                "ceiling_usd": round(_turn_cost_ceiling_usd, 6),
+                                "accumulated_usd": round(_turn_accumulated_cost_usd, 6),
+                                "model_calls_made": iteration,
+                            },
+                        )
+                    ],
+                    "suggestions": proactive_suggestions,
+                    "mode": "answer",
+                    "usage_masked": usage_masked,
+                    "provider": actual_provider,
+                    "model": actual_model,
+                    "attempted_providers": attempted_providers,
+                    "error": _RUN_COST_CEILING_INTERVENTION_KIND,
+                    "context_used": services.build_context_used(
+                        workspace_id=normalized_workspace_id,
+                        requested_provider=normalized_requested_provider,
+                        effective_provider=str(actual_provider or context.get("provider") or "").strip() or None,
+                        requested_model=normalized_requested_model,
+                        effective_model=str(actual_model or "").strip() or None,
+                        reasoning_effort=normalized_reasoning_effort,
+                        connected_systems=connected_systems,
+                        tool_capabilities=tool_capabilities,
+                        prior_messages_used=True,
+                        history_mode=history_mode,
+                        run_created=False,
+                        fallback_used=False,
+                        fallback_reason=fallback_reason,
+                    ),
+                },
+            }
+            try:
+                _persist_direct_chat_hosted_usage_with_reservation_guard(
+                    services=services,
+                    hosted_usage_reservation=hosted_usage_reservation,
+                    usage_kwargs={
+                        "workspace_id": normalized_workspace_id,
+                        "thread_id": normalized_thread_id,
+                        "session_ctx": session_ctx,
+                        "availability_payload": availability_payload,
+                        "usage_masked": usage_masked,
+                        "requested_provider": normalized_requested_provider,
+                        "effective_provider": actual_provider,
+                        "requested_model": normalized_requested_model,
+                        "effective_model": actual_model,
+                    },
+                    release_kwargs={
+                        "workspace_id": normalized_workspace_id,
+                        "thread_id": normalized_thread_id,
+                        "session_ctx": session_ctx,
+                    },
+                )
+            except Exception:
+                pass
+            services.clear_direct_tool_loop_state(tool_loop_session_key)
+            return
         if iteration >= max_iterations:
             # ── Continuous-work extension point ──
             # Reached exactly when the old `for iteration in range(max_iterations):
@@ -1728,6 +1879,12 @@ def stream_provider_backed_direct_chat(
                 final_reply = str(event.get("reply") or "").strip() or iteration_raw_reply or iteration_reply
                 final_reply = _collapse_exact_duplicate_reply(final_reply)
                 usage_masked = event.get("usage_masked") if isinstance(event.get("usage_masked"), dict) else {}
+                # MAN-144: count this iteration's real cost against the
+                # turn's running total regardless of what happens to the
+                # reply afterward (tool-honesty regeneration, nuclear
+                # fallback, etc.) -- the model call already happened and was
+                # already paid for the moment this "result" event arrived.
+                _turn_accumulated_cost_usd += float(usage_masked.get("estimated_cost_usd") or 0.0)
                 attempted_providers = str(event.get("attempted_providers") or "").strip()
                 llm_error = str(event.get("error") or "").strip()
                 actual_provider = str(event.get("provider") or actual_provider or "").strip() or actual_provider

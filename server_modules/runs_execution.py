@@ -99,6 +99,7 @@ from server_modules import policy_service
 from server_modules import safe_mode_service
 from server_modules.runs_engine import (
     ENGINE_REGISTRY,
+    RUN_COST_CEILING_ERROR_MARKER,
     RUN_TOOL_LOOP_REPLY,
     clear_run_tool_signature_state,
     format_agent_summary,
@@ -4779,7 +4780,9 @@ def _execute_workflow_graph(
                         f"Current workflow node: {label}\n"
                         "Produce the result for this node only."
                     )
-                    text = generate_with_candidate_failover(agent_state, execution_context, log_queue, system_prompt, user_input)
+                    text = generate_with_candidate_failover(
+                        agent_state, execution_context, log_queue, system_prompt, user_input, run_id=run_id
+                    )
                     current_text = text
                     state["last_text"] = text
                     state["last_data"] = {
@@ -5755,7 +5758,7 @@ def _execute_orion_dag_node(
     if kind == "plan_generate":
         plan_input = str(state.get("plan_input") or "")
         plan_prompt = ORION_PLANNER_SYSTEM_PROMPT
-        plan_text = generate_with_candidate_failover(state, context, log_queue, plan_prompt, plan_input)
+        plan_text = generate_with_candidate_failover(state, context, log_queue, plan_prompt, plan_input, run_id=run_id)
         emit_log(log_queue, "info", plan_text, event="orion_plan")
         state["plan_text"] = plan_text
         return {"chars": len(plan_text)}
@@ -5817,7 +5820,9 @@ def _execute_orion_dag_node(
             "Keep the response concise and operational."
         )
         execute_prompt = ORION_OPERATOR_SYSTEM_PROMPT
-        result_text = generate_with_candidate_failover(state, context, log_queue, execute_prompt, execute_input)
+        result_text = generate_with_candidate_failover(
+            state, context, log_queue, execute_prompt, execute_input, run_id=run_id
+        )
         emit_log(log_queue, "info", result_text, event="orion_result")
         final_text = (
             "Execution Plan\n"
@@ -6096,6 +6101,41 @@ def run_orion_mission(run_id: str):
                     _runtime_outcome_log_level(run.get("execution_outcome"), "warn"),
                     _runtime_outcome_summary(run.get("execution_outcome"), message),
                     event=_runtime_outcome_event(run.get("execution_outcome"), "run_stopped"),
+                )
+                clear_run_tool_signature_state(run_id)
+                _set_run_status_after_execution_runtime_decision(
+                    run_id,
+                    final_status,
+                    run=run,
+                    context=context,
+                    engine_name=run.get("engine") or "orion",
+                    timeout_seconds=ORION_RUN_TIMEOUT_SECONDS,
+                )
+                run["logs"].put(None)
+                return
+
+            # MAN-144: the run's own per-run cost ceiling tripped
+            # (generate_with_candidate_failover in runs_engine.py, raised
+            # BEFORE the model call that would have crossed it). Handled as
+            # its own branch, exactly like "stopped by human decision" above
+            # -- a deliberate stop, not a crash -- so it lands on the same
+            # "cancelled" run status rather than "failed", and is
+            # distinguishable in the persisted run state (run.execution_outcome
+            # .stderr / run.result carry the ceiling/spend figures) from an
+            # ordinary provider or runtime failure.
+            if RUN_COST_CEILING_ERROR_MARKER in raw_message.lower() or RUN_COST_CEILING_ERROR_MARKER in message.lower():
+                run["execution_outcome"] = _normalize_execution_outcome_with_rust(
+                    cancelled=True,
+                    stderr=message or raw_message,
+                )
+                run["halt_reason"] = "run_cost_ceiling_reached"
+                _apply_execution_outcome_record_patch(run, run.get("execution_outcome"))
+                final_status = _runtime_final_status_from_outcome(run.get("execution_outcome"), "cancelled")
+                emit_log(
+                    log_queue,
+                    _runtime_outcome_log_level(run.get("execution_outcome"), "warn"),
+                    _runtime_outcome_summary(run.get("execution_outcome"), message),
+                    event=_runtime_outcome_event(run.get("execution_outcome"), "run_cost_ceiling_reached"),
                 )
                 clear_run_tool_signature_state(run_id)
                 _set_run_status_after_execution_runtime_decision(

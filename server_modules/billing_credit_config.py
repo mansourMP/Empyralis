@@ -124,6 +124,19 @@ DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD = _env_non_negative_float(
     5.00,
 )
 
+# ── MAN-144: default per-run cost ceiling ───────────────────────────────
+# Applies to a SINGLE run/turn (checked before each model call inside it),
+# not the monthly cap above (which only settles after a run finishes and
+# only pauses future runs). Deliberately a small fraction of the monthly
+# default: one runaway turn should never be able to spend anywhere near a
+# full month's allowance before something notices. Per-agent override lives
+# in DeployedAgentCommercePolicy.per_run_cost_ceiling_usd; this is the floor
+# every run gets when nothing more specific is configured.
+DEFAULT_RUN_COST_CEILING_USD = _env_non_negative_float(
+    "EMPYRALIS_DEFAULT_RUN_COST_CEILING_USD",
+    1.00,
+)
+
 # ── 3. Free allowance ───────────────────────────────────────────────────
 # One-time (new workspaces) / floor top-up (pre-existing workspaces) grant
 # in USD. At the default rate (100 credits/$) this is 1.00 * 100 = 100 credits

@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from server_modules import (
     activity_ledger_service,
     billing_credit_config,
+    config_defaults_service,
     control_plane_repository,
     credit_ledger_contract,
     deployed_agent_config_schema,
@@ -72,6 +73,26 @@ def _parse_positive_usd(value: Any) -> Optional[float]:
 def deployed_agent_monthly_cost_cap_usd(deployed_agent: Optional[Dict[str, Any]]) -> Optional[float]:
     config = deployed_agent_config_schema.deployed_agent_config_from_record(deployed_agent)
     return _parse_positive_usd(config.commerce_policy.monthly_cost_cap_usd)
+
+
+def deployed_agent_run_cost_ceiling_usd(deployed_agent: Optional[Dict[str, Any]]) -> float:
+    """MAN-144: the enforced, mid-run, per-run spend ceiling for this deployed
+    agent -- checked before each model call inside a single run (see
+    generate_with_candidate_failover in runs_engine.py and
+    stream_provider_backed_direct_chat in direct_chat_generation_service.py).
+
+    Unlike deployed_agent_monthly_cost_cap_usd (which may legitimately be
+    None -- "no monthly cap configured" -- and is settled after a run
+    completes), this ALWAYS returns a usable positive number: an unset
+    per-agent override falls back to the platform default rather than
+    disabling enforcement, so a run with no configuration still has a real
+    ceiling instead of an unbounded one.
+    """
+    config = deployed_agent_config_schema.deployed_agent_config_from_record(deployed_agent)
+    configured = _parse_positive_usd(config.commerce_policy.per_run_cost_ceiling_usd)
+    if configured is not None:
+        return configured
+    return config_defaults_service.default_run_cost_ceiling_usd()
 
 
 def _deployed_agent_ai_source(deployed_agent: Optional[Dict[str, Any]]) -> Dict[str, Any]:
