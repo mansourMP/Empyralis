@@ -359,4 +359,27 @@ CREATE POLICY empyralis_project_task_labels_scope ON project_task_labels
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- task_notifications (MAN-146) is a BRAND NEW table (migrations/add_task_
+-- notifications.sql), unlike every block above this comment -- those are
+-- all retrofits onto tables that shipped with unprotected raw pool calls
+-- first and had to be converted to control_plane_repository.rls_fetch/
+-- rls_fetchrow/rls_execute before RLS could be turned on safely (see the
+-- MAN-109 comment above). task_notification_service.py's every call site
+-- was written against the scoped helpers from the start, so there is no
+-- such ordering hazard here and RLS ships in the same migration that
+-- creates the table. This policy enforces tenant/workspace isolation only
+-- -- it has no notion of recipient_user_id; the per-recipient inbox
+-- boundary (member A cannot read member B's notifications) is an
+-- application-level filter in list_notifications, layered ON TOP of this,
+-- exactly like assignee_user_id/completed_by_user_id are application-level
+-- concerns layered on top of the same tenant/workspace RLS everywhere else
+-- in this file.
+ALTER TABLE task_notifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE task_notifications FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_task_notifications_scope ON task_notifications;
+CREATE POLICY empyralis_task_notifications_scope ON task_notifications
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;

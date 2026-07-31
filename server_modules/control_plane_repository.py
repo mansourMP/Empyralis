@@ -827,6 +827,43 @@ CREATE TABLE IF NOT EXISTS project_task_labels (
     PRIMARY KEY (task_id, label_id)
 );
 
+-- Per-user notifications (MAN-146): a recipient-addressed record of
+-- "someone @-mentioned you", "a task was assigned to you", or "someone
+-- commented on a task you own" -- the three events outbox_service.emit_
+-- notification_event's tenant/workspace-only OutboxEvent cannot address to
+-- a specific person, which is why GET /notifications broadcasts every
+-- mention to the whole workspace today. See migrations/add_task_
+-- notifications.sql for the full reasoning (why Postgres and not the
+-- SQLite runtime_state_store notification machinery, why recipient_user_id
+-- is NOT NULL + CASCADE, why RLS is safe to enable in the same migration
+-- that creates this table, and why read_at is the ONE unread mechanism a
+-- future frontend pass should consolidate onto).
+CREATE TABLE IF NOT EXISTS task_notifications (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    recipient_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    source_event_type TEXT NOT NULL
+        CONSTRAINT task_notifications_source_event_type_check CHECK (source_event_type IN (
+            'task_mention', 'task_assigned', 'task_comment'
+        )),
+    task_id TEXT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+    comment_id TEXT NULL,
+    actor_type TEXT NOT NULL DEFAULT 'system',
+    actor_id TEXT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    deep_link TEXT NULL,
+    read_at TIMESTAMPTZ NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_notifications_recipient_feed
+    ON task_notifications(tenant_id, workspace_id, recipient_user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_task_notifications_recipient_unread
+    ON task_notifications(tenant_id, workspace_id, recipient_user_id)
+    WHERE read_at IS NULL;
+
 -- Bug reports (MAN-106): a small, honest "report an issue" entry point
 -- reachable from anywhere in the product via a rail icon button (see
 -- frontend/lib/workspace/fleet/BugReportButton.tsx). Deliberately NOT a

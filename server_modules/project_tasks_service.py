@@ -1021,6 +1021,52 @@ async def add_task_comment(
             )
         except Exception:
             LOGGER.warning("Mention dispatch failed for task %s", resolved_task_id, exc_info=True)
+
+    # MAN-146: "comment on a task you own" -- alongside the mention
+    # dispatch above (this runs for every comment, not only one carrying an
+    # @-mention), notify whoever owns this task. "Own" is deliberately read
+    # as BOTH `created_by` (the filer, the accountable owner of record --
+    # see migrations/add_task_human_assignee.sql's own header) AND
+    # `assignee_user_id` (whoever is currently working it) -- they routinely
+    # differ (Alice files a task and hands it to Bob), both readings are
+    # defensible, and both are already sitting in `task` from the write
+    # above, so checking two ids costs nothing extra and never under-
+    # notifies. Deduplicated, and the commenter is always excluded (telling
+    # someone about their own comment is a no-op, the same self-mention
+    # rule dispatch_resolved_mentions already applies). Naturally bounded
+    # to at most 2 recipients by construction -- there are only two
+    # candidate columns -- so this does not need task_mention_service's
+    # max_mentioned_human_notifications_per_comment() cap, which exists to
+    # bound an unbounded @-mention fan-out this producer cannot have.
+    if task is not None:
+        owner_user_ids: List[str] = []
+        for candidate in (task.get("created_by"), task.get("assignee_user_id")):
+            candidate_id = str(candidate or "").strip()
+            if not candidate_id or candidate_id == resolved_author_id or candidate_id in owner_user_ids:
+                continue
+            owner_user_ids.append(candidate_id)
+        if owner_user_ids:
+            from server_modules import task_notification_service
+
+            for owner_user_id in owner_user_ids:
+                try:
+                    await task_notification_service.create_notification(
+                        tenant_id=resolved_tenant_id,
+                        workspace_id=resolved_workspace_id,
+                        recipient_user_id=owner_user_id,
+                        source_event_type=task_notification_service.SOURCE_EVENT_COMMENT,
+                        task_id=resolved_task_id,
+                        comment_id=str(comment.get("id") or "") or None,
+                        actor_type=resolved_author_type,
+                        actor_id=resolved_author_id,
+                        body=f'New comment on "{task.get("title") or resolved_task_id}"',
+                        deep_link=task_notification_service.task_deep_link(resolved_task_id),
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "Task-owner comment notification failed for user %s on task %s",
+                        owner_user_id, resolved_task_id, exc_info=True,
+                    )
     return task
 
 
@@ -1631,4 +1677,35 @@ async def assign_task_to_user(
     # No scheduler call here -- see the docstring above. This is not a
     # try/except around a call that happens to always succeed; the call
     # itself does not exist in this function, in any branch.
+
+    # MAN-146: "assigned to you" -- the one producer that emitted nothing
+    # at all before this. Hooked after the row is built (so the notification
+    # only ever fires for an assignment that actually happened) and before
+    # return, best-effort exactly like every other notify/wake call in this
+    # file -- a write failure here must never undo the assignment itself,
+    # which already succeeded by this point. Skipped on self-assignment
+    # (triggered_by == the new assignee): telling someone they assigned a
+    # task to themselves is a no-op, the same self-mention exclusion
+    # dispatch_resolved_mentions already applies for @-mentions.
+    resolved_triggered_by = str(triggered_by or "").strip()
+    if resolved_triggered_by != resolved_user_id:
+        try:
+            from server_modules import task_notification_service
+
+            await task_notification_service.create_notification(
+                tenant_id=resolved_tenant_id,
+                workspace_id=resolved_workspace_id,
+                recipient_user_id=resolved_user_id,
+                source_event_type=task_notification_service.SOURCE_EVENT_ASSIGNED,
+                task_id=resolved_task_id,
+                actor_type="user",
+                actor_id=resolved_triggered_by or None,
+                body=f'You were assigned "{updated.get("title") or resolved_task_id}"',
+                deep_link=task_notification_service.task_deep_link(resolved_task_id),
+            )
+        except Exception:
+            LOGGER.warning(
+                "Assignment notification failed for user %s on task %s", resolved_user_id, resolved_task_id,
+                exc_info=True,
+            )
     return {"task": updated, "wake_request": None, "wake_error": None}
