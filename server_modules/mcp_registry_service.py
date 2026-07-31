@@ -1327,12 +1327,34 @@ def upsert_workspace_mcp_server(
             if isinstance(tool, dict) and _normalize_tool_name(tool.get("name"))
         }
         discovery_credential = _resolve_mcp_credential(payload, normalized_workspace_id)
-        discovered = discover_mcp_server_tools(
-            transport=payload["transport"],
-            endpoint=payload["endpoint"],
-            server_id=payload["id"],
-            credential=discovery_credential,
-        )
+        try:
+            discovered = discover_mcp_server_tools(
+                transport=payload["transport"],
+                endpoint=payload["endpoint"],
+                server_id=payload["id"],
+                credential=discovery_credential,
+            )
+        except Exception as exc:
+            # MAN-111/MAN-124: a raised discovery error used to abort this
+            # function before `servers[payload["id"]] = payload` ran, so a
+            # failed FIRST registration left no trace anywhere queryable —
+            # not in this registry, not in the catalog, nothing. The caller
+            # (e.g. connection_oauth_service._register_mcp_servers_for_provider)
+            # still learns about the failure via this re-raise, but now a
+            # server row is also persisted with an honest status so anything
+            # that reads the registry later (health checks, the catalog,
+            # a human debugging) can see it too instead of the credential
+            # looking connected with zero explanation for zero tools.
+            payload["status"] = "discovery_failed"
+            payload["status_detail"] = str(exc) or exc.__class__.__name__
+            payload["status_updated_at"] = _utc_now_iso()
+            payload["last_synced_at"] = _utc_now_iso()
+            payload["updated_at"] = payload["last_synced_at"]
+            servers[payload["id"]] = payload
+            bucket["servers"] = servers
+            _save_workspace_bucket(normalized_workspace_id, registry, bucket)
+            save_mcp_server_registry(registry)
+            raise
         if discovered:
             for tool in discovered:
                 normalized_name = _normalize_tool_name(tool.get("name"))
@@ -1414,12 +1436,26 @@ async def upsert_workspace_mcp_server_async(
             if isinstance(tool, dict) and _normalize_tool_name(tool.get("name"))
         }
         discovery_credential = _resolve_mcp_credential(payload, normalized_workspace_id)
-        discovered = await discover_mcp_server_tools_async(
-            transport=payload["transport"],
-            endpoint=payload["endpoint"],
-            server_id=payload["id"],
-            credential=discovery_credential,
-        )
+        try:
+            discovered = await discover_mcp_server_tools_async(
+                transport=payload["transport"],
+                endpoint=payload["endpoint"],
+                server_id=payload["id"],
+                credential=discovery_credential,
+            )
+        except Exception as exc:
+            # See the sync twin (upsert_workspace_mcp_server) above for why
+            # this persists before re-raising — MAN-111/MAN-124.
+            payload["status"] = "discovery_failed"
+            payload["status_detail"] = str(exc) or exc.__class__.__name__
+            payload["status_updated_at"] = _utc_now_iso()
+            payload["last_synced_at"] = _utc_now_iso()
+            payload["updated_at"] = payload["last_synced_at"]
+            servers[payload["id"]] = payload
+            bucket["servers"] = servers
+            _save_workspace_bucket(normalized_workspace_id, registry, bucket)
+            save_mcp_server_registry(registry)
+            raise
         if discovered:
             for tool in discovered:
                 normalized_name = _normalize_tool_name(tool.get("name"))
