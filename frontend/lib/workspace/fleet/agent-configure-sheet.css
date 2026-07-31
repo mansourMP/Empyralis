@@ -63,6 +63,27 @@
     height: 88vh;
     max-height: none;
   }
+
+  /* GroupedRail collapses to a horizontal strip below 720px on its own
+     (grouped-rail.css) — but that only changes ITS internal layout. Left
+     as a plain flex row, .agent-configure-body still sat the strip and
+     the content pane SIDE BY SIDE, squeezing both into slivers (verified
+     in-browser at 390px: the strip floated mid-sheet and the tab content
+     was pushed out of view entirely). Stacking to a column here is the
+     other half of that same breakpoint — strip on top, content below,
+     each full width. */
+  .agent-configure-body {
+    flex-direction: column;
+    padding: 16px;
+    gap: 12px;
+    overflow-y: auto;
+  }
+
+  .agent-configure-content {
+    height: auto;
+    overflow: visible;
+    padding: 4px 0 0;
+  }
 }
 
 .agent-configure-header {
