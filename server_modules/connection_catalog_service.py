@@ -2403,6 +2403,66 @@ def _oauth_setup_unconfigured(item: Dict[str, Any]) -> bool:
         return True
 
 
+def _mcp_registration_health(item: Dict[str, Any], workspace_id: str) -> tuple[Optional[str], Optional[str]]:
+    """(health_status_override, last_error) for a connector whose agent
+    tools ride on an auto-registered MCP server
+    (connection_oauth_service.APP_MCP_SERVER_MAP) rather than a bespoke
+    integration.
+
+    MAN-111: a connector could complete OAuth, store a real credential, and
+    still deliver zero tools because MCP server auto-registration
+    (connection_oauth_service._register_mcp_servers_for_provider, called
+    from the OAuth callback) failed — best-effort by design, so the OAuth
+    flow itself still "succeeds." Both status_items() and agent_status_items()
+    above used to report such a connector as unconditionally "healthy" the
+    moment a vault credential existed, which is indistinguishable from a
+    working connection to anyone looking at the UI. This checks the one
+    place that failure is durably recorded post-MAN-111/MAN-124
+    (mcp_registry_service's per-server "status"/"status_detail", now
+    persisted even when discovery raises — see upsert_workspace_mcp_server[_async])
+    and downgrades the badge so it isn't silent.
+
+    Returns (None, None) — no override — when there's nothing to report:
+    the provider doesn't ride on MCP at all, none of its mapped server_ids
+    have a live endpoint, or every mapped server registered cleanly.
+    Deliberately does NOT treat a missing server row as a failure: a
+    connector can be legitimately connected with no MCP row at all (a
+    credential stored through a path other than the OAuth auto-register
+    callback, or simply not synced yet) — that is silence, not evidence.
+    Only a row that was actually attempted and recorded a non-"ok" status is
+    something this function actually knows is broken.
+    """
+    try:
+        provider = connection_oauth_service.provider_from_connection_id(_text(item.get("id")))
+    except Exception:
+        return None, None
+    server_entries = connection_oauth_service.APP_MCP_SERVER_MAP.get(provider)
+    if not server_entries:
+        return None, None
+    from server_modules import mcp_registry_service
+    failures: list[str] = []
+    for entry in server_entries:
+        server_id = str(entry.get("server_id") or "").strip()
+        if not server_id or entry.get("endpoint") is None:
+            continue
+        try:
+            server = mcp_registry_service.get_workspace_mcp_server(workspace_id, server_id)
+        except Exception:
+            continue
+        if not isinstance(server, dict):
+            continue
+        status = str(server.get("status") or "ok").strip().lower()
+        if status and status != "ok":
+            detail = str(server.get("status_detail") or status)
+            failures.append(f"{entry.get('label') or server_id}: {detail}")
+    if not failures:
+        return None, None
+    return "tools_unavailable", (
+        "Connected, but MCP tool registration failed, so no tools are available yet — "
+        + "; ".join(failures)
+    )
+
+
 def _discord_bot_live_connection_check() -> tuple[Optional[bool], Optional[str]]:
     """(live_connected, reason) for the Discord bot's actual running
     discord.py Gateway client(s) in THIS process, as opposed to whether a
@@ -2505,6 +2565,11 @@ def status_items(
             connected = bool(aliases & vault_connector_ids)
             configured = connected
             health_status = "healthy" if connected else "not_configured"
+            if connected:
+                mcp_status, mcp_detail = _mcp_registration_health(item, workspace_id)
+                if mcp_status:
+                    health_status = mcp_status
+                    last_error = mcp_detail
             # First-party bot pairing (e.g. hosted Telegram) — check in-memory
             # pairing state rather than vault entries.
             if not connected and item.get("setup_kind") == "first_party_bot_pairing":
@@ -2669,6 +2734,23 @@ async def agent_status_items(
             item["connected"] = has_binding and has_live_credential
             item["configured"] = item["connected"]
             item["health_status"] = "healthy" if item["connected"] else "not_configured"
+            if item["connected"]:
+                # MAN-111: status_items() already computed an honest
+                # health_status above (a real MCP registration failure
+                # downgrades it) — this agent-scoped pass used to overwrite
+                # that with a bare healthy/not_configured binary derived only
+                # from "does a binding+credential exist," which is exactly
+                # the silent-failure shape the founder reported ("connecting
+                # does nothing"): the credential is real, the binding is
+                # real, and the connector still renders green with zero
+                # tools. Recompute the same MCP-aware check here so the
+                # per-agent Connectors tab (the actual live UI —
+                # ConnectorPicker.tsx via GET .../fleet/agent-connectors)
+                # doesn't lose the signal status_items() already worked out.
+                mcp_status, mcp_detail = _mcp_registration_health(item, workspace_id)
+                if mcp_status:
+                    item["health_status"] = mcp_status
+                    item["last_error"] = mcp_detail
         elif lane in {LANE_SAGE_PERSONAL_CHANNEL, LANE_STUDIO_BUSINESS_CHANNEL}:
             # Channel truth is gated by the agent's own enabled channel binding
             # on top of the underlying workspace channel/pairing state.

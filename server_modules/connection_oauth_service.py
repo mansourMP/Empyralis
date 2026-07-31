@@ -3502,6 +3502,22 @@ async def connect_app_via_oauth_to_mcp(
     3. Looks up the MCP server URL for the provider.
     4. Registers the MCP server with credential injection.
     5. Returns the list of discovered tools (empty if no MCP server URL yet).
+
+    MAN-111 diagnosis note: this is NOT the live "click Connect, finish OAuth"
+    path. The frontend's own client wrapper for this endpoint
+    (frontend/lib/workspace/workstation-client.ts, completeAppOAuthForMcp)
+    documents in its own TODO comment that it can never be called correctly
+    from the browser, because the browser never sees the OAuth authorization
+    code — only the backend's redirect-based callback does. Confirmed
+    unreferenced by any React component (only defined, never invoked). The
+    real live path is complete_oauth_callback() below, reached via
+    routes_connections.py's GET /connections/oauth/{provider}/callback,
+    which performs the same four steps inline against the code the provider
+    actually redirected back with. This function is kept reachable via
+    POST /apps/{provider}/oauth/complete for any direct API caller that DOES
+    have a code (e.g. a script, or a future non-browser client) and is fixed
+    for the same silent-failure pattern as the live path for that reason —
+    but it is not what an end user hits today.
     """
     import uuid
     import time as _time
@@ -3642,12 +3658,24 @@ async def connect_app_via_oauth_to_mcp(
             })
         except Exception as exc:
             _log.warning("MCP server registration failed for %s/%s: %s", normalized_provider, server_id, exc)
+            detail = str(exc) or exc.__class__.__name__
             registered_servers.append({
                 "server_id": server_id,
                 "mcp_server_registered": False,
                 "tools": [],
-                "error": str(exc),
+                "error": detail,
             })
+            # MAN-111: this per-server "error" field used to be the only
+            # place a registration failure landed — the top-level "warning"
+            # this function returns stayed None whenever every failure came
+            # through this branch (it only ever collected the "empty
+            # server_id" skip case above), so a caller that only checks the
+            # aggregate warning — the shape every other caller in this
+            # codebase uses (see _register_mcp_servers_for_provider's
+            # "warning" field on the live OAuth-callback path) — saw nothing
+            # wrong. Feed it here too so this bridge can't look silently
+            # clean while individual servers failed underneath it.
+            warnings.append(f"{server_label}: {detail}")
 
     return {
         "ok": True,

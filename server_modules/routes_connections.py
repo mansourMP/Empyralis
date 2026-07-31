@@ -220,12 +220,27 @@ def _oauth_completion_url(
     surface: Optional[str] = None,
     agent_install_id: Optional[str] = None,
     project_id: Optional[str] = None,
+    mcp_warning: Optional[str] = None,
 ) -> str:
     query: Dict[str, str] = {}
     if error:
         query["connection_error"] = error
     else:
         query["connected"] = provider
+        # MAN-111: complete_oauth_callback() computes an honest per-server
+        # MCP-registration warning (connection_oauth_service.
+        # _register_mcp_servers_for_provider's "warning" field — "Connected,
+        # but N ... MCP server(s) could not be registered...") whenever
+        # auto-registration failed after a successful token exchange. Before
+        # this, that string was computed and then discarded the moment this
+        # function built the redirect: the browser landed on
+        # ?connected={provider} with no way to tell "OAuth succeeded, tools
+        # did too" apart from "OAuth succeeded, tools silently didn't." Carry
+        # it across the redirect boundary so it's at least inspectable by
+        # whatever reads this callback's query string, instead of dying here
+        # unconditionally regardless of whether registration actually worked.
+        if mcp_warning:
+            query["mcp_warning"] = mcp_warning
     # Fleet agent-connectors: send the browser back to the agent's own
     # Channels or Connectors tab (not the generic workspace integrations
     # page) when this OAuth round-trip was started from the agent's own tab
@@ -628,9 +643,17 @@ async def complete_connection_oauth_callback(
         agent_install_id = str(payload.get("agent_install_id") or "").strip()
         project_id = await _resolve_agent_project_id(agent_install_id, workspace_id)
 
+        mcp_result = payload.get("mcp") if isinstance(payload.get("mcp"), dict) else {}
+        mcp_warning = str(mcp_result.get("warning") or "").strip() or None
+        if mcp_warning:
+            _logger.warning(
+                "OAUTH_CALLBACK_MCP_REGISTRATION_INCOMPLETE provider=%s workspace=%s detail=%s",
+                provider, workspace_id, mcp_warning,
+            )
         completion_url = _oauth_completion_url(
             request, workspace_id=workspace_id, provider=provider_id, surface=surface,
             agent_install_id=agent_install_id or None, project_id=project_id or None,
+            mcp_warning=mcp_warning,
         )
         _logger.warning("OAUTH_CALLBACK_SUCCESS provider=%s redirect_to=%s", provider, completion_url)
         return RedirectResponse(completion_url, status_code=303)
