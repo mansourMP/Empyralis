@@ -21,10 +21,18 @@
  * ACTIVATION SEMANTICS (browsers', deliberately):
  *   · plain click on a card/link  → REPLACES the active tab's content
  *   · ⌘/Ctrl+click, middle click  → opens a NEW BACKGROUND tab, no navigation
- *   · `+`                         → a new tab on the workspace home with the
- *                                   ⌘K quick-switcher already open, which is
- *                                   the closest honest analogue of a browser's
- *                                   new-tab-then-type-in-the-address-bar.
+ *   · `+`                         → a new tab landed on Projects (this
+ *                                   workspace's default view — see
+ *                                   defaultTabPath in fleet-tabs.ts). Used to
+ *                                   pop the ⌘K quick-switcher open over a
+ *                                   blank landing page; founder feedback
+ *                                   during YC-demo prep was that a full-
+ *                                   workspace command palette (every agent
+ *                                   listed) is not a light "type where you
+ *                                   want to go" affordance, it's a modal —
+ *                                   the wrong opening move for a plain `+`
+ *                                   click. ⌘K itself is untouched and still
+ *                                   opens the palette from anywhere.
  *
  * The modifier-click interception is ONE capture-phase listener scoped to the
  * content panel, not a prop threaded through every clickable thing. It picks
@@ -33,11 +41,13 @@
  * rather than links because they are also drag sources). Adding the attribute
  * is the entire cost of making a new surface ⌘-clickable.
  *
- * KEYBOARD. Deliberately none. ⌘W and ⌘1..9 are owned by the browser itself
- * (Chrome/Safari never deliver them to the page), and every unmodified letter
- * is already spoken for by PrimaryRail's `g`-chord/j/k model. Claiming a
- * half-working shortcut would be worse than not claiming one — see the report
- * note; a rebindable scheme is real follow-up work.
+ * KEYBOARD (tab switching itself). Deliberately none. ⌘W and ⌘1..9 are owned
+ * by the browser itself (Chrome/Safari never deliver them to the page), and
+ * every unmodified letter is already spoken for by PrimaryRail's `g`-chord/
+ * j/k model. Claiming a half-working shortcut would be worse than not
+ * claiming one — see the report note; a rebindable scheme is real follow-up
+ * work. (The history buttons rendered alongside the strip, below, are a
+ * separate control with their own ⌘[ / ⌘] binding — see nav-history.ts.)
  */
 
 import {
@@ -55,6 +65,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   BarChart3,
   Bot,
+  ChevronLeft,
+  ChevronRight,
   CircleDashed,
   Cpu,
   FolderKanban,
@@ -82,6 +94,8 @@ import {
   type FleetTabKind,
   type FleetTabsState,
 } from "./fleet-tabs";
+import { useNavHistory } from "./nav-history";
+import "./fleet-nav-history.css";
 
 type OpenOptions = { title?: string };
 
@@ -356,15 +370,16 @@ export function FleetTabsProvider({
   );
 
   const newTab = useCallback(() => {
+    // Lands on Projects (defaultTabPath) and stays there — a real, useful
+    // view, not a blank page. This used to also pop the ⌘K command palette
+    // open over that landing page; removed (YC-demo founder feedback) — the
+    // palette lists every agent in the workspace, a full-screen modal is
+    // not a light "new tab, type where you want to go" affordance. ⌘K
+    // itself is unchanged and still opens the palette from anywhere.
     const path = defaultTabPath(workspaceId);
     const tab = makeTab(path, workspaceId, labels);
     setState((cur) => ({ tabs: [...cur.tabs, tab], activeId: tab.id }));
     router.push(path);
-    // A blank tab with nothing to do in it is a dead end, so the new tab
-    // opens the ⌘K quick-switcher over its landing page — the app's version
-    // of a browser's "new tab focuses the address bar". Deferred a tick so
-    // the palette isn't mounted into a tree the navigation is still settling.
-    window.setTimeout(() => window.dispatchEvent(new Event("fleet:open-command-palette")), 60);
   }, [workspaceId, labels, router]);
 
   // ── ⌘/Ctrl+click and middle-click → background tab ────────────────────────
@@ -451,6 +466,82 @@ export function FleetTabsProvider({
   );
 }
 
+/**
+ * ‹ / › — app-chrome history navigation, rendered at the head of the tab
+ * strip (Linear's own top-left placement for the same cluster). Rides the
+ * browser's real History API via `useNavHistory` (see that module's header
+ * for the full design rationale) rather than a parallel app-level stack, so
+ * this can never disagree with the browser's own back/forward — same
+ * pointer, two controls.
+ *
+ * Disabled (not hidden) at either end of history — a real `disabled`
+ * button, not a silently inert one (CLAUDE.md: no dead controls). Native
+ * `disabled` also removes it from tab order on its own, so there's nothing
+ * extra to wire for the enabled case to stay keyboard-reachable.
+ *
+ * Shortcut is ⌘[ / ⌘] (Ctrl on non-Mac) — Safari and Chrome's own
+ * long-standing back/forward menu equivalents on macOS, not ArrowLeft/Right:
+ * PrimaryRail's `g`-chord already bails out on any modifier key, so there's
+ * no collision there, but arrow keys specifically are live elsewhere as
+ * PLAIN (unmodified-key-agnostic) shortcuts — the rail-resizer and the
+ * workstation split-workbench's resize handles both react to a bare
+ * ArrowLeft/ArrowRight keydown without checking for a held Alt/Cmd, so
+ * Alt+Left/Right (the Windows/Linux convention) would double-fire a resize
+ * on top of the navigation if one of those handles happened to be focused.
+ * Brackets are free of that: nothing else in this codebase binds them.
+ */
+function FleetHistoryControls() {
+  const router = useRouter();
+  const { canGoBack, canGoForward } = useNavHistory();
+
+  useEffect(() => {
+    const isTyping = () => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el) return false;
+      return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable;
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || isTyping()) return;
+      if (e.key === "[") {
+        if (!canGoBack) return;
+        e.preventDefault();
+        router.back();
+      } else if (e.key === "]") {
+        if (!canGoForward) return;
+        e.preventDefault();
+        router.forward();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [canGoBack, canGoForward, router]);
+
+  return (
+    <div className="fleet-navhistory">
+      <button
+        type="button"
+        className="fleet-navhistory-btn"
+        onClick={() => router.back()}
+        disabled={!canGoBack}
+        aria-label="Back"
+        title="Back (⌘[)"
+      >
+        <ChevronLeft size={15} strokeWidth={2} />
+      </button>
+      <button
+        type="button"
+        className="fleet-navhistory-btn"
+        onClick={() => router.forward()}
+        disabled={!canGoForward}
+        aria-label="Forward"
+        title="Forward (⌘])"
+      >
+        <ChevronRight size={15} strokeWidth={2} />
+      </button>
+    </div>
+  );
+}
+
 /** The strip itself. Rendered by FleetContentFrame on the canvas directly
  *  ABOVE the floating content panel (MAN-127) — see this file's header. */
 export function FleetTabStrip() {
@@ -467,7 +558,13 @@ export function FleetTabStrip() {
   const { tabs, activeId, activateTab, closeTab, newTab } = api;
 
   return (
-    <div className="fleet-tabstrip" role="tablist" aria-label="Open views">
+    <div className="fleet-tabstrip">
+      {/* History cluster leads the strip (Linear's own top-left placement) —
+          not inside the tablist below: `role="tablist"` should contain only
+          `role="tab"` children, and moving it onto `.fleet-tabstrip-list`
+          specifically (rather than leaving it up here where it used to
+          cover the `+` button too) fixes that for the same reason. */}
+      <FleetHistoryControls />
       {/* The list is sized to its content (`flex: 0 1 auto`, in the CSS), so it
           ends where the last tab ends and `+` lands right beside it — Safari,
           Chrome and Linear all put it there.
@@ -478,7 +575,7 @@ export function FleetTabStrip() {
           next to the last visible tab — never scrolled out of reach, which is
           what putting it inside the scroller would have cost. Safari and
           Chrome behave the same way once their tab bar is full. */}
-      <div className="fleet-tabstrip-list">
+      <div className="fleet-tabstrip-list" role="tablist" aria-label="Open views">
         {tabs.map((tab) => {
           const Icon = KIND_ICONS[tab.kind] || Square;
           const active = tab.id === activeId;
