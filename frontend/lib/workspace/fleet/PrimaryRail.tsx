@@ -22,9 +22,8 @@ import {
 
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
-import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
-import { StatusDot } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
 import { FleetHelpButton } from "./FleetHelpButton";
 import { SageLauncher } from "./SageLauncher";
@@ -72,15 +71,22 @@ const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
 
 /**
  * Persistent primary rail — the app's spine. A populated workspace header
- * (U3-G) replaces the static product wordmark; Projects AND Agents are both
- * real, collapsible sub-lists of the workspace's own data (Linear's "Teams"
- * treatment, same pattern for both — see the shared showSubnav logic
- * below); a quiet footer line reports the fleet's pulse above the account
- * block. Billing lives in the account menu instead — it's a look-up-
- * occasionally screen, not a nav destination. Keyboard: `j`/`k` move a
- * highlight, Enter opens it; `g` then a section key jumps directly (g i
- * inbox, g c conversations, g p projects, g a agents) — the Linear
- * muscle-memory model.
+ * (U3-G) replaces the static product wordmark; Projects is a real,
+ * collapsible sub-list of the workspace's own data (Linear's "Teams"
+ * treatment — genuine containers you navigate into); a quiet footer line
+ * reports the fleet's pulse above the account block. Billing lives in the
+ * account menu instead — it's a look-up-occasionally screen, not a nav
+ * destination. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then
+ * a section key jumps directly (g i inbox, g c conversations, g p projects,
+ * g a agents) — the Linear muscle-memory model.
+ *
+ * Agents is a plain nav link to the Agents page, not a sub-list (MAN-146).
+ * Agents are entities, not navigation destinations — the same reason Linear
+ * lists teams and projects in its sidebar but never lists every issue. A
+ * rail that rendered every agent flat under "Agents" (no cap, expanded by
+ * default) scaled linearly with fleet size: at 13 agents it pushed Inbox
+ * out of view entirely, and it only gets worse from there. The Agents page
+ * is where you browse agents; the rail is how you get there.
  */
 export function PrimaryRail({
   workspaceId,
@@ -246,19 +252,11 @@ export function PrimaryRail({
   );
 
   const projectsExpanded = sections?.projects ?? true;
-  const agentsExpanded = sections?.agents ?? true;
 
   // "/w/{ws}/projects/{id}[/...]" → {id}, so the matching rail row highlights
   // whether you're on the project's own page or one of its agents' pages.
   const activeProjectId = useMemo(() => {
     const m = pathname.match(/\/projects\/([^/]+)/);
-    return m ? decodeURIComponent(m[1]) : null;
-  }, [pathname]);
-  // Same idea for a single agent — "/agents/{agentId}" appears under a
-  // project's own path (…/projects/{p}/agents/{a}/{tab}), the one route an
-  // agent detail ever renders at.
-  const activeAgentId = useMemo(() => {
-    const m = pathname.match(/\/agents\/([^/]+)/);
     return m ? decodeURIComponent(m[1]) : null;
   }, [pathname]);
   const segment = useSelectedLayoutSegment();
@@ -408,12 +406,10 @@ export function PrimaryRail({
           const active = segment === item.segment;
           const focused = focusIdx === idx;
           const isProjects = item.key === "projects";
-          const isAgents = item.key === "agents";
           const isInbox = item.key === "inbox";
           const showProjectsSubnav = isProjects && !effectiveCollapsed && projects.length > 0;
-          const showAgentsSubnav = isAgents && !effectiveCollapsed && agents.length > 0;
-          const expanded = isProjects ? projectsExpanded : agentsExpanded;
-          const showToggle = showProjectsSubnav || showAgentsSubnav;
+          const expanded = projectsExpanded;
+          const showToggle = showProjectsSubnav;
           return (
             <div key={item.key} className="fleet-rail-nav-group">
               <div className="fleet-rail-item-row">
@@ -450,7 +446,7 @@ export function PrimaryRail({
                   <button
                     type="button"
                     className={`fleet-rail-subnav-toggle${expanded ? " is-expanded" : ""}`}
-                    onClick={() => onToggleSection?.(isProjects ? "projects" : "agents")}
+                    onClick={() => onToggleSection?.("projects")}
                     aria-expanded={expanded}
                     aria-label={expanded ? `Collapse ${item.label.toLowerCase()}` : `Expand ${item.label.toLowerCase()}`}
                   >
@@ -473,28 +469,6 @@ export function PrimaryRail({
                       </Link>
                     );
                   })}
-                </div>
-              )}
-              {showAgentsSubnav && agentsExpanded && (
-                <div className="fleet-rail-subnav">
-                  {agents.map((a) => {
-                    const agentActive = activeAgentId === a.agent_id;
-                    const st = deriveStatus(a.hardware_status || "unknown", Boolean(a.stopped?.active), Boolean(a.current_run_id));
-                    return (
-                      <Link
-                        key={a.agent_id}
-                        href={`${hrefFor("projects")}/${encodeURIComponent(resolveAgentProjectId(a.project_id, projects))}/agents/${encodeURIComponent(a.agent_id)}/overview`}
-                        className={`fleet-rail-subitem${agentActive ? " fleet-rail-subitem--active" : ""}`}
-                      >
-                        <StatusDot tone={st.tone} size={7} />
-                        <span className="fleet-rail-subitem-label">{a.label || "Unnamed agent"}</span>
-                      </Link>
-                    );
-                  })}
-                  {/* Flat list is the right call at this scale. Once a fleet
-                      runs into dozens of agents the answer is favorites/
-                      pinning, not a taller list — deliberately not built
-                      here (U3-G scope: presence, not triage tooling). */}
                 </div>
               )}
             </div>
