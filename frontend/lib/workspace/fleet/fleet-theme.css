@@ -4134,12 +4134,13 @@ a.fleet-breadcrumb:hover {
   align-items: flex-start;
   gap: 10px;
   margin-top: 16px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
+  /* FLAT, 2026-08-01. This used to carry a full border, a radius, a card
+     background and a drop shadow — the only elevated element on an
+     otherwise completely flat page, so it read as a 3D box floating above
+     everything around it. The left amber rule alone is enough of an
+     interruption; the shadow was the part that looked wrong. */
+  padding: 2px 0 2px 12px;
   border-left: 2px solid var(--warning-text);
-  border-radius: var(--radius-card);
-  background: var(--bg-card);
-  box-shadow: var(--card-shadow);
 }
 
 .fleet-overview-callout-icon {
@@ -7985,15 +7986,20 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    whole line before the reader reached the only thing they scan for. Padding,
    gap and line-height are all tightened; a two-line card is ~78px against the
    old ~115px, so roughly half again as many cards fit a column. */
+/* Scaled back up 2026-08-01: the compression above went too far — against
+   Linear's own board side by side, these read as cramped chips rather than
+   cards. Padding 8/9 → 13/14 and gap 5 → 8, which lands a two-line card
+   near Linear's own card height without giving back the deleted status
+   line that caused the original bloat. */
 .fleet-board-card {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 8px;
   flex-shrink: 0;
-  padding: 8px 9px;
+  padding: 13px 14px;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-card);
   /* none in dark (--bg-card already steps off --bg-panel), a whisper in light
      where card and panel are both pure white and the hairline alone left the
      cards looking unmoored once the column tray went away. */
