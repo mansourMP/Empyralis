@@ -483,9 +483,14 @@ export function TaskDetailView({
             </a>
           ) : null}
 
-          <h1 className="fleet-task-page-title" tabIndex={-1} ref={headingRef}>
+          {/* h2, not h1: the breadcrumb's current crumb is this page's real
+              <h1> (MAN-145 title-dedup). Rendering the task title as an h1
+              here too gave task pages two visible h1s — the same triplication
+              that pass existed to remove. Visual size is unchanged; only the
+              tag differs. */}
+          <h2 className="fleet-task-page-title" tabIndex={-1} ref={headingRef}>
             {task.title || "Untitled task"}
-          </h1>
+          </h2>
 
           {task.description ? (
             <div className="fleet-task-page-desc">

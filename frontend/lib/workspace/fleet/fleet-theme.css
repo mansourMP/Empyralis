@@ -8143,12 +8143,16 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-primary);
 }
 /* MAN-145: same specificity trap as .fleet-detail-section-title above —
-   `.fleet-root h1 { margin: 0; font-weight: 500 }` is a class+type selector
-   (0,1,1), which beats this single class (0,1,0) regardless of source order
-   now that this renders a real <h1>. Requalified so the title keeps its own
-   6px top margin and semibold weight instead of silently landing on the
-   reset's 0 and 500. */
-.fleet-root h1.fleet-task-page-title {
+   `.fleet-root h1,h2,h3 { margin: 0; font-weight: 500 }` is a class+type
+   selector (0,1,1), which beats this single class (0,1,0) regardless of
+   source order. Requalified so the title keeps its own 6px top margin and
+   semibold weight instead of silently landing on the reset's 0 and 500.
+   Matches h1 AND h2: the tag moved to h2 once the breadcrumb became the
+   page's real h1 (two visible h1s on a task page was the very duplication
+   that pass removed), and a rule bound to the old tag would have dropped
+   the styling silently. */
+.fleet-root h1.fleet-task-page-title,
+.fleet-root h2.fleet-task-page-title {
   margin: 6px 0 0;
   font-weight: var(--weight-semibold);
 }
