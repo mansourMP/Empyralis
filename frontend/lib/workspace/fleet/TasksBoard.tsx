@@ -40,34 +40,27 @@
  *      heading directly above already carried, and the widest element in
  *      the card's meta row.
  *
- * COLUMN HEADER CONTROLS (MAN-127 FIX 3) — `+` and `⋯`:
- *   · `+` opens the composer with THIS column's status already set, so a task
- *     filed in Todo starts as Todo. No second step, no dragging it over.
- *   · `⋯` carries exactly two entries, and the shortness is the point:
- *       – "Hide column" — seven statuses is a lot of horizontal board, and a
- *         team that never uses `in_review` should be able to stop looking at
- *         it. Real, used, reversible.
- *       – "Show all columns" — only present while something IS hidden. Hiding
- *         without a way back from the same menu is a trap.
- *     Linear's menu also offers "Select all", which we deliberately do NOT
- *     copy: the board has no multi-select and no bulk action to perform on a
- *     selection, so the entry would select things and then offer nothing to do
- *     with them. Fewer entries that all work beats a longer menu that looks
- *     like Linear's.
+ * COLUMN HEADER CONTROLS — just `+`:
+ *   `+` opens the composer with THIS column's status already set, so a task
+ *   filed in Todo starts as Todo. No second step, no dragging it over.
  *
- * Hidden columns persist PER WORKSPACE (`fleet:board-hidden:v1:<workspaceId>`,
- * the same `fleet:*` localStorage convention the rail width/collapse and the
- * tab strip already use). Per workspace rather than per project because
- * "I never use in_review" is a statement about how a TEAM works, not about
- * one project; and it is a view preference, so it stays client-side.
+ * REMOVED 2026-08-01: a per-column "Hide"/"Show all" menu used to live here
+ * (persisted to localStorage, independent of task count). It let a column
+ * with a real, unaddressed task in it — in_review, blocked, whatever a human
+ * had once decided to stop looking at — silently vanish from the board and
+ * stay gone, with no on-screen signal that anything was hidden. That is
+ * exactly how a real task went unseen for hours. Founder's own words apply
+ * without exception now: a column shows if and only if it has a task in it
+ * (see `visibleStatuses` below) — nothing overrides that, in either
+ * direction, so "hidden but populated" can no longer exist as a state.
  *
  * Desktop-first by explicit scope (1440x900). Below the board's own
  * breakpoint the columns simply keep scrolling horizontally rather than
  * re-laying out — a real mobile board is separate, later work.
  */
 
-import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
-import { MoreHorizontal, Plus } from "lucide-react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
+import { Plus } from "lucide-react";
 
 import { dueLabel } from "./TasksList";
 import { timeAgo } from "./fleet-presentation";
@@ -88,26 +81,6 @@ const DRAG_MIME = "application/x-fleet-task-id";
 // existing importers keep working.
 export { taskShortId };
 
-/** localStorage key for this workspace's hidden columns — `fleet:*`, versioned,
- *  workspace-scoped, exactly like fleet-tabs' own key. */
-function hiddenColumnsKey(workspaceId: string): string {
-  return `fleet:board-hidden:v1:${workspaceId}`;
-}
-
-function readHiddenColumns(workspaceId: string): FleetTaskStatus[] {
-  try {
-    const raw = window.localStorage.getItem(hiddenColumnsKey(workspaceId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    // Filtered against the live vocabulary, so a status removed from the
-    // product can't keep hiding a column that no longer exists.
-    return parsed.filter((s): s is FleetTaskStatus => FLEET_TASK_STATUSES.includes(s as FleetTaskStatus));
-  } catch {
-    return [];
-  }
-}
-
 export function TasksBoard({
   workspaceId,
   tasks,
@@ -119,8 +92,8 @@ export function TasksBoard({
   onStatusChange,
   onCreateTask,
 }: {
-  /** Scopes the hidden-column preference. Absent → nothing persists and the
-   *  hide control is a within-session toggle only. */
+  /** Unused since the hidden-column feature was removed 2026-08-01; kept in
+   *  the prop type so existing callers don't need a matching edit. */
   workspaceId?: string;
   tasks: FleetTask[];
   /** Agents in this project — valid AGENT assignees. */
@@ -146,35 +119,16 @@ export function TasksBoard({
   // can't leave two highlighted at once.
   const [dragOverStatus, setDragOverStatus] = useState<FleetTaskStatus | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
-  // Hydrated in an effect, never during render, so the server's markup and the
-  // client's first paint agree (same discipline as useFleetPreferences).
-  const [hidden, setHidden] = useState<FleetTaskStatus[]>([]);
-  useEffect(() => {
-    if (workspaceId) setHidden(readHiddenColumns(workspaceId));
-  }, [workspaceId]);
-
-  const writeHidden = useCallback(
-    (next: FleetTaskStatus[]) => {
-      setHidden(next);
-      if (!workspaceId) return;
-      try {
-        window.localStorage.setItem(hiddenColumnsKey(workspaceId), JSON.stringify(next));
-      } catch {
-        /* localStorage unavailable — the toggle still works for this session */
-      }
-    },
-    [workspaceId],
-  );
 
   // Counts come from the one shared helper (fleet-data.countTasksByStatus),
   // the same one the Overview tab's stat grid reads — so a column header and
   // the roll-up above it cannot disagree about what a status means.
   const counts = countTasksByStatus(tasks);
 
-  // Two independent filters: manual hide (persisted, a human decision) and
-  // zero-count (automatic, recomputed every render). Order doesn't matter —
-  // a column absent from either reason is absent from the board.
-  const visibleStatuses = FLEET_TASK_STATUSES.filter((s) => !hidden.includes(s) && counts[s] > 0);
+  // A column shows if and only if it has a task in it. No manual override in
+  // either direction — see the file header for why that used to exist and
+  // why it doesn't anymore.
+  const visibleStatuses = FLEET_TASK_STATUSES.filter((s) => counts[s] > 0);
 
   // MAN-145: seven columns at 252px each is wider than any board viewport,
   // so reaching the trailing columns (Blocked/In review/Done) depends on
@@ -220,11 +174,9 @@ export function TasksBoard({
     onStatusChange(taskId, status);
   }
 
-  // Every column is either manually hidden or genuinely empty — this can
-  // only mean the project has zero tasks anywhere (canHide below already
-  // blocks hiding the last VISIBLE column, so manual hiding alone can't
-  // reach zero while a real task exists in a hidden one). A blank
-  // horizontal strip would say nothing here; say it plainly instead.
+  // Every column is empty — visibility is pure count > 0 now, so this can
+  // only mean the project has zero tasks anywhere. A blank horizontal strip
+  // would say nothing here; say it plainly instead.
   if (visibleStatuses.length === 0) {
     return (
       <div className="fleet-empty" style={{ marginTop: "var(--space-3)" }}>
@@ -278,13 +230,6 @@ export function TasksBoard({
               <TaskStatusIcon status={status} size={14} />
               <span className="fleet-board-column-title">{label}</span>
               <span className="fleet-board-column-count">{counts[status]}</span>
-              <ColumnMenu
-                label={label}
-                canHide={visibleStatuses.length > 1}
-                hiddenCount={hidden.length}
-                onHide={() => writeHidden([...hidden, status])}
-                onShowAll={() => writeHidden([])}
-              />
               {onCreateTask ? (
                 <button
                   type="button"
@@ -329,93 +274,6 @@ export function TasksBoard({
         );
       })}
     </div>
-  );
-}
-
-/**
- * The `⋯` column menu. Two entries, both of which do something (see the file
- * header for what was left out and why). Same dismissal contract as every
- * other menu in the fleet surface: click anywhere else, or Esc, closes it.
- */
-function ColumnMenu({
-  label,
-  canHide,
-  hiddenCount,
-  onHide,
-  onShowAll,
-}: {
-  label: string;
-  /** False on the last visible column — hiding it would leave an empty board
-   *  with no column header left to un-hide from. */
-  canHide: boolean;
-  hiddenCount: number;
-  onHide: () => void;
-  onShowAll: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLSpanElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown, true);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown, true);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  return (
-    <span className="fleet-board-column-menuwrap" ref={wrapRef}>
-      <button
-        type="button"
-        className={`fleet-board-column-btn${open ? " is-open" : ""}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={`${label} column options`}
-        title={`${label} column options`}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <MoreHorizontal size={14} strokeWidth={2} />
-      </button>
-      {open ? (
-        <div className="fleet-board-column-menu" role="menu" aria-label={`${label} column`}>
-          <button
-            type="button"
-            role="menuitem"
-            className="fleet-composer-pop-item"
-            disabled={!canHide}
-            onClick={() => {
-              onHide();
-              setOpen(false);
-            }}
-          >
-            <span className="fleet-composer-pop-label">Hide column</span>
-          </button>
-          {hiddenCount > 0 ? (
-            <button
-              type="button"
-              role="menuitem"
-              className="fleet-composer-pop-item"
-              onClick={() => {
-                onShowAll();
-                setOpen(false);
-              }}
-            >
-              <span className="fleet-composer-pop-label">
-                Show all columns ({hiddenCount} hidden)
-              </span>
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-    </span>
   );
 }
 
