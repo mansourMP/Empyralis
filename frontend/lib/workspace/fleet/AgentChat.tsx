@@ -137,6 +137,7 @@ export function AgentChat({
   placeholder,
   sourceTag,
   liveSyncUrl,
+  onTurnComplete,
 }: {
   workspaceId: string;
   threadId: string;
@@ -151,6 +152,10 @@ export function AgentChat({
    *  another surface (e.g. Telegram) while this tab is open. Optional — no
    *  per-agent equivalent exists yet, only Sage's workspace-wide stream. */
   liveSyncUrl?: string;
+  /** Fired once a turn has been written, so a caller showing thread-level
+   *  state around this chat (the Ask AI console's conversation list) can
+   *  re-read it instead of polling for a change only it caused. */
+  onTurnComplete?: () => void;
 }) {
   const { state } = useAccountShell();
   const account = state.account;
@@ -363,8 +368,11 @@ export function AgentChat({
     } finally {
       setStreamingText("");
       setSending(false);
+      // Even a failed send may have created the thread row (ensure_master_thread
+      // runs before the turn executes), so this fires either way.
+      onTurnComplete?.();
     }
-  }, [sending, actor, workspaceId, tenantId, threadId, agentInstallId, sourceTag, autoGrow]);
+  }, [sending, actor, workspaceId, tenantId, threadId, agentInstallId, sourceTag, autoGrow, onTurnComplete]);
 
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {

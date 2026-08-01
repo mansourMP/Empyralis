@@ -9756,3 +9756,186 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   .fleet-glist-cell-due,
   .fleet-glist-cell-updated { display: none; }
 }
+
+/* ── Ask AI console: history + memory ─────────────────────────────────────
+   Appended block (SageLauncher.tsx / SageConsolePanels.tsx). Nothing above
+   is modified — the console's existing header/title/close/body rules stay
+   exactly as they were; these only add the header's icon cluster and the two
+   sibling views that cluster switches between.
+
+   Neutral throughout, deliberately: the one accent in this console is the
+   composer's Send button, and a lit-up history or memory toggle competing
+   with it would be the "two accent-filled controls in one view" bug. Active
+   state here is the same neutral wash the rail uses for its own selection. */
+
+.fleet-sage-console-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+/* Same 24px ghost-icon geometry as .fleet-sage-console-close beside it,
+   declared separately rather than by widening that selector so this block
+   stays purely additive. */
+.fleet-sage-console-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+
+.fleet-sage-console-action:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.fleet-sage-console-action.is-active {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+/* h2 now, not a div (real heading structure) — strip the UA margin so the
+   header keeps the same optical baseline it had as a div. */
+h2.fleet-sage-console-title {
+  margin: 0;
+}
+
+/* Shared shell for both non-chat views: one scroller, sized to whatever the
+   console's body has left. */
+.fleet-sage-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+/* ── History rows ──────────────────────────────────────────────────────── */
+
+.fleet-sage-history-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 14px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
+}
+
+.fleet-sage-history-row:hover {
+  background: var(--bg-card-hover);
+}
+
+.fleet-sage-history-row.is-active {
+  background: var(--bg-card-hover);
+}
+
+.fleet-sage-history-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.fleet-sage-history-row.is-active .fleet-sage-history-row-title {
+  font-weight: var(--weight-medium);
+}
+
+.fleet-sage-history-row-time {
+  flex-shrink: 0;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Memory view ───────────────────────────────────────────────────────── */
+
+/* File switcher, only rendered when there is more than one file. Wraps
+   rather than scrolls: a memory tree is a handful of files, and a hidden
+   horizontal overflow would bury the ones that matter. */
+.fleet-sage-memory-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.fleet-sage-memory-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+
+.fleet-sage-memory-file svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.fleet-sage-memory-file:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.fleet-sage-memory-file.is-active {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+.fleet-sage-memory-file-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-sage-memory-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* MemoryTab's own preview renderer, re-tuned for a 400px console: the tab
+   version is laid out for a full-width detail page (640px measure, 20/24
+   padding), which inside this panel reads as a narrow column of margin. */
+.fleet-sage-memory-body .fleet-memory-preview {
+  max-width: none;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.fleet-sage-memory-body .fleet-memory-preview-empty {
+  padding: 12px 14px;
+  font-size: 12px;
+}
+
+.fleet-sage-panel .fleet-page-state-body {
+  padding: 12px 14px;
+}

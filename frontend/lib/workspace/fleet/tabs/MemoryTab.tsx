@@ -72,7 +72,10 @@ function parseMemoryBlocks(raw: string): MemBlock[] {
   return blocks;
 }
 
-function MemoryPreview({ content }: { content: string }) {
+/** Exported so the Ask AI console's Memory view renders memory exactly the
+ *  way this tab does — same parser, same blocks, same classes. There is one
+ *  notion of "memory" in this product, not two. */
+export function MemoryPreview({ content }: { content: string }) {
   const blocks = useMemo(() => parseMemoryBlocks(content), [content]);
   if (blocks.length === 0) {
     return <div className="fleet-memory-preview-empty">Empty — nothing written here yet.</div>;
