@@ -9976,11 +9976,10 @@ h2.fleet-sage-console-title {
 }
 
 .fleet-view-options-popover {
-  /* Anchored to the trigger's LEFT edge: this button sits beside the view
-     switch on the left of the toolbar row, where the shared right:0 default
-     would throw the panel off the sheet. */
-  left: 0;
-  right: auto;
+  /* Anchors to the trigger's RIGHT edge — .fleet-toolbar-popover's own
+     default, no override needed. The trigger moved into the far-right icon
+     cluster 2026-08-01 (it used to sit between the tabs and the member
+     stack); a left-edge anchor there would throw the panel off the sheet. */
   width: 300px;
   padding: 10px;
   /* Airy between groups, dense inside one — the two select rows sit tight to

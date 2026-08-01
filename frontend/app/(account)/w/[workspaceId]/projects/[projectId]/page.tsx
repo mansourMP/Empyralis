@@ -390,17 +390,6 @@ export default function ProjectDetailPage() {
             </button>
           ))}
         </div>
-        {/* ONE control, not three (2026-08-01, founder's call). Board/List
-            used to be a second segmented strip out here beside the view
-            switch, so arriving on Tasks made two extra controls appear and
-            shoved the member stack sideways — the row changed shape per tab,
-            which read as a bug rather than a layout. Linear's reference puts
-            the layout pills INSIDE the options popover for exactly this
-            reason: the toolbar keeps one stable shape and everything that
-            reshapes the view lives behind one icon. */}
-        {view === "tasks" && tasks.length > 0 ? (
-          <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
-        ) : null}
         {/* Trails the view/layout switches, LEFT of centre — the people on a
             project read as context for the view you are choosing, so they sit
             with those controls rather than out at the edge (founder's call
@@ -417,7 +406,13 @@ export default function ProjectDetailPage() {
         {/* Far RIGHT (margin-left:auto in the stylesheet). Every control in
             here acts on the right-hand side of the screen — the panel toggle
             opens the drawer there, filter/sort drops its popover there — so
-            the cluster belongs at that edge. */}
+            the cluster belongs at that edge. TaskViewOptions moved in here
+            2026-08-01: it was sitting BETWEEN the tabs and the member stack,
+            which is not where its own popover opens, and every other control
+            with a right-opening panel already lives in this cluster. */}
+        {view === "tasks" && tasks.length > 0 ? (
+          <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
+        ) : null}
         {view === "agents" ? (
           <FleetToolbar
             filters={inProject.length > 0 ? filters : undefined}
