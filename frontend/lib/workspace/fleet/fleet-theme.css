@@ -7876,7 +7876,8 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   margin-right: 32px;
 }
 
-/* MAN-145: seven columns (1916px) never fit a real board viewport, so
+/* MAN-145: seven columns (2164px at 292 + 20 gaps) never fit a real board
+   viewport, so
    whichever ones don't fit need SOME cue that there's more to the right —
    otherwise a column with no cards in it (Blocked, say, at zero tasks) is
    indistinguishable from a column that doesn't exist. Same pattern and same
@@ -7916,8 +7917,13 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   display: flex;
   flex-direction: column;
   min-height: 0;
-  flex: 0 0 252px;
-  width: 252px;
+  /* 252 → 292 (2026-08-01). The card grew a named date ("Created Jul 30"
+     rather than a bare "9h ago"), a sub-task rollup and an assignee, and 252
+     could not hold that meta row without the date ellipsing on any card that
+     had all of it. 292 is also simply closer to Linear's own column, which is
+     half of why our board read thinner side by side. */
+  flex: 0 0 292px;
+  width: 292px;
   /* No background, no border, no radius — see the section header. The tray is
      gone on purpose; do not put it back. */
   background: transparent;
@@ -7970,7 +7976,9 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  /* 6 → 8, tracking the card scale-up: at 6px a stack of taller cards read as
+     one striped slab rather than a set of separate objects. */
+  gap: 8px;
   /* Only enough inline padding for the drop-target wash to breathe; the cards
      themselves define the column's real edges now. */
   padding: 0 2px 2px;
@@ -7991,15 +7999,19 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    old ~115px, so roughly half again as many cards fit a column. */
 /* Scaled back up 2026-08-01: the compression above went too far — against
    Linear's own board side by side, these read as cramped chips rather than
-   cards. Padding 8/9 → 13/14 → 16, gap 5 → 8 → 10 (two passes; the first
-   was still short of Linear's card height). No content added back, so the
-   status line that caused the original bloat stays deleted. */
+   cards. Padding 8/9 → 13/14 → 16 → 18, gap 5 → 8 → 10 → 11 (three passes;
+   each was still short of Linear's card).
+   The LAST of those passes is the one that actually closed the gap, and it
+   was not the numbers: the card started carrying what a task really has —
+   a parent breadcrumb, labels, a priority, a sub-task rollup, a date that
+   names itself, an assignee — each drawn only when the task has it. A card
+   reads thin when it is thin, and no amount of padding fixes that. */
 .fleet-board-card {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 11px;
   flex-shrink: 0;
-  padding: 16px;
+  padding: 18px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
@@ -8008,6 +8020,11 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
      cards looking unmoored once the column tray went away. */
   box-shadow: var(--card-shadow);
   cursor: pointer;
+  /* Hover is a state change, so it gets the state-change duration — and only
+     the two properties that actually change. No transform, no shadow ramp,
+     nothing decorative; the global prefers-reduced-motion block further up
+     this file already flattens it to ~0 for anyone who asked. */
+  transition: background-color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
 }
 .fleet-board-card:hover { background: var(--bg-card-hover); border-color: var(--border-strong); }
 .fleet-board-card:focus-visible {
@@ -8021,6 +8038,27 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   box-shadow: inset 0 0 0 1px var(--accent-muted);
 }
 .fleet-board-card.is-dragging { opacity: 0.4; }
+
+/* "↳ Parent title", above the title on a SUB-TASK card only. Pulled tight to
+   the title it belongs to (the card's own 11px gap is the airy spacing
+   BETWEEN groups; a breadcrumb and the title it qualifies are one group). */
+.fleet-board-card-parent {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-bottom: -4px;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  line-height: 1.3;
+}
+.fleet-board-card-parent svg { flex-shrink: 0; }
+.fleet-board-card-parent-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .fleet-board-card-title {
   /* 15px is deliberately off-token: --text-base (14) still read small
@@ -8037,26 +8075,39 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   overflow: hidden;
 }
 
-/* One row: status ring · priority glyph · id … date · assignee. Everything on
-   it is an icon or a short numeric token, which is what keeps it to a single
-   14px line. */
+/* One row: status ring · priority · id · sub-tasks … date · assignee. Every
+   item on it is an icon or a short token, which is what keeps it to a single
+   line, and every item after the id is conditional. */
 .fleet-board-card-meta {
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 16px;
+  /* 18, not 16: the avatar is the tallest thing that can appear here, so
+     pinning the floor to its height is what stops an assigned card standing
+     2px taller than an unassigned one in the same column. That used to be
+     done with an invisible 18px .fleet-board-card-unassigned spacer, which
+     was a placeholder element existing purely to hold a shape — deleted. */
+  min-height: 18px;
   font-size: var(--text-2xs);
   color: var(--text-secondary);
 }
-/* The date carries the row's single auto margin (see .fleet-board-card-date);
-   the avatar simply trails it. Two auto margins would split the free space
-   and strand the date mid-row. */
-.fleet-board-card-meta > .fleet-agent-avatar {
+.fleet-board-card-meta .fleet-agent-avatar {
   flex-shrink: 0;
   /* The shared avatar is 26px, sized for a 52px list row. On a meta line that
      is the tallest thing present, so it sets the card's floor — hence 18. */
   width: 18px;
   height: 18px;
+}
+/* Date + assignee as ONE right-hand group carrying the row's single auto
+   margin. Grouping them is what lets either be absent without the other
+   drifting into the middle of the row — two independent auto margins would
+   split the free space and strand the date. */
+.fleet-board-card-meta-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
 }
 
 .fleet-board-card-id {
@@ -8084,6 +8135,9 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   align-items: center;
   flex-shrink: 0;
   border-radius: var(--radius-control);
+  /* Same state-change contract as the card itself — the hover halo below used
+     to snap on. */
+  transition: background-color var(--dur-1) var(--ease-out), box-shadow var(--dur-1) var(--ease-out);
 }
 .fleet-board-card-statuspick .fleet-board-card-status {
   position: absolute;
@@ -8112,19 +8166,31 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   background: var(--rail-active);
 }
 
+/* "Due Aug 5" / "Created Jul 30" — the word is the point (see TasksBoard's
+   TaskCard). It is the one elastic thing in the meta row, so on the rare card
+   carrying priority AND sub-tasks AND an assignee it truncates rather than
+   pushing the avatar out of the card. */
 .fleet-board-card-date {
-  font-variant-numeric: tabular-nums;
-  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
-/* An empty right-hand slot, not an em dash: a column of "—" glyphs where the
-   avatars aren't is noise, and "no assignee" is already legible from the
-   absence of one. Sized so the meta row's height doesn't change. */
-.fleet-board-card-unassigned {
-  width: 18px;
-  height: 18px;
+
+/* The sub-task rollup ("1/3" + a donut filled to the same fraction). Neutral
+   ink on purpose — the status ring is the one ring on this card allowed to
+   carry colour. */
+.fleet-subtask-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
 }
+.fleet-subtask-progress svg { flex-shrink: 0; }
 
 /* ── Task detail PAGE ────────────────────────────────────────────────────────
    Was a right-hand drawer over the board; is now a routed page
@@ -9094,6 +9160,15 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    the task actually has some (TaskLabelChips renders nothing otherwise, so
    this rule never fires on an unlabelled card). */
 .fleet-board-card-labels { max-width: 100%; }
+/* Three long names still overrun a 292px card (TaskLabelChips only rolls up
+   at four or more), and the container's own overflow:hidden would guillotine
+   the last chip mid-word. Letting a NAME chip shrink turns that into a clean
+   per-chip ellipsis instead. The "+N" roll-up is excluded — a truncated count
+   is worse than useless. */
+.fleet-board-card-labels .fleet-label-chip:not(.fleet-label-chip--more) {
+  min-width: 0;
+  flex-shrink: 1;
+}
 
 /* ── Label editor (task page Properties column) ──────────────────────────── */
 .fleet-label-editor {
