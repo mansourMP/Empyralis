@@ -47,7 +47,8 @@
  * j/k model. Claiming a half-working shortcut would be worse than not
  * claiming one — see the report note; a rebindable scheme is real follow-up
  * work. (The history buttons rendered alongside the strip, below, are a
- * separate control with their own ⌘[ / ⌘] binding — see nav-history.ts.)
+ * separate control with their own ⌘[ / ⌘] binding — see
+ * FleetHistoryControls.)
  */
 
 import {
@@ -82,19 +83,22 @@ import {
 
 import { useBreadcrumbLabels } from "./Breadcrumbs";
 import {
+  canGoBack as tabCanGoBack,
+  canGoForward as tabCanGoForward,
   defaultTabPath,
   describePath,
   makeTab,
+  navigateTab,
   pathnameOf,
   readStoredTabs,
   samePath,
+  stepTabHistory,
   workspaceBase,
   writeStoredTabs,
   type FleetTab,
   type FleetTabKind,
   type FleetTabsState,
 } from "./fleet-tabs";
-import { useNavHistory } from "./nav-history";
 import "./fleet-nav-history.css";
 
 type OpenOptions = { title?: string };
@@ -111,6 +115,13 @@ type TabsApi = {
   activateTab: (id: string) => void;
   closeTab: (id: string) => void;
   newTab: () => void;
+  /** ‹ / › — the ACTIVE tab's own history, never the browser's global one.
+   *  Exposed as state, not just handlers, so the buttons can be genuinely
+   *  disabled at either end (CLAUDE.md: no dead controls). */
+  canGoBack: boolean;
+  canGoForward: boolean;
+  goBack: () => void;
+  goForward: () => void;
 };
 
 const TabsContext = createContext<TabsApi | null>(null);
@@ -221,13 +232,21 @@ export function FleetTabsProvider({
     setState((cur) => {
       const match = stored.tabs.find((t) => samePath(t.path, url));
       if (match) {
-        const tabs = stored.tabs.map((t) => (t.id === match.id ? { ...t, path: url } : t));
+        // Same view, so navigateTab REPLACES that tab's current entry with
+        // the address bar's query rather than pushing — the reader reloaded
+        // on a page they were already on, they did not navigate anywhere.
+        // Everything behind it in that tab's stack survives the reload.
+        const tabs = stored.tabs.map((t) => (t.id === match.id ? navigateTab(t, url) : t));
         return { tabs, activeId: match.id };
       }
       const idx = Math.max(0, stored.tabs.findIndex((t) => t.id === stored.activeId));
       const tabs = stored.tabs.slice();
       const described = describePath(url, workspaceId, labels);
-      tabs[idx] = { ...tabs[idx], path: url, title: described.title, kind: described.kind };
+      // A different view (a deep link, or a link followed in from outside):
+      // the stored active tab is repurposed, so this IS a navigation in it
+      // and navigateTab pushes. ‹ then returns to what that tab was holding
+      // before the reload, which is what a browser session restore does too.
+      tabs[idx] = { ...navigateTab(tabs[idx], url), title: described.title, kind: described.kind };
       return { tabs, activeId: tabs[idx].id };
     });
     // Restore runs once per workspace, on mount — `url`/`labels` are read
@@ -237,23 +256,38 @@ export function FleetTabsProvider({
   }, [workspaceId]);
 
   // ── Navigation → tabs ─────────────────────────────────────────────────────
-  // The single reconciler. Every way a pathname can change funnels through
-  // here: a plain click, a tab click, browser back/forward, a redirect, a
-  // programmatic push. If some tab already shows the new path it becomes
-  // active; otherwise the ACTIVE tab's content is replaced — which is what
-  // "a plain click replaces the current tab" means, and also the right
-  // behaviour for a back navigation to a view that no tab is holding.
+  // The single reconciler, and the ONLY place a tab's history grows. Every way
+  // a pathname can change funnels through here: a plain click, a tab click,
+  // browser back/forward, a redirect, a programmatic push, and the ‹/› buttons
+  // below. If some tab already shows the new path it becomes active;
+  // otherwise the ACTIVE tab's content is replaced — which is what "a plain
+  // click replaces the current tab" means, and also the right behaviour for a
+  // back navigation to a view that no tab is holding.
+  //
+  // A ‹/› step needs no special case here: it has already moved the active
+  // tab's index and path in state before routing, so by the time this runs the
+  // active tab matches `url` EXACTLY and the first branch returns `cur`
+  // untouched. That is what stops the buttons from pushing the entry they just
+  // stepped onto back on top of the stack.
   useEffect(() => {
     if (!pathname.startsWith(base)) return;
     setState((cur) => {
-      const match = cur.tabs.find((t) => samePath(t.path, url));
+      // The active tab gets first refusal on the match. Two tabs CAN hold the
+      // same pathname (a ‹ step, or `+`, can land one tab on a view another
+      // already shows), and without this the reconciler would hand the
+      // navigation to whichever sits earlier in the strip — yanking the reader
+      // into a different tab, which is the whole bug being fixed.
+      const active = cur.tabs.find((t) => t.id === cur.activeId);
+      const match =
+        active && samePath(active.path, url) ? active : cur.tabs.find((t) => samePath(t.path, url));
       if (match) {
         // Same view. If only the query moved (a filter changed), the tab
         // records the new one instead of opening a second tab for it — the
         // tab must keep agreeing with the address bar, because that string is
-        // what it will be restored from.
+        // what it will be restored from. navigateTab replaces that tab's
+        // current history entry rather than pushing (see its comment).
         if (match.path !== url) {
-          const tabs = cur.tabs.map((t) => (t.id === match.id ? { ...t, path: url } : t));
+          const tabs = cur.tabs.map((t) => (t.id === match.id ? navigateTab(t, url) : t));
           return { tabs, activeId: match.id };
         }
         return match.id === cur.activeId ? cur : { ...cur, activeId: match.id };
@@ -265,7 +299,10 @@ export function FleetTabsProvider({
         return { tabs: [...cur.tabs, tab], activeId: tab.id };
       }
       const tabs = cur.tabs.slice();
-      tabs[idx] = { ...tabs[idx], path: url, title: described.title, kind: described.kind };
+      // A real navigation inside this tab: pushes, truncating any forward
+      // entries first, so going back and then somewhere new destroys the
+      // forward branch exactly as a browser does.
+      tabs[idx] = { ...navigateTab(tabs[idx], url), title: described.title, kind: described.kind };
       return { ...cur, tabs };
     });
     // `labels` is intentionally not a dependency: it only ever IMPROVES a
@@ -382,6 +419,53 @@ export function FleetTabsProvider({
     router.push(path);
   }, [workspaceId, labels, router]);
 
+  // ── ‹ / › — the active tab's own history ──────────────────────────────────
+  // Computed OUTSIDE the updater, like closeTab above and for the same reason:
+  // "and now navigate here" is a side effect, and React runs an updater an
+  // unpredictable number of times (twice under StrictMode, which this app
+  // enables).
+  //
+  // The step lands in state FIRST and routes second. That ordering is what
+  // makes the reconciler a no-op for this navigation — it finds the active tab
+  // already sitting on `url` — so a ‹ can never re-push the entry it just
+  // stepped back onto, and a › can never truncate the branch it is walking.
+  //
+  // router.push, not router.replace: the address bar must say what is on
+  // screen, and every view the reader actually looks at should stay reachable
+  // by the BROWSER's own back button in the order they looked at it. The two
+  // controls answer different questions — the browser's retraces this session
+  // across all tabs, ‹ retraces THIS tab — and neither is a lie about the
+  // other, which is precisely what the old shared-pointer model could not do.
+  //
+  // The title/kind are re-derived here rather than left to the reconciler,
+  // BECAUSE that no-op is so complete: a step lands on a genuinely different
+  // view, and the effect that would normally relabel the tab sees nothing to
+  // do. Skipping this left the strip showing "Conversations" over /inbox after
+  // a ‹ — right page, wrong label and wrong icon. Applied unconditionally, the
+  // same way the reconciler's own new-view branch does it; a name that only
+  // the breadcrumb registry knows (a task, a project) is still upgraded a
+  // moment later by the resolve effect above.
+  const stepHistory = useCallback(
+    (delta: -1 | 1) => {
+      const tab = state.tabs.find((t) => t.id === state.activeId);
+      if (!tab) return;
+      const stepped = stepTabHistory(tab, delta);
+      if (!stepped) return;
+      const described = describePath(stepped.path, workspaceId, labels);
+      const moved = { ...stepped, title: described.title, kind: described.kind };
+      setState((cur) => ({ ...cur, tabs: cur.tabs.map((t) => (t.id === moved.id ? moved : t)) }));
+      if (moved.path !== url) router.push(moved.path);
+    },
+    [state, url, router, workspaceId, labels],
+  );
+
+  const goBack = useCallback(() => stepHistory(-1), [stepHistory]);
+  const goForward = useCallback(() => stepHistory(1), [stepHistory]);
+
+  const activeTab = state.tabs.find((t) => t.id === state.activeId);
+  const canGoBack = tabCanGoBack(activeTab);
+  const canGoForward = tabCanGoForward(activeTab);
+
   // ── ⌘/Ctrl+click and middle-click → background tab ────────────────────────
   useEffect(() => {
     const resolveHref = (target: EventTarget | null): { path: string; title?: string } | null => {
@@ -452,8 +536,30 @@ export function FleetTabsProvider({
   }, [base, openInNewTab]);
 
   const api = useMemo<TabsApi>(
-    () => ({ tabs: state.tabs, activeId: state.activeId, openInNewTab, activateTab, closeTab, newTab }),
-    [state.tabs, state.activeId, openInNewTab, activateTab, closeTab, newTab],
+    () => ({
+      tabs: state.tabs,
+      activeId: state.activeId,
+      openInNewTab,
+      activateTab,
+      closeTab,
+      newTab,
+      canGoBack,
+      canGoForward,
+      goBack,
+      goForward,
+    }),
+    [
+      state.tabs,
+      state.activeId,
+      openInNewTab,
+      activateTab,
+      closeTab,
+      newTab,
+      canGoBack,
+      canGoForward,
+      goBack,
+      goForward,
+    ],
   );
 
   return (
@@ -468,16 +574,31 @@ export function FleetTabsProvider({
 
 /**
  * ‹ / › — app-chrome history navigation, rendered at the head of the tab
- * strip (Linear's own top-left placement for the same cluster). Rides the
- * browser's real History API via `useNavHistory` (see that module's header
- * for the full design rationale) rather than a parallel app-level stack, so
- * this can never disagree with the browser's own back/forward — same
- * pointer, two controls.
+ * strip (Linear's own top-left placement for the same cluster).
+ *
+ * THESE WALK THE ACTIVE TAB'S OWN STACK (see FleetTab.history), not the
+ * browser's global one. The first version of this feature did the opposite:
+ * it rode the History API through a `nav-history.ts` module whose header
+ * argued at length that a parallel app-level stack could only ever be an
+ * approximation of the real history, and that sharing the browser's pointer
+ * meant the two controls could never disagree. That reasoning is overturned
+ * and the module is deleted. It never accounted for this app having a tab
+ * model of its own: the browser's history is ONE line with every tab's
+ * navigations interleaved into it, so ‹ routinely threw the reader into a
+ * DIFFERENT content tab while abandoning their position in the tab they were
+ * actually in — and the stamped-index scheme it needed to answer
+ * canGoBack/canGoForward under-reported after any reload, leaving the buttons
+ * dead when real history sat on both sides. "Never disagrees with the
+ * browser" was the wrong property to optimise for; a browser does not give
+ * its OWN tabs a shared back button either.
  *
  * Disabled (not hidden) at either end of history — a real `disabled`
  * button, not a silently inert one (CLAUDE.md: no dead controls). Native
  * `disabled` also removes it from tab order on its own, so there's nothing
- * extra to wire for the enabled case to stay keyboard-reachable.
+ * extra to wire for the enabled case to stay keyboard-reachable. The states
+ * are now exact rather than conservative: a tab knows its own index and its
+ * own length, so ‹ is enabled precisely when something precedes the current
+ * entry and › precisely when something follows it.
  *
  * Shortcut is ⌘[ / ⌘] (Ctrl on non-Mac) — Safari and Chrome's own
  * long-standing back/forward menu equivalents on macOS, not ArrowLeft/Right:
@@ -491,8 +612,14 @@ export function FleetTabsProvider({
  * Brackets are free of that: nothing else in this codebase binds them.
  */
 function FleetHistoryControls() {
-  const router = useRouter();
-  const { canGoBack, canGoForward } = useNavHistory();
+  // Read through the context rather than taken as props: this renders inside
+  // FleetTabStrip, which has already bailed out when there is no provider, but
+  // the optional chaining keeps the hooks below unconditional either way.
+  const api = useContext(TabsContext);
+  const canGoBack = Boolean(api?.canGoBack);
+  const canGoForward = Boolean(api?.canGoForward);
+  const goBack = api?.goBack;
+  const goForward = api?.goForward;
 
   useEffect(() => {
     const isTyping = () => {
@@ -503,25 +630,25 @@ function FleetHistoryControls() {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || isTyping()) return;
       if (e.key === "[") {
-        if (!canGoBack) return;
+        if (!canGoBack || !goBack) return;
         e.preventDefault();
-        router.back();
+        goBack();
       } else if (e.key === "]") {
-        if (!canGoForward) return;
+        if (!canGoForward || !goForward) return;
         e.preventDefault();
-        router.forward();
+        goForward();
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [canGoBack, canGoForward, router]);
+  }, [canGoBack, canGoForward, goBack, goForward]);
 
   return (
     <div className="fleet-navhistory">
       <button
         type="button"
         className="fleet-navhistory-btn"
-        onClick={() => router.back()}
+        onClick={() => goBack?.()}
         disabled={!canGoBack}
         aria-label="Back"
         title="Back (⌘[)"
@@ -531,7 +658,7 @@ function FleetHistoryControls() {
       <button
         type="button"
         className="fleet-navhistory-btn"
-        onClick={() => router.forward()}
+        onClick={() => goForward?.()}
         disabled={!canGoForward}
         aria-label="Forward"
         title="Forward (⌘])"
