@@ -1,25 +1,29 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { FileText } from "lucide-react";
 
 import { useAccountShell } from "@/lib/shell/account-shell-context";
+import { stripEnvelopeHeader } from "./AgentChat";
 import { timeAgo } from "./fleet-presentation";
-import { MemoryPreview } from "./tabs/MemoryTab";
 
 /**
- * The two things the Ask AI console gains beside its chat: HISTORY (your own
- * past conversations with the workspace agent, reopenable) and MEMORY (what
- * that agent actually remembers). Both live *inside* the console — neither
- * earns a route or a tab of its own.
+ * The one thing the Ask AI console gains beside its chat: HISTORY — your own
+ * past conversations with the workspace agent, reopenable. It lives *inside*
+ * the console; it does not earn a route or a tab of its own.
  *
  * Nothing here is a new endpoint. History reads GET /api/threads (registered
  * by runtime_runs_api.register_run_routes, mounted under /api by
  * routes_runs.py), the same control-plane thread store AgentChat already
- * loads a single thread from. Memory reads the agent's memory tree —
- * /api/w/{ws}/fleet/agents/{id}/memory/{tree,file} — the exact pair the
- * agent detail page's Memory tab uses, and renders it with that tab's own
- * MemoryPreview, so "memory" means one thing in this product, not two.
+ * loads a single thread from.
+ *
+ * There used to be a MEMORY view here too, reading the agent's memory tree
+ * and rendering it with MemoryTab's MemoryPreview. Removed 2026-08-01
+ * (founder ruling): Ask AI is a personal helper, not a deployed agent, so a
+ * memory-index surface is not something it needs — and what that view
+ * actually showed was the authoring scaffold ("keep it dense, no filler…"),
+ * an instruction written for an agent, never for a person. Memory that a
+ * human has a reason to read still lives on the agent detail page's Memory
+ * tab, where it is about a specific deployed agent.
  *
  * PRIVACY (CLAUDE.md: "Conversations are private. Work is shared.")
  * -----------------------------------------------------------------
@@ -62,7 +66,9 @@ export type SageConversation = {
   /** The thread's own title, which control_plane_repository builds from the
    *  FIRST message and then never overwrites (ensure_agent_thread's
    *  `CASE WHEN title = 'New chat'` upsert) — so it really is the opening
-   *  line, not the latest one. */
+   *  line, not the latest one. Built from the *enveloped* message, so it
+   *  arrives with the attribution header on the front; stripped below for
+   *  the same reason the transcript strips it. */
   title: string;
   lastActivityAt: string | null;
 };
@@ -74,7 +80,7 @@ function toConversation(raw: RawThread): SageConversation | null {
   if (!id || !isSageConsoleThread(id)) return null;
   return {
     id,
-    title: String(raw?.title ?? "").trim() || "New chat",
+    title: stripEnvelopeHeader(String(raw?.title ?? "").trim()).trim() || "New chat",
     lastActivityAt:
       String(raw?.last_turn_at ?? "").trim() ||
       String(raw?.updated_at ?? "").trim() ||
@@ -155,107 +161,6 @@ export function SageHistoryPanel({
           </button>
         );
       })}
-    </div>
-  );
-}
-
-type MemoryFile = { path: string };
-
-/** The agent's memory tree, read from the same endpoint the agent detail
- *  page's Memory tab reads. Fetched while the console is open so the
- *  console knows whether a Memory control has anything to open — a control
- *  over an empty tree would be a dead control. */
-export function useSageMemoryFiles(workspaceId: string, agentId: string | null, enabled: boolean) {
-  const [files, setFiles] = useState<MemoryFile[]>([]);
-
-  useEffect(() => {
-    if (!enabled || !agentId) return;
-    let cancelled = false;
-    const base = `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/memory`;
-    fetch(`${base}/tree`, { credentials: "include" })
-      .then((r) => r.json())
-      .then((d) => {
-        if (cancelled) return;
-        const indexPath = String(d?.index?.path || "").trim();
-        const index: MemoryFile[] = indexPath ? [{ path: indexPath }] : [];
-        const topics: MemoryFile[] = Array.isArray(d?.topics)
-          ? d.topics
-              .map((t: any) => ({ path: String(t?.path || t?.name || t || "").trim() }))
-              .filter((t: MemoryFile) => t.path && t.path !== indexPath)
-          : [];
-        setFiles([...index, ...topics]);
-      })
-      .catch(() => {
-        if (!cancelled) setFiles([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId, agentId, enabled]);
-
-  return files;
-}
-
-export function SageMemoryPanel({
-  workspaceId,
-  agentId,
-  files,
-}: {
-  workspaceId: string;
-  agentId: string;
-  files: MemoryFile[];
-}) {
-  const base = `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/memory`;
-  const [selected, setSelected] = useState<string>(files[0]?.path || "");
-  const [content, setContent] = useState<string>("");
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (!selected && files[0]?.path) setSelected(files[0].path);
-  }, [files, selected]);
-
-  useEffect(() => {
-    if (!selected) return;
-    let cancelled = false;
-    setLoading(true);
-    fetch(`${base}/file?path=${encodeURIComponent(selected)}`, { credentials: "include" })
-      .then((r) => r.json())
-      .then((d) => {
-        if (!cancelled) setContent(String(d?.content ?? d?.text ?? ""));
-      })
-      .catch(() => {
-        if (!cancelled) setContent("");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [base, selected]);
-
-  return (
-    <div className="fleet-sage-panel">
-      {/* One file is not a choice — the switcher only appears once there is
-          something to switch between. */}
-      {files.length > 1 && (
-        <div className="fleet-sage-memory-files">
-          {files.map((f) => (
-            <button
-              key={f.path}
-              type="button"
-              className={`fleet-sage-memory-file${selected === f.path ? " is-active" : ""}`}
-              onClick={() => setSelected(f.path)}
-            >
-              <FileText size={12} strokeWidth={1.75} />
-              <span className="fleet-sage-memory-file-path">{f.path}</span>
-            </button>
-          ))}
-        </div>
-      )}
-      <div className="fleet-sage-memory-body">
-        {loading ? <div className="fleet-page-state-body">Loading…</div> : <MemoryPreview content={content} />}
-      </div>
     </div>
   );
 }

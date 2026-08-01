@@ -1416,8 +1416,22 @@ a.fleet-breadcrumb:hover {
   position: absolute;
   bottom: calc(100% + 10px);
   left: 0;
+  /* ONE geometry, for every view and every loading state in between.
+     `height`, not `max-height`: sized to its content, the empty state, a live
+     transcript and the history list were each a different height, so the
+     console appeared to change shape every time you touched it. Short content
+     now sits inside this frame; long content scrolls inside it.
+
+     The subtraction is space the console cannot have. It is anchored 10px
+     above the Ask AI rail row, and everything below that row — the utility
+     icon strip, the working/stopped line, the credits chip and the account
+     row — leaves the console's bottom edge ~200px above the viewport floor
+     (measured live at 1440x900). 232px is that plus a top margin, so the
+     header stays on screen at short viewport heights. The old
+     `calc(100vh - 60px)` counted none of the rail below it, which is why at
+     ~720px tall the header ran off the top of the screen. */
   width: 400px;
-  max-height: min(560px, calc(100vh - 60px));
+  height: min(560px, calc(100vh - 232px));
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
@@ -1436,6 +1450,11 @@ a.fleet-breadcrumb:hover {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   gap: 8px;
+  /* 24px control + 6px padding either side. Pinned so the header keeps its
+     height while the conditional New chat / History controls are still
+     resolving — otherwise the body under it grew and shrank on load. */
+  min-height: 36px;
+  box-sizing: border-box;
 }
 
 /* Replaced the old Chat/Connect tab strip (MAN-93 removed Connect, leaving
@@ -7418,7 +7437,9 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
      fits. */
   .fleet-sage-console {
     width: min(400px, calc(100vw - 24px));
-    max-height: min(70vh, calc(100vh - 100px));
+    /* `height`, matching the desktop rule — one fixed frame for every view.
+       See the base rule for why this is not a max-height, and for the 232px. */
+    height: min(70vh, calc(100vh - 232px));
   }
 
   /* If the drawer isn't open, neither panel should be visible either — both
@@ -9775,9 +9796,9 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    sibling views that cluster switches between.
 
    Neutral throughout, deliberately: the one accent in this console is the
-   composer's Send button, and a lit-up history or memory toggle competing
-   with it would be the "two accent-filled controls in one view" bug. Active
-   state here is the same neutral wash the rail uses for its own selection. */
+   composer's Send button, and a lit-up history toggle competing with it
+   would be the "two accent-filled controls in one view" bug. Active state
+   here is the same neutral wash the rail uses for its own selection. */
 
 .fleet-sage-console-actions {
   display: flex;
@@ -9847,6 +9868,12 @@ h2.fleet-sage-console-title {
   transition: background var(--dur-1) var(--ease-out);
 }
 
+/* The panel is a fixed height now, so a short list leaves space below it —
+   a rule under the final row would be a divider between a row and nothing. */
+.fleet-sage-history-row:last-child {
+  border-bottom: none;
+}
+
 .fleet-sage-history-row:hover {
   background: var(--bg-card-hover);
 }
@@ -9875,77 +9902,10 @@ h2.fleet-sage-console-title {
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Memory view ───────────────────────────────────────────────────────── */
-
-/* File switcher, only rendered when there is more than one file. Wraps
-   rather than scrolls: a memory tree is a handful of files, and a hidden
-   horizontal overflow would bury the ones that matter. */
-.fleet-sage-memory-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.fleet-sage-memory-file {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 100%;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: inherit;
-  font-size: var(--text-2xs);
-  cursor: pointer;
-  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
-}
-
-.fleet-sage-memory-file svg {
-  flex-shrink: 0;
-  color: var(--text-muted);
-}
-
-.fleet-sage-memory-file:hover {
-  background: var(--bg-card-hover);
-  color: var(--text-primary);
-}
-
-.fleet-sage-memory-file.is-active {
-  background: var(--bg-card-hover);
-  color: var(--text-primary);
-}
-
-.fleet-sage-memory-file-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fleet-sage-memory-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-/* MemoryTab's own preview renderer, re-tuned for a 400px console: the tab
-   version is laid out for a full-width detail page (640px measure, 20/24
-   padding), which inside this panel reads as a narrow column of margin. */
-.fleet-sage-memory-body .fleet-memory-preview {
-  max-width: none;
-  padding: 12px 14px;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.fleet-sage-memory-body .fleet-memory-preview-empty {
-  padding: 12px 14px;
-  font-size: 12px;
-}
+/* The Memory view's rules (.fleet-sage-memory-*) lived here until 2026-08-01
+   and went with the view itself — see SageLauncher.tsx for the ruling. The
+   agent detail page's Memory tab keeps its own styles; nothing here was
+   shared with it. */
 
 .fleet-sage-panel .fleet-page-state-body {
   padding: 12px 14px;

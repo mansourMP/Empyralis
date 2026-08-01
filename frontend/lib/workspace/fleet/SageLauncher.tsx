@@ -1,17 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Brain, History, Sparkles, SquarePen, X } from "lucide-react";
+import { History, Sparkles, SquarePen, X } from "lucide-react";
 
 import { AgentChat } from "./AgentChat";
 import { useFleetAgents } from "./fleet-data";
 import { findSageAgent } from "./fleet-presentation";
 import {
   SageHistoryPanel,
-  SageMemoryPanel,
   newSageThreadId,
   useSageConversations,
-  useSageMemoryFiles,
 } from "./SageConsolePanels";
 
 // Fleet-management tools are live end-to-end — the console reflects real capability.
@@ -21,22 +19,39 @@ const STARTER_PROMPTS = [
   "Search the web for recent AI news",
 ];
 
-type ConsoleView = "chat" | "history" | "memory";
+type ConsoleView = "chat" | "history";
 
 const VIEW_TITLES: Record<ConsoleView, string> = {
   chat: "Ask AI",
   history: "History",
-  memory: "Memory",
 };
 
 /**
  * "Ask AI" console launcher — a rail row rendered at the bottom of
  * PrimaryRail's nav (the fleet-rail-utility group in PrimaryRail.tsx),
  * directly above the Shortcuts row. Opens a docked panel (not a full page)
- * holding the chat with the operator agent (reuses AgentChat), plus two
- * sibling views reached from the header: your past conversations with that
- * agent, and what it remembers. See SageConsolePanels.tsx — neither is a
- * new endpoint and neither is a new route.
+ * holding the chat with the operator agent (reuses AgentChat), plus one
+ * sibling view reached from the header: your past conversations with that
+ * agent. See SageConsolePanels.tsx — it is not a new endpoint and not a new
+ * route.
+ *
+ * ONE PANEL, ONE SIZE
+ * -------------------
+ * Every view renders inside the same fixed frame (.fleet-sage-console sets
+ * an explicit `height`, not a `max-height`). Short content sits inside that
+ * frame; long content scrolls inside it; nothing about switching views or
+ * waiting on a fetch may change the panel's outline. Before 2026-08-01 the
+ * panel sized to its content, so the empty state, a live chat, and the
+ * history list were each a different height and it read as three components
+ * instead of one console.
+ *
+ * A MEMORY view used to sit beside History. Removed 2026-08-01 (founder
+ * ruling): Ask AI is a personal helper — Cloudflare's "Ask AI", not a
+ * deployed agent — so it has no memory-index surface to offer, and what the
+ * view actually rendered was the memory file's authoring scaffold, written
+ * for an agent to follow rather than for a person to read. Agent memory
+ * that a human has a reason to open still lives on the agent detail page's
+ * Memory tab.
  *
  * This console used to carry a second "Connect" tab for pairing personal
  * channels (Telegram/WhatsApp/Signal/iMessage/WeChat). Removed (MAN-93):
@@ -91,7 +106,6 @@ export function SageLauncher({
   const [threadId, setThreadId] = useState<string | null>(null);
 
   const { conversations, loaded, refresh } = useSageConversations(workspaceId, open);
-  const memoryFiles = useSageMemoryFiles(workspaceId, sageAgent?.agent_id ?? null, open);
 
   // Resume where this person left off: the newest conversation they own, or a
   // fresh one if they have none. Only fires while no conversation is chosen,
@@ -127,8 +141,7 @@ export function SageLauncher({
 
   // No dead controls: History only when there is another conversation to go
   // back to, New chat only once the open one has actually been used (its
-  // thread row exists the moment the first turn is recorded), Memory only
-  // when the agent has a memory tree to show.
+  // thread row exists the moment the first turn is recorded).
   const hasOtherConversations = useMemo(
     () => conversations.some((c) => c.id !== threadId),
     [conversations, threadId],
@@ -172,18 +185,6 @@ export function SageLauncher({
                   <History size={15} strokeWidth={1.75} />
                 </button>
               )}
-              {memoryFiles.length > 0 && (
-                <button
-                  type="button"
-                  className={`fleet-sage-console-action${view === "memory" ? " is-active" : ""}`}
-                  onClick={() => toggleView("memory")}
-                  aria-pressed={view === "memory"}
-                  aria-label="Memory"
-                  title="Memory"
-                >
-                  <Brain size={15} strokeWidth={1.75} />
-                </button>
-              )}
               <button
                 type="button"
                 className="fleet-sage-console-close"
@@ -202,9 +203,6 @@ export function SageLauncher({
                 activeThreadId={threadId}
                 onOpen={openConversation}
               />
-            )}
-            {view === "memory" && (
-              <SageMemoryPanel workspaceId={workspaceId} agentId={sageAgent.agent_id} files={memoryFiles} />
             )}
             {view === "chat" && threadId && (
               <AgentChat

@@ -10,11 +10,57 @@ import { ChatMessage, type WorkstationChatMessageRecord } from "@/lib/workspace/
 type RawTurn = Record<string, any>;
 type SseEvent = { event: string; payload: Record<string, unknown> };
 
+/** Every label server_modules/inbound_envelope.py's _PLATFORM_LABELS can
+ *  render as the first part of an attribution header. */
+const ENVELOPE_PLATFORM_LABELS = new Set([
+  "Telegram", "WhatsApp", "Signal", "iMessage", "WeChat",
+  "Discord", "Slack", "GitHub", "SMS", "Console", "API",
+]);
+
+/**
+ * Drop the server's attribution header from a message before showing it.
+ *
+ * The backend prepends one deterministic line to every inbound message
+ * before running the turn — `[Console · your owner you@example.com]`,
+ * `[Telegram · group "Ops" · from Dana — NOT your owner]`, etc. (see
+ * inbound_envelope.render_envelope_header) — and that enveloped string is
+ * what gets persisted as the user turn, and what the thread title is built
+ * from. It is not decoration the backend can stop writing: the read-side
+ * parser in inbound_attribution_recovery.py reads the attribution back OUT
+ * of that stored text to stamp memory writes, and the model is meant to see
+ * it in prior_messages. So it stays on the wire and comes off here, at
+ * render — the person typed "hello", so the transcript says "hello".
+ *
+ * Matched by shape, never by search: the header is a bracketed run at the
+ * very start whose " · "-separated parts begin with one of the platform
+ * labels above. A message that merely opens with a bracket ("[wip] ship it")
+ * is returned untouched.
+ */
+export function stripEnvelopeHeader(text: string): string {
+  const raw = String(text ?? "");
+  if (!raw.startsWith("[")) return raw;
+  // A persisted turn keeps the header on its own line. A thread title is that
+  // same text with whitespace collapsed (build_default_thread_title), so when
+  // there is no line break, close on the first bracket instead.
+  const newline = raw.indexOf("\n");
+  const firstLine = newline < 0 ? raw : raw.slice(0, newline);
+  const close = firstLine.endsWith("]") ? firstLine.length - 1 : firstLine.indexOf("]");
+  if (close <= 0) return raw;
+  const inner = firstLine.slice(1, close);
+  if (!inner.includes(" · ")) return raw;
+  if (!ENVELOPE_PLATFORM_LABELS.has(inner.split(" · ")[0].trim())) return raw;
+  return raw.slice(close + 1).replace(/^\s+/, "");
+}
+
 function turnToMessage(turn: RawTurn): WorkstationChatMessageRecord {
+  const role = String(turn.role ?? "assistant");
+  const content = String(turn.content ?? turn.reply ?? "");
   return {
     id: String(turn.id ?? turn.turn_id ?? `${turn.role ?? "turn"}-${turn.created_at ?? Math.random()}`),
-    role: String(turn.role ?? "assistant"),
-    content: String(turn.content ?? turn.reply ?? ""),
+    role,
+    // Only inbound turns ever carry the header; an assistant reply that
+    // happens to quote one is the agent's own words and stays verbatim.
+    content: role === "user" ? stripEnvelopeHeader(content) : content,
     status: turn.status ?? null,
     createdAt: turn.created_at ?? null,
     runId: turn.run_id ?? null,
