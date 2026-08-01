@@ -5684,12 +5684,19 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   justify-content: flex-end;
   margin-bottom: var(--space-3);
 }
-/* In the project page's control row the stack is the RIGHT-hand item sharing
-   a 40px line with the view tabs, not a band of its own above the content —
-   see the comment where it is rendered. margin-left:auto eats the row's free
-   space so the stack pins to the far edge while every control stays left. */
+/* In the project page's control row the stack sits with the view tabs on a
+   shared 40px line, not a band of its own above the content — see the
+   comment where it is rendered. It trails the view/layout switches; the
+   far-right edge belongs to .fleet-toolbar-actions instead (below). */
 .fleet-content-toolbar > .fleet-member-avatar-stack {
   margin-bottom: 0;
+}
+/* The icon cluster (usage, filter/sort, panel toggle) pins to the far right
+   of the row: every one of them acts on the RIGHT side of the screen, so
+   the founder's call is that they should live at that edge rather than
+   trailing the view switch on the left. margin-left:auto eats the row's
+   free space. */
+.fleet-content-toolbar > .fleet-toolbar-actions {
   margin-left: auto;
 }
 .fleet-member-avatar-stack-item {

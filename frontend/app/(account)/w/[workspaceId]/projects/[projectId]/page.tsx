@@ -359,6 +359,23 @@ export default function ProjectDetailPage() {
             ))}
           </div>
         ) : null}
+        {/* Trails the view/layout switches, LEFT of centre — the people on a
+            project read as context for the view you are choosing, so they sit
+            with those controls rather than out at the edge (founder's call
+            2026-08-01; this has now been on both sides of the row).
+            "project member" == "workspace member" for now (MAN-70 ruling, no
+            per-project ACL table yet), so this pulls the workspace's member
+            list. `tasks` is passed through only so the hover tooltip can
+            surface real per-member attribution (tasks they created in this
+            project) — never fetched independently. It used to be the first
+            child of .fleet-content-main, which cost the board a whole 44px
+            band of dead space between the tab strip and the first card;
+            sharing the toolbar's line is what reclaimed that. */}
+        <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
+        {/* Far RIGHT (margin-left:auto in the stylesheet). Every control in
+            here acts on the right-hand side of the screen — the panel toggle
+            opens the drawer there, filter/sort drops its popover there — so
+            the cluster belongs at that edge. */}
         {view === "agents" ? (
           <FleetToolbar
             filters={inProject.length > 0 ? filters : undefined}
@@ -371,17 +388,6 @@ export default function ProjectDetailPage() {
             usageHref={`${base}/billing`}
           />
         ) : null}
-        {/* Far RIGHT of the control row (founder's call 2026-08-01 — this and
-            the view switch were the other way round). "project member" ==
-            "workspace member" for now (MAN-70 ruling, no per-project ACL
-            table yet), so this pulls the workspace's member list. `tasks` is
-            passed through only so the hover tooltip can surface real
-            per-member attribution (tasks they created in this project) —
-            never fetched independently. It used to be the first child of
-            .fleet-content-main, which cost the board a whole 44px band of
-            dead space between the tab strip and the first card; sharing the
-            toolbar's line is what reclaimed that. */}
-        <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
       </div>
 
       {/* The sheet — full width always, whether the drawer below is open or
