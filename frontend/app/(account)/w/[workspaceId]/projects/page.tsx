@@ -236,7 +236,7 @@ export default function ProjectsPage() {
           onSortChange={(v) => updateFilters({ sort: v as SortMode })}
           panelOpen={panelOpen}
           onTogglePanel={() => setPanelOpen((v) => !v)}
-          usageHref={`${base}/billing`}
+          usageWorkspaceId={workspaceId}
         />
       </div>
 

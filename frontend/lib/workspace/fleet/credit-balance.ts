@@ -108,6 +108,42 @@ export function useCreditUsageHistory(workspaceId: string, limit = 100) {
   return { history, loading, error, refresh };
 }
 
+export type DailyCreditSpend = { date: string; credits: number };
+
+/** UTC day keys for the last `days` days, oldest→newest — the same window
+ *  CreditsPanel charts (14d), derived here so the toolbar's Usage popover and
+ *  the Billing page can't drift apart on what "recent" means. */
+export function lastCreditDays(days: number): string[] {
+  const out: string[] = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+export function creditDayLabel(dayKey: string): string {
+  const d = new Date(`${dayKey}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return dayKey;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+/** Per-day debited credits over the last `days` days, oldest→newest. Every day
+ *  in the window is present (zero-filled) so a chart can render a real
+ *  calendar rather than only the days that happened to have activity. Only
+ *  `usage_debit` rows count — top-ups and grants are not spend. */
+export function dailyCreditSpend(history: CreditUsageHistory | null, days: number): DailyCreditSpend[] {
+  const byDate = new Map<string, number>();
+  for (const item of history?.items || []) {
+    if (item.kind !== "usage_debit") continue;
+    const key = (item.created_at || "").slice(0, 10);
+    if (!key) continue;
+    byDate.set(key, (byDate.get(key) || 0) + Math.abs(item.credits || 0));
+  }
+  return lastCreditDays(days).map((date) => ({ date, credits: byDate.get(date) || 0 }));
+}
+
 export type TopUpResult =
   | { ok: true; checkoutUrl: string }
   | { ok: false; notConfigured: true }

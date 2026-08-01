@@ -1674,6 +1674,114 @@ a.fleet-breadcrumb:hover {
   color: var(--text-primary);
 }
 
+/* ── Usage popover (FleetToolbar's BarChart3 slot) ────────────────────────
+   The API-console summary: balance headline, one bar per day over the same
+   14d window the Billing page charts, one quiet way out. Shares
+   .fleet-toolbar-popover's box (position, elevation, dismissal) and only
+   overrides width + interior rhythm — dense inside the group, airy between
+   head / chart / link.
+
+   Every mark here is NEUTRAL on purpose. This popover opens while the view's
+   accent-filled primary action ("New agent" / "New task") is on screen, and
+   a wall of 14 accent bars would be the second accent surface in one view.
+   Filled bars are a derived step off --text-secondary (same technique as
+   --priority-bar-empty in theme-tokens.css); a zero day is a hairline stub
+   at --border-strong so the row still reads as a calendar and never fakes
+   activity it doesn't have. No draw-in animation: the chart is state, and
+   state arrives. */
+.fleet-usage-popover {
+  width: 236px;
+  padding: 12px;
+  gap: 12px;
+}
+
+.fleet-usage-popover-value {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  letter-spacing: var(--tracking-tight);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--leading-tight);
+}
+
+.fleet-usage-popover-caption {
+  margin-top: 1px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.fleet-usage-popover-summary {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.fleet-usage-popover-summary-value {
+  color: var(--text-secondary);
+  font-weight: var(--weight-medium);
+}
+
+.fleet-usage-popover-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 44px;
+}
+
+/* Full-height hit area per day, so the title readout is reachable on a
+   near-zero day too — the bar itself may only be 2px tall. */
+.fleet-usage-popover-bar-track {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+
+.fleet-usage-popover-bar {
+  width: 100%;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-secondary) 52%, transparent);
+}
+.fleet-usage-popover-bar.is-empty {
+  height: 2px;
+  background: var(--border-strong);
+}
+/* Instant, not transitioned — colour is state (see theme-tokens.css's motion
+   contract: transform/opacity may animate, colour may not). */
+.fleet-usage-popover-bar-track:hover .fleet-usage-popover-bar {
+  background: var(--text-secondary);
+}
+
+.fleet-usage-popover-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+}
+
+/* Loading / zero-usage / failed-fetch all land here — one quiet line instead
+   of an empty chart frame. */
+.fleet-usage-popover-note {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: var(--leading-normal);
+}
+
+/* Quiet on purpose: .fleet-link is accent-coloured and the accent is spoken
+   for elsewhere in this view. */
+.fleet-usage-popover-link {
+  align-self: flex-start;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  text-decoration: none;
+}
+.fleet-usage-popover-link:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+
 /* ── UI Phase 4: collapsible right panel (Linear properties-panel pattern) ── */
 .fleet-content--with-panel {
   /* flex:1 (not height:100%) — see .fleet-shell-scroll's comment for why:
