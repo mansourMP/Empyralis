@@ -175,6 +175,75 @@ export function TaskStatusChip({ status }: { status: FleetTaskStatus }) {
   );
 }
 
+// ── Sub-tasks ───────────────────────────────────────────────────────────────
+
+/**
+ * The sub-task rollup — "1/3" against a donut filled to the same fraction.
+ *
+ * The numbers are real and already in hand: project_tasks_service computes
+ * `subtask_count` / `subtask_done_count` in the same LATERAL join that fetched
+ * the row (see migrations/add_task_parent.sql), so a board of 200 cards costs
+ * zero extra reads to draw this.
+ *
+ * The donut is deliberately the SAME geometry as TaskStatusIcon's ring, in
+ * neutral ink rather than a status colour: a card must not sprout a second
+ * coloured ring competing with the one that carries lifecycle meaning. Shape
+ * says "a fraction of something is finished"; the digits say which fraction.
+ *
+ * Renders NOTHING when the task has no sub-tasks — which is nearly every task.
+ * A "0/0" or an empty slot on every ordinary card is exactly the dead glyph
+ * this pass exists to remove.
+ */
+export function TaskSubtaskProgress({
+  done,
+  total,
+  size = 11,
+  className,
+}: {
+  /** `task.subtask_done_count` — absent on a server predating the migration. */
+  done?: number | null;
+  /** `task.subtask_count` — same. */
+  total?: number | null;
+  size?: number;
+  className?: string;
+}) {
+  const count = Math.max(0, Math.floor(Number(total) || 0));
+  if (count === 0) return null;
+  const complete = Math.min(count, Math.max(0, Math.floor(Number(done) || 0)));
+  const fraction = complete / count;
+
+  return (
+    <span
+      className={`fleet-subtask-progress${className ? ` ${className}` : ""}`}
+      title={`${complete} of ${count} sub-${count === 1 ? "task" : "tasks"} done`}
+    >
+      <svg
+        width={size}
+        height={size}
+        viewBox="0 0 14 14"
+        aria-hidden
+        focusable="false"
+        shapeRendering="geometricPrecision"
+      >
+        <circle cx="7" cy="7" r="5.25" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.45" />
+        {fraction > 0 ? (
+          <circle
+            cx="7"
+            cy="7"
+            r={FILL_R}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={FILL_R * 2}
+            strokeDasharray={`${(fraction * FILL_CIRCUMFERENCE).toFixed(3)} ${FILL_CIRCUMFERENCE.toFixed(3)}`}
+            transform="rotate(-90 7 7)"
+          />
+        ) : null}
+      </svg>
+      {complete}/{count}
+    </span>
+  );
+}
+
 // ── Priority ────────────────────────────────────────────────────────────────
 
 /**
@@ -227,9 +296,25 @@ const BAR_GEOMETRY = [
 ];
 
 /**
- * The priority glyph. `0` (no priority) draws three muted dashes rather than
- * nothing at all — an empty slot would make the card's meta row jump around
- * as priorities get set, and "nobody has triaged this" is itself information.
+ * The priority glyph.
+ *
+ * `0` (no priority) draws three muted dashes — a PLACEHOLDER, and one that
+ * only earns its place on a surface where something else depends on this
+ * glyph's width:
+ *   · TasksGroupedList — a fixed 16px grid track; an empty cell there keeps
+ *     the id/status/title columns aligned down the whole list.
+ *   · TasksList — an inline glyph leading every row's title; dropping it on
+ *     untriaged rows only would leave the titles ragged row to row.
+ *   · TaskComposer / TaskDetailView — here the glyph IS the priority control's
+ *     current value, and "No priority" is a real, selectable choice. A trigger
+ *     with no icon at all would be a control with nothing on it.
+ *
+ * Nowhere else. On the board card (TasksBoard.TaskCard) the whole element is
+ * omitted when priority is 0 — a card is a free-floating box with nothing to
+ * line up against, so three grey dashes there were just a glyph announcing it
+ * had nothing to say, on every untriaged card. CLAUDE.md: "A control whose own
+ * label admits it does nothing is a design bug, not a caption." Do not add the
+ * dashes back to a surface that has no alignment to protect.
  */
 export function TaskPriorityIcon({
   priority,

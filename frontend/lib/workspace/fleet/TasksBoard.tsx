@@ -26,6 +26,20 @@
  *     identity tint. AgentSigil's own generated shape is what makes one
  *     card's assignee glance-distinguishable from another's, not hue.
  *
+ * WHAT A CARD CARRIES, AND THE ONE RULE GOVERNING IT (2026-08-01). Every
+ * element is drawn if and only if the task actually HAS that data — there are
+ * no placeholders, no empty slots and no glyphs whose meaning is "nothing
+ * here". The card grew from title + ring + a dead `---` + id + "9h ago" to
+ * carry, conditionally: the parent task it hangs off, its labels, its
+ * priority, its sub-task rollup, an explicit date, and its assignee. A task
+ * with none of those is still a title, a ring and an id — and that is the
+ * correct card for it.
+ *
+ * There is deliberately NO "display properties" panel deciding which of those
+ * appear (Linear has one, ~14 toggles). Configuration is what you reach for
+ * when you won't make the design decision; the decision here is the rule in
+ * the paragraph above.
+ *
  * MOVING A TASK — two paths, both hitting the same handler:
  *   1. Drag a card into another column. Native HTML5 drag-and-drop only
  *      (draggable + dragover + drop) — zero new dependencies.
@@ -59,16 +73,24 @@
  * re-laying out — a real mobile board is separate, later work.
  */
 
-import { useEffect, useRef, useState, type DragEvent } from "react";
-import { Plus } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { CornerDownRight, Plus } from "lucide-react";
 
 import { dueLabel } from "./TasksList";
-import { timeAgo } from "./fleet-presentation";
+import { formatDate, formatDateTime } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
 import { TaskLabelChips } from "./task-labels";
-import { TaskStatusIcon, TaskPriorityIcon, taskStatusLabel, taskPriority, taskShortId, TASK_PRIORITY_LABELS } from "./task-status";
+import {
+  TaskStatusIcon,
+  TaskPriorityIcon,
+  TaskSubtaskProgress,
+  taskStatusLabel,
+  taskPriority,
+  taskShortId,
+  TASK_PRIORITY_LABELS,
+} from "./task-status";
 import { FLEET_TASK_STATUSES, countTasksByStatus, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
 
 /** The dataTransfer type the card writes and the column reads. Namespaced so
@@ -130,7 +152,13 @@ export function TasksBoard({
   // why it doesn't anymore.
   const visibleStatuses = FLEET_TASK_STATUSES.filter((s) => counts[s] > 0);
 
-  // MAN-145: seven columns at 252px each is wider than any board viewport,
+  // Parent lookup for the sub-task breadcrumb on a card. The board already
+  // holds every task in the project and the backend only ever allows a parent
+  // in the SAME project (migrations/add_task_parent.sql), so this resolves
+  // locally — a sub-task card costs no extra read to name its parent.
+  const tasksById = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
+
+  // MAN-145: seven columns at 292px each is wider than any board viewport,
   // so reaching the trailing columns (Blocked/In review/Done) depends on
   // scrolling sideways. A trackpad's two-finger swipe already does this for
   // free (.fleet-board is a plain overflow-x:auto box), but a PLAIN mouse
@@ -257,6 +285,7 @@ export function TasksBoard({
                   <TaskCard
                     key={task.id}
                     task={task}
+                    parentTask={task.parent_task_id ? tasksById.get(task.parent_task_id) || null : null}
                     agents={agents}
                     members={members}
                     index={index}
@@ -279,6 +308,7 @@ export function TasksBoard({
 
 function TaskCard({
   task,
+  parentTask,
   agents,
   members,
   index,
@@ -290,6 +320,9 @@ function TaskCard({
   onDragStateChange,
 }: {
   task: FleetTask;
+  /** The task this one is a sub-task of, already resolved by the board, or
+   *  null on a top-level task. */
+  parentTask?: FleetTask | null;
   agents: FleetAgent[];
   members?: WorkspaceMember[];
   index: number;
@@ -306,11 +339,43 @@ function TaskCard({
   const assignedMember = !assignee && task.assignee_user_id
     ? (members || []).find((m) => m.user_id === task.assignee_user_id) || null
     : null;
-  const due = dueLabel(task.due_at);
-  const updated = timeAgo(task.updated_at || task.created_at);
-  // Absent field → 0 ("no priority"), never a crash and never a blank slot.
-  // See task-status.taskPriority for why nothing reads task.priority raw.
+  // Absent field → 0 ("no priority"), never a crash. See
+  // task-status.taskPriority for why nothing reads task.priority raw; the
+  // GLYPH for 0 is simply not rendered here (see the meta row below).
   const priority = taskPriority(task);
+
+  // THE DATE, AND WHY IT NAMES ITSELF. The card used to print a bare "9h ago"
+  // with nothing saying what happened 9h ago; two cards reading "Aug 1" and
+  // "2d ago" looked like the same kind of fact and weren't. Both slots are now
+  // prefixed with the word for what they are.
+  //
+  // The fallback is CREATED, not updated. `updated_at` on this backend only
+  // moves on assign_task/update_task — a task can collect ten comments and a
+  // full agent run without it budging (see fleet-data.FleetTask) — so
+  // "Updated 9h ago" would be a confident statement of something we don't
+  // actually know. When a task was FILED is a fact we do know, it never
+  // changes under the reader, and it is what Linear's own card shows.
+  const due = dueLabel(task.due_at);
+  const created = task.created_at ? formatDate(task.created_at, { month: "short", day: "numeric" }) : "";
+  const dateText = due ? `Due ${due}` : created ? `Created ${created}` : "";
+  const dateTitle = due
+    ? `Due ${formatDate(task.due_at as string, { dateStyle: "full" })}`
+    : created
+      ? `Created ${formatDateTime(task.created_at as string)}`
+      : "";
+
+  const assigneeNode = assignee ? (
+    <span className="fleet-agent-avatar" title={assignee.label || "Unnamed agent"}>
+      <AgentSigil seed={assignee.agent_id} size={12} />
+    </span>
+  ) : assignedMember ? (
+    <MemberAvatar
+      name={assignedMember.display_name || assignedMember.email}
+      role={assignedMember.role}
+      size="xs"
+      tintIndex={index}
+    />
+  ) : null;
 
   return (
     <article
@@ -342,6 +407,25 @@ function TaskCard({
         }
       }}
     >
+      {/* A sub-task's parent, above the title — Linear's card order, and the
+          only thing that stops a sub-task card being indistinguishable from a
+          top-level one on a board that lists both. Text, not a link: the card
+          is a drag source and a single click target, and a nested link inside
+          it would be a second, competing destination in a 292px box. The
+          parent is one click away from the task page's own breadcrumb, which
+          IS a link. Renders only when this task has a parent. */}
+      {parentTask ? (
+        <div
+          className="fleet-board-card-parent"
+          title={`Sub-task of ${parentTask.title || "Untitled task"}`}
+        >
+          <CornerDownRight size={11} strokeWidth={2} />
+          <span className="fleet-board-card-parent-title">
+            {parentTask.title || "Untitled task"}
+          </span>
+        </div>
+      ) : null}
+
       {/* Title first, meta underneath — Linear's card order. The old version
           led with a metadata row, which pushed the one thing you actually
           scan for down a line on every card. */}
@@ -349,7 +433,7 @@ function TaskCard({
 
       {/* Labels get their OWN line rather than a slot in the meta row below.
           The meta row is already ring + glyph + id + date + avatar inside a
-          252px column; a chip squeezed in there would be ellipsed to two
+          292px column; a chip squeezed in there would be ellipsed to two
           characters and tell you nothing. This line only exists on cards that
           actually have labels, so the density the card header brags about is
           unchanged for every card that doesn't.
@@ -386,36 +470,43 @@ function TaskCard({
           </select>
         </span>
 
-        <span className="fleet-board-card-prio" title={TASK_PRIORITY_LABELS[priority]}>
-          <TaskPriorityIcon priority={priority} size={14} />
-        </span>
+        {/* No priority → no glyph. A card is a free-floating box; there is no
+            column here for an empty slot to protect, so the three grey dashes
+            this used to draw on every untriaged card were a glyph whose only
+            message was that it had nothing to say. See task-status.tsx for
+            which surfaces DO still want the placeholder and why. */}
+        {priority !== 0 ? (
+          <span className="fleet-board-card-prio" title={TASK_PRIORITY_LABELS[priority]}>
+            <TaskPriorityIcon priority={priority} size={14} />
+          </span>
+        ) : null}
 
         <span className="fleet-board-card-id">{taskShortId(task.id)}</span>
 
-        {/* Due date when there is one, last-touched otherwise — two different
-            facts in one slot, so the tooltip says which one you're reading
-            rather than leaving "Aug 1" and "2d ago" to look interchangeable. */}
-        <span
-          className={`fleet-board-card-date${due ? "" : " fleet-cell-muted"}`}
-          title={due ? "Due date" : updated ? "Last updated" : "No due date"}
-        >
-          {due || updated || "—"}
-        </span>
+        {/* "1/3" + a donut, on the tasks that actually have sub-tasks. The
+            counts ride along on the row the board already fetched, so this
+            costs no request. Renders nothing on a task with none. */}
+        <TaskSubtaskProgress
+          done={task.subtask_done_count}
+          total={task.subtask_count}
+          className="fleet-board-card-subtasks"
+        />
 
-        {assignee ? (
-          <span className="fleet-agent-avatar" title={assignee.label || "Unnamed agent"}>
-            <AgentSigil seed={assignee.agent_id} size={12} />
+        {/* Date + assignee ride to the right as a GROUP, so the row still
+            packs correctly when either is missing — a card with no due date,
+            no created_at and nobody assigned simply ends after the id rather
+            than trailing an em dash and a blank circle where information
+            would have been. */}
+        {dateText || assigneeNode ? (
+          <span className="fleet-board-card-meta-right">
+            {dateText ? (
+              <span className="fleet-board-card-date" title={dateTitle}>
+                {dateText}
+              </span>
+            ) : null}
+            {assigneeNode}
           </span>
-        ) : assignedMember ? (
-          <MemberAvatar
-            name={assignedMember.display_name || assignedMember.email}
-            role={assignedMember.role}
-            size="xs"
-            tintIndex={index}
-          />
-        ) : (
-          <span className="fleet-board-card-unassigned" title="Unassigned" aria-hidden />
-        )}
+        ) : null}
       </div>
     </article>
   );
