@@ -305,21 +305,24 @@ export default function ProjectDetailPage() {
           agents) so the Properties toggle stays reachable; filters/sort
           still hide themselves when there's nothing to filter/sort (each is
           independently optional). */}
-      {/* MAN-145: one accent-FILL per view, never two. Each of these views can
-          also show its own empty state (FirstAgentEmpty's centre "Create your
-          first agent" for Agents; the Tasks empty state's centre "+ New task"
-          below) with a filled button of its own — that's the real call to
-          action when there's nothing else on screen. So the header action
-          here stays the quiet .fleet-btn--accent hairline (same restrained
-          treatment every other app-wide primary action uses), never the
-          saturated fill, so the two are never both shouting at once. */}
+      {/* FILLED, 2026-08-01. This used to be the quiet hairline, on the theory
+          that the centre empty-state button ("Create your first agent") was
+          the real CTA and two fills would shout at once. Wrong trade: the
+          empty state is a first-run condition, while this button is the
+          view's PERSISTENT primary action — so the hairline meant the action
+          a customer uses every day looked secondary forever to avoid a clash
+          that only exists on an empty project. fleet-theme.css's own
+          .fleet-btn--accent-fill comment already named "New agent" / "New
+          task" / "New project" as exactly the curated set that earns the
+          fill; this call site simply never matched it. See the note in that
+          stylesheet about the empty-state overlap that remains. */}
       <HeaderAction>
         {view === "agents" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
             <span className="fleet-btn-plus">+</span> New agent
           </button>
         ) : view === "tasks" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setComposer({})}>
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setComposer({})}>
             <span className="fleet-btn-plus">+</span> New task
           </button>
         ) : null}

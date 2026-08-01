@@ -199,13 +199,14 @@ export default function AgentsPage() {
           was wrong. FleetToolbar always renders here (even with 0 agents)
           so the Properties toggle stays reachable; filters/sort still hide
           themselves when there's nothing to filter/sort. */}
-      {/* MAN-145: one accent-fill per view. The empty state below (0 agents)
-          shows FirstAgentEmpty's own filled "Create your first agent" centre
-          button — the real call to action when the list is empty — so this
-          header action stays the quiet .fleet-btn--accent hairline rather
-          than a second solid fill competing with it. */}
+      {/* FILLED, 2026-08-01 — same change and same reasoning as the project
+          page's header action: this is the view's PERSISTENT primary action,
+          so it should not have looked secondary forever just to avoid a
+          clash with the empty state, which is a first-run condition. See
+          fleet-theme.css's .fleet-btn--accent-fill comment, which already
+          named "New agent" as part of the curated set that earns the fill. */}
       <HeaderAction>
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => setWizardOpen(true)}>
+        <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
           <span className="fleet-btn-plus">+</span>
           New agent
         </button>

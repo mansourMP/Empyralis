@@ -2604,6 +2604,16 @@ a.fleet-breadcrumb:hover {
    class is deliberately opt-in per button, never a blanket upgrade. White
    label on a solid --accent fill, same shape/height as every other
    .fleet-btn (mirrors --danger's one-saturated-fill precedent below). */
+/* 2026-08-01: the header actions on the project and workspace Agents pages
+   now actually USE this, as the paragraph above always said they should —
+   they had been rendering .fleet-btn--accent's hairline instead, so the
+   action a customer takes every day looked secondary while a first-run
+   empty state got the only fill on screen. KNOWN REMAINING OVERLAP: on a
+   genuinely empty project both this header fill and the centre empty-state
+   fill ("Create your first agent" / "+ New task") are on screen at once,
+   which is two fills in one view. Deliberate for now — the fix is to drop
+   the centre button, not to re-quiet the persistent one — flagged to the
+   founder rather than decided here. */
 .fleet-btn--accent-fill {
   border-color: var(--accent);
   background: var(--accent);
