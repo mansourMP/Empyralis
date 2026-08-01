@@ -23,6 +23,7 @@ import {
   useFleetAgents,
   useFleetProjects,
   useFleetTasks,
+  useWorkspaceRoster,
   assignFleetTask,
   assignFleetTaskToUser,
   patchFleetTask,
@@ -49,6 +50,9 @@ export default function TaskDetailPage() {
   // MAN-64/MAN-70: the pool of valid HUMAN assignees, plus the lookup
   // TaskDetailView uses to render a human commenter's real name.
   const { members } = useWorkspaceMembers(workspaceId);
+  // MCP-connected external agents — the lookup that names an external
+  // agent's comment instead of printing its opaque ext_agent_ id.
+  const { externalAgents } = useWorkspaceRoster(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   const { tasks, loading, refresh } = useFleetTasks(workspaceId, projectId);
@@ -187,6 +191,7 @@ export default function TaskDetailPage() {
         task={task}
         agents={inProject}
         members={members}
+        externalAgents={externalAgents}
         workspaceId={workspaceId}
         projectName={project?.name || "Project"}
         projectHref={projectHref}

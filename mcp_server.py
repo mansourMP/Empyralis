@@ -86,8 +86,21 @@ Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true`` + per-key writes_enable
   - ``empyralis_trigger_test_turn`` → deployed_agent_test_turn_service.execute_test_turn
 
 All calls are ledgered with ``event_class="mcp_inbound"`` and
-``actor="external_mcp_client"``.  Workspace is resolved from the API
-key — never from tool arguments.  Operator-role rules apply.
+``actor_id`` = this key's own ``external_agent_id`` (``ext_agent_<hex16>``),
+so two different keys are two distinguishable actors in the audit trail —
+it was a hardcoded ``"external_mcp_client"`` constant for every caller until
+2026-08-01, which made them indistinguishable.  Workspace is resolved from
+the API key — never from tool arguments.  Operator-role rules apply.
+
+IDENTITY ON WRITES: the bearer-key path resolves both ``external_agent_id``
+AND ``external_agent_display_name`` (see ``_resolve_workspace``), and both
+reach the write path. The id is what gets stored as the author/creator; the
+display name rides along as a snapshot (``comment.author_display_name`` /
+``task.metadata.created_by_display_name``) so a board can name the agent
+that acted even if its roster row later disappears. The live name lives in
+``mcp_external_agent_roster`` and is served to the UI by
+``GET /api/w/{workspace_id}/fleet/roster`` (routes_fleet.py), which is what
+the frontend prefers — the snapshot is the fallback, not the source of truth.
 """
 
 from __future__ import annotations
@@ -250,13 +263,31 @@ async def _resolve_workspace(ctx: Any) -> Dict[str, Any]:
     return resolved
 
 
-async def _ledger_mcp_call(workspace_id: str, tool_name: str, ok: bool, **extra: Any) -> None:
+async def _ledger_mcp_call(resolved: Dict[str, Any], tool_name: str, ok: bool, **extra: Any) -> None:
     """Write an mcp_inbound ledger event for an inbound external MCP call.
 
     Previously called runs_core.emit_log with kwargs that don't exist on it, so
     every call raised TypeError and was swallowed — the claimed mcp_inbound audit
     trail did not exist. Routed through the real activity ledger.
+
+    Takes the WHOLE resolved-auth dict (``_resolve_workspace``'s return), not
+    just a workspace id, because ``actor_id`` used to be the literal constant
+    ``"external_mcp_client"`` for every caller — which made two different
+    bearer keys, i.e. two genuinely different external agents, indistinguishable
+    in the audit trail. The actor is now this key's own
+    ``external_agent_id`` (``ext_agent_<hex16>``, minted at key creation by
+    ``mcp_external_agent_roster_service``), with its ``display_name`` carried in
+    the event metadata — the ledger row itself has no name column, and adding
+    one to satisfy a display concern would be the wrong shape when the roster
+    is already the name's home.
+
+    The old constant remains the fallback for exactly one case that is real and
+    must stay traceable rather than crash: an OAuth Connector session, which
+    ``_resolve_workspace`` documents as minting no external-agent identity yet.
     """
+    workspace_id = str(resolved.get("workspace_id") or "").strip()
+    external_agent_id = str(resolved.get("external_agent_id") or "").strip()
+    display_name = str(resolved.get("external_agent_display_name") or "").strip()
     try:
         from server_modules import activity_ledger_service
         from server_modules import control_plane_repository as cpr
@@ -265,13 +296,18 @@ async def _ledger_mcp_call(workspace_id: str, tool_name: str, ok: bool, **extra:
         await activity_ledger_service.append_activity_event(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
-            actor_type="external_mcp_client",
-            actor_id="external_mcp_client",
+            actor_type="external_agent" if external_agent_id else "external_mcp_client",
+            actor_id=external_agent_id or "external_mcp_client",
             event_class="mcp_inbound",
             action=tool_name,
             title=f"MCP {tool_name}",
             summary=f"ok={ok}",
-            metadata={"ok": ok, **extra},
+            metadata={
+                "ok": ok,
+                **({"external_agent_id": external_agent_id} if external_agent_id else {}),
+                **({"external_agent_display_name": display_name} if display_name else {}),
+                **extra,
+            },
         )
     except Exception:
         LOGGER.debug("Failed to ledger MCP call %s", tool_name, exc_info=True)
@@ -413,7 +449,7 @@ if empyralist_mcp is not None:
         counts = await _p.count_agents_by_project(tenant_id=tenant, workspace_id=ws)
         for p in projects:
             p["agent_count"] = int(counts.get(p.get("id"), 0))
-        await _ledger_mcp_call(ws, "empyralis_list_projects", True, project_count=len(projects))
+        await _ledger_mcp_call(r, "empyralis_list_projects", True, project_count=len(projects))
         return {"ok": True, "projects": projects}
 
     @empyralist_mcp.tool(
@@ -446,7 +482,7 @@ if empyralist_mcp is not None:
             a["channels"] = sorted(set(chan_by_agent.get(aid, [])))
             a["connectors"] = sorted(set(conn_by_agent.get(aid, [])))
             a["project_name"] = (projects.get(str(a.get("project_id") or "")) or {}).get("name", "")
-        await _ledger_mcp_call(ws, "empyralis_list_agents", True, agent_count=len(agents))
+        await _ledger_mcp_call(r, "empyralis_list_agents", True, agent_count=len(agents))
         return {"ok": True, "agents": agents}
 
     @empyralist_mcp.tool(
@@ -464,7 +500,7 @@ if empyralist_mcp is not None:
         )
         if isinstance(result, dict) and isinstance(result.get("events"), list) and limit and limit > 0:
             result = {**result, "events": result["events"][: int(limit)]}
-        await _ledger_mcp_call(ws, "empyralis_get_agent_activity", True, agent_id=agent_id)
+        await _ledger_mcp_call(r, "empyralis_get_agent_activity", True, agent_id=agent_id)
         return {"ok": True, **result}
 
     @empyralist_mcp.tool(
@@ -488,9 +524,9 @@ if empyralist_mcp is not None:
                 owner_workspace_id=ws, limit=limit, offset=0,
             )
         except Exception as exc:  # noqa: BLE001 — surface a clean reason to the client
-            await _ledger_mcp_call(ws, "empyralis_get_agent_conversations", False, agent_id=agent_id)
+            await _ledger_mcp_call(r, "empyralis_get_agent_conversations", False, agent_id=agent_id)
             return {"ok": False, "error": str(exc), "agent_id": agent_id}
-        await _ledger_mcp_call(ws, "empyralis_get_agent_conversations", True, agent_id=agent_id)
+        await _ledger_mcp_call(r, "empyralis_get_agent_conversations", True, agent_id=agent_id)
         return {"ok": True, "agent_id": agent_id, **(payload if isinstance(payload, dict) else {})}
 
     # NOTE: empyralis_memory_read / _list / _write were removed here. They called
@@ -518,7 +554,7 @@ if empyralist_mcp is not None:
 
         payload = await collect_fn(message=message)
         reply = str(payload.get("reply") or "").strip()
-        await _ledger_mcp_call(ws, "empyralis_chat", True, message_len=len(message), reply_len=len(reply))
+        await _ledger_mcp_call(r, "empyralis_chat", True, message_len=len(message), reply_len=len(reply))
         return {"ok": True, "reply": reply, "agent_id": agent_id or "(sage)"}
 
     # ── Task tools (always live — see module docstring for the write-gate
@@ -556,6 +592,7 @@ if empyralist_mcp is not None:
         sub-task must be in the same project."""
         r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         author_id = r.get("external_agent_id") or "external_mcp_client"
+        author_name = str(r.get("external_agent_display_name") or "").strip()
         from server_modules import project_tasks_service as tasks
         try:
             task = await tasks.create_task(
@@ -564,11 +601,12 @@ if empyralist_mcp is not None:
                 priority=priority,
                 parent_task_id=parent_task_id or None,
                 created_by=author_id,
+                created_by_display_name=author_name,
             )
         except Exception as exc:  # noqa: BLE001 — includes an invalid/foreign project_id (FK violation)
-            await _ledger_mcp_call(ws, "empyralis_create_task", False, project_id=project_id, error=str(exc))
+            await _ledger_mcp_call(r, "empyralis_create_task", False, project_id=project_id, error=str(exc))
             return {"ok": False, "error": str(exc)}
-        await _ledger_mcp_call(ws, "empyralis_create_task", True, project_id=project_id, task_id=task.get("id"))
+        await _ledger_mcp_call(r, "empyralis_create_task", True, project_id=project_id, task_id=task.get("id"))
         return {"ok": True, "task": task}
 
     @empyralist_mcp.tool(
@@ -600,10 +638,10 @@ if empyralist_mcp is not None:
                 sort=sort or None,
             )
         except Exception as exc:  # noqa: BLE001
-            await _ledger_mcp_call(ws, "empyralis_list_my_tasks", False, error=str(exc))
+            await _ledger_mcp_call(r, "empyralis_list_my_tasks", False, error=str(exc))
             return {"ok": False, "error": str(exc), "tasks": []}
         await _ledger_mcp_call(
-            ws, "empyralis_list_my_tasks", True,
+            r, "empyralis_list_my_tasks", True,
             task_count=len(rows), external_agent_id=external_agent_id,
         )
         result: Dict[str, Any] = {"ok": True, "tasks": rows, "external_agent_id": external_agent_id}
@@ -637,7 +675,7 @@ if empyralist_mcp is not None:
         r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         from server_modules import project_tasks_service as tasks
         task = await tasks.get_task(tenant_id=tenant, workspace_id=ws, task_id=task_id)
-        await _ledger_mcp_call(ws, "empyralis_get_task", task is not None, task_id=task_id)
+        await _ledger_mcp_call(r, "empyralis_get_task", task is not None, task_id=task_id)
         if task is None:
             return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
         # The counts ride on the task itself (same query). The CHILDREN are a
@@ -679,13 +717,13 @@ if empyralist_mcp is not None:
                 parent_task_id=parent_task_id or None,
             )
         except ValueError as exc:
-            await _ledger_mcp_call(ws, "empyralis_set_task_parent", False, task_id=task_id)
+            await _ledger_mcp_call(r, "empyralis_set_task_parent", False, task_id=task_id)
             return {"ok": False, "error": str(exc), "task_id": task_id}
         if task is None:
-            await _ledger_mcp_call(ws, "empyralis_set_task_parent", False, task_id=task_id)
+            await _ledger_mcp_call(r, "empyralis_set_task_parent", False, task_id=task_id)
             return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
         await _ledger_mcp_call(
-            ws, "empyralis_set_task_parent", True,
+            r, "empyralis_set_task_parent", True,
             task_id=task_id, parent_task_id=parent_task_id or None,
         )
         return {"ok": True, "task": task}
@@ -710,12 +748,12 @@ if empyralist_mcp is not None:
         try:
             task = await tasks.update_task(tenant_id=tenant, workspace_id=ws, task_id=task_id, status=status)
         except ValueError as exc:
-            await _ledger_mcp_call(ws, "empyralis_update_task_status", False, task_id=task_id, status=status)
+            await _ledger_mcp_call(r, "empyralis_update_task_status", False, task_id=task_id, status=status)
             return {"ok": False, "error": str(exc), "task_id": task_id}
         if task is None:
-            await _ledger_mcp_call(ws, "empyralis_update_task_status", False, task_id=task_id, status=status)
+            await _ledger_mcp_call(r, "empyralis_update_task_status", False, task_id=task_id, status=status)
             return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
-        await _ledger_mcp_call(ws, "empyralis_update_task_status", True, task_id=task_id, status=status)
+        await _ledger_mcp_call(r, "empyralis_update_task_status", True, task_id=task_id, status=status)
         return {"ok": True, "task": task}
 
     @empyralist_mcp.tool(
@@ -747,12 +785,12 @@ if empyralist_mcp is not None:
                 tenant_id=tenant, workspace_id=ws, task_id=task_id, priority=priority,
             )
         except ValueError as exc:
-            await _ledger_mcp_call(ws, "empyralis_set_task_priority", False, task_id=task_id, priority=priority)
+            await _ledger_mcp_call(r, "empyralis_set_task_priority", False, task_id=task_id, priority=priority)
             return {"ok": False, "error": str(exc), "task_id": task_id}
         if task is None:
-            await _ledger_mcp_call(ws, "empyralis_set_task_priority", False, task_id=task_id, priority=priority)
+            await _ledger_mcp_call(r, "empyralis_set_task_priority", False, task_id=task_id, priority=priority)
             return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
-        await _ledger_mcp_call(ws, "empyralis_set_task_priority", True, task_id=task_id, priority=priority)
+        await _ledger_mcp_call(r, "empyralis_set_task_priority", True, task_id=task_id, priority=priority)
         return {"ok": True, "task": task}
 
     @empyralist_mcp.tool(
@@ -767,19 +805,21 @@ if empyralist_mcp is not None:
         Workspace-scoped like empyralis_get_task — any task in your workspace."""
         r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
         author_id = r.get("external_agent_id") or "external_mcp_client"
+        author_name = str(r.get("external_agent_display_name") or "").strip()
         from server_modules import project_tasks_service as tasks
         try:
             task = await tasks.add_task_comment(
                 tenant_id=tenant, workspace_id=ws, task_id=task_id,
                 author_type="external_agent", author_id=author_id, body=body,
+                author_display_name=author_name,
             )
         except ValueError as exc:
-            await _ledger_mcp_call(ws, "empyralis_comment_on_task", False, task_id=task_id)
+            await _ledger_mcp_call(r, "empyralis_comment_on_task", False, task_id=task_id)
             return {"ok": False, "error": str(exc), "task_id": task_id}
         if task is None:
-            await _ledger_mcp_call(ws, "empyralis_comment_on_task", False, task_id=task_id)
+            await _ledger_mcp_call(r, "empyralis_comment_on_task", False, task_id=task_id)
             return {"ok": False, "error": f"Task '{task_id}' not found in this workspace.", "task_id": task_id}
-        await _ledger_mcp_call(ws, "empyralis_comment_on_task", True, task_id=task_id)
+        await _ledger_mcp_call(r, "empyralis_comment_on_task", True, task_id=task_id)
         return {"ok": True, "task": task}
 
     # ── Labels. Ungated for the same reason the task tools above are (see
@@ -807,9 +847,9 @@ if empyralist_mcp is not None:
         try:
             rows = await labels.list_labels(tenant_id=tenant, workspace_id=ws)
         except Exception as exc:  # noqa: BLE001
-            await _ledger_mcp_call(ws, "empyralis_list_labels", False, error=str(exc))
+            await _ledger_mcp_call(r, "empyralis_list_labels", False, error=str(exc))
             return {"ok": False, "error": str(exc), "labels": []}
-        await _ledger_mcp_call(ws, "empyralis_list_labels", True, label_count=len(rows))
+        await _ledger_mcp_call(r, "empyralis_list_labels", True, label_count=len(rows))
         return {"ok": True, "labels": rows}
 
     @empyralist_mcp.tool(
@@ -840,9 +880,9 @@ if empyralist_mcp is not None:
                 label=label, added_by=author_id,
             )
         except Exception as exc:  # noqa: BLE001 — unknown label / unknown task both land here
-            await _ledger_mcp_call(ws, "empyralis_add_task_label", False, task_id=task_id, label=label)
+            await _ledger_mcp_call(r, "empyralis_add_task_label", False, task_id=task_id, label=label)
             return {"ok": False, "error": str(exc), "task_id": task_id}
-        await _ledger_mcp_call(ws, "empyralis_add_task_label", True, task_id=task_id, label=label)
+        await _ledger_mcp_call(r, "empyralis_add_task_label", True, task_id=task_id, label=label)
         return {"ok": True, "task_id": task_id, "labels": attached}
 
     @empyralist_mcp.tool(
@@ -866,9 +906,9 @@ if empyralist_mcp is not None:
                 tenant_id=tenant, workspace_id=ws, task_id=task_id, label=label,
             )
         except Exception as exc:  # noqa: BLE001
-            await _ledger_mcp_call(ws, "empyralis_remove_task_label", False, task_id=task_id, label=label)
+            await _ledger_mcp_call(r, "empyralis_remove_task_label", False, task_id=task_id, label=label)
             return {"ok": False, "error": str(exc), "task_id": task_id}
-        await _ledger_mcp_call(ws, "empyralis_remove_task_label", True, task_id=task_id, label=label)
+        await _ledger_mcp_call(r, "empyralis_remove_task_label", True, task_id=task_id, label=label)
         return {"ok": True, "task_id": task_id, "labels": remaining}
 
     # ── Write tools (gated per-key + global off-switch) ──────────────
@@ -888,9 +928,9 @@ if empyralist_mcp is not None:
                 tenant_id=tenant, workspace_id=ws, name=name, description=description,
             )
         except Exception as exc:  # noqa: BLE001
-            await _ledger_mcp_call(ws, "empyralis_create_project", False, name=name)
+            await _ledger_mcp_call(r, "empyralis_create_project", False, name=name)
             return {"ok": False, "error": str(exc)}
-        await _ledger_mcp_call(ws, "empyralis_create_project", True, project_id=project.get("id"))
+        await _ledger_mcp_call(r, "empyralis_create_project", True, project_id=project.get("id"))
         return {"ok": True, "project": project}
 
     @empyralist_mcp.tool(
@@ -923,7 +963,7 @@ if empyralist_mcp is not None:
             except Exception as exc:  # noqa: BLE001 — agent still created; report the linkage failure
                 result["project_assignment_error"] = str(exc)
         result["project_id"] = assigned_project
-        await _ledger_mcp_call(ws, "empyralis_create_agent", result.get("ok", False), agent_id=agent_id, project_id=assigned_project)
+        await _ledger_mcp_call(r, "empyralis_create_agent", result.get("ok", False), agent_id=agent_id, project_id=assigned_project)
         return result
 
     @empyralist_mcp.tool(
@@ -939,7 +979,7 @@ if empyralist_mcp is not None:
         result = await fleet_configure_agent(
             workspace_id=ws, tenant_id=tenant, agent_id=agent_id, patch=patch, actor_id="external_mcp_client",
         )
-        await _ledger_mcp_call(ws, "empyralis_configure_agent", result.get("ok", False), agent_id=agent_id)
+        await _ledger_mcp_call(r, "empyralis_configure_agent", result.get("ok", False), agent_id=agent_id)
         return result
 
     @empyralist_mcp.tool(
@@ -958,7 +998,7 @@ if empyralist_mcp is not None:
         result = await fleet_message_agent(
             workspace_id=ws, agent_id=agent_id, message=message, actor_id="external_mcp_client",
         )
-        await _ledger_mcp_call(ws, "empyralis_message_agent", result.get("ok", False), agent_id=agent_id)
+        await _ledger_mcp_call(r, "empyralis_message_agent", result.get("ok", False), agent_id=agent_id)
         return result
 
     @empyralist_mcp.tool(
@@ -986,9 +1026,9 @@ if empyralist_mcp is not None:
             else:
                 return {"ok": False, "error": f"Unsupported channel '{channel}'. Use 'telegram' or 'discord'."}
         except Exception as exc:  # noqa: BLE001 — includes the one-bot-one-agent guarantee
-            await _ledger_mcp_call(ws, "empyralis_assign_channel_bot", False, agent_id=agent_id, channel=ch)
+            await _ledger_mcp_call(r, "empyralis_assign_channel_bot", False, agent_id=agent_id, channel=ch)
             return {"ok": False, "error": str(exc), "channel": ch}
-        await _ledger_mcp_call(ws, "empyralis_assign_channel_bot", True, agent_id=agent_id, channel=ch)
+        await _ledger_mcp_call(r, "empyralis_assign_channel_bot", True, agent_id=agent_id, channel=ch)
         return {"ok": True, "channel": ch, "binding": result}
 
     @empyralist_mcp.tool(
@@ -1015,9 +1055,9 @@ if empyralist_mcp is not None:
             else:
                 return {"ok": False, "error": f"Unsupported channel '{channel}'. Use 'telegram' or 'discord'."}
         except Exception as exc:  # noqa: BLE001
-            await _ledger_mcp_call(ws, "empyralis_release_channel_bot", False, agent_id=agent_id, channel=ch)
+            await _ledger_mcp_call(r, "empyralis_release_channel_bot", False, agent_id=agent_id, channel=ch)
             return {"ok": False, "error": str(exc), "channel": ch}
-        await _ledger_mcp_call(ws, "empyralis_release_channel_bot", True, agent_id=agent_id, channel=ch)
+        await _ledger_mcp_call(r, "empyralis_release_channel_bot", True, agent_id=agent_id, channel=ch)
         return {"ok": True, "channel": ch, **(result if isinstance(result, dict) else {})}
 
     @empyralist_mcp.tool(
@@ -1040,10 +1080,10 @@ if empyralist_mcp is not None:
                 workspace_id=ws, surface="sage", request=shim_request, user_id="external_mcp_client",
             )
         except Exception as exc:  # noqa: BLE001 — e.g. provider not OAuth-configured on this server
-            await _ledger_mcp_call(ws, "empyralis_connect_connector", False, provider=provider)
+            await _ledger_mcp_call(r, "empyralis_connect_connector", False, provider=provider)
             return {"ok": False, "error": str(exc), "provider": provider}
         url = started.get("authorization_url") if isinstance(started, dict) else None
-        await _ledger_mcp_call(ws, "empyralis_connect_connector", True, provider=provider)
+        await _ledger_mcp_call(r, "empyralis_connect_connector", True, provider=provider)
         return {"ok": True, "provider": provider, "authorization_url": url,
                 "instructions": "Open authorization_url in a browser to grant access."}
 
@@ -1066,9 +1106,9 @@ if empyralist_mcp is not None:
                 deployed_agent_id=agent_id, workspace_id=ws, request=request, current_user=current_user,
             )
         except Exception as exc:  # noqa: BLE001 — readiness / not-a-deployed-agent surfaces cleanly
-            await _ledger_mcp_call(ws, "empyralis_trigger_test_turn", False, agent_id=agent_id)
+            await _ledger_mcp_call(r, "empyralis_trigger_test_turn", False, agent_id=agent_id)
             return {"ok": False, "error": str(exc), "agent_id": agent_id}
-        await _ledger_mcp_call(ws, "empyralis_trigger_test_turn", True, agent_id=agent_id)
+        await _ledger_mcp_call(r, "empyralis_trigger_test_turn", True, agent_id=agent_id)
         return {"ok": True, "agent_id": agent_id, **(result if isinstance(result, dict) else {"result": result})}
 
 

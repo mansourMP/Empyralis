@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
@@ -1233,6 +1233,66 @@ export async function patchFleetTask(
     throw new Error(apiErrorMessage(data, `Could not update task (HTTP ${res.status})`));
   }
   return withNormalizedStatus(data.task as FleetTask);
+}
+
+/* ── The workspace roster ─────────────────────────────────────────────────
+   routes_fleet.py: GET /fleet/roster -> mcp_external_agent_roster_service.
+   list_unified_roster. Every agent that can appear as an ACTOR on this
+   workspace's board, of both kinds:
+
+     · kind "platform" — a `workspace_agent_installs` row. Already available
+       from useFleetAgents; carried here because the roster is one list by
+       design, not because anything re-reads it from here.
+     · kind "external" — a Claude Code / Codex session connected through our
+       MCP server at /mcp. It writes tasks and comments under an opaque
+       `ext_agent_<hex16>` id and has NO agents-list row, so before this
+       endpoint existed the board had no way to name it and printed
+       "Unknown" where a real participant had acted.
+
+   Revoked external agents are included, `enabled: false`. They cannot act
+   again, but the work they already did is still on the board and naming its
+   author is the whole point — see the route's own comment. */
+
+export type WorkspaceRosterEntry = {
+  id: string;
+  kind: "platform" | "external";
+  display_name: string;
+  enabled?: boolean;
+  status?: string;
+};
+
+/** Not polled. A roster entry is minted when an MCP key is created and never
+ *  renamed, so re-fetching it on the task poll would be a request per tick
+ *  for data that does not move. */
+export function useWorkspaceRoster(workspaceId: string) {
+  const [roster, setRoster] = useState<WorkspaceRosterEntry[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const refresh = useCallback(async () => {
+    if (!workspaceId) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/roster`, {
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({}));
+      setRoster(Array.isArray(data?.roster) ? (data.roster as WorkspaceRosterEntry[]) : []);
+    } catch {
+      // A roster that isn't reachable must never break a board load — the
+      // callers fall back to an honest label instead of a resolved name.
+      setRoster([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const externalAgents = useMemo(() => roster.filter((e) => e.kind === "external"), [roster]);
+
+  return { roster, externalAgents, loading, refresh };
 }
 
 /* ── Labels ────────────────────────────────────────────────────────────────

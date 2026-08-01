@@ -286,7 +286,9 @@ async def list_workspace_external_agents(
     return [e for e in (_row_to_roster_entry(r) for r in rows) if e]
 
 
-async def list_unified_roster(*, tenant_id: str, workspace_id: str) -> List[Dict[str, Any]]:
+async def list_unified_roster(
+    *, tenant_id: str, workspace_id: str, include_revoked: bool = False,
+) -> List[Dict[str, Any]]:
     """THE one roster view: every addressable agent in the workspace, platform
     and external, each tagged ``kind``. Written for a future @-mention
     resolver to read; it must never need to know that platform and external
@@ -305,6 +307,19 @@ async def list_unified_roster(*, tenant_id: str, workspace_id: str) -> List[Dict
     that can actually wake it. Extending mention support to external
     agents (chip rendering without waking) is legitimate future work and
     WOULD read this function when it happens.
+
+    2026-08-01: this function got its FIRST caller --
+    ``routes_fleet.fleet_roster`` (GET /api/w/{workspace_id}/fleet/roster),
+    the read the task board uses to turn an ``ext_agent_<hex16>`` author id
+    into the name of the agent that actually did the work. That caller passes
+    ``include_revoked=True``, because ATTRIBUTION is a different question from
+    ADDRESSABILITY. A revoked key can never act again, so it must not appear
+    in anything that offers a target to pick -- which is why the default stays
+    False -- but the comments and tasks it already wrote are still on the
+    board, and the honest name for their author is the one that agent had, not
+    "Unknown". A revoked entry comes back tagged ``enabled: False`` /
+    ``status: "revoked"``, so a caller wanting only addressable agents filters
+    in the payload rather than by re-querying.
     """
     tenant = str(tenant_id or "").strip()
     ws = str(workspace_id or "").strip()
@@ -327,7 +342,9 @@ async def list_unified_roster(*, tenant_id: str, workspace_id: str) -> List[Dict
     except Exception:
         LOGGER.warning("Failed to list platform installs for unified roster", exc_info=True)
 
-    external_rows = await list_workspace_external_agents(tenant_id=tenant, workspace_id=ws, include_revoked=False)
+    external_rows = await list_workspace_external_agents(
+        tenant_id=tenant, workspace_id=ws, include_revoked=bool(include_revoked),
+    )
     for entry in external_rows:
         unified.append({
             "id": entry["id"],

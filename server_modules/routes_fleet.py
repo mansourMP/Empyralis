@@ -987,6 +987,59 @@ async def fleet_set_task_parent(
 # mutations are owner, matching every other route in this router. See
 # migrations/add_task_labels.sql. ─────────────────────────────────────────
 
+# ── The workspace roster: every agent that can appear as an actor ─────────
+# An EXTERNAL agent (a Claude Code / Codex session connected through our MCP
+# server at /mcp) writes tasks and comments under an opaque
+# `ext_agent_<hex16>` id. That id resolves against neither
+# `workspace_agent_installs` (GET .../fleet/agents) nor the member list, so
+# until this route existed the board had no way to name it and printed
+# "Unknown" where a real participant had acted.
+#
+# mcp_external_agent_roster_service.list_unified_roster is the module's own
+# documented "ONE roster view" for exactly this -- platform and external in
+# one list, each tagged `kind` -- so this is its read route, not a new
+# parallel listing. It returns BOTH kinds even though the frontend already
+# has the platform half from .../fleet/agents: an attribution lookup that
+# silently covers only one of the two kinds of agent is the bug this route
+# is fixing, and the platform half costs one query the roster already makes.
+#
+# `viewer`, matching .../fleet/agents and .../fleet/tasks: anyone who can
+# read the board that shows these names can read the names. Scoping is the
+# same two-step every route in this router uses -- enforce_workspace_access
+# returns the workspace the CALLER is actually allowed into, and only that
+# resolved id (never the raw path parameter) is passed downstream, so a
+# request naming someone else's workspace is rejected before the query
+# rather than filtered after it.
+@router.get("/api/w/{workspace_id}/fleet/roster")
+async def fleet_roster(
+    request: Request,
+    workspace_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Every addressable agent in this workspace, platform and external,
+    each tagged `kind` ("platform" | "external").
+
+    Revoked external agents ARE included, tagged `enabled: false` /
+    `status: "revoked"`. They are unreachable, but the work they already did
+    is still on the board and naming its author is the entire point of this
+    route -- see list_unified_roster's own docstring."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    from server_modules import mcp_external_agent_roster_service as roster
+
+    try:
+        entries = await roster.list_unified_roster(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            include_revoked=True,
+        )
+        return {"ok": True, "workspace_id": resolved_workspace_id, "roster": entries}
+    except Exception as exc:
+        # A roster that cannot be read must degrade to "no names resolved",
+        # never to a failed board load -- the caller renders an honest
+        # fallback label, which is strictly better than an error page.
+        return {"ok": False, "error": str(exc), "roster": []}
+
+
 @router.get("/api/w/{workspace_id}/fleet/labels")
 async def fleet_list_labels(
     request: Request,

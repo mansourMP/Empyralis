@@ -633,7 +633,22 @@ async def create_task(
     priority: Optional[Any] = None,
     parent_task_id: Optional[str] = None,
     task_id: Optional[str] = None,
+    created_by_display_name: str = "",
 ) -> Dict[str, Any]:
+    """Create a task.
+
+    ``created_by_display_name`` is the same optional name snapshot
+    ``add_task_comment`` takes, for the same one author kind and the same
+    reason: an EXTERNAL agent's ``created_by`` is an opaque
+    ``ext_agent_<hex>`` id that resolves against neither
+    ``workspace_agent_installs`` nor the member list. It is stored in the
+    row's existing free-form ``metadata`` JSONB (``created_by_display_name``)
+    rather than in a new column -- ``metadata`` is NOT NULL DEFAULT '{}' (see
+    migrations/add_project_tasks.sql), so the INSERT below COALESCEs to that
+    same default and a caller that passes nothing writes exactly the row it
+    always did. The frontend prefers the LIVE roster name (GET
+    .../fleet/roster) and reads this only as a fallback.
+    """
     tenant_id = str(tenant_id or "").strip()
     workspace_id = str(workspace_id or "").strip()
     project_id = str(project_id or "").strip()
@@ -677,11 +692,17 @@ async def create_task(
             project_id=project_id,
         )
     tid = str(task_id or "").strip() or _new_task_id()
+    resolved_created_by_display_name = str(created_by_display_name or "").strip()[:120]
+    initial_metadata = (
+        json.dumps({"created_by_display_name": resolved_created_by_display_name})
+        if resolved_created_by_display_name
+        else None
+    )
     row = await control_plane_repository.rls_fetchrow(
         pool,
         """
-        INSERT INTO project_tasks (id, tenant_id, workspace_id, project_id, title, description, created_by, due_at, priority, parent_task_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10)
+        INSERT INTO project_tasks (id, tenant_id, workspace_id, project_id, title, description, created_by, due_at, priority, parent_task_id, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, COALESCE($11::jsonb, '{}'::jsonb))
         RETURNING
         """ + _TASK_RETURNING_SQL,
         tid,
@@ -694,6 +715,7 @@ async def create_task(
         _coerce_due_at(due_at),
         resolved_priority,
         resolved_parent_id,
+        initial_metadata,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
     )
@@ -902,6 +924,7 @@ async def add_task_comment(
     author_type: str,
     author_id: str,
     body: str,
+    author_display_name: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Append a comment to `task.metadata.comments` -- the MCP
     `empyralis_comment_on_task` tool's backing write.
@@ -946,6 +969,21 @@ async def add_task_comment(
     NEVER attempting the unconditional assignee-wake for a non-human
     author; this one is about a specific, always-excluded target within an
     otherwise-shared pipeline).
+
+    ``author_display_name`` is an OPTIONAL name snapshot stored alongside the
+    opaque (author_type, author_id) pair. It exists for the one author kind
+    whose id resolves against neither `workspace_agent_installs` nor the
+    member list -- an EXTERNAL agent (`author_type="external_agent"`, an
+    `ext_agent_<hex>` id minted by mcp_external_agent_roster_service). Its
+    name lives in `mcp_external_agent_roster`, so the frontend CAN resolve it
+    live (GET .../fleet/roster), and normally does; this snapshot is the
+    honest fallback for a comment whose roster row is gone, so the feed says
+    who spoke rather than printing a hex id. Written into the comment object
+    itself -- `metadata.comments` is already free-form JSONB (see this
+    function's own "deliberately NOT a new task_comments table" note above),
+    so carrying one more key costs nothing and needs no migration. Omitted
+    entirely when empty: an absent key is "no snapshot", which is exactly
+    what every pre-existing comment already says.
     """
     body_text = str(body or "").strip()
     if not body_text:
@@ -983,6 +1021,9 @@ async def add_task_comment(
         "body": stored_body,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    resolved_author_display_name = str(author_display_name or "").strip()[:120]
+    if resolved_author_display_name:
+        comment["author_display_name"] = resolved_author_display_name
     if stored_mentions:
         comment["mentions"] = stored_mentions
     row = await control_plane_repository.rls_fetchrow(

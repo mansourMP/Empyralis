@@ -10143,3 +10143,25 @@ h2.fleet-sage-console-title {
     grid-template-columns: var(--fleet-glist-grid-mobile, 16px 16px minmax(0, 1fr) 20px);
   }
 }
+
+/* ── Comment author identity mark (external-agent attribution) ────────────
+   A task comment's author line now carries the SAME identity mark the author
+   already has everywhere else on this page — AgentSigil for an agent (both a
+   platform agent and an MCP-connected external one), MemberAvatar for a
+   person. Purely additive: these two rules override `align-items` and the
+   author span's display so a 13px mark sits on the name's centre line
+   instead of hanging off a text baseline. The original rules (~line 8494)
+   are left exactly as they were — a comment head that renders no mark is
+   visually identical to before, because a lone text node centres and
+   baselines the same. No colour is introduced: the mark draws in the
+   author's own existing treatment, and this file's one accent stays spent
+   on the page's primary action. */
+.fleet-task-page-comment-head {
+  align-items: center;
+}
+.fleet-task-page-comment-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}

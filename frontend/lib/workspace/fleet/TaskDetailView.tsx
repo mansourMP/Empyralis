@@ -144,6 +144,7 @@ import {
   type FleetTask,
   type FleetTaskStatus,
   type TaskAssigneeSelection,
+  type WorkspaceRosterEntry,
 } from "./fleet-data";
 import {
   DEFAULT_TASK_VIEW_OPTIONS,
@@ -183,6 +184,13 @@ type TaskComment = {
   body?: string;
   created_at?: string;
   mentions?: TaskMention[];
+  /** Name snapshot written alongside the opaque author pair by
+   *  project_tasks_service.add_task_comment, for the one author kind whose id
+   *  resolves against neither the agents list nor the member list — an
+   *  EXTERNAL agent. Read only as a FALLBACK: the live roster
+   *  (useWorkspaceRoster) is the source of truth for a name that still
+   *  exists; this covers a comment whose roster row is gone. */
+  author_display_name?: string;
 };
 
 /** task.metadata.comments as written by add_task_comment. Defensive on the
@@ -351,6 +359,7 @@ export function TaskDetailView({
   task,
   agents,
   members,
+  externalAgents,
   workspaceId,
   projectName,
   projectHref,
@@ -368,6 +377,13 @@ export function TaskDetailView({
    *  Assignee picker offers agents only (degrades to the pre-MAN-64
    *  behavior) and human comments fall back to their raw author id. */
   members?: WorkspaceMember[];
+  /** The workspace's EXTERNAL agents (useWorkspaceRoster) — MCP-connected
+   *  sessions that can comment on this task. Not assignees (an external
+   *  agent cannot hold a task today; see list_unified_roster's docstring),
+   *  purely the lookup that turns an `ext_agent_<hex16>` comment author into
+   *  its real name. Absent → an external agent's comment falls back to its
+   *  stored name snapshot, and only then to "External agent <short id>". */
+  externalAgents?: WorkspaceRosterEntry[];
   /** Scopes the label vocabulary — labels are per WORKSPACE, not per project
    *  (fleet-data's Labels section: "bug" means the same thing wherever the
    *  work sits). Absent → the Labels row renders read-only chips, and the
@@ -686,9 +702,7 @@ export function TaskDetailView({
                       className={`fleet-task-page-comment${c === pending ? " is-pending" : ""}`}
                     >
                       <div className="fleet-task-page-comment-head">
-                        <span className="fleet-task-page-comment-author">
-                          {commentAuthorLabel(c, agents, members)}
-                        </span>
+                        <CommentAuthorLine author={resolveCommentAuthor(c, agents, members, externalAgents)} />
                         {c.created_at ? (
                           <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
                             {timeAgo(c.created_at) || stamp(c.created_at)}
@@ -1043,19 +1057,108 @@ function TaskNavArrow({
   );
 }
 
+type ResolvedCommentAuthor = {
+  label: string;
+  kind: "agent" | "external_agent" | "human" | "unattributed";
+  /** The author's own id — AgentSigil's seed, so one agent draws the same
+   *  mark everywhere it appears. */
+  id: string;
+  role?: WorkspaceMember["role"];
+  memberIndex: number;
+};
+
+/** "ext_agent_5f3a2b1c9d0e4f11" -> "5f3a2b1c". Only ever reached when an
+ *  external agent has NO name from either source (see below) — a short,
+ *  stable discriminator beats collapsing two different agents into one
+ *  anonymous label, and it is never the full opaque id. */
+function externalAgentShortId(id: string): string {
+  return id.replace(/^ext_agent_/, "").slice(0, 8);
+}
+
 /** Comment authors are stored as an opaque (author_type, author_id) pair.
- *  An agent id resolves to its real label when that agent is in this
- *  project; a human ("user"/"human" author_type -- add_human_task_comment
- *  hardcodes "human") resolves to their real name when they're a workspace
- *  member; anything else falls back to the honest raw type. */
-function commentAuthorLabel(comment: TaskComment, agents: FleetAgent[], members?: WorkspaceMember[]): string {
+ *  Three kinds of author resolve here, and BEFORE 2026-08-01 only two of
+ *  them did:
+ *
+ *   · a PLATFORM agent — `author_id` is a `workspace_agent_installs` id,
+ *     resolved against this project's `agents`;
+ *   · a HUMAN ("user"/"human" author_type; add_human_task_comment hardcodes
+ *     "human") — resolved against the workspace `members`;
+ *   · an EXTERNAL agent (`author_type` "external_agent") — a Claude Code /
+ *     Codex session that commented through our MCP server at /mcp. Its
+ *     `ext_agent_<hex16>` id is in NEITHER list, so it fell through to the
+ *     literal word "Unknown" on a board whose entire proposition is that you
+ *     can see who did what. It now resolves against the workspace roster
+ *     (useWorkspaceRoster -> GET .../fleet/roster).
+ *
+ *  Resolution order for an external agent is live-then-snapshot: the roster
+ *  is current truth, `comment.author_display_name` is the name that agent
+ *  had when it wrote (persisted by add_task_comment) and covers a comment
+ *  whose roster row is gone. Only if BOTH are missing does it fall back —
+ *  and to "External agent 5f3a2b1c", which is true and distinguishing,
+ *  never to a bare "Unknown". */
+function resolveCommentAuthor(
+  comment: TaskComment,
+  agents: FleetAgent[],
+  members?: WorkspaceMember[],
+  externalAgents?: WorkspaceRosterEntry[],
+): ResolvedCommentAuthor {
   const id = String(comment.author_id || "").trim();
   const type = String(comment.author_type || "").trim();
+
   const agent = agents.find((a) => a.agent_id === id);
-  if (agent) return agent.label || "Unnamed agent";
-  const member = (members || []).find((m) => m.user_id === id);
-  if (member) return member.display_name || member.email;
-  if (type === "agent") return id || "Agent";
-  if (type === "user" || type === "human") return id || "Person";
-  return id || type || "Unknown";
+  if (agent) return { label: agent.label || "Unnamed agent", kind: "agent", id, memberIndex: 0 };
+
+  const memberIndex = (members || []).findIndex((m) => m.user_id === id);
+  if (memberIndex >= 0) {
+    const member = (members || [])[memberIndex];
+    return {
+      label: member.display_name || member.email,
+      kind: "human",
+      id,
+      role: member.role,
+      memberIndex,
+    };
+  }
+
+  const external = (externalAgents || []).find((e) => e.id === id);
+  if (external && external.display_name.trim()) {
+    return { label: external.display_name.trim(), kind: "external_agent", id, memberIndex: 0 };
+  }
+  if (type === "external_agent" || id.startsWith("ext_agent_")) {
+    const snapshot = String(comment.author_display_name || "").trim();
+    if (snapshot) return { label: snapshot, kind: "external_agent", id, memberIndex: 0 };
+    const short = externalAgentShortId(id);
+    return {
+      label: short ? `External agent ${short}` : "External agent",
+      kind: "external_agent",
+      id,
+      memberIndex: 0,
+    };
+  }
+
+  if (type === "agent") return { label: id || "Agent", kind: "agent", id, memberIndex: 0 };
+  if (type === "user" || type === "human") return { label: id || "Person", kind: "human", id, memberIndex: 0 };
+  // Neither an id nor a type — there is genuinely nothing to attribute this
+  // to, and saying so is honest where "Unknown" only sounds like a bug.
+  return { label: id || type || "Unattributed", kind: "unattributed", id, memberIndex: 0 };
+}
+
+/** The author line of one comment: identity mark + name. The mark is not a
+ *  treatment invented for external agents — it is the same AgentSigil every
+ *  agent already carries in the Assignee row, the mention chips and the
+ *  Team roster, and the same MemberAvatar a person carries there, applied
+ *  consistently to whoever wrote the comment. An external agent reading as a
+ *  real participant is the point; a badge marking it out as a special case
+ *  would defeat it. */
+function CommentAuthorLine({ author }: { author: ResolvedCommentAuthor }) {
+  return (
+    <span className="fleet-task-page-comment-author">
+      {author.kind === "human" ? (
+        <MemberAvatar name={author.label} role={author.role} size="xs" tintIndex={author.memberIndex} />
+      ) : author.kind === "unattributed" ? null : (
+        <AgentSigil seed={author.id || author.label} size={13} />
+      )}
+      <span>{author.label}</span>
+    </span>
+  );
 }

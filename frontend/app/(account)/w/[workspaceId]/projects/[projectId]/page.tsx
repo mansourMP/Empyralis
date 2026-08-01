@@ -9,6 +9,7 @@ import {
   useFleetAgents,
   useFleetProjects,
   useFleetTasks,
+  useWorkspaceRoster,
   assignFleetTask,
   assignFleetTaskToUser,
   patchFleetTask,
@@ -81,6 +82,9 @@ export default function ProjectDetailPage() {
   // MemberAvatarStack already calls for this page's own roster stack, no
   // new endpoint involved (GET /workspaces/{id}/members).
   const { members } = useWorkspaceMembers(workspaceId);
+  // MCP-connected external agents — the lookup that turns an
+  // `ext_agent_<hex16>` author id in the Activity feed into a real name.
+  const { externalAgents } = useWorkspaceRoster(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
@@ -451,6 +455,7 @@ export default function ProjectDetailPage() {
               tasksLoading={tasksLoading}
               rollup={rollup}
               members={members}
+              externalAgents={externalAgents}
               taskHref={taskHref}
               agentHref={agentHref}
             />

@@ -83,6 +83,7 @@ import {
   type FleetTask,
   type FleetTaskStatus,
   type WorkspaceActivityEvent,
+  type WorkspaceRosterEntry,
 } from "./fleet-data";
 import { TaskStatusIcon, taskStatusLabel } from "./task-status";
 import { MemberAvatar } from "./MemberAvatarStack";
@@ -118,7 +119,7 @@ function humanChannel(channel: string | null): string | null {
 type ActivityItem = {
   id: string;
   ts: string;
-  kind: "agent" | "human" | "unattributed";
+  kind: "agent" | "external_agent" | "human" | "unattributed";
   title: string;
   meta: string;
   actorLabel: string;
@@ -147,11 +148,72 @@ function dedupeConsecutive(items: Omit<ActivityItem, "count">[]): ActivityItem[]
   return out;
 }
 
+/** "ext_agent_5f3a2b1c9d0e4f11" -> "5f3a2b1c". Only reached when an external
+ *  agent has no name from either the live roster or its stored snapshot — a
+ *  short, stable discriminator, never the whole opaque id. */
+function externalAgentShortId(id: string): string {
+  return id.replace(/^ext_agent_/, "").slice(0, 8);
+}
+
+/** Who did this, and what kind of participant are they.
+ *
+ *  Three kinds act on a board, and this feed only ever resolved two of them.
+ *  A PLATFORM agent's id is a `workspace_agent_installs` id; a HUMAN's is a
+ *  workspace member's user_id; an EXTERNAL agent — a Claude Code / Codex
+ *  session connected through our MCP server at /mcp — carries an
+ *  `ext_agent_<hex16>` id that is in NEITHER map, so it landed on the
+ *  literal word "Unknown" on a feed whose entire job is saying who did what.
+ *
+ *  For an external agent the order is live-then-snapshot: the roster is
+ *  current truth, `snapshotName` is the name it had when it wrote (stored by
+ *  the backend at write time) and covers a row whose roster entry is gone.
+ *  With neither, the fallback still names something true and distinguishing
+ *  ("External agent 5f3a2b1c"), never a bare "Unknown".
+ *
+ *  It also fixes a quieter miss on the same line: a task CREATED by a
+ *  platform agent was only ever looked up in the member map, so it read
+ *  "Unknown workspace member" — an agent, described as a person we failed to
+ *  find. Both maps are consulted for every actor now. */
+function resolveActor(
+  id: string,
+  authorType: string,
+  snapshotName: string,
+  agentNameByInstall: Map<string, string>,
+  memberNameByUserId: Map<string, string>,
+  externalAgentNameById: Map<string, string>,
+): { label: string; kind: ActivityItem["kind"] } {
+  const actorId = (id || "").trim();
+  const type = (authorType || "").trim();
+
+  const agentName = actorId ? agentNameByInstall.get(actorId) : undefined;
+  if (agentName) return { label: agentName, kind: "agent" };
+
+  const memberName = actorId ? memberNameByUserId.get(actorId) : undefined;
+  if (memberName) return { label: memberName, kind: "human" };
+
+  const externalName = actorId ? externalAgentNameById.get(actorId) : undefined;
+  if (externalName) return { label: externalName, kind: "external_agent" };
+
+  if (type === "external_agent" || actorId.startsWith("ext_agent_")) {
+    const snapshot = (snapshotName || "").trim();
+    if (snapshot) return { label: snapshot, kind: "external_agent" };
+    const short = externalAgentShortId(actorId);
+    return { label: short ? `External agent ${short}` : "External agent", kind: "external_agent" };
+  }
+
+  if (type === "agent") return { label: actorId || "Agent", kind: "agent" };
+  if (type === "user" || type === "human") return { label: actorId || "Person", kind: "human" };
+  // Genuinely nothing to attribute this to — say that, rather than "Unknown",
+  // which reads as a failed lookup instead of an absent one.
+  return { label: actorId || "Unattributed", kind: "unattributed" };
+}
+
 function buildActivityItems(
   ledgerEvents: WorkspaceActivityEvent[],
   tasks: FleetTask[],
   agentNameByInstall: Map<string, string>,
   memberNameByUserId: Map<string, string>,
+  externalAgentNameById: Map<string, string>,
 ): ActivityItem[] {
   const items: Omit<ActivityItem, "count">[] = [];
 
@@ -177,38 +239,63 @@ function buildActivityItems(
 
   for (const task of tasks) {
     if (task.created_at) {
-      const createdByName = task.created_by ? memberNameByUserId.get(task.created_by) : undefined;
+      // The creator's name snapshot, written at INSERT time for an external
+      // agent (project_tasks_service.create_task) — a fallback only; the
+      // roster above is preferred whenever it still has the row.
+      const createdBySnapshot = String(
+        (task.metadata as { created_by_display_name?: unknown } | undefined)?.created_by_display_name || "",
+      );
+      const creator = resolveActor(
+        String(task.created_by || ""),
+        "",
+        createdBySnapshot,
+        agentNameByInstall,
+        memberNameByUserId,
+        externalAgentNameById,
+      );
       items.push({
         id: `task-created-${task.id}`,
         ts: task.created_at,
-        kind: createdByName ? "human" : "unattributed",
+        kind: creator.kind,
         title: `Created task "${task.title || "Untitled task"}"`,
         meta: "Task created",
-        actorLabel: createdByName || (task.created_by ? "Unknown workspace member" : "Unknown"),
+        actorLabel: creator.label,
       });
     }
 
     // Real comments — task.metadata.comments, written by the
-    // project_task__comment agent tool (project_tasks_service.add_task_comment).
-    // Only ever agent-authored today, but resolved generically in case a
-    // future write path adds a human author_type.
+    // project_task__comment agent tool, the human composer
+    // (add_human_task_comment) and the MCP tool empyralis_comment_on_task,
+    // all three through project_tasks_service.add_task_comment. Author kind
+    // is resolved generically, so all three read as themselves.
     const rawComments = task.metadata?.comments;
     if (Array.isArray(rawComments)) {
       for (const c of rawComments) {
         if (!c || typeof c !== "object") continue;
-        const comment = c as { id?: string; author_type?: string; author_id?: string; body?: string; created_at?: string };
+        const comment = c as {
+          id?: string;
+          author_type?: string;
+          author_id?: string;
+          author_display_name?: string;
+          body?: string;
+          created_at?: string;
+        };
         if (!comment.created_at || !comment.body) continue;
-        const authorType = String(comment.author_type || "").trim();
-        const authorId = String(comment.author_id || "").trim();
-        const agentName = authorId ? agentNameByInstall.get(authorId) : undefined;
-        const memberName = authorId ? memberNameByUserId.get(authorId) : undefined;
+        const author = resolveActor(
+          String(comment.author_id || ""),
+          String(comment.author_type || ""),
+          String(comment.author_display_name || ""),
+          agentNameByInstall,
+          memberNameByUserId,
+          externalAgentNameById,
+        );
         items.push({
           id: comment.id || `task-comment-${task.id}-${comment.created_at}`,
           ts: comment.created_at,
-          kind: agentName ? "agent" : memberName ? "human" : "unattributed",
+          kind: author.kind,
           title: comment.body.length > 160 ? `${comment.body.slice(0, 160)}…` : comment.body,
           meta: `Comment on "${task.title || "Untitled task"}"`,
-          actorLabel: agentName || memberName || (authorType === "agent" ? "Agent" : "Unknown"),
+          actorLabel: author.label,
         });
       }
     }
@@ -293,6 +380,7 @@ export function ProjectOverview({
   tasksLoading,
   rollup,
   members,
+  externalAgents,
   taskHref,
   agentHref,
 }: {
@@ -308,6 +396,14 @@ export function ProjectOverview({
    *  down rather than re-fetched here so the two never show a different
    *  roster for a heartbeat after either poll ticks. */
   members: WorkspaceMember[];
+  /** The workspace's EXTERNAL agents (useWorkspaceRoster) — MCP-connected
+   *  sessions that create and comment on tasks here. NOT part of the Team
+   *  roster above: an external agent is workspace-scoped with no project
+   *  membership and cannot hold a task (see list_unified_roster's docstring),
+   *  so a row for one would sit on every project reading "No active task"
+   *  forever. It is a real actor in the ACTIVITY feed, which is where it
+   *  actually appears — this is the lookup that names it there. */
+  externalAgents: WorkspaceRosterEntry[];
   /** Where a task's own page lives, for the roster row + needs-you callout
    *  to link straight into it — same builder page.tsx hands TasksBoard/
    *  TasksList/TasksGroupedList. */
@@ -326,6 +422,15 @@ export function ProjectOverview({
     () => new Map(members.map((m) => [m.user_id, m.display_name || m.email])),
     [members],
   );
+  const externalAgentNameById = useMemo(
+    () =>
+      new Map(
+        externalAgents
+          .filter((e) => (e.display_name || "").trim().length > 0)
+          .map((e) => [e.id, e.display_name.trim()]),
+      ),
+    [externalAgents],
+  );
 
   // One shared counter (fleet-data.countTasksByStatus) for this roll-up AND
   // the board's per-column header counts, so the two can never disagree
@@ -333,8 +438,15 @@ export function ProjectOverview({
   const statusCounts = useMemo(() => countTasksByStatus(tasks), [tasks]);
 
   const items = useMemo(
-    () => buildActivityItems(ledgerEvents, tasks, agentNameByInstall, memberNameByUserId),
-    [ledgerEvents, tasks, agentNameByInstall, memberNameByUserId],
+    () =>
+      buildActivityItems(
+        ledgerEvents,
+        tasks,
+        agentNameByInstall,
+        memberNameByUserId,
+        externalAgentNameById,
+      ),
+    [ledgerEvents, tasks, agentNameByInstall, memberNameByUserId, externalAgentNameById],
   );
   const dayGroups = useMemo(() => groupByDay(items.slice(0, FEED_DISPLAY_CAP)), [items]);
   const loading = tasksLoading || activityLoading;
