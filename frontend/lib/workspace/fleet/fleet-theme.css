@@ -5832,8 +5832,19 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    of the row: every one of them acts on the RIGHT side of the screen, so
    the founder's call is that they should live at that edge rather than
    trailing the view switch on the left. margin-left:auto eats the row's
-   free space. */
-.fleet-content-toolbar > .fleet-toolbar-actions {
+   free space.
+
+   FIXED 2026-08-01: TaskViewOptions.tsx's root element carries only
+   .fleet-view-options, never .fleet-toolbar-actions (FleetToolbar.tsx is
+   the one component that renders that class as its own root) — so on the
+   Tasks tab this selector never matched it and the view-options icon sat
+   wherever it fell in DOM order (right after the member stack) instead of
+   at the row's far edge, under "New task" above it. Both live in the same
+   slot in page.tsx (mutually exclusive — one is Tasks-only, the other
+   Agents-only — never rendered together, so there is no fight over which
+   one claims the free space). */
+.fleet-content-toolbar > .fleet-toolbar-actions,
+.fleet-content-toolbar > .fleet-view-options {
   margin-left: auto;
 }
 .fleet-member-avatar-stack-item {
@@ -6105,11 +6116,30 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   white-space: nowrap;
 }
 
+/* Container = the LEFT RAIL's own surface; active pill = the MAIN CONTENT
+   PAGE's own surface (founder's exact call, 2026-08-01). Not --bg-surface-2/
+   --bg-card (the old values here) — those are the flat legacy chrome ramp,
+   and neither actually matches either real surface. The fleet SHELL runs a
+   different two-surface model (see this file's own top-of-file banner:
+   "a flat canvas (--bg-canvas) with the rail sitting bare on it and the
+   content column floating as a bordered panel (--bg-panel, ...)"). .fleet-
+   rail itself is `background: transparent` — it shows the canvas through —
+   so --bg-canvas IS the rail's real colour, and --bg-panel is what
+   .fleet-shell-panel (the floating content column this toolbar lives
+   inside) actually paints. Verified the founder's "the active pill already
+   matches the page" claim against both themes: true in LIGHT only, where
+   --bg-card/--bg-panel are both literal #ffffff — in DARK the old --bg-card
+   (#292929) sat 7 points off --bg-panel (#222222), a gap small enough to
+   not register at a glance but real. Switching to the actual tokens fixes
+   dark and leaves light unchanged (--bg-panel is #ffffff there too). Net
+   effect: the pill now reads as a cutout revealing the page underneath,
+   sitting in a trough one step darker — canvas verifiably darker than panel
+   in both themes (dark: #171717 vs #222222; light: #f4f4f5 vs #ffffff). */
 .fleet-segmented {
   display: inline-flex;
   gap: 2px;
   padding: 2px;
-  background: var(--bg-surface-2);
+  background: var(--bg-canvas);
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
 }
@@ -6125,15 +6155,14 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   border-radius: calc(var(--radius-control) - 2px);
   cursor: pointer;
 }
-/* The active segment has to be obvious at a glance — which view you are on
-   is the one thing this control exists to say. Background alone did not do
-   it in DARK: the track is --bg-surface-2 (#272727) and the active pill
-   --bg-card (#292929), two points per channel, effectively invisible. (In
-   light it was fine — #f0f0f2 vs pure white.) The inset ring is what makes
-   it read in both themes, and box-shadow rather than border so the pill
-   doesn't change size and shove its neighbours when selection moves. */
+/* The inset ring stays even though canvas-vs-panel is a much bigger jump
+   than the old surface-2-vs-card pair (51 points in dark, 11 in light) —
+   it draws the pill's edge crisply the instant selection moves, rather than
+   only after the (now real, but still soft) fill contrast registers.
+   box-shadow, not border, so the pill doesn't change size and shove its
+   neighbours when selection moves. */
 .fleet-segmented-btn--active {
-  background: var(--bg-card);
+  background: var(--bg-panel);
   color: var(--text-primary);
   box-shadow: inset 0 0 0 1px var(--border-strong);
 }
@@ -10164,4 +10193,172 @@ h2.fleet-sage-console-title {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+/* ── Project member "+" (ProjectMemberAdd.tsx) ────────────────────────────
+   APPENDED BLOCK, 2026-08-01. Sits right of the member avatar stack, the
+   same relative position .fleet-toolbar-popover already establishes for a
+   trigger that is NOT in the far-right cluster (TaskViewOptions/FleetToolbar
+   are; this one deliberately isn't — the founder's own ordering call
+   elsewhere on this row is "controls near what they affect", and this
+   control affects the stack immediately to its left, not the row's edge).
+   The box borrows .fleet-toolbar-popover wholesale like every other popover
+   in this file; only width/gap are overridden here, same pattern
+   .fleet-view-options-popover uses right above.
+
+   Anchors via .fleet-toolbar-popover's own `right: 0` default — right edge
+   flush to the trigger, opening LEFTWARD. Confirmed live at 375px: with the
+   segmented tabs + avatar stack to its left, "+" sits far enough into the
+   row that a 260px leftward panel stays inside .fleet-shell-panel's bounds
+   (that ancestor is overflow:hidden — a popover that opened rightward or
+   didn't fit would be silently clipped, not just visually awkward).
+
+   NEUTRAL THROUGHOUT, same reasoning TaskViewOptions.tsx's own header
+   states: "New task" already owns this view's one accent-filled action, so
+   the trigger is .fleet-icon-btn (the plain toolbar icon button) and "Send
+   invite" is plain .fleet-btn, never .fleet-btn--accent*. */
+
+.fleet-member-invite {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.fleet-member-invite-popover {
+  width: 260px;
+  padding: 10px;
+  gap: 10px;
+}
+
+.fleet-member-invite-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Real heading over a real group, same role .fleet-view-options-heading and
+   .fleet-toolbar-popover-label already play in their own popovers. */
+.fleet-member-invite-heading {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+}
+
+.fleet-member-invite-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.fleet-member-invite-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.fleet-member-invite-row-name {
+  display: block;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Smaller than the 28px trigger — this one repeats once per row, and a
+   dense list of full-size icon buttons reads heavier than the list itself. */
+.fleet-member-invite-row-add {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.fleet-member-invite-empty {
+  padding: 2px 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.fleet-member-invite-error {
+  font-size: var(--text-xs);
+  color: var(--offline-text);
+}
+
+.fleet-member-invite-divider {
+  height: 1px;
+  background: var(--border);
+}
+
+.fleet-member-invite-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fleet-member-invite-input-row {
+  display: flex;
+  gap: 6px;
+}
+
+/* Same 26px control height as .fleet-view-options-select/-dir — one popover
+   density scale across this file, not a bespoke one per control. */
+.fleet-member-invite-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+}
+.fleet-member-invite-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.fleet-member-invite-select {
+  height: 26px;
+  padding: 0 4px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.fleet-member-invite-select:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.fleet-member-invite-submit {
+  justify-content: center;
+  width: 100%;
+}
+
+.fleet-member-invite-link-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fleet-member-invite-link {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  font-size: var(--text-2xs);
+  background: var(--bg-inset);
+  padding: 6px 8px;
+  border-radius: var(--radius-control);
+}
+
+.fleet-member-invite-hint {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
 }

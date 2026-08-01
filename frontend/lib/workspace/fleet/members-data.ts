@@ -16,9 +16,17 @@
 // owner copies a /join/{token} link and shares it however they like. See
 // frontend/app/join/[token]/page.tsx for the accept side.
 //
-// "Project member" == "workspace member" for now (MAN-70 ruling) — there is
-// no per-project ACL table yet, so a project's member list is just this
-// workspace's member list.
+// "Project member" == "workspace member" was the MAN-70 placeholder ruling —
+// SUPERSEDED. MAN-115 built the real per-project ACL (project_memberships,
+// server_modules/routes_fleet.py:392-500 + projects_repository.py:448-731;
+// frontend caller: project-members-data.ts, first wired up by
+// ProjectMemberAdd.tsx). useWorkspaceMembers/MemberAvatarStack below were
+// deliberately left reading the workspace-wide list rather than being
+// switched to the real per-project one — that's a bigger, separate call
+// (would need MemberAvatarStack to also union in workspace owners, who
+// don't get an explicit project_memberships row) — but the ACL table this
+// comment used to say didn't exist now does, and gates real access
+// (auth.enforce_project_access).
 
 import { useCallback, useEffect, useState } from "react";
 
@@ -174,6 +182,7 @@ export type CreatedWorkspaceInvite = {
     email: string;
     role: WorkspaceRole;
     status: string;
+    project_id: string | null;
     created_at: number | string | null;
   };
   token: string;
@@ -183,16 +192,25 @@ export type CreatedWorkspaceInvite = {
 /** Owner-only (server-enforced, see create_workspace_invite_route's
  *  minimum_role="owner"). Mints a signed, expiring token — never sends an
  *  email, there is no mailer anywhere in this platform. The caller turns
- *  `token` into a /join/{token} link and shares it however they like. */
+ *  `token` into a /join/{token} link and shares it however they like.
+ *
+ *  `projectId` is the MAN-115 follow-up (create_workspace_invite_route,
+ *  routes_workspaces.py:919-927): optional, no implicit default. Omitted,
+ *  the invite grants workspace membership only. Passed, acceptance ALSO
+ *  grants that specific project (projects_repository.grant_invite_project_
+ *  access) — this is how ProjectMemberAdd.tsx invites someone straight into
+ *  one project instead of the whole workspace. The Settings members section
+ *  (MembersSection.tsx) still calls this with no project — that invite
+ *  grants workspace access only, unchanged. */
 export async function createWorkspaceInvite(
   workspaceId: string,
   email: string,
   role: WorkspaceRole,
+  projectId?: string,
 ): Promise<CreatedWorkspaceInvite> {
-  const data = await mutateJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/invites`, "POST", {
-    email,
-    role,
-  });
+  const body: Record<string, unknown> = { email, role };
+  if (projectId) body.project_id = projectId;
+  const data = await mutateJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/invites`, "POST", body);
   return data as CreatedWorkspaceInvite;
 }
 

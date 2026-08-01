@@ -24,6 +24,7 @@ import { TasksGroupedList } from "@/lib/workspace/fleet/TasksGroupedList";
 import { TaskComposer } from "@/lib/workspace/fleet/TaskComposer";
 import { ProjectOverview } from "@/lib/workspace/fleet/ProjectOverview";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
+import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { breadcrumbCount, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
@@ -434,22 +435,40 @@ export default function ProjectDetailPage() {
             project read as context for the view you are choosing, so they sit
             with those controls rather than out at the edge (founder's call
             2026-08-01; this has now been on both sides of the row).
-            "project member" == "workspace member" for now (MAN-70 ruling, no
-            per-project ACL table yet), so this pulls the workspace's member
-            list. `tasks` is passed through only so the hover tooltip can
-            surface real per-member attribution (tasks they created in this
-            project) — never fetched independently. It used to be the first
-            child of .fleet-content-main, which cost the board a whole 44px
-            band of dead space between the tab strip and the first card;
-            sharing the toolbar's line is what reclaimed that. */}
+            MemberAvatarStack still pulls the WORKSPACE's member list (MAN-70
+            placeholder ruling) — a real per-project ACL table exists now
+            (MAN-115, see project-members-data.ts) but switching this stack
+            to it is a bigger call than fits here: it would also need to
+            union in workspace owners, who see every project via a role
+            bypass and never get an explicit row in that table. Left alone;
+            see that file's own header and MemberAvatarStack.tsx's for the
+            full note. `tasks` is passed through only so the hover tooltip
+            can surface real per-member attribution (tasks they created in
+            this project) — never fetched independently. It used to be the
+            first child of .fleet-content-main, which cost the board a whole
+            44px band of dead space between the tab strip and the first
+            card; sharing the toolbar's line is what reclaimed that. */}
         <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
-        {/* Far RIGHT (margin-left:auto in the stylesheet). Every control in
-            here acts on the right-hand side of the screen — the panel toggle
-            opens the drawer there, filter/sort drops its popover there — so
-            the cluster belongs at that edge. TaskViewOptions moved in here
-            2026-08-01: it was sitting BETWEEN the tabs and the member stack,
-            which is not where its own popover opens, and every other control
-            with a right-opening panel already lives in this cluster. */}
+        {/* The "+" immediately right of the stack (ProjectMemberAdd.tsx).
+            Unlike the stack beside it, this reads and writes the REAL
+            project_memberships table (MAN-115) — add an existing workspace
+            member, or invite someone new by email straight into this
+            project. Renders nothing for a non-owner: both routes it calls
+            are owner-only, server-enforced, so there is no disabled state
+            to design for. */}
+        <ProjectMemberAdd workspaceId={workspaceId} projectId={projectId} workspaceMembers={members} />
+        {/* Far RIGHT (margin-left:auto in the stylesheet, on BOTH
+            .fleet-toolbar-actions and .fleet-view-options — see
+            fleet-theme.css). Every control in here acts on the right-hand
+            side of the screen — the panel toggle opens the drawer there,
+            filter/sort drops its popover there — so the cluster belongs at
+            that edge, visually under "New task" in the topbar above.
+            FIXED 2026-08-01: TaskViewOptions's root only ever carried
+            .fleet-view-options, a class the margin-left:auto rule didn't
+            select until now — despite moving into this JSX position earlier
+            the same day, it was still rendering wherever it fell in normal
+            flow (right after the member stack) instead of at the row's
+            edge. See fleet-theme.css's own note beside the fixed rule. */}
         {view === "tasks" && tasks.length > 0 ? (
           <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
         ) : null}

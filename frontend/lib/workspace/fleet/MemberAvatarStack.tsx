@@ -1,13 +1,20 @@
 "use client";
 
 // Overlapping member-avatar stack — Multiplayer Projects Phase 1 (MAN-114).
-// "Project member" == "workspace member" for now (MAN-70 ruling, no
-// per-project ACL table yet), so this renders the workspace's own member
-// list. Hover reveals a name + role tooltip, plus real per-project
-// attribution when it exists (how many tasks in THIS project this person
-// created, and the most recent one) — never an invented "last reviewed by"
-// claim; if a member has created no tasks here, the tooltip just shows name
-// + role.
+// Renders the WORKSPACE's own member list, on the MAN-70 placeholder ruling
+// ("project member" == "workspace member", no per-project ACL table). That
+// ruling is now SUPERSEDED — MAN-115 added a real project_memberships table
+// (see project-members-data.ts) that this component was deliberately left
+// NOT reading: switching it over is a bigger call than the toolbar "+"
+// control that reads the real table (ProjectMemberAdd.tsx) — this stack
+// would also need to union in workspace owners, who see every project via
+// a role bypass rather than an explicit project_memberships row, so a
+// naive swap would silently drop every owner from their own project's
+// avatar stack. Flagged, not fixed, as of 2026-08-01. Hover reveals a name
+// + role tooltip, plus real per-project attribution when it exists (how
+// many tasks in THIS project this person created, and the most recent
+// one) — never an invented "last reviewed by" claim; if a member has
+// created no tasks here, the tooltip just shows name + role.
 //
 // Interaction reference the founder pasted was an overlapping-avatars +
 // framer-motion hover-card component. This codebase already depends on
