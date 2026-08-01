@@ -241,7 +241,21 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       segments.length >= 3 &&
       AGENT_DETAIL_TABS.has(lastSeg) &&
       segments[segments.length - 3] === "agents";
-    const effectiveLastIndex = isAgentDetailTrailingTab ? segments.length - 2 : segments.length - 1;
+    // …/projects/{id}/agents and …/projects/{id}/tasks with NOTHING after
+    // them are the project detail page's own Agents/Tasks views (a real
+    // route each now, not client state — see ProjectDetailPage's `view`).
+    // Folded the same way the agent-tab case above is: the project's own
+    // crumb, one segment back, is what should read as current on all three
+    // of its views (Overview/Agents/Tasks), same as MAN-145 already decided
+    // for the agent detail page's own sub-tabs — a customer switching
+    // between them shouldn't watch the page's one real <h1> rename itself
+    // to the generic word "Tasks" or "Agents" on every click.
+    const isProjectViewTrailingSegment =
+      segments.length >= 3 &&
+      (lastSeg === "agents" || lastSeg === "tasks") &&
+      segments[segments.length - 3] === "projects";
+    const effectiveLastIndex =
+      isAgentDetailTrailingTab || isProjectViewTrailingSegment ? segments.length - 2 : segments.length - 1;
 
     // No synthetic workspace-root crumb — crumbs start at the section
     // (Projects, Agents, Inbox, …). The "agents/{id}" pair inside a project
@@ -255,8 +269,12 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
       const prev = segments[i - 1];
       // Skip the structural "agents"/"tasks" segment that sits between a
       // project id and a child id (…/projects/{id}/agents/{agentId},
-      // …/projects/{id}/tasks/{taskId}); neither bare path is a real route,
-      // so crumbing it would draw a dead link mid-chain.
+      // …/projects/{id}/tasks/{taskId} — neither bare path is a distinct
+      // page, so crumbing it would draw a dead link mid-chain), AND the same
+      // segment when it's the project's own Agents/Tasks view and therefore
+      // trailing with nothing after it (isProjectViewTrailingSegment above,
+      // which the effectiveLastIndex adjustment already accounts for by
+      // making the PROJECT crumb current instead).
       const isStructuralChild =
         (seg === "agents" || seg === "tasks") && prev !== undefined && segments[i - 2] === "projects";
       if (isStructuralChild) return;

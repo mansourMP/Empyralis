@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, usePathname, useRouter } from "next/navigation";
 
 import { Bot, Calendar, Zap } from "lucide-react";
 
@@ -73,6 +73,9 @@ function readFiltersFromLocation(): FilterState {
 export default function ProjectDetailPage() {
   const params = useParams();
   const router = useRouter();
+  // Drives the Overview/Agents/Tasks derivation below — see the `view` const
+  // near updateFilters/projectBase.
+  const pathname = usePathname() || "";
   const workspaceId = String(params?.workspaceId || "");
   const projectId = String(params?.projectId || "");
   const base = `/w/${encodeURIComponent(workspaceId)}`;
@@ -108,18 +111,50 @@ export default function ProjectDetailPage() {
       if (next.channel !== "all") sp.set("channel", next.channel);
       if (next.sort !== "last_active") sp.set("sort", next.sort);
       const qs = sp.toString();
-      router.replace(`${projectBase}${qs ? `?${qs}` : ""}`);
+      // The CURRENT pathname, not the hardcoded Overview one: these filters
+      // only ever apply to the Agents view (see the `filters`/sortOptions
+      // wiring below), which now lives at `${projectBase}/agents` — a real
+      // route, not client state (see the `view` const below). Replacing with
+      // `projectBase` would silently bounce the reader back to Overview
+      // every time they touched a filter.
+      router.replace(`${pathname}${qs ? `?${qs}` : ""}`);
       return next;
     });
-  }, [router, projectBase]);
+  }, [router, pathname]);
 
   const [wizardOpen, setWizardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
-  // Overview | Agents | Tasks. Overview (MAN-110 Phase 1) is the landing
-  // summary — status roll-up + real activity feed; Agents/Tasks are the two
-  // working views: who is in the project, and what they are working on.
-  const [view, setView] = useState<"overview" | "agents" | "tasks">("overview");
+  // Overview | Agents | Tasks — a real ROUTE per view (`${projectBase}`,
+  // `${projectBase}/agents`, `${projectBase}/tasks`), not component state.
+  //
+  // It used to be `useState`, which is exactly why the in-app ‹ button used
+  // to strand a reader on Overview after opening a task from Tasks: state
+  // lives only as long as this component instance, and navigating to a
+  // task's own page (a different route) unmounts it. Nothing about which
+  // sub-view you were on survived that round trip, because nothing about it
+  // was ever written down anywhere durable.
+  //
+  // Each FleetTab owns its own history stack of urls it has visited (see
+  // fleet-tabs.ts) — a real pathname change pushes a new entry there, same
+  // as any other navigation, so leaving for a task and pressing ‹ now lands
+  // back on the exact view (Overview/Agents/Tasks) you left. A query param
+  // would NOT have worked for this: navigateTab treats a query-only change
+  // on the same pathname as a filter moving and REPLACES the tab's current
+  // history entry instead of pushing (see its own comment) — sub-tab clicks
+  // would have collapsed onto one entry and ‹ would jump straight out of
+  // the project, which is the "back should walk history sensibly" case the
+  // fix also has to satisfy, not just the reported bug.
+  const view: "overview" | "agents" | "tasks" =
+    pathname === `${projectBase}/agents` ? "agents" : pathname === `${projectBase}/tasks` ? "tasks" : "overview";
+  // router.replace, not .push — same choice the agent detail page's own
+  // sub-tabs already made (AgentDetailPage's onTabChange, one directory up).
+  // FleetTabs' per-tab history is driven purely by watching the resolved
+  // pathname (see FleetTabsProvider's reconciler effect), so it still gets
+  // its own entry whichever router method lands you on it; .replace only
+  // keeps the BROWSER's own native back/forward from also having to step
+  // through every Overview→Agents→Tasks click one at a time.
+  const viewHref = (v: "overview" | "agents" | "tasks") => (v === "overview" ? projectBase : `${projectBase}/${v}`);
   // TWO shapes of the same tasks, plus the options that reshape them.
   //
   // This used to be a three-way switch — Board | Grouped | List — and that
@@ -388,7 +423,8 @@ export default function ProjectDetailPage() {
               role="tab"
               aria-selected={view === v}
               className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
-              onClick={() => setView(v)}
+              data-tab-href={viewHref(v)}
+              onClick={() => router.replace(viewHref(v))}
             >
               {v === "overview" ? "Overview" : v === "agents" ? "Agents" : "Tasks"}
             </button>
