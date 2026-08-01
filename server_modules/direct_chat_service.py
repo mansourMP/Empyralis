@@ -356,9 +356,22 @@ async def execute_direct_chat_turn_request(
         generation events as they arrive via a thread-safe sink so the reply
         streams in real time instead of landing in one dump.
 
-        The sink is a contextvar — it is inherited by the thread-pool thread
-        that executes the generation loop.  When the sink is NOT set
-        (Telegram / API / background paths) nothing changes.
+        The sink is a contextvar. A bare `threading.Thread` (used below for
+        `_run_sage`) does NOT inherit the spawning thread's contextvars —
+        each OS thread starts with its own empty Context unless one is
+        explicitly copied in (verified directly: a plain `threading.Thread`
+        target sees a ContextVar's default, never the spawning thread's
+        `.set()` value). Setting the var here, before `_thread.start()`, only
+        ever affected THIS thread — the generation loop actually runs inside
+        `_run_sage`'s own thread, so the var is set again as the first thing
+        `_run_sage` does, in ITS OWN context, which is where
+        `direct_chat_generation_service.wrap_generation_with_sink`'s `.get()`
+        call actually runs. Without that second `.set()`, every event was
+        silently dropped — `sink` always resolved to `None` deep inside the
+        generation loop, so `_sink` (and this queue) never received a single
+        chunk; only the one lump "final" event at the very end ever reached
+        this producer. When the sink is NOT set (Telegram / API / background
+        paths) nothing changes.
         """
         import asyncio as _asyncio
         import queue as _queue
@@ -392,6 +405,11 @@ async def execute_direct_chat_turn_request(
 
         def _run_sage():
             try:
+                # Re-set here, in this thread's own context — see the
+                # docstring above. `threading.Thread` gives this function a
+                # fresh, empty contextvars Context; the `.set()` above (in
+                # the spawning thread) never reaches code running in here.
+                _GENERATION_EVENT_SINK.set(_sink)
                 _loop = _asyncio.new_event_loop()
                 _asyncio.set_event_loop(_loop)
                 from server_modules.sage_turn_adapter import execute_sage_turn
