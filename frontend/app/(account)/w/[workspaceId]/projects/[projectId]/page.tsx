@@ -329,17 +329,6 @@ export default function ProjectDetailPage() {
           topbar is where the earlier mobile header-overlap bug came from, and
           this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
-        {/* Top-LEFT of the control row, not a row of its own above the view.
-            "project member" == "workspace member" for now (MAN-70 ruling, no
-            per-project ACL table yet), so this pulls the workspace's member
-            list. `tasks` is passed through only so the hover tooltip can
-            surface real per-member attribution (tasks they created in this
-            project) — never fetched independently.
-            It used to be the first child of .fleet-content-main, which cost
-            the board a whole 44px band of dead space between the tab strip
-            and the first card. The toolbar row's left half was empty anyway
-            and is where Linear puts exactly this. */}
-        <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
         <div className="fleet-segmented" role="tablist" aria-label="Project view">
           {(["overview", "agents", "tasks"] as const).map((v) => (
             <button
@@ -382,6 +371,17 @@ export default function ProjectDetailPage() {
             usageHref={`${base}/billing`}
           />
         ) : null}
+        {/* Far RIGHT of the control row (founder's call 2026-08-01 — this and
+            the view switch were the other way round). "project member" ==
+            "workspace member" for now (MAN-70 ruling, no per-project ACL
+            table yet), so this pulls the workspace's member list. `tasks` is
+            passed through only so the hover tooltip can surface real
+            per-member attribution (tasks they created in this project) —
+            never fetched independently. It used to be the first child of
+            .fleet-content-main, which cost the board a whole 44px band of
+            dead space between the tab strip and the first card; sharing the
+            toolbar's line is what reclaimed that. */}
+        <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
       </div>
 
       {/* The sheet — full width always, whether the drawer below is open or

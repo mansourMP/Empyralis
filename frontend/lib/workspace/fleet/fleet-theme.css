@@ -1539,10 +1539,15 @@ a.fleet-breadcrumb:hover {
    right-aligned, sitting directly under .fleet-shell-topbar's own
    border-bottom, which already is the "hairline divider under the top
    row"; no second divider to draw. */
+/* Controls LEFT, people RIGHT (2026-08-01, founder's call). Was the
+   inverse — avatars pinned left, every control right-aligned. The view
+   switch is the thing a human reaches for constantly, so it leads the row;
+   the member stack is ambient context and sits at the far edge. */
 .fleet-content-toolbar {
   display: flex;
-  justify-content: flex-end;
+  justify-content: flex-start;
   align-items: center;
+  gap: 8px;
   height: 40px;
   padding: 0 32px;
   margin-bottom: 20px;
@@ -5679,13 +5684,13 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   justify-content: flex-end;
   margin-bottom: var(--space-3);
 }
-/* In the project page's control row the stack is a LEFT-hand item sharing a
-   40px line with the view tabs, not a band of its own above the content — see
-   the comment where it is rendered. margin-right:auto keeps everything else in
-   that row right-aligned exactly as .fleet-content-toolbar's flex-end did. */
+/* In the project page's control row the stack is the RIGHT-hand item sharing
+   a 40px line with the view tabs, not a band of its own above the content —
+   see the comment where it is rendered. margin-left:auto eats the row's free
+   space so the stack pins to the far edge while every control stays left. */
 .fleet-content-toolbar > .fleet-member-avatar-stack {
   margin-bottom: 0;
-  margin-right: auto;
+  margin-left: auto;
 }
 .fleet-member-avatar-stack-item {
   position: relative;
