@@ -23,7 +23,7 @@
  */
 
 import { useEffect, useId, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Settings2 } from "lucide-react";
+import { ArrowDown, ArrowUp, LayoutGrid, Rows3, Settings2 } from "lucide-react";
 
 import {
   TASK_GROUPING_OPTIONS,
@@ -99,6 +99,24 @@ export function TaskViewOptions({
 
       {open && (
         <div className="fleet-toolbar-popover fleet-view-options-popover">
+          {/* Layout leads the popover, matching the reference: everything that
+              reshapes the view lives behind this one icon, so the toolbar row
+              keeps a single stable shape whichever tab you are on. */}
+          <div className="fleet-view-options-layout" role="tablist" aria-label="Task layout">
+            {(["board", "list"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                role="tab"
+                aria-selected={options.layout === v}
+                className={`fleet-view-options-layout-btn${options.layout === v ? " is-active" : ""}`}
+                onClick={() => onChange((prev) => ({ ...prev, layout: v }))}
+              >
+                {v === "board" ? <LayoutGrid size={14} strokeWidth={1.75} /> : <Rows3 size={14} strokeWidth={1.75} />}
+                {v === "board" ? "Board" : "List"}
+              </button>
+            ))}
+          </div>
           {showGrouping && (
             <div className="fleet-view-options-row">
               <label className="fleet-view-options-label" htmlFor={groupingId}>

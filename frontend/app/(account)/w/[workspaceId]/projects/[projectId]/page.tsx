@@ -390,28 +390,16 @@ export default function ProjectDetailPage() {
             </button>
           ))}
         </div>
+        {/* ONE control, not three (2026-08-01, founder's call). Board/List
+            used to be a second segmented strip out here beside the view
+            switch, so arriving on Tasks made two extra controls appear and
+            shoved the member stack sideways — the row changed shape per tab,
+            which read as a bug rather than a layout. Linear's reference puts
+            the layout pills INSIDE the options popover for exactly this
+            reason: the toolbar keeps one stable shape and everything that
+            reshapes the view lives behind one icon. */}
         {view === "tasks" && tasks.length > 0 ? (
-          <>
-            <div className="fleet-segmented" role="tablist" aria-label="Task layout">
-              {(["board", "list"] as const).map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  role="tab"
-                  aria-selected={viewOptions.layout === v}
-                  className={`fleet-segmented-btn${viewOptions.layout === v ? " fleet-segmented-btn--active" : ""}`}
-                  onClick={() => updateViewOptions((prev) => ({ ...prev, layout: v }))}
-                >
-                  {v === "board" ? "Board" : "List"}
-                </button>
-              ))}
-            </div>
-            {/* Beside the switch it configures, not out with the right-hand
-                icon cluster: those controls all act on the right side of the
-                screen (the drawer, the filter popover), and this one reshapes
-                the view immediately to its left. */}
-            <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
-          </>
+          <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
         ) : null}
         {/* Trails the view/layout switches, LEFT of centre — the people on a
             project read as context for the view you are choosing, so they sit
