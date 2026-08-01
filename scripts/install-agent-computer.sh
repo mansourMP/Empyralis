@@ -237,6 +237,83 @@ create_service_user() {
     "${SERVICE_USER}"
 }
 
+install_docker() {
+  # Cloud Agent Computer boxes run `shell.execute` and `filesystem.read_write`
+  # inside a Docker sandbox — the gateway only ever advertises those two
+  # capabilities once a live `docker info` probe succeeds (see
+  # empyralis-gateway/src/health/service-inventory.ts's probeDocker, which
+  # feeds runtime/desktop-permissions.ts's shellSandboxDockerReady). Nothing
+  # in this installer used to put Docker on the box at all, so every
+  # provisioned droplet came up paired and "online" while unable to run a
+  # single shell command.
+  #
+  # Distro packaging (docker.io), not Docker's get.docker.com convenience
+  # script: one already-mirrored apt package, no extra apt repo, no GPG key
+  # fetch, no curl-pipe-to-root — and it is everything the sandboxed
+  # `docker run` shell.execute path needs.
+  #
+  # DELIBERATELY NON-FATAL. A box that cannot get Docker must still finish
+  # provisioning and come up with every OTHER capability (cli.install,
+  # llm.generate, ...) rather than dying here — see the `|| log ...` wrapper
+  # around this call in main(). Every failure path below returns 1 and
+  # reports an advisory (terminal=0) beacon instead of calling fail().
+  if [[ "${EMPYRALIS_INSTALL_SKIP_DOCKER:-0}" == "1" ]]; then
+    log "skipping Docker install because EMPYRALIS_INSTALL_SKIP_DOCKER=1"
+    return 0
+  fi
+
+  if ! command -v docker >/dev/null 2>&1; then
+    log "installing Docker (docker.io)"
+    # Same DPkg::Lock::Timeout guard as apt_install_system_deps, for the same
+    # reason: unattended-upgrades can already be holding the lock on a fresh
+    # droplet, and an indefinite block here would be silent exactly like it
+    # would be there.
+    if ! apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends docker.io; then
+      log "WARNING: docker.io install failed"
+      report_beacon 0 "docker.io install failed; shell.execute and filesystem.read_write need Docker and will stay unavailable until it is installed manually"
+      return 1
+    fi
+  else
+    log "Docker already installed"
+  fi
+
+  if systemd_available; then
+    systemctl enable --now docker >/dev/null 2>&1 || true
+  else
+    service docker start >/dev/null 2>&1 || true
+  fi
+
+  # The gateway runs as SERVICE_USER, not root (see write_systemd_units'
+  # User=${SERVICE_USER}), and docker.io's socket is root:docker 0660 by
+  # default — a perfectly running daemon still answers `docker info` with
+  # permission denied for a user outside that group. docker.io's postinst
+  # creates the `docker` group; adding SERVICE_USER to it here — before
+  # start_services() ever spawns the gateway process (see main()) — means the
+  # very first gateway process picks up the membership, no restart needed.
+  if ! usermod -aG docker "${SERVICE_USER}"; then
+    log "WARNING: could not add ${SERVICE_USER} to the docker group"
+    report_beacon 0 "could not add ${SERVICE_USER} to the docker group; shell.execute and filesystem.read_write will stay unavailable"
+    return 1
+  fi
+
+  # Verify the way the gateway itself will: as SERVICE_USER, not root. A
+  # freshly exec'd `sudo -u` process re-reads group membership, so this sees
+  # the usermod above without needing a new login session — the same
+  # guarantee the freshly-started gateway process gets.
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if sudo -u "${SERVICE_USER}" docker info >/dev/null 2>&1; then
+      log "Docker is installed and ready"
+      return 0
+    fi
+    sleep 2
+  done
+
+  log "WARNING: docker was installed but 'docker info' did not succeed as ${SERVICE_USER} after ${attempt} attempts"
+  report_beacon 0 "docker installed but 'docker info' did not succeed as ${SERVICE_USER} after ${attempt} attempts; shell.execute and filesystem.read_write may take longer to come online, or check 'systemctl status docker' on the server"
+  return 1
+}
+
 prepare_directories() {
   mkdir -p "${INSTALL_ROOT}" "${BIN_DIR}" "${STATE_ROOT}/gateway" "${CONFIG_DIR}" "${LOG_DIR}" "${RUN_DIR}"
   # BYO-brain: writable npm global prefix for cli.install (@openai/codex etc.).
@@ -674,6 +751,12 @@ main() {
   create_service_user
   prepare_directories
   write_env_file
+  set_phase docker_install "installing Docker"
+  # Non-fatal by design (see install_docker's own header comment): a box that
+  # cannot get Docker still finishes provisioning with every other
+  # capability. install_docker already reports its own advisory beacon on
+  # failure, so this is just a local log line for whoever reads the console.
+  install_docker || log "continuing without a confirmed-ready Docker sandbox — shell.execute and filesystem.read_write will stay unavailable until this is resolved"
   set_phase gateway_download "downloading Agent Computer"
   install_release_artifacts
   set_phase service_setup "setting up the service"

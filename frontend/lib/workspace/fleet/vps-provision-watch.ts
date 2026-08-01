@@ -212,6 +212,7 @@ const INSTALL_PHASE_LABELS: Record<string, string> = {
   system_dependencies: 'Installing system packages',
   node_install: 'Installing Node.js',
   prepare_host: 'Preparing the host',
+  docker_install: 'Installing Docker',
   gateway_download: 'Downloading Agent Computer',
   service_setup: 'Setting up the service',
   service_start: 'Starting the service',
