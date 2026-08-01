@@ -64,16 +64,17 @@
  * `fleet-tasks:${workspaceId}:${projectId}` — a second caller with the same
  * key subscribes to the existing polled entry, it does not issue a second
  * request). That matters for correctness, not just efficiency: it is
- * PROVABLY the same array, in the same order, that TasksList renders
- * unmodified and TasksBoard/TasksGroupedList group without re-sorting (see
- * that page's `boardTasks` — no client-side sort is ever applied to tasks,
- * unlike the agents view). So "N / total" and the ↑/↓ targets are not a
- * best-effort guess at what the user saw — they ARE what the user saw. The
- * one thing this page cannot know is which of the three layouts (board /
- * grouped / list) or which filter the user was actually looking at, since
- * that state lives in the project page's URL query string, not in this
- * task's own payload — the nav is hidden outright (not shown with a wrong
- * count) if this task can't be found in that read, rather than guessing.
+ * PROVABLY the same array that the project page renders. It is put in the
+ * same ORDER too, by reading the same per-workspace view-options preference
+ * that page writes (task-view-options.ts) and applying the same sortTasks to
+ * it — the project page stopped rendering the raw fetch order on 2026-08-01,
+ * when the view-options popover gave the reader an ordering to choose, and an
+ * ↑ that walked a different order than the list behind it would be exactly
+ * the "best-effort guess" this design was built to avoid. So "N / total" and
+ * the ↑/↓ targets ARE what the user saw. The one thing this page still cannot
+ * know is which layout or status filter they were looking at (that state is
+ * the project page's own) — the nav is hidden outright, not shown with a
+ * wrong count, if this task can't be found in the read.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
@@ -117,6 +118,12 @@ import {
   type FleetTaskStatus,
   type TaskAssigneeSelection,
 } from "./fleet-data";
+import {
+  DEFAULT_TASK_VIEW_OPTIONS,
+  readTaskViewOptions,
+  sortTasks,
+  type TaskViewOptions as TaskViewOptionsState,
+} from "./task-view-options";
 import "./task-detail.css";
 
 /** Minute precision, not the default's seconds — no decision on this page
@@ -363,21 +370,33 @@ export function TaskDetailView({
     workspaceId || "",
     workspaceId && projectId ? projectId : null,
   );
+  // The reader's own ordering, from the same localStorage preference the
+  // project page writes — so ↑/↓ walk the list they were just looking at,
+  // not the raw fetch order. Hydrated in an effect, never during render, so
+  // the server's markup and the client's first paint agree.
+  const [viewOptions, setViewOptions] = useState<TaskViewOptionsState>(DEFAULT_TASK_VIEW_OPTIONS);
+  useEffect(() => {
+    if (workspaceId) setViewOptions(readTaskViewOptions(workspaceId));
+  }, [workspaceId]);
+  const orderedSiblings = useMemo(
+    () => sortTasks(siblingTasks, viewOptions.ordering, viewOptions.direction),
+    [siblingTasks, viewOptions.ordering, viewOptions.direction],
+  );
   const taskDetailHref = useCallback(
     (id: string) => `${projectHref}/tasks/${encodeURIComponent(id)}`,
     [projectHref],
   );
   const siblingIndex = useMemo(
-    () => siblingTasks.findIndex((t) => t.id === task.id),
-    [siblingTasks, task.id],
+    () => orderedSiblings.findIndex((t) => t.id === task.id),
+    [orderedSiblings, task.id],
   );
   // Hidden outright (not shown with a wrong or single-item count) unless
   // this task was actually found in the read and there is somewhere to go
   // -- an arrow pair that jumps somewhere unexpected is worse than none.
-  const showTaskNav = siblingIndex >= 0 && siblingTasks.length > 1;
-  const prevTask = siblingIndex > 0 ? siblingTasks[siblingIndex - 1] : null;
-  const nextTask = siblingIndex >= 0 && siblingIndex < siblingTasks.length - 1
-    ? siblingTasks[siblingIndex + 1]
+  const showTaskNav = siblingIndex >= 0 && orderedSiblings.length > 1;
+  const prevTask = siblingIndex > 0 ? orderedSiblings[siblingIndex - 1] : null;
+  const nextTask = siblingIndex >= 0 && siblingIndex < orderedSiblings.length - 1
+    ? orderedSiblings[siblingIndex + 1]
     : null;
   const parentTask = useMemo(
     () => (task.parent_task_id ? siblingTasks.find((t) => t.id === task.parent_task_id) || null : null),

@@ -15,9 +15,16 @@
  * Status is deliberately exempt: status colour is information, not
  * decoration (fleet-theme.css:12-13), the same exemption the Agents table's
  * own Status column already has.
+ *
+ * DISPLAY PROPERTIES. Every cell except the title is switchable from the
+ * view-options popover (task-view-options.ts). A switched-off column loses
+ * its grid TRACK as well as its contents — `--fleet-list-grid` is rebuilt
+ * from whatever survives — so hiding Due doesn't leave a 96px hole where Due
+ * used to be. The title track is not offered: a row with no title is not a
+ * row.
  */
 
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 
 import { timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
@@ -33,6 +40,7 @@ import {
   type FleetTaskStatus,
   type TaskAssigneeSelection,
 } from "./fleet-data";
+import { DEFAULT_TASK_VIEW_OPTIONS, type TaskDisplayState } from "./task-view-options";
 
 /* Status presentation moved WHOLESALE to ./task-status (taskStatusLabel /
    TaskStatusIcon / TaskStatusChip). The map that used to live here borrowed
@@ -50,11 +58,21 @@ export function dueLabel(dueAt: string | null | undefined): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+/** The width each optional column claims when it is on. The title track is
+ *  the flexible one and is never optional, so it stays out of this map. */
+const COLUMN_TRACKS: { key: "assignee" | "due" | "updated" | "status"; track: string; head: string; right?: boolean }[] = [
+  { key: "assignee", track: "160px", head: "Assignee" },
+  { key: "due", track: "96px", head: "Due", right: true },
+  { key: "updated", track: "96px", head: "Updated", right: true },
+  { key: "status", track: "132px", head: "Status" },
+];
+
 export function TasksList({
   tasks,
   agents,
   members,
   taskHref,
+  display = DEFAULT_TASK_VIEW_OPTIONS.display,
   onAssign,
   onSelect,
 }: {
@@ -67,17 +85,24 @@ export function TasksList({
   /** The task's real route — stamped as `data-tab-href` so ⌘/Ctrl+click and
    *  middle-click open it in a background content tab (see FleetTabs). */
   taskHref?: (taskId: string) => string;
+  /** View-options "Display properties". Defaults to everything on, which is
+   *  the table this file drew before the popover existed. */
+  display?: TaskDisplayState;
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
 }) {
+  const columns = COLUMN_TRACKS.filter((c) => display[c.key]);
+  const grid = ["minmax(260px, 1fr)", ...columns.map((c) => c.track)].join(" ");
+
   return (
-    <div className="fleet-tasks-list">
+    <div className="fleet-tasks-list" style={{ "--fleet-list-grid": grid } as CSSProperties}>
       <div className="fleet-tasks-list-header" role="row">
         <span>Task</span>
-        <span>Assignee</span>
-        <span className="is-right">Due</span>
-        <span className="is-right">Updated</span>
-        <span>Status</span>
+        {columns.map((c) => (
+          <span key={c.key} className={c.right ? "is-right" : undefined}>
+            {c.head}
+          </span>
+        ))}
       </div>
       {tasks.map((task, index) => (
         <TaskRow
@@ -87,6 +112,7 @@ export function TasksList({
           members={members}
           index={index}
           href={taskHref?.(task.id)}
+          display={display}
           onAssign={onAssign}
           onSelect={onSelect}
         />
@@ -101,6 +127,7 @@ function TaskRow({
   members,
   index,
   href,
+  display,
   onAssign,
   onSelect,
 }: {
@@ -109,6 +136,7 @@ function TaskRow({
   members?: WorkspaceMember[];
   index: number;
   href?: string;
+  display: TaskDisplayState;
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
 }) {
@@ -119,7 +147,15 @@ function TaskRow({
     ? (members || []).find((m) => m.user_id === task.assignee_user_id) || null
     : null;
   const due = dueLabel(task.due_at);
-  const updated = timeAgo(task.created_at);
+  // `updated_at || created_at` — the same fallback TasksGroupedList's own
+  // Updated cell uses. This column read `created_at` outright until
+  // 2026-08-01, so a row that HAD been reassigned still reported when it was
+  // filed under a heading saying "Updated". A column whose header names one
+  // field and whose body prints another is a lie the reader has no way to
+  // catch; on this backend updated_at only moves on assign/update (see
+  // fleet-data.FleetTask), so falling back to created_at is what "never
+  // touched since it was filed" honestly looks like.
+  const updated = timeAgo(task.updated_at || task.created_at);
 
   const currentAssigneeValue = assignee
     ? assigneeOptionValue({ kind: "agent", id: assignee.agent_id })
@@ -213,35 +249,45 @@ function TaskRow({
         }
       }}
     >
-      {/* Desktop cells */}
+      {/* Desktop cells. Each optional cell is omitted, not blanked — the
+          header dropped its track too, so an emitted-but-empty <span> would
+          push every following cell one column left. */}
       <span className="fleet-agent-cell-agent-text fleet-task-cell-title">
         <span className="fleet-task-cell-titleline">
           {/* Same glyph as the board card, so a task reads the same in both
               layouts. Absent backend field degrades to "no priority". */}
-          <span className="fleet-task-cell-prio" title={TASK_PRIORITY_LABELS[priority]}>
-            <TaskPriorityIcon priority={priority} size={14} />
-          </span>
+          {display.priority ? (
+            <span className="fleet-task-cell-prio" title={TASK_PRIORITY_LABELS[priority]}>
+              <TaskPriorityIcon priority={priority} size={14} />
+            </span>
+          ) : null}
           <span className="fleet-agent-name">{task.title || "Untitled task"}</span>
           {/* Trailing the title, not a column of their own: this table's five
               tracks are already fixed, and a sixth would cost the Task column
               the width it needs. Cap 3 here (2 on a board card) — the row is
               260px+ wide, so three chips fit without pushing the title. */}
-          <TaskLabelChips labels={task.labels} max={3} />
+          {display.labels ? <TaskLabelChips labels={task.labels} max={3} /> : null}
         </span>
-        {task.description ? (
+        {display.description && task.description ? (
           <span className="fleet-agent-preview">{task.description}</span>
         ) : null}
       </span>
-      <span className="fleet-task-cell-assignee">{assigneeCell}</span>
-      <span className={`fleet-agent-cell-right fleet-cell-secondary${due ? "" : " fleet-cell-muted"}`}>
-        {due || "—"}
-      </span>
-      <span className={`fleet-agent-cell-right fleet-cell-secondary${updated ? "" : " fleet-cell-muted"}`}>
-        {updated || "—"}
-      </span>
-      <span className="fleet-task-cell-status">
-        <TaskStatusChip status={task.status} />
-      </span>
+      {display.assignee ? <span className="fleet-task-cell-assignee">{assigneeCell}</span> : null}
+      {display.due ? (
+        <span className={`fleet-agent-cell-right fleet-cell-secondary${due ? "" : " fleet-cell-muted"}`}>
+          {due || "—"}
+        </span>
+      ) : null}
+      {display.updated ? (
+        <span className={`fleet-agent-cell-right fleet-cell-secondary${updated ? "" : " fleet-cell-muted"}`}>
+          {updated || "—"}
+        </span>
+      ) : null}
+      {display.status ? (
+        <span className="fleet-task-cell-status">
+          <TaskStatusChip status={task.status} />
+        </span>
+      ) : null}
 
       {/* Mobile replacement — reuses the Agents list's own mobile classes
           verbatim (they carry no agent-specific semantics), so 375px costs
@@ -249,18 +295,27 @@ function TaskRow({
       <div className="fleet-agent-row-mobile">
         <div className="fleet-agent-row-mobile-line1">
           <span className="fleet-agent-row-mobile-name">{task.title || "Untitled task"}</span>
-          <TaskStatusChip status={task.status} />
+          {display.status ? <TaskStatusChip status={task.status} /> : null}
         </div>
+        {/* Same toggles as the desktop cells — a display property switched off
+            has to be off at 375px too, or the control silently stops working
+            at the width where space matters most. Built by filtering rather
+            than joining a fixed triple so a hidden field leaves no orphan
+            separator. */}
         <div className="fleet-agent-row-mobile-line2">
           {[
-            assignee
-              ? assignee.label || "Unnamed agent"
-              : assignedMember
-                ? assignedMember.display_name || assignedMember.email
-                : "Unassigned",
-            due || "No due date",
-            updated || "—",
-          ].join(" · ")}
+            display.assignee
+              ? assignee
+                ? assignee.label || "Unnamed agent"
+                : assignedMember
+                  ? assignedMember.display_name || assignedMember.email
+                  : "Unassigned"
+              : "",
+            display.due ? due || "No due date" : "",
+            display.updated ? updated || "—" : "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
         </div>
       </div>
     </div>

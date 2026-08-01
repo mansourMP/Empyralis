@@ -29,6 +29,14 @@ import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
+import { TaskViewOptions } from "@/lib/workspace/fleet/TaskViewOptions";
+import {
+  DEFAULT_TASK_VIEW_OPTIONS,
+  readTaskViewOptions,
+  sortTasks,
+  writeTaskViewOptions,
+  type TaskViewOptions as TaskViewOptionsState,
+} from "@/lib/workspace/fleet/task-view-options";
 import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/lib/workspace/fleet/FleetRightPanel";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
@@ -108,12 +116,38 @@ export default function ProjectDetailPage() {
   // summary — status roll-up + real activity feed; Agents/Tasks are the two
   // working views: who is in the project, and what they are working on.
   const [view, setView] = useState<"overview" | "agents" | "tasks">("overview");
-  // Three shapes of the same tasks, and they answer different questions —
-  // see TasksGroupedList's header. Board is the default (watch the work);
-  // Grouped is the one you work THROUGH; List is the flat table that shows
-  // every field at once. Board stays the default because it is what the
-  // project page has always opened on.
-  const [taskLayout, setTaskLayout] = useState<"board" | "grouped" | "list">("board");
+  // TWO shapes of the same tasks, plus the options that reshape them.
+  //
+  // This used to be a three-way switch — Board | Grouped | List — and that
+  // was a modelling error: "Grouped" is not a third view, it is the List with
+  // a grouping applied. Linear models exactly this (the view is List-or-Board;
+  // grouping is an option), so 2026-08-01 the switch collapsed to Board | List
+  // and grouping moved into the view-options popover beside it. Nothing was
+  // deleted: TasksGroupedList is what the List renders whenever a grouping is
+  // selected. Board stays the default because it is what this page has always
+  // opened on.
+  //
+  // Hydrated from localStorage in an effect, never during render, so the
+  // server's markup and the client's first paint agree — the same discipline
+  // useFleetPreferences and the grouped list's collapse state already follow.
+  const [viewOptions, setViewOptions] = useState<TaskViewOptionsState>(DEFAULT_TASK_VIEW_OPTIONS);
+  useEffect(() => {
+    if (workspaceId) setViewOptions(readTaskViewOptions(workspaceId));
+  }, [workspaceId]);
+  // Takes an UPDATER, not a value, so two changes landing in one React batch
+  // can't both start from the same snapshot and drop one of them — see the
+  // note on TaskViewOptions' own `onChange` prop. The write rides inside the
+  // updater because that is the only place the resolved next value exists.
+  const updateViewOptions = useCallback(
+    (update: (prev: TaskViewOptionsState) => TaskViewOptionsState) => {
+      setViewOptions((prev) => {
+        const next = update(prev);
+        writeTaskViewOptions(workspaceId, next);
+        return next;
+      });
+    },
+    [workspaceId],
+  );
   // The task composer (MAN-127). Held as "which status does it open on" rather
   // than a bare boolean, because a board column's `+` opens it pre-set to that
   // column — `null` is closed, an object is open.
@@ -132,6 +166,16 @@ export default function ProjectDetailPage() {
       ? tasks
       : tasks.map((t) => (pendingStatus.has(t.id) ? { ...t, status: pendingStatus.get(t.id)! } : t))),
     [tasks, pendingStatus],
+  );
+  // The reader's ordering, applied once here rather than in each of the three
+  // renderings — the board filters this list into columns and the two list
+  // shapes read it straight through, so all three agree on card order without
+  // any of them owning a sort. The backend's own default (created_at DESC)
+  // is what `created` + `desc` reproduces, so the untouched view is
+  // byte-for-byte what it was.
+  const orderedTasks = useMemo(
+    () => sortTasks(boardTasks, viewOptions.ordering, viewOptions.direction),
+    [boardTasks, viewOptions.ordering, viewOptions.direction],
   );
   const [rollup, setRollup] = useState<{ usd_cost: number; total_tokens: number; events: number } | null>(null);
   const [costBuckets, setCostBuckets] = useState<UsageBucket[]>([]);
@@ -347,20 +391,27 @@ export default function ProjectDetailPage() {
           ))}
         </div>
         {view === "tasks" && tasks.length > 0 ? (
-          <div className="fleet-segmented" role="tablist" aria-label="Task layout">
-            {(["board", "grouped", "list"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                role="tab"
-                aria-selected={taskLayout === v}
-                className={`fleet-segmented-btn${taskLayout === v ? " fleet-segmented-btn--active" : ""}`}
-                onClick={() => setTaskLayout(v)}
-              >
-                {v === "board" ? "Board" : v === "grouped" ? "Grouped" : "List"}
-              </button>
-            ))}
-          </div>
+          <>
+            <div className="fleet-segmented" role="tablist" aria-label="Task layout">
+              {(["board", "list"] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  role="tab"
+                  aria-selected={viewOptions.layout === v}
+                  className={`fleet-segmented-btn${viewOptions.layout === v ? " fleet-segmented-btn--active" : ""}`}
+                  onClick={() => updateViewOptions((prev) => ({ ...prev, layout: v }))}
+                >
+                  {v === "board" ? "Board" : "List"}
+                </button>
+              ))}
+            </div>
+            {/* Beside the switch it configures, not out with the right-hand
+                icon cluster: those controls all act on the right side of the
+                screen (the drawer, the filter popover), and this one reshapes
+                the view immediately to its left. */}
+            <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
+          </>
         ) : null}
         {/* Trails the view/layout switches, LEFT of centre — the people on a
             project read as context for the view you are choosing, so they sit
@@ -402,7 +453,7 @@ export default function ProjectDetailPage() {
             (columns scroll, the page does not), so the sheet becomes a flex
             column just for it — a modifier rather than a height calc, so
             nothing here has to hard-code how tall the chrome above it is. */}
-        <div className={`fleet-content-main${view === "tasks" && taskLayout === "board" ? " fleet-content-main--board" : ""}`}>
+        <div className={`fleet-content-main${view === "tasks" && viewOptions.layout === "board" ? " fleet-content-main--board" : ""}`}>
           {taskNotice ? (
             <div className="fleet-page-state-body" role="alert" style={{ color: "var(--warning-text)" }}>
               {taskNotice}
@@ -441,23 +492,31 @@ export default function ProjectDetailPage() {
                   </button>
                 </div>
               </div>
-            ) : taskLayout === "board" ? (
+            ) : viewOptions.layout === "board" ? (
+              // The board's columns are statuses, always — that is what makes
+              // a drop mean "move this task to In review", so grouping is not
+              // offered here (see task-view-options.ts). Its own rule that a
+              // column exists if and only if it holds a task is enforced
+              // inside TasksBoard and nothing on this page can override it.
               <TasksBoard
                 workspaceId={workspaceId}
-                tasks={boardTasks}
+                tasks={orderedTasks}
                 agents={inProject}
                 members={members}
                 taskHref={taskHref}
+                display={viewOptions.display}
                 onSelect={openTask}
                 onStatusChange={handleStatusChange}
                 onCreateTask={(status) => setComposer({ status })}
               />
-            ) : taskLayout === "grouped" ? (
+            ) : viewOptions.grouping !== "none" ? (
               <TasksGroupedList
                 workspaceId={workspaceId}
-                tasks={boardTasks}
+                tasks={orderedTasks}
                 agents={inProject}
                 members={members}
+                grouping={viewOptions.grouping}
+                display={viewOptions.display}
                 taskHref={taskHref}
                 onSelect={openTask}
                 onStatusChange={handleStatusChange}
@@ -465,10 +524,11 @@ export default function ProjectDetailPage() {
               />
             ) : (
               <TasksList
-                tasks={boardTasks}
+                tasks={orderedTasks}
                 agents={inProject}
                 members={members}
                 taskHref={taskHref}
+                display={viewOptions.display}
                 onAssign={handleAssign}
                 onSelect={openTask}
               />

@@ -35,10 +35,15 @@
  * with none of those is still a title, a ring and an id — and that is the
  * correct card for it.
  *
- * There is deliberately NO "display properties" panel deciding which of those
- * appear (Linear has one, ~14 toggles). Configuration is what you reach for
- * when you won't make the design decision; the decision here is the rule in
- * the paragraph above.
+ * DISPLAY PROPERTIES (2026-08-01, founder's call — this paragraph used to say
+ * the opposite). A `display` map can now switch individual elements off:
+ * priority, id, labels, sub-task rollup, dates, assignee. It does NOT replace
+ * the rule above, it composes with it — an element is drawn if the task has
+ * that data AND the reader has not switched it off, so turning everything on
+ * (the default) gives exactly the card this file has always drawn. What is
+ * still not offered is a toggle for anything a card cannot show: see
+ * task-view-options.ts for the full list and the reasoning, including why the
+ * status ring is exempt (it is the card's only keyboard move control).
  *
  * MOVING A TASK — two paths, both hitting the same handler:
  *   1. Drag a card into another column. Native HTML5 drag-and-drop only
@@ -92,6 +97,7 @@ import {
   TASK_PRIORITY_LABELS,
 } from "./task-status";
 import { FLEET_TASK_STATUSES, countTasksByStatus, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
+import { DEFAULT_TASK_VIEW_OPTIONS, type TaskDisplayState } from "./task-view-options";
 
 /** The dataTransfer type the card writes and the column reads. Namespaced so
  *  a drop of anything else (a file, a text selection, a card from some other
@@ -110,6 +116,7 @@ export function TasksBoard({
   members,
   selectedTaskId,
   taskHref,
+  display = DEFAULT_TASK_VIEW_OPTIONS.display,
   onSelect,
   onStatusChange,
   onCreateTask,
@@ -131,6 +138,10 @@ export function TasksBoard({
    *  "button"> rather than becoming an <a> — the attribute is how it opts into
    *  link-like modifier gestures without giving up drag-and-drop. */
   taskHref?: (taskId: string) => string;
+  /** Which card elements this reader wants drawn (the view-options popover's
+   *  "Display properties"). Defaults to everything on, which is exactly the
+   *  card this board drew before the popover existed. */
+  display?: TaskDisplayState;
   onSelect: (taskId: string) => void;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
   /** Column `+`: open the composer with this column's status pre-set. */
@@ -292,6 +303,7 @@ export function TasksBoard({
                     selected={selectedTaskId === task.id}
                     dragging={draggingTaskId === task.id}
                     href={taskHref?.(task.id)}
+                    display={display}
                     onSelect={onSelect}
                     onStatusChange={onStatusChange}
                     onDragStateChange={setDraggingTaskId}
@@ -315,6 +327,7 @@ function TaskCard({
   selected,
   dragging,
   href,
+  display,
   onSelect,
   onStatusChange,
   onDragStateChange,
@@ -329,6 +342,7 @@ function TaskCard({
   selected: boolean;
   dragging: boolean;
   href?: string;
+  display: TaskDisplayState;
   onSelect: (taskId: string) => void;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
   onDragStateChange: (taskId: string | null) => void;
@@ -355,8 +369,16 @@ function TaskCard({
   // "Updated 9h ago" would be a confident statement of something we don't
   // actually know. When a task was FILED is a fact we do know, it never
   // changes under the reader, and it is what Linear's own card shows.
-  const due = dueLabel(task.due_at);
-  const created = task.created_at ? formatDate(task.created_at, { month: "short", day: "numeric" }) : "";
+  //
+  // Each half is gated by its own display toggle BEFORE the fallback runs, so
+  // switching "Due date" off on a task that has one falls through to Created
+  // rather than leaving the slot blank — the slot shows the best date the
+  // reader still wants, or nothing.
+  const due = display.due ? dueLabel(task.due_at) : "";
+  const created =
+    display.created && task.created_at
+      ? formatDate(task.created_at, { month: "short", day: "numeric" })
+      : "";
   const dateText = due ? `Due ${due}` : created ? `Created ${created}` : "";
   const dateTitle = due
     ? `Due ${formatDate(task.due_at as string, { dateStyle: "full" })}`
@@ -364,7 +386,7 @@ function TaskCard({
       ? `Created ${formatDateTime(task.created_at as string)}`
       : "";
 
-  const assigneeNode = assignee ? (
+  const assigneeNode = !display.assignee ? null : assignee ? (
     <span className="fleet-agent-avatar" title={assignee.label || "Unnamed agent"}>
       <AgentSigil seed={assignee.agent_id} size={12} />
     </span>
@@ -440,7 +462,9 @@ function TaskCard({
           CAP: 2, then "+N" (TaskLabelChips). Two short chips is what fits the
           column at this font size without wrapping, and a card is a scannable
           handle — the full set is one click away on the task page. */}
-      <TaskLabelChips labels={task.labels} max={2} className="fleet-board-card-labels" />
+      {display.labels ? (
+        <TaskLabelChips labels={task.labels} max={2} className="fleet-board-card-labels" />
+      ) : null}
 
       <div className="fleet-board-card-meta">
         {/* Keyboard/AT path for the same move a drag performs: a real native
@@ -475,22 +499,24 @@ function TaskCard({
             this used to draw on every untriaged card were a glyph whose only
             message was that it had nothing to say. See task-status.tsx for
             which surfaces DO still want the placeholder and why. */}
-        {priority !== 0 ? (
+        {display.priority && priority !== 0 ? (
           <span className="fleet-board-card-prio" title={TASK_PRIORITY_LABELS[priority]}>
             <TaskPriorityIcon priority={priority} size={14} />
           </span>
         ) : null}
 
-        <span className="fleet-board-card-id">{taskShortId(task.id)}</span>
+        {display.id ? <span className="fleet-board-card-id">{taskShortId(task.id)}</span> : null}
 
         {/* "1/3" + a donut, on the tasks that actually have sub-tasks. The
             counts ride along on the row the board already fetched, so this
             costs no request. Renders nothing on a task with none. */}
-        <TaskSubtaskProgress
-          done={task.subtask_done_count}
-          total={task.subtask_count}
-          className="fleet-board-card-subtasks"
-        />
+        {display.subtasks ? (
+          <TaskSubtaskProgress
+            done={task.subtask_done_count}
+            total={task.subtask_count}
+            className="fleet-board-card-subtasks"
+          />
+        ) : null}
 
         {/* Date + assignee ride to the right as a GROUP, so the row still
             packs correctly when either is missing — a card with no due date,
