@@ -112,6 +112,45 @@ function friendlyTurnFailureMessage(status: number, rawBody: string): string {
   return `Could not send that (HTTP ${status}). Try again.`;
 }
 
+// Live per-iteration "step" SSE events (direct_tool_step_payload /
+// thinking_step_payload on the backend — see direct_chat_generation_service.py)
+// use a different, already-clean vocabulary than transparency_events'
+// event_type strings, so this gets its own small mapper instead of reusing
+// stepKindForTransparencyEventType above. Anything unrecognized falls through
+// to stepIcon's default wrench in chat-message.tsx, which is a fine default.
+function stepIconKindForLiveStep(kind: string): string {
+  if (kind === "file") return "file";
+  if (kind === "browser") return "search";
+  return "tool";
+}
+
+// Turns one live "step" SSE event into the same "activity_step" shape
+// transparencyEventsToStepMessages below produces, so both render through
+// ChatMessage's one activity_step path. Only non-"thinking" steps are ever
+// passed here — see the "thinking" handling inline in send() for why: those
+// are boundary markers for the narration buffer, not user-facing rows.
+function liveStepToStepMessage(step: Record<string, any>): WorkstationChatMessageRecord {
+  const label = String(step.label ?? "").trim() || "Step";
+  const detail = String(step.detail ?? "").trim();
+  const status = String(step.status ?? "");
+  return {
+    id: `step-${String(step.id ?? Math.random())}`,
+    role: "system",
+    content: detail && detail !== label ? `${label} — ${detail}` : label,
+    status: null,
+    createdAt: new Date().toISOString(),
+    runId: null,
+    approvals: [],
+    interventions: [],
+    artifacts: [],
+    metadata: {
+      display_kind: "activity_step",
+      step_kind: stepIconKindForLiveStep(String(step.kind ?? "")),
+      step_status: TRANSPARENCY_ERROR_STATUSES.has(status) ? "error" : "active",
+    },
+  };
+}
+
 // Reuses chat-message.tsx's existing "activity_step" display_kind (already
 // rendered by ChatMessage for other producers) instead of building a new
 // component — a second parallel renderer would be redundant here, since
@@ -365,6 +404,58 @@ export function AgentChat({
       let streamed = "";
       let finalPayload: Record<string, any> | null = null;
 
+      // A turn can run several model iterations before it answers (narrate,
+      // call a tool, observe, narrate again, ...). The backend already emits
+      // a "chunk" delta stream for EVERY iteration's text and a "step" event
+      // per iteration/tool boundary (direct_chat_generation_service.py's
+      // while-loop) — previously thrown away here in favor of the SSE
+      // "final" event's payload.reply, which the backend only ever sets to
+      // the LAST iteration's text (see final_reply in that file). That
+      // discarded every earlier iteration's narration the instant the turn
+      // finished — reported as "text just disappears."
+      //
+      // Fix: keep a running buffer of the CURRENT iteration's streamed text
+      // (narrationBuffer) and flush it into the permanent transcript at each
+      // iteration boundary — EXCEPT the final one, whose "thinking" step
+      // carries a literal detail of "Answer ready" (see thinking_step_payload
+      // call sites). That last buffered segment is never flushed: it is the
+      // pre-post-processing draft of the exact text finalPayload.reply
+      // supplies (after dedup/leak-guard/tool-honesty handling), so rendering
+      // both would duplicate the answer. Everything BEFORE that last segment
+      // is narration that led up to it and is kept, unmodified, as its own
+      // row(s) — this is the "coherent transcript" fix without ever
+      // re-deriving or repeating the final answer text.
+      let narrationBuffer = "";
+      let narrationSeq = 0;
+      const flushNarration = () => {
+        const text = narrationBuffer.trim();
+        narrationBuffer = "";
+        if (!text) return;
+        narrationSeq += 1;
+        setMessages((cur) => [...cur, {
+          id: `${requestId}-narration-${narrationSeq}`,
+          role: "assistant",
+          content: text,
+          status: null,
+          createdAt: new Date().toISOString(),
+          runId: null,
+          approvals: [],
+          interventions: [],
+          artifacts: [],
+          metadata: {},
+        }]);
+      };
+      const upsertStep = (step: Record<string, any>) => {
+        const stepMessage = liveStepToStepMessage(step);
+        setMessages((cur) => {
+          const idx = cur.findIndex((m) => m.id === stepMessage.id);
+          if (idx < 0) return [...cur, stepMessage];
+          const next = cur.slice();
+          next[idx] = stepMessage;
+          return next;
+        });
+      };
+
       if (/text\/event-stream/i.test(contentType) && turnRes.body) {
         const reader = turnRes.body.getReader();
         const decoder = new TextDecoder();
@@ -380,8 +471,24 @@ export function AgentChat({
             const parsed = parseSseBlock(block);
             if (!parsed) continue;
             if (parsed.event === "chunk") {
-              streamed += String((parsed.payload as any)?.delta ?? "");
-              setStreamingText(streamed);
+              const delta = String((parsed.payload as any)?.delta ?? "");
+              streamed += delta;
+              narrationBuffer += delta;
+              setStreamingText(narrationBuffer);
+            } else if (parsed.event === "step") {
+              const step = parsed.payload as Record<string, any>;
+              if (String(step?.kind ?? "") === "thinking") {
+                // Iteration boundary. "Answer ready" marks the turn's final
+                // iteration — its buffered text is a draft of finalPayload.reply,
+                // not a distinct thing that was "said," so it is deliberately
+                // left unflushed (dropped) rather than rendered twice.
+                if (String(step?.detail ?? "") !== "Answer ready") {
+                  flushNarration();
+                  setStreamingText("");
+                }
+              } else {
+                upsertStep(step);
+              }
             } else if (parsed.event === "final") {
               finalPayload = parsed.payload as Record<string, any>;
             }
