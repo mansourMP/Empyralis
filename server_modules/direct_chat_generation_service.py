@@ -2114,6 +2114,12 @@ def stream_provider_backed_direct_chat(
                         # emits anything, so a failure raised before the loop body ever runs
                         # must not cost the user the red row entirely.
                         tool_call: Dict[str, Any] = {}
+                        # Snapshot so the post-loop failure check below can isolate
+                        # exactly the entries THIS iteration added to turn_tool_trace —
+                        # see the "Detect whether any tool in THIS iteration reported a
+                        # failure" comment after the loop for why this replaced a
+                        # substring scan.
+                        _tool_trace_len_before_iteration = len(turn_tool_trace)
                         for tool_index, tool_call in enumerate(iteration_tool_calls, start=1):
                             # Assigned up front, before anything below that can raise
                             # (parse_tool_name included) — an exception mid-iteration must
@@ -2651,22 +2657,29 @@ def stream_provider_backed_direct_chat(
                         else:
                             # Detect whether any tool in THIS iteration reported a failure so we can
                             # forbid the model from fabricating an answer on top of a failed tool.
-                            _recent_tool_contents = []
-                            for _m in reversed(conversation_messages):
-                                if isinstance(_m, dict) and str(_m.get("role") or "") == "tool":
-                                    _recent_tool_contents.append(str(_m.get("content") or "").lower())
-                                else:
-                                    break
+                            #
+                            # Previously a substring scan over the raw tool-message text
+                            # (looking for '"status": "failed"', '"status": "error"',
+                            # '"runtime_state": "failed"', "timeout"/"timed out", or a bare
+                            # '"error"' key). That missed every soft-failure shape whose
+                            # STATUS TOKEN isn't literally "failed"/"error" — the live
+                            # incident this replaced: hardware__action returning
+                            # {"status": "offline", "reason": "gateway_capability_missing",
+                            # "runtime_state": "offline", ...} (skills_service.py's
+                            # _format_hardware_action_result — the exact shape a not-ready
+                            # gateway returns) matched NONE of those substrings, so the model
+                            # got the permissive "never invent, guess, or fabricate" prompt
+                            # instead of the strict one below — right before it fabricated a
+                            # full Windows ipconfig block for a paired Mac. Reuse the SAME
+                            # verdict already computed per tool call this iteration
+                            # (tool_result_status.classify_tool_result, via _tool_call_failed
+                            # -> turn_tool_trace's "status" field) instead of re-deriving one
+                            # from text, so this can never disagree with what the trace and
+                            # the tool-honesty guard already know.
+                            _iteration_tool_trace_entries = turn_tool_trace[_tool_trace_len_before_iteration:]
                             _tool_failure_detected = any(
-                                (
-                                    '"status": "failed"' in _c
-                                    or '"status": "error"' in _c
-                                    or '"runtime_state": "failed"' in _c
-                                    or 'timed out' in _c
-                                    or 'timeout' in _c
-                                    or '"error"' in _c
-                                )
-                                for _c in _recent_tool_contents
+                                isinstance(_entry, dict) and _entry.get("status") == "failed"
+                                for _entry in _iteration_tool_trace_entries
                             )
                             if _tool_failure_detected:
                                 current_prompt = (

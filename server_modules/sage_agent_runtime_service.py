@@ -13,6 +13,7 @@ from server_modules import thread_service
 from server_modules import runtime_config
 from server_modules import authority_mandate_service
 from server_modules import tool_honesty_guard
+from server_modules import tool_result_status
 from server_modules import (
     activity_ledger_service,
     agent_trace_service,
@@ -2836,8 +2837,26 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
             entry["status"] = "running"
         elif trace_type == "tool.result":
             entry = _tool_entry(tool_call_id)
-            result_status = _coerce_text(data.get("status")).lower()
-            entry["status"] = "failed" if result_status in {"error", "failed"} else "completed"
+            # Classified off the shared structural verdict (tool_result_status),
+            # not a hand-rolled {"error", "failed"} set. That narrow set happened
+            # to be correct only because THIS event stream's producer
+            # (direct_chat_generation_service.py's own "tool.result" yields,
+            # which is what _run_sage_action_loop_v3 actually consumes here —
+            # see _collect_stream_events above) only ever emits "ok"/"failed"/
+            # "error" as its status token — hardware/gateway's own richer
+            # vocabulary ("offline", "degraded", "waiting_approval", ...) is
+            # emitted by hardware_result_correlator_service.emit_tool_result
+            # onto a SEPARATE, DB-persisted audit trail (agent_trace_service ->
+            # control_plane_repository), not into this generator, so it never
+            # reaches here today. That made the 2-token set correct by
+            # coincidence rather than by design — exactly the kind of fragile,
+            # easy-to-silently-break classification tool_result_status.py exists
+            # to replace (see its docstring's FALSE NEGATIVES section). Reusing
+            # it here means a soft-failure status this branch has never seen
+            # before still classifies correctly instead of silently painting a
+            # green "completed" row the day something starts routing that
+            # vocabulary through this path.
+            entry["status"] = "failed" if tool_result_status.classify_tool_result(data).failed else "completed"
             summary = _coerce_text(data.get("summary"))
             if summary:
                 if entry["status"] == "failed":

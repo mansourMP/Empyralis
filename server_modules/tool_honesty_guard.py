@@ -22,6 +22,23 @@ HIGH-PRECISION BY DESIGN: patterns are narrow and only fire when paired with
 an actual trace contradiction (a real successful tool result on one side, or
 its total absence on the other) — never on tone or phrasing alone. An
 over-firing guard that regenerates honest replies is its own defect.
+
+Three directions are covered, all gated on the same trace-contradiction
+discipline above:
+  1. denies_success — the reply denies/disclaims a tool that the trace proves
+     actually succeeded this turn (_DENIAL_PATTERNS).
+  2. claims_without_run — the reply retrospectively or prospectively claims a
+     lookup happened when the trace proves NOTHING succeeded this turn, tool
+     trace empty or not (_CLAIM_PATTERNS).
+  3. claims_success_after_failure — added 2026-08-02 after a real production
+     incident: hardware__action returned a structured offline/failure payload
+     (`{"status": "offline", "reason": "gateway_capability_missing", ...}`)
+     and the reply fabricated full command output framed as live proof of a
+     hardware connection that had explicitly failed. Distinct from #2: this
+     fires only when the trace proves a tool call FAILED this turn (not just
+     "nothing ran"), so the correction can hand the model the REAL failure
+     reason instead of a generic refusal (_FABRICATION_AFTER_FAILURE_PATTERNS,
+     build_failure_correction_prompt).
 """
 
 from __future__ import annotations
@@ -93,6 +110,35 @@ _CLAIM_PATTERNS = [
     r"\bi will (search|check|look ?up|access|pull up|browse|read|open|go through|dig through)\s+(your|the)\s+\w+",
 ]
 
+# Reply asserts REAL, LIVE, or SUCCESSFUL tool output/execution. Only checked
+# when the trace PROVES a tool call failed this turn and nothing else
+# succeeded — see check_tool_reply_consistency's gating — so this is safe to
+# be direct about "success" vocabulary the same way _DENIAL_PATTERNS is safe
+# to be liberal about "can't" vocabulary (module docstring's HIGH-PRECISION
+# section): the precondition alone (a real, proven failure and no real
+# success) already rules out every honest use of these phrases.
+#
+# Added 2026-08-02 after the live incident this direction exists for: Vale
+# (deepseek-reasoner) asked hardware__action to prove laptop access, got back
+# {"status": "offline", "reason": "gateway_capability_missing", ...} (a real,
+# structured failure — the paired device never ran anything), and replied
+# with a fabricated Windows `ipconfig /all` block plus, verbatim, "This is
+# live output from your laptop — your hostname, your OS version, your
+# network config. That proves I'm connected to your hardware and can execute
+# commands on it." for a founder whose paired device is a Mac. Scoped to
+# explicit liveness/success/proof assertions — NOT to "any tool vocabulary
+# after a failure" — so an honest reply that reports the failure in its own
+# words (see the honest-reply test in test_tool_honesty_guard.py) never
+# matches: none of these phrasings describe FAILING to get output.
+_FABRICATION_AFTER_FAILURE_PATTERNS = [
+    r"\bthis is (?:the |)(?:live|real|actual) output from\b",
+    r"\bhere'?s (?:the |)(?:live|real|actual) output\b",
+    r"\bi successfully (?:ran|executed|connected|accessed|retrieved|read|captured)\b",
+    r"\b(?:this|that) proves (?:i'?m|i am|the connection is)\b",
+    r"\bi(?:'m| am) (?:now |actively |already )?connected to your\b",
+    r"\bi (?:just |)(?:ran|executed) (?:that|this|the) (?:command|script) on your\b",
+]
+
 
 def _matches_any(text: str, patterns: list[str]) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
@@ -110,6 +156,24 @@ def _successful_tools(tool_trace: Optional[list[ToolTraceEntry]]) -> list[ToolTr
     return out
 
 
+def _failed_tools(tool_trace: Optional[list[ToolTraceEntry]]) -> list[ToolTraceEntry]:
+    """Tools the trace proves FAILED this turn — the fabrication-after-failure
+    direction's anchor, the same role _successful_tools plays for
+    denies_success. Does not require an "error"/"output" field to be present
+    (unlike _successful_tools' output requirement) because a failure is
+    established by status alone; the text used in the correction/fallback
+    falls back to whatever detail the entry does carry (see
+    build_failure_correction_prompt)."""
+    out: list[ToolTraceEntry] = []
+    for entry in tool_trace or []:
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status") or "").strip().lower()
+        if status == "failed":
+            out.append(entry)
+    return out
+
+
 def check_tool_reply_consistency(
     reply_text: str,
     tool_trace: Optional[list[ToolTraceEntry]],
@@ -117,14 +181,24 @@ def check_tool_reply_consistency(
     """Compare a turn's reply against what tools actually did this turn.
 
     Returns {"consistent": bool, "mismatch_type": "denies_success" |
-    "claims_without_run" | None, "tools": [succeeded tool entries]}.
+    "claims_success_after_failure" | "claims_without_run" | None, "tools":
+    [succeeded tool entries, or the failed ones for claims_success_after_failure]}.
     """
     reply = str(reply_text or "")
     successful = _successful_tools(tool_trace)
     if successful and _matches_any(reply, _DENIAL_PATTERNS):
         return {"consistent": False, "mismatch_type": "denies_success", "tools": successful}
-    if not successful and _matches_any(reply, _CLAIM_PATTERNS):
-        return {"consistent": False, "mismatch_type": "claims_without_run", "tools": []}
+    if not successful:
+        # Checked before the generic claims_without_run below: when the trace
+        # PROVES a specific tool failed (not just "nothing ran"), that's a
+        # stronger, more actionable signal — it lets the correction hand the
+        # model the real failure reason instead of a blanket "I don't have a
+        # result" fallback. See the module docstring's direction #3.
+        failed = _failed_tools(tool_trace)
+        if failed and _matches_any(reply, _FABRICATION_AFTER_FAILURE_PATTERNS):
+            return {"consistent": False, "mismatch_type": "claims_success_after_failure", "tools": failed}
+        if _matches_any(reply, _CLAIM_PATTERNS):
+            return {"consistent": False, "mismatch_type": "claims_without_run", "tools": []}
     return {"consistent": True, "mismatch_type": None, "tools": successful}
 
 
@@ -158,6 +232,54 @@ def build_honest_fallback_reply(tools: list[ToolTraceEntry]) -> str:
     return "\n".join(lines)
 
 
+def _failed_tool_detail(tool: ToolTraceEntry) -> str:
+    # "error" is the field failed entries actually carry in both live pipelines
+    # (direct_chat_generation_service.py and sage_agent_runtime_service.py both
+    # set entry["error"] on a failed tool — see _collect_sage_operator_loop_v3_
+    # events and the direct-chat tool loop). "output" is read too, defensively,
+    # in case a caller hands this a differently-shaped entry.
+    return str(tool.get("error") or tool.get("output") or "").strip()
+
+
+def build_failure_correction_prompt(tools: list[ToolTraceEntry]) -> str:
+    """The claims_success_after_failure counterpart to build_correction_prompt:
+    hands the model the REAL failure it fabricated over, by name and reason,
+    instead of a vague "that was wrong" — same as the denies_success direction
+    hands back the real success. Regeneration reuses this, not the deny/
+    fabricate-free-form fallback, exactly because a specific failure reason is
+    a strictly better anchor for a second attempt than nothing at all."""
+    lines = [
+        "[PLATFORM CORRECTION] Your previous answer this turn presented "
+        "fabricated output as if a tool call had succeeded. This is a factual "
+        "correction, not a suggestion:"
+    ]
+    for tool in tools:
+        name = str(tool.get("name") or "a tool").strip()
+        detail = _failed_tool_detail(tool)
+        lines.append(f"- {name} FAILED this turn and returned no usable result: {detail[:800]}")
+    lines.append(
+        "Do not invent, guess, or present fabricated output as real — no device "
+        "details, command output, file contents, or numbers of any kind that "
+        "did not actually come back. Tell the user plainly that the action "
+        "failed and why, using only the real reason above."
+    )
+    return "\n".join(lines)
+
+
+def build_honest_failure_fallback_reply(tools: list[ToolTraceEntry]) -> str:
+    """Used only when the corrective regeneration ALSO mismatches — never ship
+    a reply that fabricates success over a real failure twice. Deterministic,
+    not model-generated, so it can't repeat the same failure mode. Only called
+    for claims_success_after_failure, where _decide guarantees tools is
+    non-empty (see _failed_tools)."""
+    lines = ["That didn't actually work — here's what really happened this turn:"]
+    for tool in tools:
+        name = str(tool.get("name") or "tool").strip()
+        detail = _failed_tool_detail(tool)
+        lines.append(f"\n**{name}:** failed — {detail[:1200]}" if detail else f"\n**{name}:** failed")
+    return "\n".join(lines)
+
+
 # A pipeline's own way of asking its model for one more answer, given an
 # extra system-prompt-shaped correction string appended to whatever prompt it
 # already used. Each pipeline supplies its own — Sage's action loop and the
@@ -186,6 +308,14 @@ def _decide(reply_text: str, tool_trace: Optional[list[ToolTraceEntry]]) -> Opti
     if result["mismatch_type"] == "denies_success" and tools:
         correction = build_correction_prompt(tools)
         fallback_reply = build_honest_fallback_reply(tools)
+        skip_regeneration = False
+    elif result["mismatch_type"] == "claims_success_after_failure" and tools:
+        # Unlike claims_without_run below, a REAL failure reason exists to
+        # anchor a correction with — same rationale as denies_success:
+        # regeneration gets one attempt with the real facts before falling
+        # back to the deterministic reply.
+        correction = build_failure_correction_prompt(tools)
+        fallback_reply = build_honest_failure_fallback_reply(tools)
         skip_regeneration = False
     else:
         # claims_without_run (defense-in-depth, fabrication direction): no

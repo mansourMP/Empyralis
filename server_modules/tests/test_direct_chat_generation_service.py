@@ -1752,6 +1752,128 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertEqual(result["tool_call_id"], "tool-call-file")
         self.assertNotIn("toolcall_error", str(result["tool_call_id"]))
 
+    def test_stream_provider_backed_direct_chat_warns_model_off_fabrication_on_offline_hardware(self) -> None:
+        """The in-context half of the tool-honesty defense (the reply-gate half
+        is tool_honesty_guard.py). The live incident this pins: a soft-failure
+        hardware payload shaped exactly like skills_service.py's
+        _format_hardware_action_result -- {"status": "offline", "reason":
+        "gateway_capability_missing", "runtime_state": "offline", ...} -- used
+        to slip past the old substring scan (it only matched '"status":
+        "failed"'/'"status": "error"'/'"runtime_state": "failed"'/"timeout"),
+        so the model got the PERMISSIVE "never invent, guess, or fabricate"
+        follow-up prompt instead of the STRICT one that explicitly forbids
+        inventing hardware specs, OS versions, and command output -- right
+        before the live agent fabricated a fake ipconfig block. Asserts the
+        SECOND provider call (the one made after the tool result is in
+        context) receives the strict prompt, off the classified
+        turn_tool_trace status rather than a string scan."""
+        trace_context, emitted, emit_with_envelope = self._trace_harness()
+
+        incident_payload = (
+            '{"status": "offline", "reason": "gateway_capability_missing", '
+            '"runtime_target": "user_device_gateway", "runtime_access_mode": "full_access", '
+            '"runtime_state": "offline", "gateway_id": "gateway_a1c6b043-test", '
+            '"device_id": "device_4e459201-test"}'
+        )
+
+        stream_rounds = iter(
+            [
+                [
+                    {
+                        "type": "result",
+                        "reply": "",
+                        "usage_masked": {"provider": "openai"},
+                        "provider": "openai",
+                        "model": "gpt-5.4",
+                        "attempted_providers": "openai",
+                        "error": "",
+                        "tool_calls": [
+                            {
+                                "id": "tool-call-hardware",
+                                "name": "hardware__action",
+                                "arguments": {"action": "shell", "command": "ipconfig /all"},
+                            }
+                        ],
+                    }
+                ],
+                [
+                    {
+                        "type": "result",
+                        "reply": "Done",
+                        "usage_masked": {"provider": "openai"},
+                        "provider": "openai",
+                        "model": "gpt-5.4",
+                        "attempted_providers": "openai",
+                        "error": "",
+                        "tool_calls": [],
+                    }
+                ],
+            ]
+        )
+        captured_user_goals: list[str] = []
+
+        def _fake_generate(**kwargs):
+            captured_user_goals.append(str(kwargs.get("user_goal") or ""))
+            return iter(next(stream_rounds))
+
+        services = self._services(stream_events=[])
+        services.generate_chat_reply_stream_with_provider_fallback = _fake_generate
+        services.execute_single_direct_tool_call = lambda **_kwargs: incident_payload
+
+        with mock.patch.object(
+            direct_chat_generation_service.agent_trace_service,
+            "emit_with_envelope",
+            side_effect=emit_with_envelope,
+        ), mock.patch.object(
+            direct_chat_generation_service.agent_trace_service,
+            "finish_trace",
+            new=mock.AsyncMock(return_value={}),
+        ):
+            list(
+                direct_chat_generation_service.stream_provider_backed_direct_chat(
+                    services=services,
+                    context={"provider": "openai"},
+                    metadata={"provider": "openai", "model": "gpt-5.4"},
+                    system_prompt="System prompt",
+                    normalized_workspace_id="default",
+                    normalized_requested_provider="openai",
+                    normalized_requested_model="gpt-5.4",
+                    normalized_reasoning_effort="medium",
+                    normalized_thread_id="thread-1",
+                    normalized_message="prove you can run commands on my laptop",
+                    compacted_prior_messages=[],
+                    prior_messages_used=False,
+                    history_mode="none",
+                    connected_systems=[],
+                    tool_capabilities=[],
+                    availability_payload={"ai_ready": True},
+                    tools=[{"name": "hardware__action"}],
+                    direct_chat_credentials={},
+                    proactive_suggestions=[],
+                    tool_loop_session_key="session-hardware-offline",
+                    fallback_reason=None,
+                    session_ctx=None,
+                    trace_context=trace_context,
+                    resolved_chat_max_iterations=3,
+                    direct_tool_result_summary_system_message="Summarize tool results.",
+                )
+            )
+
+        # First call is the model's initial turn (no tool results yet, so
+        # user_goal is the plain user message, not either follow-up prompt);
+        # the second is the one made WITH the (failed) tool result in context.
+        self.assertEqual(len(captured_user_goals), 2)
+        follow_up_prompt = captured_user_goals[1]
+        self.assertIn("FAILED", follow_up_prompt)
+        self.assertIn("MUST NOT invent", follow_up_prompt)
+        self.assertNotIn("Based on the tool results above, provide a clear and helpful answer", follow_up_prompt)
+
+        # Same verdict must have reached the trace event and the (private)
+        # turn_tool_trace the tool-honesty guard reads — this test would not
+        # have caught the original bug if the two disagreed silently.
+        result = next(item for item in emitted if item["event_type"] == "tool.result")
+        self.assertEqual(result["data"]["status"], "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

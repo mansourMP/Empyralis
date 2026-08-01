@@ -3359,5 +3359,73 @@ class SubagentSpawnToolVisibilityTests(unittest.TestCase):
         self.assertNotIn("orchestrator", role_enum)
 
 
+class CollectSageOperatorLoopV3EventsToolResultStatusTests(unittest.TestCase):
+    """_collect_sage_operator_loop_v3_events builds the tool_calls list that
+    handle_sage_chat hands to tool_honesty_guard.apply_tool_honesty_guard as
+    tool_trace (see _run_sage_action_loop_v3's return and its call site). A
+    soft-failure status wrongly landing here as "completed" would mean the
+    honesty guard's fabrication-after-failure check (tool_honesty_guard.py's
+    claims_success_after_failure direction) could never fire on this
+    pipeline — the exact "matters enormously" classification question the
+    2026-08-01 hardware fabrication incident turned on. This pins the fix:
+    classification is delegated to tool_result_status.classify_tool_result
+    (the same structural verdict every other producer in the codebase uses)
+    instead of a hand-rolled {"error", "failed"} status-token set."""
+
+    @staticmethod
+    def _trace_event(*, tool_call_id: str, status: str, summary: str = "") -> dict:
+        return {
+            "type": "trace",
+            "payload": {
+                "event_type": "tool.result",
+                "tool_call_id": tool_call_id,
+                "data": {"status": status, "summary": summary},
+            },
+        }
+
+    def test_offline_status_classifies_as_failed_not_completed(self) -> None:
+        events = [
+            self._trace_event(
+                tool_call_id="call-1",
+                status="offline",
+                summary="Gateway is not ready for this hardware action.",
+            ),
+        ]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        entry = collected["tool_calls"][0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual(entry["error"], "Gateway is not ready for this hardware action.")
+        self.assertNotIn("output", entry)
+
+    def test_degraded_status_classifies_as_failed(self) -> None:
+        events = [self._trace_event(tool_call_id="call-1", status="degraded", summary="Needs a runtime target.")]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["tool_calls"][0]["status"], "failed")
+
+    def test_ok_status_still_classifies_as_completed(self) -> None:
+        # No regression: the real producer (direct_chat_generation_service.py's
+        # own tool.result yields) only ever emits "ok"/"failed"/"error" — this
+        # pins that unchanged behavior alongside the newly-fixed tokens.
+        events = [self._trace_event(tool_call_id="call-1", status="ok", summary="Found it.")]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        entry = collected["tool_calls"][0]
+        self.assertEqual(entry["status"], "completed")
+        self.assertEqual(entry["output"], "Found it.")
+
+    def test_error_and_failed_statuses_still_classify_as_failed(self) -> None:
+        for status in ("error", "failed"):
+            with self.subTest(status=status):
+                events = [self._trace_event(tool_call_id="call-1", status=status, summary="boom")]
+                collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+                self.assertEqual(collected["tool_calls"][0]["status"], "failed")
+
+    def test_waiting_approval_status_does_not_classify_as_failed(self) -> None:
+        # A hardware action parked on approval has not failed — must stay
+        # off the failed list or a routine approval would look like a crash.
+        events = [self._trace_event(tool_call_id="call-1", status="waiting_approval", summary="Waiting for approval.")]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["tool_calls"][0]["status"], "completed")
+
+
 if __name__ == "__main__":
     unittest.main()
