@@ -6106,7 +6106,18 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   border-radius: calc(var(--radius-control) - 2px);
   cursor: pointer;
 }
-.fleet-segmented-btn--active { background: var(--bg-card); color: var(--text-primary); }
+/* The active segment has to be obvious at a glance — which view you are on
+   is the one thing this control exists to say. Background alone did not do
+   it in DARK: the track is --bg-surface-2 (#272727) and the active pill
+   --bg-card (#292929), two points per channel, effectively invisible. (In
+   light it was fine — #f0f0f2 vs pure white.) The inset ring is what makes
+   it read in both themes, and box-shadow rather than border so the pill
+   doesn't change size and shove its neighbours when selection moves. */
+.fleet-segmented-btn--active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
 
 .fleet-stat-grid {
   display: grid;
