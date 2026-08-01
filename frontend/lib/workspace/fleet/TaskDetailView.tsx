@@ -57,6 +57,31 @@
  * textarea + wide button, but the write path and the optimistic-then-
  * refetch contract are unchanged.
  *
+ * ATTRIBUTION (founder's Linear-parity gap: this page showed WHEN a task
+ * changed but never WHO). Two rows, both real identity (avatar + name via
+ * AgentSigil/MemberAvatar, never a raw id) and both OMITTED outright when
+ * unresolvable rather than shown as a placeholder:
+ *   - "Created by" -- task.created_by, resolved against whichever of
+ *     `agents`/`members` it matches (routes_fleet.fleet_create_task always
+ *     writes the authenticated human's id; skills_service's
+ *     project_task__create tool writes the calling agent's install id
+ *     instead -- same polymorphic-single-column shape commentAuthorLabel
+ *     below already handles for a comment's author_id).
+ *   - "Completed by" -- task.completed_by_user_id / completed_by_agent_id
+ *     (migrations/add_task_completion_attribution.sql), shown ONLY while
+ *     status is currently `done` (these two columns are cleared the moment
+ *     a task leaves `done` again, per project_tasks_service.update_task).
+ * NEITHER of these is a general "last touched by," and this page does not
+ * claim one. The backend has no `updated_by` column and stamps no actor on
+ * a generic PATCH -- a status flip to `in_progress`, a re-assign, a due-date
+ * edit, a title change are all silent as to who did them; `updated_at`
+ * (below) is a timestamp with no identity attached. "Completed by" is the
+ * one write path that DOES stamp a real actor, so it is rendered as exactly
+ * that -- completion, not a stand-in for "most recent edit." A comment's own
+ * author is already visible per-comment in the Activity feed just above,
+ * which is where "who said something most recently" already lives; this
+ * page doesn't duplicate that into a third Properties row.
+ *
  * PREV/NEXT NAVIGATION AND RELATED TASKS (MAN-145 items 4/5) share one read:
  * this component calls useFleetTasks(workspaceId, projectId) itself, the
  * SAME hook with the SAME cache key page.tsx already calls to find `task`
@@ -82,6 +107,7 @@ import { useRouter } from "next/navigation";
 import {
   ArrowUp,
   Calendar,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Clock3,
@@ -91,6 +117,7 @@ import {
   MessageSquare,
   SignalHigh,
   User,
+  UserPlus,
 } from "lucide-react";
 
 import { AgentSigil } from "./fleet-indicators";
@@ -226,6 +253,66 @@ function MentionChip({
   );
 }
 
+/** A resolved "who" for one of the two attribution rows below -- either an
+ *  agent in this project or a workspace member, never a raw id. */
+type ResolvedActor =
+  | { kind: "agent"; agent: FleetAgent }
+  | { kind: "user"; member: WorkspaceMember; memberIndex: number };
+
+function resolveAgentActor(agentId: string | null | undefined, agents: FleetAgent[]): ResolvedActor | null {
+  const trimmed = String(agentId || "").trim();
+  if (!trimmed) return null;
+  const agent = agents.find((a) => a.agent_id === trimmed);
+  return agent ? { kind: "agent", agent } : null;
+}
+
+function resolveUserActor(userId: string | null | undefined, members: WorkspaceMember[]): ResolvedActor | null {
+  const trimmed = String(userId || "").trim();
+  if (!trimmed) return null;
+  const memberIndex = (members || []).findIndex((m) => m.user_id === trimmed);
+  return memberIndex >= 0 ? { kind: "user", member: members[memberIndex], memberIndex } : null;
+}
+
+/** `created_by` is ONE column that can hold either an agent install id or a
+ *  human user_id (see the file header's ATTRIBUTION note) -- unlike
+ *  completed_by_user_id/completed_by_agent_id below, which already name
+ *  their own kind, this one has to be tried against both lists. Whichever
+ *  resolves first wins; neither resolving (a deleted agent/member, or a
+ *  legacy task with no created_by at all) returns null, and the caller
+ *  omits the row rather than falling back to the raw id. */
+function resolveEitherActor(
+  id: string | null | undefined,
+  agents: FleetAgent[],
+  members: WorkspaceMember[],
+): ResolvedActor | null {
+  return resolveAgentActor(id, agents) || resolveUserActor(id, members);
+}
+
+/** Real identity for an attribution row -- the exact same circular-avatar
+ *  treatment (AgentSigil in a `.fleet-agent-avatar` tile, or MemberAvatar)
+ *  the Assignee row above already uses, so "who created this" and "who is
+ *  this assigned to" read as the same kind of fact. */
+function TaskActorBadge({ actor }: { actor: ResolvedActor }) {
+  if (actor.kind === "agent") {
+    const label = actor.agent.label || "Unnamed agent";
+    return (
+      <span className="fleet-task-detail-actor" title={`Agent: ${label}`}>
+        <span className="fleet-agent-avatar" aria-hidden="true">
+          <AgentSigil seed={actor.agent.agent_id} size={14} />
+        </span>
+        <span className="fleet-task-detail-actor-name">{label}</span>
+      </span>
+    );
+  }
+  const label = actor.member.display_name || actor.member.email;
+  return (
+    <span className="fleet-task-detail-actor" title={label}>
+      <MemberAvatar name={label} role={actor.member.role} size="xs" tintIndex={actor.memberIndex} />
+      <span className="fleet-task-detail-actor-name">{label}</span>
+    </span>
+  );
+}
+
 /** Splits a comment's body at its resolved mentions' stored offsets and
  *  substitutes a MentionChip for each — the ONLY place `comment.mentions`
  *  is read. Out-of-range/overlapping entries (should not happen; the
@@ -349,6 +436,28 @@ export function TaskDetailView({
         : task.assignee_user_id
           ? assigneeOptionValue({ kind: "user", id: task.assignee_user_id })
           : "";
+
+  // Attribution (see the file header's ATTRIBUTION note for why these are
+  // the two honest rows and not a general "last touched by"). Both resolve
+  // to null -- and are simply not rendered -- when the id is empty or
+  // doesn't match anyone in `agents`/`members` today.
+  const createdByActor = useMemo(
+    () => resolveEitherActor(task.created_by, agents, members || []),
+    [task.created_by, agents, members],
+  );
+  // completed_by_* is only ever meaningful while the task IS `done` --
+  // project_tasks_service.update_task clears both columns the instant a
+  // task leaves that status, but this component still receives whatever
+  // stale values happened to be on the row a moment before a refetch lands,
+  // so the status check is re-asserted here rather than trusted from the
+  // columns' mere presence.
+  const completedByActor = useMemo(
+    () =>
+      task.status === "done"
+        ? resolveAgentActor(task.completed_by_agent_id, agents) || resolveUserActor(task.completed_by_user_id, members || [])
+        : null,
+    [task.status, task.completed_by_agent_id, task.completed_by_user_id, agents, members],
+  );
   const comments = useMemo(() => readComments(task), [task]);
 
   // Prev/next (MAN-145 item 4) and the Parent/Sub-tasks reads (item 5) all
@@ -457,182 +566,197 @@ export function TaskDetailView({
 
   return (
     <div className="fleet-task-page fleet-task-detail-page">
+      {/* .fleet-task-page-main is a flex column here (task-detail.css
+          override — see that file's "composer pinned to the bottom" note):
+          .fleet-task-page-scroll is the ONLY thing that scrolls (title,
+          description, sub-tasks, Activity/comments); the composer dock
+          below it is a flex-shrink:0 sibling that always sits at the true
+          bottom of the column, exactly AgentChat's own .fleet-sage-chat /
+          .fleet-sage-chat-list / .fleet-sage-chat-composer split — reused,
+          not reinvented, so there is one "message input pinned to the
+          bottom" pattern in this codebase, not two. */}
       <div className="fleet-task-page-main">
-        <div className="fleet-task-page-body">
-          <div className="fleet-task-detail-topbar">
-            <div className="fleet-task-page-eyebrow">{taskShortId(task.id)}</div>
-            {showTaskNav ? (
-              <div className="fleet-task-detail-nav" aria-label="Task navigation">
-                <span className="fleet-task-detail-nav-count">
-                  {siblingIndex + 1} / {siblingTasks.length}
-                </span>
-                <TaskNavArrow
-                  direction="prev"
-                  target={prevTask}
-                  href={prevTask ? taskDetailHref(prevTask.id) : null}
-                  router={router}
-                />
-                <TaskNavArrow
-                  direction="next"
-                  target={nextTask}
-                  href={nextTask ? taskDetailHref(nextTask.id) : null}
-                  router={router}
-                />
-              </div>
-            ) : null}
-          </div>
-
-          {parentTask ? (
-            <a
-              className="fleet-task-detail-parent-link"
-              href={taskDetailHref(parentTask.id)}
-              data-tab-title={parentTask.title || "Untitled task"}
-              onClick={(event) => {
-                if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
-                event.preventDefault();
-                router.push(taskDetailHref(parentTask.id));
-              }}
-            >
-              <CornerDownRight size={12} strokeWidth={2} />
-              <TaskStatusIcon status={parentTask.status} size={12} />
-              Sub-task of{" "}
-              <span className="fleet-task-detail-parent-link-title">
-                {parentTask.title || "Untitled task"}
-              </span>
-            </a>
-          ) : null}
-
-          {/* h2, not h1: the breadcrumb's current crumb is this page's real
-              <h1> (MAN-145 title-dedup). Rendering the task title as an h1
-              here too gave task pages two visible h1s — the same triplication
-              that pass existed to remove. Visual size is unchanged; only the
-              tag differs. */}
-          <h2 className="fleet-task-page-title" tabIndex={-1} ref={headingRef}>
-            {task.title || "Untitled task"}
-          </h2>
-
-          {task.description ? (
-            <div className="fleet-task-page-desc">
-              {task.description.split(/\n{2,}/).map((para, i) => (
-                <p key={i}>{para}</p>
-              ))}
+        <div className="fleet-task-page-scroll">
+          <div className="fleet-task-page-body">
+            <div className="fleet-task-detail-topbar">
+              <div className="fleet-task-page-eyebrow">{taskShortId(task.id)}</div>
+              {showTaskNav ? (
+                <div className="fleet-task-detail-nav" aria-label="Task navigation">
+                  <span className="fleet-task-detail-nav-count">
+                    {siblingIndex + 1} / {siblingTasks.length}
+                  </span>
+                  <TaskNavArrow
+                    direction="prev"
+                    target={prevTask}
+                    href={prevTask ? taskDetailHref(prevTask.id) : null}
+                    router={router}
+                  />
+                  <TaskNavArrow
+                    direction="next"
+                    target={nextTask}
+                    href={nextTask ? taskDetailHref(nextTask.id) : null}
+                    router={router}
+                  />
+                </div>
+              ) : null}
             </div>
-          ) : (
-            <p className="fleet-task-page-desc fleet-cell-muted">No description.</p>
-          )}
 
-          {subtasks.length > 0 ? (
-            <section className="fleet-task-page-section" aria-label="Sub-tasks">
-              <h2 className="fleet-task-page-section-title">
-                Sub-tasks · {subtasks.filter((t) => t.status === "done").length}/{subtasks.length}
-              </h2>
-              <ul className="fleet-task-detail-subtask-list">
-                {subtasks.map((st) => (
-                  <li key={st.id}>
-                    <a
-                      className="fleet-task-detail-subtask-row"
-                      href={taskDetailHref(st.id)}
-                      data-tab-title={st.title || "Untitled task"}
-                      onClick={(event) => {
-                        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
-                        event.preventDefault();
-                        router.push(taskDetailHref(st.id));
-                      }}
-                    >
-                      <TaskStatusIcon status={st.status} size={13} />
-                      <span className="fleet-task-detail-subtask-title">{st.title || "Untitled task"}</span>
-                      <span className="fleet-task-detail-subtask-id">{taskShortId(st.id)}</span>
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
-
-          <section className="fleet-task-page-section" aria-label="Activity">
-            <h2 className="fleet-task-page-section-title">Activity</h2>
-            {displayComments.length === 0 ? (
-              <div className="fleet-task-page-activity-empty">
-                <MessageSquare size={14} strokeWidth={1.75} />
-                <span>
-                  No comments yet. Post one below — agents working this task can leave
-                  updates here too.
+            {parentTask ? (
+              <a
+                className="fleet-task-detail-parent-link"
+                href={taskDetailHref(parentTask.id)}
+                data-tab-title={parentTask.title || "Untitled task"}
+                onClick={(event) => {
+                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+                  event.preventDefault();
+                  router.push(taskDetailHref(parentTask.id));
+                }}
+              >
+                <CornerDownRight size={12} strokeWidth={2} />
+                <TaskStatusIcon status={parentTask.status} size={12} />
+                Sub-task of{" "}
+                <span className="fleet-task-detail-parent-link-title">
+                  {parentTask.title || "Untitled task"}
                 </span>
+              </a>
+            ) : null}
+
+            {/* h2, not h1: the breadcrumb's current crumb is this page's real
+                <h1> (MAN-145 title-dedup). Rendering the task title as an h1
+                here too gave task pages two visible h1s — the same triplication
+                that pass existed to remove. Visual size is unchanged; only the
+                tag differs. */}
+            <h2 className="fleet-task-page-title" tabIndex={-1} ref={headingRef}>
+              {task.title || "Untitled task"}
+            </h2>
+
+            {task.description ? (
+              <div className="fleet-task-page-desc">
+                {task.description.split(/\n{2,}/).map((para, i) => (
+                  <p key={i}>{para}</p>
+                ))}
               </div>
             ) : (
-              <ul className="fleet-task-page-comments">
-                {displayComments.map((c, i) => (
-                  <li
-                    key={c.id || i}
-                    className={`fleet-task-page-comment${c === pending ? " is-pending" : ""}`}
-                  >
-                    <div className="fleet-task-page-comment-head">
-                      <span className="fleet-task-page-comment-author">
-                        {commentAuthorLabel(c, agents, members)}
-                      </span>
-                      {c.created_at ? (
-                        <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
-                          {timeAgo(c.created_at) || stamp(c.created_at)}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="fleet-task-page-comment-body">{renderCommentBody(c, agents, members)}</div>
-                  </li>
-                ))}
-              </ul>
+              <p className="fleet-task-page-desc fleet-cell-muted">No description.</p>
             )}
 
-            {workspaceId ? (
-              <>
-                <form
-                  className="fleet-task-detail-composer"
-                  onSubmit={(event) => {
+            {subtasks.length > 0 ? (
+              <section className="fleet-task-page-section" aria-label="Sub-tasks">
+                <h2 className="fleet-task-page-section-title">
+                  Sub-tasks · {subtasks.filter((t) => t.status === "done").length}/{subtasks.length}
+                </h2>
+                <ul className="fleet-task-detail-subtask-list">
+                  {subtasks.map((st) => (
+                    <li key={st.id}>
+                      <a
+                        className="fleet-task-detail-subtask-row"
+                        href={taskDetailHref(st.id)}
+                        data-tab-title={st.title || "Untitled task"}
+                        onClick={(event) => {
+                          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+                          event.preventDefault();
+                          router.push(taskDetailHref(st.id));
+                        }}
+                      >
+                        <TaskStatusIcon status={st.status} size={13} />
+                        <span className="fleet-task-detail-subtask-title">{st.title || "Untitled task"}</span>
+                        <span className="fleet-task-detail-subtask-id">{taskShortId(st.id)}</span>
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+
+            <section className="fleet-task-page-section" aria-label="Activity">
+              <h2 className="fleet-task-page-section-title">Activity</h2>
+              {displayComments.length === 0 ? (
+                <div className="fleet-task-page-activity-empty">
+                  <MessageSquare size={14} strokeWidth={1.75} />
+                  <span>
+                    No comments yet. Post one below — agents working this task can leave
+                    updates here too.
+                  </span>
+                </div>
+              ) : (
+                <ul className="fleet-task-page-comments">
+                  {displayComments.map((c, i) => (
+                    <li
+                      key={c.id || i}
+                      className={`fleet-task-page-comment${c === pending ? " is-pending" : ""}`}
+                    >
+                      <div className="fleet-task-page-comment-head">
+                        <span className="fleet-task-page-comment-author">
+                          {commentAuthorLabel(c, agents, members)}
+                        </span>
+                        {c.created_at ? (
+                          <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
+                            {timeAgo(c.created_at) || stamp(c.created_at)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="fleet-task-page-comment-body">{renderCommentBody(c, agents, members)}</div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+        </div>
+
+        {/* Pinned dock — outside .fleet-task-page-scroll on purpose, see the
+            comment above .fleet-task-page-main. Same visibility condition
+            the inline composer always had: no workspaceId, no write route,
+            no composer. */}
+        {workspaceId ? (
+          <div className="fleet-task-detail-composer-dock">
+            <form
+              className="fleet-task-detail-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void submitComment();
+              }}
+            >
+              <textarea
+                ref={composerRef}
+                className="fleet-task-detail-composer-input"
+                placeholder="Leave a comment for whoever picks this up next…"
+                value={draft}
+                onChange={(event) => {
+                  setDraft(event.currentTarget.value);
+                  autoGrow();
+                }}
+                onKeyDown={(event) => {
+                  // Enter sends, Shift+Enter (or any IME composition) makes
+                  // a newline — the same convention AgentChat's composer
+                  // uses, so a comment box and a chat box don't disagree
+                  // about what Enter does elsewhere in this app.
+                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault();
                     void submitComment();
-                  }}
-                >
-                  <textarea
-                    ref={composerRef}
-                    className="fleet-task-detail-composer-input"
-                    placeholder="Leave a comment for whoever picks this up next…"
-                    value={draft}
-                    onChange={(event) => {
-                      setDraft(event.currentTarget.value);
-                      autoGrow();
-                    }}
-                    onKeyDown={(event) => {
-                      // Enter sends, Shift+Enter (or any IME composition) makes
-                      // a newline — the same convention AgentChat's composer
-                      // uses, so a comment box and a chat box don't disagree
-                      // about what Enter does elsewhere in this app.
-                      if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                        event.preventDefault();
-                        void submitComment();
-                      }
-                    }}
-                    rows={1}
-                    maxLength={4000}
-                    disabled={posting}
-                    aria-label="Add a comment"
-                  />
-                  <button
-                    type="submit"
-                    className="fleet-task-detail-composer-send"
-                    disabled={!draft.trim() || posting}
-                    aria-label={posting ? "Posting comment" : "Post comment"}
-                  >
-                    {posting ? (
-                      <Loader2 size={15} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
-                    ) : (
-                      <ArrowUp size={15} strokeWidth={2} />
-                    )}
-                  </button>
-                </form>
-                {commentNotice ? <p className="fleet-task-page-comment-error">{commentNotice}</p> : null}
-              </>
-            ) : null}
-          </section>
-        </div>
+                  }
+                }}
+                rows={1}
+                maxLength={4000}
+                disabled={posting}
+                aria-label="Add a comment"
+              />
+              <button
+                type="submit"
+                className="fleet-task-detail-composer-send"
+                disabled={!draft.trim() || posting}
+                aria-label={posting ? "Posting comment" : "Post comment"}
+              >
+                {posting ? (
+                  <Loader2 size={15} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
+                ) : (
+                  <ArrowUp size={15} strokeWidth={2} />
+                )}
+              </button>
+            </form>
+            {commentNotice ? <p className="fleet-task-page-comment-error">{commentNotice}</p> : null}
+          </div>
+        ) : null}
       </div>
 
       <aside className="fleet-task-page-side" aria-label="Properties">
@@ -795,6 +919,23 @@ export function TaskDetailView({
             </span>
           </div>
 
+          {/* "Created by" — omitted outright, not shown as "Unknown", when
+              task.created_by is empty or doesn't resolve to anyone still in
+              `agents`/`members` (see resolveEitherActor and the file header's
+              ATTRIBUTION note). Real identity only, same avatar+name shape
+              as Assignee above — never the raw id. */}
+          {createdByActor ? (
+            <div className="fleet-panel-row">
+              <span className="fleet-panel-row-label">
+                <span className="fleet-panel-row-icon"><UserPlus size={15} strokeWidth={1.75} /></span>
+                <span>Created by</span>
+              </span>
+              <span className="fleet-task-detail-control">
+                <TaskActorBadge actor={createdByActor} />
+              </span>
+            </div>
+          ) : null}
+
           <div className="fleet-panel-row">
             <span className="fleet-panel-row-label">
               <span className="fleet-panel-row-icon"><Clock3 size={15} strokeWidth={1.75} /></span>
@@ -804,6 +945,28 @@ export function TaskDetailView({
               {task.created_at ? stamp(task.created_at) : "—"}
             </span>
           </div>
+
+          {/* "Completed by" — the one honest actor this page can attach to a
+              recent change (see the file header's ATTRIBUTION note for why
+              this is not a general "last touched by"). Shown ONLY while the
+              task is currently `done`; disappears the instant it reopens,
+              matching the backend's own clear-on-reopen behavior exactly —
+              never a stale "completed by X" left on a task that isn't
+              complete right now. */}
+          {completedByActor ? (
+            <div className="fleet-panel-row">
+              <span
+                className="fleet-panel-row-label"
+                title={task.completed_at ? `Completed ${stamp(task.completed_at)}` : "Completed"}
+              >
+                <span className="fleet-panel-row-icon"><CheckCircle2 size={15} strokeWidth={1.75} /></span>
+                <span>Completed by</span>
+              </span>
+              <span className="fleet-task-detail-control">
+                <TaskActorBadge actor={completedByActor} />
+              </span>
+            </div>
+          ) : null}
 
           <div className="fleet-panel-row">
             <span

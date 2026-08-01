@@ -183,12 +183,18 @@ a.fleet-task-detail-nav-btn:hover {
    send) so the app has ONE composer language, not two. See
    TaskDetailView.tsx for why there is no attachment control here: there is
    no upload endpoint behind a task comment today, and a paperclip that
-   fails on click is worse than no paperclip (CLAUDE.md: no dead controls). */
+   fails on click is worse than no paperclip (CLAUDE.md: no dead controls).
+
+   `margin-top: 0` — this card used to sit inline right after the comment
+   list, where a 16px gap separated it from whatever was above. It now
+   always lives inside .fleet-task-detail-composer-dock (section 6 below),
+   which supplies its own top padding/border instead; keeping BOTH would
+   double the gap between the dock's divider and the card. */
 .fleet-task-detail-composer {
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 0;
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
@@ -241,4 +247,103 @@ a.fleet-task-detail-nav-btn:hover {
   background: var(--bg-inset);
   color: var(--text-muted);
   cursor: default;
+}
+
+/* ── 6. Composer pinned to the bottom of the panel — founder's complaint:
+   on a short task (little description, zero comments) the composer sat
+   wherever the natural document flow happened to put it, which on a short
+   page meant near the top with a large dead gap below it, unlike a real
+   chat composer. Fixed by giving .fleet-task-page-main the exact same
+   flex-column shape AgentChat's own chat surface already uses
+   (.fleet-sage-chat / .fleet-sage-chat-list / .fleet-sage-chat-composer,
+   fleet-theme.css ~7057-7148) — reused, not reinvented, so this codebase
+   keeps ONE "message input pinned to the bottom" pattern instead of two:
+     .fleet-task-page-main   → flex column, own scroll suppressed
+       .fleet-task-page-scroll → flex:1, min-height:0, THE scroller
+         .fleet-task-page-body → unchanged (title/description/sub-tasks/Activity)
+       .fleet-task-detail-composer-dock → flex-shrink:0, always at the true
+         bottom of the column, whether the content above is one line or
+         fifty comments.
+   `overflow: hidden` on .fleet-task-page-main matches the same defensive
+   pattern .fleet-content--chat already uses for the identical reason
+   (fleet-theme.css ~1829): without it, a sizing quirk in the flex chain
+   could let the OUTER box scroll instead of the inner one, and the
+   composer would stop being reliably pinned. Two selector classes
+   (.fleet-task-page.fleet-task-detail-page …) beat fleet-theme.css's own
+   single-class .fleet-task-page-main rule (flex:1; min-width:0;
+   overflow-y:auto) regardless of source order — same override technique
+   section 1 above already uses. */
+.fleet-task-page.fleet-task-detail-page .fleet-task-page-main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.fleet-task-page.fleet-task-detail-page .fleet-task-page-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The dock itself: same reading-column width/left-right rhythm as
+   .fleet-task-page-body (720px cap, 40px side gutters) so the composer
+   lines up directly under the text above it rather than stretching to the
+   full width of the main column. The top border is a FUNCTIONAL cue, not
+   the decorative divider section 1 above removed between the reading
+   column and Properties — this one tells the reader "everything above this
+   line scrolls, this box does not," which matters once the feed is tall
+   enough to be scrolled and content is cut off just above the composer. */
+.fleet-task-detail-composer-dock {
+  flex-shrink: 0;
+  max-width: 720px;
+  padding: 12px 40px 28px;
+  border-top: 1px solid var(--border);
+}
+.fleet-task-detail-composer-dock .fleet-task-detail-composer {
+  margin: 0;
+}
+
+@media (max-width: 1000px) {
+  /* Below the page's own two-column breakpoint (section 1's media query),
+     .fleet-task-page-main already stops being the scroller — the OUTER
+     page takes over and Properties stacks under Activity (fleet-theme.css
+     ~8601-8603: `.fleet-task-page-main { overflow: visible; flex: none; }`).
+     A pinned-to-viewport composer would fight that existing, deliberate
+     mobile layout rather than fit it, so the flex-column/independent-scroll
+     shape above is switched off here and the composer returns to sitting
+     in normal document flow at the end of the page, same as every other
+     section on narrow viewports. */
+  .fleet-task-page.fleet-task-detail-page .fleet-task-page-main {
+    display: block;
+    overflow: visible;
+  }
+  .fleet-task-page.fleet-task-detail-page .fleet-task-page-scroll {
+    overflow: visible;
+    min-height: 0;
+  }
+  .fleet-task-detail-composer-dock {
+    max-width: none;
+    padding: 12px 20px 24px;
+  }
+}
+
+/* ── 7. Attribution — "who created this" / "who completed it" (founder's
+   Linear-parity gap: this panel showed WHEN but never WHO). Read-only, so
+   this reuses .fleet-task-detail-control's existing layout (avatar + value,
+   right-aligned in the row, fleet-theme.css ~8615) rather than a new
+   wrapper class; only the avatar+name pairing itself is new. See
+   TaskDetailView.tsx's file header ATTRIBUTION note for why there are
+   exactly two rows here and not a general "last touched by" row. */
+.fleet-task-detail-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.fleet-task-detail-actor-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
 }

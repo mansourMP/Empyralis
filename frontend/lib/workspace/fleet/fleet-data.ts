@@ -1013,7 +1013,33 @@ export type FleetTask = {
    *  inspecting the two id fields directly when you just need to know
    *  "agent, human, or nobody". */
   assignee_type?: "agent" | "user" | null;
+  /** Who filed this task. Polymorphic like the assignee columns above, but
+   *  a SINGLE id rather than a {agent,user} pair -- routes_fleet.fleet_
+   *  create_task always writes the authenticated human's user_id,
+   *  skills_service's project_task__create tool writes the calling agent's
+   *  install id, so this has to be resolved against BOTH the agent and
+   *  member lists on read (same two-list lookup commentAuthorLabel below
+   *  already does for a comment's author_id) -- there is no separate
+   *  created_by_type column to disambiguate up front. */
   created_by?: string | null;
+  /** Review attribution (migrations/add_task_completion_attribution.sql) --
+   *  who moved this task INTO `done`, not a general last-editor. Stamped
+   *  once, on the actual not-done -> done transition
+   *  (project_tasks_service.update_task's own docstring), and CLEARED the
+   *  moment the task leaves `done` again -- so a currently-done task's
+   *  completed_by_* always names whoever most recently closed THIS
+   *  instance of "done", never a stale prior completion. At most one of
+   *  the two id columns is ever set (project_tasks_completed_by_single_
+   *  actor_check). Both null on a task that has never gone through this
+   *  machinery, including every row from before the migration -- no
+   *  backfill, so absence here just means "unknown," never "nobody." */
+  completed_by_user_id?: string | null;
+  completed_by_agent_id?: string | null;
+  /** Pairs with the two columns above -- when this task was stamped `done`,
+   *  distinct from `updated_at` (which keeps moving on any later edit even
+   *  after completion, e.g. a re-assign or a label change) and from
+   *  `created_at`. Null under the exact same conditions as completed_by_*. */
+  completed_at?: string | null;
   due_at?: string | null;
   plan?: unknown;
   metadata?: Record<string, unknown>;
@@ -1024,7 +1050,9 @@ export type FleetTask = {
   // reaching `done`). Today this column only ever moves on assign_task or
   // update_task, and neither op is exposed to more than one field at a
   // time, so treat it as "when the current status/assignee last changed" —
-  // not a full history.
+  // not a full history. There is still no *actor* recorded for a general
+  // update (see completed_by_* above for the one write path that DOES
+  // stamp an actor) -- this timestamp alone cannot answer "who."
   updated_at?: string | null;
   /** Rolled up by project_tasks_service's LATERAL join; always an array on a
    *  server that has migrations/add_task_labels.sql, absent on one that
