@@ -401,6 +401,101 @@ class AnnouncesWithoutAnsweringTests(unittest.TestCase):
         self.assertTrue(result["consistent"])
 
 
+class EvadedInProductionTests(unittest.TestCase):
+    """Real evasion, caught live within minutes of the first version of this
+    direction shipping: "I'll attempt the command now and report exactly
+    what the tool returns." slipped past _BARE_INTENT_RE because its object
+    phrase (10 words: "the command now and report exactly what the tool
+    returns") exceeds the 8-word structural cap. Widening the cap is
+    whack-a-mole -- the next evasion just pads further -- so two independent,
+    non-regex-widening fixes (module docstring, fixes 4a/4b): a report verb
+    no longer counts as "content" when it's the OBJECT of a future-tense
+    promise to report it (4a), and a trace-grounded backstop fires on ANY
+    ungrounded promise to communicate a result after an all-failed attempt,
+    regardless of exact phrasing (4b)."""
+
+    _FAILED_TRACE = [{"name": "hardware__action", "status": "failed", "error": (
+        "full_access Agent Computer execution requires the current Full "
+        "Access setup warning acknowledgement."
+    )}]
+
+    def test_the_exact_evasion_now_fires(self) -> None:
+        reply = "I'll attempt the command now and report exactly what the tool returns."
+        result = guard.check_tool_reply_consistency(reply, self._FAILED_TRACE)
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "announces_without_answering")
+
+    def test_report_promise_variants_fire(self) -> None:
+        for reply in [
+            "I'll run that again and tell you exactly what it says.",
+            "Let me try once more and share the output with you.",
+        ]:
+            with self.subTest(reply=reply):
+                result = guard.check_tool_reply_consistency(reply, self._FAILED_TRACE)
+                self.assertFalse(result["consistent"], f"should have fired on: {reply!r}")
+                self.assertEqual(result["mismatch_type"], "announces_without_answering")
+
+    def test_shorter_variant_within_the_word_cap_also_fires(self) -> None:
+        """Fix 4a specifically: a report verb inside the SAME future-tense
+        clause it's promised in must never count as substance, even when the
+        reply is short enough to match the structural regex outright."""
+        result = guard.check_tool_reply_consistency(
+            "I'll check and report what it returns.", self._FAILED_TRACE
+        )
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "announces_without_answering")
+
+    def test_honest_failure_report_that_quotes_the_real_error_does_NOT_fire(self) -> None:
+        """The trap the coordinator flagged by name: this reply carries the
+        failure's actual content (the tool's real error text, verbatim) --
+        it must never be treated as an ungrounded promise just because a
+        failed-only trace is present."""
+        reply = (
+            "The command failed: full_access Agent Computer execution "
+            "requires the current Full Access setup warning acknowledgement."
+        )
+        result = guard.check_tool_reply_consistency(reply, self._FAILED_TRACE)
+        self.assertTrue(result["consistent"])
+
+    def test_successful_tool_turn_whose_reply_quotes_the_output_does_NOT_fire(self) -> None:
+        trace = [{"name": "docker__status", "status": "completed", "output": "4 containers running"}]
+        reply = "I'll check that for you — 4 containers are currently running."
+        result = guard.check_tool_reply_consistency(reply, trace)
+        self.assertTrue(result["consistent"])
+
+    def test_unrelated_honest_reply_next_to_an_unrelated_failed_tool_does_NOT_fire(self) -> None:
+        """The precondition that keeps 4b safe: the reply must itself look
+        like a promise to report something before the trace-grounding check
+        ever runs. Re-pins the pre-existing
+        test_ordinary_honest_replies_about_unrelated_topics_do_not_false_
+        positive cases specifically against the new backstop."""
+        for reply in [
+            "The capital of France is Paris.",
+            "I can help you with that once your computer is paired again.",
+            "Sorry, that didn't work — want me to try a different action?",
+            (
+                "I wasn't able to run that — your Agent Computer gateway is "
+                "offline right now (it doesn't have this capability "
+                "registered), so I have no real output to show you."
+            ),
+        ]:
+            with self.subTest(reply=reply):
+                result = guard.check_tool_reply_consistency(reply, self._FAILED_TRACE)
+                self.assertTrue(result["consistent"], f"false positive on: {reply!r}")
+
+    def test_ungrounded_report_promise_helper_requires_a_failed_only_trace(self) -> None:
+        # Precondition unit-level: no trace at all -> never fires via 4b.
+        self.assertFalse(guard._is_ungrounded_report_promise(
+            "I'll run that again and tell you exactly what it says.", []
+        ))
+        # A trace with a real success -> never fires via 4b either, even
+        # though the promise-shaped text alone would otherwise match.
+        success_trace = [{"name": "web_search", "status": "completed", "output": "3 results found"}]
+        self.assertFalse(guard._is_ungrounded_report_promise(
+            "I'll run that again and tell you exactly what it says.", success_trace
+        ))
+
+
 class AnnouncesWithoutAnsweringDecideAndCorrectionTests(unittest.TestCase):
     """_decide's routing and the correction/fallback text builders for
     announces_without_answering -- like denies_success and

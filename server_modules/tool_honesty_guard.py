@@ -55,6 +55,37 @@ discipline above (the fourth is the exception — see below):
      checked LAST in check_tool_reply_consistency, only once none of the
      three trace-anchored directions above already matched, so a reply
      already caught by a more specific direction keeps that classification.
+
+     Evaded in production within minutes of shipping (same day): "I'll
+     attempt the command now and report exactly what the tool returns." —
+     _BARE_INTENT_RE's object-phrase capture is bounded at 8 words specifically
+     so a reply with real content past that point can never match (see that
+     pattern's own comment); this evasion just padded the announcement past
+     the cap with MORE announcement, not content, and slipped through on
+     word count alone. Widening the cap is whack-a-mole (the next evasion
+     just pads further), so two independent fixes instead, neither of which
+     depends on the object-phrase length:
+       4a. _BARE_INTENT_SUBSTANCE_RE no longer credits a report/reveal verb
+           as "content" when it is the OBJECT of a future-tense promise to
+           report ("report/tell/share/show ... what/that/how ...") —
+           _FUTURE_GOVERNED_REPORT_CLAUSE_RE excludes everything from that
+           clause onward before the substance scan runs, so shorter variants
+           of the same evasion that DO fit the 8-word cap ("I'll check and
+           report what it returns.") can no longer hide behind "returns"
+           reading as a real status word.
+       4b. _is_ungrounded_report_promise — phrasing-independent backstop,
+           gated on the TRACE, not the regex: this turn attempted at least
+           one tool call, none of them succeeded, the reply reads as a
+           forward-looking promise to communicate a result
+           (_FUTURE_REPORT_PROMISE_RE), and nothing in the reply is actually
+           grounded in what the trace shows (_reply_grounded_in_trace — the
+           tool's name, or a meaningful chunk of its real error/output text).
+           The promise-pattern check is still required, not optional — text
+           pattern is a corroborating signal, not the sole gate — precisely
+           so an unrelated, honest reply sitting next to an unrelated failed
+           tool call (e.g. "The capital of France is Paris.") never reaches
+           the groundedness check at all: it never looks like a promise to
+           report anything in the first place.
 """
 
 from __future__ import annotations
@@ -217,12 +248,35 @@ _BARE_INTENT_SUBSTANCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Fix 4a (module docstring, 2026-08-02 evasion): a report/reveal verb from
+# _BARE_INTENT_SUBSTANCE_RE only means something ALREADY happened when it is
+# NOT the object of a future-tense promise to report it. "I'll check and
+# report what it returns." has "returns" in it, but "returns" here describes
+# what WILL be reported, not a real status — grammatically it's the object of
+# "report", governed by the future "I'll", not an independent assertion. This
+# strips everything from the first "report/tell/share/show/relay ...
+# what/that/how" clause onward before the substance scan runs, so a
+# genuine status report ("it IS running") elsewhere in the same reply still
+# counts, but the promised-content clause itself never can.
+_FUTURE_GOVERNED_REPORT_CLAUSE_RE = re.compile(
+    r"\b(?:report|tell(?:\s+you)?|share|show(?:\s+you)?|let\s+you\s+know|relay)\b"
+    r"(?:\s+\w+){0,4}?"
+    r"\s+(?:what|that|whether|how)\b",
+    re.IGNORECASE,
+)
+
 # A bare-intent reply, by construction (opener + a short object phrase),
 # cannot be long — this both saves the regex from scanning huge replies for
 # no reason and is itself a legitimate corroborating signal per the module
 # docstring's precision discipline (length alone is never sufficient, but it
 # narrows the search before the structural check runs).
 _BARE_INTENT_MAX_LEN = 240
+
+
+def _bare_intent_has_substance(text: str) -> bool:
+    match = _FUTURE_GOVERNED_REPORT_CLAUSE_RE.search(text)
+    scoped_text = text[: match.start()] if match else text
+    return bool(_BARE_INTENT_SUBSTANCE_RE.search(scoped_text))
 
 
 def _is_bare_intent_reply(reply_text: str) -> bool:
@@ -234,7 +288,74 @@ def _is_bare_intent_reply(reply_text: str) -> bool:
         return False
     if not _BARE_INTENT_RE.match(text):
         return False
-    return not _BARE_INTENT_SUBSTANCE_RE.search(text)
+    return not _bare_intent_has_substance(text)
+
+
+# Fix 4b (module docstring): the trace-grounded, phrasing-independent
+# backstop. _FUTURE_REPORT_PROMISE_RE is deliberately looser than
+# _BARE_INTENT_RE — no end-of-string anchor, no 8-word cap — because it is
+# NEVER the sole gate (module docstring's HIGH PRECISION section): it only
+# identifies "this reply LOOKS like a promise to communicate a result later,"
+# and _is_ungrounded_report_promise additionally requires the trace to prove
+# nothing succeeded AND the reply to carry nothing the trace can corroborate
+# before it fires. A modal, then up to 10 filler words, then a
+# reporting-shaped verb — wide enough to catch "I'll attempt the command now
+# and report exactly what the tool returns." and "Let me try once more and
+# share the output with you." without needing to hand-list every padding
+# phrase an evasion might insert.
+_FUTURE_REPORT_PROMISE_RE = re.compile(
+    r"\b(?:i'?ll|i will|i'?m going to|i am going to|going to|about to|"
+    r"let me|let'?s)\b"
+    r"(?:\s+\w+){0,10}?"
+    r"\s+(?:report|tell(?:\s+you)?|let\s+you\s+know|share|show\s+you|relay)\b",
+    re.IGNORECASE,
+)
+
+
+def _reply_grounded_in_trace(reply: str, trace_entries: list[ToolTraceEntry]) -> bool:
+    """True if the reply actually carries something the trace can
+    corroborate — the tool's own name, or a meaningful chunk of its real
+    error/output text — as opposed to only promising to produce it. Word-
+    overlap based, not exact-substring, so a reasonable paraphrase of a real
+    failure still counts as grounded ("your Agent Computer gateway is
+    offline" vs. a raw "gateway_capability_missing" reason both share
+    "gateway"); the >=3-shared-significant-words bar is deliberately
+    generous toward "this is a real answer," matching the module's HIGH
+    PRECISION discipline — under-firing here is far safer than over-firing
+    on an honest failure report that merely doesn't quote the trace
+    verbatim."""
+    reply_lower = str(reply or "").lower()
+    reply_words = set(re.findall(r"[a-z0-9_]{4,}", reply_lower))
+    for entry in trace_entries:
+        name = str(entry.get("name") or "").strip().lower()
+        if name and name in reply_lower:
+            return True
+        status = str(entry.get("status") or "").strip().lower()
+        detail = (_failed_tool_detail(entry) if status == "failed" else str(entry.get("output") or "")).lower()
+        detail_words = set(re.findall(r"[a-z0-9_]{4,}", detail))
+        if len(reply_words & detail_words) >= 3:
+            return True
+    return False
+
+
+def _is_ungrounded_report_promise(reply_text: str, tool_trace: Optional[list[ToolTraceEntry]]) -> bool:
+    """Phrasing-independent half of direction #4 (module docstring, fix 4b).
+    Requires ALL THREE: (a) this turn attempted at least one tool call and
+    none of them succeeded, (b) the reply reads as a forward-looking promise
+    to communicate a result (_FUTURE_REPORT_PROMISE_RE), and (c) nothing in
+    the reply is grounded in what the trace actually shows. (b) is what
+    keeps an unrelated, honest reply next to an unrelated failed tool call
+    safe — see test_ordinary_honest_replies_about_unrelated_topics_do_not_
+    false_positive — since "The capital of France is Paris." never reads as
+    a promise to report anything, it never reaches the groundedness check at
+    all."""
+    entries = _all_trace_entries(tool_trace)
+    if not entries or _successful_tools(tool_trace):
+        return False
+    text = str(reply_text or "").strip()
+    if not text or not _FUTURE_REPORT_PROMISE_RE.search(text):
+        return False
+    return not _reply_grounded_in_trace(text, entries)
 
 
 def _matches_any(text: str, patterns: list[str]) -> bool:
@@ -312,8 +433,14 @@ def check_tool_reply_consistency(
     # them (e.g. "I'll check your calendar for open slots." with an empty
     # trace, already claims_without_run) keeps that classification; this is
     # strictly a catch-all for bare announcements none of the three above
-    # happen to match.
-    if _is_bare_intent_reply(reply):
+    # happen to match. Two independent sub-checks, either one is sufficient:
+    # _is_bare_intent_reply (the structural/phrasing check, fix 4a applied)
+    # and _is_ungrounded_report_promise (the trace-grounded backstop, fix 4b)
+    # — the latter exists specifically because the former's bounded object-
+    # phrase capture can be outrun by padding the announcement with more
+    # words, and a trace fact ("nothing this turn actually succeeded, and
+    # nothing in the reply matches what did happen") can't be evaded that way.
+    if _is_bare_intent_reply(reply) or _is_ungrounded_report_promise(reply, tool_trace):
         return {"consistent": False, "mismatch_type": "announces_without_answering", "tools": _all_trace_entries(tool_trace)}
     return {"consistent": True, "mismatch_type": None, "tools": successful}
 
