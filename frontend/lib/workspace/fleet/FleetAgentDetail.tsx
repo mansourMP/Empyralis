@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Clock,
   Cpu,
+  History,
   Inbox,
   LayoutGrid,
   Loader2,
@@ -24,6 +25,7 @@ import {
   Settings,
   Sparkles,
   Square,
+  SquarePen,
   Trash2,
   Wand2,
   Wrench,
@@ -36,6 +38,14 @@ import { HardwareTab } from "./tabs/HardwareTab";
 import { MemoryTab } from "./tabs/MemoryTab";
 import { AgentChat } from "./AgentChat";
 import { GroupedRail, type GroupedRailGroup } from "./GroupedRail";
+import { SageHistoryPanel } from "./SageConsolePanels";
+import {
+  defaultAgentThreadId,
+  newAgentThreadId,
+  persistAgentThreadId,
+  readPersistedAgentThreadId,
+  useAgentConversations,
+} from "./fleet-agent-conversations";
 
 import {
   resumeFleetAgent,
@@ -736,7 +746,7 @@ export function FleetAgentDetail({
           {activeTab === "memory" && (
             <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
           )}
-          {activeTab === "chat" && <ChatTab workspaceId={workspaceId} agentId={agentId} agent={agent} />}
+          {activeTab === "chat" && <ChatTab key={agentId} workspaceId={workspaceId} agentId={agentId} agent={agent} />}
         </div>
         {propertiesPanel}
         {activeTab === "chat" && (
@@ -1502,23 +1512,154 @@ function ScheduleSection({ workspaceId, agentId }: { workspaceId: string; agentI
 // ── Chat ────────────────────────────────────────────────────────────────────
 
 // Runs as this specific agent — its own persona, model binding, and memory
-// scope — over a per-agent thread ("thread_agent_{agentId}"), the same
-// convention channel-bound turns use. See AgentChat's context_hints.metadata.
-// active_agent_install_id, read by specialist_runtime_context.resolve_
-// specialist_runtime_context.
+// scope — over a per-agent thread, the same convention channel-bound turns
+// use. See AgentChat's context_hints.metadata.active_agent_install_id, read
+// by specialist_runtime_context.resolve_specialist_runtime_context.
+//
+// THREAD IS STATE NOW, NOT A CONSTANT
+// ------------------------------------
+// Used to be the single permanent id `thread_agent_{agentId}`
+// (defaultAgentThreadId) forever — one conversation per agent, with no way
+// to leave a bad one behind. A fabricated turn recorded on it stayed in
+// every future turn's history as established fact, with no escape. Now the
+// active thread is component state: New chat mints a genuinely different id
+// (newAgentThreadId — never the same id with history hidden), History lists
+// every past conversation with THIS agent and reopens one, and the choice is
+// persisted per (workspace, agent) so a reload resumes it instead of
+// reverting to the legacy thread. An agent that has never used any of this
+// keeps behaving exactly as before: same default id, same instant render,
+// no New chat/History controls (nothing to switch between yet).
+//
+// Mirrors SageLauncher.tsx's own New chat/History pair for the Ask AI
+// console — same gating (a control that cannot do anything observable is
+// not rendered), same popover idiom, same underlying GET /api/threads —
+// just scoped to one specialist agent instead of the workspace console.
 function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
   const label = agent?.label || "this agent";
+  const pathname = usePathname();
+  // Same "swap the last path segment" tabHref uses one level up — this
+  // component doesn't have that closure, but the route shape is identical.
+  const modelHref = pathname.replace(/\/[^/]+$/, "/model");
+  const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(agent?.model_config));
+
+  const [threadId, setThreadId] = useState<string>(
+    () => readPersistedAgentThreadId(workspaceId, agentId) || defaultAgentThreadId(agentId),
+  );
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const historyRef = useRef<HTMLDivElement | null>(null);
+
+  const { conversations, refresh } = useAgentConversations(workspaceId, agentId, true);
+
+  useEffect(() => {
+    persistAgentThreadId(workspaceId, agentId, threadId);
+  }, [workspaceId, agentId, threadId]);
+
+  // FleetToolbar's dismissal contract, verbatim: outside pointerdown, or Esc
+  // (same as TaskViewOptions.tsx and AgentModelPickerRow above).
+  useEffect(() => {
+    if (!historyOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (historyRef.current?.contains(e.target as Node)) return;
+      setHistoryOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setHistoryOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [historyOpen]);
+
+  const startNewConversation = useCallback(() => {
+    setThreadId(newAgentThreadId(agentId));
+    setHistoryOpen(false);
+  }, [agentId]);
+
+  const openConversation = useCallback((id: string) => {
+    setThreadId(id);
+    setHistoryOpen(false);
+  }, []);
+
+  // No dead controls: New chat only once the open conversation actually has
+  // a turn recorded (starting a new chat over one that's already empty would
+  // do nothing observable); History only once there's another conversation
+  // with this agent to switch back to.
+  const currentHasContent = conversations.some((c) => c.id === threadId);
+  const hasOtherConversations = conversations.some((c) => c.id !== threadId);
+
   return (
     <div className="fleet-agent-chat-panel">
+      <div className="fleet-agent-chat-toolbar">
+        {/* Read-only: this agent's model lives on the agent record, not per
+            conversation — no backend override to switch here without
+            faking one. Same resolvedModel string the Properties panel's
+            Model row already shows, so this can't drift from it; the link
+            opens the same real editor that row does. */}
+        <Link
+          href={modelHref}
+          className="fleet-agent-chat-model-chip"
+          title={`${label}'s model — change it on the Model tab`}
+        >
+          <Sparkles size={12} strokeWidth={1.75} />
+          <span>{resolvedModel}</span>
+        </Link>
+        <div className="fleet-sage-console-actions">
+          {currentHasContent && (
+            <button
+              type="button"
+              className="fleet-sage-console-action"
+              onClick={startNewConversation}
+              aria-label="New chat"
+              title="New chat"
+            >
+              <SquarePen size={15} strokeWidth={1.75} />
+            </button>
+          )}
+          {hasOtherConversations && (
+            <div className="fleet-view-options" ref={historyRef}>
+              <button
+                type="button"
+                className={`fleet-sage-console-action${historyOpen ? " is-active" : ""}`}
+                onClick={() => setHistoryOpen((v) => !v)}
+                aria-haspopup="dialog"
+                aria-expanded={historyOpen}
+                aria-label="Conversation history"
+                title="History"
+              >
+                <History size={15} strokeWidth={1.75} />
+              </button>
+              {historyOpen && (
+                <div
+                  className="fleet-toolbar-popover fleet-agent-chat-history-popover"
+                  role="dialog"
+                  aria-label="Conversation history"
+                >
+                  <div className="fleet-toolbar-popover-label">Conversations with {label}</div>
+                  <SageHistoryPanel
+                    conversations={conversations}
+                    activeThreadId={threadId}
+                    onOpen={openConversation}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
       <AgentChat
+        key={threadId}
         workspaceId={workspaceId}
-        threadId={`thread_agent_${agentId}`}
+        threadId={threadId}
         agentInstallId={agentId}
         emptyIcon={MessageSquare}
         emptyTitle={`Message ${label}`}
         emptyBody={`Your owner test chat with ${label} — full access, not what a real customer would see.`}
         placeholder={`Message ${label}…`}
         sourceTag="fleet_agent_chat"
+        onTurnComplete={refresh}
       />
     </div>
   );

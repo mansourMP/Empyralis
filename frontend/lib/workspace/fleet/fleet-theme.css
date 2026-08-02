@@ -7092,11 +7092,73 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 /* Agent-detail's Chat tab: same component as Sage's own page, but its parent
    here is .fleet-detail-body — a plain overflow:auto block, not a flex
    container — so flex:1 above has nothing to fill. height:100% (same fix
-   .fleet-work-split uses) gives it a definite height to hand down. */
+   .fleet-work-split uses) gives it a definite height to hand down.
+   Column, not row: the toolbar (New chat/History/model chip) is a second,
+   fixed-height child now, stacked above .fleet-sage-chat's own flex:1 —
+   that inner component still owns pinning its composer to the bottom. */
 .fleet-agent-chat-panel {
   display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+/* ── Chat tab toolbar (New chat / History / model chip) ───────────────────
+   APPENDED BLOCK. Read-only model chip on the left (links to the real
+   editor on the Model tab — no per-conversation override exists to fake
+   here), New chat + History on the right, reusing SageLauncher's own
+   .fleet-sage-console-action geometry and .fleet-toolbar-popover box so
+   this doesn't invent a second popover idiom. Neutral throughout — the
+   composer's Send button below is this view's one accent surface. */
+.fleet-agent-chat-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5) 0;
+}
+.fleet-agent-chat-model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 60%;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  text-decoration: none;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.fleet-agent-chat-model-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-agent-chat-model-chip:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--bg-card-hover);
+}
+/* Wider than the generic .fleet-toolbar-popover default (220px) — a
+   conversation title needs more room than a menu option does — and
+   height-capped since a busy agent can have many conversations; the list
+   scrolls internally rather than growing the popover past the viewport. */
+.fleet-agent-chat-history-popover {
+  width: 280px;
+  max-height: 320px;
+  padding: 6px;
+  overflow-y: auto;
+}
+.fleet-agent-chat-history-popover .fleet-sage-panel {
+  overflow-y: visible;
+}
+.fleet-agent-chat-history-popover .fleet-toolbar-popover-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* Sits in the breadcrumb row now (see SageChat.tsx's useBreadcrumbBadge), not
    a standalone header block — no margin-left override needed here since the
