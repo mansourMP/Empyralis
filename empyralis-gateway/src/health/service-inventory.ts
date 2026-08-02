@@ -85,6 +85,19 @@ export interface PassiveInventoryCollectorOptions {
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 1_500;
+// `docker info` talks to a daemon inside a VM on macOS/Windows, so it is far
+// slower than the CLI-presence checks this file's other probes make — and
+// every probe in collectPassiveServiceInventory() is fired concurrently, so
+// it pays that cost under contention. Measured on a MacBook Air with Docker
+// Desktop running: ~0.5s idle, but 1.9s-4.5s across a 7-way parallel burst
+// matching the real probe fan-out. At DEFAULT_COMMAND_TIMEOUT_MS it
+// therefore timed out EVERY time, and because this probe's result is what
+// feeds setShellSandboxDockerReady() below, a healthy Docker read as
+// "offline" and the gateway silently stopped advertising shell.execute and
+// filesystem.read_write. The owner saw only "Agent Computer is not
+// connected" and had no way to reach the real cause. A capability gate is
+// not latency-sensitive; being slow here is fine, being wrong is not.
+const DOCKER_COMMAND_TIMEOUT_MS = 10_000;
 const PASSIVE_INVENTORY_CACHE_TTL_MS = 60_000;
 const OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags";
 const MACOS_SYSTEM_PROFILER = "/usr/sbin/system_profiler";
@@ -396,7 +409,7 @@ async function probeDocker(
       summary: "Docker CLI is not installed on this target.",
     }, checkedAt);
   }
-  const result = await runCommand(command, ["info", "--format", "{{.ServerVersion}}"], DEFAULT_COMMAND_TIMEOUT_MS);
+  const result = await runCommand(command, ["info", "--format", "{{.ServerVersion}}"], DOCKER_COMMAND_TIMEOUT_MS);
   const ready = result.exitCode === 0;
   return makeItem({
     id: "docker",
