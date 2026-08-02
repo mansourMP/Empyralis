@@ -29,7 +29,10 @@ Read + chat (always live):
   - ``empyralis_list_agents`` → fleet_list_agents (+ project, channel, connector status)
   - ``empyralis_get_agent_activity`` → fleet_get_agent_activity
   - ``empyralis_get_agent_conversations`` → deployed_agent_service.list_deployed_agent_conversations
-  - ``empyralis_chat`` → full turn through normal chat path (triage, ledger, AI)
+  - ``empyralis_chat`` → sage_turn_adapter.execute_sage_turn, the same
+    chokepoint every real channel (web, Telegram, Discord, WhatsApp...)
+    routes a turn through -- full turn, named agent, real reply or a real
+    error (MAN-205)
 
 Tasks (always live — see "Write-gate decision" below):
   - ``empyralis_list_my_tasks`` → project_tasks_service.list_my_tasks (assigned to
@@ -167,6 +170,16 @@ _MCP_OAUTH_ENABLED = os.getenv("EMPYRALIS_MCP_OAUTH_ENABLED", "").strip().lower(
    # than the existing bearer-key path, so it stays off until explicitly enabled
    # (and reviewed) per deployment, even though the legacy bearer-key path
    # always works regardless of this flag.
+
+try:
+    _CHAT_TURN_TIMEOUT_SECONDS = float(os.getenv("EMPYRALIS_MCP_CHAT_TIMEOUT_SECONDS", "") or 240)
+except (TypeError, ValueError):
+    _CHAT_TURN_TIMEOUT_SECONDS = 240.0
+# empyralis_chat runs a full agent turn synchronously (tool calls, hardware
+# dispatch) -- production p90 is ~120s. Bounded well above that so the tool
+# does not hang forever with no diagnosis on a slow turn, without cutting off
+# a merely-slow-but-healthy one. nginx's own timeout for /mcp is 86400s (see
+# deploy/nginx-empyralis.conf), so this in-process bound is the real ceiling.
 
 # Set by _build_mcp_server() when EMPYRALIS_MCP_OAUTH_ENABLED is on and a public
 # base URL is configured. None means OAuth is not wired in — mount_empyralist_mcp
@@ -537,25 +550,150 @@ if empyralist_mcp is not None:
     # rather than advertised-but-crashing.
 
     @empyralist_mcp.tool(
-        title="Chat with Sage",
+        title="Chat with an Agent",
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
     )
     async def empyralis_chat(message: str, agent_id: str = "", ctx: Context = None) -> Dict[str, Any]:
-        """Send a message through the full Empyralis turn (triage, ledger, AI)."""
-        r = await _resolve(ctx); ws = _ws(r)
-        from server_modules.direct_chat_runtime_exports import build_operator_namespace
-        from server_modules.direct_chat_operator_binding_service import build_direct_chat_module_export_map_from_namespace
+        """Send a message to a platform agent and get its real reply.
 
-        namespace = build_operator_namespace(workspace_id=ws)
-        export_map = build_direct_chat_module_export_map_from_namespace(namespace=namespace)
-        collect_fn = export_map.get("collect_direct_operator_reply")
-        if collect_fn is None:
-            raise RuntimeError("Chat runtime not available.")
+        Routes through ``sage_turn_adapter.execute_sage_turn`` -- the same
+        chokepoint every real channel (web console, Telegram, Discord,
+        WhatsApp...) runs a turn through -- so this exercises the full turn:
+        tools, hardware dispatch, memory, and the activity ledger. Never a
+        summary or a canned reply; a failed turn comes back as ``ok: false``
+        with the real error, not a fabricated success.
 
-        payload = await collect_fn(message=message)
-        reply = str(payload.get("reply") or "").strip()
-        await _ledger_mcp_call(r, "empyralis_chat", True, message_len=len(message), reply_len=len(reply))
-        return {"ok": True, "reply": reply, "agent_id": agent_id or "(sage)"}
+        ``agent_id`` is an agent install id from ``empyralis_list_agents``
+        (its ``agent_id`` field). It is validated against YOUR workspace
+        (resolved from your API key) before anything runs -- an id from
+        another workspace, or one that doesn't exist, is rejected with
+        ``ok: false`` rather than silently falling back to any default
+        agent. Omit ``agent_id`` to talk to the workspace's default agent;
+        the response always names the real agent that answered.
+
+        This can be slow -- production p90 is ~120s from tool calls inside
+        the turn. Bounded to a hard timeout (default 240s, override with
+        EMPYRALIS_MCP_CHAT_TIMEOUT_SECONDS) so a stuck turn surfaces an
+        honest timeout instead of hanging forever.
+        """
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import agent_registry_repository as reg
+
+        requested_agent_id = str(agent_id or "").strip()
+        if requested_agent_id:
+            # Workspace-scoped lookup -- get_workspace_agent_install_bundle's
+            # WHERE clause includes wai.workspace_id = ws, so an install id
+            # belonging to a DIFFERENT workspace returns None here exactly
+            # like a nonexistent one. This is the check MAN-206
+            # (empyralis_assign_channel_bot) skipped; do it before anything
+            # else touches agent_id.
+            bundle = await reg.get_workspace_agent_install_bundle(
+                requested_agent_id, tenant_id=tenant, workspace_id=ws,
+            )
+            if not isinstance(bundle, dict):
+                await _ledger_mcp_call(r, "empyralis_chat", False, agent_id=requested_agent_id)
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Agent '{requested_agent_id}' was not found in your workspace. "
+                        "Call empyralis_list_agents to see the agent_id values you can use."
+                    ),
+                    "agent_id": requested_agent_id,
+                }
+            resolved_agent_id = requested_agent_id
+            resolved_agent_label = str(bundle.get("label") or requested_agent_id)
+        else:
+            master = await reg.get_workspace_master_agent_install(tenant_id=tenant, workspace_id=ws)
+            resolved_agent_id = str((master or {}).get("id") or "").strip()
+            resolved_agent_label = str((master or {}).get("label") or resolved_agent_id)
+            if not resolved_agent_id:
+                await _ledger_mcp_call(r, "empyralis_chat", False, agent_id="")
+                return {
+                    "ok": False,
+                    "error": "No agent_id given and this workspace has no default agent yet.",
+                    "agent_id": "",
+                }
+
+        import asyncio
+
+        from server_modules.sage_turn_adapter import execute_sage_turn
+        from server_modules.specialist_runtime_context import resolve_specialist_runtime_context
+
+        try:
+            # None when resolved_agent_id IS the workspace master -- the turn
+            # then runs Sage's own unchanged runtime, matching every other
+            # channel's contract. resolved_agent_id was already validated
+            # against this workspace above, so a None here from a lookup
+            # failure (not a master match) is only a narrow race against a
+            # delete between the two calls, not a fresh silent fallback.
+            specialist_context = await resolve_specialist_runtime_context(
+                workspace_id=ws, tenant_id=tenant, active_agent_install_id=resolved_agent_id,
+            )
+        except Exception:
+            specialist_context = None
+
+        current_user = {
+            "user_id": str(r.get("external_agent_id") or "").strip() or "mcp_client",
+            "email": "",
+            "auth_type": "api_key",
+        }
+
+        try:
+            sage_result = await asyncio.wait_for(
+                execute_sage_turn(
+                    workspace_id=ws,
+                    tenant_id=tenant,
+                    message=message,
+                    surface="chat",
+                    # channel_origin is routing/audit metadata only (never
+                    # reaches the prompt). channel_sender_id is deliberately
+                    # left unset: sage_agent_runtime_service.py defaults
+                    # sender_class to "owner" for web/API sessions exactly
+                    # when no per-message sender id is given -- setting one
+                    # here would downgrade this call to "audience" tool
+                    # access, which is the opposite of "the full turn."
+                    channel_origin="mcp",
+                    channel_sender_name=str(r.get("external_agent_display_name") or ""),
+                    current_user=current_user,
+                    specialist_context=specialist_context,
+                ),
+                timeout=_CHAT_TURN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            await _ledger_mcp_call(r, "empyralis_chat", False, agent_id=resolved_agent_id, timed_out=True)
+            return {
+                "ok": False,
+                "error": (
+                    f"Timed out after {int(_CHAT_TURN_TIMEOUT_SECONDS)}s waiting for "
+                    f"{resolved_agent_label}'s reply. The turn may still be running "
+                    "server-side -- check empyralis_get_agent_activity."
+                ),
+                "agent_id": resolved_agent_id,
+            }
+        except Exception as exc:  # noqa: BLE001 -- surface the real failure, never a synthesized reply
+            await _ledger_mcp_call(r, "empyralis_chat", False, agent_id=resolved_agent_id)
+            return {"ok": False, "error": str(exc), "agent_id": resolved_agent_id}
+
+        result = sage_result.as_dict() if hasattr(sage_result, "as_dict") else dict(sage_result or {})
+        reply = str(result.get("message") or "").strip()
+        error_text = str(result.get("error") or "").strip()
+        if error_text and not reply:
+            await _ledger_mcp_call(r, "empyralis_chat", False, agent_id=resolved_agent_id)
+            return {"ok": False, "error": error_text, "agent_id": resolved_agent_id}
+
+        await _ledger_mcp_call(
+            r, "empyralis_chat", True,
+            agent_id=resolved_agent_id, message_len=len(message), reply_len=len(reply),
+        )
+        return {
+            "ok": True,
+            "reply": reply,
+            "agent_id": resolved_agent_id,
+            "agent_label": resolved_agent_label,
+            "tool_calls": result.get("tool_calls", []),
+            "provider": result.get("provider", ""),
+            "model": result.get("model"),
+        }
 
     # ── Task tools (always live — see module docstring for the write-gate
     # decision: bounded to tasks already visible through this key, not a

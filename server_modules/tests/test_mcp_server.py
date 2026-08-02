@@ -9,13 +9,20 @@
     lazily at resolve time if missing, and a mint failure is surfaced (never
     silently swallowed) -- Step 2 of "Mentions + identity for platform AND
     external agents"
+(g) empyralis_chat (MAN-205): routes through the real turn chokepoint
+    (sage_turn_adapter.execute_sage_turn), validates agent_id against the
+    caller's own workspace before touching it, never falls back to a
+    synthesized/legacy-Sage reply, and surfaces real errors/timeouts honestly
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import mcp_server
 
 
 # ── (a) Auth rejected without key ─────────────────────────────────────
@@ -343,6 +350,194 @@ class MCPExternalAgentRosterMintTests(unittest.TestCase):
 
         import asyncio
         asyncio.run(_run())
+
+
+# ── (g) empyralis_chat routes a real turn to a named, workspace-owned agent ──
+
+class _FakeChatCtx:
+    pass
+
+
+def _chat_resolved(workspace_id="ws-chat-A", external_agent_id="ext_agent_caller", writes_enabled=False):
+    return {
+        "workspace_id": workspace_id,
+        "writes_enabled": writes_enabled,
+        "external_agent_id": external_agent_id,
+        "external_agent_display_name": "Caller Bot",
+    }
+
+
+def _patched_chat(*, resolved=None, tenant_id="tenant-chat-A"):
+    resolved = resolved if resolved is not None else _chat_resolved()
+    return (
+        patch.object(mcp_server, "_resolve_workspace", new=AsyncMock(return_value=resolved)),
+        patch.object(mcp_server, "_ledger_mcp_call", new=AsyncMock()),
+        patch(
+            "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+            new=AsyncMock(return_value=tenant_id),
+        ),
+    )
+
+
+class MCPChatToolTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_chat_routes_to_named_agent_and_returns_real_reply(self):
+        """A valid agent_id in the caller's own workspace: the turn is run
+        through the real chokepoint and the real reply comes back, tagged
+        with the actual agent that answered (not a literal "(sage)")."""
+        from server_modules.sage_agent_runtime_contract import SageTurnResult
+
+        bundle = {"id": "ainstall_nova", "label": "Nova", "workspace_id": "ws-chat-A"}
+        turn_result = SageTurnResult(message="Hello from Nova", provider="anthropic", model="claude")
+
+        p1, p2, p3 = _patched_chat()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ) as bundle_mock, \
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(return_value="fake-specialist-context"),
+            ) as spec_mock, \
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=turn_result),
+            ) as turn_mock:
+            result = await mcp_server.empyralis_chat(
+                message="hi Nova", agent_id="ainstall_nova", ctx=_FakeChatCtx(),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reply"], "Hello from Nova")
+        self.assertEqual(result["agent_id"], "ainstall_nova")
+        self.assertEqual(result["agent_label"], "Nova")
+        bundle_mock.assert_awaited_once_with(
+            "ainstall_nova", tenant_id="tenant-chat-A", workspace_id="ws-chat-A",
+        )
+        spec_mock.assert_awaited_once_with(
+            workspace_id="ws-chat-A", tenant_id="tenant-chat-A",
+            active_agent_install_id="ainstall_nova",
+        )
+        turn_mock.assert_awaited_once()
+        call_kwargs = turn_mock.await_args.kwargs
+        self.assertEqual(call_kwargs["workspace_id"], "ws-chat-A")
+        self.assertEqual(call_kwargs["message"], "hi Nova")
+        self.assertEqual(call_kwargs["specialist_context"], "fake-specialist-context")
+        # Sender id must stay unset -- setting it would downgrade this
+        # first-party MCP call from owner-tier tool access to audience-tier.
+        self.assertNotIn("channel_sender_id", call_kwargs)
+
+    async def test_chat_rejects_agent_id_from_another_workspace_without_running_a_turn(self):
+        """An agent_id that doesn't resolve inside the caller's own
+        workspace (wrong workspace, or doesn't exist) must be refused --
+        and, critically, must never fall through to running the turn as
+        some default agent. This is the MAN-206-shaped hole this tool must
+        not repeat."""
+        p1, p2, p3 = _patched_chat()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=None),
+            ) as bundle_mock, \
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(),
+            ) as turn_mock:
+            result = await mcp_server.empyralis_chat(
+                message="hi", agent_id="ainstall_other_workspace", ctx=_FakeChatCtx(),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("not found in your workspace", result["error"])
+        self.assertEqual(result["agent_id"], "ainstall_other_workspace")
+        self.assertNotIn("reply", result)
+        bundle_mock.assert_awaited_once()
+        turn_mock.assert_not_awaited()
+
+    async def test_chat_defaults_to_the_real_workspace_master_when_agent_id_omitted(self):
+        """Omitting agent_id must resolve to and report the workspace's
+        actual default agent id/label -- never the bare literal "(sage)"
+        placeholder the old broken tool returned."""
+        master = {"id": "ainstall_master_1", "label": "Workspace Agent"}
+        turn_result = {"message": "Hi, I'm the default agent.", "error": None}
+
+        p1, p2, p3 = _patched_chat()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+                new=AsyncMock(return_value=master),
+            ) as master_mock, \
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(return_value=None),
+            ), \
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=turn_result),
+            ):
+            result = await mcp_server.empyralis_chat(message="hi", agent_id="", ctx=_FakeChatCtx())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["agent_id"], "ainstall_master_1")
+        self.assertEqual(result["agent_label"], "Workspace Agent")
+        self.assertNotEqual(result["agent_id"], "(sage)")
+        master_mock.assert_awaited_once_with(tenant_id="tenant-chat-A", workspace_id="ws-chat-A")
+
+    async def test_chat_surfaces_the_real_error_instead_of_a_fabricated_reply(self):
+        """When the turn itself raises, the tool must return that real
+        error -- never synthesize a plausible-sounding reply (the exact
+        failure mode 5278a58d0 fixed for tool output)."""
+        bundle = {"id": "ainstall_x", "label": "X"}
+        p1, p2, p3 = _patched_chat()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ), \
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(return_value=None),
+            ), \
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(side_effect=RuntimeError("no AI provider configured")),
+            ):
+            result = await mcp_server.empyralis_chat(message="hi", agent_id="ainstall_x", ctx=_FakeChatCtx())
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "no AI provider configured")
+        self.assertNotIn("reply", result)
+
+    async def test_chat_surfaces_an_honest_timeout_instead_of_hanging_forever(self):
+        """A turn that runs past the bound comes back as an explicit,
+        honest timeout -- not a hang, and not a fabricated reply."""
+        bundle = {"id": "ainstall_slow", "label": "Slow"}
+
+        async def _never_returns(**kwargs):
+            await asyncio.sleep(10)
+            return {"message": "should never get here"}
+
+        p1, p2, p3 = _patched_chat()
+        with p1, p2, p3, \
+            patch.object(mcp_server, "_CHAT_TURN_TIMEOUT_SECONDS", 0.05), \
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ), \
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(return_value=None),
+            ), \
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=_never_returns,
+            ):
+            result = await mcp_server.empyralis_chat(message="hi", agent_id="ainstall_slow", ctx=_FakeChatCtx())
+
+        self.assertFalse(result["ok"])
+        self.assertIn("Timed out", result["error"])
+        self.assertNotIn("reply", result)
 
 
 if __name__ == "__main__":
