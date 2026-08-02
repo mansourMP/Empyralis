@@ -3335,13 +3335,46 @@ def _runtime_access_mode_from_direct_tool_context(
         value = str(metadata.get(key) or "").strip()
         if value:
             return execution_mode_policy.normalize_runtime_access_mode(value)
+    resolved_gateway_id = str(
+        gateway_id or metadata.get("gateway_id") or metadata.get("selected_gateway_id") or ""
+    ).strip()
+    if resolved_gateway_id:
+        # A bound gateway_id is not itself authorization for full_access —
+        # the paired registration's OWN configured runtime_access_mode is
+        # the source of truth, exactly like gateway_execution_service.
+        # _runtime_access_mode_for_dispatch's `explicit_mode or
+        # metadata.get("runtime_access_mode")` already does for a real
+        # dispatch. That downstream fallback can't be relied on to resolve
+        # this itself, though: whatever this function returns is passed as
+        # an explicit runtime_access_mode= kwarg into hardware_action_
+        # broker_service.execute_hardware_action, which immediately runs it
+        # through execution_mode_policy.normalize_runtime_access_mode (never
+        # empty/None out) before forwarding it on as _runtime_access_mode_
+        # for_dispatch's `explicit_mode` — permanently short-circuiting that
+        # function's own registration fallback. The registration has to be
+        # consulted HERE, at the point where a concrete value is produced,
+        # or its real mode is unreachable no matter how it's phrased
+        # downstream. On any lookup failure this falls through to the safe
+        # guarded default below, never to full_access.
+        try:
+            from server_modules import gateway_state_repository
+
+            registration = gateway_state_repository.get_gateway_registration(resolved_gateway_id)
+        except Exception:
+            registration = None
+        registration_metadata = (
+            registration.get("metadata")
+            if isinstance(registration, dict) and isinstance(registration.get("metadata"), dict)
+            else {}
+        )
+        return execution_mode_policy.normalize_runtime_access_mode(
+            registration_metadata.get("runtime_access_mode")
+        )
     runtime_target = _runtime_target_from_direct_tool_context(
         explicit_target=explicit_target,
-        gateway_id=gateway_id or str(metadata.get("gateway_id") or metadata.get("selected_gateway_id") or "").strip(),
+        gateway_id=resolved_gateway_id,
         session_ctx=session_ctx,
     )
-    if str(gateway_id or metadata.get("gateway_id") or metadata.get("selected_gateway_id") or "").strip():
-        return execution_mode_policy.FULL_RUNTIME_ACCESS_MODE
     if _direct_tool_targets_agent_computer(runtime_target, metadata):
         return execution_mode_policy.FULL_RUNTIME_ACCESS_MODE
     return execution_mode_policy.GUARDED_RUNTIME_ACCESS_MODE

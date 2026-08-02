@@ -728,6 +728,21 @@ class SkillsServiceTests(unittest.TestCase):
                 "server_modules.skills_service._resolve_direct_tool_gateway_id",
                 return_value="gw-1",
             ),
+            # The registration paired to gw-1 is the source of truth for
+            # runtime_access_mode, not the mere presence of a gateway_id —
+            # so this test grounds "full_access" in a registration that is
+            # actually configured (and acknowledged) for it, rather than
+            # asserting the access mode falls out of gateway_id alone.
+            patch(
+                "server_modules.gateway_state_repository.get_gateway_registration",
+                return_value={
+                    "gateway_id": "gw-1",
+                    "metadata": {
+                        "runtime_access_mode": "full_access",
+                        "autonomous_agent_setup_warning_acknowledged": True,
+                    },
+                },
+            ),
             patch(
                 "server_modules.skills_service._execute_direct_tool_via_gateway",
                 return_value={
@@ -775,6 +790,88 @@ class SkillsServiceTests(unittest.TestCase):
             ),
             "full_access",
         )
+
+    def test_runtime_access_mode_from_direct_tool_context_respects_guarded_registration(self) -> None:
+        """The regression this whole fix is for: an agent with a
+        preferred_gateway_id bound to a real registration must NOT get
+        full_access just because a gateway_id is present. The paired
+        registration here is genuinely configured default_guarded (and has
+        NOT acknowledged the Full Access setup warning) — exactly the
+        founder's own gateway registration's real, live configuration — so
+        the resolved mode must come back default_guarded, never full_access,
+        with no explicit override anywhere in session context."""
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            return_value={
+                "gateway_id": "gateway_a1c6b043",
+                "metadata": {
+                    "runtime_access_mode": "default_guarded",
+                    "autonomous_agent_setup_warning_acknowledged": False,
+                },
+            },
+        ) as get_registration_mock:
+            resolved = skills_service._runtime_access_mode_from_direct_tool_context(
+                gateway_id="gateway_a1c6b043",
+                session_ctx={},
+            )
+
+        self.assertEqual(resolved, "default_guarded")
+        get_registration_mock.assert_called_once_with("gateway_a1c6b043")
+
+    def test_runtime_access_mode_from_direct_tool_context_respects_full_access_registration(self) -> None:
+        """Inverse of the guarded case above: a registration genuinely
+        configured for full_access AND with the setup warning acknowledged
+        (the SSH-remote-server / cloud-VPS onboarding paths set both) must
+        still resolve to full_access — the fix must not flip a global
+        default, it must make the registration's own configuration the
+        deciding factor in both directions."""
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            return_value={
+                "gateway_id": "gateway_acknowledged_vps",
+                "metadata": {
+                    "runtime_access_mode": "full_access",
+                    "autonomous_agent_setup_warning_acknowledged": True,
+                },
+            },
+        ):
+            resolved = skills_service._runtime_access_mode_from_direct_tool_context(
+                gateway_id="gateway_acknowledged_vps",
+                session_ctx={},
+            )
+
+        self.assertEqual(resolved, "full_access")
+
+    def test_runtime_access_mode_from_direct_tool_context_defaults_guarded_for_unknown_gateway(self) -> None:
+        """A gateway_id that doesn't resolve to any stored registration
+        (stale id, lookup failure, etc.) must fail SAFE to the guarded
+        default, never fabricate full_access."""
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+            return_value=None,
+        ):
+            resolved = skills_service._runtime_access_mode_from_direct_tool_context(
+                gateway_id="gateway_does_not_exist",
+                session_ctx={},
+            )
+
+        self.assertEqual(resolved, "default_guarded")
+
+    def test_runtime_access_mode_from_direct_tool_context_explicit_override_still_wins(self) -> None:
+        """An explicit mode passed by the caller (e.g. the agent's own
+        configured execution_mode) still short-circuits the registration
+        lookup entirely, exactly as before this fix."""
+        with patch(
+            "server_modules.gateway_state_repository.get_gateway_registration",
+        ) as get_registration_mock:
+            resolved = skills_service._runtime_access_mode_from_direct_tool_context(
+                explicit_mode="approval_mode",
+                gateway_id="gateway_a1c6b043",
+                session_ctx={},
+            )
+
+        self.assertEqual(resolved, "default_guarded")
+        get_registration_mock.assert_not_called()
 
     def test_execute_single_direct_tool_call_uses_direct_worker_when_gateway_not_live(self) -> None:
         callbacks = self._execution_callbacks()
@@ -965,6 +1062,19 @@ class SkillsServiceTests(unittest.TestCase):
             patch(
                 "server_modules.skills_service._resolve_direct_tool_gateway_id",
                 return_value="gw-1",
+            ),
+            # As above: ground "full_access" in gw-1's own registration
+            # being configured (and acknowledged) for it, not in gateway_id
+            # merely being present.
+            patch(
+                "server_modules.gateway_state_repository.get_gateway_registration",
+                return_value={
+                    "gateway_id": "gw-1",
+                    "metadata": {
+                        "runtime_access_mode": "full_access",
+                        "autonomous_agent_setup_warning_acknowledged": True,
+                    },
+                },
             ),
             patch(
                 "server_modules.hardware_action_broker_service.execute_hardware_action",
