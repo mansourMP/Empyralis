@@ -299,5 +299,218 @@ class FabricationAfterFailureDecideAndCorrectionTests(unittest.TestCase):
         self.assertNotIn("i successfully connected", outcome["reply"].lower())
 
 
+class AnnouncesWithoutAnsweringTests(unittest.TestCase):
+    """The fourth direction, added 2026-08-02: the founder's most-repeated
+    complaint ahead of the YC demo — 'my agent says let me check it for you
+    and it just doesn't.' Live-reproduced over MCP: hardware__action FAILED
+    this turn and the reply delivered as the turn's FINAL answer (no tool
+    call that iteration) was a bare promise, not an answer or a failure
+    report. Precision tests matter more than the incident reproduction
+    itself — see the module docstring's HIGH PRECISION section."""
+
+    _FAILED_TRACE = [{"name": "hardware__action", "status": "failed", "error": (
+        "full_access Agent Computer execution requires the current Full "
+        "Access setup warning acknowledgement."
+    )}]
+
+    def test_reproduces_the_incident_bare_promise_after_a_failure_is_a_mismatch(self) -> None:
+        reply = "I'll attempt to run the command on the connected hardware now."
+        result = guard.check_tool_reply_consistency(reply, self._FAILED_TRACE)
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "announces_without_answering")
+        self.assertEqual(result["tools"], self._FAILED_TRACE)
+
+    def test_bare_promise_with_empty_trace_is_also_a_mismatch(self) -> None:
+        # The generic case: nothing has run at all yet, not even a failed
+        # attempt, and the reply is still nothing but a forward-looking
+        # promise that doesn't count as claims_without_run (no "your"/"the"
+        # + noun object for _CLAIM_PATTERNS to anchor on).
+        result = guard.check_tool_reply_consistency("I'll go ahead and verify that now.", [])
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "announces_without_answering")
+        self.assertEqual(result["tools"], [])
+
+    def test_bare_promise_after_a_real_success_is_also_a_mismatch(self) -> None:
+        # Direction #4 is independent of trace state on purpose (module
+        # docstring) -- a bare "I'll check" is exactly as empty an answer
+        # even when a tool already succeeded this turn and the model just
+        # never reports it.
+        trace = [{"name": "web_search", "status": "completed", "output": "3 results found"}]
+        result = guard.check_tool_reply_consistency("Let me verify that for you.", trace)
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "announces_without_answering")
+
+    # ── Precision boundary (the part that matters most) ─────────────────
+
+    def test_intent_opener_that_actually_reports_the_result_does_NOT_fire(self) -> None:
+        """A reply that merely *begins* with intent language but goes on to
+        give the real answer is a perfectly good reply — must never be
+        flagged. Backed by a matching real success (not the failed hardware
+        trace) so this isolates direction #4's own precision boundary
+        instead of exercising claims_without_run's separate "here's what I
+        found" fabrication check on an unrelated trace."""
+        trace = [{"name": "docker__status", "status": "completed", "output": "4 containers running"}]
+        reply = "I'll check that for you, and here's what I found: Docker is running and using 4 containers."
+        result = guard.check_tool_reply_consistency(reply, trace)
+        self.assertTrue(result["consistent"])
+
+    def test_short_but_complete_answer_does_NOT_fire(self) -> None:
+        result = guard.check_tool_reply_consistency("Yes, Docker is running.", [])
+        self.assertTrue(result["consistent"])
+
+    def test_honest_failure_report_does_NOT_fire(self) -> None:
+        reply = (
+            "I wasn't able to run that — your Agent Computer gateway is "
+            "offline right now (it doesn't have this capability registered), "
+            "so I have no real output to show you."
+        )
+        result = guard.check_tool_reply_consistency(reply, self._FAILED_TRACE)
+        self.assertTrue(result["consistent"])
+
+    def test_more_specific_directions_keep_their_own_classification(self) -> None:
+        """A reply this general enough to ALSO match the bare-intent shape
+        must still resolve to whichever more specific, pre-existing
+        direction already covers it -- check_tool_reply_consistency checks
+        announces_without_answering last for exactly this reason. Pins
+        _CLAIM_PATTERNS' existing 'I'll check your calendar for open slots.'
+        test at claims_without_run, not the new direction."""
+        result = guard.check_tool_reply_consistency("I'll check your calendar for open slots.", [])
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "claims_without_run")
+
+    def test_ordinary_filler_does_not_false_positive(self) -> None:
+        for reply in [
+            "Let me help you with that.",
+            "Let me know if you need anything else.",
+            "Let me explain how this works.",
+            "I'll be here if you need me.",
+            "I will follow up shortly.",
+            "The capital of France is Paris.",
+        ]:
+            with self.subTest(reply=reply):
+                result = guard.check_tool_reply_consistency(reply, self._FAILED_TRACE)
+                self.assertTrue(result["consistent"], f"false positive on: {reply!r}")
+
+    def test_no_separating_punctuation_edge_case_does_not_false_positive(self) -> None:
+        """A structural match on the opener/object-phrase shape that still
+        contains a result word or a digit is treated as having content, not
+        as a bare announcement -- the second, independent precision gate."""
+        result = guard.check_tool_reply_consistency(
+            "I'll check right now actually the answer is 42.", []
+        )
+        self.assertTrue(result["consistent"])
+
+
+class AnnouncesWithoutAnsweringDecideAndCorrectionTests(unittest.TestCase):
+    """_decide's routing and the correction/fallback text builders for
+    announces_without_answering -- like denies_success and
+    claims_success_after_failure (and UNLIKE claims_without_run), there is
+    always something concrete to hand back (the real trace so far, or the
+    plain fact nothing has run yet), so this gets a real regeneration
+    attempt instead of skipping straight to a generic fallback."""
+
+    def test_decide_does_not_skip_regeneration_with_a_failed_trace(self) -> None:
+        decision = guard._decide(
+            "I'll attempt to run the command on the connected hardware now.",
+            AnnouncesWithoutAnsweringTests._FAILED_TRACE,
+        )
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision["mismatch_type"], "announces_without_answering")
+        self.assertFalse(decision["skip_regeneration"])
+        self.assertIsNotNone(decision["correction"])
+
+    def test_decide_does_not_skip_regeneration_with_an_empty_trace(self) -> None:
+        # The direction's whole point: unlike claims_without_run, this
+        # branch never needs a non-empty `tools` to attempt regeneration.
+        decision = guard._decide("I'll go ahead and verify that now.", [])
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision["mismatch_type"], "announces_without_answering")
+        self.assertFalse(decision["skip_regeneration"])
+        self.assertIsNotNone(decision["correction"])
+
+    def test_correction_prompt_names_the_real_failure_when_trace_has_one(self) -> None:
+        prompt = guard.build_bare_intent_correction_prompt(AnnouncesWithoutAnsweringTests._FAILED_TRACE)
+        self.assertIn("hardware__action", prompt)
+        self.assertIn("full_access", prompt)
+
+    def test_correction_prompt_says_nothing_ran_when_trace_is_empty(self) -> None:
+        prompt = guard.build_bare_intent_correction_prompt([])
+        self.assertIn("nothing has run", prompt.lower())
+
+    def test_honest_fallback_with_empty_trace_never_repeats_the_promise(self) -> None:
+        fallback = guard.build_bare_intent_fallback_reply([])
+        recheck = guard.check_tool_reply_consistency(fallback, [])
+        self.assertTrue(recheck["consistent"])
+
+    def test_honest_fallback_with_failed_trace_never_repeats_the_promise(self) -> None:
+        fallback = guard.build_bare_intent_fallback_reply(AnnouncesWithoutAnsweringTests._FAILED_TRACE)
+        recheck = guard.check_tool_reply_consistency(fallback, AnnouncesWithoutAnsweringTests._FAILED_TRACE)
+        self.assertTrue(recheck["consistent"])
+
+    def test_apply_tool_honesty_guard_sync_corrects_when_regeneration_gives_a_real_answer(self) -> None:
+        trace = AnnouncesWithoutAnsweringTests._FAILED_TRACE
+
+        def _regenerate(_correction_text: str) -> str:
+            return (
+                "That didn't work — your Agent Computer needs the Full Access "
+                "setup warning acknowledged before I can run commands on it."
+            )
+
+        outcome = guard.apply_tool_honesty_guard_sync(
+            reply_text="I'll attempt to run the command on the connected hardware now.",
+            tool_trace=trace,
+            regenerate_fn=_regenerate,
+        )
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertTrue(outcome["guard"]["corrected"])
+        self.assertFalse(outcome["guard"]["fell_back"])
+        self.assertEqual(outcome["guard"]["mismatch_type"], "announces_without_answering")
+        self.assertIn("Full Access", outcome["reply"])
+
+    def test_apply_tool_honesty_guard_sync_falls_back_when_regeneration_is_ANOTHER_bare_promise(self) -> None:
+        trace = AnnouncesWithoutAnsweringTests._FAILED_TRACE
+
+        def _regenerate(_correction_text: str) -> str:
+            # A second, differently-worded bare promise — must never ship.
+            return "I'll try running it again shortly."
+
+        outcome = guard.apply_tool_honesty_guard_sync(
+            reply_text="I'll attempt to run the command on the connected hardware now.",
+            tool_trace=trace,
+            regenerate_fn=_regenerate,
+        )
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertFalse(outcome["guard"]["corrected"])
+        self.assertTrue(outcome["guard"]["fell_back"])
+        self.assertIn("full_access", outcome["reply"])
+        # Never ship the second bare promise either.
+        self.assertNotIn("i'll try running it again", outcome["reply"].lower())
+
+    def test_apply_tool_honesty_guard_async_variant_also_routes_bare_intent(self) -> None:
+        """Sage's pipeline uses apply_tool_honesty_guard (async), not the
+        sync variant direct chat uses — both wrap the same _decide, so this
+        pins that the new direction reaches Sage's call site too."""
+        import asyncio
+
+        trace = AnnouncesWithoutAnsweringTests._FAILED_TRACE
+
+        async def _regenerate(_correction_text: str) -> str:
+            return "That failed — the Full Access setup warning hasn't been acknowledged yet, so I can't run it."
+
+        async def _run():
+            return await guard.apply_tool_honesty_guard(
+                reply_text="I'll attempt to run the command on the connected hardware now.",
+                tool_trace=trace,
+                regenerate_fn=_regenerate,
+            )
+
+        outcome = asyncio.run(_run())
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertTrue(outcome["guard"]["corrected"])
+        self.assertEqual(outcome["guard"]["mismatch_type"], "announces_without_answering")
+
+
 if __name__ == "__main__":
     unittest.main()

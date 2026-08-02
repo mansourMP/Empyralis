@@ -23,8 +23,8 @@ an actual trace contradiction (a real successful tool result on one side, or
 its total absence on the other) — never on tone or phrasing alone. An
 over-firing guard that regenerates honest replies is its own defect.
 
-Three directions are covered, all gated on the same trace-contradiction
-discipline above:
+Four directions are covered, all gated on the same trace-contradiction
+discipline above (the fourth is the exception — see below):
   1. denies_success — the reply denies/disclaims a tool that the trace proves
      actually succeeded this turn (_DENIAL_PATTERNS).
   2. claims_without_run — the reply retrospectively or prospectively claims a
@@ -39,6 +39,22 @@ discipline above:
      "nothing ran"), so the correction can hand the model the REAL failure
      reason instead of a generic refusal (_FABRICATION_AFTER_FAILURE_PATTERNS,
      build_failure_correction_prompt).
+  4. announces_without_answering — added 2026-08-02, live-reproduced over MCP
+     ahead of the YC demo: hardware__action FAILED this turn (a structured
+     "full_access ... setup warning acknowledgement" error) and the reply
+     DELIVERED AS THE TURN'S FINAL ANSWER, with no tool call this iteration,
+     was "I'll attempt to run the command on the connected hardware now." (61
+     chars). The generation loop itself was never broken — `if not
+     iteration_tool_calls: break` in both pipelines fires exactly when it
+     should, once the model stops calling tools — the defect is that a bare
+     promise got treated as a finished answer. Unlike #1-#3 this is NOT a
+     trace-contradiction check (the reply neither denies a real success nor
+     fabricates one), so it is gated differently: matched on the SHAPE of the
+     reply alone (_BARE_INTENT_RE — the reply must be essentially nothing but
+     the announcement, no reported result, no substantive content) and
+     checked LAST in check_tool_reply_consistency, only once none of the
+     three trace-anchored directions above already matched, so a reply
+     already caught by a more specific direction keeps that classification.
 """
 
 from __future__ import annotations
@@ -139,6 +155,87 @@ _FABRICATION_AFTER_FAILURE_PATTERNS = [
     r"\bi (?:just |)(?:ran|executed) (?:that|this|the) (?:command|script) on your\b",
 ]
 
+# Reply is a bare statement of intent — an announcement that a tool is about
+# to be (or was just) invoked, with NOTHING else in the reply: no reported
+# result, no substantive answer. Added 2026-08-02, the founder's most-
+# repeated complaint ahead of the YC demo ("my agent says let me check it for
+# you and it just doesn't"). The live incident: reply = "I'll attempt to run
+# the command on the connected hardware now." (61 chars), delivered as the
+# turn's FINAL answer with no tool call this iteration, while the trace
+# showed hardware__action had already FAILED. Independent of trace state on
+# purpose — a bare "I'll check that now" is exactly as empty an answer
+# whether the trace is empty, all-success, or all-failure; the defect is in
+# the reply's own shape, not in what it claims about the trace. That is why
+# this is matched with re.match + a hard end-of-string anchor, NOT re.search
+# like every pattern list above: the intent-opener clause and its object
+# phrase must consume the ENTIRE reply (trailing punctuation only) for this
+# to match structurally.
+#
+# HIGH PRECISION is the whole point (module docstring): the moment real
+# content follows the opener — "I'll check that for you, and here's what I
+# found: Docker is running" — the bounded object-phrase capture runs out of
+# room before reaching a real result, the end-of-string anchor fails, and the
+# WHOLE match fails. That is what keeps a reply that merely *begins* with
+# intent language from tripping this. A short reply with NO opener at all
+# ("Yes, Docker is running.") never reaches the pattern either — there is
+# nothing to anchor on. And an honest failure report ("I wasn't able to run
+# that — the gateway is offline") never matches because it opens in the past
+# tense / declarative, not with a forward-looking "I'll/I will/let me/...".
+#
+# _BARE_INTENT_SUBSTANCE_RE is a second, independent gate: it rejects the
+# rare case where a genuine short answer runs on immediately after the
+# opener with no separating punctuation at all ("I'll check right now
+# actually the answer is 42") — a structural match on _BARE_INTENT_RE that
+# still contains a copula (a real status claim, "it IS running"), a strong
+# report verb, or a digit is treated as having content, not as a bare
+# announcement. Deliberately does NOT include bare progressive/gerund forms
+# like "running"/"showing"/"stopped" on their own — those collide with
+# ordinary bare-intent filler ("I'll try running it again shortly" has
+# "running" as the OBJECT of "try", not a status report) and would silently
+# turn a real positive into a false negative. The copula ("is/are/was/were")
+# is what actually distinguishes "it's running" (a report) from "try running
+# it again" (more announcement) — see test_no_separating_punctuation_edge_
+# case and the "try running it again" case in
+# test_tool_honesty_guard.py for both directions of this boundary.
+_BARE_INTENT_RE = re.compile(
+    r"^\s*(?:i'?ll|i will|i'?m going to|i am going to|i'?m now going to|"
+    r"let me|let'?s|i plan to|i'?m about to|i intend to)\s+"
+    r"(?:\w+\s+){0,3}?"
+    r"(?:check|run|try|attempt|execute|verify|test|fetch|pull|retrieve|"
+    r"connect|access|look|dig|investigate|see|call|invoke|search|read|"
+    r"browse|open)\b"
+    r"(?:\s+\w+){0,8}?"
+    r"[\s.!?…]*$",
+    re.IGNORECASE,
+)
+
+_BARE_INTENT_SUBSTANCE_RE = re.compile(
+    r"\b(?:is|are|was|were)\b|"
+    r"\b(?:returns?|returned|succeeded|failed|found|contains?|equals?|"
+    r"says?|confirms?|indicates?|reveals?)\b|"
+    r"\d",
+    re.IGNORECASE,
+)
+
+# A bare-intent reply, by construction (opener + a short object phrase),
+# cannot be long — this both saves the regex from scanning huge replies for
+# no reason and is itself a legitimate corroborating signal per the module
+# docstring's precision discipline (length alone is never sufficient, but it
+# narrows the search before the structural check runs).
+_BARE_INTENT_MAX_LEN = 240
+
+
+def _is_bare_intent_reply(reply_text: str) -> bool:
+    """True only when the reply is essentially nothing but an announcement
+    of intent — see _BARE_INTENT_RE's comment for exactly what "essentially
+    nothing but" means structurally."""
+    text = str(reply_text or "").strip()
+    if not text or len(text) > _BARE_INTENT_MAX_LEN:
+        return False
+    if not _BARE_INTENT_RE.match(text):
+        return False
+    return not _BARE_INTENT_SUBSTANCE_RE.search(text)
+
 
 def _matches_any(text: str, patterns: list[str]) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
@@ -154,6 +251,14 @@ def _successful_tools(tool_trace: Optional[list[ToolTraceEntry]]) -> list[ToolTr
         if status == "completed" and output:
             out.append(entry)
     return out
+
+
+def _all_trace_entries(tool_trace: Optional[list[ToolTraceEntry]]) -> list[ToolTraceEntry]:
+    """Every well-formed entry in the trace, any status — announces_without_
+    answering's anchor. Unlike _successful_tools/_failed_tools it doesn't
+    filter by status: the correction for a bare announcement should be able
+    to reference whatever DID happen this turn, success or failure alike."""
+    return [entry for entry in (tool_trace or []) if isinstance(entry, dict)]
 
 
 def _failed_tools(tool_trace: Optional[list[ToolTraceEntry]]) -> list[ToolTraceEntry]:
@@ -181,8 +286,10 @@ def check_tool_reply_consistency(
     """Compare a turn's reply against what tools actually did this turn.
 
     Returns {"consistent": bool, "mismatch_type": "denies_success" |
-    "claims_success_after_failure" | "claims_without_run" | None, "tools":
-    [succeeded tool entries, or the failed ones for claims_success_after_failure]}.
+    "claims_success_after_failure" | "claims_without_run" |
+    "announces_without_answering" | None, "tools": [succeeded tool entries,
+    or the failed ones for claims_success_after_failure, or every trace entry
+    for announces_without_answering]}.
     """
     reply = str(reply_text or "")
     successful = _successful_tools(tool_trace)
@@ -199,6 +306,15 @@ def check_tool_reply_consistency(
             return {"consistent": False, "mismatch_type": "claims_success_after_failure", "tools": failed}
         if _matches_any(reply, _CLAIM_PATTERNS):
             return {"consistent": False, "mismatch_type": "claims_without_run", "tools": []}
+    # Checked LAST and unconditionally (regardless of successful/failed trace
+    # state) — see the module docstring's direction #4. Placed after the
+    # three trace-anchored checks above so a reply already caught by one of
+    # them (e.g. "I'll check your calendar for open slots." with an empty
+    # trace, already claims_without_run) keeps that classification; this is
+    # strictly a catch-all for bare announcements none of the three above
+    # happen to match.
+    if _is_bare_intent_reply(reply):
+        return {"consistent": False, "mismatch_type": "announces_without_answering", "tools": _all_trace_entries(tool_trace)}
     return {"consistent": True, "mismatch_type": None, "tools": successful}
 
 
@@ -280,6 +396,77 @@ def build_honest_failure_fallback_reply(tools: list[ToolTraceEntry]) -> str:
     return "\n".join(lines)
 
 
+def build_bare_intent_correction_prompt(tools: list[ToolTraceEntry]) -> str:
+    """The announces_without_answering counterpart to build_correction_prompt
+    / build_failure_correction_prompt: hands the model whatever the trace
+    actually shows (or the plain fact that nothing has run yet) instead of
+    letting it repeat the same announcement. Regeneration reuses whichever
+    mechanism the calling pipeline already supplies (module docstring) — this
+    is deliberately worded to invite EITHER outcome ("call the tool ... or
+    tell the user plainly") because the two pipelines differ in what their
+    regenerate_fn can actually do: Sage's re-runs the full action loop with
+    tools live, so this correction doubles as the model's real chance to call
+    the tool it just promised; direct chat's regenerate_fn is a text-only
+    completion, so only the second half ever applies there. Either way the
+    ask is the same and the recheck (check_tool_reply_consistency again in
+    _finish) doesn't care which one the model did — only that the result
+    isn't ANOTHER bare announcement."""
+    lines = [
+        "[PLATFORM CORRECTION] Your previous answer this turn was only an "
+        "announcement of intent — it did not answer the question and, if a "
+        "tool was needed, did not call one. This is a factual correction, "
+        "not a suggestion:"
+    ]
+    if tools:
+        for tool in tools:
+            name = str(tool.get("name") or "a tool").strip()
+            status = str(tool.get("status") or "").strip().lower()
+            detail = _failed_tool_detail(tool) if status == "failed" else str(tool.get("output") or "").strip()
+            lines.append(f"- {name} already ran this turn ({status or 'unknown'}): {detail[:800]}")
+        lines.append(
+            "Do not say you're about to try again or check something you "
+            "already checked. Either call another tool right now if one "
+            "would actually help, or tell the user plainly, using only the "
+            "real results above, what did or didn't happen. Do not repeat "
+            "your previous announcement in any form."
+        )
+    else:
+        lines.append(
+            "You have not called any tool yet this turn — nothing has run. "
+            "Either call the tool you just said you would call, right now, "
+            "or answer the user directly. Do not promise to check, look up, "
+            "or run anything unless you are actually doing it in this same "
+            "response."
+        )
+    return "\n".join(lines)
+
+
+def build_bare_intent_fallback_reply(tools: list[ToolTraceEntry]) -> str:
+    """Used only when the corrective regeneration ALSO ships a bare
+    announcement (or nothing usable). Deterministic, not model-generated, so
+    it can't repeat the same failure mode. Only called for
+    announces_without_answering, where tools may legitimately be empty
+    (nothing ran all turn) — unlike denies_success/claims_success_after_
+    failure, this direction's own _decide branch never assumes tools is
+    non-empty."""
+    if not tools:
+        return (
+            "I don't have an answer for that yet — I said I'd check but "
+            "didn't actually do it. I don't want to guess."
+        )
+    lines = ["Here's what actually happened this turn instead of trying again:"]
+    for tool in tools:
+        name = str(tool.get("name") or "tool").strip()
+        status = str(tool.get("status") or "").strip().lower()
+        if status == "failed":
+            detail = _failed_tool_detail(tool)
+            lines.append(f"\n**{name}:** failed" + (f" — {detail[:1200]}" if detail else ""))
+        else:
+            detail = str(tool.get("output") or "").strip()
+            lines.append(f"\n**{name}:**\n{detail[:1200]}" if detail else f"\n**{name}:** completed with no output.")
+    return "\n".join(lines)
+
+
 # A pipeline's own way of asking its model for one more answer, given an
 # extra system-prompt-shaped correction string appended to whatever prompt it
 # already used. Each pipeline supplies its own — Sage's action loop and the
@@ -316,6 +503,20 @@ def _decide(reply_text: str, tool_trace: Optional[list[ToolTraceEntry]]) -> Opti
         # back to the deterministic reply.
         correction = build_failure_correction_prompt(tools)
         fallback_reply = build_honest_failure_fallback_reply(tools)
+        skip_regeneration = False
+    elif result["mismatch_type"] == "announces_without_answering":
+        # Unlike claims_without_run below, there is ALWAYS something concrete
+        # to hand back — either the real trace so far, or the plain fact
+        # that nothing has run yet (build_bare_intent_correction_prompt
+        # handles both) — so, like denies_success and
+        # claims_success_after_failure, regeneration gets one real attempt
+        # before falling back to the deterministic reply. Note `tools` here
+        # can legitimately be [] (an empty turn-so-far trace is itself an
+        # anchor: "nothing has run yet"), unlike the denies_success/
+        # claims_success_after_failure branches above which require
+        # non-empty tools to take this path at all.
+        correction = build_bare_intent_correction_prompt(tools)
+        fallback_reply = build_bare_intent_fallback_reply(tools)
         skip_regeneration = False
     else:
         # claims_without_run (defense-in-depth, fabrication direction): no

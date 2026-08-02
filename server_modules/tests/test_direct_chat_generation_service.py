@@ -192,8 +192,15 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertIn("uname -a && sw_vers", events[-1]["payload"]["reply"])
 
     def test_stream_provider_backed_direct_chat_never_streams_split_fullwidth_dsml(self) -> None:
+        # "Checking now." (not "Let me check.") deliberately: this test is
+        # about DSML-token stripping across chunk boundaries, not tool
+        # honesty, but a bare "Let me check." with nothing after it is
+        # EXACTLY the shape tool_honesty_guard's announces_without_answering
+        # direction now catches (see test_tool_honesty_guard.py) — a
+        # placeholder reply for an unrelated test must not itself collide
+        # with a real guard.
         dsml_reply = (
-            "Let me check.\n"
+            "Checking now.\n"
             "<｜｜DSML｜｜tool_calls>"
             "<｜｜DSML｜｜invoke name=\"bash\">"
             "<｜｜DSML｜｜parameter name=\"command\" string=\"true\">system_profiler</｜｜DSML｜｜parameter>"
@@ -204,7 +211,7 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
             direct_chat_generation_service.stream_provider_backed_direct_chat(
                 services=self._services(
                     stream_events=[
-                        {"type": "chunk", "delta": "Let me check.\n<"},
+                        {"type": "chunk", "delta": "Checking now.\n<"},
                         {"type": "chunk", "delta": "｜｜"},
                         {"type": "chunk", "delta": "DSML｜｜tool_calls>"},
                         {
@@ -251,7 +258,7 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertNotIn("tool_calls", streamed_text)
         self.assertNotIn("system_profiler", streamed_text)
         self.assertEqual(events[-1]["type"], "final")
-        self.assertEqual(events[-1]["payload"]["reply"], "Let me check.")
+        self.assertEqual(events[-1]["payload"]["reply"], "Checking now.")
         self.assertTrue(events[-1]["payload"]["response_leak_guard"]["redacted"])
 
     def test_stream_provider_backed_direct_chat_returns_final_answer(self) -> None:
