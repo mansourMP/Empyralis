@@ -8,6 +8,18 @@ import { Bot, Radio } from "lucide-react";
 import { resolveAgentProjectId, useFleetAgents, useFleetProjects, type FleetAgent, type FleetProject } from "@/lib/workspace/fleet/fleet-data";
 import { breadcrumbCount, findSageAgent } from "@/lib/workspace/fleet/fleet-presentation";
 import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
+import { AgentsBoard } from "@/lib/workspace/fleet/AgentsBoard";
+import { AgentsGroupedList } from "@/lib/workspace/fleet/AgentsGroupedList";
+import { AgentViewOptions } from "@/lib/workspace/fleet/AgentViewOptions";
+import {
+  DEFAULT_AGENT_VIEW_OPTIONS,
+  agentSurfaceFor,
+  readAgentViewOptions,
+  sortAgentsForView,
+  writeAgentViewOptions,
+  type AgentViewOptions as AgentViewOptionsState,
+} from "@/lib/workspace/fleet/agent-view-options";
+import { useWorkspaceGateways } from "@/lib/workspace/fleet/gateway-box-picker";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
@@ -72,6 +84,35 @@ export default function AgentsPage() {
   );
   const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
   const { project: projectFilter, status: statusFilter, channel: channelFilter, sort } = filterState;
+
+  // Board/List layout, grouping, ordering, display properties — the new,
+  // additive control. Hydrated from localStorage in an effect, never during
+  // render, so the server's markup and the client's first paint agree (same
+  // discipline the project page's own viewOptions state follows for tasks).
+  // Its OWN namespace (fleet:agent-view:*) and its OWN engine
+  // (agent-view-options.ts) — see that file's header for why this is a
+  // parallel build rather than a reuse of task-view-options.ts.
+  const [viewOptions, setViewOptions] = useState<AgentViewOptionsState>(DEFAULT_AGENT_VIEW_OPTIONS);
+  useEffect(() => {
+    if (workspaceId) setViewOptions(readAgentViewOptions(workspaceId));
+  }, [workspaceId]);
+  const updateViewOptions = useCallback(
+    (update: (prev: AgentViewOptionsState) => AgentViewOptionsState) => {
+      setViewOptions((prev) => {
+        const next = update(prev);
+        writeAgentViewOptions(workspaceId, next);
+        return next;
+      });
+    },
+    [workspaceId],
+  );
+  const surface = agentSurfaceFor(viewOptions);
+  // Paired-Gateway boxes for this workspace — needed to resolve a
+  // brain-bound agent's real status/placement (deriveAgentStatus /
+  // agentPlacementCategory) on the Board and Grouped-list surfaces. Its own
+  // independent fetch, same as AgentsList.tsx's internal call to the same
+  // hook — see AgentsBoard.tsx's prop doc for why that duplication is fine.
+  const { gateways } = useWorkspaceGateways(workspaceId);
 
   const updateFilters = useCallback((patch: Partial<FilterState>) => {
     setFilterState((prev) => {
@@ -140,6 +181,16 @@ export default function AgentsPage() {
     });
   }, [agents, projectFilter, statusFilter, channelFilter]);
   const shown = useMemo(() => sortAgents(filtered, sort, cost), [filtered, sort, cost]);
+  // The Board and Grouped-list surfaces order via the NEW view-options
+  // popover instead of the legacy "Sort by" dropdown above — same `filtered`
+  // input (the project/status/channel filters apply everywhere regardless of
+  // layout), a different ordering function. The flat table (`shown`) is
+  // untouched by this and keeps using the pre-existing sortAgents exactly as
+  // it always has.
+  const orderedForNewSurfaces = useMemo(
+    () => sortAgentsForView(filtered, viewOptions.ordering, viewOptions.direction, cost),
+    [filtered, viewOptions.ordering, viewOptions.direction, cost],
+  );
 
   const filters: ToolbarFilter[] = [
     {
@@ -213,23 +264,37 @@ export default function AgentsPage() {
       </HeaderAction>
 
       <div className="fleet-content-toolbar">
-        <FleetToolbar
-          filters={agents.length > 0 ? filters : undefined}
-          sortOptions={agents.length > 0 ? SORT_OPTIONS : undefined}
-          sortValue={sort}
-          sortDefault="last_active"
-          onSortChange={(v) => updateFilters({ sort: v as SortMode })}
-          panelOpen={panelOpen}
-          onTogglePanel={() => setPanelOpen((v) => !v)}
-          usageWorkspaceId={workspaceId}
-        />
+        {/* AgentViewOptions + FleetToolbar, pinned together at the row's
+            right edge (see .fleet-agent-view-cluster in fleet-theme.css for
+            why a wrapper is needed here rather than reusing the auto-margin
+            rule the Tasks tab's mutually-exclusive pair relies on). The
+            legacy "Sort by" dropdown inside FleetToolbar is only wired up
+            while the flat, ungrouped table is what's actually on screen — it
+            has nothing to act on once Board or a grouping is selected, and
+            AgentViewOptions' own Ordering row takes over at that point (see
+            that component's file header). Filters stay wired up always:
+            project/status/channel narrow which agents are shown regardless
+            of layout. */}
+        <div className="fleet-agent-view-cluster">
+          <AgentViewOptions options={viewOptions} onChange={updateViewOptions} />
+          <FleetToolbar
+            filters={agents.length > 0 ? filters : undefined}
+            sortOptions={agents.length > 0 && surface === "list" ? SORT_OPTIONS : undefined}
+            sortValue={sort}
+            sortDefault="last_active"
+            onSortChange={(v) => updateFilters({ sort: v as SortMode })}
+            panelOpen={panelOpen}
+            onTogglePanel={() => setPanelOpen((v) => !v)}
+            usageWorkspaceId={workspaceId}
+          />
+        </div>
       </div>
 
       {/* The sheet — full width always, whether the drawer below is open or
           closed. The page shows agents; everything else is behind the
           toggle above, not a permanent strip competing with the list. */}
       <div className="fleet-content-with-panel">
-        <div className="fleet-content-main">
+        <div className={`fleet-content-main${surface === "board" ? " fleet-content-main--agent-board" : ""}`}>
           {loading && agents.length === 0 ? (
             // rowHeight matches .fleet-agent-row's real min-height (52px) —
             // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton row
@@ -243,6 +308,35 @@ export default function AgentsPage() {
               desc="Agents do the work — they handle customer chats, run tasks, and use your tools. Create your first one to get started."
               onCreate={() => setWizardOpen(true)}
             />
+          ) : surface === "board" ? (
+            filtered.length === 0 ? (
+              <div className="fleet-page-state-body">No agents match these filters.</div>
+            ) : (
+              <AgentsBoard
+                agents={orderedForNewSurfaces}
+                gateways={gateways}
+                costByAgent={cost}
+                display={viewOptions.display}
+                agentHref={agentHref}
+                onSelect={goToAgent}
+              />
+            )
+          ) : surface === "grouped" ? (
+            filtered.length === 0 ? (
+              <div className="fleet-page-state-body">No agents match these filters.</div>
+            ) : (
+              <AgentsGroupedList
+                workspaceId={workspaceId}
+                agents={orderedForNewSurfaces}
+                gateways={gateways}
+                costByAgent={cost}
+                projectById={projById}
+                grouping={viewOptions.grouping as Exclude<typeof viewOptions.grouping, "none">}
+                display={viewOptions.display}
+                agentHref={agentHref}
+                onSelect={goToAgent}
+              />
+            )
           ) : shown.length === 0 ? (
             <div className="fleet-page-state-body">No agents match these filters.</div>
           ) : (

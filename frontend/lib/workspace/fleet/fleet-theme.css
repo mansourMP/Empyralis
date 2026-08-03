@@ -10424,3 +10424,579 @@ h2.fleet-sage-console-title {
   font-size: var(--text-2xs);
   color: var(--text-muted);
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   WORKSPACE AGENTS PAGE — Board/List view options (AgentViewOptions.tsx,
+   AgentsBoard.tsx, AgentsGroupedList.tsx). APPENDED BLOCK, PARALLEL to the
+   Tasks view-options block above (.fleet-view-options*, .fleet-board*,
+   .fleet-glist*) — nothing above this line is modified, and nothing in this
+   block is selected by any rule above it or vice versa. Every class here is
+   its own name (.fleet-agent-*), mirroring the Tasks block's STRUCTURE
+   (same box, same tokens, same motion budget) without sharing a single
+   selector with it. See agent-view-options.ts's file header for why this is
+   a deliberate duplication rather than a shared rule.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Toolbar cluster ─────────────────────────────────────────────────────
+   Unlike the Tasks tab (where TaskViewOptions and FleetToolbar are mutually
+   exclusive — see the note above `.fleet-content-toolbar > .fleet-toolbar-
+   actions, .fleet-content-toolbar > .fleet-view-options`), the workspace
+   Agents page renders AgentViewOptions AND FleetToolbar at the same time:
+   the pre-existing filter/sort control never goes away, this feature sits
+   beside it. Two DIRECT children of .fleet-content-toolbar both carrying
+   margin-left:auto would each absorb an equal share of the row's free
+   space (the CSS flexbox rule for multiple auto margins on one line),
+   stranding a wide gap between the two icon clusters instead of the ~8px
+   gap every other pair of controls in this file reads as. This wrapper is
+   the fix: it is the one direct child that claims the free space (see
+   agents/page.tsx), and AgentViewOptions + FleetToolbar sit inside it as
+   ordinary flex children — FleetToolbar's own `.fleet-toolbar-actions` no
+   longer matches the direct-child selector once nested a level deeper,
+   which is what stops that shared rule from also firing in here. */
+/* position:relative lives HERE, not on .fleet-agent-view-options below —
+   the popover's `right: 0` (inherited from .fleet-toolbar-popover) resolves
+   against whichever ancestor carries the nearest non-static position, and it
+   needs to be THIS wrapper's right edge (flush with Usage/Filter/Panel,
+   which is where every other popover in this cluster already opens from),
+   not the gear button's own ~28px-wide box. Getting this wrong doesn't show
+   at a 1600px desktop viewport — the gap between the two is a few percent of
+   the width, easy to miss — but at 375px that same absolute gap is a third
+   of the screen, and the popover's left edge ran off it. Anchoring here
+   instead is what TaskViewOptions gets for free on the Tasks tab, where its
+   trigger genuinely IS the row's only/rightmost element; AgentViewOptions
+   isn't (FleetToolbar's icons trail it), so it has to say so explicitly. */
+.fleet-agent-view-cluster {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* ── View-options popover (AgentViewOptions.tsx) ──────────────────────────
+   Borrows .fleet-toolbar-popover's box wholesale (elevation, radius,
+   dismissal geometry), same as the Tasks version. Neutral throughout: this
+   opens while the page's one accent-filled action ("New agent") is on
+   screen. */
+.fleet-agent-view-options {
+  display: inline-flex;
+  align-items: center;
+}
+
+.fleet-agent-view-options-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-surface-2);
+  border-radius: var(--radius-control);
+}
+.fleet-agent-view-options-layout-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--radius-control) - 2px);
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+}
+.fleet-agent-view-options-layout-btn:hover:not(.is-active) {
+  color: var(--text-primary);
+}
+.fleet-agent-view-options-layout-btn.is-active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.fleet-agent-view-options-popover {
+  width: 300px;
+  padding: 10px;
+  gap: 12px;
+}
+
+.fleet-agent-view-options-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.fleet-agent-view-options-label {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.fleet-agent-view-options-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fleet-agent-view-options-select {
+  height: 26px;
+  min-width: 132px;
+  padding: 0 6px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease-out);
+}
+.fleet-agent-view-options-select:hover {
+  border-color: var(--border-strong);
+}
+.fleet-agent-view-options-select:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.fleet-agent-view-options-dir {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.fleet-agent-view-options-dir:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.fleet-agent-view-options-dir:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.fleet-agent-view-options-section {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.fleet-agent-view-options-heading {
+  margin: 0;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-muted);
+  letter-spacing: 0;
+}
+
+.fleet-agent-view-options-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.fleet-agent-view-options-chip {
+  padding: 3px 9px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out);
+}
+.fleet-agent-view-options-chip:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.fleet-agent-view-options-chip.is-on {
+  background: var(--bg-inset);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+.fleet-agent-view-options-chip:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.fleet-agent-view-options-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+
+.fleet-agent-view-options-reset {
+  padding: 3px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out), background-color var(--dur-1) var(--ease-out);
+}
+.fleet-agent-view-options-reset:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+.fleet-agent-view-options-reset:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+/* ── Board (AgentsBoard.tsx) ───────────────────────────────────────────── */
+
+.fleet-agent-board {
+  display: flex;
+  gap: 20px;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 10px;
+  flex: 1;
+  min-height: 320px;
+}
+
+/* Applied to the content sheet only while the agent board is the active
+   layout (see agents/page.tsx) — same full-bleed treatment
+   .fleet-content-main--board gives the task board, under its own class so
+   neither page's rule can ever be reused for the other by accident. */
+.fleet-content-main--agent-board {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: hidden;
+  max-width: none;
+  margin-inline: 0;
+  width: 100%;
+  padding: 10px 32px 0;
+  position: relative;
+}
+.fleet-content-main--agent-board > .fleet-agent-board {
+  margin-right: -32px;
+}
+.fleet-content-main--agent-board > .fleet-agent-board > .fleet-agent-board-column:last-child {
+  margin-right: 32px;
+}
+.fleet-content-main--agent-board::after {
+  content: "";
+  position: absolute;
+  top: 10px;
+  bottom: 10px;
+  right: 0;
+  width: 32px;
+  pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--bg-panel));
+}
+@media (max-width: 768px) {
+  .fleet-content-main--agent-board {
+    padding: 16px 12px 0;
+  }
+  .fleet-content-main--agent-board > .fleet-agent-board {
+    margin-right: -12px;
+  }
+  .fleet-content-main--agent-board > .fleet-agent-board > .fleet-agent-board-column:last-child {
+    margin-right: 12px;
+  }
+}
+
+.fleet-agent-board-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 0 0 292px;
+  width: 292px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-card);
+}
+
+.fleet-agent-board-column-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  padding: 0 2px 9px;
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.fleet-agent-board-column-title {
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fleet-agent-board-column-count {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding-right: 2px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-agent-board-column-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 2px 2px;
+}
+
+/* No drag states here (no is-drop-target, no is-dragging) — this board has
+   no drag-and-drop; see AgentsBoard.tsx's file header for why. */
+.fleet-agent-board-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--card-shadow);
+  cursor: pointer;
+  transition: background-color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.fleet-agent-board-card:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-strong);
+}
+.fleet-agent-board-card:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -1px;
+}
+.fleet-agent-board-card.is-selected {
+  border-color: var(--accent-muted);
+  box-shadow: inset 0 0 0 1px var(--accent-muted);
+}
+
+.fleet-agent-board-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.fleet-agent-board-card-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-agent-board-card-head .fleet-badge {
+  flex-shrink: 0;
+  margin-left: 0;
+}
+
+.fleet-agent-board-card-preview {
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Wraps rather than truncating to one line (unlike the task card's single
+   meta row) — an agent card's fields carry longer text (a model name, a
+   real machine name) than a task's icon-only glyphs, so a hard single-line
+   cap would ellipsis half of them on any card with more than three fields
+   switched on. */
+.fleet-agent-board-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+}
+.fleet-agent-board-card-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+/* ── Grouped list (AgentsGroupedList.tsx) ─────────────────────────────── */
+
+.fleet-agent-glist {
+  display: flex;
+  flex-direction: column;
+  max-width: 1400px;
+}
+
+.fleet-agent-glist-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.fleet-agent-glist-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 8px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+.fleet-agent-glist-header-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  margin-left: -6px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.fleet-agent-glist-header-btn:hover {
+  background: var(--rail-active);
+}
+.fleet-agent-glist-header-btn:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -1px;
+}
+.fleet-agent-glist-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transform: rotate(90deg);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+.fleet-agent-glist-header-btn[aria-expanded="false"] .fleet-agent-glist-chevron {
+  transform: rotate(0deg);
+}
+.fleet-agent-glist-header-title {
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fleet-agent-glist-header-count {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-agent-glist-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Row grid rebuilt per display state from CSS custom properties the
+   component sets inline — same technique .fleet-glist-row uses for tasks,
+   under its own variable names so the two never collide. */
+.fleet-agent-glist-row {
+  display: grid;
+  grid-template-columns: var(--fleet-agent-glist-grid, 22px minmax(200px, 1fr) 92px 64px 56px 64px 76px 128px);
+  gap: 10px;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.fleet-agent-glist-rows .fleet-agent-glist-row:last-child {
+  border-bottom: none;
+}
+.fleet-agent-glist-row:hover {
+  background: var(--bg-card-hover);
+}
+.fleet-agent-glist-row:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
+@media (max-width: 768px) {
+  .fleet-agent-glist-row {
+    grid-template-columns: var(--fleet-agent-glist-grid-mobile, 22px minmax(0, 1fr) 104px);
+  }
+}
+
+.fleet-agent-glist-cell-avatar {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+}
+.fleet-agent-glist-cell-title {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.fleet-agent-glist-cell-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+.fleet-agent-glist-cell-title .fleet-badge {
+  flex-shrink: 0;
+  margin-left: 6px;
+}
+.fleet-agent-glist-cell-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+.fleet-agent-glist-cell-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+}
+.fleet-agent-glist-cell-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+}
+
+@media (max-width: 768px) {
+  .fleet-agent-glist-cell-preview,
+  .fleet-agent-glist-cell-text { display: none; }
+}
