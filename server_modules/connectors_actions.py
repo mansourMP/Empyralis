@@ -1326,8 +1326,17 @@ async def sms_twilio_webhook(request: Request):
     if creds is None:
         # "not configured on this deployment" — no numbers can exist without
         # the master account, so any inbound here is unexpected. Fail loudly
-        # (503) rather than crash; never 500.
-        raise HTTPException(status_code=503, detail=sms_provisioning.NOT_CONFIGURED_MESSAGE)
+        # (503) rather than crash; never 500. This route has no auth (Twilio
+        # calls it directly), so the response is effectively public — the
+        # operator-facing detail (which env vars to set) goes to the log
+        # only, never into the HTTP response (see MAN-293: same leak shape
+        # as the unauthenticated verify-email/resend 503).
+        import logging
+
+        logging.getLogger(__name__).error(
+            "sms_twilio_webhook_not_configured: %s", sms_provisioning.NOT_CONFIGURED_MESSAGE
+        )
+        raise HTTPException(status_code=503, detail="SMS is not available on this deployment.")
 
     raw_body = await request.body()
     try:

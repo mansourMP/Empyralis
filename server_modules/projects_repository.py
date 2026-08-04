@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from typing import Any, Dict, List, Optional
 
 from server_modules import control_plane_repository
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PROJECT_NAME = "General"
 DEFAULT_PROJECT_SLUG = "general"
@@ -256,7 +259,31 @@ async def create_project(
                 pool=pool,
             )
         except Exception:
-            pass
+            # MAN-299: this used to be a bare `except Exception: pass` --
+            # the project was returned as created while the membership row
+            # silently never landed, with no log, no signal to the caller.
+            # add_project_member's INSERT is already idempotent (ON CONFLICT
+            # ... DO UPDATE), so "the creator is already a member" never
+            # raises here -- there is no benign case to narrow this to.
+            # Anything that does land here (a dropped connection, a
+            # constraint violation, a bad pool) is a real failure, and the
+            # roster becoming wrong (the creator silently missing from
+            # project_memberships) is exactly the bug MAN-114's add-member
+            # UI depends on this table being honest about. Still
+            # best-effort by design -- the project itself is already
+            # committed by this point, so this must not undo (or appear to
+            # undo) a successful create -- but it must never be silent.
+            LOGGER.error(
+                "create_project_member_grant_failed: could not add creator "
+                "user_id=%s as a member of project_id=%s (tenant_id=%s, "
+                "workspace_id=%s) -- the project was created but the "
+                "creator has no project_memberships row.",
+                clean_creator,
+                project["id"],
+                tenant_id,
+                workspace_id,
+                exc_info=True,
+            )
     return project
 
 
