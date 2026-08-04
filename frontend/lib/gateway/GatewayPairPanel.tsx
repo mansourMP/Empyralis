@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, Loader2 } from "lucide-react";
+import { AlertTriangle, Check, Copy, Loader2 } from "lucide-react";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 
 export type GatewayRegistrationRecord = Record<string, unknown> & {
@@ -10,7 +10,35 @@ export type GatewayRegistrationRecord = Record<string, unknown> & {
   platform?: string | null;
   connection_status?: string | null;
   status?: string | null;
+  /** Capabilities this box actually advertised at connect time (gateway_
+   *  registry_service.gateway_registration_public_payload). shell.execute /
+   *  filesystem.read_write are withheld here — never sent at all, not sent
+   *  and then rejected — until Docker is confirmed ready on the box (see
+   *  empyralis-gateway/src/supervisor/capability-router.ts's
+   *  filterCapabilitiesByDesktopPermission). Absent/undefined on a backend
+   *  that predates this field; only ever treated as a signal when it's a
+   *  real array. */
+  capabilities?: string[] | null;
 };
+
+/** Capabilities gated behind a locally-confirmed Docker sandbox — mirrors
+ *  empyralis-gateway/src/runtime/desktop-permissions.ts's
+ *  DESKTOP_CAPABILITY_PERMISSIONS shell_sandbox entries. A freshly-paired
+ *  box that hasn't advertised either one has Docker not (yet) running —
+ *  the exact "connected, but can't execute anything" gap MAN-295 diagnosed:
+ *  pairing succeeds and shows "Connected" while shell.execute is silently
+ *  missing from the connect frame, with nothing in this flow saying why. */
+const DOCKER_GATED_CAPABILITIES = ["shell.execute", "filesystem.read_write"];
+
+/** True only when this box has REPORTED its capability list and Docker's
+ *  gate is closed — i.e. a real "not ready" signal, not just "we don't know
+ *  yet" (an absent/non-array `capabilities` field never claims either way,
+ *  so it renders no badge rather than a false one). */
+export function gatewayNeedsDocker(gateway: GatewayRegistrationRecord): boolean {
+  const capabilities = gateway.capabilities;
+  if (!Array.isArray(capabilities)) return false;
+  return !DOCKER_GATED_CAPABILITIES.some((capability) => capabilities.includes(capability));
+}
 
 type PairingIntent = {
   pairing_token?: string | null;
@@ -172,12 +200,22 @@ export function GatewayPairPanel({
 
   if (paired) {
     const postPair = renderPostPairNext?.(paired);
+    const needsDocker = gatewayNeedsDocker(paired);
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <div className="gw-pair-panel gw-pair-panel--success">
           <Check size={16} strokeWidth={2} />
           <span>Connected — {String(paired.display_name || paired.gateway_id || "device")} is paired.</span>
         </div>
+        {needsDocker && (
+          <div className="gw-pair-panel gw-pair-panel--warning">
+            <AlertTriangle size={16} strokeWidth={2} />
+            <span>
+              Docker isn&apos;t running on this machine, so agents can&apos;t run commands or read/write files
+              here yet. Start Docker Desktop, then reconnect.
+            </span>
+          </div>
+        )}
         {postPair}
       </div>
     );

@@ -594,4 +594,51 @@ export class GatewayDoctorRuntime {
   async runHealthCheck(): Promise<GatewayDoctorRunResult> {
     return runGatewayDoctor(this.checks, this.ctx, { repair: false });
   }
+
+  /** MAN-295 / MAN-269: before this, the ONLY code path that ever wrote a
+   *  macOS LaunchAgent (or repaired a drifted one) was a human explicitly
+   *  invoking the gateway.doctor.run capability with repair:true — nothing
+   *  ran this at pairing or at boot, so a Mac gateway that died had nothing
+   *  to bring it back. index.ts calls this once, best-effort, right after
+   *  the cloud WS first connects (same afterConnected hook personal-channel
+   *  startup and the post-restart health check already use) so "this
+   *  computer restarts itself if it crashes" becomes true on normal
+   *  pairing/install, not just after a manual doctor run.
+   *
+   *  Reuses SUPERVISOR_PRESENCE_CHECK.detect()/.repair() verbatim (via
+   *  this.ctx) — the exact same code the gateway.doctor.run capability and
+   *  the Hardware page's "Fix what's safe to fix" button already call —
+   *  rather than a second implementation. Safe to call unconditionally on
+   *  every platform and every startup: detect() short-circuits to "already
+   *  supervised, nothing to do" the instant a systemd/launchd hint is
+   *  present (the common case for a cloud VPS provisioned by scripts/
+   *  install-agent-computer.sh), and resolveExpectedSupervisorUnit() itself
+   *  no-ops on any platform that isn't darwin/linux. Never throws — a
+   *  failure here (e.g. EACCES writing to ~/Library/LaunchAgents) is
+   *  reported in the returned result's `detail`/`repair_detail`, which the
+   *  caller journals so it's visible rather than silently dropped; it must
+   *  never abort gateway startup. */
+  async ensureSupervisorInstalled(): Promise<GatewayDoctorCheckResult> {
+    const outcome = await safeDetect(SUPERVISOR_PRESENCE_CHECK, this.ctx);
+    const result: GatewayDoctorCheckResult = {
+      id: SUPERVISOR_PRESENCE_CHECK.id,
+      label: SUPERVISOR_PRESENCE_CHECK.label,
+      status: outcome.status,
+      detail: outcome.detail,
+      repairable: Boolean(SUPERVISOR_PRESENCE_CHECK.repair),
+    };
+    if ((outcome.status === "fail" || outcome.status === "warn") && SUPERVISOR_PRESENCE_CHECK.repair) {
+      try {
+        const repairOutcome = await SUPERVISOR_PRESENCE_CHECK.repair(this.ctx);
+        result.repair_detail = repairOutcome.detail;
+      } catch (error) {
+        result.repair_detail = `Repair attempt failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      const revalidated = await safeDetect(SUPERVISOR_PRESENCE_CHECK, this.ctx);
+      result.status = revalidated.status;
+      result.detail = revalidated.detail;
+      result.repaired = revalidated.status === "pass";
+    }
+    return result;
+  }
 }

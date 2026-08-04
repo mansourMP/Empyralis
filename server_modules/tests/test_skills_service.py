@@ -1106,6 +1106,16 @@ class SkillsServiceTests(unittest.TestCase):
         payload = json.loads(raw)
         self.assertEqual(payload["status"], "offline")
         self.assertEqual(payload["runtime_target"], "user_device_gateway")
+        # MAN-295: the JSON string returned here IS the tool result content a
+        # model reads directly on this path (see skills_service._format_
+        # hardware_action_result) — it must carry plain-language guidance
+        # alongside the raw "gateway_offline" reason token, not just the
+        # token itself.
+        self.assertEqual(
+            payload["message"],
+            "This computer isn't connected right now. Make sure it's powered on and the "
+            "Empyralis gateway is running, then retry.",
+        )
         execute_hardware_mock.assert_awaited_once()
         call_kwargs = execute_hardware_mock.await_args.kwargs
         self.assertEqual(call_kwargs["tenant_id"], "tenant-1")

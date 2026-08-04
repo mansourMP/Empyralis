@@ -4862,6 +4862,26 @@ a.fleet-breadcrumb:hover {
   font-weight: 500;
 }
 
+/* Docker-not-ready badge under a successful pairing (MAN-295) — pairing can
+   report "Connected" while shell.execute/filesystem.read_write are still
+   withheld (Docker not confirmed ready), which otherwise leaves the owner
+   with no idea execution is impossible. Deliberately its own bordered row,
+   not folded into --success, so the warning can't be mistaken for part of
+   the "you're done" message. */
+.gw-pair-panel--warning {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--warning-text);
+  font-size: 12px;
+  border-color: color-mix(in oklch, var(--warning-text) 40%, transparent);
+}
+
+.gw-pair-panel--warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 .gw-pair-panel-row {
   display: flex;
   align-items: flex-end;
