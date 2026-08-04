@@ -287,6 +287,45 @@ class ProjectTasksCrudTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"title": "Step 1"', args[-1])
 
 
+class RowToTaskPendingWakeTests(unittest.TestCase):
+    """MAN-294 part 3: _row_to_task's read side of the pending_wake_due_at/
+    pending_wake_delay_reason rollup (_TASK_ROLLUP_COLUMNS/_TASK_ROLLUP_JOINS/
+    _TASK_ROLLUP_RETURNING in project_tasks_service.py -- the actual SQL was
+    verified separately against a real Postgres schema via EXPLAIN plus a
+    fabricated-data functional check inside a rolled-back transaction, since
+    this file's fake pool only returns canned rows and cannot execute SQL).
+    This class covers the Python-side mapping: does a raw row that carries
+    the two new columns surface them correctly, and does a row from a server
+    predating this rollup (no keys at all) degrade to None/None instead of
+    raising -- the same deploy-before-migrate posture every sibling rollup
+    field on this row already takes."""
+
+    def test_present_pending_wake_fields_are_surfaced(self):
+        row = _task_row(
+            pending_wake_due_at="2026-08-05 07:00:00+00:00",
+            pending_wake_delay_reason="quiet_hours",
+        )
+        task = project_tasks_service._row_to_task(row)
+        self.assertEqual(task["pending_wake_due_at"], "2026-08-05 07:00:00+00:00")
+        self.assertEqual(task["pending_wake_delay_reason"], "quiet_hours")
+
+    def test_absent_pending_wake_fields_read_as_none_not_a_raise(self):
+        row = _task_row()
+        self.assertNotIn("pending_wake_due_at", row)
+        task = project_tasks_service._row_to_task(row)
+        self.assertIsNone(task["pending_wake_due_at"])
+        self.assertIsNone(task["pending_wake_delay_reason"])
+
+    def test_null_pending_wake_fields_read_as_none(self):
+        """The common case once a wake has actually fired: the LEFT JOIN/
+        scalar subquery finds no non-terminal row and both come back
+        SQL NULL, which Postgres hands back as Python None."""
+        row = _task_row(pending_wake_due_at=None, pending_wake_delay_reason=None)
+        task = project_tasks_service._row_to_task(row)
+        self.assertIsNone(task["pending_wake_due_at"])
+        self.assertIsNone(task["pending_wake_delay_reason"])
+
+
 class TaskPriorityTests(unittest.IsolatedAsyncioTestCase):
     """Task priority on Linear's five-level scale
     (migrations/add_task_priority.sql):

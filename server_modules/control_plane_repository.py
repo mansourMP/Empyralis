@@ -13154,7 +13154,22 @@ async def append_agent_scheduler_wake_request(
             "SELECT * FROM agent_scheduler_wake_requests WHERE id = $1 LIMIT 1",
             resolved_wake_id,
         )
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    record = dict(row)
+    # No jsonb codec is registered on this pool (see _decode_json_object's
+    # other call sites in this file) -- payload/policy/metadata otherwise
+    # come back as raw JSON text, not dicts. This return value is handed
+    # straight through bounded_scheduler_service._persist_wakeup to every
+    # caller (schedule_task_assigned_wakeup, schedule_task_commented_wakeup,
+    # maybe_schedule_event_trigger, propose_self_wakeup) and from there
+    # straight into the HTTP response as `wake_request` -- e.g. a caller
+    # reading wake_request["metadata"]["policy_delay_reason"] wants a real
+    # dict lookup, not a JSON string it has to remember to parse itself.
+    record["payload"] = _decode_json_object(record.get("payload"))
+    record["policy"] = _decode_json_object(record.get("policy"))
+    record["metadata"] = _decode_json_object(record.get("metadata"))
+    return record
 
 
 def _scheduler_policy_value(policy: Optional[Dict[str, Any]], key: str, default: Any) -> Any:
