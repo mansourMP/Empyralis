@@ -41,10 +41,58 @@ _TRUSTED_DSML_SOURCES = {
     "local_worker",
 }
 
+# MAN-303 (production, 2026-08-04): a model on a text-tool-calling fallback
+# path (deepseek-reasoner, no native tool_calls that iteration) wrote a
+# literal "<memorywrite>...</memorywrite>" block into its final reply
+# alongside a real, separately-issued native tool_calls entry that actually
+# executed. Nothing recognized "<memorywrite>" as internal markup — it isn't
+# the DSML format above — so it rendered raw to the user. This is a second,
+# independent class of internal-looking markup: not a specific provider's
+# transport encoding, but a model narrating (or hallucinating) one of THIS
+# platform's own tool names as an XML-ish tag instead of a real structured
+# call. Anchored to the platform's actual flat tool-name vocabulary (see
+# direct_chat_generation_service.py's _MEMORY_TOOL_NAMES/
+# _TOOL_CALL_NOTATION_RE and no_provider_service.py's tool_names) — never a
+# generic "<anything>" sweep — so ordinary HTML/XML a user asked to see is
+# never touched. Normalized (letters+digits only, case-insensitive) before
+# comparison so "<memorywrite>" matches the real tool "memory_write" even
+# though the model didn't reproduce the underscore.
+_KNOWN_TOOL_IDENTIFIERS = {
+    "memory_write", "memory_read", "memory_search", "memory_get", "memory_list",
+    "find_workspace_memory_entry", "memory_context",
+    "shell__exec", "file__read", "file__write", "file__delete",
+    "http_request", "web__search", "web__fetch",
+    "browser__navigate", "browser__extract_text",
+    "hardware__action", "screenshot__capture",
+    "task_complete", "query_tool_registry", "update_plan",
+}
+
+
+def _normalize_tag_identifier(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+_KNOWN_TOOL_IDENTIFIERS_NORMALIZED = {_normalize_tag_identifier(name) for name in _KNOWN_TOOL_IDENTIFIERS}
+
+# A bare XML-ish tag: "<name>" or "</name>" or "<name/>". Deliberately not
+# paired with its own closer here — an unclosed opening tag (generation cut
+# off mid-block, exactly like the DSML start-marker case above) must still
+# be caught, not just a complete open/close pair.
+_GENERIC_TAG_RE = re.compile(r"<\s*/?\s*([a-zA-Z_][a-zA-Z0-9_]{2,40})\s*/?\s*>")
+
+
+def _find_hallucinated_tool_tag_start(raw: str) -> int:
+    for match in _GENERIC_TAG_RE.finditer(raw):
+        if _normalize_tag_identifier(match.group(1)) in _KNOWN_TOOL_IDENTIFIERS_NORMALIZED:
+            return match.start()
+    return -1
+
 
 def detect_internal_tool_markup(value: Any) -> bool:
     raw = str(value or "")
-    return bool(_INTERNAL_TOOL_MARKUP_RE.search(raw) or _INTERNAL_TOOL_MARKUP_START_RE.search(raw))
+    if _INTERNAL_TOOL_MARKUP_RE.search(raw) or _INTERNAL_TOOL_MARKUP_START_RE.search(raw):
+        return True
+    return _find_hallucinated_tool_tag_start(raw) >= 0
 
 
 def strip_internal_tool_markup(value: Any) -> str:
@@ -52,9 +100,13 @@ def strip_internal_tool_markup(value: Any) -> str:
     if not raw:
         return ""
     match = _INTERNAL_TOOL_MARKUP_RE.search(raw) or _INTERNAL_TOOL_MARKUP_START_RE.search(raw)
-    if not match:
+    cut_at = match.start() if match else -1
+    tag_start = _find_hallucinated_tool_tag_start(raw)
+    if tag_start >= 0 and (cut_at < 0 or tag_start < cut_at):
+        cut_at = tag_start
+    if cut_at < 0:
         return raw.strip()
-    return raw[: match.start()].strip()
+    return raw[:cut_at].strip()
 
 
 def _normalize_dsml_tool_name(name: Any) -> str:

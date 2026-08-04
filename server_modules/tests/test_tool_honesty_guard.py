@@ -607,5 +607,113 @@ class AnnouncesWithoutAnsweringDecideAndCorrectionTests(unittest.TestCase):
         self.assertEqual(outcome["guard"]["mismatch_type"], "announces_without_answering")
 
 
+class FalseRejectionClaimDenialTests(unittest.TestCase):
+    """MAN-303 (production, 2026-08-04): a fresh-account agent asked to save
+    a fact to memory replied with 'The first write was rejected for
+    formatting — retrying with a single-line entry,' followed by a raw
+    '<memorywrite>...</memorywrite>' block, then issued a second memory_write
+    call. BOTH calls actually succeeded (the trace below reproduces that
+    exactly: two completed memory_write entries) — memory ended up with two
+    duplicate entries, and the guard never fired.
+
+    Root cause established by investigation: this is not a tool-trace
+    visibility gap. Both memory_write calls were genuine native tool_calls
+    and both landed in the trace correctly (verified separately — see
+    turn_tool_trace.append at direct_chat_generation_service.py). The gap is
+    narrower and more concrete: _DENIAL_PATTERNS had no phrasing for a claim
+    that a call was REJECTED/FAILED VALIDATION when the trace proves it
+    succeeded — every existing pattern is shaped like "I don't have a tool" /
+    "no tool ran", not "that call was rejected." check_tool_reply_consistency
+    is fed a fully-populated, correct trace here specifically to prove that:
+    if this test fails, it must be failing because the reply text doesn't
+    match any denial pattern, not because the trace is empty or malformed.
+    """
+
+    def _two_successful_memory_writes(self) -> list[dict]:
+        return [
+            {"name": "memory_write", "status": "completed", "output": "ok: appended to MEMORY.md"},
+            {"name": "memory_write", "status": "completed", "output": "ok: appended to MEMORY.md"},
+        ]
+
+    def test_false_rejection_claim_is_denies_success_against_a_fully_successful_trace(self) -> None:
+        trace = self._two_successful_memory_writes()
+        # Precondition, not the thing under test: this trace must actually
+        # register as "successful" or the assertion below would pass for the
+        # wrong reason (empty-trace claims_without_run instead of
+        # denies_success). Pins the trace shape so a future refactor of
+        # _successful_tools can't silently make this test meaningless.
+        self.assertEqual(len(guard._successful_tools(trace)), 2)
+
+        reply = (
+            "The first write was rejected for formatting — retrying with a "
+            "single-line entry.\n\n<memorywrite>\nentry: Favorite color: teal.\n</memorywrite>"
+        )
+        result = guard.check_tool_reply_consistency(reply, trace)
+        self.assertFalse(result["consistent"], "guard did not fire on a false rejection claim over a proven success")
+        self.assertEqual(result["mismatch_type"], "denies_success")
+        self.assertEqual(result["tools"], trace)
+
+    def test_decide_produces_a_correction_anchored_on_the_real_successes(self) -> None:
+        trace = self._two_successful_memory_writes()
+        reply = "The first write was rejected for formatting — retrying with a single-line entry."
+        decision = guard._decide(reply, trace)
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision["mismatch_type"], "denies_success")
+        self.assertFalse(decision["skip_regeneration"])
+        assert decision["correction"] is not None
+        self.assertIn("memory_write", decision["correction"])
+        self.assertIn("DID run", decision["correction"])
+
+    def test_full_guard_replaces_the_false_rejection_claim(self) -> None:
+        trace = self._two_successful_memory_writes()
+        reply = (
+            "The first write was rejected for formatting — retrying with a "
+            "single-line entry.\n\n<memorywrite>\nentry: Favorite color: teal.\n</memorywrite>"
+        )
+
+        def _regenerate(_correction_text: str) -> str:
+            return "Saved — favorite color: teal."
+
+        outcome = guard.apply_tool_honesty_guard_sync(
+            reply_text=reply,
+            tool_trace=trace,
+            regenerate_fn=_regenerate,
+        )
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertEqual(outcome["guard"]["mismatch_type"], "denies_success")
+        self.assertNotIn("rejected", outcome["reply"].lower())
+        self.assertNotIn("<memorywrite>", outcome["reply"])
+
+    def test_other_rejected_then_retried_phrasings_also_match(self) -> None:
+        trace = self._two_successful_memory_writes()
+        for reply in [
+            "That call got rejected, so I am retrying now.",
+            "My previous attempt was rejected — retrying with the correct format.",
+            "The save didn't go through, retrying now.",
+            "It wasn't saved the first time, so I am retrying.",
+        ]:
+            with self.subTest(reply=reply):
+                result = guard.check_tool_reply_consistency(reply, trace)
+                self.assertFalse(result["consistent"], f"false negative on: {reply!r}")
+                self.assertEqual(result["mismatch_type"], "denies_success")
+
+    def test_unrelated_rejection_does_not_false_positive_without_a_successful_trace(self) -> None:
+        # "was rejected" alone, about something with no tool-call-shaped head
+        # noun, must never trip this direction even when paired with an
+        # (unrelated) success — the head-noun anchor is what keeps this safe.
+        trace = self._two_successful_memory_writes()
+        result = guard.check_tool_reply_consistency(
+            "Saved that for you. By the way, the committee's proposal was rejected.",
+            trace,
+        )
+        self.assertTrue(result["consistent"], "unrelated 'was rejected' text false-positived denies_success")
+
+    def test_honest_success_report_is_not_flagged(self) -> None:
+        trace = self._two_successful_memory_writes()
+        result = guard.check_tool_reply_consistency("Saved — favorite color: teal.", trace)
+        self.assertTrue(result["consistent"])
+
+
 if __name__ == "__main__":
     unittest.main()
