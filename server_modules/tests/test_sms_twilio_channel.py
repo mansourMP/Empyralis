@@ -200,6 +200,15 @@ class SmsInboundWebhookTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as exc_info:
                 await connectors_actions.sms_twilio_webhook(request)
         self.assertEqual(exc_info.exception.status_code, 503)
+        # MAN-293 (same leak shape): this route has no auth -- anyone who
+        # POSTs to the webhook path sees this response -- so the 503 body
+        # must never name the env vars the platform Twilio account needs
+        # (sms.NOT_CONFIGURED_MESSAGE, which does name them, is for the
+        # server log only now; see connectors_actions.sms_twilio_webhook).
+        detail = str(exc_info.exception.detail or "")
+        self.assertNotIn("TWILIO_ACCOUNT_SID", detail)
+        self.assertNotIn("TWILIO_AUTH_TOKEN", detail)
+        self.assertTrue(detail.strip())
 
     async def test_webhook_rejects_missing_signature(self) -> None:
         request = _request_from_body(b"From=%2B15559998888&To=%2B15550001111&Body=hi")
