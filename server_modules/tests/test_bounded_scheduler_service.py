@@ -1,9 +1,11 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 import importlib
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
-from server_modules import bounded_scheduler_service, fleet_tools
+from server_modules import bounded_scheduler_service, db as db_module, fleet_tools
 
 
 class BoundedSchedulerServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -460,6 +462,178 @@ class BoundedSchedulerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(snapshot["active"])
         self.assertIn("Quiet hours active until", snapshot["label"])
         self.assertTrue(snapshot["next_allowed_at"].endswith("Z"))
+
+
+class _FastStopEvent:
+    """A threading.Event look-alike whose .wait(timeout) returns
+    immediately instead of actually sleeping -- lets the tests below drive
+    run_wake_request_scan_forever through several ticks without paying
+    the real wake_request_scan_poll_seconds() floor (5s minimum)."""
+
+    def __init__(self) -> None:
+        self._flag = False
+
+    def wait(self, timeout=None) -> bool:  # noqa: ARG002 - signature parity with threading.Event
+        return self._flag
+
+    def set(self) -> None:
+        self._flag = True
+
+    def is_set(self) -> bool:
+        return self._flag
+
+
+class WakeRequestScanLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """MAN-292: bounded_scheduler_service.py had two silent swallows in the
+    wake-request-scanner daemon -- a bare `except Exception: continue` on
+    each tick (run_wake_request_scan_forever), and a per-scope
+    run_workspace_heartbeat failure caught into an `outcome` dict that the
+    tick-level caller then discards entirely (scan_due_wake_requests_once).
+    Both are now logged via LOGGER.exception; these tests prove a raising
+    scan produces a real log record at each of those two points."""
+
+    async def test_scan_once_logs_a_per_scope_heartbeat_failure(self):
+        def _raising_heartbeat(tasks, metadata):
+            raise RuntimeError("boom")
+
+        with (
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository."
+                "list_due_agent_scheduler_wake_request_scopes",
+                new=AsyncMock(return_value=[{"tenant_id": "tenant-1", "workspace_id": "workspace-1"}]),
+            ),
+            self.assertLogs("server_modules.bounded_scheduler_service", level="ERROR") as log_ctx,
+        ):
+            result = await bounded_scheduler_service.scan_due_wake_requests_once(
+                run_workspace_heartbeat=_raising_heartbeat,
+            )
+
+        # The scan itself still completes and still reports the failure in
+        # its return value (unchanged behavior) -- the fix is that the
+        # failure is ALSO now logged, not a replacement for the return
+        # value.
+        self.assertEqual(result["scanned"], 1)
+        self.assertFalse(result["results"][0]["result"]["acted"])
+        self.assertIn("wake scan failed", result["results"][0]["result"]["summary"])
+
+        self.assertTrue(
+            any("heartbeat failed" in message for message in log_ctx.output),
+            f"expected a heartbeat-failure log record, got: {log_ctx.output}",
+        )
+        self.assertTrue(
+            any("boom" in message for message in log_ctx.output),
+            f"expected the original exception text in the log record, got: {log_ctx.output}",
+        )
+
+    def test_run_forever_logs_a_tick_failure_and_keeps_running(self):
+        """A tick that raises must be logged (MAN-292) AND must not kill
+        the scanner for subsequent ticks (MAN-265's explicit constraint:
+        a transient failure must never become a permanent outage)."""
+        tick_count = {"n": 0}
+        stop_event = _FastStopEvent()
+
+        async def _fake_scan(*, run_workspace_heartbeat):
+            tick_count["n"] += 1
+            if tick_count["n"] >= 2:
+                stop_event.set()
+            raise RuntimeError("tick boom")
+
+        with (
+            patch.object(bounded_scheduler_service, "scan_due_wake_requests_once", _fake_scan),
+            self.assertLogs("server_modules.bounded_scheduler_service", level="ERROR") as log_ctx,
+        ):
+            bounded_scheduler_service.run_wake_request_scan_forever(
+                run_workspace_heartbeat=lambda tasks, metadata: {"acted": False},
+                stop_event=stop_event,
+                poll_seconds=5,
+            )
+
+        # Both ticks ran despite tick 1 raising -- the loop survived.
+        self.assertEqual(tick_count["n"], 2)
+        tick_failure_logs = [m for m in log_ctx.output if "tick failed" in m]
+        self.assertEqual(
+            len(tick_failure_logs), 2,
+            f"expected one 'tick failed' log record per raising tick, got: {log_ctx.output}",
+        )
+        self.assertTrue(any("tick boom" in m for m in log_ctx.output))
+
+
+class WakeRequestScannerPersistentLoopTests(unittest.TestCase):
+    """MAN-265: run_wake_request_scan_forever used to open a brand new
+    asyncio event loop (asyncio.new_event_loop() / run_until_complete() /
+    loop.close()) on EVERY tick via a since-removed `_run_sync` helper.
+    server_modules.db.get_pool() caches the Postgres pool keyed by
+    id(current_loop) (server_modules/db.py:150) specifically so a
+    long-lived worker reuses one pool -- a fresh loop object every tick
+    (every wake_request_scan_poll_seconds(), 20s by default) defeated that
+    cache: get_pool() saw a "new" loop each time, tore down the "stale"
+    pool from the just-closed previous loop, and paid for a fresh
+    asyncpg.create_pool(...) call every single tick, forever. Confirmed
+    live on production: "Postgres pool initialized -- run state will be
+    durable" in ~/.pm2/logs/empyralis-error.log at exact 20-second
+    intervals.
+
+    This test proves the actual fix property MAN-265 asked for: across N
+    ticks on one persistent loop, asyncpg.create_pool is invoked exactly
+    ONCE, not once per tick.
+    """
+
+    def test_pool_created_once_across_multiple_ticks(self):
+        create_pool_calls: list[str] = []
+        loop_ids_seen: list[int] = []
+        tick_count = {"n": 0}
+        stop_event = _FastStopEvent()
+
+        class _FakePool:
+            async def close(self) -> None:
+                pass
+
+            def terminate(self) -> None:
+                pass
+
+        async def _fake_create_pool(*, dsn, min_size, max_size, command_timeout):
+            create_pool_calls.append(dsn)
+            return _FakePool()
+
+        async def _fake_scan(*, run_workspace_heartbeat):
+            tick_count["n"] += 1
+            loop_ids_seen.append(id(asyncio.get_running_loop()))
+            # The real scan reaches db.get_pool() indirectly (through
+            # run_workspace_heartbeat's own DB access); this stands in for
+            # that and is the actual thing MAN-265 is about.
+            await db_module.get_pool()
+            if tick_count["n"] >= 3:
+                stop_event.set()
+            return {"scanned": 0, "results": []}
+
+        fake_asyncpg = SimpleNamespace(create_pool=_fake_create_pool)
+
+        with (
+            patch.dict("os.environ", {"DATABASE_URL": "postgresql://fake:fake@fake-host/fake_db"}),
+            patch.object(db_module, "asyncpg", fake_asyncpg),
+            patch.object(db_module, "_POOLS_BY_LOOP", {}),
+            patch.object(db_module, "_POOL_INIT_LOCKS_BY_LOOP", {}),
+            patch.object(db_module, "_POOL_INIT_FAILED", False),
+            patch.object(bounded_scheduler_service, "scan_due_wake_requests_once", _fake_scan),
+        ):
+            bounded_scheduler_service.run_wake_request_scan_forever(
+                run_workspace_heartbeat=lambda tasks, metadata: {"acted": False},
+                stop_event=stop_event,
+                poll_seconds=5,
+            )
+
+        self.assertEqual(tick_count["n"], 3, "expected exactly 3 ticks to have run")
+        self.assertEqual(
+            len(set(loop_ids_seen)), 1,
+            f"expected every tick to run on the SAME event loop object, saw "
+            f"{len(set(loop_ids_seen))} distinct loop ids across ticks {loop_ids_seen}",
+        )
+        self.assertEqual(
+            len(create_pool_calls), 1,
+            f"expected asyncpg.create_pool to be called exactly ONCE across "
+            f"{tick_count['n']} ticks (this is MAN-265's whole point), but it "
+            f"was called {len(create_pool_calls)} times",
+        )
 
 
 if __name__ == "__main__":

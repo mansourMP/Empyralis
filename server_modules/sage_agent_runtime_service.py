@@ -4126,6 +4126,33 @@ async def _run_post_turn_auto_compaction(
             pass  # observability must never break the calling turn
 
 
+# MAN-266 fix: asyncio.ensure_future()/create_task() returns a Task, but
+# the event loop only holds a WEAK reference to it -- if nothing else
+# keeps a strong reference, the task can be garbage-collected while still
+# pending (a well-documented asyncio footgun; see the "Important: Save a
+# reference to the result" note under asyncio.create_task in the stdlib
+# docs). That is exactly what was happening below: the old
+# _schedule_post_turn_auto_compaction called
+# asyncio.ensure_future(_run_post_turn_auto_compaction(...)) and threw the
+# returned Task away immediately (nothing assigned, nothing stored) --
+# so the background auto-compaction job could be collected mid-run,
+# producing the recurring production log line "ERROR [asyncio] Task was
+# destroyed but it is pending!" (MAN-266's reported "task destroyed,
+# connection dropped" symptom). Mirrors the exact pattern already used
+# elsewhere in this codebase for the same footgun --
+# routes_gateway.py's _VPS_PROVISION_BACKGROUND_TASKS /
+# _track_vps_provision_task and gateway_protocol_service.py's per-
+# connection background_tasks set: hold a strong reference in a module-
+# level set, and let the task remove itself via add_done_callback the
+# moment it finishes so this never grows unbounded.
+_POST_TURN_COMPACTION_TASKS: set[asyncio.Task] = set()
+
+
+def _track_post_turn_compaction_task(task: "asyncio.Task") -> None:
+    _POST_TURN_COMPACTION_TASKS.add(task)
+    task.add_done_callback(_POST_TURN_COMPACTION_TASKS.discard)
+
+
 def _schedule_post_turn_auto_compaction(
     *,
     workspace_id: str,
@@ -4144,11 +4171,15 @@ def _schedule_post_turn_auto_compaction(
     which the task itself now logs) is logged here rather than swallowed —
     matches the "never silent" fix the inline setup+dispatch code used to
     violate.
+
+    MAN-266 fix: the scheduled Task is now tracked in
+    _POST_TURN_COMPACTION_TASKS (see comment above) instead of being
+    discarded — see that comment for why a discarded Task reference was
+    the confirmed root cause of the "Task was destroyed but it is
+    pending!" errors this was producing in production.
     """
     try:
-        import asyncio as _asyncio
-
-        _asyncio.ensure_future(_run_post_turn_auto_compaction(
+        task = asyncio.ensure_future(_run_post_turn_auto_compaction(
             workspace_id=workspace_id,
             tenant_id=tenant_id,
             thread_id=thread_id,
@@ -4159,6 +4190,7 @@ def _schedule_post_turn_auto_compaction(
             session_id=session_id,
             trace_id=trace_id,
         ))
+        _track_post_turn_compaction_task(task)
     except Exception as exc:
         logging.getLogger(__name__).error(
             "sage_agent_runtime: failed to SCHEDULE background auto-compaction "
