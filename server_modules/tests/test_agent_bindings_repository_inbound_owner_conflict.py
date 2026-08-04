@@ -166,5 +166,87 @@ class GetAgentInstallLabelTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class AgentInstallInScopeTests(unittest.TestCase):
+    """MAN-206: agent_install_in_scope is the ownership guard every
+    channel-bot assignment must pass before writing a binding/credential
+    for a caller-supplied agent_install_id. Fails closed in every case where
+    ownership can't be positively confirmed."""
+
+    def test_returns_true_when_the_install_resolves_in_scope(self):
+        with (
+            patch(
+                "server_modules.control_plane_repository.ensure_control_plane_schema",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "server_modules.control_plane_repository.rls_fetchrow",
+                new=AsyncMock(return_value={"?column?": 1}),
+            ) as fetch_mock,
+        ):
+            result = _run(bindings.agent_install_in_scope(
+                "agent-a", tenant_id="t1", workspace_id="w1",
+            ))
+        self.assertTrue(result)
+        # The RLS GUC scope passed to the query must be the CALLER's own
+        # tenant/workspace -- this is what makes the query actually prove
+        # ownership rather than just checking the row exists somewhere.
+        _, kwargs = fetch_mock.call_args
+        self.assertEqual(kwargs.get("tenant_id"), "t1")
+        self.assertEqual(kwargs.get("workspace_id"), "w1")
+
+    def test_returns_false_when_no_row_resolves_in_scope(self):
+        """The install exists, but under a DIFFERENT tenant/workspace than
+        the caller's -- the RLS-scoped query returns no row, exactly as if
+        the id didn't exist at all from the caller's point of view."""
+        with (
+            patch(
+                "server_modules.control_plane_repository.ensure_control_plane_schema",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "server_modules.control_plane_repository.rls_fetchrow",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            result = _run(bindings.agent_install_in_scope(
+                "agent-belongs-to-another-tenant", tenant_id="t1", workspace_id="w1",
+            ))
+        self.assertFalse(result)
+
+    def test_returns_false_when_the_control_plane_pool_is_unavailable(self):
+        with patch(
+            "server_modules.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=None),
+        ):
+            result = _run(bindings.agent_install_in_scope(
+                "agent-a", tenant_id="t1", workspace_id="w1",
+            ))
+        self.assertFalse(result)
+
+    def test_returns_false_rather_than_raising_on_a_lookup_failure(self):
+        with patch(
+            "server_modules.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(side_effect=RuntimeError("db down")),
+        ):
+            result = _run(bindings.agent_install_in_scope(
+                "agent-a", tenant_id="t1", workspace_id="w1",
+            ))
+        self.assertFalse(result)
+
+    def test_returns_false_for_an_empty_agent_install_id(self):
+        result = _run(bindings.agent_install_in_scope(
+            "", tenant_id="t1", workspace_id="w1",
+        ))
+        self.assertFalse(result)
+
+    def test_returns_false_for_missing_tenant_or_workspace(self):
+        self.assertFalse(_run(bindings.agent_install_in_scope(
+            "agent-a", tenant_id="", workspace_id="w1",
+        )))
+        self.assertFalse(_run(bindings.agent_install_in_scope(
+            "agent-a", tenant_id="t1", workspace_id="",
+        )))
+
+
 if __name__ == "__main__":
     unittest.main()

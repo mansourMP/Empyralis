@@ -140,6 +140,16 @@ async def assign_agent_discord(
     structurally by ``uq_agent_channel_bindings_active_inbound_owner`` — a second
     agent binding the same bot raises :class:`DiscordBotAlreadyBoundError`.
     """
+    # MAN-206: agent_install_id is caller-supplied and must be confirmed to
+    # belong to THIS (tenant_id, workspace_id) before anything is written --
+    # see agent_bindings_repository.agent_install_in_scope for why RLS alone
+    # does not catch a cross-workspace id here.
+    if not await bindings.agent_install_in_scope(
+        agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    ):
+        raise bindings.AgentInstallNotInScopeError(
+            "This agent does not belong to your workspace."
+        )
     me = await discord_get_me(token)  # validates; raises on failure
     bot_id = str(me.get("id") or "").strip()
     bot_username = str(me.get("username") or "").strip()
