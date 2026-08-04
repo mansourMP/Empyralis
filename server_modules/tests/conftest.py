@@ -67,10 +67,14 @@ _DATABASE_URL_DENYLIST_HOSTS = frozenset({
 
 def _resolve_candidate_database_url() -> str:
     """An explicit shell export always wins. Otherwise, fall back to
-    whatever a .env file in the working directory (or an ancestor) would
-    supply -- the same file runtime_config.py's module-level load_dotenv()
-    call and test_agent_registry_install_metadata_concurrency.py's own
-    _database_url() helper both read from.
+    whatever this checkout's own repo-root .env file would supply -- the
+    same explicit path runtime_config.py's module-level load_dotenv() call
+    now reads from (MAN-202 scoped it there so it can no longer search UP
+    the directory tree into a *different* checkout's .env; see that file
+    for the full incident writeup). Mirroring the exact path here -- rather
+    than a bare load_dotenv() that would search upward on its own -- keeps
+    this guard definitionally correct instead of a re-derivation that could
+    drift from the real app behavior.
 
     python-dotenv's load_dotenv() never overrides an already-set
     environment variable (override=False is the default), so calling it
@@ -88,7 +92,8 @@ def _resolve_candidate_database_url() -> str:
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        repo_root_env = Path(__file__).resolve().parent.parent.parent / ".env"
+        load_dotenv(repo_root_env)
     except Exception:
         pass
     return str(os.environ.get("DATABASE_URL") or "").strip()

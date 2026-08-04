@@ -383,9 +383,24 @@ def _should_load_dotenv() -> bool:
     return _resolved_environment() in {"dev", "development", "local", "test", "testing"}
 
 
+# MAN-202 / MAN-268: this used to be a bare load_dotenv(), which lets
+# python-dotenv search UP the directory tree from wherever the process
+# happens to be invoked, looking for the nearest ".env". A subagent working
+# inside a git worktree nested under the real checkout
+# (.claude/worktrees/<name>/) has no .env of its own, so that search walked
+# straight past the worktree and into the *real* repo root's .env, silently
+# handing a "throwaway" local stack production-adjacent credentials
+# (DATABASE_URL included) while the agent believed it was running in
+# isolation. That is very likely what let an agent wipe the founder's local
+# database, and it was hit again for real running the test suite (MAN-268).
+# Anchoring the path to this file's own location means only *this
+# checkout's* repo-root .env is ever read -- never a parent directory's.
+_RUNTIME_CONFIG_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+
 # 1. Load Secrets
 if _should_load_dotenv():
-    load_dotenv()
+    load_dotenv(_RUNTIME_CONFIG_ENV_PATH)
 # Avoid interactive trace prompts and color issues in headless runtime
 os.environ.setdefault("RICH_DISABLE_COLOR", "1")
 os.environ.setdefault("RICH_NO_COLOR", "1")

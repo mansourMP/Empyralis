@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -38,7 +39,12 @@ def _database_url() -> str:
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        # MAN-202: scoped to this checkout's own repo-root .env rather than
+        # a bare load_dotenv(), which would search UP the directory tree
+        # from cwd and could reach a different checkout's .env (see
+        # server_modules/runtime_config.py for the full writeup).
+        repo_root_env = Path(__file__).resolve().parent.parent.parent / ".env"
+        load_dotenv(repo_root_env)
     except Exception:
         pass
     return str(os.getenv("DATABASE_URL") or "").strip()
