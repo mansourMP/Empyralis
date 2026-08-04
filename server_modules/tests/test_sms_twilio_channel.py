@@ -144,6 +144,7 @@ class SmsProvisioningGateTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(sms, "platform_twilio_credentials", return_value={"account_sid": "AC", "auth_token": "tok"}),
             patch.object(sms, "webhook_base_url", return_value="https://hook.test"),
+            patch.object(sms.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)),
             patch.object(sms, "search_available_numbers", new=AsyncMock(return_value=[{"phone_number": "+15550001111"}])),
             patch.object(sms, "purchase_number", new=AsyncMock(return_value={"phone_number": "+15550001111", "sid": "PN123"})),
             patch.object(sms, "store_sms_credential", return_value="cred-1"),
@@ -168,6 +169,7 @@ class SmsProvisioningGateTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(sms, "platform_twilio_credentials", return_value={"account_sid": "AC", "auth_token": "tok"}),
             patch.object(sms, "webhook_base_url", return_value="https://hook.test"),
+            patch.object(sms.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)),
             patch.object(sms, "search_available_numbers", new=AsyncMock(return_value=[{"phone_number": "+15550001111"}])),
             patch.object(sms, "purchase_number", new=AsyncMock(return_value={"phone_number": "+15550001111", "sid": "PN123"})),
             patch.object(sms, "store_sms_credential", return_value="cred-1"),

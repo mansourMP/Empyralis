@@ -2868,6 +2868,23 @@ async def store_agent_connector_credential(
     if not isinstance(credentials, dict) or not credentials:
         raise HTTPException(status_code=400, detail="credentials payload is required.")
 
+    # MAN-301: agent_install_id is caller-supplied and must be confirmed to
+    # belong to THIS (tenant_id, workspace_id) before anything is written.
+    # _resolve_agent_project_id below is already tenant/workspace-scoped,
+    # but its empty-string result was only ever used to label project_id,
+    # never to reject the write — and an agent that genuinely belongs here
+    # but simply has no project also resolves empty, so that signal alone
+    # can't distinguish "foreign agent" from "my own unscoped agent".
+    # agent_install_in_scope (added for MAN-206) answers the ownership
+    # question directly; reused here rather than a second, divergent copy
+    # of the same check. Matches subscribe_agent_to_project_credential's
+    # existing HTTPException(403) convention in this file.
+    from server_modules import agent_bindings_repository as bindings
+    if not await bindings.agent_install_in_scope(
+        agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    ):
+        raise HTTPException(status_code=403, detail="This agent does not belong to your workspace.")
+
     resolved_project_id = str(project_id or "").strip() or await _resolve_agent_project_id(
         tenant_id=tenant_id, workspace_id=workspace_id, agent_install_id=agent_install_id,
     )
