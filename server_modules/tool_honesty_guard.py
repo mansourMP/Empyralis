@@ -127,6 +127,24 @@ _DENIAL_PATTERNS = [
     r"\bi'?m unable to (search|browse|access|fetch)\b",
     r"\bi have no (way|means) to (search|access|browse|fetch|look ?up)\b",
     r"\bi don'?t have (any |the )?(tool|search) results?\b",
+    # MAN-303 (production, 2026-08-04): "The first write was rejected for
+    # formatting — retrying with a single-line entry," said by the model
+    # about a memory_write call the trace shows fully succeeded (twice,
+    # producing duplicate entries). Distinct phrasing from the two patterns
+    # above: this is not "I don't have a tool" / "no tool ran," it's a claim
+    # that a call the trace proves succeeded actually FAILED validation or
+    # was REJECTED, usually followed by a false "retrying" narrative. Head-
+    # noun anchored (write/call/attempt/save/request/update/entry) so an
+    # unrelated "the proposal was rejected" elsewhere in an honest reply
+    # never matches — same precision discipline as the rest of this list,
+    # and safe to be liberal for the same reason (module docstring,
+    # HIGH-PRECISION section): only checked when the trace proves a tool
+    # call genuinely succeeded this turn.
+    r"\b(?:the\s+)?(?:first\s+|previous\s+|last\s+|initial\s+|earlier\s+|my\s+)?"
+    r"(?:write|call|attempt|save|request|update|entry)\s+(?:was|got|is)\s+rejected\b",
+    r"\brejected for (?:formatting|validation|the format)\b",
+    r"\b(?:didn'?t (?:go through|save|work|succeed)|wasn'?t saved|wasn'?t written|"
+    r"failed to (?:save|write|go through))\b(?:\W*\w+){0,8}?\W*retry(?:ing|ied)?\b",
 ]
 
 # Reply claims a real lookup happened. Only checked when the trace shows
