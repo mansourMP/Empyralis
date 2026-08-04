@@ -1041,6 +1041,24 @@ export type FleetTask = {
    *  `created_at`. Null under the exact same conditions as completed_by_*. */
   completed_at?: string | null;
   due_at?: string | null;
+  /** MAN-294: the most recent still-pending task_assigned/task_commented
+   *  wake request for this task, if one exists — project_tasks_service's
+   *  rollup join against agent_scheduler_wake_requests (never a second
+   *  fetch). A task can read `status: "in_progress"` (assign_task flips
+   *  that column the instant an agent is assigned) while ALSO carrying a
+   *  future pending_wake_due_at — that combination means the assignee has
+   *  not actually started yet (still waiting out a battery/network delay;
+   *  quiet hours no longer defer an assignment at all, see
+   *  bounded_scheduler_service.schedule_task_assigned_wakeup). Both null
+   *  once the wake has actually fired (the common case) or on a server
+   *  predating this rollup. */
+  pending_wake_due_at?: string | null;
+  /** "quiet_hours" | "battery_low" | "network_offline" — bounded_scheduler_
+   *  service._apply_policy_to_due_at's own reason strings, passed through
+   *  verbatim rather than re-enumerated here so a new reason on the backend
+   *  doesn't need a frontend release to become visible. Null whenever
+   *  pending_wake_due_at is (see above) — never one without the other. */
+  pending_wake_delay_reason?: string | null;
   plan?: unknown;
   metadata?: Record<string, unknown>;
   created_at?: string | null;

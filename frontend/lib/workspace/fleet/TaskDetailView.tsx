@@ -127,6 +127,7 @@ import {
   taskShortId,
   taskStatusLabel,
   taskPriority,
+  taskWakeDeferral,
   TASK_PRIORITIES,
   TASK_PRIORITY_LABELS,
 } from "./task-status";
@@ -434,6 +435,10 @@ export function TaskDetailView({
   }, [task.id]);
 
   const priority = taskPriority(task);
+  // MAN-294: non-null only while `status` is lying -- see taskWakeDeferral's
+  // own docstring. Recomputed every render off the polled task, so it
+  // clears itself the moment a refetch shows the agent has actually woken.
+  const wakeDeferral = taskWakeDeferral(task);
   const assignee = agents.find((a) => a.agent_id === task.assignee_agent_id) || null;
   // The human half of MAN-64/MAN-70 -- only looked up when there is no
   // agent assignee, matching the backend's own mutual-exclusivity
@@ -798,6 +803,20 @@ export function TaskDetailView({
               </select>
             </span>
           </div>
+          {/* MAN-294: the Status control above still reads "In progress" —
+              that IS the task's real lifecycle state, and the dropdown
+              stays the honest place to change it. But "In progress" alone
+              here would claim the agent is actively working when it
+              provably has not started yet (still waiting out a policy
+              delay), which is the confirmed bug this note exists to close.
+              Rendered as a plain caption, not a second .fleet-panel-row —
+              this qualifies the row above it rather than standing as its
+              own property. */}
+          {wakeDeferral ? (
+            <p className="fleet-task-detail-wake-note" role="status">
+              Scheduled — {wakeDeferral.reasonLabel}, starts {wakeDeferral.startsLabel}
+            </p>
+          ) : null}
 
           <div className="fleet-panel-row">
             <span className="fleet-panel-row-label">

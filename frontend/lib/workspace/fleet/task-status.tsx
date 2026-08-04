@@ -26,7 +26,8 @@
 
 import type { CSSProperties } from "react";
 
-import type { FleetTaskStatus } from "./fleet-data";
+import type { FleetTask, FleetTaskStatus } from "./fleet-data";
+import { formatTime } from "./fleet-presentation";
 
 // ── Identity ────────────────────────────────────────────────────────────────
 
@@ -76,6 +77,63 @@ export function taskStatusVisual(status: FleetTaskStatus): StatusVisual {
 
 export function taskStatusLabel(status: FleetTaskStatus): string {
   return taskStatusVisual(status).label;
+}
+
+// ── Deferred wake (MAN-294) ─────────────────────────────────────────────────
+
+/** bounded_scheduler_service._apply_policy_to_due_at's own reason strings,
+ *  given a human reading — kept as a lookup (not re-derived) so a reason this
+ *  map doesn't recognize still renders as something, never a blank. */
+const WAKE_DELAY_REASON_LABELS: Record<string, string> = {
+  quiet_hours: "quiet hours",
+  battery_low: "low battery",
+  network_offline: "offline network",
+};
+
+function wakeDelayReasonLabel(reason: string): string {
+  return WAKE_DELAY_REASON_LABELS[reason] || reason.replace(/_/g, " ");
+}
+
+/** How long a due_at has to sit in the future before this counts as
+ *  "deferred" rather than "about to happen anyway" — mirrors the backend's
+ *  own IMMEDIATE_TRIGGER_WINDOW_SECONDS (bounded_scheduler_service.py), the
+ *  window inside which a due wake already triggers the ambient monitor
+ *  directly. A wake due in the next 5s reads as "starting", not "scheduled
+ *  for later". */
+const DEFERRED_WAKE_THRESHOLD_MS = 5_000;
+
+export type TaskWakeDeferral = { reason: string; reasonLabel: string; startsLabel: string };
+
+/**
+ * MAN-294: a task's `status` column flips to `in_progress` the instant it is
+ * assigned, whether or not the scheduler actually let the agent start yet —
+ * see project_tasks_service.assign_task and bounded_scheduler_service's own
+ * skip_quiet_hours note. This is the read-side check for "is that true right
+ * now": non-null only while the task is genuinely still waiting on a
+ * still-pending, still-future wake, so a caller can swap the dishonest "In
+ * progress" reading for an honest one instead of asserting work is running
+ * that provably has not started (CLAUDE.md: a status that says work is in
+ * progress when it isn't is a lie).
+ *
+ * Deliberately does not touch `task.status` itself or the status dropdown's
+ * own option list — those still name the real lifecycle state a human (or
+ * the scheduler, on completion) can set. This is an adjacent, honest
+ * amendment to that reading, not a new status value.
+ */
+export function taskWakeDeferral(
+  task: Pick<FleetTask, "status" | "assignee_agent_id" | "pending_wake_due_at" | "pending_wake_delay_reason">,
+): TaskWakeDeferral | null {
+  if (task.status !== "in_progress" || !task.assignee_agent_id) return null;
+  const reason = String(task.pending_wake_delay_reason || "").trim();
+  if (!reason || !task.pending_wake_due_at) return null;
+  const dueAt = new Date(task.pending_wake_due_at);
+  if (Number.isNaN(dueAt.getTime())) return null;
+  if (dueAt.getTime() - Date.now() < DEFERRED_WAKE_THRESHOLD_MS) return null;
+  return {
+    reason,
+    reasonLabel: wakeDelayReasonLabel(reason),
+    startsLabel: formatTime(dueAt, { hour: "2-digit", minute: "2-digit" }),
+  };
 }
 
 /** Ring geometry, in the 14x14 user space every icon here shares.

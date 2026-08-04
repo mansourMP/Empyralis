@@ -8731,6 +8731,18 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   outline-offset: 1px;
 }
 
+/* MAN-294: the honest amendment to the Status row directly above it — "In
+   progress" is the real lifecycle state, this line says the agent has not
+   actually picked it up yet and when it will. Tight to the row above
+   (dense inside a group), --warning-text so it reads as "needs your eye"
+   the same way the page-level wake-error notice already does, never bold
+   enough to compete with the row's own value. */
+.fleet-task-detail-wake-note {
+  margin: -2px 4px 4px;
+  font-size: 11px;
+  color: var(--warning-text);
+}
+
 /* ── Main-content tab strip (Safari / VS Code) ────────────────────────────────
    MAN-127 FIX 1: sits ON THE CANVAS, ABOVE the content panel and outside it —
    the strip is window chrome, the panel below is the page. It spans the
