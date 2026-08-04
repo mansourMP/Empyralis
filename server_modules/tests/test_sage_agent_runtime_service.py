@@ -3066,6 +3066,60 @@ class PostTurnAutoCompactionExceptionLoggingTests(unittest.TestCase):
         self.assertTrue(any("failed to SCHEDULE" in m for m in log_ctx.output))
 
 
+class PostTurnAutoCompactionTaskReferenceTests(unittest.IsolatedAsyncioTestCase):
+    """MAN-266: _schedule_post_turn_auto_compaction used to call
+    asyncio.ensure_future(_run_post_turn_auto_compaction(...)) as a bare
+    statement, discarding the returned Task immediately. The event loop
+    only holds a WEAK reference to a Task (see asyncio.create_task's own
+    "Important: Save a reference to the result" docs note); with nothing
+    else keeping it alive, it could be garbage-collected while still
+    pending -- matching the recurring production
+    'ERROR [asyncio] Task was destroyed but it is pending!' log line this
+    ticket reports. server_modules/tests/test_exception_and_task_lint.py
+    independently confirms this was the file's ONLY unassigned
+    create_task/ensure_future site (it's been removed from that lint
+    test's baseline as part of this fix).
+
+    Fixed by tracking the Task in the module-level
+    _POST_TURN_COMPACTION_TASKS set with a done-callback that discards it
+    on completion (same pattern as routes_gateway.py's
+    _VPS_PROVISION_BACKGROUND_TASKS). This test proves both halves: the
+    task is tracked while running, and untracked once it finishes."""
+
+    async def test_scheduled_task_is_tracked_while_pending_and_untracked_on_completion(self):
+        release = asyncio.Event()
+
+        async def _fake_job(**kwargs):
+            await release.wait()
+
+        with patch.object(sage_agent_runtime_service, "_run_post_turn_auto_compaction", new=_fake_job):
+            sage_agent_runtime_service._schedule_post_turn_auto_compaction(
+                workspace_id="ws-1", tenant_id="default", thread_id="sage-main",
+                provider="deepseek", model="deepseek-chat",
+                ctx_policy_max=0, ctx_policy_action="compact",
+                session_id="sess-1", trace_id="trace-1",
+            )
+            # ensure_future only SCHEDULES the task -- it needs one trip
+            # through the loop before it's actually running and has had a
+            # chance to register itself.
+            await asyncio.sleep(0)
+
+            self.assertEqual(
+                len(sage_agent_runtime_service._POST_TURN_COMPACTION_TASKS), 1,
+                "scheduled task must be held by a strong reference while pending",
+            )
+            tracked_task = next(iter(sage_agent_runtime_service._POST_TURN_COMPACTION_TASKS))
+            self.assertFalse(tracked_task.done())
+
+            release.set()
+            await tracked_task
+
+        self.assertEqual(
+            len(sage_agent_runtime_service._POST_TURN_COMPACTION_TASKS), 0,
+            "the done-callback must discard the task once it completes, so this never grows unbounded",
+        )
+
+
 class ContextPolicyFalsyZeroTests(unittest.TestCase):
     """BUG 5 falsy-zero: capability_presets.PRESET_STANDARD and
     PRESET_OPERATOR (the two most common agent presets) both set

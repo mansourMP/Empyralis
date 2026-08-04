@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from server_modules import agent_registry_repository, authority_mandate_service, control_plane_repository, entitlements_service, rust_runtime_kernel_client, workspace_context
 from server_modules.config_loader import config_bool, config_int
 
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_QUIET_HOURS_START = 23
 DEFAULT_QUIET_HOURS_END = 7
@@ -1045,14 +1048,6 @@ def max_task_comment_wake_debounce_seconds() -> int:
     )
 
 
-def _run_sync(coro: Any) -> Any:
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
-
 async def scan_due_wake_requests_once(
     *,
     run_workspace_heartbeat: Callable[[List[str], Dict[str, Any]], Any],
@@ -1090,6 +1085,16 @@ async def scan_due_wake_requests_once(
                 {"workspace_id": workspace_id, "tenant_id": tenant_id, "trigger": "schedule"},
             )
         except Exception as exc:
+            # MAN-292: this used to be swallowed into `outcome` with no
+            # logging, and the caller (run_wake_request_scan_forever)
+            # discards the returned `results` list entirely -- so a
+            # per-scope heartbeat failure was invisible everywhere.
+            # LOGGER.exception here (full traceback + scope context) is the
+            # only place this failure is ever recorded now.
+            LOGGER.exception(
+                "wake-request-scanner: workspace heartbeat failed for tenant=%s workspace=%s",
+                tenant_id, workspace_id,
+            )
             outcome = {"acted": False, "summary": f"wake scan failed: {exc}"}
         results.append({"tenant_id": tenant_id, "workspace_id": workspace_id, "result": outcome})
     return {"scanned": len(scopes), "results": results}
@@ -1104,16 +1109,62 @@ def run_wake_request_scan_forever(
     """Daemon-thread entry point -- same shape as run_service's
     run_weekly_scheduler_forever (plain while-not-stopped/sleep loop, started
     once at boot). Not asyncio-native since it's started from a sync
-    bootstrap context; each tick opens and closes its own event loop via
-    _run_sync, matching the sync/async bridge pattern already used in
-    runtime_heartbeat_service for the same reason."""
+    bootstrap context.
+
+    MAN-265 fix: runs on ONE event loop for this thread's entire lifetime
+    instead of the old _run_sync helper, which did
+    asyncio.new_event_loop() / run_until_complete() / loop.close() fresh on
+    EVERY tick. server_modules/db.py's get_pool() caches the Postgres pool
+    keyed by id(current_loop) (db.py:150) precisely so a long-lived worker
+    reuses one pool -- but a brand-new loop object every
+    wake_request_scan_poll_seconds() (default 20s) made every tick look
+    like a new caller to that cache, so it tore down the "stale" pool and
+    paid for a fresh asyncpg.create_pool(...) every single tick, forever.
+    Confirmed live on production: "Postgres pool initialized -- run state
+    will be durable" in ~/.pm2/logs/empyralis-error.log at exact 20-second
+    intervals. One persistent loop here means db.py's per-loop cache
+    actually caches, as designed -- see
+    WakeRequestScannerPersistentLoopTests.test_pool_created_once_across_
+    multiple_ticks in
+    server_modules/tests/test_bounded_scheduler_service.py, which proves
+    the pool is created once across multiple ticks.
+
+    A single tick failure must never be allowed to kill this loop (and
+    therefore the scanner) for good -- that would turn a transient error
+    into a permanent outage, strictly worse than the old wasteful-but-
+    resilient per-tick-loop behavior. So each tick's run_until_complete is
+    individually try/excepted (MAN-292: and now logged, see
+    scan_due_wake_requests_once above and the except below); only
+    stop_event controls whether the loop keeps going.
+    """
     interval = int(poll_seconds) if poll_seconds is not None else wake_request_scan_poll_seconds()
     interval = max(5, interval)
-    while not stop_event.wait(interval):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        while not stop_event.wait(interval):
+            try:
+                loop.run_until_complete(
+                    scan_due_wake_requests_once(run_workspace_heartbeat=run_workspace_heartbeat)
+                )
+            except Exception:
+                LOGGER.exception("wake-request-scanner: tick failed")
+                continue
+    finally:
         try:
-            _run_sync(scan_due_wake_requests_once(run_workspace_heartbeat=run_workspace_heartbeat))
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         except Exception:
-            continue
+            LOGGER.exception("wake-request-scanner: error cleaning up pending tasks during shutdown")
+        finally:
+            try:
+                asyncio.set_event_loop(None)
+            except Exception:
+                LOGGER.debug("wake-request-scanner: asyncio.set_event_loop(None) failed during shutdown", exc_info=True)
+            loop.close()
 
 
 def _extract_context_event_ids(wake_requests: List[Dict[str, Any]]) -> List[str]:
