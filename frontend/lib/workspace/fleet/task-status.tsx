@@ -25,6 +25,7 @@
  */
 
 import type { CSSProperties } from "react";
+import { Clock3 } from "lucide-react";
 
 import type { FleetTask, FleetTaskStatus } from "./fleet-data";
 import { formatTime } from "./fleet-presentation";
@@ -134,6 +135,49 @@ export function taskWakeDeferral(
     reasonLabel: wakeDelayReasonLabel(reason),
     startsLabel: formatTime(dueAt, { hour: "2-digit", minute: "2-digit" }),
   };
+}
+
+/**
+ * MAN-294: the COMPACT counterpart to TaskDetailView's own running-text
+ * "Scheduled — quiet hours, starts 07:00" note. A board card, a task-list
+ * row, and a grouped-list row have no spare line for a sentence — every
+ * OTHER secondary/qualifying glyph on those three surfaces (the priority
+ * bars, the assignee avatar, the read-only status ring in grouped-list) is
+ * already icon-only with the full explanation in `title`, never icon-plus-
+ * visible-text, so this matches that existing affordance rather than
+ * inventing a fourth. Renders nothing when the task isn't deferred
+ * (taskWakeDeferral's own null case) — CLAUDE.md's "no dead controls": an
+ * icon slot with nothing to say is not drawn, same as TaskPriorityIcon at
+ * priority 0 on a board card.
+ *
+ * Every caller wraps THIS component rather than re-deriving the icon,
+ * colour, or sentence itself, so the four surfaces that show it (this one
+ * plus TaskDetailView's own prose version, which calls taskWakeDeferral
+ * directly for its fuller rendering) cannot drift into different answers
+ * for "is this task's wake actually deferred."
+ */
+export function TaskWakeDeferralIcon({
+  task,
+  size = 13,
+  className,
+}: {
+  task: Pick<FleetTask, "status" | "assignee_agent_id" | "pending_wake_due_at" | "pending_wake_delay_reason">;
+  size?: number;
+  className?: string;
+}) {
+  const deferral = taskWakeDeferral(task);
+  if (!deferral) return null;
+  const sentence = `Scheduled — ${deferral.reasonLabel}, starts ${deferral.startsLabel}`;
+  return (
+    <span
+      className={`fleet-task-wake-deferral-icon${className ? ` ${className}` : ""}`}
+      role="img"
+      aria-label={sentence}
+      title={sentence}
+    >
+      <Clock3 size={size} strokeWidth={2} aria-hidden focusable="false" />
+    </span>
+  );
 }
 
 /** Ring geometry, in the 14x14 user space every icon here shares.

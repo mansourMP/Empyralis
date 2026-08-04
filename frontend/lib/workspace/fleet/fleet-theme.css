@@ -2338,6 +2338,19 @@ a.fleet-breadcrumb:hover {
 .fleet-schip--degraded { color: var(--warning-text); }
 .fleet-schip--degraded .fleet-schip-dot { background: var(--degraded-dot); }
 
+/* MAN-294: task-status.TaskWakeDeferralIcon's own compact glyph — the board
+   card, the flat list, and the grouped list all wrap this one class, so a
+   deferred task's icon is pixel-identical wherever it appears. Same
+   --warning-text as the properties-panel's own running-text note (and as
+   .fleet-schip--degraded above) — one amber for "needs your eye," not a
+   second invented for this specific glyph. */
+.fleet-task-wake-deferral-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--warning-text);
+}
+
 .fleet-tile {
   display: inline-flex;
   align-items: center;
@@ -8007,6 +8020,17 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 .fleet-task-cell-title { min-width: 0; }
 .fleet-task-cell-assignee { min-width: 0; }
+/* MAN-294: room for the deferral icon (TaskWakeDeferralIcon) beside the
+   status chip's own ring+text — inline-flex so the two sit on one baseline
+   with a small gap, same idiom .fleet-schip itself already uses. The mobile
+   line1 equivalent needs no new rule: .fleet-agent-row-mobile-line1 (shared
+   with AgentsList, see its own `gap: 8px` under the 768px query) already
+   spaces every flex child it's given, including this icon as a third one. */
+.fleet-task-cell-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 
 /* Priority glyph leading the title in the flat list — same icon as the board
    card, so one task reads identically in both layouts. */
