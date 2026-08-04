@@ -34,7 +34,7 @@ import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
 import { readAndClearPendingGatewayRestartMarker } from "./update/gateway-restart-pending";
 import { GatewayDoctorRuntime, type GatewayDoctorCheckResult, type GatewayDoctorRunResult } from "./health/gateway-doctor";
 import { collectPassiveInventorySnapshot } from "./health/service-inventory";
-import { setCliSetupLocallyEnabled } from "./runtime/desktop-permissions";
+import { setCliSetupLocallyEnabled, setShellFullAccessLocallyEnabled } from "./runtime/desktop-permissions";
 
 const GATEWAY_VERSION = "0.1.0";
 
@@ -285,6 +285,12 @@ async function main(): Promise<void> {
   // just above) — set once, here, before the one-time
   // supportedCapabilities() computation below.
   setCliSetupLocallyEnabled(config.cliSetupLocallyEnabled);
+  // Same "static local policy choice, set once before the first
+  // supportedCapabilities() computation" shape as cliSetupLocallyEnabled
+  // just above — see desktop-permissions.ts's shellFullAccessLocallyEnabled
+  // doc comment for why this now also unlocks shell_sandbox advertisement,
+  // not just execution mode.
+  setShellFullAccessLocallyEnabled(config.shellFullAccessLocallyEnabled);
   const cliSetupRuntime = new GatewayCliSetupRuntime();
   // `triggerShutdown` is reassigned below, once `cleanup`/`identity`/`journal`
   // exist, to the real SIGINT/SIGTERM shutdown path — self-update needs to
