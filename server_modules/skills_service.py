@@ -3822,10 +3822,26 @@ async def _execute_direct_tool_via_gateway_async(
 
 
 def _format_hardware_action_result(payload: Dict[str, Any]) -> str:
+    from server_modules import gateway_reason_messages
+
     runtime_session = payload.get("runtime_session") if isinstance(payload.get("runtime_session"), dict) else {}
+    reason = str(payload.get("reason") or "").strip() or None
     summary = {
         "status": str(payload.get("status") or "").strip(),
-        "reason": str(payload.get("reason") or "").strip() or None,
+        "reason": reason,
+        # Plain-language, actionable translation of `reason` — added so a
+        # model reading this tool result directly (this JSON string IS the
+        # tool's returned content on the direct-tool-call path) has real
+        # English to relay instead of just a raw reason token like
+        # "gateway_capability_missing" it has to guess the meaning of. See
+        # gateway_reason_messages.py's module doc comment (MAN-295).
+        "message": (
+            gateway_reason_messages.gateway_reason_message(
+                reason, capability_id=runtime_session.get("capability_id"),
+            )
+            if reason
+            else None
+        ),
         "runtime_target": str(runtime_session.get("canonical_runtime_target") or runtime_session.get("runtime_target") or "").strip() or None,
         "runtime_access_mode": str(runtime_session.get("runtime_access_mode") or "").strip() or None,
         "runtime_state": str(runtime_session.get("state") or "").strip() or None,
