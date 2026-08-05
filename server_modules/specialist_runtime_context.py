@@ -62,6 +62,16 @@ class SpecialistRuntimeContext:
     # has no effect (matches the Fleet UI, which hides the picker for those
     # two modes rather than promising something that doesn't happen yet).
     reasoning_effort: str = ""
+    # MAN-310 Phase 1: which turn engine drives this specialist's turn —
+    # model_config.engine ("legacy" | "claude_agent_sdk", fleet_tools.py's
+    # _VALID_ENGINES). "" (unset) means the existing engine, same as
+    # "legacy" — see sage_agent_runtime_service.py's handle_sage_chat, the
+    # one consumer. Only meaningful for mode in (platform_credits, byok_api)
+    # — same _ENGINE_SUPPORTED_MODES boundary as reasoning_effort just
+    # above: cli_subscription/local dispatch to the Gateway "brain" branches
+    # instead, which never reach the turn-engine seam at all, so a value
+    # saved under those modes is carried here but has no effect.
+    engine: str = ""
     # The paired box this specialist's TOOL calls (shell/file/browser) prefer,
     # distinct from gateway_binding above (which names the box that hosts the
     # AI brain itself, only used in local/cli_subscription mode). Empty = no
@@ -194,6 +204,7 @@ async def resolve_specialist_runtime_context(
         gateway_binding=_text(_model_config.get("gateway_binding")),
         runtime=_text(_model_config.get("runtime")).lower(),
         reasoning_effort=_text(_model_config.get("reasoning_effort")).lower(),
+        engine=_text(_model_config.get("engine")).lower(),
         preferred_gateway_id=_text(_inst_meta.get("preferred_gateway_id")),
         project_id=_text(bundle.get("project_id")),
         context_policy=dict(_ctx_policy),

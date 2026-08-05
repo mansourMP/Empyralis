@@ -56,13 +56,26 @@ https://github.com/anthropics/claude-agent-sdk-python/issues/410. Empyralis
 does this knowingly: the founder runs Claude Code directly against
 DeepSeek's Anthropic-Messages-API-compatible endpoint
 (https://api.deepseek.com/anthropic) and reports it working flawlessly.
-resolve_sdk_process_env() below takes ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL
+resolve_sdk_process_env() below takes ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL
 from explicit per-turn arguments (falling back to the turn's resolved
 `credentials` dict), never hardcoded, and hands them to
-ClaudeAgentOptions(env=...) — which only overrides those two keys in the
-spawned CLI subprocess's environment (subprocess_cli.py:792-797 merges
-options.env on top of the inherited process env), never os.environ,
-never a global default.
+ClaudeAgentOptions(env=...), never os.environ, never a global default.
+
+Credential isolation (multi-tenancy): the Python SDK's Transport MERGES
+options.env ON TOP OF the parent (Empyralis backend) process's own
+environment rather than replacing it (subprocess_cli.py's env handling;
+also documented at code.claude.com/docs/en/llm-gateway-connect's Agent SDK
+section — the TypeScript SDK does the opposite). A dict that only sets the
+keys it has real per-turn values for is therefore NOT enough isolation: any
+ANTHROPIC_*/CLAUDE_CODE_* variable ambiently set in Empyralis's own process
+would otherwise leak into every spawned tenant subprocess. resolve_sdk_
+process_env() always returns every credential-shaped key it knows about
+(_CREDENTIAL_ENV_KEYS), blanked to "" when this turn has no value for it —
+see that function's own docstring — and run_claude_agent_sdk_turn always
+gives each turn a brand-new CLAUDE_CONFIG_DIR that has never had `claude
+/login` run against it, destroyed the moment the turn ends, and spawns
+exactly one fresh subprocess per turn (never a pooled/reused warm CLI
+process across tenants).
 """
 
 from __future__ import annotations
@@ -71,6 +84,8 @@ import asyncio
 import itertools
 import json
 import logging
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -100,11 +115,50 @@ _MCP_TOOL_PREFIX = f"mcp__{_MCP_SERVER_NAME}__"
 _UNSUPPORTED_TOOL_NAMES = frozenset({"task_complete", "update_plan", "query_tool_registry"})
 
 
+# Credential-shaped env vars claude_agent_sdk's spawned `claude` CLI
+# subprocess recognizes, in Anthropic's own documented precedence order
+# (code.claude.com/docs/en/authentication's "Authentication precedence"
+# table, fetched 2026-08-05): cloud-provider flags (rank #1) outrank
+# ANTHROPIC_AUTH_TOKEN (#2), which outranks ANTHROPIC_API_KEY (#3), which
+# outranks CLAUDE_CODE_OAUTH_TOKEN (#5) and any subscription OAuth already
+# saved via `claude /login` (#6, last).
+#
+# Why this list matters: per code.claude.com/docs/en/llm-gateway-connect's
+# Agent SDK section, the PYTHON SDK's Transport MERGES ClaudeAgentOptions
+# (env=...) ON TOP OF the parent process's own environment rather than
+# replacing it (the TypeScript SDK does the opposite). A dict that only
+# sets keys it has a real value for is therefore NOT sufficient isolation:
+# any ANTHROPIC_*/CLAUDE_CODE_* variable that happens to be set in
+# Empyralis's OWN backend process (an operator's local `claude /login`,
+# a future accidental export, a cloud-provider flag meant for some other
+# purpose) would leak into every spawned tenant subprocess, unrelated to
+# that tenant's own resolved credential -- wrong billing attribution at
+# best, cross-tenant credential use at worst (cloud-provider flags are
+# rank #1 and would silently override everything this module passes).
+# resolve_sdk_process_env() below therefore ALWAYS returns every one of
+# these keys, blanked to "" when this turn has no value for them, rather
+# than omitting the key -- an explicit "" in options.env still wins the
+# merge over parent os.environ, which is what actually blocks the leak.
+_CREDENTIAL_ENV_KEYS = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+    "CLAUDE_CODE_USE_MANTLE",
+)
+
+
 def resolve_sdk_process_env(
     *,
     credentials: Optional[Dict[str, Any]] = None,
     anthropic_api_key: str = "",
     anthropic_base_url: str = "",
+    config_dir: str = "",
 ) -> Dict[str, str]:
     """Build the `env` override for ClaudeAgentOptions — never os.environ,
     never a hardcoded URL. Explicit per-turn overrides win; otherwise falls
@@ -118,19 +172,44 @@ def resolve_sdk_process_env(
     credentials dict carrying that as "base_url") — this function does not
     special-case DeepSeek or hardcode that URL anywhere; it is only ever
     data the caller supplies for this turn.
+
+    Every key in _CREDENTIAL_ENV_KEYS is ALWAYS present in the returned
+    dict (see that constant's own docstring for why an omitted key is not
+    safe here, given the SDK's merge-over-parent-env behavior) — this
+    function never reads os.environ itself, so nothing ambient can leak in
+    through it either.
+
+    `config_dir`, when given, is forwarded as BOTH CLAUDE_CONFIG_DIR and
+    CLAUDE_SECURESTORAGE_CONFIG_DIR (the latter covers macOS local dev,
+    where credential storage also touches a Keychain entry namespaced by
+    this directory, in addition to CLAUDE_CONFIG_DIR's on-disk store that
+    covers Linux, how this deploys) — see run_claude_agent_sdk_turn, which
+    always passes a fresh, never-logged-in-to directory for this reason.
     """
     creds = credentials if isinstance(credentials, dict) else {}
-    env: Dict[str, str] = {}
+    env: Dict[str, str] = {key: "" for key in _CREDENTIAL_ENV_KEYS}
     api_key = str(
         anthropic_api_key or creds.get("api_key") or creds.get("anthropic_api_key") or ""
     ).strip()
+    # ANTHROPIC_AUTH_TOKEN (rank #2), not ANTHROPIC_API_KEY (rank #3): an
+    # API_KEY value the CLI hasn't seen before triggers a one-time
+    # interactive "approve this key?" consent gate cached in .claude.json
+    # (nothing this module could answer, and pointless anyway given
+    # config_dir below is fresh every turn — the cache would never carry
+    # over). AUTH_TOKEN carries no such gate. DeepSeek's own setup guide
+    # for its Anthropic-Messages-API-compatible endpoint (see this module's
+    # docstring) also instructs ANTHROPIC_AUTH_TOKEN for exactly this
+    # reason.
     if api_key:
-        env["ANTHROPIC_API_KEY"] = api_key
+        env["ANTHROPIC_AUTH_TOKEN"] = api_key
     base_url = str(
         anthropic_base_url or creds.get("base_url") or creds.get("anthropic_base_url") or ""
     ).strip()
     if base_url:
         env["ANTHROPIC_BASE_URL"] = base_url
+    if config_dir:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+        env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = config_dir
     return env
 
 
@@ -538,9 +617,22 @@ async def run_claude_agent_sdk_turn(
 
     Requires the `claude` CLI (Node.js + Claude Code) on PATH — the SDK's
     only shipped Transport spawns it as a subprocess (see this module's
-    docstring and the MAN-310 spike). Requires an ANTHROPIC_API_KEY (or an
-    equivalent credential for whatever ANTHROPIC_BASE_URL is configured) —
-    see resolve_sdk_process_env.
+    docstring and the MAN-310 spike). Requires an ANTHROPIC_AUTH_TOKEN (or
+    an equivalent credential for whatever ANTHROPIC_BASE_URL is
+    configured) — see resolve_sdk_process_env.
+
+    Isolation: this spawns exactly ONE fresh `claude` subprocess for this
+    one turn — never a pooled/reused warm process across turns or tenants,
+    since the CLI holds process-global in-memory auth/client state that
+    would otherwise bleed between tenants. It also allocates a brand-new,
+    never-logged-in-to CLAUDE_CONFIG_DIR (tempfile.mkdtemp, destroyed in the
+    `finally` below the moment this turn ends) rather than reusing whatever
+    config dir the CLI would default to — on Linux (how this deploys) the
+    entire credential store is one file under that directory, so a fresh
+    directory is provably clean of any other tenant's or the operator's own
+    `claude /login` session. See resolve_sdk_process_env's docstring for the
+    companion fix this pairs with (blanking every credential-shaped env key
+    the SDK could otherwise merge in from Empyralis's own process env).
     """
     from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, query
 
@@ -563,25 +655,30 @@ async def run_claude_agent_sdk_turn(
     mcp_server = create_sdk_mcp_server(name=_MCP_SERVER_NAME, tools=sdk_tools)
     allowed_tools = [f"{_MCP_TOOL_PREFIX}{tool_def.get('name')}" for tool_def in usable_tool_defs]
 
-    options = ClaudeAgentOptions(
-        system_prompt=system_prompt or None,
-        mcp_servers={_MCP_SERVER_NAME: mcp_server},
-        allowed_tools=allowed_tools,
-        model=model or None,
-        max_turns=max_turns,
-        env=resolve_sdk_process_env(
-            credentials=credentials,
-            anthropic_api_key=anthropic_api_key,
-            anthropic_base_url=anthropic_base_url,
-        ),
-    )
+    config_dir = tempfile.mkdtemp(prefix="empyralis-claude-sdk-")
+    try:
+        options = ClaudeAgentOptions(
+            system_prompt=system_prompt or None,
+            mcp_servers={_MCP_SERVER_NAME: mcp_server},
+            allowed_tools=allowed_tools,
+            model=model or None,
+            max_turns=max_turns,
+            env=resolve_sdk_process_env(
+                credentials=credentials,
+                anthropic_api_key=anthropic_api_key,
+                anthropic_base_url=anthropic_base_url,
+                config_dir=config_dir,
+            ),
+        )
 
-    prompt = render_prompt(message, prior_messages)
-    state = TranslationState()
-    events: List[Dict[str, Any]] = []
-    async for sdk_message in query(prompt=prompt, options=options):
-        events.extend(translate_sdk_message(sdk_message, state=state, trace_context=trace_context))
-    return events
+        prompt = render_prompt(message, prior_messages)
+        state = TranslationState()
+        events: List[Dict[str, Any]] = []
+        async for sdk_message in query(prompt=prompt, options=options):
+            events.extend(translate_sdk_message(sdk_message, state=state, trace_context=trace_context))
+        return events
+    finally:
+        shutil.rmtree(config_dir, ignore_errors=True)
 
 
 def collect_events_via_claude_agent_sdk(**kwargs: Any) -> List[Dict[str, Any]]:
