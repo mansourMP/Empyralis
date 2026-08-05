@@ -1647,6 +1647,245 @@ class SageActionLoopKillSwitchTests(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "reached_specialist_toolset_resolution")
 
 
+class SdkEngineSessionLookupTests(unittest.TestCase):
+    """MAN-310 Phase 2: _sdk_engine_session_lookup is the fingerprint check
+    that decides whether a previously captured claude_agent_sdk session id
+    is still safe to resume for THIS turn — see its own docstring for the
+    count-based staleness invariant. Exercised directly (not through the
+    full action loop) so the matching/mismatching logic is pinned in
+    isolation."""
+
+    def _thread_row(self, metadata):
+        return {"thread_id": "thread-1", "metadata": metadata}
+
+    def test_no_thread_id_returns_empty(self):
+        result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+            thread_id="", tenant_id="t-1", workspace_id="ws-1", prior_message_count=0,
+        ))
+        self.assertEqual(result, "")
+
+    def test_matching_fingerprint_resumes(self):
+        stored = self._thread_row({"claude_agent_sdk_session": {"session_id": "sess-1", "turn_fingerprint": 4}})
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(return_value=stored),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=4,
+            ))
+        self.assertEqual(result, "sess-1")
+
+    def test_mismatched_fingerprint_refuses_to_resume(self):
+        """A different prior_message_count than what the stored session was
+        captured against means something else touched this thread in
+        between (a legacy-engine turn, a channel-injected message, a
+        background compaction summary) -- the session's own memory is
+        stale relative to what this turn is about to see, so resuming
+        would silently drop that history. Must return "", not the stale id."""
+        stored = self._thread_row({"claude_agent_sdk_session": {"session_id": "sess-1", "turn_fingerprint": 4}})
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(return_value=stored),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=6,
+            ))
+        self.assertEqual(result, "")
+
+    def test_no_stored_session_returns_empty(self):
+        stored = self._thread_row({})
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(return_value=stored),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=0,
+            ))
+        self.assertEqual(result, "")
+
+    def test_metadata_as_raw_json_string_is_decoded(self):
+        """The real (Postgres) path returns agent_threads.metadata as a raw
+        JSON string, not a dict (no jsonb codec registered on that pool) --
+        must still be read correctly."""
+        stored = self._thread_row(
+            '{"claude_agent_sdk_session": {"session_id": "sess-json", "turn_fingerprint": 2}}'
+        )
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(return_value=stored),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=2,
+            ))
+        self.assertEqual(result, "sess-json")
+
+    def test_lookup_exception_fails_closed(self):
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(side_effect=RuntimeError("kernel unavailable")),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=0,
+            ))
+        self.assertEqual(result, "")
+
+
+class SdkEngineSessionPersistTests(unittest.TestCase):
+    """_sdk_engine_session_persist's write side -- best-effort, never raises,
+    writes the exact metadata_patch shape _sdk_engine_session_lookup later
+    reads back."""
+
+    def test_writes_expected_metadata_patch(self):
+        mock_merge = AsyncMock(return_value=None)
+        with patch("server_modules.control_plane_repository.merge_agent_thread_metadata", new=mock_merge):
+            _run(sage_agent_runtime_service._sdk_engine_session_persist(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1",
+                session_id="sess-2", next_turn_fingerprint=6,
+            ))
+        mock_merge.assert_awaited_once_with(
+            thread_id="thread-1",
+            tenant_id="t-1",
+            workspace_id="ws-1",
+            metadata_patch={"claude_agent_sdk_session": {"session_id": "sess-2", "turn_fingerprint": 6}},
+        )
+
+    def test_empty_thread_id_is_a_noop(self):
+        mock_merge = AsyncMock(return_value=None)
+        with patch("server_modules.control_plane_repository.merge_agent_thread_metadata", new=mock_merge):
+            _run(sage_agent_runtime_service._sdk_engine_session_persist(
+                thread_id="", tenant_id="t-1", workspace_id="ws-1",
+                session_id="sess-2", next_turn_fingerprint=6,
+            ))
+        mock_merge.assert_not_awaited()
+
+    def test_empty_session_id_is_a_noop(self):
+        mock_merge = AsyncMock(return_value=None)
+        with patch("server_modules.control_plane_repository.merge_agent_thread_metadata", new=mock_merge):
+            _run(sage_agent_runtime_service._sdk_engine_session_persist(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1",
+                session_id="", next_turn_fingerprint=6,
+            ))
+        mock_merge.assert_not_awaited()
+
+    def test_write_failure_does_not_raise(self):
+        mock_merge = AsyncMock(side_effect=RuntimeError("kernel unavailable"))
+        with patch("server_modules.control_plane_repository.merge_agent_thread_metadata", new=mock_merge):
+            _run(sage_agent_runtime_service._sdk_engine_session_persist(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1",
+                session_id="sess-2", next_turn_fingerprint=6,
+            ))  # must not raise
+
+
+class SdkEngineSessionContinuityIntegrationTests(unittest.TestCase):
+    """MAN-310 Phase 2's central claim, exercised end to end through
+    _run_sage_action_loop_v3 (not just the two helpers above in isolation):
+    a SECOND SDK-engine turn on the SAME conversation resumes the session
+    the FIRST turn minted, instead of re-sending full history. Session
+    storage is faked with a plain dict standing in for the agent_threads
+    row (thread_service.get_thread / control_plane_repository.merge_agent_
+    thread_metadata are both patched to read/write it) so this runs with no
+    real database and no compiled Rust kernel -- both unavailable in this
+    test environment -- while still exercising the REAL _sdk_engine_
+    session_lookup/_sdk_engine_session_persist logic in between."""
+
+    def _decision(self):
+        from server_modules import kill_switch_gate
+        return kill_switch_gate.KillSwitchDecision(blocked=False, reason="", scope="")
+
+    def _call(self, *, prior_messages, thread_row):
+        get_thread_mock = AsyncMock(return_value={"metadata": dict(thread_row.get("metadata") or {})})
+
+        async def _fake_merge(*, thread_id, tenant_id, workspace_id, metadata_patch):
+            thread_row.setdefault("metadata", {}).update(metadata_patch)
+
+        collect_mock = MagicMock(return_value=[
+            {"type": "final", "payload": {"reply": "ok", "session_id": thread_row.pop("_next_session_id")}},
+        ])
+        with (
+            patch("server_modules.kill_switch_gate.evaluate_kill_switch", return_value=self._decision()),
+            patch("server_modules.sage_agent_runtime_service.thread_service.get_thread", new=get_thread_mock),
+            patch(
+                "server_modules.control_plane_repository.merge_agent_thread_metadata",
+                new=AsyncMock(side_effect=_fake_merge),
+            ),
+            patch.object(
+                sage_agent_runtime_service.claude_agent_sdk_bridge,
+                "collect_events_via_claude_agent_sdk",
+                new=collect_mock,
+            ),
+        ):
+            _run(sage_agent_runtime_service._run_sage_action_loop_v3(
+                workspace_id="ws-1", tenant_id="tenant-1", message="hello",
+                provider="anthropic", model="claude", credentials={},
+                trace_id="trace-1", actor_user_id="user-1", system_prompt="",
+                prior_messages=prior_messages, agent_install_id="",
+                engine_options={"engine": "claude_agent_sdk"},
+                conversation_thread_id="thread-xyz",
+            ))
+        return collect_mock
+
+    def test_first_turn_has_no_session_to_resume(self):
+        thread_row = {"metadata": {}, "_next_session_id": "sess-1"}
+        collect_mock = self._call(prior_messages=[], thread_row=thread_row)
+        _, kwargs = collect_mock.call_args
+        self.assertEqual(kwargs["resume_session_id"], "")
+        # ...and persists what it minted, fingerprinted for the NEXT turn
+        # (0 prior + this turn's own user+assistant pair = 2).
+        self.assertEqual(
+            thread_row["metadata"]["claude_agent_sdk_session"],
+            {"session_id": "sess-1", "turn_fingerprint": 2},
+        )
+
+    def test_second_turn_resumes_the_first_turns_session(self):
+        """The proof the report asks for: turn 2, on the same conversation,
+        with prior_messages matching what turn 1 left behind, must be
+        called with resume_session_id set to turn 1's session id -- NOT
+        re-sent full history via a folded prompt (that decision lives in
+        claude_agent_sdk_bridge.run_claude_agent_sdk_turn, proven separately
+        in test_claude_agent_sdk_bridge.py; this test proves the ORCHESTRATION
+        layer feeds it the right resume token in the first place)."""
+        thread_row = {"metadata": {}, "_next_session_id": "sess-1"}
+        self._call(prior_messages=[], thread_row=thread_row)
+        self.assertEqual(
+            thread_row["metadata"]["claude_agent_sdk_session"]["session_id"], "sess-1",
+        )
+
+        # Turn 2: Empyralis's own thread store now shows the 2 turns turn 1
+        # just recorded (user message + assistant reply) -- exactly the
+        # fingerprint turn 1 persisted.
+        turn_2_prior_messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        thread_row["_next_session_id"] = "sess-2"
+        collect_mock = self._call(prior_messages=turn_2_prior_messages, thread_row=thread_row)
+        _, kwargs = collect_mock.call_args
+        self.assertEqual(kwargs["resume_session_id"], "sess-1")
+        # Session id rolled forward for turn 3, fingerprint advanced by 2 again.
+        self.assertEqual(
+            thread_row["metadata"]["claude_agent_sdk_session"],
+            {"session_id": "sess-2", "turn_fingerprint": 4},
+        )
+
+    def test_drifted_history_refuses_to_resume(self):
+        """If something else appended to the thread between turn 1 and turn
+        2 (e.g. a legacy-engine turn, a channel message), turn 2's real
+        prior_messages length no longer matches turn 1's fingerprint --
+        must NOT resume."""
+        thread_row = {"metadata": {}, "_next_session_id": "sess-1"}
+        self._call(prior_messages=[], thread_row=thread_row)
+
+        turn_2_prior_messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "an interleaved message this session never saw"},
+        ]
+        thread_row["_next_session_id"] = "sess-2"
+        collect_mock = self._call(prior_messages=turn_2_prior_messages, thread_row=thread_row)
+        _, kwargs = collect_mock.call_args
+        self.assertEqual(kwargs["resume_session_id"], "")
+
+
 class CliSubscriptionGatewayBrainTests(unittest.TestCase):
     """BYO-brain Phase 3: cli_subscription dispatch — the happy path plus
     every G5 error path (no gateway bound, gateway offline, CLI not

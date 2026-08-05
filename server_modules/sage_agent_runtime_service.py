@@ -2961,6 +2961,109 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
     }
 
 
+def _decode_thread_metadata_object(raw: Any) -> dict[str, Any]:
+    """agent_threads.metadata comes back from thread_service.get_thread as a
+    dict on the local (no-Postgres) fallback store but as a raw JSON string
+    on the real asyncpg-backed path (no jsonb codec registered on that pool
+    — see control_plane_repository.py's own `_decode_json_object`, which
+    this mirrors narrowly rather than importing a private cross-module
+    symbol for one call site)."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    token = str(raw or "").strip()
+    if not token:
+        return {}
+    try:
+        parsed = json.loads(token)
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+async def _sdk_engine_session_lookup(
+    *, thread_id: str, tenant_id: str, workspace_id: str, prior_message_count: int,
+) -> str:
+    """MAN-310 Phase 2 session continuity: return a resumable claude_agent_
+    sdk session id for this conversation, or "" if none is safely resumable.
+
+    "Safely resumable" is a count check, not a full replay: the SDK session
+    captured after some earlier SDK-engine turn only knows the history up
+    through that turn. If the NEXT SDK-engine turn's own `prior_messages`
+    (fetched fresh from Empyralis's thread store — the same list about to
+    be folded into the prompt on the non-resuming path) is a different
+    length than what was recorded when that session was captured, the
+    thread moved on without that session seeing it — e.g. an intervening
+    legacy-engine turn, a channel-injected message, or a background
+    compaction summary. Resuming anyway would hand the model a stale view
+    of the conversation while ALSO silently dropping whatever isn't in that
+    stale view (folding history is skipped whenever we resume — see
+    run_claude_agent_sdk_turn's resume_session_id branch) — a correctness
+    regression, not just a missed cache hit. On any mismatch (or lookup
+    failure) this returns "", which makes the caller fold full history and
+    mint a fresh session exactly as if no prior session existed — fail
+    closed, never fail wrong."""
+    token = str(thread_id or "").strip()
+    if not token:
+        return ""
+    try:
+        thread_row = await thread_service.get_thread(
+            token, tenant_id=tenant_id or "default", workspace_id=workspace_id, include_turns=False,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "claude_agent_sdk session lookup failed for thread=%s", token, exc_info=True,
+        )
+        return ""
+    if not isinstance(thread_row, dict):
+        return ""
+    stored = _decode_thread_metadata_object(thread_row.get("metadata")).get("claude_agent_sdk_session")
+    if not isinstance(stored, dict):
+        return ""
+    session_id = str(stored.get("session_id") or "").strip()
+    if not session_id:
+        return ""
+    try:
+        stored_fingerprint = int(stored.get("turn_fingerprint"))
+    except (TypeError, ValueError):
+        return ""
+    if stored_fingerprint != int(prior_message_count):
+        return ""
+    return session_id
+
+
+async def _sdk_engine_session_persist(
+    *, thread_id: str, tenant_id: str, workspace_id: str, session_id: str, next_turn_fingerprint: int,
+) -> None:
+    """Best-effort write-back of the new/continued session id after an
+    SDK-engine turn, so the NEXT turn on this conversation can resume it
+    (see _sdk_engine_session_lookup). Never raises — this is engine cache
+    state, not the turn's own durable record (thread_service.record_user_
+    turn/record_assistant_turn already persisted the actual conversation
+    content regardless of engine and regardless of whether this write
+    succeeds)."""
+    token = str(thread_id or "").strip()
+    if not token or not str(session_id or "").strip():
+        return
+    try:
+        from server_modules import control_plane_repository
+
+        await control_plane_repository.merge_agent_thread_metadata(
+            thread_id=token,
+            tenant_id=tenant_id or "default",
+            workspace_id=workspace_id,
+            metadata_patch={
+                "claude_agent_sdk_session": {
+                    "session_id": str(session_id).strip(),
+                    "turn_fingerprint": int(next_turn_fingerprint),
+                },
+            },
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "claude_agent_sdk session persist failed for thread=%s", token, exc_info=True,
+        )
+
+
 async def _run_sage_action_loop_v3(
     *,
     workspace_id: str,
@@ -3014,6 +3117,17 @@ async def _run_sage_action_loop_v3(
     # selected (see that function's docstring for the non-Anthropic-backend
     # use case) — ignored on the legacy path.
     engine_options: dict[str, Any] | None = None,
+    # MAN-310 Phase 2: Empyralis's own stable per-conversation identity
+    # (handle_sage_chat's own `thread_id` param — NOT `trace_id` above,
+    # which is a fresh uuid4 minted for every single call and therefore
+    # useless as a key for anything that must survive across turns). Only
+    # consulted on the claude_agent_sdk_bridge.ENGINE_ID branch, to look up
+    # / persist a resumable SDK session id keyed to THIS conversation — see
+    # _sdk_engine_session_lookup below. Empty (default) = every existing caller
+    # that doesn't pass it: the SDK branch simply never resumes, folding
+    # full history every turn exactly as before this parameter existed. The
+    # legacy branch never reads this parameter at all.
+    conversation_thread_id: str = "",
 ) -> dict[str, Any] | None:
     # Phase 4B: when agent_install_id is set this turn runs as that specialist —
     # its tool whitelist, tool-call executor identity, and mid-turn memory
@@ -3328,6 +3442,20 @@ async def _run_sage_action_loop_v3(
     # see the identical value — the flag is read exactly once per turn.
     _engine_options = engine_options if isinstance(engine_options, dict) else {}
     _selected_engine = _resolve_turn_engine_id(engine_options)
+    # MAN-310 Phase 2: session continuity. Only ever looked up on the SDK
+    # branch (_sdk_engine_session_lookup's own thread_id check also no-ops
+    # if conversation_thread_id wasn't passed) — the legacy branch below
+    # never reads _sdk_resume_session_id, so it stays byte-for-byte
+    # unaffected regardless of what this resolves to.
+    _sdk_prior_message_fingerprint = len(prior_messages or [])
+    _sdk_resume_session_id = ""
+    if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
+        _sdk_resume_session_id = await _sdk_engine_session_lookup(
+            thread_id=conversation_thread_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            prior_message_count=_sdk_prior_message_fingerprint,
+        )
 
     def _collect_stream_events() -> List[Dict[str, Any]]:
         if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
@@ -3358,6 +3486,7 @@ async def _run_sage_action_loop_v3(
                 max_turns=_SAGE_OPERATOR_LOOP_MAX_ITERATIONS,
                 anthropic_api_key=str(_engine_options.get("anthropic_api_key") or "").strip(),
                 anthropic_base_url=str(_engine_options.get("anthropic_base_url") or "").strip(),
+                resume_session_id=_sdk_resume_session_id,
             )
         _gen = direct_chat_generation_service.stream_provider_backed_direct_chat(
             services=generation_services,
@@ -3414,6 +3543,24 @@ async def _run_sage_action_loop_v3(
     stream_events = await asyncio.to_thread(_collect_stream_events)
     collected = _collect_sage_operator_loop_v3_events(stream_events)
     final_payload = collected["final_payload"]
+    if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
+        # Write back whatever session id this turn ended on (resumed or
+        # freshly minted — claude_agent_sdk_bridge always includes one; see
+        # translate_sdk_message's ResultMessage branch) so the NEXT turn on
+        # this conversation can resume it. next_turn_fingerprint mirrors
+        # what thread_service.record_user_turn/record_assistant_turn are
+        # about to append below (this turn's own user+assistant pair) —
+        # see _sdk_engine_session_lookup's docstring for why an exact-count
+        # match is required before a future turn trusts this session id.
+        _sdk_new_session_id = str(final_payload.get("session_id") or "").strip()
+        if _sdk_new_session_id:
+            await _sdk_engine_session_persist(
+                thread_id=conversation_thread_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                session_id=_sdk_new_session_id,
+                next_turn_fingerprint=_sdk_prior_message_fingerprint + 2,
+            )
     # Accumulate streaming reply text from all result events (same pattern as web chat path)
     accumulated_reply = ""
     for event in stream_events:
@@ -5278,6 +5425,7 @@ async def handle_sage_chat(
         credit_idempotency_key=turn_credit_idempotency_key,
         attribution=_turn_attribution,
         engine_options=engine_options,
+        conversation_thread_id=thread_id,
     )
     if action_result is not None:
         if "sage_action_loop" not in used_context:
@@ -5357,6 +5505,7 @@ async def handle_sage_chat(
                     reasoning_effort=requested_reasoning_effort,
                     credit_idempotency_key=turn_credit_idempotency_key,
                     engine_options=engine_options,
+                    conversation_thread_id=thread_id,
                 )
                 if not isinstance(_corrected, dict):
                     return None

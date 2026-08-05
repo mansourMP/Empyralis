@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from claude_agent_sdk import types as sdk_types
 
@@ -300,6 +301,22 @@ class TranslateResultMessageTests(unittest.TestCase):
         final_event = next(e for e in events if e["type"] == "final")
         self.assertEqual(final_event["payload"]["error"], "error_max_turns")
 
+    def test_final_payload_carries_session_id_for_later_resume(self):
+        # MAN-310 Phase 2: every real ResultMessage carries a session_id
+        # (required, non-Optional field) — this is how sage_agent_runtime_
+        # service._run_sage_action_loop_v3 learns what to persist for the
+        # NEXT turn's resume (see _sdk_engine_session_persist).
+        state = claude_agent_sdk_bridge.TranslationState()
+        message = sdk_types.ResultMessage(
+            subtype="success", duration_ms=100, duration_api_ms=80, is_error=False,
+            num_turns=1, session_id="sess-continuity-1", result="Done.",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["session_id"], "sess-continuity-1")
+
 
 class TranslationSurvivesMissingTraceContextTests(unittest.TestCase):
     """trace_context=None must degrade to dropping trace events, never
@@ -497,6 +514,211 @@ class RenderPromptTests(unittest.TestCase):
         self.assertTrue(rendered.strip().endswith("user: second message"))
         self.assertLess(rendered.index("first message"), rendered.index("first reply"))
         self.assertLess(rendered.index("first reply"), rendered.index("second message"))
+
+
+class _FakeQuery:
+    """Stands in for claude_agent_sdk.query: an async-generator callable
+    that records each call's (prompt, options) and, per call (consumed in
+    order), either yields a scripted list of SDK message objects or raises
+    a scripted exception — optionally after yielding some messages first
+    (pass an (messages, exception) tuple), to simulate a failure partway
+    through a turn."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls: list[SimpleNamespace] = []
+
+    async def __call__(self, *, prompt, options):
+        self.calls.append(SimpleNamespace(prompt=prompt, options=options))
+        item = self._responses.pop(0)
+        if isinstance(item, tuple):
+            messages, exc = item
+            for message in messages:
+                yield message
+            raise exc
+        for message in item:
+            yield message
+
+
+def _result_message(session_id: str = "sess-1", reply: str = "ok") -> sdk_types.ResultMessage:
+    return sdk_types.ResultMessage(
+        subtype="success", duration_ms=10, duration_api_ms=8, is_error=False,
+        num_turns=1, session_id=session_id, result=reply,
+    )
+
+
+class RunClaudeAgentSdkTurnResumeTests(unittest.TestCase):
+    """MAN-310 Phase 2: run_claude_agent_sdk_turn's resume_session_id branch
+    — the actual mechanism that lets a turn skip re-folding history. Trace
+    persistence (agent_trace_service.persist_ephemeral_envelope) is patched
+    out in every test here so these stay focused on prompt/resume wiring;
+    it has its own dedicated tests below."""
+
+    def _run_turn(self, *, resume_session_id="", prior_messages=None, fake_query, message="second message"):
+        with (
+            patch("claude_agent_sdk.query", new=fake_query),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message=message,
+                system_prompt="Be terse.",
+                prior_messages=prior_messages,
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="trace-1",
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                credentials={},
+                trace_context=_trace_context(),
+                resume_session_id=resume_session_id,
+            ))
+        return events
+
+    def test_no_resume_folds_full_history_and_leaves_resume_option_unset(self):
+        prior = [{"role": "user", "content": "first message"}, {"role": "assistant", "content": "first reply"}]
+        fake_query = _FakeQuery([[_result_message()]])
+
+        self._run_turn(resume_session_id="", prior_messages=prior, fake_query=fake_query)
+
+        self.assertEqual(len(fake_query.calls), 1)
+        sent_prompt = fake_query.calls[0].prompt
+        self.assertIn("first message", sent_prompt)
+        self.assertIn("first reply", sent_prompt)
+        self.assertIsNone(fake_query.calls[0].options.resume)
+
+    def test_resume_sends_bare_message_and_sets_resume_option(self):
+        prior = [{"role": "user", "content": "first message"}, {"role": "assistant", "content": "first reply"}]
+        fake_query = _FakeQuery([[_result_message()]])
+
+        self._run_turn(resume_session_id="sess-prior", prior_messages=prior, fake_query=fake_query)
+
+        self.assertEqual(len(fake_query.calls), 1)
+        sent_prompt = fake_query.calls[0].prompt
+        # The resumed session already has this history — must NOT be folded
+        # in again (that would be two independent memories of the same
+        # conversation at once).
+        self.assertEqual(sent_prompt, "second message")
+        self.assertNotIn("first message", sent_prompt)
+        self.assertEqual(fake_query.calls[0].options.resume, "sess-prior")
+
+    def test_resume_failure_before_any_message_retries_fresh_with_full_history(self):
+        prior = [{"role": "user", "content": "first message"}, {"role": "assistant", "content": "first reply"}]
+        # First call (resume attempted): raises before yielding anything.
+        # Second call (the fallback retry): succeeds.
+        fake_query = _FakeQuery([
+            ([], RuntimeError("no such session")),
+            [_result_message(session_id="sess-fresh")],
+        ])
+
+        events = self._run_turn(resume_session_id="sess-stale", prior_messages=prior, fake_query=fake_query)
+
+        self.assertEqual(len(fake_query.calls), 2)
+        first_call, second_call = fake_query.calls
+        self.assertEqual(first_call.options.resume, "sess-stale")
+        self.assertEqual(first_call.prompt, "second message")
+        # The retry drops resume entirely and folds full history, exactly
+        # like a turn that never had a session to resume.
+        self.assertIsNone(second_call.options.resume)
+        self.assertIn("first message", second_call.prompt)
+        self.assertIn("first reply", second_call.prompt)
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["session_id"], "sess-fresh")
+
+    def test_resume_failure_after_a_message_does_not_retry(self):
+        """A tool may already have executed a real side effect through the
+        SAME in-process executor the legacy engine uses -- retrying the
+        whole turn from scratch there could run it twice. Only a resume
+        that fails before yielding ANYTHING is safe to retry."""
+        prior = [{"role": "user", "content": "first message"}]
+        partial_message = sdk_types.AssistantMessage(
+            content=[sdk_types.TextBlock(text="partial...")], model="claude-sonnet-4-5",
+        )
+        fake_query = _FakeQuery([
+            ([partial_message], RuntimeError("connection dropped mid-turn")),
+        ])
+
+        with self.assertRaises(RuntimeError):
+            self._run_turn(resume_session_id="sess-stale", prior_messages=prior, fake_query=fake_query)
+
+        self.assertEqual(len(fake_query.calls), 1)  # no retry attempted
+
+    def test_failure_without_resume_attempt_propagates_without_retry(self):
+        fake_query = _FakeQuery([([], RuntimeError("boom"))])
+
+        with self.assertRaises(RuntimeError):
+            self._run_turn(resume_session_id="", prior_messages=[], fake_query=fake_query)
+
+        self.assertEqual(len(fake_query.calls), 1)  # nothing to fall back FROM
+
+
+class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
+    """MAN-310 Phase 2: run_claude_agent_sdk_turn is the async context that
+    makes each PERSISTED_TRACE_EVENT_TYPES envelope translate_sdk_message
+    builds (ephemeral-only, by construction) durable, via agent_trace_
+    service.persist_ephemeral_envelope."""
+
+    def test_persists_trace_events_and_skips_tool_progress_and_final(self):
+        tool_use = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_1", name="web__search", input={"query": "x"})],
+            model="claude-sonnet-4-5",
+        )
+        tool_result = sdk_types.UserMessage(content=[sdk_types.ToolResultBlock(
+            tool_use_id="toolu_1", content=[{"type": "text", "text": "found it"}], is_error=False,
+        )])
+        fake_query = _FakeQuery([[tool_use, tool_result, _result_message()]])
+        persist_mock = AsyncMock()
+
+        with (
+            patch("claude_agent_sdk.query", new=fake_query),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=persist_mock),
+        ):
+            events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="find something",
+                system_prompt="",
+                prior_messages=None,
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="trace-1",
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                credentials={},
+                trace_context=_trace_context(),
+            ))
+
+        trace_events = [e for e in events if e.get("type") == "trace"]
+        self.assertGreaterEqual(len(trace_events), 1)
+        self.assertEqual(persist_mock.await_count, len(trace_events))
+        persisted_envelopes = [call.args[1] for call in persist_mock.await_args_list]
+        self.assertEqual(persisted_envelopes, [e["payload"] for e in trace_events])
+        # tool_progress and final events are never routed to persistence.
+        non_trace_types = {e["type"] for e in events} - {"trace"}
+        self.assertTrue(non_trace_types <= {"tool_progress", "final"})
+
+    def test_no_trace_context_persists_nothing(self):
+        fake_query = _FakeQuery([[_result_message()]])
+        persist_mock = AsyncMock()
+
+        with (
+            patch("claude_agent_sdk.query", new=fake_query),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=persist_mock),
+        ):
+            asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="hi",
+                system_prompt="",
+                prior_messages=None,
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="trace-1",
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                credentials={},
+                trace_context=None,
+            ))
+
+        persist_mock.assert_not_awaited()
 
 
 class TurnEngineSelectionFlagOffTests(unittest.TestCase):
