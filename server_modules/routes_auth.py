@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any, Optional
 
@@ -49,6 +50,16 @@ from server_modules.schemas import AuthLoginRequest, AuthRegisterRequest, AuthVe
 
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
+
+# Shown to the end user when the email provider can't send right now, no
+# matter the underlying cause (missing API key, provider outage, rejected
+# request). The real cause -- which may name an env var or a vendor -- goes
+# to the server log only; see MAN-293 (a leaked "EMAIL_PROVIDER_API_KEY is
+# not configured..." 503 body was reproduced on production).
+EMAIL_SEND_UNAVAILABLE_MESSAGE = (
+    "We couldn't send a verification email right now. Please try again in a few minutes."
+)
 
 
 def _require_tenant_id(value: Optional[str]) -> str:
@@ -372,9 +383,22 @@ async def auth_resend_verify_email(request: Request, current_user=Depends(get_cu
     try:
         await email_verification_service.resend_verification(user_id=user_id, email=email)
     except email_provider_service.EmailProviderUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # str(exc) names the missing env var and the vendor (Resend) -- that
+        # belongs in the operator's log, never in a response an end user
+        # can read (MAN-293).
+        LOGGER.error(
+            "verify_email_resend_provider_unavailable: user_id=%s: %s",
+            user_id,
+            exc,
+        )
+        raise HTTPException(status_code=503, detail=EMAIL_SEND_UNAVAILABLE_MESSAGE) from exc
     except email_provider_service.EmailSendFailed as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        LOGGER.error(
+            "verify_email_resend_send_failed: user_id=%s: %s",
+            user_id,
+            exc,
+        )
+        raise HTTPException(status_code=502, detail=EMAIL_SEND_UNAVAILABLE_MESSAGE) from exc
     return {"ok": True, "sent": True}
 
 

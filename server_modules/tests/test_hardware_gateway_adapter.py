@@ -532,3 +532,127 @@ class HardwareGatewayAdapterTests(unittest.TestCase):
             None,
         )
         self.assertEqual(resolved["mount"], "shared")
+
+    def test_execute_gateway_action_surfaces_actionable_message_for_unusable_registration(self) -> None:
+        # MAN-295: before this, every unusable-registration path emitted the
+        # same generic "Gateway is not available for this workspace."
+        # regardless of WHY (missing registration vs. revoked device vs.
+        # workspace mismatch...). Assert the real reason-specific,
+        # actionable text now reaches emit_tool_result's `summary` — the
+        # exact field that becomes the user-visible tool-result text (see
+        # hardware_result_correlator_service.emit_tool_result and
+        # frontend/lib/workspace/codex-chat/event-projector.ts's
+        # `data.summary` read).
+        async def run_test() -> None:
+            runtime_session = {"session_id": "session-1", "state": "ready"}
+            emit_result_mock = AsyncMock()
+            with (
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.find_gateway_registration",
+                    return_value=_registration(),
+                ),
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.registration_is_usable",
+                    return_value=(False, "gateway_device_revoked"),
+                ),
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.hardware_runtime_session_service.update_runtime_session",
+                    side_effect=lambda session, **kwargs: {**session, **({"state": kwargs["state"]} if "state" in kwargs else {})},
+                ),
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.hardware_result_correlator_service.emit_tool_result",
+                    emit_result_mock,
+                ),
+            ):
+                result = await gateway_adapter.execute_gateway_action(
+                    tenant_id="tenant-1",
+                    workspace_id="ws-1",
+                    user_id="user-1",
+                    gateway_id="gw-1",
+                    device_id="device-1",
+                    action_id="shell.execute",
+                    capability_id="shell.execute",
+                    arguments={"command": "echo ok"},
+                    runtime_session=runtime_session,
+                    run_id="run-1",
+                    trace_id="trace-1",
+                    thread_id=None,
+                    request_id="req-1",
+                    trace_context=None,
+                    require_approval=None,
+                    runtime_access_mode="guarded",
+                    timeout_seconds=None,
+                    tool_call_id="tool-1",
+                )
+
+            self.assertEqual(result["status"], "offline")
+            self.assertEqual(result["reason"], "gateway_device_revoked")
+            emitted_summary = emit_result_mock.await_args.kwargs["summary"]
+            self.assertNotEqual(emitted_summary, "Gateway is not available for this workspace.")
+            self.assertIn("revoked", emitted_summary)
+            self.assertIn("Hardware page", emitted_summary)
+
+        asyncio.run(run_test())
+
+    def test_execute_gateway_action_names_docker_when_shell_capability_missing(self) -> None:
+        # Same MAN-295 fix, the other call site: a not-ready-for-execution
+        # gateway (registration usable, but the capability readiness check
+        # fails) must name Docker specifically for a shell.execute /
+        # filesystem.read_write capability — the exact example the brief
+        # calls out — not the old generic "Gateway is not ready for this
+        # hardware action."
+        async def run_test() -> None:
+            runtime_session = {"session_id": "session-1", "state": "ready"}
+            emit_result_mock = AsyncMock()
+            with (
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.find_gateway_registration",
+                    return_value=_registration(),
+                ),
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.registration_is_usable",
+                    return_value=(True, ""),
+                ),
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.gateway_execution_service.gateway_registration_execution_readiness",
+                    return_value=(False, "gateway_capability_missing"),
+                ),
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.hardware_runtime_session_service.update_runtime_session",
+                    side_effect=lambda session, **kwargs: {**session, **({"state": kwargs["state"]} if "state" in kwargs else {})},
+                ),
+                patch(
+                    "server_modules.hardware_runtime_adapters.gateway_adapter.hardware_result_correlator_service.emit_tool_result",
+                    emit_result_mock,
+                ),
+            ):
+                result = await gateway_adapter.execute_gateway_action(
+                    tenant_id="tenant-1",
+                    workspace_id="ws-1",
+                    user_id="user-1",
+                    gateway_id="gw-1",
+                    device_id="device-1",
+                    action_id="shell.execute",
+                    capability_id="shell.execute",
+                    arguments={"command": "echo ok"},
+                    runtime_session=runtime_session,
+                    run_id="run-1",
+                    trace_id="trace-1",
+                    thread_id=None,
+                    request_id="req-1",
+                    trace_context=None,
+                    require_approval=None,
+                    runtime_access_mode="guarded",
+                    timeout_seconds=None,
+                    tool_call_id="tool-1",
+                )
+
+            self.assertEqual(result["status"], "offline")
+            self.assertEqual(result["reason"], "gateway_capability_missing")
+            emitted_summary = emit_result_mock.await_args.kwargs["summary"]
+            self.assertEqual(
+                emitted_summary,
+                "Docker isn't running on this machine. Start Docker Desktop, then retry.",
+            )
+
+        asyncio.run(run_test())

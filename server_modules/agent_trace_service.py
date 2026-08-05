@@ -357,6 +357,71 @@ async def emit_with_envelope(
         return None
 
 
+async def persist_ephemeral_envelope(
+    trace_context: Optional[TraceContext],
+    envelope: Optional[Dict[str, Any]],
+) -> None:
+    """Write an ALREADY-BUILT ephemeral envelope (build_ephemeral_envelope's
+    own return value) to agent_trace_events, reusing ITS seq/event_id/data
+    rather than minting fresh ones the way emit_with_envelope does.
+    emit_with_envelope always calls trace_context.next_seq() itself, which
+    is correct when persist-or-not is decided BEFORE the event is built
+    (every direct_chat_generation_service._emit_trace_event call site) —
+    but wrong here, where the caller already built and live-streamed an
+    ephemeral envelope with a specific seq/id and this is a best-effort
+    follow-up to also make it durable: minting a second seq/id for "the
+    same" event would persist a differently-numbered duplicate, out of
+    order with what a live consumer already saw.
+
+    Exists for callers whose event-translation step is itself synchronous
+    and pure by design and therefore can only ever produce the ephemeral,
+    build-only envelope inline (claude_agent_sdk_bridge.translate_sdk_
+    message — see its own docstring's "Pure function ... no I/O" — is
+    unit-tested directly, hundreds of times over, as a plain sync call with
+    no event loop running; it cannot itself await a DB write). The async
+    caller driving that translation (claude_agent_sdk_bridge.run_claude_
+    agent_sdk_turn) calls this right after, once per emitted envelope, to
+    give the SDK engine the same agent_trace_events history the legacy
+    engine's _emit_trace_event(persisted=True) call sites already produce —
+    same PERSISTED_TRACE_EVENT_TYPES vocabulary, same table, same replay
+    path (control_plane_repository.get_agent_trace_events(persisted_only=
+    True)).
+
+    A no-op — never raises — for: trace_context is None, envelope is
+    None/malformed, its event_type isn't in PERSISTED_TRACE_EVENT_TYPES, or
+    it's missing a seq/id (shouldn't happen for a real build_ephemeral_
+    envelope() output, but this stays defensive rather than assume)."""
+    try:
+        if trace_context is None or not isinstance(envelope, dict):
+            return
+        event_type = str(envelope.get("event_type") or "").strip()
+        if event_type not in PERSISTED_TRACE_EVENT_TYPES:
+            return
+        seq = int(envelope.get("seq") or 0)
+        event_id = str(envelope.get("id") or "").strip()
+        if seq <= 0 or not event_id:
+            return
+        await control_plane_repository.append_agent_trace_event(
+            trace_id=trace_context.trace_id,
+            tenant_id=trace_context.tenant_id,
+            workspace_id=trace_context.workspace_id,
+            seq=seq,
+            event_type=event_type,
+            persisted=True,
+            agent_id=trace_context.root_agent_id,
+            payload=_persisted_trace_event_payload(event_type, _normalized_payload(envelope.get("data"))),
+            parent_id=envelope.get("parent_id"),
+            item_id=envelope.get("item_id"),
+            tool_call_id=envelope.get("tool_call_id"),
+            child_run_id=envelope.get("child_run_id"),
+            approval_id=envelope.get("approval_id"),
+            artifact_id=envelope.get("artifact_id"),
+            event_id=event_id,
+        )
+    except Exception as exc:
+        _log_failure("persist_ephemeral_envelope", exc)
+
+
 async def emit(
     trace_context: Optional[TraceContext],
     event_type: str,

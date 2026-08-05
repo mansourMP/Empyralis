@@ -2338,6 +2338,19 @@ a.fleet-breadcrumb:hover {
 .fleet-schip--degraded { color: var(--warning-text); }
 .fleet-schip--degraded .fleet-schip-dot { background: var(--degraded-dot); }
 
+/* MAN-294: task-status.TaskWakeDeferralIcon's own compact glyph — the board
+   card, the flat list, and the grouped list all wrap this one class, so a
+   deferred task's icon is pixel-identical wherever it appears. Same
+   --warning-text as the properties-panel's own running-text note (and as
+   .fleet-schip--degraded above) — one amber for "needs your eye," not a
+   second invented for this specific glyph. */
+.fleet-task-wake-deferral-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  color: var(--warning-text);
+}
+
 .fleet-tile {
   display: inline-flex;
   align-items: center;
@@ -4862,6 +4875,26 @@ a.fleet-breadcrumb:hover {
   font-weight: 500;
 }
 
+/* Docker-not-ready badge under a successful pairing (MAN-295) — pairing can
+   report "Connected" while shell.execute/filesystem.read_write are still
+   withheld (Docker not confirmed ready), which otherwise leaves the owner
+   with no idea execution is impossible. Deliberately its own bordered row,
+   not folded into --success, so the warning can't be mistaken for part of
+   the "you're done" message. */
+.gw-pair-panel--warning {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--warning-text);
+  font-size: 12px;
+  border-color: color-mix(in oklch, var(--warning-text) 40%, transparent);
+}
+
+.gw-pair-panel--warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 .gw-pair-panel-row {
   display: flex;
   align-items: flex-end;
@@ -4893,6 +4926,38 @@ a.fleet-breadcrumb:hover {
   font-size: 12px;
   color: var(--text-secondary);
   margin: 0;
+}
+
+/* full_access opt-in checkbox + warning, nested inside the pairing form's
+   own .gw-pair-panel box — a plain tinted note rather than a second bordered
+   box, since a full box-within-a-box would double up on the outer panel's
+   own border/background right where the reader needs the warning to feel
+   like part of the same form, not a separate alert bolted on. */
+.gw-pair-panel-fullaccess-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.gw-pair-panel-fullaccess-toggle input {
+  margin: 0;
+}
+
+.gw-pair-panel-fullaccess-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--warning-text);
+  margin: 0;
+}
+
+.gw-pair-panel-fullaccess-warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
 }
 
 .gw-pair-panel-command {
@@ -7074,6 +7139,20 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   text-underline-offset: 2px;
 }
 
+/* Row shell wrapping the chat column and the (collapsed-by-default)
+   context-usage rail — see ContextUsageRail.tsx. Sits exactly where
+   .fleet-sage-chat used to sit as AgentChat's own top-level element, so it
+   takes over that flex:1/min-height:0 contract from BOTH callers (Sage's
+   own flex-column page shell below, and .fleet-agent-chat-panel's column
+   further down); .fleet-sage-chat, now its row child, keeps its own
+   flex:1 column rules to fill the row's height via the row's default
+   align-items:stretch — no separate height rule needed on it. */
+.fleet-agent-chat-shell {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+}
 /* SAGE — full-width chat with the Operator. No tabs, no stat cards, no right
    panel, no deployment status, no second header repeating "Sage" (the
    breadcrumb already says it — the Operator badge rides on that crumb via
@@ -7087,6 +7166,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
   min-height: 0;
 }
 /* Agent-detail's Chat tab: same component as Sage's own page, but its parent
@@ -7268,6 +7348,182 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   background: var(--bg-inset);
   color: var(--text-muted);
   cursor: not-allowed;
+}
+
+/* ── Context usage rail (ContextUsageRail.tsx) ─────────────────────────────
+   Collapsed by default: only the 36px toggle strip renders inside
+   .fleet-agent-chat-shell (a row, see above) until a person opens it — it
+   never occupies vertical space in the compose area, which is the whole
+   point (this product's target user is non-developers who have no reason
+   to see token accounting unasked). Neutral throughout, same restraint as
+   the Chat tab's own toolbar — the composer's Send button is still this
+   view's one accent surface. */
+.fleet-context-usage-rail {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  height: 100%;
+}
+.fleet-context-usage-toggle {
+  flex-shrink: 0;
+  width: 36px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: var(--space-4);
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.fleet-context-usage-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+.fleet-context-usage-rail.is-open .fleet-context-usage-toggle {
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border-left-color: transparent;
+}
+.fleet-context-usage-panel {
+  width: 260px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--bg-card);
+  border-left: 1px solid var(--border);
+  animation: fleet-context-usage-panel-in var(--dur-2) var(--ease-out);
+}
+@keyframes fleet-context-usage-panel-in {
+  from { opacity: 0; transform: translateX(6px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.fleet-context-usage-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.fleet-context-usage-panel-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.fleet-context-usage-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.fleet-context-usage-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+.fleet-context-usage-empty {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin: 0;
+}
+.fleet-context-usage-model {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-context-usage-meter {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.fleet-context-usage-meter-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transition: width var(--dur-2) var(--ease-out);
+}
+.fleet-context-usage-totals {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.fleet-context-usage-pct {
+  color: var(--text-muted);
+}
+.fleet-context-usage-categories {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.fleet-context-usage-category {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.fleet-context-usage-category-swatch {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.fleet-context-usage-category-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-context-usage-category-tokens {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.fleet-context-usage-reasoning-link {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+  margin-top: var(--space-1);
+}
+.fleet-context-usage-reasoning-link:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+/* Narrow viewports: the panel pushing the chat column aside would crush it
+   to unusable width, so it leaves the flex flow (same escape hatch
+   .fleet-shell-panel's own mobile rule uses below) and overlays instead.
+   The 36px toggle strip stays inline either way. */
+@media (max-width: 768px) {
+  .fleet-context-usage-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(85vw, 300px);
+    z-index: 40;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  }
 }
 
 /* ── Mobile shell (<=768px) — Truth Map mobile pass, 2026-07-11 ────────────
@@ -8007,6 +8263,17 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 .fleet-task-cell-title { min-width: 0; }
 .fleet-task-cell-assignee { min-width: 0; }
+/* MAN-294: room for the deferral icon (TaskWakeDeferralIcon) beside the
+   status chip's own ring+text — inline-flex so the two sit on one baseline
+   with a small gap, same idiom .fleet-schip itself already uses. The mobile
+   line1 equivalent needs no new rule: .fleet-agent-row-mobile-line1 (shared
+   with AgentsList, see its own `gap: 8px` under the 768px query) already
+   spaces every flex child it's given, including this icon as a third one. */
+.fleet-task-cell-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 
 /* Priority glyph leading the title in the flat list — same icon as the board
    card, so one task reads identically in both layouts. */
@@ -8729,6 +8996,18 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-task-detail-select:focus-visible {
   outline: 2px solid var(--accent-ring);
   outline-offset: 1px;
+}
+
+/* MAN-294: the honest amendment to the Status row directly above it — "In
+   progress" is the real lifecycle state, this line says the agent has not
+   actually picked it up yet and when it will. Tight to the row above
+   (dense inside a group), --warning-text so it reads as "needs your eye"
+   the same way the page-level wake-error notice already does, never bold
+   enough to compete with the row's own value. */
+.fleet-task-detail-wake-note {
+  margin: -2px 4px 4px;
+  font-size: 11px;
+  color: var(--warning-text);
 }
 
 /* ── Main-content tab strip (Safari / VS Code) ────────────────────────────────

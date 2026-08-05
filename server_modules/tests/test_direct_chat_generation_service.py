@@ -1882,5 +1882,74 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertEqual(result["data"]["status"], "failed")
 
 
+class MemoryWriteTextPromotionExclusionTests(unittest.TestCase):
+    """MAN-303 investigation: grounds the refutation of the leading
+    hypothesis that a literal '<memorywrite>' block in a model's reply gets
+    text-parsed into a real, executing tool call.
+
+    The only text-fallback mechanism that promotes reply prose into a tool
+    call on the deepseek path is _detect_memory_intent (see its module
+    comment: "DeepSeek-chat often emits conversational intent ... instead of
+    native tool_calls"). memory_write is deliberately excluded from
+    _MEMORY_TOOL_NAMES ("Memory tools are read-only — safe to auto-invoke
+    from natural language") — these tests prove that exclusion holds for
+    both the bracket notation the regex recognizes AND the literal XML tag
+    observed in production, even when a full tool set including memory_write
+    is available this turn. They also prove the flip side: whatever this
+    function DOES promote (a read-only call) comes back in the same
+    {"type": "function", "function": {...}} shape a native tool_calls entry
+    would, which direct_chat_generation_service.py's tool-execution loop
+    appends to turn_tool_trace identically regardless of origin — so a call
+    that DOES get promoted is not invisible to the tool-honesty guard.
+    """
+
+    @staticmethod
+    def _memory_tools():
+        return [
+            {"type": "function", "function": {"name": "memory_write"}},
+            {"type": "function", "function": {"name": "memory_read"}},
+            {"type": "function", "function": {"name": "memory_search"}},
+        ]
+
+    def test_bracket_notation_for_memory_write_is_not_promoted(self) -> None:
+        # The regex explicitly includes memory_write in its alternation (the
+        # notation is anticipated), but _MEMORY_TOOL_NAMES excludes it from
+        # the set actually allowed through -- confirms that gate holds
+        # end-to-end, not just in the regex's own alternation list.
+        reply = "[memory_write: key=color, value=teal]"
+        self.assertIsNotNone(direct_chat_generation_service._TOOL_CALL_NOTATION_RE.search(reply))
+        calls = direct_chat_generation_service._detect_memory_intent(reply, self._memory_tools())
+        self.assertEqual(calls, [])
+
+    def test_production_memorywrite_xml_tag_is_not_promoted_either(self) -> None:
+        reply = (
+            "The first write was rejected for formatting — retrying with a "
+            "single-line entry.\n\n<memorywrite>\nentry: Favorite color: teal.\n</memorywrite>"
+        )
+        calls = direct_chat_generation_service._detect_memory_intent(reply, self._memory_tools())
+        self.assertEqual(calls, [])
+
+    def test_readonly_bracket_notation_is_promoted_in_the_native_tool_call_shape(self) -> None:
+        # The read-only counterpart succeeds -- proving the exclusion above
+        # is a deliberate memory_write-only carve-out, not a broken regex.
+        # Same shape a real provider tool_calls entry has (see
+        # _normalize_openai_tool_calls in scripts/orion_local_worker_llm.py),
+        # which is exactly what lets the executor loop treat it identically.
+        reply = "[memory_search: teal]"
+        calls = direct_chat_generation_service._detect_memory_intent(reply, self._memory_tools())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["type"], "function")
+        self.assertEqual(calls[0]["function"]["name"], "memory_search")
+
+    def test_natural_language_memory_write_intent_is_also_never_promoted(self) -> None:
+        reply = "Let me save that to memory for you."
+        calls = direct_chat_generation_service._detect_memory_intent(reply, self._memory_tools())
+        # Falls through to the read-only intent patterns at best
+        # (memory_search / memory_read) -- never memory_write, which has no
+        # natural-language intent pattern of its own at all.
+        for call in calls:
+            self.assertNotEqual(call["function"]["name"], "memory_write")
+
+
 if __name__ == "__main__":
     unittest.main()

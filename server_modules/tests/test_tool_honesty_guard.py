@@ -607,5 +607,260 @@ class AnnouncesWithoutAnsweringDecideAndCorrectionTests(unittest.TestCase):
         self.assertEqual(outcome["guard"]["mismatch_type"], "announces_without_answering")
 
 
+class FalseRejectionClaimDenialTests(unittest.TestCase):
+    """MAN-303 (production, 2026-08-04): a fresh-account agent asked to save
+    a fact to memory replied with 'The first write was rejected for
+    formatting — retrying with a single-line entry,' followed by a raw
+    '<memorywrite>...</memorywrite>' block, then issued a second memory_write
+    call. BOTH calls actually succeeded (the trace below reproduces that
+    exactly: two completed memory_write entries) — memory ended up with two
+    duplicate entries, and the guard never fired.
+
+    Root cause established by investigation: this is not a tool-trace
+    visibility gap. Both memory_write calls were genuine native tool_calls
+    and both landed in the trace correctly (verified separately — see
+    turn_tool_trace.append at direct_chat_generation_service.py). The gap is
+    narrower and more concrete: _DENIAL_PATTERNS had no phrasing for a claim
+    that a call was REJECTED/FAILED VALIDATION when the trace proves it
+    succeeded — every existing pattern is shaped like "I don't have a tool" /
+    "no tool ran", not "that call was rejected." check_tool_reply_consistency
+    is fed a fully-populated, correct trace here specifically to prove that:
+    if this test fails, it must be failing because the reply text doesn't
+    match any denial pattern, not because the trace is empty or malformed.
+    """
+
+    def _two_successful_memory_writes(self) -> list[dict]:
+        return [
+            {"name": "memory_write", "status": "completed", "output": "ok: appended to MEMORY.md"},
+            {"name": "memory_write", "status": "completed", "output": "ok: appended to MEMORY.md"},
+        ]
+
+    def test_false_rejection_claim_is_denies_success_against_a_fully_successful_trace(self) -> None:
+        trace = self._two_successful_memory_writes()
+        # Precondition, not the thing under test: this trace must actually
+        # register as "successful" or the assertion below would pass for the
+        # wrong reason (empty-trace claims_without_run instead of
+        # denies_success). Pins the trace shape so a future refactor of
+        # _successful_tools can't silently make this test meaningless.
+        self.assertEqual(len(guard._successful_tools(trace)), 2)
+
+        reply = (
+            "The first write was rejected for formatting — retrying with a "
+            "single-line entry.\n\n<memorywrite>\nentry: Favorite color: teal.\n</memorywrite>"
+        )
+        result = guard.check_tool_reply_consistency(reply, trace)
+        self.assertFalse(result["consistent"], "guard did not fire on a false rejection claim over a proven success")
+        self.assertEqual(result["mismatch_type"], "denies_success")
+        self.assertEqual(result["tools"], trace)
+
+    def test_decide_produces_a_correction_anchored_on_the_real_successes(self) -> None:
+        trace = self._two_successful_memory_writes()
+        reply = "The first write was rejected for formatting — retrying with a single-line entry."
+        decision = guard._decide(reply, trace)
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision["mismatch_type"], "denies_success")
+        self.assertFalse(decision["skip_regeneration"])
+        assert decision["correction"] is not None
+        self.assertIn("memory_write", decision["correction"])
+        self.assertIn("DID run", decision["correction"])
+
+    def test_full_guard_replaces_the_false_rejection_claim(self) -> None:
+        trace = self._two_successful_memory_writes()
+        reply = (
+            "The first write was rejected for formatting — retrying with a "
+            "single-line entry.\n\n<memorywrite>\nentry: Favorite color: teal.\n</memorywrite>"
+        )
+
+        def _regenerate(_correction_text: str) -> str:
+            return "Saved — favorite color: teal."
+
+        outcome = guard.apply_tool_honesty_guard_sync(
+            reply_text=reply,
+            tool_trace=trace,
+            regenerate_fn=_regenerate,
+        )
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertEqual(outcome["guard"]["mismatch_type"], "denies_success")
+        self.assertNotIn("rejected", outcome["reply"].lower())
+        self.assertNotIn("<memorywrite>", outcome["reply"])
+
+    def test_other_rejected_then_retried_phrasings_also_match(self) -> None:
+        trace = self._two_successful_memory_writes()
+        for reply in [
+            "That call got rejected, so I am retrying now.",
+            "My previous attempt was rejected — retrying with the correct format.",
+            "The save didn't go through, retrying now.",
+            "It wasn't saved the first time, so I am retrying.",
+        ]:
+            with self.subTest(reply=reply):
+                result = guard.check_tool_reply_consistency(reply, trace)
+                self.assertFalse(result["consistent"], f"false negative on: {reply!r}")
+                self.assertEqual(result["mismatch_type"], "denies_success")
+
+    def test_unrelated_rejection_does_not_false_positive_without_a_successful_trace(self) -> None:
+        # "was rejected" alone, about something with no tool-call-shaped head
+        # noun, must never trip this direction even when paired with an
+        # (unrelated) success — the head-noun anchor is what keeps this safe.
+        trace = self._two_successful_memory_writes()
+        result = guard.check_tool_reply_consistency(
+            "Saved that for you. By the way, the committee's proposal was rejected.",
+            trace,
+        )
+        self.assertTrue(result["consistent"], "unrelated 'was rejected' text false-positived denies_success")
+
+    def test_honest_success_report_is_not_flagged(self) -> None:
+        trace = self._two_successful_memory_writes()
+        result = guard.check_tool_reply_consistency("Saved — favorite color: teal.", trace)
+        self.assertTrue(result["consistent"])
+
+class NarratesToolCallAfterSuccessTests(unittest.TestCase):
+    """MAN-263: completes MAN-308's tool-call recovery layer for the shape
+    MAN-308 didn't cover. MAN-308 recovered DSML tool-call markup on the
+    INVOCATION turn (nothing had run yet, so recovering-and-executing was
+    correct). This is a different shape (bare JSON, not DSML) on a
+    different turn (the SYNTHESIS round AFTER a real success) — recovering
+    and executing THIS text would double-run a side-effecting command that
+    already ran for real. See _decide's narrates_tool_call_after_success
+    branch: it never calls regenerate_fn at all, so this direction is
+    structurally incapable of triggering a second execution through either
+    pipeline's regeneration mechanism."""
+
+    # The exact recorded MAN-263 incident: hardware__action genuinely
+    # succeeded this turn (real exit_code 0, real stdout), and the
+    # synthesis turn afterward produced this text instead of using the
+    # result.
+    _INCIDENT_REPLY = (
+        "I'll actually make the call now.\n"
+        "```json\n"
+        "{\"tool\": \"hardware__action\", \"arguments\": {\"command\": \"uname -a\"}}\n"
+        "```"
+    )
+    _SUCCESS_TRACE = [
+        {
+            "name": "hardware__action",
+            "status": "completed",
+            "output": "Darwin MacBook-Pro.local 23.0.0 Darwin Kernel Version 23.0.0",
+        }
+    ]
+
+    def test_reproduces_the_incident_narrated_json_after_success_is_a_mismatch(self) -> None:
+        result = guard.check_tool_reply_consistency(self._INCIDENT_REPLY, self._SUCCESS_TRACE)
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "narrates_tool_call_after_success")
+        self.assertEqual(result["tools"], self._SUCCESS_TRACE)
+
+    def test_honest_reply_using_the_real_result_does_NOT_fire(self) -> None:
+        result = guard.check_tool_reply_consistency(
+            "Ran it — the machine is a Darwin MacBook-Pro on kernel 23.0.0.",
+            self._SUCCESS_TRACE,
+        )
+        self.assertTrue(result["consistent"])
+
+    def test_narrated_json_for_a_DIFFERENT_tool_than_the_one_that_succeeded_does_NOT_fire(self) -> None:
+        # Precision boundary: the JSON mention must name the SAME tool the
+        # trace proves succeeded, not just any tool-shaped JSON anywhere
+        # near a successful trace entry.
+        reply = (
+            "Let me also check the weather.\n"
+            "```json\n{\"tool\": \"weather__lookup\", \"arguments\": {\"city\": \"NYC\"}}\n```"
+        )
+        result = guard.check_tool_reply_consistency(reply, self._SUCCESS_TRACE)
+        self.assertNotEqual(result["mismatch_type"], "narrates_tool_call_after_success")
+
+    def test_narrated_json_with_no_successful_trace_does_NOT_fire_this_direction(self) -> None:
+        # This direction is gated on `if successful:` the same way
+        # denies_success is (module docstring) — no real success this turn
+        # means there is nothing for the narration to contradict via THIS
+        # direction. (Whether some other direction should catch a bare
+        # invocation-turn JSON miss is a separate, narrower question this
+        # fix does not attempt — see the report for why.)
+        result = guard.check_tool_reply_consistency(self._INCIDENT_REPLY, [])
+        self.assertNotEqual(result["mismatch_type"], "narrates_tool_call_after_success")
+
+    def test_decide_skips_regeneration_entirely(self) -> None:
+        """The double-execution guarantee starts here: no correction text
+        is even produced, and skip_regeneration routes the caller straight
+        to the deterministic fallback without ever invoking regenerate_fn."""
+        decision = guard._decide(self._INCIDENT_REPLY, self._SUCCESS_TRACE)
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertTrue(decision["skip_regeneration"])
+        self.assertIsNone(decision["correction"])
+        self.assertEqual(decision["mismatch_type"], "narrates_tool_call_after_success")
+
+    def test_fallback_reply_carries_the_real_result_not_the_narrated_json(self) -> None:
+        fallback = guard.build_narrated_call_fallback_reply(self._SUCCESS_TRACE)
+        self.assertIn("Darwin MacBook-Pro.local", fallback)
+        self.assertNotIn("```json", fallback)
+        self.assertNotIn('"tool"', fallback)
+
+    def test_apply_tool_honesty_guard_sync_never_calls_regenerate_fn(self) -> None:
+        """Direct chat's pipeline (stream_provider_backed_direct_chat) uses
+        the sync variant. Proves no double execution: if regenerate_fn were
+        ever called here, it would prove this fix could re-run the model
+        with tools live and risk a second real hardware__action call."""
+        regenerate_calls: list[str] = []
+
+        def _regenerate(correction_text: str) -> str:
+            regenerate_calls.append(correction_text)
+            return "should never be reached"
+
+        outcome = guard.apply_tool_honesty_guard_sync(
+            reply_text=self._INCIDENT_REPLY,
+            tool_trace=self._SUCCESS_TRACE,
+            regenerate_fn=_regenerate,
+        )
+        self.assertEqual(regenerate_calls, [], "regenerate_fn must never be called for this direction")
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertEqual(outcome["guard"]["mismatch_type"], "narrates_tool_call_after_success")
+        self.assertFalse(outcome["guard"]["corrected"])
+        self.assertTrue(outcome["guard"]["fell_back"])
+        self.assertIn("Darwin MacBook-Pro.local", outcome["reply"])
+        self.assertNotIn("```json", outcome["reply"])
+        self.assertNotIn('"tool"', outcome["reply"])
+
+    def test_apply_tool_honesty_guard_async_never_calls_regenerate_fn(self) -> None:
+        """Same guarantee on Sage's pipeline (apply_tool_honesty_guard,
+        async), whose regenerate_fn re-runs a FULL action loop with tools
+        LIVE (_sage_action_loop_regenerate in sage_agent_runtime_service.py)
+        — the one call site where an actual re-invocation of a real,
+        side-effecting tool would be possible if this direction ever
+        reached it. It must not."""
+        import asyncio
+
+        regenerate_calls: list[str] = []
+
+        async def _regenerate(correction_text: str) -> str:
+            regenerate_calls.append(correction_text)
+            return "should never be reached"
+
+        async def _run():
+            return await guard.apply_tool_honesty_guard(
+                reply_text=self._INCIDENT_REPLY,
+                tool_trace=self._SUCCESS_TRACE,
+                regenerate_fn=_regenerate,
+            )
+
+        outcome = asyncio.run(_run())
+        self.assertEqual(regenerate_calls, [], "regenerate_fn must never be called for this direction")
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertEqual(outcome["guard"]["mismatch_type"], "narrates_tool_call_after_success")
+        self.assertIn("Darwin MacBook-Pro.local", outcome["reply"])
+
+    def test_guard_disabled_ships_the_incident_reply_unchanged(self) -> None:
+        """Sanity check on the escape hatch: with the guard off, the raw
+        narrated JSON ships as-is — confirms the guard, not some other
+        mechanism, is what fixes this."""
+        outcome = guard.apply_tool_honesty_guard_sync(
+            reply_text=self._INCIDENT_REPLY,
+            tool_trace=self._SUCCESS_TRACE,
+            regenerate_fn=lambda _correction: "unused",
+            enabled=False,
+        )
+        self.assertFalse(outcome["guard"]["fired"])
+        self.assertEqual(outcome["reply"], self._INCIDENT_REPLY)
+
+
 if __name__ == "__main__":
     unittest.main()

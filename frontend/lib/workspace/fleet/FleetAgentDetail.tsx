@@ -60,6 +60,7 @@ import {
   createFleetAgentSchedule,
   deleteFleetAgentSchedule,
   friendlyChannelOwnershipError,
+  useFleetProjects,
   type FleetAgent,
   type FleetAgentActivity,
   type FleetChannel,
@@ -3845,6 +3846,18 @@ function ModelTab({
   const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
   const { gateways: cliGateways } = useWorkspaceGateways(workspaceId);
   const cliRuntime = normalizeCliRuntime(runtimeForProvider(provider));
+  // U3-K: this agent's project, so an unset gateway_binding can say what it
+  // actually resolves to at turn time (specialist_runtime_context's project-
+  // default fallback) rather than reading as unset/broken. Cheap — the
+  // workspace's project list is already polled elsewhere on this page tree
+  // and shared via useSharedPolledResource, so this doesn't add a new
+  // network round trip of its own.
+  const { projects } = useFleetProjects(workspaceId);
+  const agentProject = projects.find((p) => p.id === agent?.project_id);
+  const inheritedGatewayLabel =
+    !gatewayBinding.trim() && agentProject?.default_gateway_id
+      ? agentProject.default_gateway_label || agentProject.default_gateway_id
+      : null;
   const [selectedModel, setSelectedModel] = useState<string>(() =>
     seedSelectedModel(resolveDisplayMode(config), config.provider || "", config.model || ""),
   );
@@ -4216,6 +4229,11 @@ function ModelTab({
             onChange={(id) => { setGatewayBinding(id); setSaved(false); }}
             requireRuntime={cliRuntime}
           />
+          {inheritedGatewayLabel && (
+            <p className="fleet-channel-expand-hint" style={{ margin: "6px 0 0" }}>
+              No computer set on this agent — inherits {agentProject?.name || "this project"}&apos;s default: {inheritedGatewayLabel}.
+            </p>
+          )}
         </div>
       )}
 
@@ -4239,6 +4257,11 @@ function ModelTab({
           {renderReasoningEffortUnsupportedNote()}
           <div className="fleet-detail-section-title" style={{ marginTop: 16 }}>Brain runs on</div>
           <GatewayBoxPicker workspaceId={workspaceId} value={gatewayBinding} onChange={(id) => { setGatewayBinding(id); setSaved(false); }} requireLocalModel />
+          {inheritedGatewayLabel && (
+            <p className="fleet-channel-expand-hint" style={{ margin: "6px 0 0" }}>
+              No computer set on this agent — inherits {agentProject?.name || "this project"}&apos;s default: {inheritedGatewayLabel}.
+            </p>
+          )}
         </div>
       )}
 

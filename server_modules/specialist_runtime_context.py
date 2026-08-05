@@ -62,6 +62,16 @@ class SpecialistRuntimeContext:
     # has no effect (matches the Fleet UI, which hides the picker for those
     # two modes rather than promising something that doesn't happen yet).
     reasoning_effort: str = ""
+    # MAN-310 Phase 1: which turn engine drives this specialist's turn —
+    # model_config.engine ("legacy" | "claude_agent_sdk", fleet_tools.py's
+    # _VALID_ENGINES). "" (unset) means the existing engine, same as
+    # "legacy" — see sage_agent_runtime_service.py's handle_sage_chat, the
+    # one consumer. Only meaningful for mode in (platform_credits, byok_api)
+    # — same _ENGINE_SUPPORTED_MODES boundary as reasoning_effort just
+    # above: cli_subscription/local dispatch to the Gateway "brain" branches
+    # instead, which never reach the turn-engine seam at all, so a value
+    # saved under those modes is carried here but has no effect.
+    engine: str = ""
     # The paired box this specialist's TOOL calls (shell/file/browser) prefer,
     # distinct from gateway_binding above (which names the box that hosts the
     # AI brain itself, only used in local/cli_subscription mode). Empty = no
@@ -183,6 +193,51 @@ async def resolve_specialist_runtime_context(
     _ctx_policy = _inst_meta.get("context_policy") if isinstance(_inst_meta.get("context_policy"), dict) else {}
     _model_config = _inst_meta.get("model_config") if isinstance(_inst_meta.get("model_config"), dict) else {}
 
+    mode = _text(_model_config.get("mode")).lower()
+    gateway_binding = _text(_model_config.get("gateway_binding"))
+    preferred_gateway_id = _text(_inst_meta.get("preferred_gateway_id"))
+    project_id = _text(bundle.get("project_id"))
+    source: Dict[str, Any] = {"resolved_from": "install_bundle", "master_id": master_id}
+
+    # Phase U3-K: project-level default-gateway fallback. Projects are
+    # already the product's collaboration boundary (members live on the
+    # project, not a Teams layer above it), so a project can carry a default
+    # Gateway that agents inherit when they have none of their own — letting
+    # teammates in the same project share its compute through whichever
+    # agent they're using, without each install needing its own separate
+    # pairing. Only fills a field that is ALREADY EMPTY: an agent's own
+    # explicit gateway_binding/preferred_gateway_id always wins, this never
+    # overrides a deliberate per-agent choice. gateway_binding is only
+    # meaningful for cli_subscription/local (the two brain-hosting modes —
+    # see the SpecialistRuntimeContext.gateway_binding field comment);
+    # preferred_gateway_id (tool-dispatch) applies regardless of mode.
+    #
+    # Fail-safe by construction: no project_id, no project row, no default
+    # set on the project, or any lookup error all leave both fields exactly
+    # as they already were (today's behavior) — this never raises, so a
+    # broken project lookup can never break an otherwise-normal turn.
+    if project_id and (not gateway_binding or not preferred_gateway_id):
+        project_default_gateway_id = ""
+        try:
+            from server_modules import projects_repository as proj_repo
+
+            project = await proj_repo.get_project(
+                tenant_id=tenant_id or "default", workspace_id=workspace_id, project_id=project_id,
+            )
+            project_default_gateway_id = _text((project or {}).get("default_gateway_id"))
+        except Exception as exc:
+            logger.debug(
+                "specialist context: project default-gateway lookup failed for project %s: %s — no fallback applied",
+                project_id, exc,
+            )
+        if project_default_gateway_id:
+            if not gateway_binding and mode in ("cli_subscription", "local"):
+                gateway_binding = project_default_gateway_id
+                source["gateway_binding_from"] = "project_default"
+            if not preferred_gateway_id:
+                preferred_gateway_id = project_default_gateway_id
+                source["preferred_gateway_id_from"] = "project_default"
+
     return SpecialistRuntimeContext(
         agent_install_id=active_id,
         agent_label=label,
@@ -190,13 +245,14 @@ async def resolve_specialist_runtime_context(
         persona=persona,
         provider=provider,
         model=model,
-        mode=_text(_model_config.get("mode")).lower(),
-        gateway_binding=_text(_model_config.get("gateway_binding")),
+        mode=mode,
+        gateway_binding=gateway_binding,
         runtime=_text(_model_config.get("runtime")).lower(),
         reasoning_effort=_text(_model_config.get("reasoning_effort")).lower(),
-        preferred_gateway_id=_text(_inst_meta.get("preferred_gateway_id")),
-        project_id=_text(bundle.get("project_id")),
+        engine=_text(_model_config.get("engine")).lower(),
+        preferred_gateway_id=preferred_gateway_id,
+        project_id=project_id,
         context_policy=dict(_ctx_policy),
         is_specialist=True,
-        source={"resolved_from": "install_bundle", "master_id": master_id},
+        source=source,
     )

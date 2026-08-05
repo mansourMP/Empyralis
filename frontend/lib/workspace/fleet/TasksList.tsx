@@ -30,7 +30,7 @@ import { timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
-import { TaskStatusChip, TaskPriorityIcon, taskPriority, taskStatusLabel, TASK_PRIORITY_LABELS } from "./task-status";
+import { TaskStatusChip, TaskPriorityIcon, TaskWakeDeferralIcon, taskPriority, taskStatusLabel, TASK_PRIORITY_LABELS } from "./task-status";
 import { TaskLabelChips } from "./task-labels";
 import {
   assigneeOptionValue,
@@ -286,6 +286,11 @@ function TaskRow({
       {display.status ? (
         <span className="fleet-task-cell-status">
           <TaskStatusChip status={task.status} />
+          {/* MAN-294: "In progress" above is the real status, unchanged —
+              this is the compact qualifier for "but not actually started
+              yet", same icon/colour/title as the board card's. Renders
+              nothing on every task that isn't deferred. */}
+          <TaskWakeDeferralIcon task={task} size={12} />
         </span>
       ) : null}
 
@@ -295,7 +300,12 @@ function TaskRow({
       <div className="fleet-agent-row-mobile">
         <div className="fleet-agent-row-mobile-line1">
           <span className="fleet-agent-row-mobile-name">{task.title || "Untitled task"}</span>
-          {display.status ? <TaskStatusChip status={task.status} /> : null}
+          {display.status ? (
+            <>
+              <TaskStatusChip status={task.status} />
+              <TaskWakeDeferralIcon task={task} size={12} />
+            </>
+          ) : null}
         </div>
         {/* Same toggles as the desktop cells — a display property switched off
             has to be off at 375px too, or the control silently stops working

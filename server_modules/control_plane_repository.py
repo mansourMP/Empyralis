@@ -12149,6 +12149,22 @@ def _local_ensure_agent_thread(
         return _clone_local_agent_thread(_LOCAL_AGENT_THREADS[key], include_turns=False)
 
 
+def _local_merge_agent_thread_metadata(
+    *, thread_id: str, tenant_id: str, workspace_id: str, metadata_patch: Dict[str, Any],
+) -> None:
+    key = _local_agent_thread_key(tenant_id, workspace_id, thread_id)
+    with _LOCAL_AGENT_THREAD_LOCK:
+        _local_load_agent_thread_store_locked()
+        existing = _LOCAL_AGENT_THREADS.get(key)
+        if existing is None:
+            return
+        next_metadata = _decode_json_object(existing.get("metadata"))
+        next_metadata.update(metadata_patch)
+        existing["metadata"] = next_metadata
+        existing["updated_at"] = _utc_now_iso()
+        _local_persist_agent_thread_store_locked()
+
+
 def _local_upsert_agent_turn(
     *,
     tenant_id: str,
@@ -12473,6 +12489,64 @@ async def ensure_agent_thread(
         workspace_id=resolved_workspace_id,
         include_turns=False,
     )
+
+
+async def merge_agent_thread_metadata(
+    *,
+    thread_id: str,
+    tenant_id: str,
+    workspace_id: str,
+    metadata_patch: Dict[str, Any],
+) -> None:
+    """Merge `metadata_patch` (top-level keys only — same `||` merge
+    ensure_agent_thread's own INSERT ... ON CONFLICT already uses) into an
+    EXISTING agent_threads row, touching ONLY the metadata column (and
+    updated_at). Deliberately narrower than ensure_agent_thread: that
+    function's UPDATE also unconditionally overwrites `channel` on every
+    call (no COALESCE — see its SQL), which is correct for its one call
+    site (thread creation/normalization, which always has the real
+    channel) but would be a silent-corruption hazard for a SECOND,
+    later call site that doesn't necessarily know the thread's original
+    channel — exactly this function's use case (MAN-310's claude_agent_sdk
+    session-continuity cache, called turns after the thread was created).
+
+    Best-effort by design: a no-op (not an error) if the thread row doesn't
+    exist yet, or if metadata_patch is empty. This is engine-internal cache
+    state, not a governed product record — unlike every other write in this
+    file's agent_threads/agent_turns family, it does NOT go through
+    thread_service.py's Rust thread-record-decision gate (that gate exists
+    for turns/threads with product semantics: visible content, ownership,
+    titles; a provider session id backing a resumable SDK turn has none of
+    that). Callers still get tenant/workspace scoping via
+    _require_scope_token/_scoped_connection below.
+    """
+    token = str(thread_id or "").strip()
+    if not token or not isinstance(metadata_patch, dict) or not metadata_patch:
+        return
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    now_ts = _utc_now_ts()
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            _local_merge_agent_thread_metadata(
+                thread_id=token,
+                tenant_id=resolved_tenant_id,
+                workspace_id=resolved_workspace_id,
+                metadata_patch=metadata_patch,
+            )
+            return
+        await connection.execute(
+            """
+            UPDATE agent_threads
+            SET metadata = agent_threads.metadata || $4::jsonb, updated_at = $5::timestamptz
+            WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3
+            """,
+            token,
+            resolved_tenant_id,
+            resolved_workspace_id,
+            _to_json(metadata_patch, default={}),
+            now_ts,
+        )
 
 
 async def upsert_agent_session(
@@ -13154,7 +13228,22 @@ async def append_agent_scheduler_wake_request(
             "SELECT * FROM agent_scheduler_wake_requests WHERE id = $1 LIMIT 1",
             resolved_wake_id,
         )
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    record = dict(row)
+    # No jsonb codec is registered on this pool (see _decode_json_object's
+    # other call sites in this file) -- payload/policy/metadata otherwise
+    # come back as raw JSON text, not dicts. This return value is handed
+    # straight through bounded_scheduler_service._persist_wakeup to every
+    # caller (schedule_task_assigned_wakeup, schedule_task_commented_wakeup,
+    # maybe_schedule_event_trigger, propose_self_wakeup) and from there
+    # straight into the HTTP response as `wake_request` -- e.g. a caller
+    # reading wake_request["metadata"]["policy_delay_reason"] wants a real
+    # dict lookup, not a JSON string it has to remember to parse itself.
+    record["payload"] = _decode_json_object(record.get("payload"))
+    record["policy"] = _decode_json_object(record.get("policy"))
+    record["metadata"] = _decode_json_object(record.get("metadata"))
+    return record
 
 
 def _scheduler_policy_value(policy: Optional[Dict[str, Any]], key: str, default: Any) -> Any:

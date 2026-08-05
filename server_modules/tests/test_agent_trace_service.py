@@ -349,6 +349,92 @@ class AgentTraceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(finished)
         self.assertEqual(replay, {"trace": None, "events": []})
 
+    async def test_persist_ephemeral_envelope_writes_persisted_type(self) -> None:
+        """MAN-310 Phase 2: claude_agent_sdk_bridge.translate_sdk_message is
+        synchronous/pure and can only ever build the ephemeral (persisted=
+        False) envelope inline — this is the async follow-up its caller
+        (run_claude_agent_sdk_turn) invokes to make a PERSISTED_TRACE_EVENT_
+        TYPES envelope durable, reusing the envelope's OWN seq/event_id
+        rather than minting new ones (unlike emit_with_envelope)."""
+        context = agent_trace_service.TraceContext(
+            trace_id="trace_1", workspace_id="ws-1", tenant_id="tenant-1",
+            thread_id="thread-1", run_id="run-1", root_agent_id="sage",
+        )
+        envelope = agent_trace_service.build_ephemeral_envelope(
+            context, "tool.started", {"tool_name": "web__search"}, tool_call_id="toolu_1",
+        )
+        self.assertIsNotNone(envelope)
+        self.assertFalse(envelope["persisted"])  # the live copy stays ephemeral-shaped
+
+        with patch(
+            "server_modules.agent_trace_service.control_plane_repository.append_agent_trace_event",
+            new=AsyncMock(return_value=_event_row()),
+        ) as append_event:
+            await agent_trace_service.persist_ephemeral_envelope(context, envelope)
+
+        append_event.assert_awaited_once()
+        kwargs = append_event.await_args.kwargs
+        self.assertEqual(kwargs["seq"], envelope["seq"])
+        self.assertEqual(kwargs["event_id"], envelope["id"])
+        self.assertEqual(kwargs["event_type"], "tool.started")
+        self.assertTrue(kwargs["persisted"])
+        self.assertEqual(kwargs["tool_call_id"], "toolu_1")
+        self.assertEqual(kwargs["payload"], {"tool_name": "web__search"})
+
+    async def test_persist_ephemeral_envelope_skips_non_persisted_type(self) -> None:
+        context = agent_trace_service.TraceContext(
+            trace_id="trace_1", workspace_id="ws-1", tenant_id="tenant-1",
+            thread_id="thread-1", run_id="run-1", root_agent_id="sage",
+        )
+        envelope = agent_trace_service.build_ephemeral_envelope(
+            context, "reasoning.summary.delta", {"text": "thinking..."},
+        )
+        self.assertIsNotNone(envelope)
+        self.assertNotIn(envelope["event_type"], agent_trace_service.PERSISTED_TRACE_EVENT_TYPES)
+
+        with patch(
+            "server_modules.agent_trace_service.control_plane_repository.append_agent_trace_event",
+            new=AsyncMock(return_value=_event_row()),
+        ) as append_event:
+            await agent_trace_service.persist_ephemeral_envelope(context, envelope)
+
+        append_event.assert_not_awaited()
+
+    async def test_persist_ephemeral_envelope_noop_without_trace_context(self) -> None:
+        with patch(
+            "server_modules.agent_trace_service.control_plane_repository.append_agent_trace_event",
+            new=AsyncMock(return_value=_event_row()),
+        ) as append_event:
+            await agent_trace_service.persist_ephemeral_envelope(None, {"event_type": "tool.started", "seq": 1, "id": "tevent_1"})
+
+        append_event.assert_not_awaited()
+
+    async def test_persist_ephemeral_envelope_noop_for_malformed_envelope(self) -> None:
+        context = agent_trace_service.TraceContext(
+            trace_id="trace_1", workspace_id="ws-1", tenant_id="tenant-1",
+            thread_id="thread-1", run_id="run-1", root_agent_id="sage",
+        )
+        with patch(
+            "server_modules.agent_trace_service.control_plane_repository.append_agent_trace_event",
+            new=AsyncMock(return_value=_event_row()),
+        ) as append_event:
+            await agent_trace_service.persist_ephemeral_envelope(context, None)
+            await agent_trace_service.persist_ephemeral_envelope(context, {"event_type": "tool.started"})  # no seq/id
+
+        append_event.assert_not_awaited()
+
+    async def test_persist_ephemeral_envelope_never_raises_on_repository_failure(self) -> None:
+        context = agent_trace_service.TraceContext(
+            trace_id="trace_1", workspace_id="ws-1", tenant_id="tenant-1",
+            thread_id="thread-1", run_id="run-1", root_agent_id="sage",
+        )
+        envelope = agent_trace_service.build_ephemeral_envelope(context, "tool.result", {"status": "ok"})
+        with patch(
+            "server_modules.agent_trace_service.control_plane_repository.append_agent_trace_event",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ), patch("server_modules.agent_trace_service.failure_policy_service.log_degraded_operation"):
+            await agent_trace_service.persist_ephemeral_envelope(context, envelope)  # must not raise
+
     async def test_repository_failures_emit_typed_observability_notice(self) -> None:
         with patch(
             "server_modules.agent_trace_service.control_plane_repository.create_agent_trace",

@@ -34,6 +34,38 @@ async def _resolve_tenant(workspace_id: str) -> str:
     return await control_plane_repository.resolve_tenant_id_for_workspace(workspace_id, default="default")
 
 
+def _resolve_gateway_display_name(gateway_id: Optional[str]) -> Optional[str]:
+    """Human-readable label for a project's default_gateway_id, resolved the
+    same way GatewayBoxPicker's own gatewayLabel() does client-side
+    (display_name, falling back to hostname/platform/the raw id) — so a
+    project's saved default reads the same name here as it would in the
+    picker itself. Kept out of projects_repository.py (repo layer stays free
+    of the gateway-registry dependency, same reasoning fleet_tools.
+    gateway_resolves_in_workspace's own docstring gives for living there
+    instead of in this file). None when the id is empty or doesn't resolve
+    to a live registration (deleted/never existed) — the frontend renders an
+    honest "no longer available" state for that rather than a raw id."""
+    gid = str(gateway_id or "").strip()
+    if not gid:
+        return None
+    try:
+        from server_modules import gateway_registry_service, gateway_state_repository
+
+        registration = gateway_state_repository.get_gateway_registration(gid)
+        if not registration:
+            return None
+        payload = gateway_registry_service.gateway_registration_public_payload(registration)
+        label = str(
+            payload.get("display_name")
+            or (registration.get("metadata") or {}).get("hostname")
+            or payload.get("platform")
+            or gid
+        ).strip()
+        return label or None
+    except Exception:
+        return None
+
+
 # ── MAN-115: real per-project ACL wiring ─────────────────────────────────
 # The MAN-70 placeholder ("project member" == "workspace member", no
 # per-project table) is replaced by project_memberships
@@ -289,6 +321,11 @@ async def fleet_projects(
         counts = await projects.count_agents_by_project(tenant_id=tenant_id, workspace_id=resolved_workspace_id)
         for p in rows:
             p["agent_count"] = int(counts.get(p["id"], 0))
+            # U3-K: resolved here (once per list call) rather than making the
+            # frontend re-derive it from a separate /gateway/registrations
+            # fetch — the project settings control and any other reader can
+            # show "what's set" from this one response.
+            p["default_gateway_label"] = _resolve_gateway_display_name(p.get("default_gateway_id"))
         return {"ok": True, "projects": rows}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "projects": []}
@@ -344,6 +381,11 @@ class FleetPatchProjectRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     archived: Optional[bool] = None
+    # U3-K: the project's default Gateway — see projects_repository.
+    # set_project_default_gateway. `None` (the default) leaves it untouched;
+    # `""` explicitly clears it back to unset; any other string is validated
+    # against this workspace's registrations before saving.
+    default_gateway_id: Optional[str] = None
 
 
 @router.patch("/api/w/{workspace_id}/fleet/projects/{project_id}")
@@ -354,14 +396,18 @@ async def fleet_patch_project(
     body: FleetPatchProjectRequest,
     current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
 ) -> Dict[str, Any]:
-    """Rename, edit, or archive/unarchive a project.
+    """Rename, edit, archive/unarchive, or set the default Gateway of a
+    project.
 
     MAN-64/MAN-70 permission review: LEFT AT `owner`, DELIBERATELY, flagged
     rather than loosened -- same reasoning as fleet_create_project just
     above (out of the brief's explicit member list, and archiving in
     particular hides a project from every non-owner member's board at
     once, which is a workspace-shaping decision closer to project-level
-    settings than to routine task upkeep)."""
+    settings than to routine task upkeep). default_gateway_id is gated the
+    same way, if anything for a stronger reason: assigning the project's
+    shared compute is a workspace-shaping decision too, not routine task
+    upkeep -- see set_project_default_gateway's own docstring."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
     from server_modules import projects_repository as projects
 
@@ -382,8 +428,16 @@ async def fleet_patch_project(
                 project_id=project_id,
                 archived=body.archived,
             )
+        if body.default_gateway_id is not None:
+            project = await projects.set_project_default_gateway(
+                tenant_id=await _resolve_tenant(resolved_workspace_id),
+                workspace_id=resolved_workspace_id,
+                project_id=project_id,
+                gateway_id=body.default_gateway_id,
+            )
         if project is None:
             return {"ok": False, "error": "Project not found."}
+        project["default_gateway_label"] = _resolve_gateway_display_name(project.get("default_gateway_id"))
         return {"ok": True, "project": project}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

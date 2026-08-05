@@ -213,14 +213,21 @@ UNASSIGNED_FIRE_AND_FORGET_BASELINE_FILES: frozenset[str] = frozenset({
     "server_modules/local_tool_executor.py",
     "server_modules/memory_service.py",
     "server_modules/runtime_run_delegation_service.py",
-    "server_modules/sage_agent_runtime_service.py",
     "server_modules/sage_telegram_hosted_service.py",
     "server_modules/tool_broker.py",
     "server_modules/workspace_scope.py",
-})  # 12 files, 19 sites at time of seeding -- note personal_channels_service.py
+})  # 11 files, 18 sites after MAN-266's removal (was 12 files, 19 sites at
+    # time of seeding) -- note personal_channels_service.py
     # is NOT here: its one fire-and-forget task (C2) is fixed in this same
     # wave (module-level task set + done-callback, see
-    # _ensure_agent_channel_binding_enabled).
+    # _ensure_agent_channel_binding_enabled). server_modules/
+    # sage_agent_runtime_service.py was removed from this baseline (MAN-266):
+    # its one violation, _schedule_post_turn_auto_compaction's
+    # asyncio.ensure_future(...) at (what was) line 4151 with the returned
+    # Task discarded, was the confirmed root cause of the recurring
+    # production "Task was destroyed but it is pending!" errors -- fixed via
+    # the same module-level task-set + done-callback pattern
+    # (_POST_TURN_COMPACTION_TASKS / _track_post_turn_compaction_task).
 
 
 def _scan() -> tuple[dict[str, list[int]], dict[str, list[tuple[int, str]]]]:

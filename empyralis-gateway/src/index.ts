@@ -32,9 +32,9 @@ import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
 import { readAndClearPendingGatewayRestartMarker } from "./update/gateway-restart-pending";
-import { GatewayDoctorRuntime, type GatewayDoctorRunResult } from "./health/gateway-doctor";
+import { GatewayDoctorRuntime, type GatewayDoctorCheckResult, type GatewayDoctorRunResult } from "./health/gateway-doctor";
 import { collectPassiveInventorySnapshot } from "./health/service-inventory";
-import { setCliSetupLocallyEnabled } from "./runtime/desktop-permissions";
+import { setCliSetupLocallyEnabled, setShellFullAccessLocallyEnabled } from "./runtime/desktop-permissions";
 
 const GATEWAY_VERSION = "0.1.0";
 
@@ -285,6 +285,12 @@ async function main(): Promise<void> {
   // just above) — set once, here, before the one-time
   // supportedCapabilities() computation below.
   setCliSetupLocallyEnabled(config.cliSetupLocallyEnabled);
+  // Same "static local policy choice, set once before the first
+  // supportedCapabilities() computation" shape as cliSetupLocallyEnabled
+  // just above — see desktop-permissions.ts's shellFullAccessLocallyEnabled
+  // doc comment for why this now also unlocks shell_sandbox advertisement,
+  // not just execution mode.
+  setShellFullAccessLocallyEnabled(config.shellFullAccessLocallyEnabled);
   const cliSetupRuntime = new GatewayCliSetupRuntime();
   // `triggerShutdown` is reassigned below, once `cleanup`/`identity`/`journal`
   // exist, to the real SIGINT/SIGTERM shutdown path — self-update needs to
@@ -438,6 +444,35 @@ async function main(): Promise<void> {
     await client.publishStateUpdate({ gateway_restart_health_check: report });
   };
 
+  // MAN-295 / MAN-269: "something must be running in the background always"
+  // — a Mac gateway had NO automatic-restart-on-crash path at all until a
+  // human explicitly ran gateway.doctor.run with repair:true (the ONLY
+  // pre-existing caller of update/gateway-supervisor-install.ts's
+  // LaunchAgent writer). This makes that happen as part of normal pairing/
+  // install instead: fired once from afterConnected below, same hook
+  // personal-channel startup and the post-restart health check already use,
+  // so it runs on every real boot (including the very first one right after
+  // `curl | sh` on a fresh Mac) — not gated behind the owner discovering the
+  // Hardware page's Diagnostics panel. Reuses GatewayDoctorRuntime.
+  // ensureSupervisorInstalled(), which itself reuses SUPERVISOR_PRESENCE_
+  // CHECK.detect()/.repair() verbatim — no second LaunchAgent-writing
+  // implementation. Publishes the outcome via the same gateway.state.update
+  // -> registration.metadata path reportPostRestartHealthCheck uses above,
+  // so a permission-denied repair (the one case this can't silently
+  // succeed — e.g. an unwritable home directory) is a VISIBLE state on the
+  // Hardware page's Diagnostics panel instead of a line only findable in
+  // this process's own local log file.
+  const ensureSupervisorInstalledOnce = async (): Promise<void> => {
+    const result: GatewayDoctorCheckResult = await doctorRuntime.ensureSupervisorInstalled();
+    await journal.append("system", "gateway.supervisor_install.checked", {
+      status: result.status,
+      detail: result.detail,
+      repaired: Boolean(result.repaired),
+      repair_detail: result.repair_detail ?? null,
+    });
+    await client.publishStateUpdate({ gateway_supervisor_install: result });
+  };
+
   try {
     const existingTokens: GatewayTokenState = await tokenStore.load();
     if (shouldAttemptPairing(config.pairingToken, existingTokens.gatewayToken)) {
@@ -462,6 +497,12 @@ async function main(): Promise<void> {
         void personalChannelRuntimes.startAll().catch((error: unknown) => {
           const message = error instanceof Error ? error.message : String(error);
           void journal.append("system", "gateway.personal_channels.start_failed", {
+            error: message,
+          });
+        });
+        void ensureSupervisorInstalledOnce().catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          void journal.append("system", "gateway.supervisor_install.check_failed", {
             error: message,
           });
         });

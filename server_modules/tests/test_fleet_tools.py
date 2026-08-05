@@ -1607,6 +1607,84 @@ class FleetConfigureAgentReasoningEffortValidationTests(unittest.TestCase):
         self.assertTrue(result["ok"], result.get("error"))
 
 
+class FleetConfigureAgentEngineValidationTests(unittest.TestCase):
+    """MAN-310 Phase 1: model_config.engine ("legacy" | "claude_agent_sdk")
+    is only meaningful for platform_credits/byok_api — cli_subscription/
+    local dispatch entirely through the Gateway "brain" branches and never
+    reach the turn-engine seam at all (see fleet_tools.py's
+    _ENGINE_SUPPORTED_MODES). Rejected at save time, same convention as
+    reasoning_effort just above, rather than silently accepted and later
+    discovered to be a dead control."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    def _configure(self, model_config):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+        ):
+            return _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"model_config": model_config},
+                )
+            )
+
+    def test_platform_credits_accepts_the_sdk_engine(self):
+        result = self._configure({"mode": "platform_credits", "engine": "claude_agent_sdk"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_byok_api_accepts_the_sdk_engine(self):
+        result = self._configure({"mode": "byok_api", "provider": "anthropic", "engine": "claude_agent_sdk"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_unset_mode_defaults_to_platform_credits_for_the_engine_gate(self):
+        """No explicit mode + engine=claude_agent_sdk must be accepted --
+        an unset mode means platform_credits everywhere else in this
+        module (see resolve_model_config), so the engine gate must agree."""
+        result = self._configure({"engine": "claude_agent_sdk"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_cli_subscription_rejects_the_sdk_engine(self):
+        result = self._configure({"mode": "cli_subscription", "runtime": "claude_code", "engine": "claude_agent_sdk"})
+        self.assertFalse(result["ok"])
+        self.assertIn("cli_subscription", result["error"])
+
+    def test_local_rejects_the_sdk_engine(self):
+        result = self._configure({"mode": "local", "engine": "claude_agent_sdk"})
+        self.assertFalse(result["ok"])
+        self.assertIn("local", result["error"])
+
+    def test_unrecognized_engine_value_is_rejected(self):
+        result = self._configure({"mode": "platform_credits", "engine": "some-future-engine"})
+        self.assertFalse(result["ok"])
+        self.assertIn("engine", result["error"])
+
+    def test_explicit_legacy_engine_is_accepted_for_every_mode(self):
+        """"legacy" is always valid regardless of mode -- it never selects
+        the bridge, so there is no dead-control concern for it."""
+        for mode in ("platform_credits", "byok_api", "cli_subscription", "local"):
+            with self.subTest(mode=mode):
+                result = self._configure({"mode": mode, "engine": "legacy"})
+                self.assertTrue(result["ok"], result.get("error"))
+
+    def test_empty_engine_skips_validation_entirely(self):
+        """Omitting the field (the overwhelming common case, and the
+        default-to-legacy safety property) must never be rejected."""
+        result = self._configure({"mode": "cli_subscription", "runtime": "claude_code"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

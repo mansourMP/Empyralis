@@ -145,3 +145,79 @@ def test_scheduler_wake_update_blocks_on_unexpected_next_action_before_execute()
         connection.execute.assert_not_awaited()
 
     asyncio.run(run())
+
+
+def test_scheduler_wake_append_decodes_jsonb_fields_from_the_round_trip() -> None:
+    """MAN-294: no jsonb codec is registered on this pool, so a bare
+    `dict(row)` off asyncpg hands back payload/policy/metadata as raw JSON
+    TEXT, not dicts -- append_agent_scheduler_wake_request's return value
+    goes straight through bounded_scheduler_service._persist_wakeup to
+    schedule_task_assigned_wakeup/schedule_task_commented_wakeup and from
+    there straight into the HTTP response as `wake_request`, so a caller
+    reading wake_request["metadata"]["policy_delay_reason"] needs a real
+    dict, not a string it has to remember to json.loads() itself. This
+    fixture's fetchrow response deliberately returns JSON TEXT for all
+    three fields -- exactly what an uncodec'd asyncpg connection actually
+    returns -- to prove the decode happens, not just that a dict passed
+    straight through unchanged."""
+
+    async def run() -> None:
+        connection = AsyncMock()
+        connection.execute = AsyncMock()
+        connection.fetchrow = AsyncMock(
+            return_value={
+                "id": "wake-1",
+                "tenant_id": "tenant-1",
+                "workspace_id": "workspace-1",
+                "trigger_kind": "task_assigned",
+                "source": "project_tasks",
+                "status": "pending",
+                # Raw JSON text, matching what an uncodec'd asyncpg
+                # connection actually hands back for a jsonb column --
+                # NOT a dict.
+                "payload": '{"agent_id": "agent-1", "task_id": "task-1"}',
+                "policy": '{"quiet_hours_start": 22, "quiet_hours_end": 7}',
+                "metadata": '{"agent_id": "agent-1", "task_id": "task-1", "policy_delay_reason": "quiet_hours"}',
+            }
+        )
+
+        @asynccontextmanager
+        async def fake_scoped_connection(**kwargs):
+            yield connection
+
+        with patch.object(
+            control_plane_repository.rust_runtime_kernel_client,
+            "run_runtime_kernel_enforced",
+            # task_assigned -> _scheduler_wake_operation() -> "wake_decision",
+            # whose accepted next_actions are trigger_wakeup/request_session_
+            # scheduler_approval/defer_session_scheduler_operation (NOT the
+            # operation name itself) -- see _SCHEDULER_WAKE_REPOSITORY_NEXT_
+            # ACTIONS above.
+            return_value={"ok": True, "decision": "allow", "next_action": "trigger_wakeup"},
+        ), patch.object(
+            control_plane_repository,
+            "_scoped_connection",
+            side_effect=fake_scoped_connection,
+        ):
+            record = await control_plane_repository.append_agent_scheduler_wake_request(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                trigger_kind="task_assigned",
+                source="project_tasks",
+                requested_by="owner",
+                due_at=datetime.now(timezone.utc),
+                payload={"agent_id": "agent-1", "task_id": "task-1"},
+                policy={"quiet_hours_start": 22, "quiet_hours_end": 7},
+                metadata={"agent_id": "agent-1", "task_id": "task-1", "policy_delay_reason": "quiet_hours"},
+            )
+
+        assert isinstance(record["payload"], dict)
+        assert record["payload"]["task_id"] == "task-1"
+        assert isinstance(record["policy"], dict)
+        assert record["policy"]["quiet_hours_start"] == 22
+        assert isinstance(record["metadata"], dict)
+        assert record["metadata"]["policy_delay_reason"] == "quiet_hours"
+
+    asyncio.run(run())
+
+    asyncio.run(run())

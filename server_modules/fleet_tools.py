@@ -69,6 +69,22 @@ _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME = {
     "grok_build": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
     "cursor_cli": set(),
 }
+# MAN-310 Phase 1: which turn engine drives an agent whose model_config.mode
+# is platform_credits/byok_api. "legacy" (also what an unset/absent value
+# means — see sage_agent_runtime_service.py's handle_sage_chat resolution)
+# is the existing direct_chat_generation_service.stream_provider_backed_
+# direct_chat path; "claude_agent_sdk" selects claude_agent_sdk_bridge.
+# ENGINE_ID at the turn seam (_run_sage_action_loop_v3's _resolve_turn_
+# engine_id). Duplicated here rather than imported from claude_agent_sdk_
+# bridge (same duplicate-but-documented-across-layers pattern as
+# _VALID_MODEL_RUNTIMES/_VALID_REASONING_EFFORTS above — that module pulls
+# in a much heavier import chain and this one must stay light). Only
+# meaningful for _ENGINE_SUPPORTED_MODES below: cli_subscription/local never
+# reach the turn-engine seam at all (handle_sage_chat's _dispatch_cli_
+# subscription_gateway_brain / _dispatch_local_gateway_brain branches
+# return before it), so a saved engine value there would be a dead control.
+_VALID_ENGINES = {"legacy", "claude_agent_sdk"}
+_ENGINE_SUPPORTED_MODES = {"platform_credits", "byok_api"}
 _VALID_PURPOSE_PRESETS = {"customer_facing", "internal_assistant", "operator"}
 _PURPOSE_PRESET_INSTRUCTIONS = {
     "customer_facing": (
@@ -1209,6 +1225,50 @@ async def fleet_clear_agent_capability_key(
     return {"ok": True, "capability": cap, "mode": "platform_credits"}
 
 
+def gateway_resolves_in_workspace(gateway_id: str, workspace_id: str) -> Dict[str, Any]:
+    """Confirm `gateway_id` resolves to a real, active, non-revoked Gateway
+    registration paired to this workspace. Factored out of the inline check
+    fleet_configure_agent applies to the agent-level model_config.
+    gateway_binding field (below) so any OTHER caller that needs to validate
+    a gateway id before saving it — today, projects_repository.
+    set_project_default_gateway — applies the identical rule instead of a
+    hand-copied (and inevitably drifting) duplicate.
+
+    Returns {"ok": True} when it resolves, else {"ok": False, "error": "..."}
+    with the exact same message fleet_configure_agent has always returned.
+    Deliberately does NOT include the CLI-installed/authenticated check
+    fleet_configure_agent layers on top for a chosen runtime — that check is
+    runtime-specific (claude_code / codex / ...), which a project-level
+    default has no concept of; only "is this a real box in this workspace"
+    is common ground between the two callers."""
+    _gateway_id = str(gateway_id or "").strip()
+    if not _gateway_id:
+        return {"ok": True}
+    from server_modules import gateway_state_repository
+
+    _registration = gateway_state_repository.get_gateway_registration(_gateway_id)
+    _registration_workspace_id = str((_registration or {}).get("workspace_id") or "").strip()
+    _resolves = (
+        isinstance(_registration, dict)
+        and bool(_registration)
+        and str(_registration.get("status") or "").strip().lower() == "active"
+        and str(_registration.get("device_trust_state") or "").strip().lower() != "revoked"
+        and (
+            not _registration_workspace_id
+            or _registration_workspace_id == (str(workspace_id or "").strip() or "default")
+        )
+    )
+    if not _resolves:
+        return {
+            "ok": False,
+            "error": (
+                f"gateway_binding '{_gateway_id}' does not resolve to a Gateway paired "
+                "to this workspace. Pair a Gateway first, then bind it here."
+            ),
+        }
+    return {"ok": True}
+
+
 async def fleet_configure_agent(
     *,
     actor_id: str,
@@ -1225,6 +1285,9 @@ async def fleet_configure_agent(
     Model config modes: platform_credits | byok_api | cli_subscription | local
     Model config may also carry gateway_binding (paired Gateway id that runs
     the brain) and runtime (claude_code | codex | ollama). Both persist as-is.
+    MAN-310 Phase 1: model_config may also carry engine (legacy |
+    claude_agent_sdk) — which turn engine drives platform_credits/byok_api
+    agents; see _VALID_ENGINES/_ENGINE_SUPPORTED_MODES above.
     """
     from server_modules import agent_registry_repository as repo
 
@@ -1255,6 +1318,29 @@ async def fleet_configure_agent(
                 "ok": False,
                 "error": f"Invalid model_config runtime: {runtime}. Must be one of: {', '.join(sorted(_VALID_MODEL_RUNTIMES))}",
             }
+        # MAN-310 Phase 1: engine — rejected at save time (same convention as
+        # runtime/reasoning_effort just above/below) rather than silently
+        # ignored at turn time, so a caller never believes a saved choice is
+        # in effect when handle_sage_chat's resolution would actually never
+        # consult it (cli_subscription/local bypass the turn-engine seam
+        # entirely — see _ENGINE_SUPPORTED_MODES's own comment).
+        engine = str(mc.get("engine") or "").strip().lower()
+        if engine and engine not in _VALID_ENGINES:
+            return {
+                "ok": False,
+                "error": f"Invalid model_config engine: {engine}. Must be one of: {', '.join(sorted(_VALID_ENGINES))}",
+            }
+        if engine == "claude_agent_sdk":
+            _effective_mode_for_engine = mode or "platform_credits"
+            if _effective_mode_for_engine not in _ENGINE_SUPPORTED_MODES:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"model_config engine 'claude_agent_sdk' isn't available for mode "
+                        f"'{_effective_mode_for_engine}' — it only applies to "
+                        f"{', '.join(sorted(_ENGINE_SUPPORTED_MODES))}."
+                    ),
+                }
         # reasoning_effort: two DIFFERENT vocabularies depending on mode/
         # runtime — see _VALID_REASONING_EFFORTS and _VALID_CLI_REASONING_
         # EFFORTS_BY_RUNTIME's own docstrings. Rejected here (save time)
@@ -1298,29 +1384,15 @@ async def fleet_configure_agent(
         # never dispatch (the turn-time error would otherwise only surface
         # much later, mid-conversation, instead of at save time).
         if mode == "cli_subscription" and isinstance(gateway_binding, str) and gateway_binding.strip():
-            from server_modules import gateway_state_repository, gateway_registry_service
+            from server_modules import gateway_registry_service
 
             _gateway_id = gateway_binding.strip()
+            _resolution = gateway_resolves_in_workspace(_gateway_id, workspace_id)
+            if not _resolution.get("ok"):
+                return _resolution
+            from server_modules import gateway_state_repository
+
             _registration = gateway_state_repository.get_gateway_registration(_gateway_id)
-            _registration_workspace_id = str((_registration or {}).get("workspace_id") or "").strip()
-            _resolves = (
-                isinstance(_registration, dict)
-                and bool(_registration)
-                and str(_registration.get("status") or "").strip().lower() == "active"
-                and str(_registration.get("device_trust_state") or "").strip().lower() != "revoked"
-                and (
-                    not _registration_workspace_id
-                    or _registration_workspace_id == (str(workspace_id or "").strip() or "default")
-                )
-            )
-            if not _resolves:
-                return {
-                    "ok": False,
-                    "error": (
-                        f"gateway_binding '{_gateway_id}' does not resolve to a Gateway paired "
-                        "to this workspace. Pair a Gateway first, then bind it here."
-                    ),
-                }
             # And the CLI itself must be installed AND authenticated on that
             # Gateway — save-time honesty, so users hear "sign it in first"
             # here instead of getting an opaque "Gateway dispatch could not
@@ -2224,10 +2296,16 @@ async def fleet_create_agent(
             try:
                 from server_modules import projects_repository as _projects
                 if not _project_id:
+                    # agent_label, not the raw `name` param — `name` is empty
+                    # whenever the wizard auto-assigned one from the pool
+                    # (see above), which used to leave the project stuck on
+                    # the "Untitled agent" fallback even though the agent
+                    # sitting right next to it in the sidebar had a real
+                    # name.
                     _own_project = await _projects.create_project(
                         tenant_id=tenant_id,
                         workspace_id=workspace_id,
-                        name=(str(name or "").strip() or "Untitled agent"),
+                        name=(agent_label.strip() or "Untitled agent"),
                     )
                     _project_id = str((_own_project or {}).get("id") or "")
                 if _project_id:

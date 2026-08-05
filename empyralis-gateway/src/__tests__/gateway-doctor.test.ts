@@ -583,6 +583,114 @@ test("GatewayDoctorRuntime threads the repair argument through to runGatewayDoct
   assert.equal((withRepair.results as any[])[0].repaired, true);
 });
 
+// ---------------------------------------------------------------------------
+// GatewayDoctorRuntime.ensureSupervisorInstalled — MAN-295 / MAN-269: the
+// install-time/afterConnected call index.ts makes so a fresh macOS pairing
+// gets its LaunchAgent written automatically, without a human ever having to
+// find the Diagnostics panel and click "Fix what's safe to fix". Reuses
+// SUPERVISOR_PRESENCE_CHECK.detect()/.repair() verbatim (not re-implemented)
+// — these tests pin that reuse and the three outcomes index.ts's afterConnected
+// hook has to handle honestly: already-supervised, a clean install, and a
+// permission-denied install.
+
+test("ensureSupervisorInstalled skips repair entirely when this process is already supervised", async () => {
+  let auditCalls = 0;
+  const runtime = new GatewayDoctorRuntime({
+    checkpoints: { currentHealthState: () => "online" },
+    getRequestedCapabilities: () => [],
+    detectSupervisor: () => "launchd",
+    auditSupervisorInstall: async () => {
+      auditCalls += 1;
+      return { supported: true, definition: null, fileState: "present_matching" };
+    },
+  });
+
+  const result = await runtime.ensureSupervisorInstalled();
+
+  assert.equal(result.id, "supervisor_presence");
+  assert.equal(result.status, "pass");
+  assert.match(result.detail, /automatically restart itself/);
+  assert.equal(result.repaired, undefined, "a passing check must never attempt (or claim) a repair");
+  assert.equal(auditCalls, 0, "detect() already reports pass via detectSupervisor — no on-disk audit needed");
+});
+
+test("ensureSupervisorInstalled installs a missing LaunchAgent and re-validates against the new on-disk state", async () => {
+  // A freshly-written LaunchAgent takes effect on the NEXT start (repair
+  // deliberately never kickstarts/restarts the currently-running process —
+  // see gateway-supervisor-install.ts's module doc comment), so THIS run's
+  // re-validated status is "warn: takes effect next start", not "pass" —
+  // repaired only ever means "the re-validated detect() came back pass",
+  // and it honestly doesn't here. That's still a world away from the
+  // pre-fix behavior (nothing ever ran repair() at all).
+  let installedOnDisk = false;
+  const runtime = new GatewayDoctorRuntime({
+    checkpoints: { currentHealthState: () => "online" },
+    getRequestedCapabilities: () => [],
+    platform: "darwin",
+    detectSupervisor: () => "none",
+    auditSupervisorInstall: async (attemptRepair: boolean) => {
+      if (!attemptRepair) {
+        return {
+          supported: true,
+          definition: null,
+          fileState: installedOnDisk ? "present_matching" : "missing",
+        };
+      }
+      installedOnDisk = true;
+      return {
+        supported: true,
+        definition: null,
+        fileState: "missing",
+        repair: {
+          action: "wrote_new_unit",
+          changed: true,
+          permissionDenied: false,
+          requiresManualReload: false,
+          detail: "Installed the launch agent so this computer restarts itself automatically going forward.",
+        },
+      };
+    },
+  });
+
+  const result = await runtime.ensureSupervisorInstalled();
+
+  assert.equal(result.repair_detail, "Installed the launch agent so this computer restarts itself automatically going forward.");
+  assert.equal(result.status, "warn");
+  assert.notEqual(result.repaired, true);
+  // Re-validated detail reflects the NEW on-disk state (installedOnDisk is
+  // now true) rather than the pre-repair "missing" detail — proof the
+  // re-validation pass actually re-read state instead of trusting the
+  // repair step's own claim.
+  assert.match(result.detail, /take effect the next time/);
+});
+
+test("ensureSupervisorInstalled surfaces a permission-denied install honestly instead of silently skipping it", async () => {
+  const runtime = new GatewayDoctorRuntime({
+    checkpoints: { currentHealthState: () => "online" },
+    getRequestedCapabilities: () => [],
+    platform: "darwin",
+    detectSupervisor: () => "none",
+    auditSupervisorInstall: async () => ({
+      supported: true,
+      definition: null,
+      fileState: "missing",
+      repair: {
+        action: "permission_denied",
+        changed: false,
+        permissionDenied: true,
+        requiresManualReload: false,
+        detail: "Could not write the unit — this computer needs elevated permissions (for example, sudo) to install automatic restart here.",
+      },
+    }),
+  });
+
+  const result = await runtime.ensureSupervisorInstalled();
+
+  assert.equal(result.status, "warn", "a permission-denied install must stay warn, never silently report pass");
+  assert.notEqual(result.repaired, true);
+  assert.match(result.repair_detail!, /elevated permissions/);
+});
+
 test("router advertises gateway.doctor.run and dispatches it to the doctor executor", async () => {
   const doctorRuntime = new GatewayDoctorRuntime({
     checkpoints: { currentHealthState: () => "online" },

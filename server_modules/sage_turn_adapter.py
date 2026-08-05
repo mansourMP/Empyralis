@@ -317,6 +317,7 @@ async def execute_sage_turn(
         model=result.get("model"),
         ai_setup_url=_ai_setup_url,
         media=list(result.get("media") or []),
+        context_usage=result.get("context_usage") if isinstance(result.get("context_usage"), dict) else None,
     )
 
 

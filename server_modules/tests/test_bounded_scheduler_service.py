@@ -1,9 +1,12 @@
+import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 import importlib
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any, Dict
 
-from server_modules import bounded_scheduler_service, fleet_tools
+from server_modules import bounded_scheduler_service, db as db_module, fleet_tools
 
 
 class BoundedSchedulerServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -440,6 +443,44 @@ class BoundedSchedulerServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["wake_queue"]["claimed_count"], 1)
 
     def test_quiet_hours_status_snapshot_reports_active_window(self):
+        """MAN-294: `policy` below leaves timezone_name at its default
+        (DEFAULT_SCHEDULER_TIMEZONE, "UTC"), so `now_utc` must actually fall
+        inside 22:00-07:00 UTC for this to be a real assertion. Before the
+        fix, _is_within_quiet_hours used the HOST MACHINE's local timezone
+        (bare .astimezone()), so this test's original fixture --
+        15:30 UTC, nowhere near 22:00-07:00 in ANY timezone actually used in
+        this window's own arithmetic -- only ever passed by accident,
+        because the CI/dev box's own local zone happened to shift 15:30 UTC
+        into the window. That was the bug, disguised as a passing test:
+        changing the box's TZ would have flipped this test's result without
+        touching a line of source. 23:30 UTC is unambiguously inside
+        22:00-07:00 in the explicit UTC default this test now exercises, so
+        the result no longer depends on where this test happens to run."""
+        policy = bounded_scheduler_service.SchedulerPolicyBounds(
+            quiet_hours_start=22,
+            quiet_hours_end=7,
+            max_event_triggers_per_hour=4,
+            max_self_proposed_per_hour=2,
+            max_runtime_seconds=20,
+            minimum_battery_percent=20,
+            require_network_online=False,
+            require_owner_approval_for_privileged_wakeups=True,
+            plan_tier="standard",
+        )
+
+        snapshot = bounded_scheduler_service.quiet_hours_status_snapshot(
+            policy=policy,
+            now_utc=datetime(2026, 5, 5, 23, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertTrue(snapshot["active"])
+        self.assertIn("Quiet hours active until", snapshot["label"])
+        # The window ends at 07:00 in the policy's own (UTC, here) timezone,
+        # not whatever the host machine's zone would have produced.
+        self.assertIn("07:00", snapshot["label"])
+        self.assertEqual(snapshot["next_allowed_at"], "2026-05-06T07:00:00Z")
+
+    def test_quiet_hours_status_snapshot_reports_inactive_outside_window(self):
         policy = bounded_scheduler_service.SchedulerPolicyBounds(
             quiet_hours_start=22,
             quiet_hours_end=7,
@@ -457,9 +498,445 @@ class BoundedSchedulerServiceTests(unittest.IsolatedAsyncioTestCase):
             now_utc=datetime(2026, 5, 5, 15, 30, tzinfo=timezone.utc),
         )
 
-        self.assertTrue(snapshot["active"])
-        self.assertIn("Quiet hours active until", snapshot["label"])
-        self.assertTrue(snapshot["next_allowed_at"].endswith("Z"))
+        self.assertFalse(snapshot["active"])
+        self.assertEqual(snapshot["label"], "Background work can run now")
+
+
+class SchedulerPolicyTimezoneTests(unittest.TestCase):
+    """MAN-294 part 1: no workspace, install, or user anywhere in this
+    codebase stores a timezone today (verified by reading workspace
+    metadata, the workspace settings routes, and the user profile). Per the
+    ruling on this ticket, resolve_scheduler_policy now ALWAYS resolves an
+    explicit timezone_name -- DEFAULT_SCHEDULER_TIMEZONE ("UTC") until a
+    workspace or install configures scheduler.timezone in its metadata,
+    mirroring exactly how scheduler.quiet_hours is already threaded
+    through -- rather than the previous implicit, server-clock-dependent
+    behavior (bare datetime.astimezone())."""
+
+    def test_defaults_to_utc_when_nothing_configures_a_timezone(self):
+        policy = bounded_scheduler_service.resolve_scheduler_policy(
+            workspace={"metadata": {}},
+            master_install={"metadata": {}},
+        )
+        self.assertEqual(policy.timezone_name, "UTC")
+
+    def test_workspace_metadata_timezone_is_honored(self):
+        policy = bounded_scheduler_service.resolve_scheduler_policy(
+            workspace={"metadata": {"scheduler": {"timezone": "Asia/Tokyo"}}},
+            master_install={"metadata": {}},
+        )
+        self.assertEqual(policy.timezone_name, "Asia/Tokyo")
+
+    def test_install_metadata_timezone_wins_over_workspace(self):
+        """Matches quiet_hours' own precedence (install over workspace) --
+        see _workspace_scheduler_metadata/_install_scheduler_metadata's
+        merge order in resolve_scheduler_policy."""
+        policy = bounded_scheduler_service.resolve_scheduler_policy(
+            workspace={"metadata": {"scheduler": {"timezone": "Asia/Tokyo"}}},
+            master_install={"metadata": {"scheduler": {"timezone": "America/Phoenix"}}},
+        )
+        self.assertEqual(policy.timezone_name, "America/Phoenix")
+
+    def test_unrecognized_timezone_string_falls_back_to_default_not_a_guess(self):
+        """A garbled/invalid IANA name must not silently become the server's
+        own zone, and must not raise -- it falls back to the same explicit
+        DEFAULT_SCHEDULER_TIMEZONE an unconfigured workspace gets."""
+        policy = bounded_scheduler_service.resolve_scheduler_policy(
+            workspace={"metadata": {"scheduler": {"timezone": "Not/AZone"}}},
+            master_install={"metadata": {}},
+        )
+        self.assertEqual(policy.timezone_name, "UTC")
+
+
+class QuietHoursTimezoneEvaluationTests(unittest.TestCase):
+    """MAN-294 part 1's actual regression coverage: _is_within_quiet_hours
+    must evaluate against the POLICY's configured timezone, not the host
+    process's. All cases below share one wrap-around window
+    (quiet_hours_start=22 > quiet_hours_end=7, i.e. 22:00-07:00), the exact
+    shape production hit, and one fixed UTC instant -- only `timezone_name`
+    varies between assertions, so any difference in the result is
+    attributable to that one field and nothing else (in particular: not to
+    whatever timezone this test happens to run in, unlike the pre-fix
+    behavior this replaces).
+
+    America/Phoenix and Asia/Tokyo are both deliberately DST-free
+    (Arizona does not observe DST; Japan has none), so these results hold on
+    every calendar date, not just the ones picked here.
+    """
+
+    def _policy(self, *, timezone_name: str) -> bounded_scheduler_service.SchedulerPolicyBounds:
+        return bounded_scheduler_service.SchedulerPolicyBounds(
+            quiet_hours_start=22,
+            quiet_hours_end=7,
+            max_event_triggers_per_hour=4,
+            max_self_proposed_per_hour=2,
+            max_runtime_seconds=20,
+            minimum_battery_percent=20,
+            require_network_online=False,
+            require_owner_approval_for_privileged_wakeups=True,
+            plan_tier="standard",
+            timezone_name=timezone_name,
+        )
+
+    def test_same_instant_is_on_opposite_sides_of_the_window_in_two_timezones(self):
+        """2026-06-15T14:00:00Z is 23:00 in Tokyo (UTC+9) -- well inside
+        22:00-07:00 -- and simultaneously 07:00 in Phoenix (UTC-7) -- the
+        window's own end boundary, exclusive, so NOT active. One real
+        instant, two workspaces, two different honest answers -- this is
+        exactly what a shared server-clock evaluation cannot produce, since
+        it can only ever give one answer for everyone at a given UTC
+        instant."""
+        instant = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+        tokyo_policy = self._policy(timezone_name="Asia/Tokyo")
+        phoenix_policy = self._policy(timezone_name="America/Phoenix")
+
+        self.assertTrue(bounded_scheduler_service._is_within_quiet_hours(instant, tokyo_policy))
+        self.assertFalse(bounded_scheduler_service._is_within_quiet_hours(instant, phoenix_policy))
+
+    def test_reverse_direction_other_timezone_active_instead(self):
+        """2026-06-15T05:00:00Z is 22:00 in Phoenix (UTC-7) -- just inside
+        the window's START boundary, inclusive -- and simultaneously 14:00
+        in Tokyo (UTC+9) -- nowhere near it. Confirms the previous test
+        wasn't a one-off coincidence of which zone happened to be ahead."""
+        instant = datetime(2026, 6, 15, 5, 0, tzinfo=timezone.utc)
+        tokyo_policy = self._policy(timezone_name="Asia/Tokyo")
+        phoenix_policy = self._policy(timezone_name="America/Phoenix")
+
+        self.assertTrue(bounded_scheduler_service._is_within_quiet_hours(instant, phoenix_policy))
+        self.assertFalse(bounded_scheduler_service._is_within_quiet_hours(instant, tokyo_policy))
+
+    def test_midnight_wrap_next_allowed_wakeup_time_lands_in_the_right_zone(self):
+        """_next_allowed_wakeup_time's own wrap-handling (candidate <= local_
+        now -> +1 day) evaluated in a non-UTC, non-server zone: at
+        2026-06-15T14:00:00Z (23:00 in Tokyo), the next allowed wakeup is
+        Tokyo's own 07:00 the following LOCAL day, converted back to UTC
+        (07:00 JST == 2026-06-15T22:00:00Z, still the 15th UTC because JST
+        is ahead of UTC) -- not 07:00 UTC, and not 07:00 in whatever zone
+        the test runner's machine is in."""
+        instant = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+        tokyo_policy = self._policy(timezone_name="Asia/Tokyo")
+
+        next_allowed = bounded_scheduler_service._next_allowed_wakeup_time(instant, tokyo_policy)
+
+        self.assertEqual(next_allowed, datetime(2026, 6, 15, 22, 0, tzinfo=timezone.utc))
+
+
+class QuietHoursSkipForExplicitHumanActionTests(unittest.IsolatedAsyncioTestCase):
+    """MAN-294 part 2: schedule_task_assigned_wakeup/schedule_task_commented_
+    wakeup must skip the quiet-hours gate entirely (an explicit human action
+    is not an ambient trigger); propose_self_wakeup (self_proposed) must
+    stay fully gated, exactly as before. Same quiet-hours-active policy and
+    the same frozen instant back every case here -- the only thing that
+    differs between "due immediately" and "deferred to 07:00" is which
+    entry point is under test, not the policy or the clock."""
+
+    def _quiet_hours_active_policy(self) -> bounded_scheduler_service.SchedulerPolicyBounds:
+        # 22:00-07:00 UTC. frozen_now (below, 23:30 UTC) sits inside it in
+        # the explicit UTC default, so this is deterministic regardless of
+        # the host machine's own timezone.
+        return bounded_scheduler_service.SchedulerPolicyBounds(
+            quiet_hours_start=22,
+            quiet_hours_end=7,
+            max_event_triggers_per_hour=4,
+            max_self_proposed_per_hour=2,
+            max_runtime_seconds=20,
+            minimum_battery_percent=20,
+            require_network_online=False,
+            require_owner_approval_for_privileged_wakeups=True,
+            plan_tier="standard",
+        )
+
+    async def test_task_assigned_wake_during_quiet_hours_is_due_immediately(self):
+        policy = self._quiet_hours_active_policy()
+        frozen_now = datetime(2026, 5, 5, 23, 30, tzinfo=timezone.utc)
+        captured: Dict[str, Any] = {}
+
+        async def fake_persist(**kwargs):
+            captured.update(kwargs)
+            return {"id": "wake-immediate", "status": "pending"}
+
+        with (
+            patch("server_modules.bounded_scheduler_service._utc_now", return_value=frozen_now),
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, policy)),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=0),
+            ),
+            patch("server_modules.bounded_scheduler_service._persist_wakeup", side_effect=fake_persist),
+            patch(
+                "server_modules.bounded_scheduler_service._trigger_ambient_monitor",
+                return_value={"ok": True},
+            ) as trigger_mock,
+        ):
+            await bounded_scheduler_service.schedule_task_assigned_wakeup(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                agent_id="agent-1",
+                task_id="task-1",
+                title="Ship the widget",
+            )
+
+        # The production bug, closed: before this fix due_at would have
+        # been deferred to 2026-05-06T07:00:00+00:00 (quiet_hours_end).
+        self.assertEqual(captured["due_at"], frozen_now)
+        self.assertNotIn("policy_delay_reason", captured["metadata"])
+        # An immediate due_at also wakes the ambient monitor right away,
+        # instead of leaving the assignment silent until the next scan.
+        trigger_mock.assert_called_once_with("ws-1")
+
+    async def test_task_commented_wake_during_quiet_hours_is_due_immediately(self):
+        policy = self._quiet_hours_active_policy()
+        frozen_now = datetime(2026, 5, 5, 23, 30, tzinfo=timezone.utc)
+        captured: Dict[str, Any] = {}
+
+        async def fake_persist(**kwargs):
+            captured.update(kwargs)
+            return {"id": "wake-immediate-comment", "status": "pending"}
+
+        with (
+            patch("server_modules.bounded_scheduler_service._utc_now", return_value=frozen_now),
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, policy)),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=0),
+            ),
+            patch("server_modules.bounded_scheduler_service._persist_wakeup", side_effect=fake_persist),
+            patch(
+                "server_modules.bounded_scheduler_service._trigger_ambient_monitor",
+                return_value={"ok": True},
+            ) as trigger_mock,
+        ):
+            await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                agent_id="agent-1",
+                task_id="task-1",
+                title="Ship the widget",
+                comment_body="try approach B instead",
+            )
+
+        self.assertEqual(captured["due_at"], frozen_now)
+        self.assertNotIn("policy_delay_reason", captured["metadata"])
+        trigger_mock.assert_called_once_with("ws-1")
+
+    async def test_self_proposed_wake_during_quiet_hours_is_still_deferred(self):
+        """The control case: self_proposed (an ambient, agent-initiated
+        trigger, not a human clicking something) must NOT get the same
+        skip -- it stays deferred to the next allowed wakeup, exactly as
+        before this fix."""
+        policy = self._quiet_hours_active_policy()
+        frozen_now = datetime(2026, 5, 5, 23, 30, tzinfo=timezone.utc)
+        captured: Dict[str, Any] = {}
+
+        async def fake_persist(**kwargs):
+            captured.update(kwargs)
+            return {"id": "wake-deferred", "status": "pending"}
+
+        with (
+            patch("server_modules.bounded_scheduler_service._utc_now", return_value=frozen_now),
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, policy)),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=0),
+            ),
+            patch("server_modules.bounded_scheduler_service._persist_wakeup", side_effect=fake_persist),
+            patch(
+                "server_modules.bounded_scheduler_service._trigger_ambient_monitor",
+                return_value={"ok": True},
+            ) as trigger_mock,
+        ):
+            result = await bounded_scheduler_service.propose_self_wakeup(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                summary="Check on the reply backlog.",
+                reason="ambient_followup",
+            )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(captured["due_at"], datetime(2026, 5, 6, 7, 0, tzinfo=timezone.utc))
+        self.assertEqual(captured["metadata"]["policy_delay_reason"], "quiet_hours")
+        trigger_mock.assert_not_called()
+
+
+class _FastStopEvent:
+    """A threading.Event look-alike whose .wait(timeout) returns
+    immediately instead of actually sleeping -- lets the tests below drive
+    run_wake_request_scan_forever through several ticks without paying
+    the real wake_request_scan_poll_seconds() floor (5s minimum)."""
+
+    def __init__(self) -> None:
+        self._flag = False
+
+    def wait(self, timeout=None) -> bool:  # noqa: ARG002 - signature parity with threading.Event
+        return self._flag
+
+    def set(self) -> None:
+        self._flag = True
+
+    def is_set(self) -> bool:
+        return self._flag
+
+
+class WakeRequestScanLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """MAN-292: bounded_scheduler_service.py had two silent swallows in the
+    wake-request-scanner daemon -- a bare `except Exception: continue` on
+    each tick (run_wake_request_scan_forever), and a per-scope
+    run_workspace_heartbeat failure caught into an `outcome` dict that the
+    tick-level caller then discards entirely (scan_due_wake_requests_once).
+    Both are now logged via LOGGER.exception; these tests prove a raising
+    scan produces a real log record at each of those two points."""
+
+    async def test_scan_once_logs_a_per_scope_heartbeat_failure(self):
+        def _raising_heartbeat(tasks, metadata):
+            raise RuntimeError("boom")
+
+        with (
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository."
+                "list_due_agent_scheduler_wake_request_scopes",
+                new=AsyncMock(return_value=[{"tenant_id": "tenant-1", "workspace_id": "workspace-1"}]),
+            ),
+            self.assertLogs("server_modules.bounded_scheduler_service", level="ERROR") as log_ctx,
+        ):
+            result = await bounded_scheduler_service.scan_due_wake_requests_once(
+                run_workspace_heartbeat=_raising_heartbeat,
+            )
+
+        # The scan itself still completes and still reports the failure in
+        # its return value (unchanged behavior) -- the fix is that the
+        # failure is ALSO now logged, not a replacement for the return
+        # value.
+        self.assertEqual(result["scanned"], 1)
+        self.assertFalse(result["results"][0]["result"]["acted"])
+        self.assertIn("wake scan failed", result["results"][0]["result"]["summary"])
+
+        self.assertTrue(
+            any("heartbeat failed" in message for message in log_ctx.output),
+            f"expected a heartbeat-failure log record, got: {log_ctx.output}",
+        )
+        self.assertTrue(
+            any("boom" in message for message in log_ctx.output),
+            f"expected the original exception text in the log record, got: {log_ctx.output}",
+        )
+
+    def test_run_forever_logs_a_tick_failure_and_keeps_running(self):
+        """A tick that raises must be logged (MAN-292) AND must not kill
+        the scanner for subsequent ticks (MAN-265's explicit constraint:
+        a transient failure must never become a permanent outage)."""
+        tick_count = {"n": 0}
+        stop_event = _FastStopEvent()
+
+        async def _fake_scan(*, run_workspace_heartbeat):
+            tick_count["n"] += 1
+            if tick_count["n"] >= 2:
+                stop_event.set()
+            raise RuntimeError("tick boom")
+
+        with (
+            patch.object(bounded_scheduler_service, "scan_due_wake_requests_once", _fake_scan),
+            self.assertLogs("server_modules.bounded_scheduler_service", level="ERROR") as log_ctx,
+        ):
+            bounded_scheduler_service.run_wake_request_scan_forever(
+                run_workspace_heartbeat=lambda tasks, metadata: {"acted": False},
+                stop_event=stop_event,
+                poll_seconds=5,
+            )
+
+        # Both ticks ran despite tick 1 raising -- the loop survived.
+        self.assertEqual(tick_count["n"], 2)
+        tick_failure_logs = [m for m in log_ctx.output if "tick failed" in m]
+        self.assertEqual(
+            len(tick_failure_logs), 2,
+            f"expected one 'tick failed' log record per raising tick, got: {log_ctx.output}",
+        )
+        self.assertTrue(any("tick boom" in m for m in log_ctx.output))
+
+
+class WakeRequestScannerPersistentLoopTests(unittest.TestCase):
+    """MAN-265: run_wake_request_scan_forever used to open a brand new
+    asyncio event loop (asyncio.new_event_loop() / run_until_complete() /
+    loop.close()) on EVERY tick via a since-removed `_run_sync` helper.
+    server_modules.db.get_pool() caches the Postgres pool keyed by
+    id(current_loop) (server_modules/db.py:150) specifically so a
+    long-lived worker reuses one pool -- a fresh loop object every tick
+    (every wake_request_scan_poll_seconds(), 20s by default) defeated that
+    cache: get_pool() saw a "new" loop each time, tore down the "stale"
+    pool from the just-closed previous loop, and paid for a fresh
+    asyncpg.create_pool(...) call every single tick, forever. Confirmed
+    live on production: "Postgres pool initialized -- run state will be
+    durable" in ~/.pm2/logs/empyralis-error.log at exact 20-second
+    intervals.
+
+    This test proves the actual fix property MAN-265 asked for: across N
+    ticks on one persistent loop, asyncpg.create_pool is invoked exactly
+    ONCE, not once per tick.
+    """
+
+    def test_pool_created_once_across_multiple_ticks(self):
+        create_pool_calls: list[str] = []
+        loop_ids_seen: list[int] = []
+        tick_count = {"n": 0}
+        stop_event = _FastStopEvent()
+
+        class _FakePool:
+            async def close(self) -> None:
+                pass
+
+            def terminate(self) -> None:
+                pass
+
+        async def _fake_create_pool(*, dsn, min_size, max_size, command_timeout):
+            create_pool_calls.append(dsn)
+            return _FakePool()
+
+        async def _fake_scan(*, run_workspace_heartbeat):
+            tick_count["n"] += 1
+            loop_ids_seen.append(id(asyncio.get_running_loop()))
+            # The real scan reaches db.get_pool() indirectly (through
+            # run_workspace_heartbeat's own DB access); this stands in for
+            # that and is the actual thing MAN-265 is about.
+            await db_module.get_pool()
+            if tick_count["n"] >= 3:
+                stop_event.set()
+            return {"scanned": 0, "results": []}
+
+        fake_asyncpg = SimpleNamespace(create_pool=_fake_create_pool)
+
+        with (
+            patch.dict("os.environ", {"DATABASE_URL": "postgresql://fake:fake@fake-host/fake_db"}),
+            patch.object(db_module, "asyncpg", fake_asyncpg),
+            patch.object(db_module, "_POOLS_BY_LOOP", {}),
+            patch.object(db_module, "_POOL_INIT_LOCKS_BY_LOOP", {}),
+            patch.object(db_module, "_POOL_INIT_FAILED", False),
+            patch.object(bounded_scheduler_service, "scan_due_wake_requests_once", _fake_scan),
+        ):
+            bounded_scheduler_service.run_wake_request_scan_forever(
+                run_workspace_heartbeat=lambda tasks, metadata: {"acted": False},
+                stop_event=stop_event,
+                poll_seconds=5,
+            )
+
+        self.assertEqual(tick_count["n"], 3, "expected exactly 3 ticks to have run")
+        self.assertEqual(
+            len(set(loop_ids_seen)), 1,
+            f"expected every tick to run on the SAME event loop object, saw "
+            f"{len(set(loop_ids_seen))} distinct loop ids across ticks {loop_ids_seen}",
+        )
+        self.assertEqual(
+            len(create_pool_calls), 1,
+            f"expected asyncpg.create_pool to be called exactly ONCE across "
+            f"{tick_count['n']} ticks (this is MAN-265's whole point), but it "
+            f"was called {len(create_pool_calls)} times",
+        )
 
 
 if __name__ == "__main__":
