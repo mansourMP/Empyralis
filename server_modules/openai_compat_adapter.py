@@ -3,8 +3,11 @@
 Problem this solves: claude_agent_sdk_bridge.py's engine (the Claude Agent
 SDK, which spawns the real `claude` CLI and points it at ANTHROPIC_BASE_URL)
 only works today for providers that ship a genuinely native Anthropic-
-Messages-compatible endpoint (Anthropic itself, DeepSeek, and — not yet
-wired — Ollama; see that module's `_ANTHROPIC_COMPATIBLE_BASE_URLS`).
+Messages-compatible endpoint (Anthropic itself, DeepSeek, and Ollama — the
+first two resolved from that module's fixed `_ANTHROPIC_COMPATIBLE_BASE_
+URLS` map; Ollama resolved differently, per-turn, by that module's
+`resolve_ollama_anthropic_base_url`, since it is self-hosted per workspace
+rather than one fixed public URL).
 Everything else in provider_profiles.py that speaks OpenAI's Chat
 Completions protocol instead (openai, gemini, xai, groq, azure_openai,
 openrouter, qwen, mistral, ollama_cloud, custom_openai_compatible) has no
@@ -176,11 +179,15 @@ LOGGER = logging.getLogger(__name__)
 # ============================================================================
 
 # Every provider_profiles.py provider id that speaks OpenAI's Chat
-# Completions protocol and has NO native Anthropic-Messages endpoint. This
-# is the set claude_agent_sdk_bridge.py's own module docstring names as
-# "not yet wired" (minus Ollama and DeepSeek, which are Anthropic-native
-# and already handled by _ANTHROPIC_COMPATIBLE_BASE_URLS — never add them
-# here, they don't need translation).
+# Completions protocol and has NO native Anthropic-Messages endpoint.
+# DeepSeek and (bare) "ollama" are deliberately absent — both are
+# Anthropic-native and resolved natively by claude_agent_sdk_bridge.py
+# (DeepSeek via its fixed `_ANTHROPIC_COMPATIBLE_BASE_URLS` map, Ollama
+# per-turn via its `resolve_ollama_anthropic_base_url`) — never add either
+# here, they don't need translation. "ollama_cloud" (Ollama's separate
+# hosted/BYOK offering, ollama.com) is NOT the same provider id as local
+# "ollama" and belongs in this set: it is a genuinely OpenAI-shaped hosted
+# endpoint with no native Anthropic-Messages surface of its own.
 ADAPTER_ROUTED_PROVIDER_IDS = frozenset({
     "openai",
     "gemini",
