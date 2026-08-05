@@ -2266,10 +2266,16 @@ async def fleet_create_agent(
             try:
                 from server_modules import projects_repository as _projects
                 if not _project_id:
+                    # agent_label, not the raw `name` param — `name` is empty
+                    # whenever the wizard auto-assigned one from the pool
+                    # (see above), which used to leave the project stuck on
+                    # the "Untitled agent" fallback even though the agent
+                    # sitting right next to it in the sidebar had a real
+                    # name.
                     _own_project = await _projects.create_project(
                         tenant_id=tenant_id,
                         workspace_id=workspace_id,
-                        name=(str(name or "").strip() or "Untitled agent"),
+                        name=(agent_label.strip() or "Untitled agent"),
                     )
                     _project_id = str((_own_project or {}).get("id") or "")
                 if _project_id:
