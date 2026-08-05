@@ -86,6 +86,39 @@ discipline above (the fourth is the exception — see below):
            tool call (e.g. "The capital of France is Paris.") never reaches
            the groundedness check at all: it never looks like a promise to
            report anything in the first place.
+
+  5. narrates_tool_call_after_success — added 2026-08-05 (MAN-263), the
+     engine-agnostic half of completing MAN-308's tool-call recovery layer.
+     MAN-308 fixed one shape of "the model wrote a tool call as text instead
+     of a structured call": DSML markup on the INVOCATION turn, recovered and
+     actually executed at the provider layer (extract_dsml_tool_calls_from_
+     text in scripts/orion_local_worker_llm.py), which was correct there
+     because nothing had run yet at that point in the turn. MAN-263's
+     recorded incident is a different shape on a different turn: a
+     hardware__action call genuinely succeeded this turn (real exit_code 0,
+     real stdout), and the SYNTHESIS turn afterward — the round that is
+     supposed to turn that real result into prose — replied "I'll actually
+     make the call now." followed by a fenced ```json {"tool":
+     "hardware__action", "arguments": {"command": "uname -a"}} ``` block:
+     bare JSON, not DSML, and it appears AFTER a real success, not in place
+     of a missed one. Extending MAN-308's recover-and-execute pattern to this
+     shape would be a serious regression, not a fix: re-running that JSON
+     would execute the same side-effecting command a second time for real.
+     So this direction never executes anything — it is a pure trace
+     cross-check, structurally unable to double-execute (see _decide's
+     skip_regeneration branch for this mismatch_type: regenerate_fn is never
+     even called, so neither pipeline's regeneration mechanism — Sage's full
+     tools-live action-loop rerun or direct chat's text-only completion —
+     ever runs for this direction). internal_tool_markup_service.extract_
+     textual_tool_call_mentions (detection only, never wired to any executor)
+     finds tool-call-shaped JSON sitting in the reply's own text;
+     _matched_completed_tool_call_mentions cross-references the mentioned
+     tool name(s) against _successful_tools the same way _DENIAL_PATTERNS is
+     only checked when a real success exists — the trace-contradiction
+     discipline this whole module is built on. Checked right after
+     denies_success (same `if successful:` branch) since both require the
+     identical precondition and are mutually exclusive reply shapes (a denial
+     vs. a narrated re-call).
 """
 
 from __future__ import annotations
@@ -93,6 +126,8 @@ from __future__ import annotations
 import os
 import re
 from typing import Any, Optional
+
+from server_modules import internal_tool_markup_service
 
 
 def guard_enabled_by_default() -> bool:
@@ -374,6 +409,39 @@ def _successful_tools(tool_trace: Optional[list[ToolTraceEntry]]) -> list[ToolTr
     return out
 
 
+def _matched_completed_tool_call_mentions(
+    reply: str,
+    tool_trace: Optional[list[ToolTraceEntry]],
+) -> list[ToolTraceEntry]:
+    """Direction #5's anchor (module docstring, narrates_tool_call_after_
+    success): the reply contains a tool-call-shaped JSON payload as literal
+    TEXT — bare JSON, a fenced ```json block, or an OpenAI-style {"function":
+    {...}} envelope; internal_tool_markup_service.extract_textual_tool_call_
+    mentions covers all three, detection only, it never executes anything —
+    that NAMES a tool the trace proves already completed successfully this
+    same turn. That combination is the contradiction: the reply depicts an
+    about-to-happen or currently-happening call for something that has
+    already happened. Name comparison reuses the same normalization DSML
+    tool names get (case, dashes, aliases) via extract_textual_tool_call_
+    mentions, so "Hardware__Action" in the reply still matches a trace
+    entry named "hardware__action". Returns the matched trace entries
+    (empty if no textual mention corresponds to a real completed call this
+    turn) — same shape _successful_tools returns, so it drops straight into
+    the same correction/fallback builders."""
+    mentions = internal_tool_markup_service.extract_textual_tool_call_mentions(reply)
+    if not mentions:
+        return []
+    mentioned_names = {str(mention.get("name") or "").strip().lower() for mention in mentions}
+    mentioned_names.discard("")
+    if not mentioned_names:
+        return []
+    return [
+        entry
+        for entry in _successful_tools(tool_trace)
+        if str(entry.get("name") or "").strip().lower() in mentioned_names
+    ]
+
+
 def _all_trace_entries(tool_trace: Optional[list[ToolTraceEntry]]) -> list[ToolTraceEntry]:
     """Every well-formed entry in the trace, any status — announces_without_
     answering's anchor. Unlike _successful_tools/_failed_tools it doesn't
@@ -408,14 +476,25 @@ def check_tool_reply_consistency(
 
     Returns {"consistent": bool, "mismatch_type": "denies_success" |
     "claims_success_after_failure" | "claims_without_run" |
-    "announces_without_answering" | None, "tools": [succeeded tool entries,
-    or the failed ones for claims_success_after_failure, or every trace entry
-    for announces_without_answering]}.
+    "announces_without_answering" | "narrates_tool_call_after_success" |
+    None, "tools": [succeeded tool entries, or the failed ones for
+    claims_success_after_failure, or every trace entry for announces_
+    without_answering, or the matched succeeded entries for narrates_
+    tool_call_after_success]}.
     """
     reply = str(reply_text or "")
     successful = _successful_tools(tool_trace)
     if successful and _matches_any(reply, _DENIAL_PATTERNS):
         return {"consistent": False, "mismatch_type": "denies_success", "tools": successful}
+    if successful:
+        # Direction #5 (module docstring, MAN-263): same `if successful:`
+        # precondition as denies_success right above — a real success must
+        # exist this turn for either direction to even be checkable — but a
+        # different, mutually exclusive reply shape: not a denial, a
+        # narrated re-call of the very thing that already succeeded.
+        narrated = _matched_completed_tool_call_mentions(reply, tool_trace)
+        if narrated:
+            return {"consistent": False, "mismatch_type": "narrates_tool_call_after_success", "tools": narrated}
     if not successful:
         # Checked before the generic claims_without_run below: when the trace
         # PROVES a specific tool failed (not just "nothing ran"), that's a
@@ -467,6 +546,28 @@ def build_honest_fallback_reply(tools: list[ToolTraceEntry]) -> str:
     so it can't repeat the same failure mode. Only called for denies_success,
     where _decide guarantees tools is non-empty — claims_without_run (the
     empty-tools case) never reaches here, see _decide's skip_regeneration."""
+    lines = ["Here's what actually came back this turn:"]
+    for tool in tools:
+        name = str(tool.get("name") or "tool").strip()
+        output = str(tool.get("output") or "").strip()
+        lines.append(f"\n**{name}:**\n{output[:1200]}")
+    return "\n".join(lines)
+
+
+def build_narrated_call_fallback_reply(tools: list[ToolTraceEntry]) -> str:
+    """The narrates_tool_call_after_success counterpart to build_honest_
+    fallback_reply — but unlike that one (and unlike every other direction
+    with a real anchor: claims_success_after_failure, announces_without_
+    answering), this is not a last resort after a failed regeneration
+    attempt. _decide routes this direction straight to
+    skip_regeneration=True, so this is the ONLY reply the turn ever ships:
+    regenerate_fn is never called at all (see _decide's comment on this
+    branch for why — the double-execution risk a live regeneration attempt
+    would reintroduce). Deterministic, not model-generated, so it can't
+    repeat the same narrated-JSON failure mode. Only called for narrates_
+    tool_call_after_success, where check_tool_reply_consistency guarantees
+    tools is non-empty (it only returns this mismatch_type when
+    _matched_completed_tool_call_mentions found at least one match)."""
     lines = ["Here's what actually came back this turn:"]
     for tool in tools:
         name = str(tool.get("name") or "tool").strip()
@@ -645,6 +746,29 @@ def _decide(reply_text: str, tool_trace: Optional[list[ToolTraceEntry]]) -> Opti
         correction = build_bare_intent_correction_prompt(tools)
         fallback_reply = build_bare_intent_fallback_reply(tools)
         skip_regeneration = False
+    elif result["mismatch_type"] == "narrates_tool_call_after_success" and tools:
+        # Deliberately the ONLY direction with a real anchor (non-empty
+        # `tools`) that still skips regeneration — every other anchored
+        # direction above (denies_success, claims_success_after_failure,
+        # announces_without_answering) gives the model one more live attempt
+        # first specifically because, in those cases, the tool either hasn't
+        # run yet or failed — calling it for real (or trying again) during
+        # regeneration is the CORRECT outcome there, not a risk. Here the
+        # opposite is true: the trace already proves the tool succeeded this
+        # turn, so handing this reply to Sage's regenerate_fn (a full action
+        # loop with tools live, see sage_agent_runtime_service.py's
+        # _sage_action_loop_regenerate) would risk the model calling the SAME
+        # side-effecting tool a second time for real — an actual double
+        # execution, not just a narrated one, and strictly worse than the
+        # original MAN-263 bug. Skipping regeneration removes that risk
+        # structurally (regenerate_fn is simply never invoked for this
+        # mismatch_type — see apply_tool_honesty_guard[_sync]'s
+        # skip_regeneration check, which returns via _immediate_fallback
+        # before either pipeline's regenerate_fn is ever called) rather than
+        # relying on correction-prompt wording to prevent it.
+        correction = None
+        fallback_reply = build_narrated_call_fallback_reply(tools)
+        skip_regeneration = True
     else:
         # claims_without_run (defense-in-depth, fabrication direction): no
         # real tool result exists to anchor a correction with. Live-tested on
