@@ -27,6 +27,7 @@ import {
   assignFleetTask,
   assignFleetTaskToUser,
   patchFleetTask,
+  setFleetTaskParent,
   type FleetTaskStatus,
   type TaskAssigneeSelection,
 } from "@/lib/workspace/fleet/fleet-data";
@@ -68,18 +69,20 @@ export default function TaskDetailPage() {
   // sits stale for up to the poll interval.
   const [pendingStatus, setPendingStatus] = useState<FleetTaskStatus | null>(null);
   const [pendingPriority, setPendingPriority] = useState<number | null>(null);
+  const [pendingDue, setPendingDue] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const task = useMemo(() => {
     const found = tasks.find((t) => t.id === taskId);
     if (!found) return null;
-    if (pendingStatus === null && pendingPriority === null) return found;
+    if (pendingStatus === null && pendingPriority === null && pendingDue === null) return found;
     return {
       ...found,
       ...(pendingStatus !== null ? { status: pendingStatus } : {}),
       ...(pendingPriority !== null ? { priority: pendingPriority } : {}),
+      ...(pendingDue !== null ? { due_at: pendingDue } : {}),
     };
-  }, [tasks, taskId, pendingStatus, pendingPriority]);
+  }, [tasks, taskId, pendingStatus, pendingPriority, pendingDue]);
 
   // Breadcrumb: Projects › {project} › {task}. The task crumb carries its
   // status ring, so the chain shows the same state the board column does.
@@ -148,6 +151,33 @@ export default function TaskDetailPage() {
     }
   }, [workspaceId, refresh]);
 
+  const handleDueChange = useCallback(async (id: string, dueAt: string | null) => {
+    setNotice(null);
+    setPendingDue(dueAt);
+    try {
+      await patchFleetTask(workspaceId, id, { due_at: dueAt });
+      await refresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Could not update this task's due date.");
+    } finally {
+      setPendingDue(null);
+    }
+  }, [workspaceId, refresh]);
+
+  const handleSetParent = useCallback(async (id: string, parentTaskId: string | null) => {
+    setNotice(null);
+    try {
+      await setFleetTaskParent(workspaceId, id, parentTaskId);
+      await refresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Could not set parent task.");
+    }
+  }, [workspaceId, refresh]);
+
+  const handleSubTaskCreated = useCallback(async () => {
+    await refresh();
+  }, [refresh]);
+
   // A task that vanished (an agent deleted it, or the id is simply wrong) gets
   // an explicit page below rather than a silent redirect — a bounce back to
   // the board would look like the click did nothing.
@@ -197,7 +227,10 @@ export default function TaskDetailPage() {
         projectHref={projectHref}
         onStatusChange={handleStatusChange}
         onPriorityChange={handlePriorityChange}
+        onDueChange={handleDueChange}
         onAssign={handleAssign}
+        onSetParent={handleSetParent}
+        onSubTaskCreated={handleSubTaskCreated}
         // Labels are their own endpoints (attach/detach), not a field on the
         // task PATCH, so the editor writes directly and asks for a re-read —
         // the same polled cache the board reads, so both agree immediately.

@@ -1183,6 +1183,11 @@ export async function createFleetTask(
     title: string;
     description?: string;
     due_at?: string | null;
+    /** File this as a sub-task of an existing task at creation time (one
+     *  call rather than create+setParent). Exactly ONE level of nesting is
+     *  allowed; the backend rejects a cycle or a grandchild the same way the
+     *  HTTP API does. */
+    parent_task_id?: string | null;
     /** 0..4, Linear's scale (see FleetTask.priority). Accepted by the create
      *  route itself, so a triaged task is one call rather than create+patch.
      *  STATUS is not — the row is born at the table default ('todo') and any
@@ -1558,4 +1563,34 @@ export async function commentFleetTask(
     wakeError,
     woke: Boolean(data?.wake_request) && !wakeError,
   };
+}
+
+/** Make a task a sub-task of another, or detach it back to top-level.
+ *
+ *  Its own endpoint rather than a field on patchFleetTask — same reason
+ *  /assign is: this is a structural change with a validity question attached
+ *  (does it break the one-level rule?), not a plain field edit.
+ *
+ *  Pass `null` or `""` for parentTaskId to DETACH (promote back to top-level).
+ *  The backend treats both identically (FleetSetTaskParentRequest's own
+ *  comment: "None/\"\" DETACHES"). */
+export async function setFleetTaskParent(
+  workspaceId: string,
+  taskId: string,
+  parentTaskId: string | null,
+): Promise<FleetTask> {
+  const res = await fetch(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/tasks/${encodeURIComponent(taskId)}/parent`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+      body: JSON.stringify({ parent_task_id: parentTaskId ?? "" }),
+    },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not set parent task (HTTP ${res.status})`));
+  }
+  return withNormalizedStatus(data.task as FleetTask);
 }
