@@ -157,6 +157,16 @@ _SAGE_ACTION_LOOP_MAX_TOOL_CALLS = 25
 _SAGE_OPERATOR_LOOP_MAX_ITERATIONS = 5  # Cap at 5 to prevent runaway; most tasks finish in 1-3
 
 
+def _primary_compaction_enabled() -> bool:
+    """Whether primary-path compaction is enabled (EMPYRALIS_PRIMARY_COMPACTION_ENABLED).
+
+    Originally from direct_chat_generation_service._primary_compaction_enabled —
+    moved here during SDK migration."""
+    return str(os.environ.get("EMPYRALIS_PRIMARY_COMPACTION_ENABLED", "1")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _resolve_turn_engine_id(engine_options: dict[str, Any] | None) -> str:
     """MAN-310: the ONE decision point _run_sage_action_loop_v3's
     _collect_stream_events closure branches on. Pulled out as its own
@@ -3978,7 +3988,7 @@ async def _action_loop_context_budget_preflight(
 
     Skips entirely (returns prior_messages unchanged) when compaction is
     flag-disabled (EMPYRALIS_PRIMARY_COMPACTION_ENABLED=0, same flag —
-    reused via direct_chat_generation_service._primary_compaction_enabled,
+    reused via _primary_compaction_enabled,
     not redefined here) or when this install's context policy action is
     "fresh_session" — that policy is B2's own Phase 5C mechanism and stays
     exclusively there, not duplicated here.
@@ -3987,7 +3997,7 @@ async def _action_loop_context_budget_preflight(
     use the return value from here on, including for the _run_sage_action_
     loop_v3 call this exists to protect.
     """
-    if not direct_chat_generation_service._primary_compaction_enabled():
+    if not _primary_compaction_enabled():
         return prior_messages
     if ctx_policy_action == "fresh_session":
         return prior_messages
