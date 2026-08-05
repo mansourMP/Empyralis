@@ -68,12 +68,58 @@ test("passive service inventory detects services without enabling execution", as
   assert.deepEqual(snapshot.capability_readiness.blocked, ["shell.execute"]);
   assert.equal(snapshot.capability_readiness.permission_states["shell.execute"].state, "restricted");
   assert.equal(snapshot.capability_readiness.service_statuses.postgres, "ready");
+  // Not passed in this call's options — must default to false, never
+  // silently coerced to true. See the two dedicated tests below for the
+  // opted-in case.
+  assert.equal(snapshot.capability_readiness.shell_full_access_locally_enabled, false);
+});
+
+// Hardware-readiness gap (MAN): the control plane has only ever known what
+// runtime_access_mode IT authorized server-side, never whether the box
+// operator's own EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED opt-in is
+// actually on right now. These two tests cover both real snapshot builders
+// (not a hand-rolled fixture) so a regression here — the flag silently
+// getting dropped or defaulted wrong on the path ws-client.ts actually
+// calls — fails loudly.
+test("collectPassiveInventorySnapshot reports the box operator's live full_access opt-in", async () => {
+  const snapshotEnabled = await collectPassiveInventorySnapshot({
+    requestedCapabilities: [],
+    shellFullAccessLocallyEnabled: true,
+    deps: {
+      platform: "linux",
+      arch: "x64",
+      release: "6.0-test",
+      hostname: "agent-box",
+      now: () => new Date("2026-05-29T00:00:00Z"),
+      commandExists: () => null,
+      runCommand: async () => ({ exitCode: 1, stdout: "", stderr: "not present" }),
+      httpGetJson: async () => ({ ok: false, status: 0, error: "not reachable" }),
+    },
+  });
+  assert.equal(snapshotEnabled.capability_readiness.shell_full_access_locally_enabled, true);
+
+  const snapshotDisabled = await collectPassiveInventorySnapshot({
+    requestedCapabilities: [],
+    shellFullAccessLocallyEnabled: false,
+    deps: {
+      platform: "linux",
+      arch: "x64",
+      release: "6.0-test",
+      hostname: "agent-box",
+      now: () => new Date("2026-05-29T00:00:01Z"),
+      commandExists: () => null,
+      runCommand: async () => ({ exitCode: 1, stdout: "", stderr: "not present" }),
+      httpGetJson: async () => ({ ok: false, status: 0, error: "not reachable" }),
+    },
+  });
+  assert.equal(snapshotDisabled.capability_readiness.shell_full_access_locally_enabled, false);
 });
 
 test("fast passive inventory snapshot avoids service probes for heartbeat liveness", () => {
   const snapshot = buildFastPassiveInventorySnapshot({
     requestedCapabilities: ["shell.execute", "screenshot.capture"],
     localRunnerReady: true,
+    shellFullAccessLocallyEnabled: true,
     deps: {
       platform: "linux",
       arch: "x64",
@@ -96,6 +142,11 @@ test("fast passive inventory snapshot avoids service probes for heartbeat livene
   assert.deepEqual(snapshot.capability_readiness.requested, ["shell.execute", "screenshot.capture"]);
   assert.deepEqual(snapshot.service_inventory.map((item) => item.id), ["local_runner", "desktop_permissions"]);
   assert.equal(snapshot.capability_readiness.service_statuses.local_runner, "ready");
+  // The fast/no-probe path (used on the very first heartbeat before the
+  // slower probe suite has resolved — see ws-client.ts's sendHeartbeat)
+  // must still carry the operator's real opt-in through, not just the
+  // slower collectPassiveInventorySnapshot() path covered above.
+  assert.equal(snapshot.capability_readiness.shell_full_access_locally_enabled, true);
 });
 
 test("local runner readiness blocks supervisor-backed capabilities", () => {

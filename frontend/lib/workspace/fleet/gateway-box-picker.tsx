@@ -72,6 +72,15 @@ export type FleetGateway = {
   created_at?: string | null;
   runtime_access_mode?: string | null;
   runtime_access_label?: string | null;
+  /** The box operator's OWN live full_access opt-in
+   *  (EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED on the gateway's machine),
+   *  reported on every heartbeat — distinct from runtime_access_mode/
+   *  runtime_access_label above, which are only what the SERVER authorized
+   *  at pairing time. true/false once this gateway has heartbeated it at
+   *  least once; null/undefined means "not reported yet" (an older gateway
+   *  build, or one that hasn't heartbeated since this field shipped) — never
+   *  guess a value for that case. */
+  shell_full_access_locally_enabled?: boolean | null;
   llm_runtimes?: LlmRuntimeSummary | null;
   /** Optional — a concurrent backend change adds this to the gateway
    *  registration payload. Absent on older backends/gateway builds; every

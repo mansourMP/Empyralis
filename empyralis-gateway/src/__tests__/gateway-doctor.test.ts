@@ -32,6 +32,7 @@ function makeEmptyInventory(overrides: Partial<PassiveInventorySnapshot> = {}): 
       permission_states: {},
       passive_services: [],
       service_statuses: {},
+      shell_full_access_locally_enabled: false,
     },
     ...overrides,
   };
@@ -239,6 +240,7 @@ test("default checks: capability_readiness passes when nothing is blocked, warns
             permission_states: {},
             passive_services: [],
             service_statuses: {},
+            shell_full_access_locally_enabled: false,
           },
         })) as GatewayDoctorContext["collectPassiveInventory"],
     }),
@@ -265,6 +267,7 @@ test("default checks: capability_readiness passes when nothing is blocked, warns
             },
             passive_services: [],
             service_statuses: {},
+            shell_full_access_locally_enabled: false,
           },
         })) as GatewayDoctorContext["collectPassiveInventory"],
     }),
