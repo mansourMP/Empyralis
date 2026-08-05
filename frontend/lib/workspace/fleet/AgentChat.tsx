@@ -6,6 +6,7 @@ import { ArrowUp, Loader2, type LucideIcon } from "lucide-react";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ChatMessage, type WorkstationChatMessageRecord } from "@/lib/workspace/chat-message";
+import { ContextUsageRail, type ContextUsagePayload } from "./ContextUsageRail";
 
 type RawTurn = Record<string, any>;
 type SseEvent = { event: string; payload: Record<string, unknown> };
@@ -259,6 +260,14 @@ export function AgentChat({
   const [sending, setSending] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // claude_agent_sdk-engine turns only — see handle_sage_chat's own
+  // "context_usage" key (sage_agent_runtime_service.py). null until (and
+  // unless) a turn on this engine actually completes; the rail shows a
+  // plain "not available" note rather than a fake chart until then, and
+  // keeps showing the LAST turn's usage rather than resetting to null on
+  // every new send — knowing where context stood a moment ago is still
+  // useful while the next turn is in flight.
+  const [contextUsage, setContextUsage] = useState<ContextUsagePayload | null>(null);
 
   const sessionRef = useRef<{ session_id: string } | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -499,6 +508,14 @@ export function AgentChat({
         finalPayload = await turnRes.json().catch(() => null);
       }
 
+      // claude_agent_sdk-engine turns only (see ContextUsageRail's own
+      // docstring) — every other engine/mode never sets this key, so it's
+      // left alone rather than reset to null, keeping the last known
+      // reading on screen instead of flashing "not available" between turns.
+      if (finalPayload?.context_usage && typeof finalPayload.context_usage === "object") {
+        setContextUsage(finalPayload.context_usage as ContextUsagePayload);
+      }
+
       const replyText = String(finalPayload?.reply ?? streamed ?? "").trim();
       const stepMessages = transparencyEventsToStepMessages(
         finalPayload?.transparency_events,
@@ -537,88 +554,91 @@ export function AgentChat({
   const showEmptyState = !loading && messages.length === 0 && !streamingText;
 
   return (
-    <div className="fleet-sage-chat">
-      <div className="fleet-sage-chat-list" ref={listRef}>
-        {loading ? (
-          <div className="fleet-activity-skeleton" aria-label="Loading conversation">
-            {[60, 42, 70].map((w, i) => (
-              <div key={i} className="fleet-skeleton-row">
-                <div className="fleet-skeleton-bar" style={{ width: 8 }} />
-                <div className="fleet-skeleton-bar" style={{ width: `${w}%` }} />
-              </div>
-            ))}
-          </div>
-        ) : showEmptyState ? (
-          <div className="fleet-sage-chat-empty">
-            <span className="fleet-empty-icon"><EmptyIcon size={20} strokeWidth={1.75} /></span>
-            <div className="fleet-tab-state-title">{emptyTitle}</div>
-            <div className="fleet-tab-state-body">{emptyBody}</div>
-            {starterPrompts.length > 0 && (
-              <div className="fleet-sage-chat-suggestions">
-                {starterPrompts.map((prompt) => (
-                  <button
-                    key={prompt}
-                    type="button"
-                    className="fleet-sage-chat-suggestion"
-                    onClick={() => void send(prompt)}
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : (
-          <>
-            {messages.map((m) => <ChatMessage key={m.id} message={m} />)}
-            {sending && streamingText && (
-              <ChatMessage
-                message={{
-                  id: "streaming",
-                  role: "assistant",
-                  content: streamingText,
-                  status: null,
-                  createdAt: null,
-                  runId: null,
-                  approvals: [],
-                  interventions: [],
-                  artifacts: [],
-                  metadata: {},
-                }}
-              />
-            )}
-            {sending && !streamingText && (
-              <div className="fleet-sage-chat-thinking">
-                <Loader2 size={14} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
-                Thinking…
-              </div>
-            )}
-          </>
-        )}
-        {error && <p className="fleet-channel-expand-error">{error}</p>}
-      </div>
+    <div className="fleet-agent-chat-shell">
+      <div className="fleet-sage-chat">
+        <div className="fleet-sage-chat-list" ref={listRef}>
+          {loading ? (
+            <div className="fleet-activity-skeleton" aria-label="Loading conversation">
+              {[60, 42, 70].map((w, i) => (
+                <div key={i} className="fleet-skeleton-row">
+                  <div className="fleet-skeleton-bar" style={{ width: 8 }} />
+                  <div className="fleet-skeleton-bar" style={{ width: `${w}%` }} />
+                </div>
+              ))}
+            </div>
+          ) : showEmptyState ? (
+            <div className="fleet-sage-chat-empty">
+              <span className="fleet-empty-icon"><EmptyIcon size={20} strokeWidth={1.75} /></span>
+              <div className="fleet-tab-state-title">{emptyTitle}</div>
+              <div className="fleet-tab-state-body">{emptyBody}</div>
+              {starterPrompts.length > 0 && (
+                <div className="fleet-sage-chat-suggestions">
+                  {starterPrompts.map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      className="fleet-sage-chat-suggestion"
+                      onClick={() => void send(prompt)}
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              {messages.map((m) => <ChatMessage key={m.id} message={m} />)}
+              {sending && streamingText && (
+                <ChatMessage
+                  message={{
+                    id: "streaming",
+                    role: "assistant",
+                    content: streamingText,
+                    status: null,
+                    createdAt: null,
+                    runId: null,
+                    approvals: [],
+                    interventions: [],
+                    artifacts: [],
+                    metadata: {},
+                  }}
+                />
+              )}
+              {sending && !streamingText && (
+                <div className="fleet-sage-chat-thinking">
+                  <Loader2 size={14} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
+                  Thinking…
+                </div>
+              )}
+            </>
+          )}
+          {error && <p className="fleet-channel-expand-error">{error}</p>}
+        </div>
 
-      <div className="fleet-sage-chat-composer">
-        <textarea
-          ref={textareaRef}
-          className="fleet-sage-chat-input"
-          placeholder={placeholder}
-          rows={1}
-          value={draft}
-          disabled={!actor}
-          onChange={(e) => { setDraft(e.currentTarget.value); autoGrow(); }}
-          onKeyDown={onComposerKeyDown}
-        />
-        <button
-          type="button"
-          className="fleet-sage-chat-send"
-          disabled={!draft.trim() || sending || !actor}
-          onClick={() => void send(draft)}
-          aria-label="Send"
-        >
-          {sending ? <Loader2 size={16} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} /> : <ArrowUp size={16} strokeWidth={2} />}
-        </button>
+        <div className="fleet-sage-chat-composer">
+          <textarea
+            ref={textareaRef}
+            className="fleet-sage-chat-input"
+            placeholder={placeholder}
+            rows={1}
+            value={draft}
+            disabled={!actor}
+            onChange={(e) => { setDraft(e.currentTarget.value); autoGrow(); }}
+            onKeyDown={onComposerKeyDown}
+          />
+          <button
+            type="button"
+            className="fleet-sage-chat-send"
+            disabled={!draft.trim() || sending || !actor}
+            onClick={() => void send(draft)}
+            aria-label="Send"
+          >
+            {sending ? <Loader2 size={16} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} /> : <ArrowUp size={16} strokeWidth={2} />}
+          </button>
+        </div>
       </div>
+      <ContextUsageRail contextUsage={contextUsage} agentInstallId={agentInstallId} />
     </div>
   );
 }
