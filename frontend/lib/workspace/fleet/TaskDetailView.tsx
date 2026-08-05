@@ -21,16 +21,6 @@
  * columns scroll independently.
  *
  * WHAT IS NOT HERE, on purpose:
- *  · Sub-issue CREATION or re-parenting. The column and the rollup are real
- *    (migrations/add_task_parent.sql — `parent_task_id`, plus the
- *    subtask_count / subtask_done_count project_tasks_service returns on
- *    every read) and MAN-145 wires this page up to READ them — a "Sub-task
- *    of …" link when this task has a parent, a Sub-tasks list when it has
- *    children (both looked up from the same sibling-task read prev/next
- *    below already does — see that note). What's still missing is a way to
- *    CREATE that relationship from here; that stays a drawn promise for a
- *    narrower reason than before; the storage and the reading surface are
- *    both real now, only the write surface isn't built.
  *  · Rich text. `description` is a plain-text column; it is rendered with
  *    paragraph breaks preserved, not parsed as markdown it may not be.
  *  · An attachment/image control on the comment composer. Linear's has one;
@@ -115,9 +105,11 @@ import {
   FolderKanban,
   Loader2,
   MessageSquare,
+  Plus,
   SignalHigh,
   User,
   UserPlus,
+  X,
 } from "lucide-react";
 
 import { AgentSigil } from "./fleet-indicators";
@@ -138,6 +130,7 @@ import type { WorkspaceMember } from "./members-data";
 import {
   assigneeOptionValue,
   commentFleetTask,
+  createFleetTask,
   FLEET_TASK_STATUSES,
   parseAssigneeOptionValue,
   useFleetTasks,
@@ -366,7 +359,10 @@ export function TaskDetailView({
   projectHref,
   onStatusChange,
   onPriorityChange,
+  onDueChange,
   onAssign,
+  onSetParent,
+  onSubTaskCreated,
   onLabelsChanged,
   onCommentPosted,
 }: {
@@ -395,9 +391,19 @@ export function TaskDetailView({
   projectHref: string;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
   onPriorityChange?: (taskId: string, priority: number) => void;
+  /** Due-date edit (MAN-145): the route page patches the task and optimistically
+   *  overlays the new value, same shape as onPriorityChange. */
+  onDueChange?: (taskId: string, dueAt: string | null) => void;
   /** Assignee is agent-or-human (MAN-64/MAN-70) — the caller dispatches to
    *  assignFleetTask or assignFleetTaskToUser based on `selection.kind`. */
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
+  /** Make this task a sub-task of another (pass a non-null id) or detach it
+   *  back to top-level (pass null). Calls setFleetTaskParent through the
+   *  route page, which owns all writes. */
+  onSetParent?: (taskId: string, parentTaskId: string | null) => void;
+  /** Refetch after a sub-task is created inline (the write goes through
+   *  createFleetTask directly, same contract as the comment composer). */
+  onSubTaskCreated?: () => void | Promise<void>;
   /** Refetch after a label attach/detach. Labels are not part of the task
    *  PATCH — they are their own endpoints — so the editor writes directly and
    *  then asks the page to re-read. */
@@ -536,6 +542,15 @@ export function TaskDetailView({
     () => siblingTasks.filter((t) => t.parent_task_id === task.id),
     [siblingTasks, task.id],
   );
+  // Valid parent candidates: every task in this project minus self and
+  // children of self (a child can't become a parent — cycle). The backend
+  // also enforces the one-level rule, so a task that already has children
+  // is rejected server-side anyway; this filter keeps the picker honest
+  // without a second round-trip.
+  const availableParents = useMemo(
+    () => siblingTasks.filter((t) => t.id !== task.id && t.parent_task_id !== task.id),
+    [siblingTasks, task.id],
+  );
 
   // The composer: local state only, exactly TaskLabelEditor's shape
   // (writes go straight out via commentFleetTask, painted optimistically
@@ -560,6 +575,84 @@ export function TaskDetailView({
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, []);
+
+  // ── Due-date inline edit ──────────────────────────────────────────────────
+  // Same skipBlurCommit ref pattern as AgentTitle (FleetAgentDetail.tsx):
+  // Escape sets the ref so the blur handler doesn't re-commit the stale draft.
+  const [editingDue, setEditingDue] = useState(false);
+  const [dueDraft, setDueDraft] = useState("");
+  const dueInputRef = useRef<HTMLInputElement | null>(null);
+  const skipDueBlur = useRef(false);
+
+  const toDateInputValue = useCallback((iso: string | null | undefined): string => {
+    if (!iso) return "";
+    return iso.slice(0, 10); // "2026-08-15T00:00:00Z" → "2026-08-15"
+  }, []);
+
+  const enterDueEdit = useCallback(() => {
+    setDueDraft(toDateInputValue(task.due_at));
+    setEditingDue(true);
+    // focus + select after the next paint, when the input exists
+    requestAnimationFrame(() => {
+      dueInputRef.current?.focus();
+      dueInputRef.current?.select();
+    });
+  }, [task.due_at, toDateInputValue]);
+
+  const commitDue = useCallback(() => {
+    if (!onDueChange) return;
+    const raw = dueDraft.trim();
+    const next = raw || null; // empty → null (clear)
+    const current = toDateInputValue(task.due_at) || null;
+    if (next === current) {
+      setEditingDue(false);
+      return;
+    }
+    setEditingDue(false);
+    onDueChange(task.id, next);
+  }, [dueDraft, onDueChange, task.id, task.due_at, toDateInputValue]);
+
+  const clearDue = useCallback(() => {
+    if (!onDueChange) return;
+    setEditingDue(false);
+    skipDueBlur.current = true;
+    onDueChange(task.id, null);
+  }, [onDueChange, task.id]);
+
+  // ── Inline sub-task creation ──────────────────────────────────────────────
+  const [addingSubtask, setAddingSubtask] = useState(false);
+  const [newSubtaskTitle, setNewSubtaskTitle] = useState("");
+  const [creatingSubtask, setCreatingSubtask] = useState(false);
+  const subtaskInputRef = useRef<HTMLInputElement | null>(null);
+  const skipSubtaskBlur = useRef(false);
+
+  const startAddingSubtask = useCallback(() => {
+    setNewSubtaskTitle("");
+    setAddingSubtask(true);
+    requestAnimationFrame(() => {
+      subtaskInputRef.current?.focus();
+    });
+  }, []);
+
+  async function submitSubtask() {
+    const title = newSubtaskTitle.trim();
+    if (!title || creatingSubtask || !workspaceId) return;
+    setCreatingSubtask(true);
+    try {
+      await createFleetTask(workspaceId, {
+        project_id: projectId,
+        title,
+        parent_task_id: task.id,
+      });
+      setNewSubtaskTitle("");
+      setAddingSubtask(false);
+      await onSubTaskCreated?.();
+    } catch {
+      // Keep the form open with the draft intact so the user can retry.
+    } finally {
+      setCreatingSubtask(false);
+    }
+  }
 
   async function submitComment() {
     const body = draft.trim();
@@ -623,23 +716,36 @@ export function TaskDetailView({
             </div>
 
             {parentTask ? (
-              <a
-                className="fleet-task-detail-parent-link"
-                href={taskDetailHref(parentTask.id)}
-                data-tab-title={parentTask.title || "Untitled task"}
-                onClick={(event) => {
-                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
-                  event.preventDefault();
-                  router.push(taskDetailHref(parentTask.id));
-                }}
-              >
-                <CornerDownRight size={12} strokeWidth={2} />
-                <TaskStatusIcon status={parentTask.status} size={12} />
-                Sub-task of{" "}
-                <span className="fleet-task-detail-parent-link-title">
-                  {parentTask.title || "Untitled task"}
-                </span>
-              </a>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <a
+                  className="fleet-task-detail-parent-link"
+                  href={taskDetailHref(parentTask.id)}
+                  data-tab-title={parentTask.title || "Untitled task"}
+                  onClick={(event) => {
+                    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+                    event.preventDefault();
+                    router.push(taskDetailHref(parentTask.id));
+                  }}
+                >
+                  <CornerDownRight size={12} strokeWidth={2} />
+                  <TaskStatusIcon status={parentTask.status} size={12} />
+                  Sub-task of{" "}
+                  <span className="fleet-task-detail-parent-link-title">
+                    {parentTask.title || "Untitled task"}
+                  </span>
+                </a>
+                {onSetParent ? (
+                  <button
+                    type="button"
+                    className="fleet-task-detail-icon-btn"
+                    aria-label={`Detach from ${parentTask.title || "parent task"}`}
+                    title={`Detach from ${parentTask.title || "parent task"}`}
+                    onClick={() => onSetParent(task.id, null)}
+                  >
+                    <X size={12} strokeWidth={2} />
+                  </button>
+                ) : null}
+              </div>
             ) : null}
 
             {/* h2, not h1: the breadcrumb's current crumb is this page's real
@@ -661,31 +767,109 @@ export function TaskDetailView({
               <p className="fleet-task-page-desc fleet-cell-muted">No description.</p>
             )}
 
-            {subtasks.length > 0 ? (
+            {(subtasks.length > 0 || (workspaceId && onSubTaskCreated)) ? (
               <section className="fleet-task-page-section" aria-label="Sub-tasks">
-                <h2 className="fleet-task-page-section-title">
-                  Sub-tasks · {subtasks.filter((t) => t.status === "done").length}/{subtasks.length}
-                </h2>
-                <ul className="fleet-task-detail-subtask-list">
-                  {subtasks.map((st) => (
-                    <li key={st.id}>
-                      <a
-                        className="fleet-task-detail-subtask-row"
-                        href={taskDetailHref(st.id)}
-                        data-tab-title={st.title || "Untitled task"}
-                        onClick={(event) => {
-                          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
-                          event.preventDefault();
-                          router.push(taskDetailHref(st.id));
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <h2 className="fleet-task-page-section-title">
+                    {subtasks.length > 0
+                      ? `Sub-tasks · ${subtasks.filter((t) => t.status === "done").length}/${subtasks.length}`
+                      : "Sub-tasks"}
+                  </h2>
+                  {workspaceId && onSubTaskCreated && !addingSubtask ? (
+                    <button
+                      type="button"
+                      className="fleet-task-detail-icon-btn"
+                      aria-label="Add sub-task"
+                      title="Add sub-task"
+                      onClick={startAddingSubtask}
+                    >
+                      <Plus size={14} strokeWidth={2} />
+                    </button>
+                  ) : null}
+                </div>
+                {subtasks.length > 0 ? (
+                  <ul className="fleet-task-detail-subtask-list">
+                    {subtasks.map((st) => (
+                      <li key={st.id}>
+                        <a
+                          className="fleet-task-detail-subtask-row"
+                          href={taskDetailHref(st.id)}
+                          data-tab-title={st.title || "Untitled task"}
+                          onClick={(event) => {
+                            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+                            event.preventDefault();
+                            router.push(taskDetailHref(st.id));
+                          }}
+                        >
+                          <TaskStatusIcon status={st.status} size={13} />
+                          <span className="fleet-task-detail-subtask-title">{st.title || "Untitled task"}</span>
+                          <span className="fleet-task-detail-subtask-id">{taskShortId(st.id)}</span>
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {addingSubtask ? (
+                  <div className="fleet-task-detail-subtask-form">
+                    <input
+                      ref={subtaskInputRef}
+                      className="fleet-task-detail-select"
+                      style={{ width: "100%", boxSizing: "border-box" }}
+                      placeholder="Sub-task title…"
+                      value={newSubtaskTitle}
+                      maxLength={400}
+                      disabled={creatingSubtask}
+                      onChange={(e) => setNewSubtaskTitle(e.currentTarget.value)}
+                      onBlur={() => {
+                        if (skipSubtaskBlur.current) {
+                          skipSubtaskBlur.current = false;
+                          return;
+                        }
+                        // Blur cancels — don't create an empty sub-task
+                        if (!newSubtaskTitle.trim()) {
+                          setAddingSubtask(false);
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          if (newSubtaskTitle.trim()) void submitSubtask();
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          skipSubtaskBlur.current = true;
+                          setNewSubtaskTitle("");
+                          setAddingSubtask(false);
+                        }
+                      }}
+                    />
+                    <div className="fleet-task-detail-subtask-form-actions">
+                      <button
+                        type="button"
+                        className="fleet-btn fleet-btn--accent-fill"
+                        disabled={!newSubtaskTitle.trim() || creatingSubtask}
+                        onClick={() => void submitSubtask()}
+                      >
+                        {creatingSubtask ? (
+                          <Loader2 size={13} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
+                        ) : (
+                          "Add"
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="fleet-btn fleet-btn--neutral"
+                        disabled={creatingSubtask}
+                        onClick={() => {
+                          skipSubtaskBlur.current = true;
+                          setNewSubtaskTitle("");
+                          setAddingSubtask(false);
                         }}
                       >
-                        <TaskStatusIcon status={st.status} size={13} />
-                        <span className="fleet-task-detail-subtask-title">{st.title || "Untitled task"}</span>
-                        <span className="fleet-task-detail-subtask-id">{taskShortId(st.id)}</span>
-                      </a>
-                    </li>
-                  ))}
-                </ul>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </section>
             ) : null}
 
@@ -942,14 +1126,101 @@ export function TaskDetailView({
             </span>
           </div>
 
+          {/* Parent task picker — only shown when this task has NO parent
+              and the caller has wired onSetParent (a read-only view omits
+              it). No dead control: hidden entirely when there are no
+              candidates or the picker cannot write. */}
+          {!task.parent_task_id && onSetParent && availableParents.length > 0 ? (
+            <div className="fleet-panel-row">
+              <span className="fleet-panel-row-label">
+                <span className="fleet-panel-row-icon"><CornerDownRight size={15} strokeWidth={1.75} /></span>
+                <span>Parent</span>
+              </span>
+              <span className="fleet-task-detail-control">
+                <select
+                  className="fleet-task-detail-select"
+                  value=""
+                  aria-label="Set parent task"
+                  onChange={(e) => {
+                    const next = e.currentTarget.value || null;
+                    if (next) onSetParent(task.id, next);
+                  }}
+                >
+                  <option value="">None</option>
+                  {availableParents.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.title || "Untitled task"} · {taskShortId(p.id)}
+                    </option>
+                  ))}
+                </select>
+              </span>
+            </div>
+          ) : null}
+
           <div className="fleet-panel-row">
             <span className="fleet-panel-row-label">
               <span className="fleet-panel-row-icon"><Calendar size={15} strokeWidth={1.75} /></span>
               <span>Due</span>
             </span>
-            <span className={`fleet-panel-row-value${task.due_at ? "" : " fleet-panel-row-value--muted"}`}>
-              {task.due_at ? stamp(task.due_at) : "—"}
-            </span>
+            {editingDue ? (
+              <span className="fleet-task-detail-control" style={{ gap: 4 }}>
+                <input
+                  ref={dueInputRef}
+                  type="date"
+                  className="fleet-task-detail-select"
+                  value={dueDraft}
+                  disabled={!onDueChange}
+                  onChange={(e) => setDueDraft(e.currentTarget.value)}
+                  onBlur={() => {
+                    if (skipDueBlur.current) {
+                      skipDueBlur.current = false;
+                      return;
+                    }
+                    commitDue();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      e.currentTarget.blur();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      skipDueBlur.current = true;
+                      setDueDraft(toDateInputValue(task.due_at));
+                      setEditingDue(false);
+                    }
+                  }}
+                />
+                {onDueChange ? (
+                  <button
+                    type="button"
+                    className="fleet-task-detail-icon-btn"
+                    aria-label="Clear due date"
+                    title="Clear due date"
+                    onClick={clearDue}
+                  >
+                    <X size={13} strokeWidth={2} />
+                  </button>
+                ) : null}
+              </span>
+            ) : (
+              <span
+                className={`fleet-panel-row-value${task.due_at ? "" : " fleet-panel-row-value--muted"}${onDueChange ? " fleet-panel-row-value--editable" : ""}`}
+                {...(onDueChange ? {
+                  role: "button",
+                  tabIndex: 0,
+                  "aria-label": task.due_at ? `Due ${stamp(task.due_at)} — click to edit` : "Due date not set — click to edit",
+                  onClick: enterDueEdit,
+                  onKeyDown: (e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      enterDueEdit();
+                    }
+                  },
+                } : {})}
+              >
+                {task.due_at ? stamp(task.due_at) : "—"}
+              </span>
+            )}
           </div>
 
           {/* "Created by" — omitted outright, not shown as "Unknown", when

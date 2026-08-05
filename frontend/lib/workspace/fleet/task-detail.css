@@ -347,3 +347,62 @@ a.fleet-task-detail-nav-btn:hover {
   font-weight: var(--weight-semibold);
   color: var(--text-primary);
 }
+
+/* ── 8. Small icon-only buttons (add sub-task, clear due, detach parent) ─────
+   A 24×24 square, same radius as every other control, neutral until hovered.
+   Explicitly NOT the accent fill — none of these is the primary action in
+   this view (CLAUDE.md: "one accent colour, spent on the single primary action"). */
+.fleet-task-detail-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out);
+  flex-shrink: 0;
+}
+.fleet-task-detail-icon-btn:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
+/* ── 9. Due-date value as an editable affordance ────────────────────────────
+   Same visual weight as every other .fleet-panel-row-value, but when a
+   caller has wired onDueChange the text gets a pointer cursor and a subtle
+   hover background so the reader knows it's clickable without a separate
+   "edit" button. */
+.fleet-panel-row-value--editable {
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-control);
+  padding: 1px 4px;
+  margin: -1px -4px;
+  transition: background var(--dur-1) var(--ease-out);
+}
+.fleet-panel-row-value--editable:hover {
+  background: var(--bg-card-hover);
+}
+
+/* ── 10. Inline sub-task creation form ──────────────────────────────────────
+   A small card that expands below the sub-task header with a title input and
+   Add/Cancel buttons. Compact, not a modal — a sub-task is one field. */
+.fleet-task-detail-subtask-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+}
+.fleet-task-detail-subtask-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
