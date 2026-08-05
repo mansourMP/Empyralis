@@ -271,12 +271,17 @@ class TranslateAssistantMessageTests(unittest.TestCase):
         self.assertEqual(events, [])
 
     def test_unsupported_meta_tool_still_gets_a_tool_started_shape(self):
-        # translate_sdk_message doesn't filter tool names -- filtering
-        # happens earlier, in build_sdk_tools/run_claude_agent_sdk_turn,
-        # which never registers task_complete/update_plan/query_tool_registry
-        # with the SDK in the first place, so the model can't call them.
-        # This test just documents that translate_sdk_message itself has no
-        # opinion on tool identity.
+        # With known_tool_names left unset ("not configured" — the pure-
+        # translation mode these unit tests use), translate_sdk_message has
+        # no opinion on tool identity: filtering happens earlier, in
+        # build_sdk_tools/run_claude_agent_sdk_turn, which never registers
+        # task_complete/update_plan/query_tool_registry with the SDK in the
+        # first place, so the model can't call them.
+        #
+        # Every REAL turn does configure known_tool_names (see
+        # RunClaudeAgentSdkTurnForeignToolTests), and there the opposite is
+        # asserted — an unregistered name never becomes a tool.started. See
+        # TranslateForeignToolTests.
         state = claude_agent_sdk_bridge.TranslationState()
         message = sdk_types.AssistantMessage(
             content=[sdk_types.ToolUseBlock(id="toolu_3", name="memory_search", input={"query": "x"})],
@@ -774,8 +779,15 @@ class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
     service.persist_ephemeral_envelope."""
 
     def test_persists_trace_events_and_skips_tool_progress_and_final(self):
+        # The tool must be one this turn actually REGISTERS, named the way
+        # the CLI really presents an SDK MCP tool (mcp__empyralis__*), or
+        # translate_sdk_message's foreign-tool guard would (correctly)
+        # reject it and this would silently stop exercising the
+        # tool.started/tool.result persistence path it exists to cover.
         tool_use = sdk_types.AssistantMessage(
-            content=[sdk_types.ToolUseBlock(id="toolu_1", name="web__search", input={"query": "x"})],
+            content=[sdk_types.ToolUseBlock(
+                id="toolu_1", name="mcp__empyralis__web__search", input={"query": "x"},
+            )],
             model="claude-sonnet-4-5",
         )
         tool_result = sdk_types.UserMessage(content=[sdk_types.ToolResultBlock(
@@ -792,7 +804,10 @@ class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
                 message="find something",
                 system_prompt="",
                 prior_messages=None,
-                tool_defs=[],
+                tool_defs=[{
+                    "name": "web__search", "description": "d",
+                    "parameters": {"type": "object", "properties": {}},
+                }],
                 generation_services=MagicMock(),
                 workspace_id="ws-1",
                 thread_id="trace-1",
@@ -804,6 +819,9 @@ class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
 
         trace_events = [e for e in events if e.get("type") == "trace"]
         self.assertGreaterEqual(len(trace_events), 1)
+        persisted_types = [e["payload"]["event_type"] for e in trace_events]
+        self.assertIn("tool.started", persisted_types)
+        self.assertIn("tool.result", persisted_types)
         self.assertEqual(persist_mock.await_count, len(trace_events))
         persisted_envelopes = [call.args[1] for call in persist_mock.await_args_list]
         self.assertEqual(persisted_envelopes, [e["payload"] for e in trace_events])
@@ -922,6 +940,479 @@ class RunClaudeAgentSdkTurnIsolationTests(unittest.TestCase):
 
         dir_path = captured["options_kwargs"]["env"]["CLAUDE_CONFIG_DIR"]
         self.assertFalse(os.path.isdir(dir_path), "temp config dir leaked after an exception")
+
+
+class RunClaudeAgentSdkTurnBuiltInToolLockdownTests(unittest.TestCase):
+    """MAN-310 regression pin. ClaudeAgentOptions.tools defaults to the full
+    `claude_code` preset, which leaves the CLI's OWN built-ins (TaskCreate,
+    TodoWrite, Read, Write, Edit, Bash, WebFetch, Task) callable by the
+    model. allowed_tools does NOT restrict them — it governs APPROVAL, not
+    AVAILABILITY, and only ever lists this bridge's mcp__empyralis__* tools.
+
+    Live consequence, observed before the fix: asked to create a task, the
+    model called the CLI's built-in TaskCreate. It really ran and really
+    returned "Task #1 created successfully"; translate_sdk_message faithfully
+    turned that into a tool.started/tool.result pair persisted to
+    agent_trace_events; the customer was told the task existed; project_tasks
+    was empty. tool_honesty_guard structurally cannot catch that — the trace
+    corroborated the claim. Work that never happened must never be reportable
+    as done, so this asserts the option is set, on EVERY options object the
+    turn builds (including the resume-fallback retry's).
+
+    Same faking pattern as RunClaudeAgentSdkTurnIsolationTests: only
+    claude_agent_sdk's three entrypoints are stubbed, so the real
+    run_claude_agent_sdk_turn builds the real kwargs. No network, no
+    subprocess, no paid call."""
+
+    def _capture_options_kwargs(self, *, responses, tool_defs=(), resume_session_id=""):
+        import claude_agent_sdk as real_sdk
+
+        captured: list[Dict[str, Any]] = []
+
+        class _FakeOptions:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        fake_query = _FakeQuery(responses)
+        with (
+            patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
+            patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
+            patch.object(real_sdk, "query", new=fake_query),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="create a task called ship it",
+                system_prompt="",
+                prior_messages=[{"role": "user", "content": "earlier"}],
+                tool_defs=list(tool_defs),
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                provider="anthropic",
+                model="claude-x",
+                credentials={"api_key": "sk-test"},
+                trace_context=_trace_context(),
+                resume_session_id=resume_session_id,
+            ))
+        return captured
+
+    def test_built_in_cli_toolset_is_disabled(self):
+        captured = self._capture_options_kwargs(responses=[[_result_message()]])
+
+        self.assertEqual(len(captured), 1)
+        kwargs = captured[0]
+        # Present AND empty. An absent key is the bug: it means the SDK
+        # default (the full claude_code preset) applies.
+        self.assertIn("tools", kwargs)
+        self.assertEqual(kwargs["tools"], [])
+
+    def test_every_options_object_including_the_resume_retry_disables_built_ins(self):
+        # The resume-failure fallback builds a SECOND options object. A fix
+        # applied to only one construction site would leave the CLI's
+        # built-ins live on exactly the retry path.
+        captured = self._capture_options_kwargs(
+            responses=[([], RuntimeError("no such session")), [_result_message()]],
+            resume_session_id="sess-stale",
+        )
+
+        self.assertEqual(len(captured), 2)
+        for kwargs in captured:
+            self.assertIn("tools", kwargs)
+            self.assertEqual(kwargs["tools"], [])
+
+    def test_only_empyralis_mcp_tools_are_ever_allowed(self):
+        captured = self._capture_options_kwargs(
+            responses=[[_result_message()]],
+            tool_defs=[
+                {"name": "web__search", "description": "d", "parameters": {}},
+                {"name": "project_task__create", "description": "d", "parameters": {}},
+            ],
+        )
+
+        allowed = captured[0]["allowed_tools"]
+        self.assertEqual(
+            allowed, ["mcp__empyralis__web__search", "mcp__empyralis__project_task__create"],
+        )
+        # No CLI built-in name may ever appear here either.
+        for builtin in ("TaskCreate", "TodoWrite", "Read", "Write", "Edit", "Bash", "WebFetch", "Task"):
+            self.assertNotIn(builtin, allowed)
+
+    def test_ambient_mcp_and_filesystem_settings_are_not_loaded(self):
+        """Siblings of the tools=[] hole, both reached through the CLI's own
+        defaults rather than through anything this module passes.
+
+        strict_mcp_config defaults to False, so the CLI ALSO loads MCP
+        servers it finds ambiently (a project .mcp.json beside the backend
+        process's cwd, user/global settings, plugin-provided servers). Those
+        arrive as ordinary mcp__*__* tool_use blocks that tools=[] does not
+        touch — same failure class, different door.
+
+        setting_sources defaults to None, which per the SDK's own docstring
+        means "all sources are loaded (matches CLI defaults)": user settings,
+        project .claude/settings.json, .claude/settings.local.json and —
+        because "project" is among them — CLAUDE.md files, all resolved from
+        the inherited backend cwd. That put the HOST repo's instructions,
+        permission rules and slash commands inside a tenant's turn."""
+        kwargs = self._capture_options_kwargs(responses=[[_result_message()]])[0]
+
+        self.assertIs(kwargs["strict_mcp_config"], True)
+        self.assertEqual(kwargs["setting_sources"], [])
+
+
+class IsRegisteredEmpyralisToolTests(unittest.TestCase):
+    """The predicate translate_sdk_message's foreign-tool guard is built on.
+    Note the strip_mcp_tool_prefix interplay: that helper only ever strips
+    THIS server's prefix, so a foreign MCP tool name survives whole and can
+    never collide with a registered bare Empyralis tool name."""
+
+    KNOWN = frozenset({"web__search", "project_task__create"})
+
+    def test_registered_tool_under_our_prefix_is_accepted(self):
+        self.assertTrue(claude_agent_sdk_bridge.is_registered_empyralis_tool(
+            "mcp__empyralis__project_task__create", self.KNOWN,
+        ))
+
+    def test_cli_built_in_is_rejected(self):
+        for builtin in ("TaskCreate", "TodoWrite", "Read", "Write", "Edit", "Bash", "WebFetch", "Task"):
+            self.assertFalse(
+                claude_agent_sdk_bridge.is_registered_empyralis_tool(builtin, self.KNOWN),
+                f"{builtin} must not be treated as Empyralis work",
+            )
+
+    def test_foreign_mcp_server_tool_is_rejected(self):
+        self.assertFalse(claude_agent_sdk_bridge.is_registered_empyralis_tool(
+            "mcp__github__create_issue", self.KNOWN,
+        ))
+
+    def test_foreign_server_cannot_impersonate_a_registered_name(self):
+        # strip_mcp_tool_prefix leaves a non-empyralis prefix intact, so this
+        # never reduces to the registered "web__search".
+        self.assertFalse(claude_agent_sdk_bridge.is_registered_empyralis_tool(
+            "mcp__evil__web__search", self.KNOWN,
+        ))
+
+    def test_unprefixed_name_is_rejected_even_when_it_matches_a_registered_name(self):
+        # The CLI always presents SDK MCP tools prefixed (allowed_tools is
+        # built on that same convention), so a bare name that happens to
+        # match a registered tool came from somewhere else.
+        self.assertFalse(claude_agent_sdk_bridge.is_registered_empyralis_tool(
+            "web__search", self.KNOWN,
+        ))
+
+    def test_unregistered_name_under_our_prefix_is_rejected(self):
+        self.assertFalse(claude_agent_sdk_bridge.is_registered_empyralis_tool(
+            "mcp__empyralis__not_registered_this_turn", self.KNOWN,
+        ))
+
+    def test_empty_name_is_rejected_even_when_unconfigured(self):
+        self.assertFalse(claude_agent_sdk_bridge.is_registered_empyralis_tool("", None))
+        self.assertFalse(claude_agent_sdk_bridge.is_registered_empyralis_tool("   ", None))
+
+    def test_unconfigured_allowlist_has_no_opinion(self):
+        self.assertTrue(claude_agent_sdk_bridge.is_registered_empyralis_tool("web__search", None))
+
+    def test_empty_allowlist_rejects_everything(self):
+        # A turn that registered no tools at all: nothing is Empyralis work.
+        self.assertFalse(claude_agent_sdk_bridge.is_registered_empyralis_tool(
+            "mcp__empyralis__web__search", frozenset(),
+        ))
+
+
+class TranslateForeignToolTests(unittest.TestCase):
+    """Defence in depth behind tools=[]. Even if a non-Empyralis tool becomes
+    reachable again — an options regression, an ambient MCP server, a CLI
+    update — its call must never be translated into the tool.started/
+    tool.result pair that IS the product's record of work done."""
+
+    KNOWN = frozenset({"web__search"})
+
+    def _state(self):
+        return claude_agent_sdk_bridge.TranslationState(known_tool_names=self.KNOWN)
+
+    def test_cli_built_in_emits_an_anomaly_not_a_tool_started(self):
+        state = self._state()
+        message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(
+                id="toolu_1", name="TaskCreate", input={"title": "ship it"},
+            )],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        trace_types = [e["payload"]["event_type"] for e in events if e["type"] == "trace"]
+        self.assertEqual(trace_types, ["trace.failed"])
+        self.assertNotIn("tool.started", trace_types)
+        # No tool_progress either: nothing in the product is in progress.
+        self.assertEqual([e["type"] for e in events], ["trace"])
+        payload = events[0]["payload"]
+        self.assertEqual(payload["data"]["code"], "foreign_tool_call")
+        self.assertIn("TaskCreate", payload["data"]["message"])
+        self.assertIn("toolu_1", state.foreign_tool_use_ids)
+        # And it is NOT remembered as a real call, so no later result can
+        # be correlated back onto it.
+        self.assertNotIn("toolu_1", state.tool_use_names)
+
+    def test_result_of_a_foreign_tool_emits_nothing(self):
+        state = self._state()
+        claude_agent_sdk_bridge.translate_sdk_message(
+            sdk_types.AssistantMessage(
+                content=[sdk_types.ToolUseBlock(id="toolu_1", name="TaskCreate", input={})],
+                model="claude-sonnet-4-5",
+            ),
+            state=state, trace_context=_trace_context(),
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            sdk_types.UserMessage(content=[sdk_types.ToolResultBlock(
+                tool_use_id="toolu_1",
+                content=[{"type": "text", "text": "Task #1 created successfully"}],
+                is_error=False,
+            )]),
+            state=state, trace_context=_trace_context(),
+        )
+        # The exact string that got a customer told a task existed. It must
+        # produce no tool.result and no completed plan item.
+        self.assertEqual(events, [])
+
+    def test_registered_tool_is_unaffected(self):
+        state = self._state()
+        message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(
+                id="toolu_2", name="mcp__empyralis__web__search", input={"query": "x"},
+            )],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        trace_types = [e["payload"]["event_type"] for e in events if e["type"] == "trace"]
+        self.assertIn("tool.started", trace_types)
+        self.assertIn("tool_progress", [e["type"] for e in events])
+        self.assertEqual(state.tool_use_names["toolu_2"], "web__search")
+        self.assertEqual(state.foreign_tool_use_ids, set())
+
+    def test_orphan_tool_result_is_not_recorded_as_a_completed_call(self):
+        # No ToolUseBlock ever announced toolu_ghost. Without this guard the
+        # collector invents an entry named "direct_tool" and marks it
+        # completed — a green row in the work ledger for a call nothing in
+        # this turn can name.
+        state = self._state()
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            sdk_types.UserMessage(content=[sdk_types.ToolResultBlock(
+                tool_use_id="toolu_ghost", content=[{"type": "text", "text": "done"}], is_error=False,
+            )]),
+            state=state, trace_context=_trace_context(),
+        )
+        trace_types = [e["payload"]["event_type"] for e in events if e["type"] == "trace"]
+        self.assertEqual(trace_types, ["trace.failed"])
+        self.assertEqual(events[0]["payload"]["data"]["code"], "orphan_tool_result")
+
+    def test_anomalies_survive_a_missing_trace_context(self):
+        # Same None-in/None-out contract the rest of this module honours:
+        # degrade to emitting nothing, never raise.
+        state = claude_agent_sdk_bridge.TranslationState(known_tool_names=self.KNOWN)
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            sdk_types.AssistantMessage(
+                content=[sdk_types.ToolUseBlock(id="toolu_1", name="Bash", input={"command": "ls"})],
+                model="claude-sonnet-4-5",
+            ),
+            state=state, trace_context=None,
+        )
+        self.assertEqual(events, [])
+        self.assertIn("toolu_1", state.foreign_tool_use_ids)
+
+
+class ForeignToolThroughRealCollectorAndHonestyGuardTests(unittest.TestCase):
+    """The end-to-end proof, through the two REAL, unmodified consumers:
+    sage_agent_runtime_service._collect_sage_operator_loop_v3_events (which
+    builds the customer-visible work ledger) and tool_honesty_guard (which
+    checks a reply's claims against that ledger)."""
+
+    def _run_turn_events(self, *, tool_name, known_tool_names, reply):
+        state = claude_agent_sdk_bridge.TranslationState(known_tool_names=known_tool_names)
+        trace_context = _trace_context()
+        events = []
+        events += claude_agent_sdk_bridge.translate_sdk_message(
+            sdk_types.AssistantMessage(
+                content=[sdk_types.ToolUseBlock(id="toolu_1", name=tool_name, input={"query": "x"})],
+                model="claude-sonnet-4-5",
+            ),
+            state=state, trace_context=trace_context,
+        )
+        events += claude_agent_sdk_bridge.translate_sdk_message(
+            sdk_types.UserMessage(content=[sdk_types.ToolResultBlock(
+                tool_use_id="toolu_1", content=[{"type": "text", "text": "3 results found."}], is_error=False,
+            )]),
+            state=state, trace_context=trace_context,
+        )
+        events += claude_agent_sdk_bridge.translate_sdk_message(
+            sdk_types.ResultMessage(
+                subtype="success", duration_ms=10, duration_api_ms=8, is_error=False,
+                num_turns=2, session_id="sess-1", result=reply,
+            ),
+            state=state, trace_context=trace_context,
+        )
+        return sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+
+    def test_foreign_tool_never_enters_the_work_ledger(self):
+        collected = self._run_turn_events(
+            tool_name="WebFetch",
+            known_tool_names=frozenset({"web__search"}),
+            reply="Here's what I found.",
+        )
+        # Nothing completed. The whole point: the Work tab and every
+        # downstream consumer of tool_calls see no work, because none was
+        # done in this product.
+        self.assertEqual(collected["tool_calls"], [])
+        self.assertEqual(collected["action_execution_mode"], "tool_blocked")
+        self.assertEqual(len(collected["blocked_tools"]), 1)
+        self.assertEqual(collected["blocked_tools"][0]["name"], "foreign_tool_call")
+        self.assertEqual(collected["blocked_tools"][0]["status"], "blocked")
+
+    def test_removing_the_foreign_trace_restores_tool_honesty_guard(self):
+        """Why this class of bug is worse than a normal one, and what the
+        guard buys back. tool_honesty_guard compares a reply's claims
+        against the turn's tool_calls. A foreign tool that really ran and
+        really succeeded puts a genuine-looking SUCCESS in that list, and
+        check_tool_reply_consistency's `if successful:` branch then treats
+        the claim as corroborated — the guard is blinded by the very
+        evidence that should have condemned the reply. Keeping the foreign
+        call OUT of tool_calls hands the guard back its ability to see."""
+        from server_modules import tool_honesty_guard
+
+        reply = "Here's what I found."
+
+        # What the collector produced before this guard existed: the foreign
+        # call translated into a completed tool_calls entry.
+        masked = tool_honesty_guard.check_tool_reply_consistency(
+            reply, [{"name": "WebFetch", "status": "completed", "output": "3 results found."}],
+        )
+        self.assertTrue(masked["consistent"], "sanity: a fake success masks the guard")
+
+        collected = self._run_turn_events(
+            tool_name="WebFetch",
+            known_tool_names=frozenset({"web__search"}),
+            reply=reply,
+        )
+        unmasked = tool_honesty_guard.check_tool_reply_consistency(
+            reply, list(collected["tool_calls"]),
+        )
+        self.assertFalse(unmasked["consistent"])
+        self.assertEqual(unmasked["mismatch_type"], "claims_without_run")
+
+    def test_a_registered_tool_still_produces_a_completed_entry(self):
+        collected = self._run_turn_events(
+            tool_name="mcp__empyralis__web__search",
+            known_tool_names=frozenset({"web__search"}),
+            reply="Here's what I found.",
+        )
+        self.assertEqual(len(collected["tool_calls"]), 1)
+        self.assertEqual(collected["tool_calls"][0]["name"], "web__search")
+        self.assertEqual(collected["tool_calls"][0]["status"], "completed")
+        self.assertEqual(collected["blocked_tools"], [])
+        self.assertEqual(collected["action_execution_mode"], "tools_executed")
+
+
+class RunClaudeAgentSdkTurnForeignToolTests(unittest.TestCase):
+    """The wiring: translate_sdk_message's guard is only armed if the turn
+    tells it which tools it registered. Pins that run_claude_agent_sdk_turn
+    always does, on both the normal and the resume-fallback path."""
+
+    def _run(self, *, responses, tool_defs, resume_session_id=""):
+        fake_query = _FakeQuery(responses)
+        with (
+            patch("claude_agent_sdk.query", new=fake_query),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            return asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="create a task called ship it",
+                system_prompt="",
+                prior_messages=[{"role": "user", "content": "earlier"}],
+                tool_defs=tool_defs,
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="trace-1",
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                credentials={},
+                trace_context=_trace_context(),
+                resume_session_id=resume_session_id,
+            ))
+
+    @staticmethod
+    def _task_create_turn():
+        return [
+            sdk_types.AssistantMessage(
+                content=[sdk_types.ToolUseBlock(
+                    id="toolu_1", name="TaskCreate", input={"title": "ship it"},
+                )],
+                model="claude-sonnet-4-5",
+            ),
+            sdk_types.UserMessage(content=[sdk_types.ToolResultBlock(
+                tool_use_id="toolu_1",
+                content=[{"type": "text", "text": "Task #1 created successfully"}],
+                is_error=False,
+            )]),
+            _result_message(reply="Task created. The task id is 1"),
+        ]
+
+    def test_the_live_incident_turn_records_no_tool_work(self):
+        # Replays the exact message sequence observed in production before
+        # the fix, through the real run_claude_agent_sdk_turn.
+        events = self._run(
+            responses=[self._task_create_turn()],
+            tool_defs=[{
+                "name": "project_task__create", "description": "d",
+                "parameters": {"type": "object", "properties": {}},
+            }],
+        )
+        trace_types = [e["payload"]["event_type"] for e in events if e["type"] == "trace"]
+        self.assertEqual(trace_types, ["trace.failed"])
+        self.assertNotIn("tool.started", trace_types)
+        self.assertNotIn("tool.result", trace_types)
+        self.assertNotIn("tool_progress", [e["type"] for e in events])
+
+    def test_the_resume_fallback_path_is_armed_too(self):
+        events = self._run(
+            responses=[([], RuntimeError("no such session")), self._task_create_turn()],
+            tool_defs=[{
+                "name": "project_task__create", "description": "d",
+                "parameters": {"type": "object", "properties": {}},
+            }],
+            resume_session_id="sess-stale",
+        )
+        trace_types = [e["payload"]["event_type"] for e in events if e["type"] == "trace"]
+        self.assertEqual(trace_types, ["trace.failed"])
+        self.assertNotIn("tool.started", trace_types)
+
+    def test_registered_tool_still_flows_through_the_real_turn(self):
+        events = self._run(
+            responses=[[
+                sdk_types.AssistantMessage(
+                    content=[sdk_types.ToolUseBlock(
+                        id="toolu_1", name="mcp__empyralis__project_task__create",
+                        input={"title": "ship it"},
+                    )],
+                    model="claude-sonnet-4-5",
+                ),
+                sdk_types.UserMessage(content=[sdk_types.ToolResultBlock(
+                    tool_use_id="toolu_1",
+                    content=[{"type": "text", "text": "Created task MAN-1."}],
+                    is_error=False,
+                )]),
+                _result_message(reply="Created it."),
+            ]],
+            tool_defs=[{
+                "name": "project_task__create", "description": "d",
+                "parameters": {"type": "object", "properties": {}},
+            }],
+        )
+        trace_types = [e["payload"]["event_type"] for e in events if e["type"] == "trace"]
+        self.assertIn("tool.started", trace_types)
+        self.assertIn("tool.result", trace_types)
+        self.assertNotIn("trace.failed", trace_types)
 
 
 class TurnEngineSelectionFlagOffTests(unittest.TestCase):
