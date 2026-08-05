@@ -4792,8 +4792,10 @@ async def handle_sage_chat(
     # system-prompt instruction — see stream_provider_backed_direct_chat's
     # degradation branch).
     _raw_reasoning_effort = ""
+    _raw_engine = ""
     if _spec is not None:
         _raw_reasoning_effort = str(getattr(_spec, "reasoning_effort", "") or "").strip().lower()
+        _raw_engine = str(getattr(_spec, "engine", "") or "").strip().lower()
     else:
         try:
             from server_modules import agent_registry_repository as _reg_re
@@ -4806,9 +4808,22 @@ async def handle_sage_chat(
             )
             _master_re_mc = _master_re_meta.get("model_config") if isinstance(_master_re_meta.get("model_config"), dict) else {}
             _raw_reasoning_effort = str(_master_re_mc.get("reasoning_effort") or "").strip().lower()
+            _raw_engine = str(_master_re_mc.get("engine") or "").strip().lower()
         except Exception:
             _raw_reasoning_effort = ""
+            _raw_engine = ""
     requested_reasoning_effort = _raw_reasoning_effort if _raw_reasoning_effort in _VALID_REASONING_EFFORTS else ""
+    # MAN-310 Phase 1: model_config.engine, resolved the same specialist-vs-
+    # master way as reasoning effort just above — the ONE place a persisted
+    # per-agent engine choice turns into engine_options; nothing upstream of
+    # this function ever set engine_options before this phase. Only
+    # claude_agent_sdk_bridge.ENGINE_ID itself changes behavior below (at
+    # the _run_sage_action_loop_v3 call sites); an unset value, "legacy", or
+    # anything unrecognized all resolve to "", which keeps engine_options
+    # empty/None and the turn on the existing engine — _resolve_turn_
+    # engine_id's existing "" default, the safety property this phase must
+    # preserve.
+    requested_engine = _raw_engine if _raw_engine == claude_agent_sdk_bridge.ENGINE_ID else ""
 
     # --- Build Sage prompt/context before any model-backed action loop ---
     # --- Load recent conversation turns from shared thread store ---
@@ -5400,6 +5415,16 @@ async def handle_sage_chat(
     )
 
     action_loop_message = _normalized_sage_action_loop_message(normalized_message, prior_messages)
+    # MAN-310 Phase 1: a caller-supplied engine_options (still accepted,
+    # unchanged — see this function's own docstring) wins over the resolved
+    # per-agent model_config.engine above; only when the caller left it
+    # unset/empty (every real caller today) does the resolved choice take
+    # effect. Either way an unresolved engine yields None, so both the
+    # regenerate call below and this one stay on the legacy path by default.
+    _effective_engine_options = (
+        engine_options if isinstance(engine_options, dict) and engine_options
+        else ({"engine": requested_engine} if requested_engine else None)
+    )
     # Always run the action loop — the LLM decides whether tools are needed.
     # A keyword heuristic gate would silently skip tools for messages that don't
     # match exact tokens, causing "let me check..." promises with no follow-up.
@@ -5424,7 +5449,7 @@ async def handle_sage_chat(
         reasoning_effort=requested_reasoning_effort,
         credit_idempotency_key=turn_credit_idempotency_key,
         attribution=_turn_attribution,
-        engine_options=engine_options,
+        engine_options=_effective_engine_options,
         conversation_thread_id=thread_id,
     )
     if action_result is not None:
@@ -5504,7 +5529,7 @@ async def handle_sage_chat(
                     preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
                     reasoning_effort=requested_reasoning_effort,
                     credit_idempotency_key=turn_credit_idempotency_key,
-                    engine_options=engine_options,
+                    engine_options=_effective_engine_options,
                     conversation_thread_id=thread_id,
                 )
                 if not isinstance(_corrected, dict):

@@ -25,8 +25,10 @@ provably untouched when the flag is off.
 from __future__ import annotations
 
 import asyncio
+import os
 import unittest
 from types import SimpleNamespace
+from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from claude_agent_sdk import types as sdk_types
@@ -52,28 +54,97 @@ def _trace_context() -> agent_trace_service.TraceContext:
 
 
 class ResolveSdkProcessEnvTests(unittest.TestCase):
+    """Anthropic's documented auth precedence (code.claude.com/docs/en/
+    authentication) ranks ANTHROPIC_AUTH_TOKEN above ANTHROPIC_API_KEY, and
+    AUTH_TOKEN carries no interactive "approve this key?" consent gate — see
+    resolve_sdk_process_env's own docstring for why that matters for a
+    fresh-every-turn subprocess. A supplied credential therefore lands on
+    ANTHROPIC_AUTH_TOKEN, not ANTHROPIC_API_KEY."""
+
     def test_explicit_overrides_win_over_credentials(self):
         env = claude_agent_sdk_bridge.resolve_sdk_process_env(
             credentials={"api_key": "from-credentials", "base_url": "https://from-credentials.example"},
             anthropic_api_key="explicit-key",
             anthropic_base_url="https://api.deepseek.com/anthropic",
         )
-        self.assertEqual(env["ANTHROPIC_API_KEY"], "explicit-key")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "explicit-key")
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic")
+        # The old (pre-fix) target key stays blanked, not merely absent —
+        # see the ambient-leak test class below for why "blanked" and
+        # "absent" are not the same thing for this function.
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
 
     def test_falls_back_to_credentials_when_no_explicit_override(self):
         env = claude_agent_sdk_bridge.resolve_sdk_process_env(
             credentials={"api_key": "sk-from-creds"},
         )
-        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-from-creds")
-        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-from-creds")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
 
     def test_never_hardcodes_a_base_url(self):
         # No override, no credentials base_url — nothing about DeepSeek (or
         # any other non-Anthropic backend) appears anywhere unless the
         # caller supplied it for this turn.
         env = claude_agent_sdk_bridge.resolve_sdk_process_env(credentials=None)
-        self.assertEqual(env, {})
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+
+    def test_config_dir_forwarded_to_both_linux_and_macos_keys(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(config_dir="/tmp/fresh-turn-dir")
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/tmp/fresh-turn-dir")
+        self.assertEqual(env["CLAUDE_SECURESTORAGE_CONFIG_DIR"], "/tmp/fresh-turn-dir")
+
+    def test_no_config_dir_means_no_config_dir_keys(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env()
+        self.assertNotIn("CLAUDE_CONFIG_DIR", env)
+        self.assertNotIn("CLAUDE_SECURESTORAGE_CONFIG_DIR", env)
+
+
+class ResolveSdkProcessEnvAmbientLeakTests(unittest.TestCase):
+    """claude_agent_sdk's Python Transport MERGES ClaudeAgentOptions(env=...)
+    ON TOP OF the parent process's own environment rather than replacing it
+    (see resolve_sdk_process_env's docstring) — so Empyralis's OWN backend
+    process having any ANTHROPIC_*/CLAUDE_CODE_* variable set would
+    otherwise leak into every spawned tenant subprocess: wrong billing
+    attribution at best, cross-tenant credential use at worst. This pins
+    that every credential-shaped key this module knows about is ALWAYS
+    present in the returned dict — omitted is not safe, since an omitted
+    key doesn't survive the merge-over-parent-env — and that patching
+    os.environ with plausible ambient leakage never changes the result."""
+
+    def test_every_credential_key_is_always_present_and_blank_by_default(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env()
+        for key in claude_agent_sdk_bridge._CREDENTIAL_ENV_KEYS:
+            self.assertIn(key, env)
+            self.assertEqual(env[key], "")
+
+    def test_ambient_environment_variables_never_reach_the_result(self):
+        ambient = {
+            "ANTHROPIC_API_KEY": "leaked-ambient-key",
+            "ANTHROPIC_AUTH_TOKEN": "leaked-ambient-token",
+            "ANTHROPIC_BASE_URL": "https://leaked.example.com",
+            "CLAUDE_CODE_OAUTH_TOKEN": "leaked-oauth-token",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+            "CLAUDE_CODE_USE_FOUNDRY": "1",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS": "1",
+            "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "1",
+            "CLAUDE_CODE_USE_MANTLE": "1",
+        }
+        with patch.dict(os.environ, ambient, clear=False):
+            # No explicit per-turn credential supplied — this function must
+            # not read the ambient values above out of os.environ (it never
+            # touches os.environ at all) and must still explicitly blank
+            # every one of them in its own returned dict.
+            env = claude_agent_sdk_bridge.resolve_sdk_process_env()
+        for key in ambient:
+            self.assertEqual(env[key], "", f"{key} leaked from ambient os.environ")
+
+    def test_explicit_credential_still_wins_over_ambient_noise(self):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "leaked-ambient-key"}, clear=False):
+            env = claude_agent_sdk_bridge.resolve_sdk_process_env(anthropic_api_key="real-tenant-key")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "real-tenant-key")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
 
 
 class StripMcpToolPrefixTests(unittest.TestCase):
@@ -719,6 +790,94 @@ class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
             ))
 
         persist_mock.assert_not_awaited()
+
+
+class RunClaudeAgentSdkTurnIsolationTests(unittest.TestCase):
+    """Each turn must get its own fresh, never-logged-in-to CLAUDE_CONFIG_DIR
+    (see resolve_sdk_process_env's docstring for why) and that directory
+    must not survive past the turn — a leftover directory per turn is an
+    unbounded disk leak on a server handling many turns. Exercises the REAL
+    run_claude_agent_sdk_turn with only claude_agent_sdk's own three
+    entrypoints (ClaudeAgentOptions/create_sdk_mcp_server/query) faked out —
+    everything this module does with them (building options, awaiting the
+    async generator) runs for real."""
+
+    def test_config_dir_is_fresh_for_the_turn_and_removed_after(self):
+        import claude_agent_sdk as real_sdk
+
+        captured: Dict[str, Any] = {}
+
+        class _FakeOptions:
+            def __init__(self, **kwargs):
+                captured["options_kwargs"] = kwargs
+
+        async def _fake_query(*, prompt, options):
+            # The directory must exist WHILE the (fake) subprocess would be
+            # running — the property this test exists to pin.
+            env = captured["options_kwargs"]["env"]
+            captured["dir_existed_during_call"] = os.path.isdir(env["CLAUDE_CONFIG_DIR"])
+            captured["dir_path"] = env["CLAUDE_CONFIG_DIR"]
+            return
+            yield  # pragma: no cover - makes this an async generator function
+
+        with (
+            patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
+            patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
+            patch.object(real_sdk, "query", _fake_query),
+        ):
+            events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="hi",
+                system_prompt="",
+                prior_messages=None,
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                provider="anthropic",
+                model="claude-x",
+                credentials={"api_key": "sk-test"},
+            ))
+
+        self.assertEqual(events, [])
+        env = captured["options_kwargs"]["env"]
+        self.assertTrue(captured["dir_existed_during_call"], "config dir did not exist during the turn")
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], env["CLAUDE_SECURESTORAGE_CONFIG_DIR"])
+        self.assertFalse(os.path.isdir(captured["dir_path"]), "temp config dir was not cleaned up after the turn")
+
+    def test_config_dir_is_removed_even_when_the_turn_raises(self):
+        import claude_agent_sdk as real_sdk
+
+        captured: Dict[str, Any] = {}
+
+        class _FakeOptions:
+            def __init__(self, **kwargs):
+                captured["options_kwargs"] = kwargs
+
+        async def _fake_query(*, prompt, options):
+            raise RuntimeError("simulated CLI failure")
+            yield  # pragma: no cover
+
+        with (
+            patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
+            patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
+            patch.object(real_sdk, "query", _fake_query),
+        ):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                    message="hi",
+                    system_prompt="",
+                    prior_messages=None,
+                    tool_defs=[],
+                    generation_services=MagicMock(),
+                    workspace_id="ws-1",
+                    thread_id="thread-1",
+                    provider="anthropic",
+                    model="claude-x",
+                    credentials={"api_key": "sk-test"},
+                ))
+
+        dir_path = captured["options_kwargs"]["env"]["CLAUDE_CONFIG_DIR"]
+        self.assertFalse(os.path.isdir(dir_path), "temp config dir leaked after an exception")
 
 
 class TurnEngineSelectionFlagOffTests(unittest.TestCase):

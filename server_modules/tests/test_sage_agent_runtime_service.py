@@ -2870,6 +2870,175 @@ class SageAgentRuntimeReasoningEffortResolutionTests(unittest.TestCase):
         self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
 
 
+class SageAgentRuntimeEngineSelectionResolutionTests(unittest.TestCase):
+    """MAN-310 Phase 1: model_config.engine ("legacy" | "claude_agent_sdk")
+    must reach the _run_sage_action_loop_v3 turn-engine seam as
+    engine_options={"engine": claude_agent_sdk_bridge.ENGINE_ID} -- proven
+    by checking WHICH generation entry point _collect_stream_events
+    actually calls (claude_agent_sdk_bridge.collect_events_via_claude_
+    agent_sdk vs. the legacy direct_chat_generation_service.stream_
+    provider_backed_direct_chat), the same way
+    SageAgentRuntimeReasoningEffortResolutionTests just above proves
+    reasoning_effort reaches its own kwarg -- a resolved local variable
+    alone wouldn't prove the branch this phase's whole safety property
+    (flag off == legacy, byte for byte) actually depends on. Defines its
+    own harness (not SageAgentRuntimeSpecialistProviderResolutionTests's
+    _run_chat) because that helper doesn't patch the bridge function."""
+
+    _spec = staticmethod(SageAgentRuntimeSpecialistProviderResolutionTests._spec)
+
+    @staticmethod
+    def _run_chat(specialist_context=None, mock_agent_provider=None, engine_options=None):
+        mock_agent_provider = mock_agent_provider or AsyncMock(
+            return_value=("anthropic", {"api_key": "sk-agent-own-key"}, "byok_api")
+        )
+        mock_workspace_provider = AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))
+        bridge_events = [{"type": "final", "payload": {"reply": "SDK reply", "error": None}}]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=mock_workspace_provider),
+            patch("server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider", new=mock_agent_provider),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch(
+                "server_modules.claude_agent_sdk_bridge.collect_events_via_claude_agent_sdk",
+                return_value=bridge_events,
+            ) as mock_bridge,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter([{
+                "type": "final",
+                "payload": {"reply": "Legacy reply", "actions": [], "error": None},
+            }])
+            result = _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=specialist_context,
+                engine_options=engine_options,
+            ))
+        return result, mock_stream, mock_bridge
+
+    def test_byok_specialist_with_sdk_engine_calls_the_bridge_not_the_legacy_stream(self):
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="claude_agent_sdk")
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+        self.assertEqual(result["message"], "SDK reply")
+
+    def test_byok_specialist_with_unset_engine_stays_on_the_legacy_stream(self):
+        """The safety property this whole phase must not break: an agent
+        with no engine configured (every agent that existed before this
+        phase) must call the EXACT SAME legacy entry point as always, and
+        never touch the bridge."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api")
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+        self.assertEqual(result["message"], "Legacy reply")
+
+    def test_byok_specialist_with_literal_legacy_engine_stays_on_the_legacy_stream(self):
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="legacy")
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+
+    def test_byok_specialist_with_garbage_engine_value_fails_safe_to_legacy(self):
+        """A stale/hand-edited model_config.engine outside {legacy,
+        claude_agent_sdk} must never select the bridge -- same fail-safe
+        convention as reasoning_effort's own invalid-value handling."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="some-future-engine")
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+
+    def test_platform_credits_specialist_with_sdk_engine_calls_the_bridge(self):
+        """engine is meaningful for platform_credits too, not just byok_api
+        -- both reach the same turn-engine seam."""
+        spec = self._spec(provider="", model="", mode="platform_credits", engine="claude_agent_sdk")
+        mock_agent_provider = AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}, "platform_credits"))
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec, mock_agent_provider=mock_agent_provider)
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+
+    def test_sage_own_turn_consults_its_own_master_engine(self):
+        """Sage's own (master) turn also resolves model_config.engine off
+        its own install -- the same specialist-vs-master resolution
+        reasoning_effort already gets (see
+        test_sage_own_turn_now_consults_its_own_master_reasoning_effort
+        above)."""
+        master_install = {
+            "id": "sage-main-1",
+            "install_metadata": {"model_config": {"mode": "platform_credits", "engine": "claude_agent_sdk"}},
+        }
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+            new=AsyncMock(return_value=master_install),
+        ):
+            result, mock_stream, mock_bridge = self._run_chat(specialist_context=None)
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+        self.assertEqual(result["message"], "SDK reply")
+
+    def test_sage_own_turn_with_no_master_engine_stays_on_legacy(self):
+        master_install = {
+            "id": "sage-main-1",
+            "install_metadata": {"model_config": {"mode": "platform_credits"}},
+        }
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+            new=AsyncMock(return_value=master_install),
+        ):
+            result, mock_stream, mock_bridge = self._run_chat(specialist_context=None)
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+
+    def test_explicit_caller_supplied_engine_options_wins_over_persisted_config(self):
+        """handle_sage_chat's own engine_options parameter (the pre-existing
+        explicit override -- see its docstring) still wins over the
+        resolved per-agent model_config.engine when a caller supplies it,
+        exactly as documented -- proven here with the two in direct
+        conflict: persisted config says the SDK engine, the explicit
+        caller override says legacy."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="claude_agent_sdk")
+        result, mock_stream, mock_bridge = self._run_chat(
+            specialist_context=spec, engine_options={"engine": "legacy"},
+        )
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+
+    def test_explicit_caller_supplied_engine_options_can_opt_in_even_when_persisted_config_is_unset(self):
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api")
+        result, mock_stream, mock_bridge = self._run_chat(
+            specialist_context=spec, engine_options={"engine": "claude_agent_sdk"},
+        )
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+
+
 class SageAgentRuntimeSpecialistMemoryLoadTests(unittest.TestCase):
     """The core fix under test: a specialist's turn must load ITS OWN
     MEMORY.md index into its system prompt every turn, the same way Sage

@@ -69,6 +69,22 @@ _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME = {
     "grok_build": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
     "cursor_cli": set(),
 }
+# MAN-310 Phase 1: which turn engine drives an agent whose model_config.mode
+# is platform_credits/byok_api. "legacy" (also what an unset/absent value
+# means — see sage_agent_runtime_service.py's handle_sage_chat resolution)
+# is the existing direct_chat_generation_service.stream_provider_backed_
+# direct_chat path; "claude_agent_sdk" selects claude_agent_sdk_bridge.
+# ENGINE_ID at the turn seam (_run_sage_action_loop_v3's _resolve_turn_
+# engine_id). Duplicated here rather than imported from claude_agent_sdk_
+# bridge (same duplicate-but-documented-across-layers pattern as
+# _VALID_MODEL_RUNTIMES/_VALID_REASONING_EFFORTS above — that module pulls
+# in a much heavier import chain and this one must stay light). Only
+# meaningful for _ENGINE_SUPPORTED_MODES below: cli_subscription/local never
+# reach the turn-engine seam at all (handle_sage_chat's _dispatch_cli_
+# subscription_gateway_brain / _dispatch_local_gateway_brain branches
+# return before it), so a saved engine value there would be a dead control.
+_VALID_ENGINES = {"legacy", "claude_agent_sdk"}
+_ENGINE_SUPPORTED_MODES = {"platform_credits", "byok_api"}
 _VALID_PURPOSE_PRESETS = {"customer_facing", "internal_assistant", "operator"}
 _PURPOSE_PRESET_INSTRUCTIONS = {
     "customer_facing": (
@@ -1225,6 +1241,9 @@ async def fleet_configure_agent(
     Model config modes: platform_credits | byok_api | cli_subscription | local
     Model config may also carry gateway_binding (paired Gateway id that runs
     the brain) and runtime (claude_code | codex | ollama). Both persist as-is.
+    MAN-310 Phase 1: model_config may also carry engine (legacy |
+    claude_agent_sdk) — which turn engine drives platform_credits/byok_api
+    agents; see _VALID_ENGINES/_ENGINE_SUPPORTED_MODES above.
     """
     from server_modules import agent_registry_repository as repo
 
@@ -1255,6 +1274,29 @@ async def fleet_configure_agent(
                 "ok": False,
                 "error": f"Invalid model_config runtime: {runtime}. Must be one of: {', '.join(sorted(_VALID_MODEL_RUNTIMES))}",
             }
+        # MAN-310 Phase 1: engine — rejected at save time (same convention as
+        # runtime/reasoning_effort just above/below) rather than silently
+        # ignored at turn time, so a caller never believes a saved choice is
+        # in effect when handle_sage_chat's resolution would actually never
+        # consult it (cli_subscription/local bypass the turn-engine seam
+        # entirely — see _ENGINE_SUPPORTED_MODES's own comment).
+        engine = str(mc.get("engine") or "").strip().lower()
+        if engine and engine not in _VALID_ENGINES:
+            return {
+                "ok": False,
+                "error": f"Invalid model_config engine: {engine}. Must be one of: {', '.join(sorted(_VALID_ENGINES))}",
+            }
+        if engine == "claude_agent_sdk":
+            _effective_mode_for_engine = mode or "platform_credits"
+            if _effective_mode_for_engine not in _ENGINE_SUPPORTED_MODES:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"model_config engine 'claude_agent_sdk' isn't available for mode "
+                        f"'{_effective_mode_for_engine}' — it only applies to "
+                        f"{', '.join(sorted(_ENGINE_SUPPORTED_MODES))}."
+                    ),
+                }
         # reasoning_effort: two DIFFERENT vocabularies depending on mode/
         # runtime — see _VALID_REASONING_EFFORTS and _VALID_CLI_REASONING_
         # EFFORTS_BY_RUNTIME's own docstrings. Rejected here (save time)
