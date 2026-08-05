@@ -559,6 +559,8 @@ class SageAgentRuntimeAuditTests(unittest.TestCase):
             _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", tenant_id="t-1", message="hello",
                 current_user={"user_id": "u-1"},
+            
+                engine_options={"engine": "legacy"},
             ))
 
             sage_activity_calls = [
@@ -605,6 +607,8 @@ class SageAgentRuntimeAuditTests(unittest.TestCase):
             _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", tenant_id="t-1", message="hello",
                 current_user={"user_id": "u-1"},
+            
+                engine_options={"engine": "legacy"},
             ))
 
             failed_calls = [
@@ -767,6 +771,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="search the web for OpenClaw browser docs",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertEqual(result["action_execution_mode"], "tools_executed")
@@ -834,6 +840,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
                 workspace_id="ws-1",
                 message="send me that fox picture",
                 channel_origin="whatsapp_personal",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertEqual(result["message"], "Sent!")
@@ -859,6 +867,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             chat_task = asyncio.create_task(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="run: echo hello from hardware",
+            
+                engine_options={"engine": "legacy"},
             ))
             tick_task = asyncio.create_task(ticker())
             result = await chat_task
@@ -921,6 +931,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="fetch https://example.com/docs and summarize it",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertEqual(result["action_execution_mode"], "tools_executed")
@@ -972,6 +984,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="Create my morning brief from connected email and calendar.",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertEqual(result["action_execution_mode"], "daily_operator_executed")
@@ -1031,6 +1045,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="Prepare me for my next meeting using calendar and Drive.",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertEqual(result["action_execution_mode"], "daily_operator_blocked")
@@ -1087,6 +1103,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="Triage my important email and draft responses for approval.",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertEqual(result["action_execution_mode"], "approval_required")
@@ -1188,6 +1206,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="run command: rm -rf /tmp/sage-action-loop-test",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         # With internalized governance, approval is logged for audit but never blocks.
@@ -1239,6 +1259,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="search the web for today's news",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertTrue(result["blocked_tools"])
@@ -1316,6 +1338,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="use the inventory MCP tool to check stock",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertEqual(result["action_execution_mode"], "tools_executed")
@@ -1362,6 +1386,8 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
                 message="search the web for a lot of things",
+            
+                engine_options={"engine": "legacy"},
             ))
 
         self.assertEqual(result["action_execution_mode"], "tool_blocked")

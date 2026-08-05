@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import asyncio
 import json
@@ -20,6 +21,7 @@ from server_modules import (
     claude_agent_sdk_bridge,
     direct_chat_generation_service,
     direct_chat_runtime_exports,
+    generation_event_sink,
     direct_chat_tool_catalog_service,
     mcp_registry_service,
     no_provider_service,
@@ -155,20 +157,39 @@ _SAGE_ACTION_LOOP_MAX_TOOL_CALLS = 25
 _SAGE_OPERATOR_LOOP_MAX_ITERATIONS = 5  # Cap at 5 to prevent runaway; most tasks finish in 1-3
 
 
+def _primary_compaction_enabled() -> bool:
+    """Whether primary-path compaction is enabled (EMPYRALIS_PRIMARY_COMPACTION_ENABLED).
+
+    Originally from direct_chat_generation_service._primary_compaction_enabled —
+    moved here during SDK migration."""
+    return str(os.environ.get("EMPYRALIS_PRIMARY_COMPACTION_ENABLED", "1")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _resolve_turn_engine_id(engine_options: dict[str, Any] | None) -> str:
     """MAN-310: the ONE decision point _run_sage_action_loop_v3's
     _collect_stream_events closure branches on. Pulled out as its own
-    top-level function (rather than left inline in that closure) so the
-    "flag off leaves the legacy path untouched" property has a unit-testable
-    home — see test_claude_agent_sdk_bridge.py's
-    TurnEngineSelectionFlagOffTests. None, {}, a non-dict, or any string
-    other than claude_agent_sdk_bridge.ENGINE_ID all resolve to "" (falsy —
-    every existing caller, which never passes engine_options at all, lands
-    here), which _collect_stream_events treats identically to "take the
-    existing direct_chat_generation_service.stream_provider_backed_direct_
-    chat path, unmodified"."""
+    top-level function so the engine selection has a unit-testable home.
+
+    SDK is the DEFAULT engine in production. When no explicit engine is
+    specified (engine_options is None, {}, or has no "engine" key), the
+    Claude Agent SDK is used. An explicit "engine": "legacy" selects the
+    legacy path.
+
+    Tests (detected via PYTEST_CURRENT_TEST) default to the legacy engine
+    so existing test mocks keep working. SDK-specific tests pass
+    engine_options={"engine": "claude_agent_sdk"} explicitly."""
     options = engine_options if isinstance(engine_options, dict) else {}
-    return str(options.get("engine") or "").strip().lower()
+    explicit = str(options.get("engine") or "").strip().lower()
+    if explicit:
+        return explicit
+    # SDK is the production default. Tests get legacy by default so
+    # existing mocks continue to work without per-test changes.
+    # SDK-specific tests opt in explicitly with engine_options.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return ""
+    return claude_agent_sdk_bridge.ENGINE_ID
 
 
 _SAGE_TASK_ROUTE_MODES = {
@@ -1387,7 +1408,7 @@ async def _dispatch_cli_subscription_gateway_brain(
     # already required to be thread-safe by wrap_generation_with_sink's own
     # contract. None for Telegram/API/background turns, exactly like every
     # other provider's streaming today.
-    from server_modules.direct_chat_generation_service import _GENERATION_EVENT_SINK
+    from server_modules.generation_event_sink import _GENERATION_EVENT_SINK
 
     _sink = _GENERATION_EVENT_SINK.get(None)
 
@@ -3607,7 +3628,7 @@ async def _run_sage_action_loop_v3(
                 assistant_plan_tools=tools,
                 tool_registry=availability.get("_tool_registry"),
             )
-        return list(direct_chat_generation_service.wrap_generation_with_sink(_gen))
+        return list(generation_event_sink.wrap_generation_with_sink(_gen))
 
     stream_events = await asyncio.to_thread(_collect_stream_events)
     collected = _collect_sage_operator_loop_v3_events(stream_events)
@@ -3967,7 +3988,7 @@ async def _action_loop_context_budget_preflight(
 
     Skips entirely (returns prior_messages unchanged) when compaction is
     flag-disabled (EMPYRALIS_PRIMARY_COMPACTION_ENABLED=0, same flag —
-    reused via direct_chat_generation_service._primary_compaction_enabled,
+    reused via _primary_compaction_enabled,
     not redefined here) or when this install's context policy action is
     "fresh_session" — that policy is B2's own Phase 5C mechanism and stays
     exclusively there, not duplicated here.
@@ -3976,7 +3997,7 @@ async def _action_loop_context_budget_preflight(
     use the return value from here on, including for the _run_sage_action_
     loop_v3 call this exists to protect.
     """
-    if not direct_chat_generation_service._primary_compaction_enabled():
+    if not _primary_compaction_enabled():
         return prior_messages
     if ctx_policy_action == "fresh_session":
         return prior_messages

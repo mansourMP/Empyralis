@@ -377,7 +377,7 @@ async def execute_direct_chat_turn_request(
         import queue as _queue
         import threading as _threading
 
-        from server_modules.direct_chat_generation_service import (
+        from server_modules.generation_event_sink import (
             _GENERATION_EVENT_SINK,
         )
 
