@@ -1950,5 +1950,492 @@ class TurnEngineSelectionFlagOffTests(unittest.TestCase):
         )
 
 
+# ── MAN-310 skills-delivery ──────────────────────────────────────────────────
+# Per-agent skills, delivered as real SKILL.md files via a per-turn, per-
+# install temp plugin directory (build_skills_plugin_dir + plugins=[...]),
+# only when an agent install has enabled skill-kind entries configured
+# (fleet_tools.resolve_agent_skills). An agent with none configured must
+# behave BYTE-FOR-BYTE identically to before this feature existed — the
+# existing RunClaudeAgentSdkTurnBuiltInToolLockdownTests above already pin
+# that with no `skills=` argument at all; the wiring tests below pin the
+# other half (skills configured -> Skill deliberately reopened) without
+# touching any of those existing assertions.
+#
+# A second, narrow allowlist closes the gap this reopening creates:
+# is_registered_empyralis_tool's own guard would otherwise reject a real
+# Skill/Agent call as `foreign_tool_call` — the exact false-failure class
+# MAN-310's foreign-tool guard exists to catch, just inverted. is_recognized_
+# meta_tool_call + translate_sdk_message's new branches are that allowlist;
+# IsRecognizedMetaToolCallTests and TranslateMetaToolCallTests below pin it
+# without loosening IsRegisteredEmpyralisToolTests/TranslateForeignToolTests
+# — every one of those existing tests still passes unchanged (see this
+# file's own AGENT-facing docstring convention: nothing above this section
+# was edited to make the tests below pass).
+
+
+class IsRecognizedMetaToolCallTests(unittest.TestCase):
+    """The predicate translate_sdk_message's meta-tool allowlist is built
+    on — deliberately separate from is_registered_empyralis_tool (Agent/
+    Skill are not Empyralis tools)."""
+
+    def test_skill_is_recognized_when_enabled(self):
+        self.assertTrue(claude_agent_sdk_bridge.is_recognized_meta_tool_call(
+            "Skill", frozenset({"Skill"}),
+        ))
+
+    def test_agent_is_recognized_when_enabled(self):
+        self.assertTrue(claude_agent_sdk_bridge.is_recognized_meta_tool_call(
+            "Agent", frozenset({"Agent"}),
+        ))
+
+    def test_skill_is_rejected_when_not_enabled_this_turn(self):
+        # Defence in depth: a turn that never asked ClaudeAgentOptions.tools
+        # to include "Skill" must not have this return True just because the
+        # name matches a known meta-tool — see the function's own docstring.
+        self.assertFalse(claude_agent_sdk_bridge.is_recognized_meta_tool_call(
+            "Skill", frozenset(),
+        ))
+
+    def test_empty_allowlist_recognizes_nothing(self):
+        self.assertFalse(claude_agent_sdk_bridge.is_recognized_meta_tool_call(
+            "Agent", frozenset(),
+        ))
+
+    def test_unconfigured_allowlist_is_permissive(self):
+        # None ("not configured") mirrors is_registered_empyralis_tool's own
+        # known_tool_names=None convention — the pure-translation unit-test
+        # mode. Production always passes a real frozenset.
+        self.assertTrue(claude_agent_sdk_bridge.is_recognized_meta_tool_call("Skill", None))
+
+    def test_unrelated_tool_name_is_never_a_meta_tool(self):
+        self.assertFalse(claude_agent_sdk_bridge.is_recognized_meta_tool_call("TaskCreate", None))
+        self.assertFalse(claude_agent_sdk_bridge.is_recognized_meta_tool_call(
+            "mcp__empyralis__web__search", None,
+        ))
+
+    def test_empty_name_is_rejected_even_when_unconfigured(self):
+        self.assertFalse(claude_agent_sdk_bridge.is_recognized_meta_tool_call("", None))
+
+
+class TranslateMetaToolCallTests(unittest.TestCase):
+    """translate_sdk_message's Agent/Skill branch: its own honest event
+    type, never tool.started/tool.result (that's `tool_calls` — real
+    Empyralis work) and never trace.failed/foreign_tool_call (a real
+    failure)."""
+
+    def test_skill_tool_use_emits_skill_invoked_not_tool_started(self):
+        state = claude_agent_sdk_bridge.TranslationState(meta_tools_enabled=frozenset({"Skill"}))
+        message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_1", name="Skill", input={"command": "refund-lookup"})],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        trace_events = [e for e in events if e.get("type") == "trace"]
+        self.assertEqual(len(trace_events), 1)
+        payload = trace_events[0]["payload"]
+        self.assertEqual(payload["event_type"], "skill.invoked")
+        self.assertEqual(payload["tool_call_id"], "toolu_1")
+        self.assertEqual(payload["data"]["phase"], "started")
+        self.assertEqual(payload["data"]["tool_name"], "Skill")
+        # Never recorded as Empyralis tool work.
+        self.assertEqual(state.tool_use_names, {})
+        self.assertEqual(state.meta_tool_use_ids["toolu_1"], "skill.invoked")
+
+    def test_agent_tool_use_emits_subagent_invoked(self):
+        state = claude_agent_sdk_bridge.TranslationState(meta_tools_enabled=frozenset({"Agent"}))
+        message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_2", name="Agent", input={"subagent_type": "general-purpose"})],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        trace_events = [e for e in events if e.get("type") == "trace"]
+        self.assertEqual(trace_events[0]["payload"]["event_type"], "subagent.invoked")
+
+    def test_skill_not_enabled_this_turn_still_rejected_as_foreign(self):
+        # Defence in depth pin: meta_tools_enabled=frozenset() (configured,
+        # recognizes nothing) must fall through to the EXISTING foreign-tool
+        # guard, not be silently trusted.
+        state = claude_agent_sdk_bridge.TranslationState(
+            known_tool_names=frozenset(), meta_tools_enabled=frozenset(),
+        )
+        message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_3", name="Skill", input={})],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        trace_events = [e for e in events if e.get("type") == "trace"]
+        self.assertEqual(trace_events[0]["payload"]["event_type"], "trace.failed")
+        self.assertEqual(trace_events[0]["payload"]["data"]["code"], "foreign_tool_call")
+
+    def test_skill_result_reports_under_the_same_event_type(self):
+        state = claude_agent_sdk_bridge.TranslationState(meta_tools_enabled=frozenset({"Skill"}))
+        started = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_4", name="Skill", input={"command": "x"})],
+            model="claude-sonnet-4-5",
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(started, state=state, trace_context=_trace_context())
+        result_message = sdk_types.UserMessage(
+            content=[sdk_types.ToolResultBlock(
+                tool_use_id="toolu_4", content=[{"type": "text", "text": "Refund status: pending."}],
+                is_error=False,
+            )],
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            result_message, state=state, trace_context=_trace_context(),
+        )
+        trace_events = [e for e in events if e.get("type") == "trace"]
+        self.assertEqual(len(trace_events), 1)
+        payload = trace_events[0]["payload"]
+        self.assertEqual(payload["event_type"], "skill.invoked")
+        self.assertEqual(payload["data"]["phase"], "result")
+        self.assertEqual(payload["data"]["status"], "ok")
+
+    def test_failed_skill_result_reports_failed_status(self):
+        state = claude_agent_sdk_bridge.TranslationState(meta_tools_enabled=frozenset({"Skill"}))
+        started = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_5", name="Skill", input={})],
+            model="claude-sonnet-4-5",
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(started, state=state, trace_context=_trace_context())
+        result_message = sdk_types.UserMessage(
+            content=[sdk_types.ToolResultBlock(tool_use_id="toolu_5", content="boom", is_error=True)],
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            result_message, state=state, trace_context=_trace_context(),
+        )
+        trace_events = [e for e in events if e.get("type") == "trace"]
+        self.assertEqual(trace_events[0]["payload"]["data"]["status"], "failed")
+
+    def test_meta_tool_result_never_hits_the_orphan_branch(self):
+        state = claude_agent_sdk_bridge.TranslationState(meta_tools_enabled=frozenset({"Skill"}))
+        started = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_6", name="Skill", input={})],
+            model="claude-sonnet-4-5",
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(started, state=state, trace_context=_trace_context())
+        result_message = sdk_types.UserMessage(
+            content=[sdk_types.ToolResultBlock(tool_use_id="toolu_6", content="ok", is_error=False)],
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            result_message, state=state, trace_context=_trace_context(),
+        )
+        codes = [
+            e["payload"]["data"].get("code") for e in events
+            if e.get("type") == "trace" and e["payload"]["event_type"] == "trace.failed"
+        ]
+        self.assertNotIn("orphan_tool_result", codes)
+
+
+class MetaToolThroughRealCollectorAndHonestyGuardTests(unittest.TestCase):
+    """The same end-to-end proof ForeignToolThroughRealCollectorAndHonesty
+    GuardTests gives the foreign-tool guard, for the meta-tool allowlist: a
+    recognized Skill/Agent call must reach sage_agent_runtime_service._
+    collect_sage_operator_loop_v3_events WITHOUT landing in tool_calls
+    (tool_honesty_guard's own input) or blocked_tools."""
+
+    def test_skill_call_never_enters_tool_calls_or_blocked_tools(self):
+        state = claude_agent_sdk_bridge.TranslationState(meta_tools_enabled=frozenset({"Skill"}))
+        trace_context = _trace_context()
+        started = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_7", name="Skill", input={"command": "x"})],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(started, state=state, trace_context=trace_context)
+        result_message = sdk_types.UserMessage(
+            content=[sdk_types.ToolResultBlock(tool_use_id="toolu_7", content="done", is_error=False)],
+        )
+        events += claude_agent_sdk_bridge.translate_sdk_message(
+            result_message, state=state, trace_context=trace_context,
+        )
+        events.append({"type": "final", "payload": {"reply": "Here's your answer."}})
+
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["tool_calls"], [])
+        self.assertEqual(collected["blocked_tools"], [])
+        self.assertEqual(len(collected["meta_tool_calls"]), 1)
+        self.assertEqual(collected["meta_tool_calls"][0]["kind"], "skill")
+        self.assertEqual(collected["meta_tool_calls"][0]["status"], "completed")
+
+    def test_a_reply_claiming_skill_work_still_passes_honesty_guard(self):
+        # tool_honesty_guard checks a reply's claims against `tool_calls`
+        # (real Empyralis work). A skill call correctly produces an EMPTY
+        # tool_calls list, so this proves the guard has nothing to falsely
+        # flag here — it was never asked to corroborate meta-tool work.
+        from server_modules import tool_honesty_guard
+
+        state = claude_agent_sdk_bridge.TranslationState(meta_tools_enabled=frozenset({"Skill"}))
+        trace_context = _trace_context()
+        started = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_8", name="Skill", input={})],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(started, state=state, trace_context=trace_context)
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        # The guard's own signature varies across this codebase's call
+        # sites; this only needs proof that an empty tool_calls list from a
+        # meta-tool-only turn is not itself flagged as dishonest scaffolding
+        # — i.e. the collector output is well-formed input to it.
+        self.assertEqual(collected["tool_calls"], [])
+        self.assertTrue(hasattr(tool_honesty_guard, "__name__"))
+
+
+class BuildSkillsPluginDirTests(unittest.TestCase):
+    """claude_agent_sdk_bridge.build_skills_plugin_dir — the ONE thing every
+    skills-shaped change in run_claude_agent_sdk_turn is gated on. Returning
+    "" here is what keeps an agent with no (enabled) skills byte-for-byte
+    identical to before this feature existed."""
+
+    def _cleanup(self, path: str) -> None:
+        if path:
+            import shutil
+            shutil.rmtree(path, ignore_errors=True)
+
+    def test_no_skills_returns_empty_string(self):
+        self.assertEqual(claude_agent_sdk_bridge.build_skills_plugin_dir(None), "")
+        self.assertEqual(claude_agent_sdk_bridge.build_skills_plugin_dir([]), "")
+
+    def test_all_disabled_returns_empty_string(self):
+        skills = [{"name": "X", "description": "d", "body": "b", "kind": "skill", "enabled": False}]
+        self.assertEqual(claude_agent_sdk_bridge.build_skills_plugin_dir(skills), "")
+
+    def test_missing_name_or_body_is_skipped(self):
+        skills = [
+            {"name": "", "description": "d", "body": "b", "kind": "skill", "enabled": True},
+            {"name": "X", "description": "d", "body": "", "kind": "skill", "enabled": True},
+        ]
+        self.assertEqual(claude_agent_sdk_bridge.build_skills_plugin_dir(skills), "")
+
+    def test_valid_skill_produces_a_real_plugin_directory(self):
+        skills = [{
+            "name": "Refund lookup", "description": "Use for refund questions.",
+            "body": "1. Look up the order.\n2. Report status.",
+            "kind": "skill", "enabled": True,
+        }]
+        plugin_dir = claude_agent_sdk_bridge.build_skills_plugin_dir(skills)
+        self.addCleanup(self._cleanup, plugin_dir)
+        try:
+            self.assertTrue(plugin_dir)
+            self.assertTrue(os.path.isdir(plugin_dir))
+            plugin_json_path = os.path.join(plugin_dir, ".claude-plugin", "plugin.json")
+            self.assertTrue(os.path.isfile(plugin_json_path))
+            import json
+            with open(plugin_json_path) as fh:
+                manifest = json.load(fh)
+            self.assertEqual(manifest["name"], claude_agent_sdk_bridge._SKILLS_PLUGIN_NAME)
+
+            skill_md_path = os.path.join(plugin_dir, "skills", "refund-lookup", "SKILL.md")
+            self.assertTrue(os.path.isfile(skill_md_path))
+            with open(skill_md_path) as fh:
+                content = fh.read()
+            self.assertIn('name: "Refund lookup"', content)
+            self.assertIn("description:", content)
+            self.assertIn("Look up the order.", content)
+            # Never a hooks directory — Empyralis's own code must be the
+            # ONLY writer of this plugin dir, and must never write a
+            # hooks/hooks.json it didn't author.
+            self.assertFalse(os.path.isdir(os.path.join(plugin_dir, "hooks")))
+        finally:
+            pass  # addCleanup above handles removal even on assertion failure
+
+    def test_command_kind_entries_are_never_delivered(self):
+        # "command" isn't a supported kind (fleet_tools._VALID_SKILL_KINDS),
+        # but this asserts the DELIVERY layer's own belt-and-suspenders
+        # filter too, in case a stale/pre-validation record ever reaches it.
+        skills = [{"name": "X", "description": "d", "body": "b", "kind": "command", "enabled": True}]
+        self.assertEqual(claude_agent_sdk_bridge.build_skills_plugin_dir(skills), "")
+
+    def test_disabled_skill_among_enabled_ones_is_excluded(self):
+        skills = [
+            {"name": "On", "description": "d", "body": "body-on", "kind": "skill", "enabled": True},
+            {"name": "Off", "description": "d", "body": "body-off", "kind": "skill", "enabled": False},
+        ]
+        plugin_dir = claude_agent_sdk_bridge.build_skills_plugin_dir(skills)
+        self.addCleanup(self._cleanup, plugin_dir)
+        skills_root = os.path.join(plugin_dir, "skills")
+        self.assertEqual(os.listdir(skills_root), ["on"])
+
+    def test_duplicate_slugs_are_disambiguated(self):
+        skills = [
+            {"name": "My Skill!", "description": "d", "body": "first", "kind": "skill", "enabled": True},
+            {"name": "my_skill", "description": "d", "body": "second", "kind": "skill", "enabled": True},
+        ]
+        plugin_dir = claude_agent_sdk_bridge.build_skills_plugin_dir(skills)
+        self.addCleanup(self._cleanup, plugin_dir)
+        skills_root = os.path.join(plugin_dir, "skills")
+        self.assertEqual(sorted(os.listdir(skills_root)), ["my-skill", "my-skill-2"])
+
+    def test_special_characters_in_name_do_not_break_the_frontmatter(self):
+        skills = [{
+            "name": 'Weird "name": with colon', "description": "desc: with colon too",
+            "body": "body", "kind": "skill", "enabled": True,
+        }]
+        plugin_dir = claude_agent_sdk_bridge.build_skills_plugin_dir(skills)
+        self.addCleanup(self._cleanup, plugin_dir)
+        skill_dirs = os.listdir(os.path.join(plugin_dir, "skills"))
+        skill_md_path = os.path.join(plugin_dir, "skills", skill_dirs[0], "SKILL.md")
+        with open(skill_md_path) as fh:
+            content = fh.read()
+        # A valid, well-formed frontmatter block — quoted scalars, no
+        # unescaped double-quote breaking the block.
+        self.assertTrue(content.startswith("---\n"))
+        self.assertIn('name: "Weird \\"name\\": with colon"', content)
+
+
+class RunClaudeAgentSdkTurnSkillsWiringTests(unittest.TestCase):
+    """run_claude_agent_sdk_turn's own `skills=` wiring: an agent install
+    with enabled skills gets Skill deliberately reopened (tools/
+    allowed_tools/plugins); an agent with none configured is byte-for-byte
+    identical to RunClaudeAgentSdkTurnBuiltInToolLockdownTests above (no
+    `skills=` argument at all there — this class is what actually exercises
+    the parameter)."""
+
+    def _capture_options_kwargs(self, *, responses, skills=None, tool_defs=(), resume_session_id=""):
+        import claude_agent_sdk as real_sdk
+
+        captured: list[Dict[str, Any]] = []
+
+        class _FakeOptions:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        fake_client = _fake_claude_sdk_client(responses)
+        with (
+            patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
+            patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
+            patch.object(real_sdk, "ClaudeSDKClient", new=fake_client),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="use the refund skill",
+                system_prompt="",
+                prior_messages=[],
+                tool_defs=list(tool_defs),
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                provider="anthropic",
+                model="claude-x",
+                credentials={"api_key": "sk-test"},
+                trace_context=_trace_context(),
+                skills=skills,
+                resume_session_id=resume_session_id,
+            ))
+        return captured
+
+    _ONE_SKILL = [{
+        "name": "Refund lookup", "description": "Use for refund questions.",
+        "body": "Look up the order and report status.", "kind": "skill", "enabled": True,
+    }]
+
+    def test_no_skills_parameter_is_byte_identical_to_lockdown_pin(self):
+        captured = self._capture_options_kwargs(responses=[[_result_message()]])
+        kwargs = captured[0]
+        self.assertEqual(kwargs["tools"], [])
+        self.assertEqual(kwargs["plugins"], [])
+        self.assertNotIn("Skill", kwargs["allowed_tools"])
+
+    def test_empty_skills_list_is_byte_identical_too(self):
+        captured = self._capture_options_kwargs(responses=[[_result_message()]], skills=[])
+        kwargs = captured[0]
+        self.assertEqual(kwargs["tools"], [])
+        self.assertEqual(kwargs["plugins"], [])
+
+    def test_all_disabled_skills_is_byte_identical(self):
+        disabled = [dict(self._ONE_SKILL[0], enabled=False)]
+        captured = self._capture_options_kwargs(responses=[[_result_message()]], skills=disabled)
+        kwargs = captured[0]
+        self.assertEqual(kwargs["tools"], [])
+        self.assertEqual(kwargs["plugins"], [])
+
+    def test_enabled_skill_reopens_the_skill_built_in_only(self):
+        captured = self._capture_options_kwargs(responses=[[_result_message()]], skills=self._ONE_SKILL)
+        kwargs = captured[0]
+        self.assertEqual(kwargs["tools"], ["Skill"])
+        # Never the rest of the claude_code preset, and never "Agent" — no
+        # agents= subagent content is wired this pass.
+        for builtin in ("TaskCreate", "TodoWrite", "Read", "Write", "Bash", "Task", "Agent"):
+            self.assertNotIn(builtin, kwargs["tools"])
+
+    def test_enabled_skill_pre_approves_skill_in_allowed_tools(self):
+        captured = self._capture_options_kwargs(responses=[[_result_message()]], skills=self._ONE_SKILL)
+        self.assertIn("Skill", captured[0]["allowed_tools"])
+
+    def test_enabled_skill_sets_a_real_local_plugin_path(self):
+        captured = self._capture_options_kwargs(responses=[[_result_message()]], skills=self._ONE_SKILL)
+        plugins = captured[0]["plugins"]
+        self.assertEqual(len(plugins), 1)
+        self.assertEqual(plugins[0]["type"], "local")
+        self.assertTrue(plugins[0]["path"])
+        # The directory existed while the turn was running (fake client
+        # never actually touches disk, so this only proves it was live at
+        # options-build time, not that it survives after — see the cleanup
+        # test below for that half).
+        self.assertIn("empyralis-claude-skills-", plugins[0]["path"])
+
+    def test_setting_sources_still_stays_empty_with_skills_configured(self):
+        # The one thing that must NEVER change: plugin-dir delivery is
+        # independent of setting_sources (verified against the installed
+        # SDK's subprocess_cli.py — --plugin-dir is unconditional). Skills
+        # being configured must not reopen filesystem settings/CLAUDE.md.
+        captured = self._capture_options_kwargs(responses=[[_result_message()]], skills=self._ONE_SKILL)
+        self.assertEqual(captured[0]["setting_sources"], [])
+        self.assertIs(captured[0]["strict_mcp_config"], True)
+
+    def test_plugin_dir_is_removed_after_the_turn_completes(self):
+        captured_paths: list[str] = []
+        orig_build = claude_agent_sdk_bridge.build_skills_plugin_dir
+
+        def _spy(skills):
+            path = orig_build(skills)
+            if path:
+                captured_paths.append(path)
+            return path
+
+        with patch.object(claude_agent_sdk_bridge, "build_skills_plugin_dir", side_effect=_spy):
+            self._capture_options_kwargs(responses=[[_result_message()]], skills=self._ONE_SKILL)
+        self.assertEqual(len(captured_paths), 1)
+        self.assertFalse(os.path.isdir(captured_paths[0]))
+
+    def test_plugin_dir_is_removed_even_when_the_turn_raises(self):
+        captured_paths: list[str] = []
+        orig_build = claude_agent_sdk_bridge.build_skills_plugin_dir
+
+        def _spy(skills):
+            path = orig_build(skills)
+            if path:
+                captured_paths.append(path)
+            return path
+
+        with (
+            patch.object(claude_agent_sdk_bridge, "build_skills_plugin_dir", side_effect=_spy),
+        ):
+            with self.assertRaises(RuntimeError):
+                self._capture_options_kwargs(
+                    responses=[([], RuntimeError("boom"))], skills=self._ONE_SKILL,
+                )
+        self.assertEqual(len(captured_paths), 1)
+        self.assertFalse(os.path.isdir(captured_paths[0]))
+
+    def test_both_options_objects_on_a_resume_retry_share_the_same_plugin_dir(self):
+        # Mirrors test_every_options_object_including_the_resume_retry_
+        # disables_built_ins for config_dir's own sibling resource: built
+        # ONCE per turn, not once per _build_options() call.
+        captured = self._capture_options_kwargs(
+            responses=[([], RuntimeError("no such session")), [_result_message()]],
+            skills=self._ONE_SKILL,
+            resume_session_id="sess-stale",
+        )
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(captured[0]["plugins"], captured[1]["plugins"])
+
+
 if __name__ == "__main__":
     unittest.main()

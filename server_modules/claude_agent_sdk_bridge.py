@@ -122,6 +122,8 @@ import asyncio
 import itertools
 import json
 import logging
+import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, field
@@ -174,6 +176,28 @@ _UNSUPPORTED_TOOL_NAMES = frozenset({"task_complete", "update_plan", "query_tool
 #   name. Same failure class, different door.
 _FOREIGN_TOOL_TRACE_CODE = "foreign_tool_call"
 _ORPHAN_TOOL_RESULT_TRACE_CODE = "orphan_tool_result"
+
+# MAN-310 skills-delivery: the CLI's OWN built-in meta-tools that a turn may
+# deliberately re-open (see build_skills_plugin_dir / run_claude_agent_sdk_
+# turn's `tools=` construction) now that tools=[] no longer means "every
+# built-in is unreachable" unconditionally. Mapped to the HONEST trace event
+# type each one gets — never "tool.started"/"tool.result" (that bucket is
+# `tool_calls`, what tool_honesty_guard checks a reply's claims against, and
+# a Skill/Agent call is not a registered Empyralis tool doing Empyralis
+# work), and never "trace.failed" either (that bucket is `blocked_tools`, a
+# real failure — a deliberately-reopened meta-tool succeeding is not one).
+# Exact names verified against the installed SDK, not guessed: `tools:
+# list[str] | ToolsPreset | None` on ClaudeAgentOptions documents "list[str]
+# — Specific tool names (e.g. ["Bash", "Read", "Edit"])"; AgentDefinition's
+# own docstring says "Programmatically define custom subagents invokable via
+# the Agent tool"; ClaudeAgentOptions.skills says skill files are "rejected
+# by the Skill tool" when not listed — both PascalCase, both bare (neither
+# is an mcp__*__* name, since neither is an MCP tool) — see venv/claude_
+# agent_sdk/types.py (ClaudeAgentOptions.tools/.agents/.skills docstrings).
+_META_TOOL_EVENT_TYPES = {
+    "Agent": "subagent.invoked",
+    "Skill": "skill.invoked",
+}
 
 # The one trace.failed `code` this module uses when the turn failed upstream
 # (the provider/API, not a tool). Deliberately ONE token, not a taxonomy:
@@ -489,6 +513,44 @@ def is_registered_empyralis_tool(
     return strip_mcp_tool_prefix(token) in known_tool_names
 
 
+def is_recognized_meta_tool_call(
+    raw_name: str, meta_tools_enabled: Optional[frozenset] = None
+) -> bool:
+    """Is `raw_name` one of the CLI's own built-in meta-tools (Agent/Skill —
+    see _META_TOOL_EVENT_TYPES) that THIS turn deliberately re-opened?
+
+    Deliberately a SEPARATE check from is_registered_empyralis_tool rather
+    than folded into it: Agent/Skill are not Empyralis tools (nothing here
+    registered them with the SDK MCP server, and they carry no mcp__
+    prefix), so widening that function's own "is this a REGISTERED EMPYRALIS
+    tool" contract to also mean "or one of the CLI's own reopened built-ins"
+    would blur a distinction translate_sdk_message's caller needs kept sharp
+    (see _META_TOOL_EVENT_TYPES' own docstring on why the trace event type
+    must differ).
+
+    `meta_tools_enabled` mirrors is_registered_empyralis_tool's own
+    known_tool_names contract on purpose, DEFENCE IN DEPTH included: `None`
+    ("not configured") is permissive — the pure-translation unit-test mode,
+    matching known_tool_names=None's own meaning — but production
+    (run_claude_agent_sdk_turn) always passes a real frozenset, typically
+    `frozenset({"Skill"})` on a turn with enabled skills configured and
+    `frozenset()` (empty — recognizes NOTHING) otherwise. That empty-set
+    default is what keeps this a narrow allowlist rather than a blanket
+    reopening: if "Skill"/"Agent" ever reached the model on a turn that
+    never asked ClaudeAgentOptions.tools to include it — a future options
+    regression, exactly the failure class is_registered_empyralis_tool's own
+    docstring describes — this returns False for it, and it falls through
+    to the EXISTING foreign-tool guard below instead of being silently
+    trusted just because its name matches a known meta-tool.
+    """
+    token = str(raw_name or "").strip()
+    if token not in _META_TOOL_EVENT_TYPES:
+        return False
+    if meta_tools_enabled is None:
+        return True
+    return token in meta_tools_enabled
+
+
 def _safe_parse_tool_name(tool_name: str) -> Tuple[str, str]:
     try:
         connector_id, action_id = direct_chat_operator_binding_service.parse_tool_name(tool_name)
@@ -578,6 +640,21 @@ class TranslationState:
     # in the ResultMessage branch that keeps the same prose from arriving as
     # the reply by the other door (ResultMessage.result).
     saw_provider_error: bool = False
+    # The set of meta-tool names (bare "Agent"/"Skill" — they carry no
+    # mcp__ prefix, see is_recognized_meta_tool_call) THIS turn deliberately
+    # re-opened. None ("not configured") is the permissive
+    # pure-translation-unit-test default; run_claude_agent_sdk_turn always
+    # supplies a real frozenset (empty when no skills are configured this
+    # turn) — see is_recognized_meta_tool_call's own docstring for why that
+    # default matters (defence in depth, symmetric with known_tool_names).
+    meta_tools_enabled: Optional[frozenset] = None
+    # tool_use_id -> the honest trace event type it was announced under
+    # (_META_TOOL_EVENT_TYPES' values), so the matching ToolResultBlock (see
+    # the UserMessage branch) reports its result under the SAME event type
+    # instead of falling into the orphan-result or foreign-tool branches —
+    # neither of which this is: a deliberately-reopened meta-tool call is
+    # neither unattributed nor foreign.
+    meta_tool_use_ids: Dict[str, str] = field(default_factory=dict)
 
 
 def translate_sdk_message(
@@ -703,6 +780,27 @@ def translate_sdk_message(
             raw_name = str(getattr(block, "name", "") or "")
             raw_input = getattr(block, "input", None)
             tool_input = dict(raw_input) if isinstance(raw_input, dict) else {}
+            if is_recognized_meta_tool_call(raw_name, state.meta_tools_enabled):
+                # A deliberately-reopened CLI built-in (Agent/Skill), not an
+                # Empyralis tool and not a foreign one either — see
+                # _META_TOOL_EVENT_TYPES. Its own honest event type, tracked
+                # by tool_use_id so the matching ToolResultBlock (UserMessage
+                # branch below) reports under the SAME type instead of
+                # falling into the orphan-result branch.
+                meta_event_type = _META_TOOL_EVENT_TYPES[raw_name]
+                state.meta_tool_use_ids[tool_use_id] = meta_event_type
+                meta_event = _envelope(
+                    meta_event_type,
+                    {
+                        "phase": "started",
+                        "tool_name": raw_name,
+                        "args_preview": secret_redaction_service.sanitize_mapping(tool_input),
+                    },
+                    tool_call_id=tool_use_id,
+                )
+                if meta_event is not None:
+                    events.append(meta_event)
+                continue
             if not is_registered_empyralis_tool(raw_name, state.known_tool_names):
                 # NOT Empyralis work. Emitting the usual tool.started/
                 # tool.result pair here is precisely how "Task #1 created
@@ -779,6 +877,28 @@ def translate_sdk_message(
                 # Already surfaced as a trace.failed anomaly when the
                 # ToolUseBlock came through. Whatever this result says, it
                 # is another system's bookkeeping — not a tool.result.
+                continue
+            if tool_use_id in state.meta_tool_use_ids:
+                # The result half of a deliberately-reopened meta-tool call
+                # (see the AssistantMessage branch above) — reported under
+                # the SAME honest event type as the "started" half, never as
+                # a plain tool.result (that bucket is `tool_calls`) and
+                # never as an orphan (it IS attributed — to the meta-tool
+                # event, not to Empyralis work).
+                meta_event_type = state.meta_tool_use_ids[tool_use_id]
+                is_error = bool(getattr(block, "is_error", False) or False)
+                result_text = _tool_result_block_text(getattr(block, "content", None))
+                # redact_text: this is the CLI's own output (which subagent
+                # ran, which skill fired, what it said) — not vetted the way
+                # an Empyralis connector's own result_summary already is.
+                detail = secret_redaction_service.redact_text(result_text)[:500]
+                meta_result_event = _envelope(
+                    meta_event_type,
+                    {"phase": "result", "status": "failed" if is_error else "ok", "summary": detail},
+                    tool_call_id=tool_use_id,
+                )
+                if meta_result_event is not None:
+                    events.append(meta_result_event)
                 continue
             if tool_use_id not in state.tool_use_names:
                 # A result for a call this stream never announced. The
@@ -1018,6 +1138,115 @@ def build_sdk_tools(
     return sdk_tools
 
 
+# MAN-310 skills-delivery: minimal plugin.json shape, matching a real
+# installed plugin on this machine (~/.claude/plugins/cache/openai-codex/
+# codex/1.0.0/.claude-plugin/plugin.json — {"name", "description", "author"})
+# rather than guessed. `name` is the plugin-qualifier prefix the CLI shows
+# discovered skills under (e.g. that plugin's own skills list as "codex:
+# <skill-name>"); fixed here since every turn only ever builds ONE plugin
+# for ONE agent install's own skills, never a marketplace of several.
+_SKILLS_PLUGIN_NAME = "empyralis-agent-skills"
+_SKILL_SLUG_INVALID_CHARS_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify_skill_name(name: str, fallback: str) -> str:
+    """A filesystem- and SKILL.md-directory-safe slug for a skill's display
+    name. Never empty (falls back to `fallback`, e.g. "skill-3") — an empty
+    directory name would either fail os.makedirs or, worse, collapse to the
+    plugin root itself."""
+    slug = _SKILL_SLUG_INVALID_CHARS_RE.sub("-", str(name or "").strip().lower()).strip("-")
+    return slug or fallback
+
+
+def _yaml_quoted_scalar(value: str) -> str:
+    """A double-quoted YAML scalar safe for arbitrary owner-authored text
+    (colons, quotes, newlines) inside a SKILL.md frontmatter block. Not a
+    general YAML encoder — just enough escaping (backslash, double-quote,
+    newline) for the two fields (name/description) this module ever writes
+    into frontmatter, both single-line by the time they reach here."""
+    escaped = str(value or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def build_skills_plugin_dir(skills: Optional[Sequence[Dict[str, Any]]]) -> str:
+    """Materialize this turn's ENABLED, kind="skill" entries as real
+    SKILL.md files under a fresh temp directory shaped like a Claude Code
+    plugin, or "" when there is nothing to deliver (no skills configured, or
+    none of them are enabled skill-kind entries with a name+body) — the "no
+    skills configured" case is what keeps an agent with none behaving byte-
+    for-byte identically to before this function existed (see
+    run_claude_agent_sdk_turn, which only sets tools/plugins/allowed_tools
+    for the Skill built-in when this returns non-empty).
+
+    Lifecycle discipline mirrors config_dir exactly, on purpose (same
+    hazard, same fix): tempfile.mkdtemp() here, destroyed in run_claude_
+    agent_sdk_turn's own `finally` block, never reused across turns or
+    tenants. Empyralis's own code is the ONLY writer of this directory —
+    it never contains a hooks/hooks.json, because nothing here ever creates
+    a `hooks/` subdirectory at all. Hooks execute arbitrary shell commands
+    on tool events; a tenant-authored skill's SKILL.md body is inert
+    Markdown text a model reads, never something the CLI executes — that
+    distinction is the whole reason this is safe to build from untrusted
+    per-workspace input in the first place.
+
+    Every skill name is validated at fleet_tools._normalize_skills_patch
+    (save time) — this reads already-clean storage (fleet_tools.
+    resolve_agent_skills), so it degrades a malformed record (missing
+    name/body) by skipping it rather than raising, matching resolve_agent_
+    skills' own fail-open-by-omission behavior.
+    """
+    enabled = [
+        skill for skill in (skills or [])
+        if isinstance(skill, dict)
+        and skill.get("enabled")
+        and str(skill.get("kind") or "skill").strip().lower() == "skill"
+        and str(skill.get("name") or "").strip()
+        and str(skill.get("body") or "").strip()
+    ]
+    if not enabled:
+        return ""
+
+    plugin_dir = tempfile.mkdtemp(prefix="empyralis-claude-skills-")
+    plugin_meta_dir = os.path.join(plugin_dir, ".claude-plugin")
+    os.makedirs(plugin_meta_dir, exist_ok=True)
+    with open(os.path.join(plugin_meta_dir, "plugin.json"), "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "name": _SKILLS_PLUGIN_NAME,
+                "description": "Workspace-authored skills for this Empyralis agent.",
+            },
+            fh,
+        )
+
+    used_slugs: set = set()
+    for index, skill in enumerate(enabled, start=1):
+        raw_name = str(skill.get("name") or "").strip()
+        slug = _slugify_skill_name(raw_name, f"skill-{index}")
+        # Two differently-named skills can slugify to the same directory
+        # name (e.g. "My Skill!" and "my_skill") — de-duplicate rather than
+        # let the second silently overwrite the first's SKILL.md.
+        base_slug, suffix = slug, 2
+        while slug in used_slugs:
+            slug = f"{base_slug}-{suffix}"
+            suffix += 1
+        used_slugs.add(slug)
+
+        skill_dir = os.path.join(plugin_dir, "skills", slug)
+        os.makedirs(skill_dir, exist_ok=True)
+        description = str(skill.get("description") or raw_name).strip().replace("\n", " ")
+        body = str(skill.get("body") or "").strip()
+        frontmatter = (
+            "---\n"
+            f"name: {_yaml_quoted_scalar(raw_name or slug)}\n"
+            f"description: {_yaml_quoted_scalar(description)}\n"
+            "---\n\n"
+        )
+        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as fh:
+            fh.write(frontmatter + body + "\n")
+
+    return plugin_dir
+
+
 def render_prompt(message: str, prior_messages: Optional[List[Dict[str, Any]]]) -> str:
     """Fold prior turns into a single prompt string for query()'s one-shot
     `prompt` mode.
@@ -1086,6 +1315,15 @@ async def run_claude_agent_sdk_turn(
     # resumable session — takes the exact pre-Phase-2 path: render_prompt
     # folds prior_messages in every time, byte-for-byte unchanged.
     resume_session_id: str = "",
+    # MAN-310 skills-delivery: this agent install's configured skills — the
+    # SAME shape fleet_tools.resolve_agent_skills(..., enabled_only=True)
+    # returns ({id, name, description, body, kind, enabled}, kind="skill"
+    # only for now — see fleet_tools._VALID_SKILL_KINDS). None/empty (every
+    # existing caller, and any agent with none configured) means this turn
+    # behaves BYTE-FOR-BYTE identically to before this parameter existed —
+    # see build_skills_plugin_dir, which returns "" for that input and is
+    # the one thing every skills-shaped change below is gated on.
+    skills: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Drive one turn through claude_agent_sdk, translating every yielded
     message into Empyralis's event dicts. Returns the SAME list[dict] shape
@@ -1150,6 +1388,26 @@ async def run_claude_agent_sdk_turn(
     known_tool_names = frozenset(
         str(tool_def.get("name") or "").strip() for tool_def in usable_tool_defs
     ) - {""}
+    # MAN-310 skills-delivery: "" (no enabled skill-kind entries) is the
+    # SAME as this parameter never existing — see build_skills_plugin_dir's
+    # own docstring. Only when it returns a real path does anything below
+    # touch tools/allowed_tools/plugins/meta_tools_enabled at all.
+    skills_plugin_dir = build_skills_plugin_dir(skills)
+    if skills_plugin_dir:
+        # Pre-approved, the same way Empyralis's own mcp__empyralis__* tools
+        # already are above — this runs headless, with no human available to
+        # answer a permission prompt, so an un-approved "Skill" call would
+        # simply hang rather than ever reach the model's answer.
+        allowed_tools = allowed_tools + ["Skill"]
+    # The one authoritative answer to "is this tool call a deliberately-
+    # reopened meta-tool?" for is_recognized_meta_tool_call — empty
+    # (recognizes NOTHING) unless this turn actually asked
+    # ClaudeAgentOptions.tools to include "Skill". Agent is never in this
+    # set yet: no agents= subagent-shaped content is wired this pass (see
+    # this module's MAN-310 skills-delivery docstring note), so the
+    # translate_sdk_message allowlist recognizes "Agent" in the abstract
+    # (_META_TOOL_EVENT_TYPES) without any turn ever actually reopening it.
+    meta_tools_enabled = frozenset({"Skill"}) if skills_plugin_dir else frozenset()
     # Resolved ONCE, from the same inputs the subprocess env is built from,
     # and fed to every TranslationState this turn creates (including the
     # resume-fallback retry below). This is the only thing that lets
@@ -1203,7 +1461,16 @@ async def run_claude_agent_sdk_turn(
                 # called and really did succeed, just in the CLI's own
                 # bookkeeping instead of the product's. Work that never
                 # happened must never be reportable as done.
-                tools=[],
+                #
+                # MAN-310 skills-delivery: the ONE narrow, named exception —
+                # "Skill" (never the rest of the claude_code preset, never
+                # "Agent" — no agents= subagent-shaped content is wired this
+                # pass) is added back ONLY when skills_plugin_dir is non-
+                # empty, i.e. only when THIS agent install has at least one
+                # enabled skill configured (fleet_tools.resolve_agent_
+                # skills). An agent with none configured gets tools=[]
+                # unchanged — byte-for-byte the pre-existing behavior.
+                tools=(["Skill"] if skills_plugin_dir else []),
                 # Only the MCP server built above. Without this the CLI
                 # ALSO loads whatever MCP configuration it finds ambiently
                 # — a project .mcp.json next to the backend process's cwd,
@@ -1236,6 +1503,21 @@ async def run_claude_agent_sdk_turn(
                 # and local scopes, which are cwd-derived and unaffected by
                 # that variable.
                 setting_sources=[],
+                # MAN-310 skills-delivery: local plugin dirs load over
+                # `--plugin-dir`, a code path INDEPENDENT of setting_sources
+                # (verified in the installed SDK's _internal/transport/
+                # subprocess_cli.py: the plugin-dir flags are appended
+                # unconditionally, never gated on effective_setting_
+                # sources) — the reason setting_sources=[] above does not
+                # also have to be loosened for this to work. Empty when no
+                # skills are configured this turn (build_skills_plugin_dir
+                # returned ""), so an agent with none behaves identically to
+                # before this parameter existed. The directory itself is
+                # Empyralis's OWN, freshly-written output for this one turn
+                # (build_skills_plugin_dir) — never a path supplied by a
+                # tenant, and it never contains a hooks/hooks.json, because
+                # nothing here ever creates a `hooks/` subdirectory.
+                plugins=([{"type": "local", "path": skills_plugin_dir}] if skills_plugin_dir else []),
                 model=model or None,
                 max_turns=max_turns,
                 resume=resume or None,
@@ -1343,6 +1625,7 @@ async def run_claude_agent_sdk_turn(
 
         state = TranslationState(
             known_tool_names=known_tool_names, served_by_anthropic=served_by_anthropic,
+            meta_tools_enabled=meta_tools_enabled,
         )
         events: List[Dict[str, Any]] = []
         received_any_message = False
@@ -1377,6 +1660,8 @@ async def run_claude_agent_sdk_turn(
         return events
     finally:
         shutil.rmtree(config_dir, ignore_errors=True)
+        if skills_plugin_dir:
+            shutil.rmtree(skills_plugin_dir, ignore_errors=True)
         for _token in minted_adapter_tokens:
             openai_compat_adapter.clear_turn_credential(_token)
 

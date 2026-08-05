@@ -3889,5 +3889,139 @@ class CollectSageOperatorLoopV3EventsToolResultStatusTests(unittest.TestCase):
         self.assertEqual(collected["tool_calls"][0]["status"], "completed")
 
 
+class CollectSageOperatorLoopV3EventsMetaToolCallsTests(unittest.TestCase):
+    """MAN-310 skills-delivery: skill.invoked/subagent.invoked trace events
+    (claude_agent_sdk_bridge's honest meta-tool event types) land in their
+    OWN `meta_tool_calls` bucket — never tool_calls (tool_honesty_guard's
+    own input) and never blocked_tools (a real failure)."""
+
+    @staticmethod
+    def _meta_event(*, event_type: str, tool_call_id: str, phase: str, **data) -> dict:
+        return {
+            "type": "trace",
+            "payload": {"event_type": event_type, "tool_call_id": tool_call_id, "data": {"phase": phase, **data}},
+        }
+
+    def test_skill_invoked_never_enters_tool_calls_or_blocked_tools(self) -> None:
+        events = [
+            self._meta_event(event_type="skill.invoked", tool_call_id="c1", phase="started", tool_name="Skill"),
+            self._meta_event(event_type="skill.invoked", tool_call_id="c1", phase="result", status="ok", summary="done"),
+        ]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["tool_calls"], [])
+        self.assertEqual(collected["blocked_tools"], [])
+        self.assertEqual(len(collected["meta_tool_calls"]), 1)
+        entry = collected["meta_tool_calls"][0]
+        self.assertEqual(entry["kind"], "skill")
+        self.assertEqual(entry["status"], "completed")
+        self.assertEqual(entry["summary"], "done")
+
+    def test_subagent_invoked_is_bucketed_with_kind_subagent(self) -> None:
+        events = [self._meta_event(event_type="subagent.invoked", tool_call_id="c2", phase="started", tool_name="Agent")]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["meta_tool_calls"][0]["kind"], "subagent")
+
+    def test_failed_meta_tool_result_is_still_not_a_blocked_tool(self) -> None:
+        events = [
+            self._meta_event(event_type="skill.invoked", tool_call_id="c3", phase="started", tool_name="Skill"),
+            self._meta_event(event_type="skill.invoked", tool_call_id="c3", phase="result", status="failed", summary="broke"),
+        ]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["blocked_tools"], [])
+        self.assertEqual(collected["meta_tool_calls"][0]["status"], "failed")
+
+    def test_a_meta_tool_only_turn_is_still_text_only(self) -> None:
+        # Empyralis's own perspective: a turn that only invoked a skill and
+        # called no Empyralis tool really did no Empyralis-tool work.
+        events = [
+            self._meta_event(event_type="skill.invoked", tool_call_id="c4", phase="started", tool_name="Skill"),
+            {"type": "final", "payload": {"reply": "Here is your answer."}},
+        ]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["action_execution_mode"], "text_only")
+
+    def test_no_meta_tool_events_yields_an_empty_bucket(self) -> None:
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events([])
+        self.assertEqual(collected["meta_tool_calls"], [])
+
+
+class ResolveSpecialistToolsetSkillsTests(unittest.TestCase):
+    """_resolve_specialist_toolset's own `skills` key — the glue between
+    fleet_tools.resolve_agent_skills and claude_agent_sdk_bridge.run_
+    claude_agent_sdk_turn's `skills=` parameter (see _run_sage_action_loop_
+    v3's _collect_stream_events closure, which forwards this straight
+    through)."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_enabled_skills_are_resolved_onto_the_toolset(self) -> None:
+        bundle = {
+            "install_metadata": {
+                "skills": [
+                    {"name": "On", "description": "d", "body": "b", "kind": "skill", "enabled": True},
+                    {"name": "Off", "description": "d", "body": "b", "kind": "skill", "enabled": False},
+                ],
+            },
+            "tool_toggles": {},
+        }
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ),
+        ):
+            toolset = self._run(sage_agent_runtime_service._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="default", agent_install_id="agent-1",
+            ))
+        self.assertEqual([s["name"] for s in toolset["skills"]], ["On"])
+
+    def test_no_skills_configured_resolves_to_an_empty_list(self) -> None:
+        bundle = {"install_metadata": {}, "tool_toggles": {}}
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ),
+        ):
+            toolset = self._run(sage_agent_runtime_service._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="default", agent_install_id="agent-1",
+            ))
+        self.assertEqual(toolset["skills"], [])
+
+    def test_bundle_load_failure_fails_safe_to_no_skills(self) -> None:
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(side_effect=RuntimeError("control plane unavailable")),
+            ),
+        ):
+            toolset = self._run(sage_agent_runtime_service._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="default", agent_install_id="agent-1",
+            ))
+        self.assertEqual(toolset["skills"], [])
+
+    def test_master_agent_path_never_resolves_a_toolset_at_all(self) -> None:
+        # agent_install_id="" is the master/Sage path — _resolve_specialist_
+        # toolset returns None outright, same architectural boundary
+        # persona/instructions already draws (specialist_runtime_context.py).
+        toolset = self._run(sage_agent_runtime_service._resolve_specialist_toolset(
+            workspace_id="ws-1", tenant_id="default", agent_install_id="",
+        ))
+        self.assertIsNone(toolset)
+
+
 if __name__ == "__main__":
     unittest.main()

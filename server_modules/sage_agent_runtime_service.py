@@ -2241,6 +2241,9 @@ async def _resolve_specialist_toolset(
     # rest of this function: a lookup error must never silently grant a
     # specialist the sub-agent spawn tool.
     subagents_enabled = False
+    # Fail-safe default (MAN-310 skills-delivery): a lookup error must never
+    # silently deliver a stale/wrong skill set — no skills this turn instead.
+    skills: list[dict[str, Any]] = []
     try:
         from server_modules import agent_bindings_repository as _bind
         rows = await _bind.list_agent_connector_bindings(
@@ -2279,6 +2282,22 @@ async def _resolve_specialist_toolset(
         # Threaded onto session_ctx below so the mandate gate can consult it
         # without a fetch of its own.
         meta = bundle.get("install_metadata") if isinstance(bundle, dict) and isinstance(bundle.get("install_metadata"), dict) else (bundle.get("metadata") if isinstance(bundle, dict) else None)
+        # MAN-310 skills-delivery: this specialist's ENABLED skills, read
+        # from the SAME bundle fetch (no extra round-trip), scoped to
+        # specialist installs only — the same architectural boundary
+        # persona/instructions already draws (specialist_runtime_context.py
+        # only ever resolves a persona for a specialist install; the master/
+        # Sage path returns None and runs its own separately-built system
+        # prompt). fleet_tools.resolve_agent_skills(enabled_only=True) is
+        # also what fails safe on a malformed record (skips it) rather than
+        # raising, matching every other lookup in this function.
+        try:
+            skills = _fleet_tools_subagents.resolve_agent_skills(bundle, enabled_only=True)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "specialist toolset: skills resolution failed for %s — no skills this turn", aid, exc_info=True
+            )
+            skills = []
         mandate = meta.get("mandate") if isinstance(meta, dict) and isinstance(meta.get("mandate"), dict) else {}
         raw_audience_tools = mandate.get("audience_tools")
         if isinstance(raw_audience_tools, list):
@@ -2308,6 +2327,7 @@ async def _resolve_specialist_toolset(
         logging.getLogger(__name__).warning(
             "specialist toolset: install bundle load failed for %s — core-only", aid, exc_info=True
         )
+        skills = []
     return {
         "core": _core_direct_tool_names(),
         "connectors": connectors,
@@ -2315,6 +2335,11 @@ async def _resolve_specialist_toolset(
         "raw_tool_toggles": raw_toggles,
         "mandate_audience_tools": mandate_audience_tools,
         "capability_providers": capability_providers,
+        # MAN-310 skills-delivery: forwarded to claude_agent_sdk_bridge.
+        # run_claude_agent_sdk_turn's own `skills=` parameter at the
+        # _collect_stream_events seam below — see this function's own
+        # comment on why the master/Sage path never populates this.
+        "skills": skills,
         # §1.3 (Multiplayer Projects plan): this specialist's own identity,
         # so _filter_registry_for_specialist can tell "an MCP server this
         # workspace has connected" apart from "an MCP server THIS agent (or
@@ -2812,6 +2837,22 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
     blocked_tools: list[dict[str, Any]] = []
     trace_events: list[dict[str, Any]] = []
     tool_progress_messages: list[str] = []  # transient progress shown before final reply
+    # MAN-310 skills-delivery: a deliberately-reopened CLI meta-tool call
+    # (Skill/Agent — claude_agent_sdk_bridge._META_TOOL_EVENT_TYPES) lands
+    # HERE, never in tool_calls (real Empyralis work, what tool_honesty_
+    # guard checks a reply's claims against) and never in blocked_tools (a
+    # real failure). Keyed by tool_call_id so the "started"/"result" phases
+    # of the same call merge into one entry, mirroring _tool_entry's own
+    # dedup-by-id shape one level down.
+    meta_tool_calls_by_id: dict[str, dict[str, Any]] = {}
+    ordered_meta_tool_ids: list[str] = []
+
+    def _meta_tool_entry(tool_call_id: str, kind: str) -> dict[str, Any]:
+        key = _coerce_text(tool_call_id) or f"metacall-{len(ordered_meta_tool_ids) + 1}"
+        if key not in meta_tool_calls_by_id:
+            ordered_meta_tool_ids.append(key)
+            meta_tool_calls_by_id[key] = {"id": key, "kind": kind, "status": "running"}
+        return meta_tool_calls_by_id[key]
 
     def _tool_entry(tool_call_id: str, tool_name: str = "") -> dict[str, Any]:
         key = _coerce_text(tool_call_id) or f"toolcall-{len(ordered_tool_ids) + 1}"
@@ -2902,6 +2943,18 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
                     "reason": _coerce_text(data.get("summary")) or "blocked",
                     "status": "blocked",
                 })
+        elif trace_type in ("skill.invoked", "subagent.invoked"):
+            entry = _meta_tool_entry(tool_call_id, "skill" if trace_type == "skill.invoked" else "subagent")
+            phase = _coerce_text(data.get("phase")).lower()
+            if phase == "started":
+                entry["name"] = _coerce_text(data.get("tool_name")) or entry["kind"]
+                entry["arguments"] = data.get("args_preview") if isinstance(data.get("args_preview"), dict) else {}
+            elif phase == "result":
+                status = _coerce_text(data.get("status")).lower()
+                entry["status"] = "failed" if status == "failed" else "completed"
+                summary = _coerce_text(data.get("summary"))
+                if summary:
+                    entry["summary"] = summary
 
     approvals_required = _normalize_direct_action_approvals(final_payload)
     actions = final_payload.get("actions") if isinstance(final_payload.get("actions"), list) else []
@@ -2946,6 +2999,14 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
         "final_payload": final_payload,
         "tool_calls": tool_calls,
         "blocked_tools": blocked_tools,
+        # MAN-310 skills-delivery: deliberately-reopened meta-tool calls
+        # (Skill/Agent) — their own honest bucket, never folded into
+        # tool_calls or blocked_tools above (see meta_tool_calls_by_id's own
+        # comment). action_execution_mode below deliberately does NOT factor
+        # this in: a turn that only invoked a skill and called no Empyralis
+        # tool is still "text_only" from Empyralis's own perspective — it
+        # really didn't do any Empyralis-tool work.
+        "meta_tool_calls": [meta_tool_calls_by_id[key] for key in ordered_meta_tool_ids],
         "approvals_required": approvals_required,
         "action_execution_mode": action_mode,
         "trace_events": trace_events,
@@ -3487,6 +3548,14 @@ async def _run_sage_action_loop_v3(
                 anthropic_api_key=str(_engine_options.get("anthropic_api_key") or "").strip(),
                 anthropic_base_url=str(_engine_options.get("anthropic_base_url") or "").strip(),
                 resume_session_id=_sdk_resume_session_id,
+                # MAN-310 skills-delivery: only ever populated for a
+                # specialist turn (_specialist_toolset is None on the
+                # master/Sage path — see _resolve_specialist_toolset's own
+                # "skills" comment for why that boundary is deliberate, not
+                # a gap). None/[] here reaches build_skills_plugin_dir as
+                # "nothing configured", which is what keeps an agent with no
+                # skills byte-for-byte unchanged.
+                skills=(_specialist_toolset or {}).get("skills") if isinstance(_specialist_toolset, dict) else None,
             )
         _gen = direct_chat_generation_service.stream_provider_backed_direct_chat(
             services=generation_services,

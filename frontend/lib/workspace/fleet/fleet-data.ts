@@ -16,6 +16,21 @@ export type StoppedState = {
   at?: string;
 };
 
+/** MAN-310 skills-delivery: install_metadata.skills — a reusable procedure
+ *  the model can invoke via the Claude Agent SDK engine's Skill tool
+ *  (server: fleet_tools.resolve_agent_skills / _normalize_skills_patch).
+ *  "command" is a valid future kind but not deliverable yet — see fleet_
+ *  tools._VALID_SKILL_KINDS' own docstring — so the client only ever
+ *  writes "skill". */
+export type FleetAgentSkill = {
+  id: string;
+  name: string;
+  description: string;
+  body: string;
+  kind: "skill";
+  enabled: boolean;
+};
+
 export type FleetAgent = {
   agent_id: string;
   label: string;
@@ -46,6 +61,7 @@ export type FleetAgent = {
   context_policy?: { max_context_tokens?: number; on_context_full?: string };
   subagents_enabled?: boolean;
   instructions?: string;
+  skills?: FleetAgentSkill[];
   preferred_gateway_id?: string;
   telegram_first_contact_reply?: boolean;
   stopped?: StoppedState;
