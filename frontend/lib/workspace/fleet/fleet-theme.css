@@ -7107,6 +7107,20 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   text-underline-offset: 2px;
 }
 
+/* Row shell wrapping the chat column and the (collapsed-by-default)
+   context-usage rail — see ContextUsageRail.tsx. Sits exactly where
+   .fleet-sage-chat used to sit as AgentChat's own top-level element, so it
+   takes over that flex:1/min-height:0 contract from BOTH callers (Sage's
+   own flex-column page shell below, and .fleet-agent-chat-panel's column
+   further down); .fleet-sage-chat, now its row child, keeps its own
+   flex:1 column rules to fill the row's height via the row's default
+   align-items:stretch — no separate height rule needed on it. */
+.fleet-agent-chat-shell {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+}
 /* SAGE — full-width chat with the Operator. No tabs, no stat cards, no right
    panel, no deployment status, no second header repeating "Sage" (the
    breadcrumb already says it — the Operator badge rides on that crumb via
@@ -7120,6 +7134,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-width: 0;
   min-height: 0;
 }
 /* Agent-detail's Chat tab: same component as Sage's own page, but its parent
@@ -7301,6 +7316,182 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   background: var(--bg-inset);
   color: var(--text-muted);
   cursor: not-allowed;
+}
+
+/* ── Context usage rail (ContextUsageRail.tsx) ─────────────────────────────
+   Collapsed by default: only the 36px toggle strip renders inside
+   .fleet-agent-chat-shell (a row, see above) until a person opens it — it
+   never occupies vertical space in the compose area, which is the whole
+   point (this product's target user is non-developers who have no reason
+   to see token accounting unasked). Neutral throughout, same restraint as
+   the Chat tab's own toolbar — the composer's Send button is still this
+   view's one accent surface. */
+.fleet-context-usage-rail {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  height: 100%;
+}
+.fleet-context-usage-toggle {
+  flex-shrink: 0;
+  width: 36px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: var(--space-4);
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.fleet-context-usage-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+.fleet-context-usage-rail.is-open .fleet-context-usage-toggle {
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border-left-color: transparent;
+}
+.fleet-context-usage-panel {
+  width: 260px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: var(--bg-card);
+  border-left: 1px solid var(--border);
+  animation: fleet-context-usage-panel-in var(--dur-2) var(--ease-out);
+}
+@keyframes fleet-context-usage-panel-in {
+  from { opacity: 0; transform: translateX(6px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.fleet-context-usage-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.fleet-context-usage-panel-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.fleet-context-usage-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.fleet-context-usage-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+.fleet-context-usage-empty {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin: 0;
+}
+.fleet-context-usage-model {
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-context-usage-meter {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.fleet-context-usage-meter-fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transition: width var(--dur-2) var(--ease-out);
+}
+.fleet-context-usage-totals {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.fleet-context-usage-pct {
+  color: var(--text-muted);
+}
+.fleet-context-usage-categories {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.fleet-context-usage-category {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.fleet-context-usage-category-swatch {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+.fleet-context-usage-category-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-context-usage-category-tokens {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.fleet-context-usage-reasoning-link {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+  margin-top: var(--space-1);
+}
+.fleet-context-usage-reasoning-link:hover {
+  color: var(--text-primary);
+  text-decoration: underline;
+}
+/* Narrow viewports: the panel pushing the chat column aside would crush it
+   to unusable width, so it leaves the flex flow (same escape hatch
+   .fleet-shell-panel's own mobile rule uses below) and overlays instead.
+   The 36px toggle strip stays inline either way. */
+@media (max-width: 768px) {
+  .fleet-context-usage-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(85vw, 300px);
+    z-index: 40;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  }
 }
 
 /* ── Mobile shell (<=768px) — Truth Map mobile pass, 2026-07-11 ────────────

@@ -5591,6 +5591,24 @@ async def handle_sage_chat(
         route_decision = dict(action_result.get("route_decision")) if isinstance(action_result.get("route_decision"), dict) else _build_sage_route_decision(message=normalized_message)
         action_execution_mode = _coerce_text(action_result.get("action_execution_mode")) or "tools_executed"
         trace_events = list(action_result.get("trace_events") or [])
+        # Present only for claude_agent_sdk-engine turns — see
+        # claude_agent_sdk_bridge.run_claude_agent_sdk_turn's best-effort
+        # get_context_usage() attach onto its ResultMessage "final" event
+        # payload (translate_sdk_message's ResultMessage branch), which
+        # rides through unmodified as action_result["raw_final_payload"]
+        # (== _collect_sage_operator_loop_v3_events' final_payload, a
+        # verbatim copy of that "final" event's payload dict). Legacy-engine
+        # and gateway_brain (local/cli_subscription) turns never populate
+        # this key on their own final payloads, so it is None for them —
+        # additive only, never fabricated for an engine that never had it.
+        _raw_final_payload_for_context_usage = action_result.get("raw_final_payload")
+        context_usage_payload = (
+            _raw_final_payload_for_context_usage.get("context_usage")
+            if isinstance(_raw_final_payload_for_context_usage, dict)
+            else None
+        )
+        if not isinstance(context_usage_payload, dict):
+            context_usage_payload = None
         daily_operator_payload = (
             dict(action_result.get("daily_operator"))
             if isinstance(action_result.get("daily_operator"), dict)
@@ -5827,6 +5845,9 @@ async def handle_sage_chat(
             "proof_log_id": proof_log_id,
             "ai_setup_url": f"/w/{normalized_workspace_id}{_SAGE_AI_SETUP_PATH}",
             "media": list(action_result.get("media") or []),
+            # See context_usage_payload's own comment above: only ever
+            # non-None for a claude_agent_sdk-engine turn.
+            "context_usage": context_usage_payload,
         }
 
     # ── B2: Overflow error recovery ──

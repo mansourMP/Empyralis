@@ -1046,12 +1046,12 @@ async def run_claude_agent_sdk_turn(
     # folds prior_messages in every time, byte-for-byte unchanged.
     resume_session_id: str = "",
 ) -> List[Dict[str, Any]]:
-    """Drive one turn through claude_agent_sdk.query(), translating every
-    yielded message into Empyralis's event dicts. Returns the SAME
-    list[dict] shape sage_agent_runtime_service._collect_sage_operator_
-    loop_v3_events already parses — this is the function
-    server_modules/sage_agent_runtime_service.py's _collect_stream_events
-    calls when a turn's engine_options select ENGINE_ID.
+    """Drive one turn through claude_agent_sdk, translating every yielded
+    message into Empyralis's event dicts. Returns the SAME list[dict] shape
+    sage_agent_runtime_service._collect_sage_operator_loop_v3_events already
+    parses — this is the function server_modules/sage_agent_runtime_
+    service.py's _collect_stream_events calls when a turn's engine_options
+    select ENGINE_ID.
 
     Requires the `claude` CLI (Node.js + Claude Code) on PATH — the SDK's
     only shipped Transport spawns it as a subprocess (see this module's
@@ -1071,8 +1071,18 @@ async def run_claude_agent_sdk_turn(
     `claude /login` session. See resolve_sdk_process_env's docstring for the
     companion fix this pairs with (blanking every credential-shaped env key
     the SDK could otherwise merge in from Empyralis's own process env).
+
+    Engine: claude_agent_sdk.ClaudeSDKClient (connect -> query ->
+    receive_response -> disconnect), not the simpler one-shot query()
+    function this module used before. The two are otherwise equivalent for
+    this call site — same one-subprocess-per-call lifecycle, same
+    ClaudeAgentOptions, same message stream, terminating after the same
+    single ResultMessage — but only ClaudeSDKClient exposes
+    get_context_usage() (query()'s InternalClient has no such method), and
+    that is the whole reason for the swap: see _run_via_client below, which
+    calls it, best-effort, once the message loop finishes.
     """
-    from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, query
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server
 
     usable_tool_defs = [
         tool_def
@@ -1200,6 +1210,74 @@ async def run_claude_agent_sdk_turn(
                     await agent_trace_service.persist_ephemeral_envelope(trace_context, event.get("payload"))
             return new_events
 
+        async def _run_via_client(
+            *, options: Any, prompt: str, state: TranslationState
+        ) -> List[Dict[str, Any]]:
+            """Run ONE turn to completion via ClaudeSDKClient: connect (no
+            initial prompt — an empty stream, per the class's own __aenter__),
+            send `prompt` via .query(), drain .receive_response() through
+            _consume exactly the way the old query()-based loop drained
+            query(prompt=prompt, options=options) — same message stream, same
+            per-call subprocess lifecycle (connect() spawns exactly one
+            `claude` subprocess; receive_response() stops after yielding the
+            ResultMessage; the `async with` block's __aexit__ calls
+            disconnect() whether this returns normally or raises).
+
+            `received_any_message` is a `nonlocal` write into
+            run_claude_agent_sdk_turn's own local of that name, not a return
+            value — the resume/fallback decision below reads that variable
+            directly (as it always did, back when the loop was written
+            inline over query()), specifically so it survives an exception
+            raised out of THIS function: a raised exception discards
+            everything this function would otherwise have returned, but the
+            nonlocal write already happened for every message received
+            before the failure.
+
+            Context usage: success path only, i.e. only once the message
+            loop above returns normally (this function's own `except`-free
+            body — the resume/fallback exception branch belongs to the
+            caller, not here). get_context_usage() is itself a second,
+            independent best-effort step — a CLI control-protocol round trip
+            that can fail on its own (an older CLI build without the
+            capability, a connection race right at turn end) — so it is
+            wrapped in its own try/except and NEVER allowed to turn an
+            otherwise-successful turn into a failed one, or to slow down
+            returning the reply. On success it is attached to this attempt's
+            own "final" event payload under "context_usage"; on any failure
+            (or a non-dict return, which would indicate an unexpected SDK
+            shape) the key is simply omitted — never fabricated, never
+            zeroed.
+            """
+            nonlocal received_any_message
+            events: List[Dict[str, Any]] = []
+            async with ClaudeSDKClient(options=options) as client:
+                await client.query(prompt)
+                async for sdk_message in client.receive_response():
+                    received_any_message = True
+                    events.extend(await _consume(sdk_message, state=state))
+                try:
+                    usage = await client.get_context_usage()
+                except Exception as exc:
+                    LOGGER.warning(
+                        "claude_agent_sdk_bridge: get_context_usage() failed — omitting "
+                        "context_usage from this turn's final payload: %s", exc,
+                    )
+                else:
+                    if isinstance(usage, dict):
+                        for event in events:
+                            if isinstance(event, dict) and event.get("type") == "final":
+                                payload = event.get("payload")
+                                if isinstance(payload, dict):
+                                    payload["context_usage"] = dict(usage)
+                                break
+                    else:
+                        LOGGER.warning(
+                            "claude_agent_sdk_bridge: get_context_usage() returned a "
+                            "non-dict (%s) — omitting context_usage.",
+                            type(usage).__name__,
+                        )
+            return events
+
         resume_token = str(resume_session_id or "").strip()
         prompt = message if resume_token else render_prompt(message, prior_messages)
         options = _build_options(resume=resume_token)
@@ -1210,9 +1288,7 @@ async def run_claude_agent_sdk_turn(
         events: List[Dict[str, Any]] = []
         received_any_message = False
         try:
-            async for sdk_message in query(prompt=prompt, options=options):
-                received_any_message = True
-                events.extend(await _consume(sdk_message, state=state))
+            events = await _run_via_client(options=options, prompt=prompt, state=state)
         except Exception:
             if not resume_token or received_any_message:
                 # Either there was nothing to fall back FROM (no resume was
@@ -1236,11 +1312,9 @@ async def run_claude_agent_sdk_turn(
             state = TranslationState(
                 known_tool_names=known_tool_names, served_by_anthropic=served_by_anthropic,
             )
-            events = []
             fallback_prompt = render_prompt(message, prior_messages)
             fallback_options = _build_options(resume="")
-            async for sdk_message in query(prompt=fallback_prompt, options=fallback_options):
-                events.extend(await _consume(sdk_message, state=state))
+            events = await _run_via_client(options=fallback_options, prompt=fallback_prompt, state=state)
         return events
     finally:
         shutil.rmtree(config_dir, ignore_errors=True)

@@ -683,9 +683,9 @@ class RunTurnCostAttributionWiringTests(unittest.TestCase):
             subtype="success", duration_ms=10, duration_api_ms=8, is_error=False,
             num_turns=1, session_id="sess-1", result="Done.", total_cost_usd=total_cost_usd,
         )
-        fake_query = _FakeQuery([[result_message]])
+        fake_client = _fake_claude_sdk_client([[result_message]])
         with (
-            patch("claude_agent_sdk.query", new=fake_query),
+            patch("claude_agent_sdk.ClaudeSDKClient", new=fake_client),
             patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
         ):
             events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
@@ -924,28 +924,76 @@ class RenderPromptTests(unittest.TestCase):
         self.assertLess(rendered.index("first reply"), rendered.index("second message"))
 
 
-class _FakeQuery:
-    """Stands in for claude_agent_sdk.query: an async-generator callable
-    that records each call's (prompt, options) and, per call (consumed in
-    order), either yields a scripted list of SDK message objects or raises
-    a scripted exception — optionally after yielding some messages first
-    (pass an (messages, exception) tuple), to simulate a failure partway
-    through a turn."""
+_UNSET_CONTEXT_USAGE = object()
 
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls: list[SimpleNamespace] = []
 
-    async def __call__(self, *, prompt, options):
-        self.calls.append(SimpleNamespace(prompt=prompt, options=options))
-        item = self._responses.pop(0)
-        if isinstance(item, tuple):
-            messages, exc = item
-            for message in messages:
+def _fake_claude_sdk_client(responses, *, context_usage=_UNSET_CONTEXT_USAGE, context_usage_error=None):
+    """Build a fake CLASS standing in for claude_agent_sdk.ClaudeSDKClient —
+    patched in as the class itself (`patch("claude_agent_sdk.ClaudeSDKClient",
+    new=...)`), never as one pre-built instance, because run_claude_agent_sdk_
+    turn instantiates a fresh client per attempt (the primary call, and — on
+    a safe resume failure — the fallback retry), the same way it called
+    claude_agent_sdk.query() fresh per attempt before this module's engine
+    swap from query() to ClaudeSDKClient.
+
+    `responses` is popped once per INSTANTIATION (there is exactly one
+    .query()/.receive_response() pair per instance in production, mirroring
+    one query() call per attempt before). Each item is either a plain list
+    of scripted SDK message objects (yielded in order from
+    receive_response()), or an (messages, exception) tuple to simulate a
+    failure partway through the stream — the same two shapes the prior
+    query()-mocking harness (formerly _FakeQuery) used, so every resume/
+    fallback test below ports over with the same responses= scripts.
+
+    `.calls` lives on the returned CLASS (not an instance): a list of
+    SimpleNamespace(prompt=, options=), one entry per .query(prompt) call
+    across every instance this factory produced — the direct analogue of
+    the old _FakeQuery.calls.
+
+    `context_usage` / `context_usage_error` script get_context_usage()
+    identically for every instance this factory produces. Neither
+    supplied -> raises AttributeError, standing in for "this build of the
+    SDK/CLI has no such method" — the realistic default for a test that
+    isn't specifically exercising context-usage attachment.
+    """
+    responses_queue = list(responses)
+    calls: list[SimpleNamespace] = []
+
+    class _FakeClaudeSDKClient:
+        def __init__(self, *, options=None, transport=None):
+            self.options = options
+            self._transport = transport
+            self._item = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def query(self, prompt, session_id="default"):
+            calls.append(SimpleNamespace(prompt=prompt, options=self.options))
+            self._item = responses_queue.pop(0)
+
+        async def receive_response(self):
+            item = self._item
+            if isinstance(item, tuple):
+                messages, exc = item
+                for message in messages:
+                    yield message
+                raise exc
+            for message in item:
                 yield message
-            raise exc
-        for message in item:
-            yield message
+
+        async def get_context_usage(self):
+            if context_usage_error is not None:
+                raise context_usage_error
+            if context_usage is _UNSET_CONTEXT_USAGE:
+                raise AttributeError("get_context_usage is not scripted on this fake")
+            return context_usage
+
+    _FakeClaudeSDKClient.calls = calls
+    return _FakeClaudeSDKClient
 
 
 def _result_message(session_id: str = "sess-1", reply: str = "ok") -> sdk_types.ResultMessage:
@@ -962,9 +1010,9 @@ class RunClaudeAgentSdkTurnResumeTests(unittest.TestCase):
     out in every test here so these stay focused on prompt/resume wiring;
     it has its own dedicated tests below."""
 
-    def _run_turn(self, *, resume_session_id="", prior_messages=None, fake_query, message="second message"):
+    def _run_turn(self, *, resume_session_id="", prior_messages=None, fake_client, message="second message"):
         with (
-            patch("claude_agent_sdk.query", new=fake_query),
+            patch("claude_agent_sdk.ClaudeSDKClient", new=fake_client),
             patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
         ):
             events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
@@ -985,44 +1033,44 @@ class RunClaudeAgentSdkTurnResumeTests(unittest.TestCase):
 
     def test_no_resume_folds_full_history_and_leaves_resume_option_unset(self):
         prior = [{"role": "user", "content": "first message"}, {"role": "assistant", "content": "first reply"}]
-        fake_query = _FakeQuery([[_result_message()]])
+        fake_client = _fake_claude_sdk_client([[_result_message()]])
 
-        self._run_turn(resume_session_id="", prior_messages=prior, fake_query=fake_query)
+        self._run_turn(resume_session_id="", prior_messages=prior, fake_client=fake_client)
 
-        self.assertEqual(len(fake_query.calls), 1)
-        sent_prompt = fake_query.calls[0].prompt
+        self.assertEqual(len(fake_client.calls), 1)
+        sent_prompt = fake_client.calls[0].prompt
         self.assertIn("first message", sent_prompt)
         self.assertIn("first reply", sent_prompt)
-        self.assertIsNone(fake_query.calls[0].options.resume)
+        self.assertIsNone(fake_client.calls[0].options.resume)
 
     def test_resume_sends_bare_message_and_sets_resume_option(self):
         prior = [{"role": "user", "content": "first message"}, {"role": "assistant", "content": "first reply"}]
-        fake_query = _FakeQuery([[_result_message()]])
+        fake_client = _fake_claude_sdk_client([[_result_message()]])
 
-        self._run_turn(resume_session_id="sess-prior", prior_messages=prior, fake_query=fake_query)
+        self._run_turn(resume_session_id="sess-prior", prior_messages=prior, fake_client=fake_client)
 
-        self.assertEqual(len(fake_query.calls), 1)
-        sent_prompt = fake_query.calls[0].prompt
+        self.assertEqual(len(fake_client.calls), 1)
+        sent_prompt = fake_client.calls[0].prompt
         # The resumed session already has this history — must NOT be folded
         # in again (that would be two independent memories of the same
         # conversation at once).
         self.assertEqual(sent_prompt, "second message")
         self.assertNotIn("first message", sent_prompt)
-        self.assertEqual(fake_query.calls[0].options.resume, "sess-prior")
+        self.assertEqual(fake_client.calls[0].options.resume, "sess-prior")
 
     def test_resume_failure_before_any_message_retries_fresh_with_full_history(self):
         prior = [{"role": "user", "content": "first message"}, {"role": "assistant", "content": "first reply"}]
         # First call (resume attempted): raises before yielding anything.
         # Second call (the fallback retry): succeeds.
-        fake_query = _FakeQuery([
+        fake_client = _fake_claude_sdk_client([
             ([], RuntimeError("no such session")),
             [_result_message(session_id="sess-fresh")],
         ])
 
-        events = self._run_turn(resume_session_id="sess-stale", prior_messages=prior, fake_query=fake_query)
+        events = self._run_turn(resume_session_id="sess-stale", prior_messages=prior, fake_client=fake_client)
 
-        self.assertEqual(len(fake_query.calls), 2)
-        first_call, second_call = fake_query.calls
+        self.assertEqual(len(fake_client.calls), 2)
+        first_call, second_call = fake_client.calls
         self.assertEqual(first_call.options.resume, "sess-stale")
         self.assertEqual(first_call.prompt, "second message")
         # The retry drops resume entirely and folds full history, exactly
@@ -1042,22 +1090,22 @@ class RunClaudeAgentSdkTurnResumeTests(unittest.TestCase):
         partial_message = sdk_types.AssistantMessage(
             content=[sdk_types.TextBlock(text="partial...")], model="claude-sonnet-4-5",
         )
-        fake_query = _FakeQuery([
+        fake_client = _fake_claude_sdk_client([
             ([partial_message], RuntimeError("connection dropped mid-turn")),
         ])
 
         with self.assertRaises(RuntimeError):
-            self._run_turn(resume_session_id="sess-stale", prior_messages=prior, fake_query=fake_query)
+            self._run_turn(resume_session_id="sess-stale", prior_messages=prior, fake_client=fake_client)
 
-        self.assertEqual(len(fake_query.calls), 1)  # no retry attempted
+        self.assertEqual(len(fake_client.calls), 1)  # no retry attempted
 
     def test_failure_without_resume_attempt_propagates_without_retry(self):
-        fake_query = _FakeQuery([([], RuntimeError("boom"))])
+        fake_client = _fake_claude_sdk_client([([], RuntimeError("boom"))])
 
         with self.assertRaises(RuntimeError):
-            self._run_turn(resume_session_id="", prior_messages=[], fake_query=fake_query)
+            self._run_turn(resume_session_id="", prior_messages=[], fake_client=fake_client)
 
-        self.assertEqual(len(fake_query.calls), 1)  # nothing to fall back FROM
+        self.assertEqual(len(fake_client.calls), 1)  # nothing to fall back FROM
 
 
 class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
@@ -1081,11 +1129,11 @@ class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
         tool_result = sdk_types.UserMessage(content=[sdk_types.ToolResultBlock(
             tool_use_id="toolu_1", content=[{"type": "text", "text": "found it"}], is_error=False,
         )])
-        fake_query = _FakeQuery([[tool_use, tool_result, _result_message()]])
+        fake_client = _fake_claude_sdk_client([[tool_use, tool_result, _result_message()]])
         persist_mock = AsyncMock()
 
         with (
-            patch("claude_agent_sdk.query", new=fake_query),
+            patch("claude_agent_sdk.ClaudeSDKClient", new=fake_client),
             patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=persist_mock),
         ):
             events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
@@ -1118,11 +1166,11 @@ class RunClaudeAgentSdkTurnTracePersistenceTests(unittest.TestCase):
         self.assertTrue(non_trace_types <= {"tool_progress", "final"})
 
     def test_no_trace_context_persists_nothing(self):
-        fake_query = _FakeQuery([[_result_message()]])
+        fake_client = _fake_claude_sdk_client([[_result_message()]])
         persist_mock = AsyncMock()
 
         with (
-            patch("claude_agent_sdk.query", new=fake_query),
+            patch("claude_agent_sdk.ClaudeSDKClient", new=fake_client),
             patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=persist_mock),
         ):
             asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
@@ -1148,9 +1196,9 @@ class RunClaudeAgentSdkTurnIsolationTests(unittest.TestCase):
     must not survive past the turn — a leftover directory per turn is an
     unbounded disk leak on a server handling many turns. Exercises the REAL
     run_claude_agent_sdk_turn with only claude_agent_sdk's own three
-    entrypoints (ClaudeAgentOptions/create_sdk_mcp_server/query) faked out —
-    everything this module does with them (building options, awaiting the
-    async generator) runs for real."""
+    entrypoints (ClaudeAgentOptions/create_sdk_mcp_server/ClaudeSDKClient)
+    faked out — everything this module does with them (building options,
+    connecting, awaiting receive_response()) runs for real."""
 
     def test_config_dir_is_fresh_for_the_turn_and_removed_after(self):
         import claude_agent_sdk as real_sdk
@@ -1161,19 +1209,34 @@ class RunClaudeAgentSdkTurnIsolationTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 captured["options_kwargs"] = kwargs
 
-        async def _fake_query(*, prompt, options):
-            # The directory must exist WHILE the (fake) subprocess would be
-            # running — the property this test exists to pin.
-            env = captured["options_kwargs"]["env"]
-            captured["dir_existed_during_call"] = os.path.isdir(env["CLAUDE_CONFIG_DIR"])
-            captured["dir_path"] = env["CLAUDE_CONFIG_DIR"]
-            return
-            yield  # pragma: no cover - makes this an async generator function
+        class _FakeClient:
+            def __init__(self, *, options=None, transport=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def query(self, prompt, session_id="default"):
+                # The directory must exist WHILE the (fake) subprocess would
+                # be running — the property this test exists to pin.
+                env = captured["options_kwargs"]["env"]
+                captured["dir_existed_during_call"] = os.path.isdir(env["CLAUDE_CONFIG_DIR"])
+                captured["dir_path"] = env["CLAUDE_CONFIG_DIR"]
+
+            async def receive_response(self):
+                return
+                yield  # pragma: no cover - makes this an async generator function
+
+            async def get_context_usage(self):
+                raise AttributeError("not scripted on this fake")
 
         with (
             patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
             patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
-            patch.object(real_sdk, "query", _fake_query),
+            patch.object(real_sdk, "ClaudeSDKClient", _FakeClient),
         ):
             events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
                 message="hi",
@@ -1203,14 +1266,27 @@ class RunClaudeAgentSdkTurnIsolationTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 captured["options_kwargs"] = kwargs
 
-        async def _fake_query(*, prompt, options):
-            raise RuntimeError("simulated CLI failure")
-            yield  # pragma: no cover
+        class _FakeClient:
+            def __init__(self, *, options=None, transport=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def query(self, prompt, session_id="default"):
+                return None
+
+            async def receive_response(self):
+                raise RuntimeError("simulated CLI failure")
+                yield  # pragma: no cover
 
         with (
             patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
             patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
-            patch.object(real_sdk, "query", _fake_query),
+            patch.object(real_sdk, "ClaudeSDKClient", _FakeClient),
         ):
             with self.assertRaises(RuntimeError):
                 asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
@@ -1263,11 +1339,11 @@ class RunClaudeAgentSdkTurnBuiltInToolLockdownTests(unittest.TestCase):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
 
-        fake_query = _FakeQuery(responses)
+        fake_client = _fake_claude_sdk_client(responses)
         with (
             patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
             patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
-            patch.object(real_sdk, "query", new=fake_query),
+            patch.object(real_sdk, "ClaudeSDKClient", new=fake_client),
             patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
         ):
             asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
@@ -1609,9 +1685,9 @@ class RunClaudeAgentSdkTurnForeignToolTests(unittest.TestCase):
     always does, on both the normal and the resume-fallback path."""
 
     def _run(self, *, responses, tool_defs, resume_session_id=""):
-        fake_query = _FakeQuery(responses)
+        fake_client = _fake_claude_sdk_client(responses)
         with (
-            patch("claude_agent_sdk.query", new=fake_query),
+            patch("claude_agent_sdk.ClaudeSDKClient", new=fake_client),
             patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
         ):
             return asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
@@ -1701,6 +1777,120 @@ class RunClaudeAgentSdkTurnForeignToolTests(unittest.TestCase):
         self.assertIn("tool.started", trace_types)
         self.assertIn("tool.result", trace_types)
         self.assertNotIn("trace.failed", trace_types)
+
+
+class RunClaudeAgentSdkTurnContextUsageTests(unittest.TestCase):
+    """The whole reason this module swapped from claude_agent_sdk.query() to
+    ClaudeSDKClient: get_context_usage() is only reachable on the stateful
+    client. Success-path-only, best-effort — see _run_via_client's own
+    docstring in claude_agent_sdk_bridge.py for the full reasoning; these
+    tests pin the observable behavior."""
+
+    _USAGE = {
+        "categories": [{"name": "System prompt", "tokens": 1200, "color": "#888"}],
+        "totalTokens": 15000,
+        "maxTokens": 200000,
+        "rawMaxTokens": 200000,
+        "percentage": 7.5,
+        "model": "claude-sonnet-4-5",
+        "isAutoCompactEnabled": True,
+        "memoryFiles": [],
+        "mcpTools": [],
+        "agents": [],
+        "gridRows": [],
+    }
+
+    def _run_turn(self, *, fake_client, resume_session_id=""):
+        with (
+            patch("claude_agent_sdk.ClaudeSDKClient", new=fake_client),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            return asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="hello",
+                system_prompt="Be terse.",
+                prior_messages=None,
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="trace-1",
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                credentials={},
+                trace_context=_trace_context(),
+                resume_session_id=resume_session_id,
+            ))
+
+    def test_successful_turn_attaches_context_usage_to_final_payload(self):
+        fake_client = _fake_claude_sdk_client([[_result_message()]], context_usage=self._USAGE)
+        events = self._run_turn(fake_client=fake_client)
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["context_usage"], self._USAGE)
+
+    def test_get_context_usage_failure_is_best_effort_and_omitted(self):
+        fake_client = _fake_claude_sdk_client(
+            [[_result_message()]],
+            context_usage_error=RuntimeError("control-protocol round trip failed"),
+        )
+        events = self._run_turn(fake_client=fake_client)
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertNotIn("context_usage", final_event["payload"])
+        # The rest of the turn is unaffected — a failed best-effort extra
+        # must never take the real reply down with it.
+        self.assertEqual(final_event["payload"]["reply"], "ok")
+
+    def test_missing_get_context_usage_method_is_best_effort_and_omitted(self):
+        # The fake's default (neither context_usage nor context_usage_error
+        # passed) raises AttributeError — standing in for an older SDK/CLI
+        # build that has no such method at all.
+        fake_client = _fake_claude_sdk_client([[_result_message()]])
+        events = self._run_turn(fake_client=fake_client)
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertNotIn("context_usage", final_event["payload"])
+
+    def test_non_dict_context_usage_is_omitted_not_fabricated(self):
+        fake_client = _fake_claude_sdk_client([[_result_message()]], context_usage="not-a-dict")
+        events = self._run_turn(fake_client=fake_client)
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertNotIn("context_usage", final_event["payload"])
+
+    def test_errored_turn_still_gets_context_usage_since_the_client_completed(self):
+        # A provider-level error (ResultMessage.is_error=True) still lets the
+        # SDK message loop finish normally — the client/subprocess is still
+        # alive and answering control-protocol requests, so this still
+        # counts as "the turn's message loop completed" (as opposed to a
+        # raised exception, which is what actually withholds the call — see
+        # the next test). Context usage is still real, useful information
+        # about a turn that ran, even though its own answer failed.
+        error_result = sdk_types.ResultMessage(
+            subtype="error_max_turns", duration_ms=10, duration_api_ms=8, is_error=True,
+            num_turns=5, session_id="sess-1", result=None,
+        )
+        fake_client = _fake_claude_sdk_client([[error_result]], context_usage=self._USAGE)
+        events = self._run_turn(fake_client=fake_client)
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["context_usage"], self._USAGE)
+
+    def test_raised_exception_never_attempts_context_usage(self):
+        # No resume attempted -> the exception propagates without a fallback
+        # retry, and this fake never scripts get_context_usage. If
+        # run_claude_agent_sdk_turn tried to call it anyway on this path, it
+        # would surface as the fake's AttributeError instead of the
+        # RuntimeError asserted here.
+        fake_client = _fake_claude_sdk_client([([], RuntimeError("boom"))])
+        with self.assertRaises(RuntimeError):
+            self._run_turn(fake_client=fake_client)
+
+    def test_resume_fallback_success_still_attaches_context_usage(self):
+        fake_client = _fake_claude_sdk_client(
+            [
+                ([], RuntimeError("no such session")),
+                [_result_message(session_id="sess-fresh")],
+            ],
+            context_usage=self._USAGE,
+        )
+        events = self._run_turn(fake_client=fake_client, resume_session_id="sess-stale")
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["context_usage"], self._USAGE)
 
 
 class TurnEngineSelectionFlagOffTests(unittest.TestCase):
