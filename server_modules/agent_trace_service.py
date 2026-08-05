@@ -35,6 +35,14 @@ PERSISTED_TRACE_EVENT_TYPES = frozenset(
         "assistant.message.completed",
         "trace.completed",
         "trace.failed",
+        # MAN-310 skills-delivery: the CLI's own Agent/Skill built-ins, once
+        # a turn deliberately re-opens them (claude_agent_sdk_bridge.py's
+        # _META_TOOL_EVENT_TYPES) — a real, honest record of a deliberately-
+        # reopened meta-tool call, distinct from both "tool.started"/"tool.
+        # result" (real Empyralis work, what tool_honesty_guard checks a
+        # reply's claims against) and "trace.failed" (a real failure).
+        "subagent.invoked",
+        "skill.invoked",
         # docs/design/audit-context-anatomy.md fix #3 (compaction gap, half
         # b): compact_turns used to no-op silently (empty summary, no key/
         # provider) with nothing but a swallowed exception downstream. This

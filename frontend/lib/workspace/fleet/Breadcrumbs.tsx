@@ -234,7 +234,7 @@ export function Breadcrumbs({ workspaceId }: { workspaceId: string }) {
     // the agent's own crumb — one segment back — becomes the last, current
     // one instead.
     const AGENT_DETAIL_TABS = new Set([
-      "overview", "work", "channels", "connectors", "tools", "capabilities", "hardware", "model", "memory", "chat",
+      "overview", "work", "channels", "connectors", "tools", "capabilities", "hardware", "model", "skills", "memory", "chat",
     ]);
     const lastSeg = segments[segments.length - 1];
     const isAgentDetailTrailingTab =

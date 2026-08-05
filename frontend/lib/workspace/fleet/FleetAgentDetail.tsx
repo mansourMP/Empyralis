@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import {
+  BookOpen,
   Brain,
   Check,
   ChevronDown,
@@ -63,6 +64,7 @@ import {
   useFleetProjects,
   type FleetAgent,
   type FleetAgentActivity,
+  type FleetAgentSkill,
   type FleetChannel,
   type FleetTool,
   type FleetCapability,
@@ -177,7 +179,7 @@ function isChannelConnected(
   return channel.connected;
 }
 
-type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "memory" | "tools" | "capabilities" | "chat";
+type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat";
 
 // Single source of id/label/icon truth for every one of the nine sections —
 // both the permanent top strip (three of these, TOP_TAB_IDS below) and the
@@ -191,6 +193,7 @@ type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "mod
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
   { id: "model", label: "Model", icon: Sparkles },
+  { id: "skills", label: "Skills", icon: BookOpen },
   { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
@@ -214,7 +217,11 @@ const TOP_TAB_IDS = new Set<TabId>(["overview", "work", "memory"]);
 // twice. Order within each group is the order the old flat tab strip had
 // them in.
 const CONFIGURE_GROUPS: { id: string; label: string; tabs: TabId[] }[] = [
-  { id: "brain", label: "Brain", tabs: ["model", "capabilities"] },
+  // Skills lives here, one level down from Persona/instructions
+  // (Overview's own primary column) — it's "set once" configuration, not
+  // something read daily, the same reasoning that already moved Model and
+  // Capabilities out of the top tab strip.
+  { id: "brain", label: "Brain", tabs: ["model", "capabilities", "skills"] },
   { id: "reach", label: "Reach", tabs: ["channels", "connectors", "tools"] },
   { id: "compute", label: "Compute", tabs: ["hardware"] },
 ];
@@ -824,6 +831,9 @@ export function FleetAgentDetail({
             {activeTab === "model" && <ModelTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />}
             {activeTab === "capabilities" && (
               <CapabilitiesTab workspaceId={workspaceId} agentId={agentId} agent={agent} />
+            )}
+            {activeTab === "skills" && (
+              <SkillsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onSaved={onRenamed} />
             )}
             {activeTab === "channels" && (
               <ChannelsTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChannelsChanged={refreshChannels} />
@@ -2821,6 +2831,223 @@ function ToolsTab({
           </div>
         </Disclosure>
       )}
+    </div>
+  );
+}
+
+// ── Skills (MAN-310 skills-delivery) ────────────────────────────────────────
+// A workspace owner's own reusable-procedure library for this agent — name +
+// description (so the model can judge when it's relevant, matching Claude
+// Code's own SKILL.md frontmatter) + a body of instructions, delivered to
+// the Claude Agent SDK engine as a real SKILL.md file
+// (server_modules/claude_agent_sdk_bridge.py's build_skills_plugin_dir).
+// Deliberately minimal: no syntax highlighting, no templates, no
+// marketplace — a name field, a description field, a body textarea, and
+// enable/disable is what a first version needs. `kind` is always "skill"
+// here; "command" is a real future value server-side but isn't wired to
+// anything the model can invoke yet, so the client never offers it — an
+// unusable option is a dead control (CLAUDE.md).
+const EMPTY_SKILL_DRAFT = { name: "", description: "", body: "" };
+
+function SkillsTab({
+  workspaceId, agentId, agent, onSaved,
+}: { workspaceId: string; agentId: string; agent: FleetAgent | null; onSaved?: () => void }) {
+  const skills = agent?.skills || [];
+  // Editing state: null = list view, "new" = the add form, or an existing
+  // skill's id = editing that row in place. Only one editor open at a time —
+  // the same single-primary-action-per-view discipline the rest of this
+  // file's inline editors (ScheduleSection, PersonaEditor) already follow.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState(EMPTY_SKILL_DRAFT);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // Same agentId-keyed reset as PersonaEditor above — a Cmd+K palette swap
+  // must not leave a half-typed draft for the PREVIOUS agent open against
+  // the new one.
+  useEffect(() => {
+    setEditingId(null);
+    setDraft(EMPTY_SKILL_DRAFT);
+    setError(null);
+  }, [agentId]);
+
+  async function persist(nextSkills: FleetAgentSkill[]): Promise<boolean> {
+    setError(null);
+    try {
+      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ patch: { skills: nextSkills } }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      onSaved?.();
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save.");
+      return false;
+    }
+  }
+
+  function startAdd() {
+    setDraft(EMPTY_SKILL_DRAFT);
+    setEditingId("new");
+    setError(null);
+  }
+
+  function startEdit(skill: FleetAgentSkill) {
+    setDraft({ name: skill.name, description: skill.description, body: skill.body });
+    setEditingId(skill.id);
+    setError(null);
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setDraft(EMPTY_SKILL_DRAFT);
+    setError(null);
+  }
+
+  async function saveDraft() {
+    const name = draft.name.trim();
+    const body = draft.body.trim();
+    if (!name || !body) {
+      setError(name ? "Body can't be empty." : "Name can't be empty.");
+      return;
+    }
+    setSaving(true);
+    const isNew = editingId === "new";
+    const nextSkills: FleetAgentSkill[] = isNew
+      ? [...skills, {
+          id: "", name, description: draft.description.trim(), body, kind: "skill", enabled: true,
+        }]
+      : skills.map((s) => (s.id === editingId ? { ...s, name, description: draft.description.trim(), body } : s));
+    const ok = await persist(nextSkills);
+    setSaving(false);
+    if (ok) cancelEdit();
+  }
+
+  async function toggleEnabled(skill: FleetAgentSkill) {
+    setTogglingId(skill.id);
+    await persist(skills.map((s) => (s.id === skill.id ? { ...s, enabled: !s.enabled } : s)));
+    setTogglingId(null);
+  }
+
+  async function deleteSkill(skill: FleetAgentSkill) {
+    setDeletingId(skill.id);
+    await persist(skills.filter((s) => s.id !== skill.id));
+    setDeletingId(null);
+  }
+
+  const isEditingNew = editingId === "new";
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div className="fleet-detail-section-title" style={{ marginTop: 0, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span>Skills</span>
+        {editingId === null && (
+          <button type="button" className="fleet-btn fleet-btn--accent" onClick={startAdd}>
+            <BookOpen size={14} strokeWidth={1.75} /> Add skill
+          </button>
+        )}
+      </div>
+      <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+        A reusable procedure this agent can reach for on its own — the description is what tells it WHEN.
+      </p>
+
+      {(isEditingNew || editingId !== null) && (
+        <div className="fleet-card" style={{ padding: "var(--space-3)", marginBottom: 12 }}>
+          <div className="fleet-wizard-label" style={{ marginTop: 0 }}>Name</div>
+          <input
+            className="fleet-wizard-input"
+            placeholder="Refund lookup"
+            value={draft.name}
+            onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+          />
+          <div className="fleet-wizard-label">Description</div>
+          <input
+            className="fleet-wizard-input"
+            placeholder="Use when a customer asks about a refund status."
+            value={draft.description}
+            onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))}
+          />
+          <div className="fleet-wizard-label">Instructions</div>
+          <textarea
+            className="fleet-wizard-input"
+            placeholder={"1. Look up the order by number.\n2. Report the refund status in one sentence."}
+            value={draft.body}
+            onChange={(e) => setDraft((d) => ({ ...d, body: e.target.value }))}
+            rows={6}
+            style={{ height: "auto", padding: "8px 12px", resize: "vertical" }}
+          />
+          {error && <p className="fleet-channel-expand-error" style={{ marginTop: 4 }}>{error}</p>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button type="button" className="fleet-btn" disabled={saving} onClick={cancelEdit}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="fleet-btn fleet-btn--accent"
+              disabled={saving || !draft.name.trim() || !draft.body.trim()}
+              onClick={saveDraft}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {skills.length === 0 && editingId === null ? (
+        <EmptyState
+          icon={BookOpen}
+          title="No skills yet"
+          body="Give this agent a named, reusable procedure — like a refund-lookup checklist — and it will reach for it on its own when the description matches what's being asked."
+        />
+      ) : (
+        <div className="fleet-config" style={{ padding: 0 }}>
+          {skills.map((skill) => (
+            <div key={skill.id} className="fleet-toggle-row">
+              <div style={{ minWidth: 0 }}>
+                <div className="fleet-toggle-row-label">{skill.name}</div>
+                {skill.description && <div className="fleet-toggle-row-desc">{skill.description}</div>}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  className="fleet-btn"
+                  disabled={togglingId === skill.id}
+                  onClick={() => toggleEnabled(skill)}
+                  title={skill.enabled ? "Disable this skill" : "Enable this skill"}
+                >
+                  {skill.enabled ? "Enabled" : "Disabled"}
+                </button>
+                <button
+                  type="button"
+                  className="fleet-icon-btn"
+                  onClick={() => startEdit(skill)}
+                  aria-label={`Edit ${skill.name}`}
+                  title="Edit"
+                >
+                  <Pencil size={14} strokeWidth={1.75} />
+                </button>
+                <button
+                  type="button"
+                  className="fleet-icon-btn"
+                  disabled={deletingId === skill.id}
+                  onClick={() => deleteSkill(skill)}
+                  aria-label={`Delete ${skill.name}`}
+                  title="Delete"
+                >
+                  <Trash2 size={14} strokeWidth={1.75} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {editingId === null && error && <p className="fleet-channel-expand-error" style={{ marginTop: 8 }}>{error}</p>}
     </div>
   );
 }
