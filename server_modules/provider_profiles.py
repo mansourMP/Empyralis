@@ -696,9 +696,20 @@ PROVIDER_CATALOG = {
             {"id": "api_key", "label": "API Key", "secret_required": True},
         ],
         "default_auth_mode": "api_key",
-        "default_model": "deepseek-chat",
+        # "deepseek-chat"/"deepseek-reasoner" were retired by DeepSeek on
+        # 2026-07-24 — confirmed live (2026-08-05): DeepSeek still accepts
+        # the old name but every response now comes back labeled
+        # "model": "deepseek-v4-flash", so a platform-credit customer was
+        # silently getting v4-flash under a stale label, not a distinct
+        # "deepseek-chat" model. Defaulting to the real current name
+        # instead of an alias. v4-pro verified live against the real
+        # Anthropic-compatible endpoint this bridge actually uses (thinking
+        # block + final text + clean end_turn) — no behavior change needed
+        # elsewhere, it speaks the same wire shape as every other model
+        # here.
+        "default_model": "deepseek-v4-pro",
         "base_url": "https://api.deepseek.com/v1",
-        "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+        "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
         "provider_scopes": ["sage_personal", "workspace_api", "studio_safe"],
         "note": "Direct DeepSeek API key using the OpenAI-compatible endpoint.",
     },
