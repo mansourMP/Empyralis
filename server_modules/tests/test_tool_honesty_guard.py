@@ -714,6 +714,153 @@ class FalseRejectionClaimDenialTests(unittest.TestCase):
         result = guard.check_tool_reply_consistency("Saved — favorite color: teal.", trace)
         self.assertTrue(result["consistent"])
 
+class NarratesToolCallAfterSuccessTests(unittest.TestCase):
+    """MAN-263: completes MAN-308's tool-call recovery layer for the shape
+    MAN-308 didn't cover. MAN-308 recovered DSML tool-call markup on the
+    INVOCATION turn (nothing had run yet, so recovering-and-executing was
+    correct). This is a different shape (bare JSON, not DSML) on a
+    different turn (the SYNTHESIS round AFTER a real success) — recovering
+    and executing THIS text would double-run a side-effecting command that
+    already ran for real. See _decide's narrates_tool_call_after_success
+    branch: it never calls regenerate_fn at all, so this direction is
+    structurally incapable of triggering a second execution through either
+    pipeline's regeneration mechanism."""
+
+    # The exact recorded MAN-263 incident: hardware__action genuinely
+    # succeeded this turn (real exit_code 0, real stdout), and the
+    # synthesis turn afterward produced this text instead of using the
+    # result.
+    _INCIDENT_REPLY = (
+        "I'll actually make the call now.\n"
+        "```json\n"
+        "{\"tool\": \"hardware__action\", \"arguments\": {\"command\": \"uname -a\"}}\n"
+        "```"
+    )
+    _SUCCESS_TRACE = [
+        {
+            "name": "hardware__action",
+            "status": "completed",
+            "output": "Darwin MacBook-Pro.local 23.0.0 Darwin Kernel Version 23.0.0",
+        }
+    ]
+
+    def test_reproduces_the_incident_narrated_json_after_success_is_a_mismatch(self) -> None:
+        result = guard.check_tool_reply_consistency(self._INCIDENT_REPLY, self._SUCCESS_TRACE)
+        self.assertFalse(result["consistent"])
+        self.assertEqual(result["mismatch_type"], "narrates_tool_call_after_success")
+        self.assertEqual(result["tools"], self._SUCCESS_TRACE)
+
+    def test_honest_reply_using_the_real_result_does_NOT_fire(self) -> None:
+        result = guard.check_tool_reply_consistency(
+            "Ran it — the machine is a Darwin MacBook-Pro on kernel 23.0.0.",
+            self._SUCCESS_TRACE,
+        )
+        self.assertTrue(result["consistent"])
+
+    def test_narrated_json_for_a_DIFFERENT_tool_than_the_one_that_succeeded_does_NOT_fire(self) -> None:
+        # Precision boundary: the JSON mention must name the SAME tool the
+        # trace proves succeeded, not just any tool-shaped JSON anywhere
+        # near a successful trace entry.
+        reply = (
+            "Let me also check the weather.\n"
+            "```json\n{\"tool\": \"weather__lookup\", \"arguments\": {\"city\": \"NYC\"}}\n```"
+        )
+        result = guard.check_tool_reply_consistency(reply, self._SUCCESS_TRACE)
+        self.assertNotEqual(result["mismatch_type"], "narrates_tool_call_after_success")
+
+    def test_narrated_json_with_no_successful_trace_does_NOT_fire_this_direction(self) -> None:
+        # This direction is gated on `if successful:` the same way
+        # denies_success is (module docstring) — no real success this turn
+        # means there is nothing for the narration to contradict via THIS
+        # direction. (Whether some other direction should catch a bare
+        # invocation-turn JSON miss is a separate, narrower question this
+        # fix does not attempt — see the report for why.)
+        result = guard.check_tool_reply_consistency(self._INCIDENT_REPLY, [])
+        self.assertNotEqual(result["mismatch_type"], "narrates_tool_call_after_success")
+
+    def test_decide_skips_regeneration_entirely(self) -> None:
+        """The double-execution guarantee starts here: no correction text
+        is even produced, and skip_regeneration routes the caller straight
+        to the deterministic fallback without ever invoking regenerate_fn."""
+        decision = guard._decide(self._INCIDENT_REPLY, self._SUCCESS_TRACE)
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertTrue(decision["skip_regeneration"])
+        self.assertIsNone(decision["correction"])
+        self.assertEqual(decision["mismatch_type"], "narrates_tool_call_after_success")
+
+    def test_fallback_reply_carries_the_real_result_not_the_narrated_json(self) -> None:
+        fallback = guard.build_narrated_call_fallback_reply(self._SUCCESS_TRACE)
+        self.assertIn("Darwin MacBook-Pro.local", fallback)
+        self.assertNotIn("```json", fallback)
+        self.assertNotIn('"tool"', fallback)
+
+    def test_apply_tool_honesty_guard_sync_never_calls_regenerate_fn(self) -> None:
+        """Direct chat's pipeline (stream_provider_backed_direct_chat) uses
+        the sync variant. Proves no double execution: if regenerate_fn were
+        ever called here, it would prove this fix could re-run the model
+        with tools live and risk a second real hardware__action call."""
+        regenerate_calls: list[str] = []
+
+        def _regenerate(correction_text: str) -> str:
+            regenerate_calls.append(correction_text)
+            return "should never be reached"
+
+        outcome = guard.apply_tool_honesty_guard_sync(
+            reply_text=self._INCIDENT_REPLY,
+            tool_trace=self._SUCCESS_TRACE,
+            regenerate_fn=_regenerate,
+        )
+        self.assertEqual(regenerate_calls, [], "regenerate_fn must never be called for this direction")
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertEqual(outcome["guard"]["mismatch_type"], "narrates_tool_call_after_success")
+        self.assertFalse(outcome["guard"]["corrected"])
+        self.assertTrue(outcome["guard"]["fell_back"])
+        self.assertIn("Darwin MacBook-Pro.local", outcome["reply"])
+        self.assertNotIn("```json", outcome["reply"])
+        self.assertNotIn('"tool"', outcome["reply"])
+
+    def test_apply_tool_honesty_guard_async_never_calls_regenerate_fn(self) -> None:
+        """Same guarantee on Sage's pipeline (apply_tool_honesty_guard,
+        async), whose regenerate_fn re-runs a FULL action loop with tools
+        LIVE (_sage_action_loop_regenerate in sage_agent_runtime_service.py)
+        — the one call site where an actual re-invocation of a real,
+        side-effecting tool would be possible if this direction ever
+        reached it. It must not."""
+        import asyncio
+
+        regenerate_calls: list[str] = []
+
+        async def _regenerate(correction_text: str) -> str:
+            regenerate_calls.append(correction_text)
+            return "should never be reached"
+
+        async def _run():
+            return await guard.apply_tool_honesty_guard(
+                reply_text=self._INCIDENT_REPLY,
+                tool_trace=self._SUCCESS_TRACE,
+                regenerate_fn=_regenerate,
+            )
+
+        outcome = asyncio.run(_run())
+        self.assertEqual(regenerate_calls, [], "regenerate_fn must never be called for this direction")
+        self.assertTrue(outcome["guard"]["fired"])
+        self.assertEqual(outcome["guard"]["mismatch_type"], "narrates_tool_call_after_success")
+        self.assertIn("Darwin MacBook-Pro.local", outcome["reply"])
+
+    def test_guard_disabled_ships_the_incident_reply_unchanged(self) -> None:
+        """Sanity check on the escape hatch: with the guard off, the raw
+        narrated JSON ships as-is — confirms the guard, not some other
+        mechanism, is what fixes this."""
+        outcome = guard.apply_tool_honesty_guard_sync(
+            reply_text=self._INCIDENT_REPLY,
+            tool_trace=self._SUCCESS_TRACE,
+            regenerate_fn=lambda _correction: "unused",
+            enabled=False,
+        )
+        self.assertFalse(outcome["guard"]["fired"])
+        self.assertEqual(outcome["reply"], self._INCIDENT_REPLY)
+
 
 if __name__ == "__main__":
     unittest.main()
