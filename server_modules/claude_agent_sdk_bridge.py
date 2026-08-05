@@ -755,6 +755,23 @@ async def run_claude_agent_sdk_turn(
                 system_prompt=system_prompt or None,
                 mcp_servers={_MCP_SERVER_NAME: mcp_server},
                 allowed_tools=allowed_tools,
+                # Drop the CLI's OWN built-in toolset (--tools "") so the only
+                # tools reachable are Empyralis's, served over the in-process
+                # MCP server above. allowed_tools alone does NOT do this:
+                # `tools` defaults to the full claude_code preset, leaving
+                # TaskCreate/TodoWrite/Read/Write/Bash callable.
+                #
+                # Caught by driving a real product turn: asked to create a
+                # task, the model called the CLI's built-in TaskCreate instead
+                # of Empyralis's project_task__create. It returned "Task #1
+                # created successfully", Empyralis translated that into a
+                # genuine tool.started/tool.result pair, and the customer was
+                # told the task existed — while project_tasks stayed empty.
+                # tool_honesty_guard cannot catch this: a real tool really was
+                # called and really did succeed, just in the CLI's own
+                # bookkeeping instead of the product's. Work that never
+                # happened must never be reportable as done.
+                tools=[],
                 model=model or None,
                 max_turns=max_turns,
                 resume=resume or None,
