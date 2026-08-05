@@ -70,6 +70,7 @@ import { TaskLabelChips } from "./task-labels";
 import {
   TaskStatusIcon,
   TaskPriorityIcon,
+  TaskWakeDeferralIcon,
   taskStatusLabel,
   taskPriority,
   taskShortId,
@@ -519,6 +520,13 @@ function GroupedRow({
           times wider. */}
       <span className="fleet-glist-cell-title">
         <span className="fleet-glist-cell-name">{task.title || "Untitled task"}</span>
+        {/* MAN-294: the status cell above (ring or ring+<select>) is a fixed
+            16px column with no room for a second glyph, so this rides in the
+            one flexible track instead — still fixed-width/flex-shrink:0, so
+            it doesn't reopen the "title and labels share one track" zig-zag
+            problem the comment above describes. Renders nothing on every
+            task that isn't deferred. */}
+        <TaskWakeDeferralIcon task={task} size={12} />
         {display.labels ? <TaskLabelChips labels={task.labels} max={3} /> : null}
       </span>
 

@@ -99,6 +99,25 @@ export function setShellSandboxDockerReady(ready: boolean): void {
   shellSandboxDockerReady = ready;
 }
 
+// The box operator's own full_access opt-in (EMPYRALIS_GATEWAY_SHELL_
+// FULL_ACCESS_ENABLED — see config.ts's shellFullAccessLocallyEnabled,
+// which this mirrors) ALSO unlocks the shell_sandbox permission, same as
+// Docker readiness above. This is a static local policy choice, not a
+// probed environment fact (contrast shellSandboxDockerReady), so — same
+// shape as cliSetupLocallyEnabled below — it is set once, here, before the
+// one-time supportedCapabilities() computation at startup, not updated on
+// a timer. See the shell_sandbox branch of defaultDesktopPermissionState()
+// for why this needs to unlock advertisement at all: it always unlocked
+// EXECUTION (shell/runtime.ts's resolveExecutionMode()/runOnHost) but
+// never used to unlock the advertisement gated here, so a Docker-less,
+// full_access-enabled box could never be dispatched to in the first
+// place.
+let shellFullAccessLocallyEnabled = false;
+
+export function setShellFullAccessLocallyEnabled(enabled: boolean): void {
+  shellFullAccessLocallyEnabled = enabled;
+}
+
 // Ollama (local model runtime) readiness for the llm_runtime permission.
 // Same shape as shellSandboxDockerReady: NO "granted by default" fallback —
 // the on-box LLM capability is only "granted" when a local Ollama endpoint has
@@ -190,9 +209,43 @@ function defaultDesktopPermissionState(
     return configured;
   }
   if (permission === "shell_sandbox") {
-    // No "granted by default" fallback for this one — absence of a
-    // confirmed-ready Docker daemon means restricted, never granted.
-    return shellSandboxDockerReady ? "granted" : "restricted";
+    // No "granted by default" fallback for this one — either a confirmed-
+    // ready Docker daemon (sandbox mode) or the box operator's own
+    // full_access opt-in (direct host execution, no Docker involved at
+    // all — see shell/runtime.ts's resolveExecutionMode()/runOnHost) must
+    // be true, or this stays restricted.
+    //
+    // Before this, capability ADVERTISEMENT (this function) only ever
+    // checked Docker readiness, even though EXECUTION (shell/runtime.ts)
+    // has always had a second, Docker-free path for full_access mode. A
+    // box with full_access enabled locally, fully authorized server-side
+    // (runtime_access_mode=full_access, agent_scope=sage,
+    // autonomous_agent_setup_warning_acknowledged=true — see
+    // gateway_execution_service.py), but no Docker daemon at all, would
+    // never even advertise shell.execute/filesystem.read_write, so the
+    // control plane would never dispatch to it in the first place —
+    // dead-ending before resolveExecutionMode() ever got a chance to
+    // choose full_access. That is exactly the case for platform-
+    // provisioned VPS hardware: a fresh box provisioned for or connected
+    // to Empyralis specifically to run agent workloads, nothing on it to
+    // isolate the agent FROM, where Docker is pure friction with no
+    // corresponding safety benefit (Docker only earns its keep protecting
+    // a human's personal machine, or a VPS the operator has separately
+    // configured with their own stuff on it — see cloud-vps-setup-
+    // panel.tsx / ssh-server-connect-panel.tsx, which already request
+    // full_access at pairing time for exactly those two cases).
+    //
+    // Granting the PERMISSION here does not, by itself, grant any call
+    // full_access — resolveExecutionMode() still requires the per-call
+    // server authorization on top of this. If that authorization is
+    // absent for a given call, execution still falls back to sandbox mode
+    // and still fails cleanly with the existing "requires Docker... or
+    // full_access" error at invoke time. This only changes whether the
+    // capability is offered to the control plane at all.
+    if (shellSandboxDockerReady) {
+      return "granted";
+    }
+    return shellFullAccessLocallyEnabled ? "granted" : "restricted";
   }
   if (permission === "llm_runtime") {
     // No "granted by default" fallback either — the on-box LLM capability is

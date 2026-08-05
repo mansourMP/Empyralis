@@ -1607,6 +1607,84 @@ class FleetConfigureAgentReasoningEffortValidationTests(unittest.TestCase):
         self.assertTrue(result["ok"], result.get("error"))
 
 
+class FleetConfigureAgentEngineValidationTests(unittest.TestCase):
+    """MAN-310 Phase 1: model_config.engine ("legacy" | "claude_agent_sdk")
+    is only meaningful for platform_credits/byok_api — cli_subscription/
+    local dispatch entirely through the Gateway "brain" branches and never
+    reach the turn-engine seam at all (see fleet_tools.py's
+    _ENGINE_SUPPORTED_MODES). Rejected at save time, same convention as
+    reasoning_effort just above, rather than silently accepted and later
+    discovered to be a dead control."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    def _configure(self, model_config):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+        ):
+            return _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"model_config": model_config},
+                )
+            )
+
+    def test_platform_credits_accepts_the_sdk_engine(self):
+        result = self._configure({"mode": "platform_credits", "engine": "claude_agent_sdk"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_byok_api_accepts_the_sdk_engine(self):
+        result = self._configure({"mode": "byok_api", "provider": "anthropic", "engine": "claude_agent_sdk"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_unset_mode_defaults_to_platform_credits_for_the_engine_gate(self):
+        """No explicit mode + engine=claude_agent_sdk must be accepted --
+        an unset mode means platform_credits everywhere else in this
+        module (see resolve_model_config), so the engine gate must agree."""
+        result = self._configure({"engine": "claude_agent_sdk"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_cli_subscription_rejects_the_sdk_engine(self):
+        result = self._configure({"mode": "cli_subscription", "runtime": "claude_code", "engine": "claude_agent_sdk"})
+        self.assertFalse(result["ok"])
+        self.assertIn("cli_subscription", result["error"])
+
+    def test_local_rejects_the_sdk_engine(self):
+        result = self._configure({"mode": "local", "engine": "claude_agent_sdk"})
+        self.assertFalse(result["ok"])
+        self.assertIn("local", result["error"])
+
+    def test_unrecognized_engine_value_is_rejected(self):
+        result = self._configure({"mode": "platform_credits", "engine": "some-future-engine"})
+        self.assertFalse(result["ok"])
+        self.assertIn("engine", result["error"])
+
+    def test_explicit_legacy_engine_is_accepted_for_every_mode(self):
+        """"legacy" is always valid regardless of mode -- it never selects
+        the bridge, so there is no dead-control concern for it."""
+        for mode in ("platform_credits", "byok_api", "cli_subscription", "local"):
+            with self.subTest(mode=mode):
+                result = self._configure({"mode": mode, "engine": "legacy"})
+                self.assertTrue(result["ok"], result.get("error"))
+
+    def test_empty_engine_skips_validation_entirely(self):
+        """Omitting the field (the overwhelming common case, and the
+        default-to-legacy safety property) must never be rejected."""
+        result = self._configure({"mode": "cli_subscription", "runtime": "claude_code"})
+        self.assertTrue(result["ok"], result.get("error"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1714,3 +1792,220 @@ class CreateAgentProjectIsolationTests(unittest.TestCase):
         self.assertEqual(
             assign_mock.await_args.kwargs.get("project_id"), "proj-chosen"
         )
+
+
+# ── MAN-310 skills-delivery: storage layer ──────────────────────────────────
+# install_metadata.skills — a workspace owner's own reusable-procedure
+# library for a specialist, delivered to the Claude Agent SDK engine as real
+# SKILL.md files (claude_agent_sdk_bridge.build_skills_plugin_dir). These
+# tests cover the storage/validation layer only — turn-construction wiring
+# and delivery live in test_claude_agent_sdk_bridge.py.
+
+
+def _one_skill(**overrides) -> dict:
+    base = {
+        "name": "Refund lookup",
+        "description": "Use when a customer asks about a refund status.",
+        "body": "1. Look up the order.\n2. Report the refund status.",
+        "kind": "skill",
+        "enabled": True,
+    }
+    base.update(overrides)
+    return base
+
+
+class NormalizeSkillsPatchTests(unittest.TestCase):
+    """fleet_tools._normalize_skills_patch — the save-time gate. Bad input is
+    REJECTED (None, error), never silently truncated/coerced — unlike
+    resolve_agent_skills, which must degrade gracefully reading storage that
+    already exists."""
+
+    def test_a_clean_list_round_trips_with_a_minted_id(self):
+        clean, error = fleet_tools._normalize_skills_patch([_one_skill()])
+        self.assertEqual(error, "")
+        self.assertEqual(len(clean), 1)
+        self.assertEqual(clean[0]["name"], "Refund lookup")
+        self.assertEqual(clean[0]["kind"], "skill")
+        self.assertTrue(clean[0]["enabled"])
+        self.assertTrue(clean[0]["id"].startswith("sk_"))
+
+    def test_an_explicit_id_is_preserved_not_reminted(self):
+        clean, error = fleet_tools._normalize_skills_patch([_one_skill(id="sk_fixed")])
+        self.assertEqual(error, "")
+        self.assertEqual(clean[0]["id"], "sk_fixed")
+
+    def test_enabled_defaults_true_when_omitted(self):
+        skill = _one_skill()
+        del skill["enabled"]
+        clean, error = fleet_tools._normalize_skills_patch([skill])
+        self.assertEqual(error, "")
+        self.assertTrue(clean[0]["enabled"])
+
+    def test_disabled_flag_is_preserved(self):
+        clean, error = fleet_tools._normalize_skills_patch([_one_skill(enabled=False)])
+        self.assertEqual(error, "")
+        self.assertFalse(clean[0]["enabled"])
+
+    def test_non_list_is_rejected(self):
+        clean, error = fleet_tools._normalize_skills_patch({"name": "x"})
+        self.assertIsNone(clean)
+        self.assertIn("list", error)
+
+    def test_too_many_skills_is_rejected(self):
+        skills = [_one_skill(name=f"Skill {i}") for i in range(fleet_tools._MAX_SKILLS_PER_AGENT + 1)]
+        clean, error = fleet_tools._normalize_skills_patch(skills)
+        self.assertIsNone(clean)
+        self.assertIn(str(fleet_tools._MAX_SKILLS_PER_AGENT), error)
+
+    def test_missing_name_is_rejected(self):
+        skill = _one_skill()
+        skill["name"] = "  "
+        clean, error = fleet_tools._normalize_skills_patch([skill])
+        self.assertIsNone(clean)
+        self.assertIn("name", error)
+
+    def test_missing_body_is_rejected(self):
+        skill = _one_skill()
+        skill["body"] = ""
+        clean, error = fleet_tools._normalize_skills_patch([skill])
+        self.assertIsNone(clean)
+        self.assertIn("body", error)
+
+    def test_oversized_name_is_rejected(self):
+        skill = _one_skill(name="x" * (fleet_tools._MAX_SKILL_NAME_CHARS + 1))
+        clean, error = fleet_tools._normalize_skills_patch([skill])
+        self.assertIsNone(clean)
+        self.assertIn("name", error)
+
+    def test_oversized_body_is_rejected(self):
+        skill = _one_skill(body="x" * (fleet_tools._MAX_SKILL_BODY_CHARS + 1))
+        clean, error = fleet_tools._normalize_skills_patch([skill])
+        self.assertIsNone(clean)
+        self.assertIn("body", error)
+
+    def test_duplicate_names_case_insensitive_is_rejected(self):
+        clean, error = fleet_tools._normalize_skills_patch(
+            [_one_skill(name="Refund Lookup"), _one_skill(name="refund lookup")]
+        )
+        self.assertIsNone(clean)
+        self.assertIn("Duplicate", error)
+
+    def test_command_kind_is_rejected_not_silently_supported(self):
+        # "command" is a deliberate v1 non-goal (see fleet_tools._VALID_
+        # SKILL_KINDS' own docstring: no interactive REPL to type a slash
+        # command into in this product's headless architecture) — a value
+        # this product cannot deliver must be refused at save time, not
+        # accepted and silently dropped at turn time.
+        clean, error = fleet_tools._normalize_skills_patch([_one_skill(kind="command")])
+        self.assertIsNone(clean)
+        self.assertIn("kind", error)
+
+    def test_non_dict_entry_is_rejected(self):
+        clean, error = fleet_tools._normalize_skills_patch(["not-a-dict"])
+        self.assertIsNone(clean)
+        self.assertIn("object", error)
+
+
+class ResolveAgentSkillsTests(unittest.TestCase):
+    """fleet_tools.resolve_agent_skills — the read side. Must degrade
+    gracefully on malformed storage (never raise), unlike the save-time
+    validator above."""
+
+    def test_no_skills_key_returns_empty(self):
+        self.assertEqual(fleet_tools.resolve_agent_skills({"install_metadata": {}}), [])
+
+    def test_none_install_returns_empty(self):
+        self.assertEqual(fleet_tools.resolve_agent_skills(None), [])
+
+    def test_returns_clean_records(self):
+        bundle = {"install_metadata": {"skills": [_one_skill()]}}
+        result = fleet_tools.resolve_agent_skills(bundle)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "Refund lookup")
+
+    def test_enabled_only_filters_disabled_entries(self):
+        bundle = {"install_metadata": {"skills": [
+            _one_skill(name="On", enabled=True),
+            _one_skill(name="Off", enabled=False),
+        ]}}
+        result = fleet_tools.resolve_agent_skills(bundle, enabled_only=True)
+        self.assertEqual([s["name"] for s in result], ["On"])
+
+    def test_enabled_only_false_returns_both(self):
+        bundle = {"install_metadata": {"skills": [
+            _one_skill(name="On", enabled=True),
+            _one_skill(name="Off", enabled=False),
+        ]}}
+        result = fleet_tools.resolve_agent_skills(bundle, enabled_only=False)
+        self.assertEqual({s["name"] for s in result}, {"On", "Off"})
+
+    def test_malformed_entries_are_skipped_not_raised(self):
+        bundle = {"install_metadata": {"skills": [
+            "not-a-dict", {"name": ""}, {"body": "no name"}, _one_skill(),
+        ]}}
+        result = fleet_tools.resolve_agent_skills(bundle)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "Refund lookup")
+
+    def test_non_list_skills_value_returns_empty(self):
+        bundle = {"install_metadata": {"skills": "not-a-list"}}
+        self.assertEqual(fleet_tools.resolve_agent_skills(bundle), [])
+
+
+class FleetConfigureAgentSkillsTests(unittest.TestCase):
+    """fleet_configure_agent's `skills` patch key — validation + persistence
+    wiring, mirroring FleetConfigureAgentRecommendationTests' mocking
+    pattern for the other patch keys."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    def test_valid_skills_patch_is_persisted(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ) as mock_update,
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"skills": [_one_skill()]},
+                )
+            )
+        self.assertTrue(result["ok"], result.get("error"))
+        saved_metadata = mock_update.await_args.kwargs.get("metadata")
+        self.assertEqual(len(saved_metadata["skills"]), 1)
+        self.assertEqual(saved_metadata["skills"][0]["name"], "Refund lookup")
+
+    def test_invalid_skills_patch_is_rejected_before_any_write(self):
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ) as mock_update,
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"skills": [{"name": "", "body": "x"}]},
+                )
+            )
+        self.assertFalse(result["ok"])
+        mock_update.assert_not_awaited()
+
+    def test_skills_key_is_in_the_allowlist(self):
+        self.assertIn("skills", fleet_tools._ALLOWED_CONFIGURE_KEYS)

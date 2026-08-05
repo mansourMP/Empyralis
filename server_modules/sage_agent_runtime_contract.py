@@ -72,6 +72,14 @@ class SageTurnResult:
     # matching gateway_protocol_service.dispatch_channel_outbound's media
     # contract. Empty for every turn that never called a media-producing tool.
     media: list[dict] = field(default_factory=list)
+    # claude_agent_sdk-engine turns only — a verbatim copy of claude_agent_sdk
+    # .ContextUsageResponse (categories/totalTokens/maxTokens/percentage/...),
+    # best-effort attached by run_claude_agent_sdk_turn via
+    # ClaudeSDKClient.get_context_usage() and threaded through unmodified by
+    # handle_sage_chat. None for every other engine/mode (legacy tool loop,
+    # gateway_brain local/cli_subscription) — those never populate this key,
+    # so it stays None rather than a fabricated/zeroed chart.
+    context_usage: Optional[dict] = None
 
     def as_dict(self) -> dict:
         return {
@@ -91,6 +99,7 @@ class SageTurnResult:
             "model": self.model,
             "ai_setup_url": self.ai_setup_url,
             "media": list(self.media),
+            "context_usage": self.context_usage,
         }
 
 

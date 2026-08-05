@@ -1,13 +1,18 @@
 import json
 import os
 import ssl
+from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
 import certifi
 from dotenv import load_dotenv
 
-load_dotenv()
+# MAN-202: scoped to this file's own repo-root .env rather than a bare
+# load_dotenv(), which would otherwise search UP the directory tree from
+# the process cwd and could silently pick up a parent checkout's .env (see
+# server_modules/runtime_config.py for the full incident writeup).
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_RESPONSES_URL = os.getenv("OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses")

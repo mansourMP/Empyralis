@@ -91,6 +91,7 @@ import {
   TaskStatusIcon,
   TaskPriorityIcon,
   TaskSubtaskProgress,
+  TaskWakeDeferralIcon,
   taskStatusLabel,
   taskPriority,
   taskShortId,
@@ -493,6 +494,13 @@ function TaskCard({
             ))}
           </select>
         </span>
+
+        {/* MAN-294: the status ring above still reads `in_progress` — that IS
+            the real status, unchanged. This is the compact qualifier for
+            "but the agent hasn't actually woken up yet", right beside the
+            ring it qualifies. Renders nothing on every task that isn't
+            deferred, which is the common case. */}
+        <TaskWakeDeferralIcon task={task} size={13} />
 
         {/* No priority → no glyph. A card is a free-floating box; there is no
             column here for an empty slot to protect, so the three grey dashes

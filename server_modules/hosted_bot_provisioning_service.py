@@ -223,6 +223,16 @@ async def assign_byo_bot(*, agent_install_id: str, workspace_id: str, tenant_id:
     token = str(token or "").strip()
     if not token:
         raise RuntimeError("A bot token is required for a BYO Telegram bot.")
+    # MAN-206: agent_install_id is caller-supplied and must be confirmed to
+    # belong to THIS (tenant_id, workspace_id) before anything is written --
+    # see agent_bindings_repository.agent_install_in_scope for why RLS alone
+    # does not catch a cross-workspace id here.
+    if not await bindings.agent_install_in_scope(
+        agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    ):
+        raise bindings.AgentInstallNotInScopeError(
+            "This agent does not belong to your workspace."
+        )
     me = await get_me(token)  # validates the token; raises on failure
     bot_username = str(me.get("username") or "").strip()
     bot_id = str(me.get("id") or "").strip()

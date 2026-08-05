@@ -10,6 +10,7 @@ is denied with a policy_denial ledger event.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -29,10 +30,50 @@ _ALLOWED_CONFIGURE_KEYS = {
     "subagents_enabled", "hardware_access", "model_config", "display_name",
     "purpose_preset", "instructions", "context_policy", "tool_toggles",
     "preferred_gateway_id", "telegram_first_contact_reply", "mandate",
-    "capability_config", "audience",
+    "capability_config", "audience", "skills",
 }
 _MAX_MANDATE_AUDIENCE_TOOLS = 200
 _MAX_INSTRUCTIONS_CHARS = 8000
+# MAN-310 skills-delivery: install_metadata.skills — a workspace owner's own
+# reusable-procedure library for THIS specialist, one level down from the
+# Persona/instructions field (FleetAgentDetail.tsx). Storage precedent
+# (workspace_agent_installs.metadata already holds `instructions` — a single
+# capped string, fleet_tools._MAX_INSTRUCTIONS_CHARS) doesn't fit here: a
+# skill needs name + description (so the model/UI can reason about when it's
+# relevant, matching Claude Code's own SKILL.md frontmatter shape) + body,
+# multiple per agent — so this is a small JSONB array under the SAME
+# metadata column rather than a new child table. A child table earns its
+# keep past dozens-to-hundreds of rows per agent with query/filter needs of
+# its own; this is a handful of small records read-and-written whole
+# alongside the rest of install_metadata on every configure/turn-build call,
+# exactly like `mandate`/`context_policy` already are. Revisit only if real
+# usage clears _MAX_SKILLS_PER_AGENT often enough to need pagination.
+#
+# Delivered to the Claude Agent SDK engine as real SKILL.md files inside a
+# per-turn, per-install temp plugin directory (claude_agent_sdk_bridge.
+# build_skills_plugin_dir) — never as filesystem content on THIS process
+# outside that turn. See that module's docstring for the full delivery
+# mechanism and its lifecycle discipline.
+_MAX_SKILL_NAME_CHARS = 100
+_MAX_SKILL_DESCRIPTION_CHARS = 500
+# Matches _MAX_INSTRUCTIONS_CHARS above — same "one capped string" precedent
+# applied per-field instead of to the whole record.
+_MAX_SKILL_BODY_CHARS = 8000
+# Precedent recommendation was a child table only past "small counts (<10/
+# agent)" — 20 is a deliberately generous ceiling above that bar, not a
+# promise of good UX at the limit: past a handful of skills an agent's own
+# system-prompt-level skill listing (every SKILL.md name+description is
+# always shown to the model, unlike a body which loads lazily) gets noisy
+# long before storage does.
+_MAX_SKILLS_PER_AGENT = 20
+# "command" (commands/*.md, invoked by a user typing "/name") is deliberately
+# NOT supported yet: in this product's headless single-turn architecture
+# there is no interactive REPL to type a slash command into, so shipping a
+# "kind": "command" option here would be a control that cannot be used in
+# the current state — exactly what CLAUDE.md's "no dead controls" rule
+# exists to catch. Only "skill" (SKILL.md, invoked by the MODEL via the Skill
+# tool when it judges the description relevant) is real today.
+_VALID_SKILL_KINDS = {"skill"}
 _VALID_CONTEXT_FULL_ACTIONS = {"compact", "fresh_session"}
 _VALID_MODEL_MODES = {"platform_credits", "byok_api", "cli_subscription", "local"}
 # BYO-brain Phase 0: model_config may carry which paired Gateway box runs the
@@ -69,6 +110,22 @@ _VALID_CLI_REASONING_EFFORTS_BY_RUNTIME = {
     "grok_build": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
     "cursor_cli": set(),
 }
+# MAN-310 Phase 1: which turn engine drives an agent whose model_config.mode
+# is platform_credits/byok_api. "legacy" (also what an unset/absent value
+# means — see sage_agent_runtime_service.py's handle_sage_chat resolution)
+# is the existing direct_chat_generation_service.stream_provider_backed_
+# direct_chat path; "claude_agent_sdk" selects claude_agent_sdk_bridge.
+# ENGINE_ID at the turn seam (_run_sage_action_loop_v3's _resolve_turn_
+# engine_id). Duplicated here rather than imported from claude_agent_sdk_
+# bridge (same duplicate-but-documented-across-layers pattern as
+# _VALID_MODEL_RUNTIMES/_VALID_REASONING_EFFORTS above — that module pulls
+# in a much heavier import chain and this one must stay light). Only
+# meaningful for _ENGINE_SUPPORTED_MODES below: cli_subscription/local never
+# reach the turn-engine seam at all (handle_sage_chat's _dispatch_cli_
+# subscription_gateway_brain / _dispatch_local_gateway_brain branches
+# return before it), so a saved engine value there would be a dead control.
+_VALID_ENGINES = {"legacy", "claude_agent_sdk"}
+_ENGINE_SUPPORTED_MODES = {"platform_credits", "byok_api"}
 _VALID_PURPOSE_PRESETS = {"customer_facing", "internal_assistant", "operator"}
 _PURPOSE_PRESET_INSTRUCTIONS = {
     "customer_facing": (
@@ -157,6 +214,109 @@ def resolve_subagents_enabled(install: Optional[Dict[str, Any]]) -> bool:
         return bool(m["subagents_enabled"])
     # Default: operator can delegate, specialist cannot
     return resolve_agent_role(install) == OPERATOR_ROLE
+
+
+def _clean_skill_record(item: Any) -> Optional[Dict[str, Any]]:
+    """Coerce one raw metadata.skills[] entry into the canonical read shape,
+    or None when it's too malformed to use (not a dict, or missing a
+    name/body — the two fields nothing downstream can render or deliver
+    without). Never raises: this reads storage that may pre-date a
+    validation tightening, so it degrades a bad record to "skip it" rather
+    than fail the whole agent's skill list."""
+    if not isinstance(item, dict):
+        return None
+    name = str(item.get("name") or "").strip()
+    body = str(item.get("body") or "").strip()
+    if not name or not body:
+        return None
+    kind = str(item.get("kind") or "skill").strip().lower()
+    return {
+        "id": str(item.get("id") or "").strip() or f"sk_{uuid.uuid4().hex[:12]}",
+        "name": name[:_MAX_SKILL_NAME_CHARS],
+        "description": str(item.get("description") or "").strip()[:_MAX_SKILL_DESCRIPTION_CHARS],
+        "body": body[:_MAX_SKILL_BODY_CHARS],
+        "kind": kind if kind in _VALID_SKILL_KINDS else "skill",
+        "enabled": bool(item.get("enabled", True)),
+    }
+
+
+def resolve_agent_skills(
+    install: Optional[Dict[str, Any]], *, enabled_only: bool = False
+) -> List[Dict[str, Any]]:
+    """Resolve this agent's configured skills (install_metadata.skills — see
+    _MAX_SKILLS_PER_AGENT's own docstring for the storage shape/precedent).
+
+    `enabled_only=True` is what claude_agent_sdk_bridge's turn construction
+    wants (sage_agent_runtime_service._resolve_specialist_toolset calls this
+    with it on) — a disabled skill must never reach the CLI as a real
+    SKILL.md, so filtering happens here rather than trusting every caller to
+    remember to check the flag itself. `enabled_only=False` (default) is
+    what the Fleet UI's own GET wants: it needs to show disabled skills too
+    so an owner can re-enable one.
+    """
+    raw = _meta(install).get("skills")
+    if not isinstance(raw, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        clean = _clean_skill_record(item)
+        if clean is None:
+            continue
+        if enabled_only and not clean["enabled"]:
+            continue
+        out.append(clean)
+    return out
+
+
+def _normalize_skills_patch(raw: Any) -> tuple:
+    """Validate a `skills` fleet_configure_agent patch value.
+
+    Returns (clean_list, error) — error is "" and clean_list is the fully
+    normalized list on success; clean_list is None and error is a
+    human-readable message on failure. Deliberately rejects rather than
+    silently truncates/coerces bad input: unlike resolve_agent_skills (which
+    must degrade gracefully reading storage that already exists), this is
+    the save-time gate — the one place a bad value can still be refused
+    before it's ever persisted or shipped to a CLI subprocess as a file.
+    """
+    if not isinstance(raw, list):
+        return None, "skills must be a list."
+    if len(raw) > _MAX_SKILLS_PER_AGENT:
+        return None, f"A maximum of {_MAX_SKILLS_PER_AGENT} skills is supported per agent."
+    clean: List[Dict[str, Any]] = []
+    seen_names: set = set()
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None, f"skills[{index}] must be an object."
+        name = str(item.get("name") or "").strip()
+        if not name:
+            return None, f"skills[{index}].name is required."
+        if len(name) > _MAX_SKILL_NAME_CHARS:
+            return None, f"skills[{index}].name must be at most {_MAX_SKILL_NAME_CHARS} characters."
+        key = name.lower()
+        if key in seen_names:
+            return None, f"Duplicate skill name: {name!r}. Skill names must be unique per agent."
+        seen_names.add(key)
+        body = str(item.get("body") or "").strip()
+        if not body:
+            return None, f"skills[{index}].body is required."
+        if len(body) > _MAX_SKILL_BODY_CHARS:
+            return None, f"skills[{index}].body must be at most {_MAX_SKILL_BODY_CHARS} characters."
+        description = str(item.get("description") or "").strip()
+        if len(description) > _MAX_SKILL_DESCRIPTION_CHARS:
+            return None, f"skills[{index}].description must be at most {_MAX_SKILL_DESCRIPTION_CHARS} characters."
+        kind = str(item.get("kind") or "skill").strip().lower()
+        if kind not in _VALID_SKILL_KINDS:
+            return None, f"skills[{index}].kind must be one of: {', '.join(sorted(_VALID_SKILL_KINDS))}."
+        clean.append({
+            "id": str(item.get("id") or "").strip() or f"sk_{uuid.uuid4().hex[:12]}",
+            "name": name,
+            "description": description,
+            "body": body,
+            "kind": kind,
+            "enabled": bool(item.get("enabled", True)),
+        })
+    return clean, ""
 
 
 def resolve_hardware_access(install: Optional[Dict[str, Any]]) -> str:
@@ -773,6 +933,7 @@ async def fleet_list_agents(
             "hardware_access_locked": bool(_meta_i.get("hardware_access_locked") or _pco_i.get("hardware_access_locked")),
             "context_policy": dict(_ctx_pol),
             "instructions": str(_meta_i.get("instructions") or "").strip(),
+            "skills": resolve_agent_skills(inst_dict),
             "preferred_gateway_id": str(_meta_i.get("preferred_gateway_id") or "").strip(),
             "telegram_first_contact_reply": bool(_meta_i.get("telegram_first_contact_reply")),
             "stopped": dict(_meta_i.get("stopped") or {}) if bool((_meta_i.get("stopped") or {}).get("active")) else {"active": False},
@@ -1209,6 +1370,50 @@ async def fleet_clear_agent_capability_key(
     return {"ok": True, "capability": cap, "mode": "platform_credits"}
 
 
+def gateway_resolves_in_workspace(gateway_id: str, workspace_id: str) -> Dict[str, Any]:
+    """Confirm `gateway_id` resolves to a real, active, non-revoked Gateway
+    registration paired to this workspace. Factored out of the inline check
+    fleet_configure_agent applies to the agent-level model_config.
+    gateway_binding field (below) so any OTHER caller that needs to validate
+    a gateway id before saving it — today, projects_repository.
+    set_project_default_gateway — applies the identical rule instead of a
+    hand-copied (and inevitably drifting) duplicate.
+
+    Returns {"ok": True} when it resolves, else {"ok": False, "error": "..."}
+    with the exact same message fleet_configure_agent has always returned.
+    Deliberately does NOT include the CLI-installed/authenticated check
+    fleet_configure_agent layers on top for a chosen runtime — that check is
+    runtime-specific (claude_code / codex / ...), which a project-level
+    default has no concept of; only "is this a real box in this workspace"
+    is common ground between the two callers."""
+    _gateway_id = str(gateway_id or "").strip()
+    if not _gateway_id:
+        return {"ok": True}
+    from server_modules import gateway_state_repository
+
+    _registration = gateway_state_repository.get_gateway_registration(_gateway_id)
+    _registration_workspace_id = str((_registration or {}).get("workspace_id") or "").strip()
+    _resolves = (
+        isinstance(_registration, dict)
+        and bool(_registration)
+        and str(_registration.get("status") or "").strip().lower() == "active"
+        and str(_registration.get("device_trust_state") or "").strip().lower() != "revoked"
+        and (
+            not _registration_workspace_id
+            or _registration_workspace_id == (str(workspace_id or "").strip() or "default")
+        )
+    )
+    if not _resolves:
+        return {
+            "ok": False,
+            "error": (
+                f"gateway_binding '{_gateway_id}' does not resolve to a Gateway paired "
+                "to this workspace. Pair a Gateway first, then bind it here."
+            ),
+        }
+    return {"ok": True}
+
+
 async def fleet_configure_agent(
     *,
     actor_id: str,
@@ -1220,11 +1425,19 @@ async def fleet_configure_agent(
     """Update an agent's fleet-managed configuration.
 
     Allowed patch keys: enabled_tools, connectors, channel_bindings,
-    subagents_enabled, hardware_access, model_config.
+    subagents_enabled, hardware_access, model_config, skills.
+
+    `skills` replaces the WHOLE list (like model_config, not a per-field
+    merge like capability_config) — see _normalize_skills_patch for the
+    validated shape ({id, name, description, body, kind, enabled}) and
+    resolve_agent_skills for how a turn reads it back.
 
     Model config modes: platform_credits | byok_api | cli_subscription | local
     Model config may also carry gateway_binding (paired Gateway id that runs
     the brain) and runtime (claude_code | codex | ollama). Both persist as-is.
+    MAN-310 Phase 1: model_config may also carry engine (legacy |
+    claude_agent_sdk) — which turn engine drives platform_credits/byok_api
+    agents; see _VALID_ENGINES/_ENGINE_SUPPORTED_MODES above.
     """
     from server_modules import agent_registry_repository as repo
 
@@ -1239,6 +1452,12 @@ async def fleet_configure_agent(
             "ok": False,
             "error": "No valid patch keys. Allowed: " + ", ".join(sorted(_ALLOWED_CONFIGURE_KEYS)),
         }
+
+    _clean_skills: Optional[List[Dict[str, Any]]] = None
+    if "skills" in clean_patch:
+        _clean_skills, _skills_error = _normalize_skills_patch(clean_patch["skills"])
+        if _clean_skills is None:
+            return {"ok": False, "error": _skills_error}
 
     # Validate model_config mode + BYO-brain sub-fields if present.
     if "model_config" in clean_patch:
@@ -1255,6 +1474,29 @@ async def fleet_configure_agent(
                 "ok": False,
                 "error": f"Invalid model_config runtime: {runtime}. Must be one of: {', '.join(sorted(_VALID_MODEL_RUNTIMES))}",
             }
+        # MAN-310 Phase 1: engine — rejected at save time (same convention as
+        # runtime/reasoning_effort just above/below) rather than silently
+        # ignored at turn time, so a caller never believes a saved choice is
+        # in effect when handle_sage_chat's resolution would actually never
+        # consult it (cli_subscription/local bypass the turn-engine seam
+        # entirely — see _ENGINE_SUPPORTED_MODES's own comment).
+        engine = str(mc.get("engine") or "").strip().lower()
+        if engine and engine not in _VALID_ENGINES:
+            return {
+                "ok": False,
+                "error": f"Invalid model_config engine: {engine}. Must be one of: {', '.join(sorted(_VALID_ENGINES))}",
+            }
+        if engine == "claude_agent_sdk":
+            _effective_mode_for_engine = mode or "platform_credits"
+            if _effective_mode_for_engine not in _ENGINE_SUPPORTED_MODES:
+                return {
+                    "ok": False,
+                    "error": (
+                        f"model_config engine 'claude_agent_sdk' isn't available for mode "
+                        f"'{_effective_mode_for_engine}' — it only applies to "
+                        f"{', '.join(sorted(_ENGINE_SUPPORTED_MODES))}."
+                    ),
+                }
         # reasoning_effort: two DIFFERENT vocabularies depending on mode/
         # runtime — see _VALID_REASONING_EFFORTS and _VALID_CLI_REASONING_
         # EFFORTS_BY_RUNTIME's own docstrings. Rejected here (save time)
@@ -1298,29 +1540,15 @@ async def fleet_configure_agent(
         # never dispatch (the turn-time error would otherwise only surface
         # much later, mid-conversation, instead of at save time).
         if mode == "cli_subscription" and isinstance(gateway_binding, str) and gateway_binding.strip():
-            from server_modules import gateway_state_repository, gateway_registry_service
+            from server_modules import gateway_registry_service
 
             _gateway_id = gateway_binding.strip()
+            _resolution = gateway_resolves_in_workspace(_gateway_id, workspace_id)
+            if not _resolution.get("ok"):
+                return _resolution
+            from server_modules import gateway_state_repository
+
             _registration = gateway_state_repository.get_gateway_registration(_gateway_id)
-            _registration_workspace_id = str((_registration or {}).get("workspace_id") or "").strip()
-            _resolves = (
-                isinstance(_registration, dict)
-                and bool(_registration)
-                and str(_registration.get("status") or "").strip().lower() == "active"
-                and str(_registration.get("device_trust_state") or "").strip().lower() != "revoked"
-                and (
-                    not _registration_workspace_id
-                    or _registration_workspace_id == (str(workspace_id or "").strip() or "default")
-                )
-            )
-            if not _resolves:
-                return {
-                    "ok": False,
-                    "error": (
-                        f"gateway_binding '{_gateway_id}' does not resolve to a Gateway paired "
-                        "to this workspace. Pair a Gateway first, then bind it here."
-                    ),
-                }
             # And the CLI itself must be installed AND authenticated on that
             # Gateway — save-time honesty, so users hear "sign it in first"
             # here instead of getting an opaque "Gateway dispatch could not
@@ -1391,6 +1619,8 @@ async def fleet_configure_agent(
             meta["subagents_enabled"] = bool(clean_patch["subagents_enabled"])
         if "instructions" in clean_patch:
             meta["instructions"] = str(clean_patch["instructions"] or "").strip()[:_MAX_INSTRUCTIONS_CHARS]
+        if _clean_skills is not None:
+            meta["skills"] = _clean_skills
         _next_label: Optional[str] = None
         if "display_name" in clean_patch:
             # Inline rename (Overview tab). The real storage target is the
@@ -2224,10 +2454,16 @@ async def fleet_create_agent(
             try:
                 from server_modules import projects_repository as _projects
                 if not _project_id:
+                    # agent_label, not the raw `name` param — `name` is empty
+                    # whenever the wizard auto-assigned one from the pool
+                    # (see above), which used to leave the project stuck on
+                    # the "Untitled agent" fallback even though the agent
+                    # sitting right next to it in the sidebar had a real
+                    # name.
                     _own_project = await _projects.create_project(
                         tenant_id=tenant_id,
                         workspace_id=workspace_id,
-                        name=(str(name or "").strip() or "Untitled agent"),
+                        name=(agent_label.strip() or "Untitled agent"),
                     )
                     _project_id = str((_own_project or {}).get("id") or "")
                 if _project_id:

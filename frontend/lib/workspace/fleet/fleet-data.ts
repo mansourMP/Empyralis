@@ -16,6 +16,21 @@ export type StoppedState = {
   at?: string;
 };
 
+/** MAN-310 skills-delivery: install_metadata.skills — a reusable procedure
+ *  the model can invoke via the Claude Agent SDK engine's Skill tool
+ *  (server: fleet_tools.resolve_agent_skills / _normalize_skills_patch).
+ *  "command" is a valid future kind but not deliverable yet — see fleet_
+ *  tools._VALID_SKILL_KINDS' own docstring — so the client only ever
+ *  writes "skill". */
+export type FleetAgentSkill = {
+  id: string;
+  name: string;
+  description: string;
+  body: string;
+  kind: "skill";
+  enabled: boolean;
+};
+
 export type FleetAgent = {
   agent_id: string;
   label: string;
@@ -46,6 +61,7 @@ export type FleetAgent = {
   context_policy?: { max_context_tokens?: number; on_context_full?: string };
   subagents_enabled?: boolean;
   instructions?: string;
+  skills?: FleetAgentSkill[];
   preferred_gateway_id?: string;
   telegram_first_contact_reply?: boolean;
   stopped?: StoppedState;
@@ -64,6 +80,17 @@ export type FleetProject = {
   icon?: string;
   tint?: string;
   metadata?: Record<string, unknown>;
+  /** U3-K: the Gateway agents in this project inherit when they carry none
+   *  of their own — see specialist_runtime_context.
+   *  resolve_specialist_runtime_context's fallback and ProjectSettings.tsx's
+   *  "Default hardware" control. Null/absent when unset. */
+  default_gateway_id?: string | null;
+  /** Human-readable label for default_gateway_id (routes_fleet.py resolves
+   *  it server-side, same source GatewayBoxPicker's own gatewayLabel() uses)
+   *  — null when unset OR when the id no longer resolves to a live
+   *  registration (deleted box), so the frontend can tell "unset" apart
+   *  from "set but gone" if it ever needs to. */
+  default_gateway_label?: string | null;
   created_at?: string;
 };
 
@@ -319,6 +346,31 @@ export function useFleetProjects(workspaceId: string) {
   );
 
   return { projects, loading, error, refresh };
+}
+
+/** PATCH .../fleet/projects/{id} — rename, archive/unarchive, or set/clear
+ *  the project's default Gateway (routes_fleet.fleet_patch_project,
+ *  owner-only server-side). `default_gateway_id: ""` explicitly clears the
+ *  default; omitting the field leaves it untouched — same "undefined means
+ *  don't touch, empty string means clear" contract patchFleetTask's own
+ *  clear_due_at pairing established for a nullable field on this same kind
+ *  of PATCH. */
+export async function patchFleetProject(
+  workspaceId: string,
+  projectId: string,
+  patch: { name?: string; description?: string; archived?: boolean; default_gateway_id?: string }
+): Promise<FleetProject> {
+  const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+    body: JSON.stringify(patch),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not update project (HTTP ${res.status})`));
+  }
+  return data.project as FleetProject;
 }
 
 export function useFleetAgentActivity(workspaceId: string, agentId: string | null) {
@@ -1041,6 +1093,24 @@ export type FleetTask = {
    *  `created_at`. Null under the exact same conditions as completed_by_*. */
   completed_at?: string | null;
   due_at?: string | null;
+  /** MAN-294: the most recent still-pending task_assigned/task_commented
+   *  wake request for this task, if one exists — project_tasks_service's
+   *  rollup join against agent_scheduler_wake_requests (never a second
+   *  fetch). A task can read `status: "in_progress"` (assign_task flips
+   *  that column the instant an agent is assigned) while ALSO carrying a
+   *  future pending_wake_due_at — that combination means the assignee has
+   *  not actually started yet (still waiting out a battery/network delay;
+   *  quiet hours no longer defer an assignment at all, see
+   *  bounded_scheduler_service.schedule_task_assigned_wakeup). Both null
+   *  once the wake has actually fired (the common case) or on a server
+   *  predating this rollup. */
+  pending_wake_due_at?: string | null;
+  /** "quiet_hours" | "battery_low" | "network_offline" — bounded_scheduler_
+   *  service._apply_policy_to_due_at's own reason strings, passed through
+   *  verbatim rather than re-enumerated here so a new reason on the backend
+   *  doesn't need a frontend release to become visible. Null whenever
+   *  pending_wake_due_at is (see above) — never one without the other. */
+  pending_wake_delay_reason?: string | null;
   plan?: unknown;
   metadata?: Record<string, unknown>;
   created_at?: string | null;

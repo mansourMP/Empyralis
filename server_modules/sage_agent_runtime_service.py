@@ -17,6 +17,7 @@ from server_modules import tool_result_status
 from server_modules import (
     activity_ledger_service,
     agent_trace_service,
+    claude_agent_sdk_bridge,
     direct_chat_generation_service,
     direct_chat_runtime_exports,
     direct_chat_tool_catalog_service,
@@ -152,6 +153,24 @@ _SAGE_ACTION_LOOP_VERSION = "v2"
 _SAGE_OPERATOR_LOOP_VERSION = "v3"
 _SAGE_ACTION_LOOP_MAX_TOOL_CALLS = 25
 _SAGE_OPERATOR_LOOP_MAX_ITERATIONS = 5  # Cap at 5 to prevent runaway; most tasks finish in 1-3
+
+
+def _resolve_turn_engine_id(engine_options: dict[str, Any] | None) -> str:
+    """MAN-310: the ONE decision point _run_sage_action_loop_v3's
+    _collect_stream_events closure branches on. Pulled out as its own
+    top-level function (rather than left inline in that closure) so the
+    "flag off leaves the legacy path untouched" property has a unit-testable
+    home — see test_claude_agent_sdk_bridge.py's
+    TurnEngineSelectionFlagOffTests. None, {}, a non-dict, or any string
+    other than claude_agent_sdk_bridge.ENGINE_ID all resolve to "" (falsy —
+    every existing caller, which never passes engine_options at all, lands
+    here), which _collect_stream_events treats identically to "take the
+    existing direct_chat_generation_service.stream_provider_backed_direct_
+    chat path, unmodified"."""
+    options = engine_options if isinstance(engine_options, dict) else {}
+    return str(options.get("engine") or "").strip().lower()
+
+
 _SAGE_TASK_ROUTE_MODES = {
     "chat_only",
     "connector_api",
@@ -2222,6 +2241,9 @@ async def _resolve_specialist_toolset(
     # rest of this function: a lookup error must never silently grant a
     # specialist the sub-agent spawn tool.
     subagents_enabled = False
+    # Fail-safe default (MAN-310 skills-delivery): a lookup error must never
+    # silently deliver a stale/wrong skill set — no skills this turn instead.
+    skills: list[dict[str, Any]] = []
     try:
         from server_modules import agent_bindings_repository as _bind
         rows = await _bind.list_agent_connector_bindings(
@@ -2260,6 +2282,22 @@ async def _resolve_specialist_toolset(
         # Threaded onto session_ctx below so the mandate gate can consult it
         # without a fetch of its own.
         meta = bundle.get("install_metadata") if isinstance(bundle, dict) and isinstance(bundle.get("install_metadata"), dict) else (bundle.get("metadata") if isinstance(bundle, dict) else None)
+        # MAN-310 skills-delivery: this specialist's ENABLED skills, read
+        # from the SAME bundle fetch (no extra round-trip), scoped to
+        # specialist installs only — the same architectural boundary
+        # persona/instructions already draws (specialist_runtime_context.py
+        # only ever resolves a persona for a specialist install; the master/
+        # Sage path returns None and runs its own separately-built system
+        # prompt). fleet_tools.resolve_agent_skills(enabled_only=True) is
+        # also what fails safe on a malformed record (skips it) rather than
+        # raising, matching every other lookup in this function.
+        try:
+            skills = _fleet_tools_subagents.resolve_agent_skills(bundle, enabled_only=True)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "specialist toolset: skills resolution failed for %s — no skills this turn", aid, exc_info=True
+            )
+            skills = []
         mandate = meta.get("mandate") if isinstance(meta, dict) and isinstance(meta.get("mandate"), dict) else {}
         raw_audience_tools = mandate.get("audience_tools")
         if isinstance(raw_audience_tools, list):
@@ -2289,6 +2327,7 @@ async def _resolve_specialist_toolset(
         logging.getLogger(__name__).warning(
             "specialist toolset: install bundle load failed for %s — core-only", aid, exc_info=True
         )
+        skills = []
     return {
         "core": _core_direct_tool_names(),
         "connectors": connectors,
@@ -2296,6 +2335,11 @@ async def _resolve_specialist_toolset(
         "raw_tool_toggles": raw_toggles,
         "mandate_audience_tools": mandate_audience_tools,
         "capability_providers": capability_providers,
+        # MAN-310 skills-delivery: forwarded to claude_agent_sdk_bridge.
+        # run_claude_agent_sdk_turn's own `skills=` parameter at the
+        # _collect_stream_events seam below — see this function's own
+        # comment on why the master/Sage path never populates this.
+        "skills": skills,
         # §1.3 (Multiplayer Projects plan): this specialist's own identity,
         # so _filter_registry_for_specialist can tell "an MCP server this
         # workspace has connected" apart from "an MCP server THIS agent (or
@@ -2793,6 +2837,22 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
     blocked_tools: list[dict[str, Any]] = []
     trace_events: list[dict[str, Any]] = []
     tool_progress_messages: list[str] = []  # transient progress shown before final reply
+    # MAN-310 skills-delivery: a deliberately-reopened CLI meta-tool call
+    # (Skill/Agent — claude_agent_sdk_bridge._META_TOOL_EVENT_TYPES) lands
+    # HERE, never in tool_calls (real Empyralis work, what tool_honesty_
+    # guard checks a reply's claims against) and never in blocked_tools (a
+    # real failure). Keyed by tool_call_id so the "started"/"result" phases
+    # of the same call merge into one entry, mirroring _tool_entry's own
+    # dedup-by-id shape one level down.
+    meta_tool_calls_by_id: dict[str, dict[str, Any]] = {}
+    ordered_meta_tool_ids: list[str] = []
+
+    def _meta_tool_entry(tool_call_id: str, kind: str) -> dict[str, Any]:
+        key = _coerce_text(tool_call_id) or f"metacall-{len(ordered_meta_tool_ids) + 1}"
+        if key not in meta_tool_calls_by_id:
+            ordered_meta_tool_ids.append(key)
+            meta_tool_calls_by_id[key] = {"id": key, "kind": kind, "status": "running"}
+        return meta_tool_calls_by_id[key]
 
     def _tool_entry(tool_call_id: str, tool_name: str = "") -> dict[str, Any]:
         key = _coerce_text(tool_call_id) or f"toolcall-{len(ordered_tool_ids) + 1}"
@@ -2883,6 +2943,18 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
                     "reason": _coerce_text(data.get("summary")) or "blocked",
                     "status": "blocked",
                 })
+        elif trace_type in ("skill.invoked", "subagent.invoked"):
+            entry = _meta_tool_entry(tool_call_id, "skill" if trace_type == "skill.invoked" else "subagent")
+            phase = _coerce_text(data.get("phase")).lower()
+            if phase == "started":
+                entry["name"] = _coerce_text(data.get("tool_name")) or entry["kind"]
+                entry["arguments"] = data.get("args_preview") if isinstance(data.get("args_preview"), dict) else {}
+            elif phase == "result":
+                status = _coerce_text(data.get("status")).lower()
+                entry["status"] = "failed" if status == "failed" else "completed"
+                summary = _coerce_text(data.get("summary"))
+                if summary:
+                    entry["summary"] = summary
 
     approvals_required = _normalize_direct_action_approvals(final_payload)
     actions = final_payload.get("actions") if isinstance(final_payload.get("actions"), list) else []
@@ -2927,6 +2999,14 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
         "final_payload": final_payload,
         "tool_calls": tool_calls,
         "blocked_tools": blocked_tools,
+        # MAN-310 skills-delivery: deliberately-reopened meta-tool calls
+        # (Skill/Agent) — their own honest bucket, never folded into
+        # tool_calls or blocked_tools above (see meta_tool_calls_by_id's own
+        # comment). action_execution_mode below deliberately does NOT factor
+        # this in: a turn that only invoked a skill and called no Empyralis
+        # tool is still "text_only" from Empyralis's own perspective — it
+        # really didn't do any Empyralis-tool work.
+        "meta_tool_calls": [meta_tool_calls_by_id[key] for key in ordered_meta_tool_ids],
         "approvals_required": approvals_required,
         "action_execution_mode": action_mode,
         "trace_events": trace_events,
@@ -2940,6 +3020,109 @@ def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[
             "blocked_tool_calls": len(blocked_tools),
         },
     }
+
+
+def _decode_thread_metadata_object(raw: Any) -> dict[str, Any]:
+    """agent_threads.metadata comes back from thread_service.get_thread as a
+    dict on the local (no-Postgres) fallback store but as a raw JSON string
+    on the real asyncpg-backed path (no jsonb codec registered on that pool
+    — see control_plane_repository.py's own `_decode_json_object`, which
+    this mirrors narrowly rather than importing a private cross-module
+    symbol for one call site)."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    token = str(raw or "").strip()
+    if not token:
+        return {}
+    try:
+        parsed = json.loads(token)
+    except Exception:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+async def _sdk_engine_session_lookup(
+    *, thread_id: str, tenant_id: str, workspace_id: str, prior_message_count: int,
+) -> str:
+    """MAN-310 Phase 2 session continuity: return a resumable claude_agent_
+    sdk session id for this conversation, or "" if none is safely resumable.
+
+    "Safely resumable" is a count check, not a full replay: the SDK session
+    captured after some earlier SDK-engine turn only knows the history up
+    through that turn. If the NEXT SDK-engine turn's own `prior_messages`
+    (fetched fresh from Empyralis's thread store — the same list about to
+    be folded into the prompt on the non-resuming path) is a different
+    length than what was recorded when that session was captured, the
+    thread moved on without that session seeing it — e.g. an intervening
+    legacy-engine turn, a channel-injected message, or a background
+    compaction summary. Resuming anyway would hand the model a stale view
+    of the conversation while ALSO silently dropping whatever isn't in that
+    stale view (folding history is skipped whenever we resume — see
+    run_claude_agent_sdk_turn's resume_session_id branch) — a correctness
+    regression, not just a missed cache hit. On any mismatch (or lookup
+    failure) this returns "", which makes the caller fold full history and
+    mint a fresh session exactly as if no prior session existed — fail
+    closed, never fail wrong."""
+    token = str(thread_id or "").strip()
+    if not token:
+        return ""
+    try:
+        thread_row = await thread_service.get_thread(
+            token, tenant_id=tenant_id or "default", workspace_id=workspace_id, include_turns=False,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "claude_agent_sdk session lookup failed for thread=%s", token, exc_info=True,
+        )
+        return ""
+    if not isinstance(thread_row, dict):
+        return ""
+    stored = _decode_thread_metadata_object(thread_row.get("metadata")).get("claude_agent_sdk_session")
+    if not isinstance(stored, dict):
+        return ""
+    session_id = str(stored.get("session_id") or "").strip()
+    if not session_id:
+        return ""
+    try:
+        stored_fingerprint = int(stored.get("turn_fingerprint"))
+    except (TypeError, ValueError):
+        return ""
+    if stored_fingerprint != int(prior_message_count):
+        return ""
+    return session_id
+
+
+async def _sdk_engine_session_persist(
+    *, thread_id: str, tenant_id: str, workspace_id: str, session_id: str, next_turn_fingerprint: int,
+) -> None:
+    """Best-effort write-back of the new/continued session id after an
+    SDK-engine turn, so the NEXT turn on this conversation can resume it
+    (see _sdk_engine_session_lookup). Never raises — this is engine cache
+    state, not the turn's own durable record (thread_service.record_user_
+    turn/record_assistant_turn already persisted the actual conversation
+    content regardless of engine and regardless of whether this write
+    succeeds)."""
+    token = str(thread_id or "").strip()
+    if not token or not str(session_id or "").strip():
+        return
+    try:
+        from server_modules import control_plane_repository
+
+        await control_plane_repository.merge_agent_thread_metadata(
+            thread_id=token,
+            tenant_id=tenant_id or "default",
+            workspace_id=workspace_id,
+            metadata_patch={
+                "claude_agent_sdk_session": {
+                    "session_id": str(session_id).strip(),
+                    "turn_fingerprint": int(next_turn_fingerprint),
+                },
+            },
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "claude_agent_sdk session persist failed for thread=%s", token, exc_info=True,
+        )
 
 
 async def _run_sage_action_loop_v3(
@@ -2984,6 +3167,28 @@ async def _run_sage_action_loop_v3(
     # saves. None (default) = caller didn't resolve one; memory writes this
     # turn stay unattributed, same as before this parameter existed.
     attribution: dict[str, Any] | None = None,
+    # MAN-310: per-turn engine selection at the _collect_stream_events seam
+    # below. None/empty/anything other than {"engine": claude_agent_sdk_
+    # bridge.ENGINE_ID} takes the EXISTING path (direct_chat_generation_
+    # service.stream_provider_backed_direct_chat) completely unchanged —
+    # this parameter's default keeps every caller that doesn't pass it
+    # byte-for-byte identical to before it existed. "anthropic_api_key" /
+    # "anthropic_base_url" are optional per-turn overrides forwarded to
+    # claude_agent_sdk_bridge.resolve_sdk_process_env when the SDK engine is
+    # selected (see that function's docstring for the non-Anthropic-backend
+    # use case) — ignored on the legacy path.
+    engine_options: dict[str, Any] | None = None,
+    # MAN-310 Phase 2: Empyralis's own stable per-conversation identity
+    # (handle_sage_chat's own `thread_id` param — NOT `trace_id` above,
+    # which is a fresh uuid4 minted for every single call and therefore
+    # useless as a key for anything that must survive across turns). Only
+    # consulted on the claude_agent_sdk_bridge.ENGINE_ID branch, to look up
+    # / persist a resumable SDK session id keyed to THIS conversation — see
+    # _sdk_engine_session_lookup below. Empty (default) = every existing caller
+    # that doesn't pass it: the SDK branch simply never resumes, folding
+    # full history every turn exactly as before this parameter existed. The
+    # legacy branch never reads this parameter at all.
+    conversation_thread_id: str = "",
 ) -> dict[str, Any] | None:
     # Phase 4B: when agent_install_id is set this turn runs as that specialist —
     # its tool whitelist, tool-call executor identity, and mid-turn memory
@@ -3294,7 +3499,64 @@ async def _run_sage_action_loop_v3(
         provider=provider,
         model=model,
     )
+    # MAN-310: resolved once, outside the closure, so both branches below
+    # see the identical value — the flag is read exactly once per turn.
+    _engine_options = engine_options if isinstance(engine_options, dict) else {}
+    _selected_engine = _resolve_turn_engine_id(engine_options)
+    # MAN-310 Phase 2: session continuity. Only ever looked up on the SDK
+    # branch (_sdk_engine_session_lookup's own thread_id check also no-ops
+    # if conversation_thread_id wasn't passed) — the legacy branch below
+    # never reads _sdk_resume_session_id, so it stays byte-for-byte
+    # unaffected regardless of what this resolves to.
+    _sdk_prior_message_fingerprint = len(prior_messages or [])
+    _sdk_resume_session_id = ""
+    if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
+        _sdk_resume_session_id = await _sdk_engine_session_lookup(
+            thread_id=conversation_thread_id,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            prior_message_count=_sdk_prior_message_fingerprint,
+        )
+
     def _collect_stream_events() -> List[Dict[str, Any]]:
+        if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
+            # Second, selectable engine (MAN-310) — the Claude Agent SDK
+            # drives the turn instead of direct_chat_generation_service.
+            # stream_provider_backed_direct_chat below. Same in-scope
+            # variables (generation_services, tools, credentials, ...),
+            # same trace_context, same return contract
+            # (_collect_sage_operator_loop_v3_events parses whatever this
+            # produces identically to the legacy branch's output). The
+            # legacy branch is entirely unreached when this fires, and this
+            # branch is entirely unreached when it doesn't — the two paths
+            # never interact.
+            return claude_agent_sdk_bridge.collect_events_via_claude_agent_sdk(
+                message=message,
+                system_prompt=system_prompt,
+                prior_messages=prior_messages,
+                tool_defs=tools,
+                generation_services=generation_services,
+                workspace_id=workspace_id,
+                thread_id=trace_id,
+                provider=provider,
+                model=model,
+                credentials=credentials,
+                reasoning_effort=reasoning_effort or "",
+                session_ctx=session_ctx,
+                trace_context=trace_context,
+                max_turns=_SAGE_OPERATOR_LOOP_MAX_ITERATIONS,
+                anthropic_api_key=str(_engine_options.get("anthropic_api_key") or "").strip(),
+                anthropic_base_url=str(_engine_options.get("anthropic_base_url") or "").strip(),
+                resume_session_id=_sdk_resume_session_id,
+                # MAN-310 skills-delivery: only ever populated for a
+                # specialist turn (_specialist_toolset is None on the
+                # master/Sage path — see _resolve_specialist_toolset's own
+                # "skills" comment for why that boundary is deliberate, not
+                # a gap). None/[] here reaches build_skills_plugin_dir as
+                # "nothing configured", which is what keeps an agent with no
+                # skills byte-for-byte unchanged.
+                skills=(_specialist_toolset or {}).get("skills") if isinstance(_specialist_toolset, dict) else None,
+            )
         _gen = direct_chat_generation_service.stream_provider_backed_direct_chat(
             services=generation_services,
                 context={
@@ -3350,6 +3612,24 @@ async def _run_sage_action_loop_v3(
     stream_events = await asyncio.to_thread(_collect_stream_events)
     collected = _collect_sage_operator_loop_v3_events(stream_events)
     final_payload = collected["final_payload"]
+    if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
+        # Write back whatever session id this turn ended on (resumed or
+        # freshly minted — claude_agent_sdk_bridge always includes one; see
+        # translate_sdk_message's ResultMessage branch) so the NEXT turn on
+        # this conversation can resume it. next_turn_fingerprint mirrors
+        # what thread_service.record_user_turn/record_assistant_turn are
+        # about to append below (this turn's own user+assistant pair) —
+        # see _sdk_engine_session_lookup's docstring for why an exact-count
+        # match is required before a future turn trusts this session id.
+        _sdk_new_session_id = str(final_payload.get("session_id") or "").strip()
+        if _sdk_new_session_id:
+            await _sdk_engine_session_persist(
+                thread_id=conversation_thread_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                session_id=_sdk_new_session_id,
+                next_turn_fingerprint=_sdk_prior_message_fingerprint + 2,
+            )
     # Accumulate streaming reply text from all result events (same pattern as web chat path)
     accumulated_reply = ""
     for event in stream_events:
@@ -4126,6 +4406,33 @@ async def _run_post_turn_auto_compaction(
             pass  # observability must never break the calling turn
 
 
+# MAN-266 fix: asyncio.ensure_future()/create_task() returns a Task, but
+# the event loop only holds a WEAK reference to it -- if nothing else
+# keeps a strong reference, the task can be garbage-collected while still
+# pending (a well-documented asyncio footgun; see the "Important: Save a
+# reference to the result" note under asyncio.create_task in the stdlib
+# docs). That is exactly what was happening below: the old
+# _schedule_post_turn_auto_compaction called
+# asyncio.ensure_future(_run_post_turn_auto_compaction(...)) and threw the
+# returned Task away immediately (nothing assigned, nothing stored) --
+# so the background auto-compaction job could be collected mid-run,
+# producing the recurring production log line "ERROR [asyncio] Task was
+# destroyed but it is pending!" (MAN-266's reported "task destroyed,
+# connection dropped" symptom). Mirrors the exact pattern already used
+# elsewhere in this codebase for the same footgun --
+# routes_gateway.py's _VPS_PROVISION_BACKGROUND_TASKS /
+# _track_vps_provision_task and gateway_protocol_service.py's per-
+# connection background_tasks set: hold a strong reference in a module-
+# level set, and let the task remove itself via add_done_callback the
+# moment it finishes so this never grows unbounded.
+_POST_TURN_COMPACTION_TASKS: set[asyncio.Task] = set()
+
+
+def _track_post_turn_compaction_task(task: "asyncio.Task") -> None:
+    _POST_TURN_COMPACTION_TASKS.add(task)
+    task.add_done_callback(_POST_TURN_COMPACTION_TASKS.discard)
+
+
 def _schedule_post_turn_auto_compaction(
     *,
     workspace_id: str,
@@ -4144,11 +4451,15 @@ def _schedule_post_turn_auto_compaction(
     which the task itself now logs) is logged here rather than swallowed —
     matches the "never silent" fix the inline setup+dispatch code used to
     violate.
+
+    MAN-266 fix: the scheduled Task is now tracked in
+    _POST_TURN_COMPACTION_TASKS (see comment above) instead of being
+    discarded — see that comment for why a discarded Task reference was
+    the confirmed root cause of the "Task was destroyed but it is
+    pending!" errors this was producing in production.
     """
     try:
-        import asyncio as _asyncio
-
-        _asyncio.ensure_future(_run_post_turn_auto_compaction(
+        task = asyncio.ensure_future(_run_post_turn_auto_compaction(
             workspace_id=workspace_id,
             tenant_id=tenant_id,
             thread_id=thread_id,
@@ -4159,6 +4470,7 @@ def _schedule_post_turn_auto_compaction(
             session_id=session_id,
             trace_id=trace_id,
         ))
+        _track_post_turn_compaction_task(task)
     except Exception as exc:
         logging.getLogger(__name__).error(
             "sage_agent_runtime: failed to SCHEDULE background auto-compaction "
@@ -4183,6 +4495,15 @@ async def handle_sage_chat(
     request_id: str = "",
     specialist_context: Any = None,
     channel_prior_messages: list | None = None,
+    # MAN-310: per-turn engine selection, forwarded to _run_sage_action_loop_
+    # v3 unchanged. None (default) — the ordinary case for every existing
+    # caller — takes the existing action-loop path exactly as before this
+    # parameter existed. Pass {"engine": "claude_agent_sdk"} to run this ONE
+    # turn through the Claude Agent SDK bridge instead (see
+    # claude_agent_sdk_bridge.py); optional "anthropic_api_key"/
+    # "anthropic_base_url" keys override that engine's credentials/backend
+    # for this turn only.
+    engine_options: dict[str, Any] | None = None,
 ) -> dict:
     # Phase 4: when specialist_context is set, this turn runs as a specialist
     # (its persona, model/provider binding, and memory namespace) instead of the
@@ -4540,8 +4861,10 @@ async def handle_sage_chat(
     # system-prompt instruction — see stream_provider_backed_direct_chat's
     # degradation branch).
     _raw_reasoning_effort = ""
+    _raw_engine = ""
     if _spec is not None:
         _raw_reasoning_effort = str(getattr(_spec, "reasoning_effort", "") or "").strip().lower()
+        _raw_engine = str(getattr(_spec, "engine", "") or "").strip().lower()
     else:
         try:
             from server_modules import agent_registry_repository as _reg_re
@@ -4554,9 +4877,22 @@ async def handle_sage_chat(
             )
             _master_re_mc = _master_re_meta.get("model_config") if isinstance(_master_re_meta.get("model_config"), dict) else {}
             _raw_reasoning_effort = str(_master_re_mc.get("reasoning_effort") or "").strip().lower()
+            _raw_engine = str(_master_re_mc.get("engine") or "").strip().lower()
         except Exception:
             _raw_reasoning_effort = ""
+            _raw_engine = ""
     requested_reasoning_effort = _raw_reasoning_effort if _raw_reasoning_effort in _VALID_REASONING_EFFORTS else ""
+    # MAN-310 Phase 1: model_config.engine, resolved the same specialist-vs-
+    # master way as reasoning effort just above — the ONE place a persisted
+    # per-agent engine choice turns into engine_options; nothing upstream of
+    # this function ever set engine_options before this phase. Only
+    # claude_agent_sdk_bridge.ENGINE_ID itself changes behavior below (at
+    # the _run_sage_action_loop_v3 call sites); an unset value, "legacy", or
+    # anything unrecognized all resolve to "", which keeps engine_options
+    # empty/None and the turn on the existing engine — _resolve_turn_
+    # engine_id's existing "" default, the safety property this phase must
+    # preserve.
+    requested_engine = _raw_engine if _raw_engine == claude_agent_sdk_bridge.ENGINE_ID else ""
 
     # --- Build Sage prompt/context before any model-backed action loop ---
     # --- Load recent conversation turns from shared thread store ---
@@ -5148,6 +5484,16 @@ async def handle_sage_chat(
     )
 
     action_loop_message = _normalized_sage_action_loop_message(normalized_message, prior_messages)
+    # MAN-310 Phase 1: a caller-supplied engine_options (still accepted,
+    # unchanged — see this function's own docstring) wins over the resolved
+    # per-agent model_config.engine above; only when the caller left it
+    # unset/empty (every real caller today) does the resolved choice take
+    # effect. Either way an unresolved engine yields None, so both the
+    # regenerate call below and this one stay on the legacy path by default.
+    _effective_engine_options = (
+        engine_options if isinstance(engine_options, dict) and engine_options
+        else ({"engine": requested_engine} if requested_engine else None)
+    )
     # Always run the action loop — the LLM decides whether tools are needed.
     # A keyword heuristic gate would silently skip tools for messages that don't
     # match exact tokens, causing "let me check..." promises with no follow-up.
@@ -5172,6 +5518,8 @@ async def handle_sage_chat(
         reasoning_effort=requested_reasoning_effort,
         credit_idempotency_key=turn_credit_idempotency_key,
         attribution=_turn_attribution,
+        engine_options=_effective_engine_options,
+        conversation_thread_id=thread_id,
     )
     if action_result is not None:
         if "sage_action_loop" not in used_context:
@@ -5250,6 +5598,8 @@ async def handle_sage_chat(
                     preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
                     reasoning_effort=requested_reasoning_effort,
                     credit_idempotency_key=turn_credit_idempotency_key,
+                    engine_options=_effective_engine_options,
+                    conversation_thread_id=thread_id,
                 )
                 if not isinstance(_corrected, dict):
                     return None
@@ -5310,6 +5660,24 @@ async def handle_sage_chat(
         route_decision = dict(action_result.get("route_decision")) if isinstance(action_result.get("route_decision"), dict) else _build_sage_route_decision(message=normalized_message)
         action_execution_mode = _coerce_text(action_result.get("action_execution_mode")) or "tools_executed"
         trace_events = list(action_result.get("trace_events") or [])
+        # Present only for claude_agent_sdk-engine turns — see
+        # claude_agent_sdk_bridge.run_claude_agent_sdk_turn's best-effort
+        # get_context_usage() attach onto its ResultMessage "final" event
+        # payload (translate_sdk_message's ResultMessage branch), which
+        # rides through unmodified as action_result["raw_final_payload"]
+        # (== _collect_sage_operator_loop_v3_events' final_payload, a
+        # verbatim copy of that "final" event's payload dict). Legacy-engine
+        # and gateway_brain (local/cli_subscription) turns never populate
+        # this key on their own final payloads, so it is None for them —
+        # additive only, never fabricated for an engine that never had it.
+        _raw_final_payload_for_context_usage = action_result.get("raw_final_payload")
+        context_usage_payload = (
+            _raw_final_payload_for_context_usage.get("context_usage")
+            if isinstance(_raw_final_payload_for_context_usage, dict)
+            else None
+        )
+        if not isinstance(context_usage_payload, dict):
+            context_usage_payload = None
         daily_operator_payload = (
             dict(action_result.get("daily_operator"))
             if isinstance(action_result.get("daily_operator"), dict)
@@ -5546,6 +5914,9 @@ async def handle_sage_chat(
             "proof_log_id": proof_log_id,
             "ai_setup_url": f"/w/{normalized_workspace_id}{_SAGE_AI_SETUP_PATH}",
             "media": list(action_result.get("media") or []),
+            # See context_usage_payload's own comment above: only ever
+            # non-None for a claude_agent_sdk-engine turn.
+            "context_usage": context_usage_payload,
         }
 
     # ── B2: Overflow error recovery ──

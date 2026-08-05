@@ -109,6 +109,7 @@ class AssignByoBotConflictTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pre_check_rejects_a_bot_already_bound_to_another_agent(self) -> None:
         with (
+            patch.object(prov.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)),
             patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
             patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value={"agent_install_id": "agent-owner"})),
             patch.object(prov, "store_byo_bot_credential") as store_mock,
@@ -136,6 +137,7 @@ class AssignByoBotConflictTests(unittest.IsolatedAsyncioTestCase):
             '"uq_agent_channel_bindings_inbound_owner_v2"'
         )
         with (
+            patch.object(prov.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)),
             patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
             patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
             patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
@@ -155,6 +157,7 @@ class AssignByoBotConflictTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_assign_when_no_conflict(self) -> None:
         with (
+            patch.object(prov.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)),
             patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
             patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
             patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
@@ -164,6 +167,67 @@ class AssignByoBotConflictTests(unittest.IsolatedAsyncioTestCase):
             result = await prov.assign_byo_bot(
                 agent_install_id="agent-2", workspace_id="ws-1", tenant_id="tenant-1", token="tok",
             )
+        self.assertEqual(result["bot_username"], "parts_pro_bot")
+        upsert_mock.assert_awaited_once()
+
+
+class AssignByoBotCrossWorkspaceOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    """MAN-206 regression cover: assign_byo_bot took a caller-supplied
+    agent_install_id and wrote a vault credential + channel binding against
+    it with NO check that the install belongs to the caller's own
+    (tenant_id, workspace_id). RLS's INSERT WITH CHECK does not catch this —
+    the new binding/credential row correctly carries the CALLER's own
+    tenant_id/workspace_id, so the policy is satisfied even though
+    agent_install_id points at a different tenant's agent. Workspace A could
+    plant a channel binding (and a Telegram webhook registration, via
+    agent_bot_webhook_url(agent_install_id)) against an agent that actually
+    belongs to workspace B.
+
+    This test must FAIL against pre-fix code: before the ownership check was
+    added, nothing here would raise, get_me/store_byo_bot_credential/
+    upsert_channel_binding would all be reached, and the assertRaises block
+    would fail with "RuntimeError not raised" (and the write-not-called
+    assertions below would fail too, since the writes WOULD have happened).
+    """
+
+    async def test_rejects_when_agent_install_id_is_outside_the_callers_workspace(self) -> None:
+        with (
+            patch.object(prov.bindings, "agent_install_in_scope", new=AsyncMock(return_value=False)) as scope_mock,
+            patch.object(prov, "get_me", new=AsyncMock()) as get_me_mock,
+            patch.object(prov, "store_byo_bot_credential") as store_mock,
+            patch.object(prov.bindings, "upsert_channel_binding", new=AsyncMock()) as upsert_mock,
+        ):
+            with self.assertRaises(prov.bindings.AgentInstallNotInScopeError):
+                await prov.assign_byo_bot(
+                    agent_install_id="ainstall_belongs_to_other_tenant",
+                    workspace_id="ws-attacker",
+                    tenant_id="tenant-attacker",
+                    token="tok",
+                )
+        scope_mock.assert_awaited_once_with(
+            "ainstall_belongs_to_other_tenant", tenant_id="tenant-attacker", workspace_id="ws-attacker",
+        )
+        # The rejection must happen BEFORE any token validation or write —
+        # no Telegram API call, no credential, no binding.
+        get_me_mock.assert_not_called()
+        store_mock.assert_not_called()
+        upsert_mock.assert_not_awaited()
+
+    async def test_legitimate_same_workspace_assignment_still_works(self) -> None:
+        """The ownership gate must not block the ordinary path: an agent
+        that genuinely belongs to the caller's own workspace."""
+        with (
+            patch.object(prov.bindings, "agent_install_in_scope", new=AsyncMock(return_value=True)) as scope_mock,
+            patch.object(prov, "get_me", new=AsyncMock(return_value={"username": "parts_pro_bot", "id": "999"})),
+            patch.object(prov.bindings, "find_inbound_owner_conflict", new=AsyncMock(return_value=None)),
+            patch.object(prov, "store_byo_bot_credential", return_value="cred-123"),
+            patch.object(prov, "agent_bot_webhook_url", return_value=""),
+            patch.object(prov.bindings, "upsert_channel_binding", new=AsyncMock(return_value={"id": "x"})) as upsert_mock,
+        ):
+            result = await prov.assign_byo_bot(
+                agent_install_id="agent-own", workspace_id="ws-1", tenant_id="tenant-1", token="tok",
+            )
+        scope_mock.assert_awaited_once_with("agent-own", tenant_id="tenant-1", workspace_id="ws-1")
         self.assertEqual(result["bot_username"], "parts_pro_bot")
         upsert_mock.assert_awaited_once()
 

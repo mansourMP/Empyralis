@@ -25,6 +25,7 @@ import { TaskComposer } from "@/lib/workspace/fleet/TaskComposer";
 import { ProjectOverview } from "@/lib/workspace/fleet/ProjectOverview";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
+import { ProjectSettings } from "@/lib/workspace/fleet/ProjectSettings";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { breadcrumbCount, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
@@ -89,7 +90,7 @@ export default function ProjectDetailPage() {
   // MCP-connected external agents — the lookup that turns an
   // `ext_agent_<hex16>` author id in the Activity feed into a real name.
   const { externalAgents } = useWorkspaceRoster(workspaceId);
-  const { projects } = useFleetProjects(workspaceId);
+  const { projects, refresh: refreshProjects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
   useBreadcrumbIcon(
@@ -457,6 +458,11 @@ export default function ProjectDetailPage() {
             are owner-only, server-enforced, so there is no disabled state
             to design for. */}
         <ProjectMemberAdd workspaceId={workspaceId} projectId={projectId} workspaceMembers={members} />
+        {/* U3-K: the same toolbar slot, same owner-only gate — rename +
+            default hardware. See ProjectSettings.tsx's own header for why
+            this row (not the Agents-only Properties drawer) is this
+            control's home. */}
+        <ProjectSettings workspaceId={workspaceId} project={project} workspaceMembers={members} onChanged={refreshProjects} />
         {/* Far RIGHT (margin-left:auto in the stylesheet, on BOTH
             .fleet-toolbar-actions and .fleet-view-options — see
             fleet-theme.css). Every control in here acts on the right-hand

@@ -488,6 +488,7 @@ export class GatewayWsClient {
     const inventory = applyLocalRunnerReadiness(this.passiveInventorySnapshot ?? buildFastPassiveInventorySnapshot({
       requestedCapabilities: runtimeMetadata.requestedCapabilities,
       localRunnerReady,
+      shellFullAccessLocallyEnabled: this.config.shellFullAccessLocallyEnabled,
     }), localRunnerReady);
     void this.refreshPassiveInventorySnapshot(runtimeMetadata.requestedCapabilities, localRunnerReady);
     // Cached internally for ~5s (health/resource-metrics.ts) so back-to-back
@@ -554,6 +555,7 @@ export class GatewayWsClient {
     // snapshot does a few lines above this.
     this.passiveInventoryRefresh = collectPassiveInventorySnapshot({
       requestedCapabilities,
+      shellFullAccessLocallyEnabled: this.config.shellFullAccessLocallyEnabled,
     })
       .then((snapshot) => {
         this.passiveInventorySnapshot = applyLocalRunnerReadiness(snapshot, localRunnerReady);

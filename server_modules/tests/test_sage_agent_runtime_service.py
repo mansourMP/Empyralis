@@ -1647,6 +1647,245 @@ class SageActionLoopKillSwitchTests(unittest.TestCase):
         self.assertEqual(str(ctx.exception), "reached_specialist_toolset_resolution")
 
 
+class SdkEngineSessionLookupTests(unittest.TestCase):
+    """MAN-310 Phase 2: _sdk_engine_session_lookup is the fingerprint check
+    that decides whether a previously captured claude_agent_sdk session id
+    is still safe to resume for THIS turn — see its own docstring for the
+    count-based staleness invariant. Exercised directly (not through the
+    full action loop) so the matching/mismatching logic is pinned in
+    isolation."""
+
+    def _thread_row(self, metadata):
+        return {"thread_id": "thread-1", "metadata": metadata}
+
+    def test_no_thread_id_returns_empty(self):
+        result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+            thread_id="", tenant_id="t-1", workspace_id="ws-1", prior_message_count=0,
+        ))
+        self.assertEqual(result, "")
+
+    def test_matching_fingerprint_resumes(self):
+        stored = self._thread_row({"claude_agent_sdk_session": {"session_id": "sess-1", "turn_fingerprint": 4}})
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(return_value=stored),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=4,
+            ))
+        self.assertEqual(result, "sess-1")
+
+    def test_mismatched_fingerprint_refuses_to_resume(self):
+        """A different prior_message_count than what the stored session was
+        captured against means something else touched this thread in
+        between (a legacy-engine turn, a channel-injected message, a
+        background compaction summary) -- the session's own memory is
+        stale relative to what this turn is about to see, so resuming
+        would silently drop that history. Must return "", not the stale id."""
+        stored = self._thread_row({"claude_agent_sdk_session": {"session_id": "sess-1", "turn_fingerprint": 4}})
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(return_value=stored),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=6,
+            ))
+        self.assertEqual(result, "")
+
+    def test_no_stored_session_returns_empty(self):
+        stored = self._thread_row({})
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(return_value=stored),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=0,
+            ))
+        self.assertEqual(result, "")
+
+    def test_metadata_as_raw_json_string_is_decoded(self):
+        """The real (Postgres) path returns agent_threads.metadata as a raw
+        JSON string, not a dict (no jsonb codec registered on that pool) --
+        must still be read correctly."""
+        stored = self._thread_row(
+            '{"claude_agent_sdk_session": {"session_id": "sess-json", "turn_fingerprint": 2}}'
+        )
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(return_value=stored),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=2,
+            ))
+        self.assertEqual(result, "sess-json")
+
+    def test_lookup_exception_fails_closed(self):
+        with patch(
+            "server_modules.sage_agent_runtime_service.thread_service.get_thread",
+            new=AsyncMock(side_effect=RuntimeError("kernel unavailable")),
+        ):
+            result = _run(sage_agent_runtime_service._sdk_engine_session_lookup(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1", prior_message_count=0,
+            ))
+        self.assertEqual(result, "")
+
+
+class SdkEngineSessionPersistTests(unittest.TestCase):
+    """_sdk_engine_session_persist's write side -- best-effort, never raises,
+    writes the exact metadata_patch shape _sdk_engine_session_lookup later
+    reads back."""
+
+    def test_writes_expected_metadata_patch(self):
+        mock_merge = AsyncMock(return_value=None)
+        with patch("server_modules.control_plane_repository.merge_agent_thread_metadata", new=mock_merge):
+            _run(sage_agent_runtime_service._sdk_engine_session_persist(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1",
+                session_id="sess-2", next_turn_fingerprint=6,
+            ))
+        mock_merge.assert_awaited_once_with(
+            thread_id="thread-1",
+            tenant_id="t-1",
+            workspace_id="ws-1",
+            metadata_patch={"claude_agent_sdk_session": {"session_id": "sess-2", "turn_fingerprint": 6}},
+        )
+
+    def test_empty_thread_id_is_a_noop(self):
+        mock_merge = AsyncMock(return_value=None)
+        with patch("server_modules.control_plane_repository.merge_agent_thread_metadata", new=mock_merge):
+            _run(sage_agent_runtime_service._sdk_engine_session_persist(
+                thread_id="", tenant_id="t-1", workspace_id="ws-1",
+                session_id="sess-2", next_turn_fingerprint=6,
+            ))
+        mock_merge.assert_not_awaited()
+
+    def test_empty_session_id_is_a_noop(self):
+        mock_merge = AsyncMock(return_value=None)
+        with patch("server_modules.control_plane_repository.merge_agent_thread_metadata", new=mock_merge):
+            _run(sage_agent_runtime_service._sdk_engine_session_persist(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1",
+                session_id="", next_turn_fingerprint=6,
+            ))
+        mock_merge.assert_not_awaited()
+
+    def test_write_failure_does_not_raise(self):
+        mock_merge = AsyncMock(side_effect=RuntimeError("kernel unavailable"))
+        with patch("server_modules.control_plane_repository.merge_agent_thread_metadata", new=mock_merge):
+            _run(sage_agent_runtime_service._sdk_engine_session_persist(
+                thread_id="thread-1", tenant_id="t-1", workspace_id="ws-1",
+                session_id="sess-2", next_turn_fingerprint=6,
+            ))  # must not raise
+
+
+class SdkEngineSessionContinuityIntegrationTests(unittest.TestCase):
+    """MAN-310 Phase 2's central claim, exercised end to end through
+    _run_sage_action_loop_v3 (not just the two helpers above in isolation):
+    a SECOND SDK-engine turn on the SAME conversation resumes the session
+    the FIRST turn minted, instead of re-sending full history. Session
+    storage is faked with a plain dict standing in for the agent_threads
+    row (thread_service.get_thread / control_plane_repository.merge_agent_
+    thread_metadata are both patched to read/write it) so this runs with no
+    real database and no compiled Rust kernel -- both unavailable in this
+    test environment -- while still exercising the REAL _sdk_engine_
+    session_lookup/_sdk_engine_session_persist logic in between."""
+
+    def _decision(self):
+        from server_modules import kill_switch_gate
+        return kill_switch_gate.KillSwitchDecision(blocked=False, reason="", scope="")
+
+    def _call(self, *, prior_messages, thread_row):
+        get_thread_mock = AsyncMock(return_value={"metadata": dict(thread_row.get("metadata") or {})})
+
+        async def _fake_merge(*, thread_id, tenant_id, workspace_id, metadata_patch):
+            thread_row.setdefault("metadata", {}).update(metadata_patch)
+
+        collect_mock = MagicMock(return_value=[
+            {"type": "final", "payload": {"reply": "ok", "session_id": thread_row.pop("_next_session_id")}},
+        ])
+        with (
+            patch("server_modules.kill_switch_gate.evaluate_kill_switch", return_value=self._decision()),
+            patch("server_modules.sage_agent_runtime_service.thread_service.get_thread", new=get_thread_mock),
+            patch(
+                "server_modules.control_plane_repository.merge_agent_thread_metadata",
+                new=AsyncMock(side_effect=_fake_merge),
+            ),
+            patch.object(
+                sage_agent_runtime_service.claude_agent_sdk_bridge,
+                "collect_events_via_claude_agent_sdk",
+                new=collect_mock,
+            ),
+        ):
+            _run(sage_agent_runtime_service._run_sage_action_loop_v3(
+                workspace_id="ws-1", tenant_id="tenant-1", message="hello",
+                provider="anthropic", model="claude", credentials={},
+                trace_id="trace-1", actor_user_id="user-1", system_prompt="",
+                prior_messages=prior_messages, agent_install_id="",
+                engine_options={"engine": "claude_agent_sdk"},
+                conversation_thread_id="thread-xyz",
+            ))
+        return collect_mock
+
+    def test_first_turn_has_no_session_to_resume(self):
+        thread_row = {"metadata": {}, "_next_session_id": "sess-1"}
+        collect_mock = self._call(prior_messages=[], thread_row=thread_row)
+        _, kwargs = collect_mock.call_args
+        self.assertEqual(kwargs["resume_session_id"], "")
+        # ...and persists what it minted, fingerprinted for the NEXT turn
+        # (0 prior + this turn's own user+assistant pair = 2).
+        self.assertEqual(
+            thread_row["metadata"]["claude_agent_sdk_session"],
+            {"session_id": "sess-1", "turn_fingerprint": 2},
+        )
+
+    def test_second_turn_resumes_the_first_turns_session(self):
+        """The proof the report asks for: turn 2, on the same conversation,
+        with prior_messages matching what turn 1 left behind, must be
+        called with resume_session_id set to turn 1's session id -- NOT
+        re-sent full history via a folded prompt (that decision lives in
+        claude_agent_sdk_bridge.run_claude_agent_sdk_turn, proven separately
+        in test_claude_agent_sdk_bridge.py; this test proves the ORCHESTRATION
+        layer feeds it the right resume token in the first place)."""
+        thread_row = {"metadata": {}, "_next_session_id": "sess-1"}
+        self._call(prior_messages=[], thread_row=thread_row)
+        self.assertEqual(
+            thread_row["metadata"]["claude_agent_sdk_session"]["session_id"], "sess-1",
+        )
+
+        # Turn 2: Empyralis's own thread store now shows the 2 turns turn 1
+        # just recorded (user message + assistant reply) -- exactly the
+        # fingerprint turn 1 persisted.
+        turn_2_prior_messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        thread_row["_next_session_id"] = "sess-2"
+        collect_mock = self._call(prior_messages=turn_2_prior_messages, thread_row=thread_row)
+        _, kwargs = collect_mock.call_args
+        self.assertEqual(kwargs["resume_session_id"], "sess-1")
+        # Session id rolled forward for turn 3, fingerprint advanced by 2 again.
+        self.assertEqual(
+            thread_row["metadata"]["claude_agent_sdk_session"],
+            {"session_id": "sess-2", "turn_fingerprint": 4},
+        )
+
+    def test_drifted_history_refuses_to_resume(self):
+        """If something else appended to the thread between turn 1 and turn
+        2 (e.g. a legacy-engine turn, a channel message), turn 2's real
+        prior_messages length no longer matches turn 1's fingerprint --
+        must NOT resume."""
+        thread_row = {"metadata": {}, "_next_session_id": "sess-1"}
+        self._call(prior_messages=[], thread_row=thread_row)
+
+        turn_2_prior_messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "an interleaved message this session never saw"},
+        ]
+        thread_row["_next_session_id"] = "sess-2"
+        collect_mock = self._call(prior_messages=turn_2_prior_messages, thread_row=thread_row)
+        _, kwargs = collect_mock.call_args
+        self.assertEqual(kwargs["resume_session_id"], "")
+
+
 class CliSubscriptionGatewayBrainTests(unittest.TestCase):
     """BYO-brain Phase 3: cli_subscription dispatch — the happy path plus
     every G5 error path (no gateway bound, gateway offline, CLI not
@@ -2631,6 +2870,175 @@ class SageAgentRuntimeReasoningEffortResolutionTests(unittest.TestCase):
         self.assertIsNone(mock_stream.call_args.kwargs["normalized_reasoning_effort"])
 
 
+class SageAgentRuntimeEngineSelectionResolutionTests(unittest.TestCase):
+    """MAN-310 Phase 1: model_config.engine ("legacy" | "claude_agent_sdk")
+    must reach the _run_sage_action_loop_v3 turn-engine seam as
+    engine_options={"engine": claude_agent_sdk_bridge.ENGINE_ID} -- proven
+    by checking WHICH generation entry point _collect_stream_events
+    actually calls (claude_agent_sdk_bridge.collect_events_via_claude_
+    agent_sdk vs. the legacy direct_chat_generation_service.stream_
+    provider_backed_direct_chat), the same way
+    SageAgentRuntimeReasoningEffortResolutionTests just above proves
+    reasoning_effort reaches its own kwarg -- a resolved local variable
+    alone wouldn't prove the branch this phase's whole safety property
+    (flag off == legacy, byte for byte) actually depends on. Defines its
+    own harness (not SageAgentRuntimeSpecialistProviderResolutionTests's
+    _run_chat) because that helper doesn't patch the bridge function."""
+
+    _spec = staticmethod(SageAgentRuntimeSpecialistProviderResolutionTests._spec)
+
+    @staticmethod
+    def _run_chat(specialist_context=None, mock_agent_provider=None, engine_options=None):
+        mock_agent_provider = mock_agent_provider or AsyncMock(
+            return_value=("anthropic", {"api_key": "sk-agent-own-key"}, "byok_api")
+        )
+        mock_workspace_provider = AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))
+        bridge_events = [{"type": "final", "payload": {"reply": "SDK reply", "error": None}}]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=mock_workspace_provider),
+            patch("server_modules.sage_agent_runtime_service._resolve_agent_cloud_provider", new=mock_agent_provider),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch(
+                "server_modules.claude_agent_sdk_bridge.collect_events_via_claude_agent_sdk",
+                return_value=bridge_events,
+            ) as mock_bridge,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter([{
+                "type": "final",
+                "payload": {"reply": "Legacy reply", "actions": [], "error": None},
+            }])
+            result = _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=specialist_context,
+                engine_options=engine_options,
+            ))
+        return result, mock_stream, mock_bridge
+
+    def test_byok_specialist_with_sdk_engine_calls_the_bridge_not_the_legacy_stream(self):
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="claude_agent_sdk")
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+        self.assertEqual(result["message"], "SDK reply")
+
+    def test_byok_specialist_with_unset_engine_stays_on_the_legacy_stream(self):
+        """The safety property this whole phase must not break: an agent
+        with no engine configured (every agent that existed before this
+        phase) must call the EXACT SAME legacy entry point as always, and
+        never touch the bridge."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api")
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+        self.assertEqual(result["message"], "Legacy reply")
+
+    def test_byok_specialist_with_literal_legacy_engine_stays_on_the_legacy_stream(self):
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="legacy")
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+
+    def test_byok_specialist_with_garbage_engine_value_fails_safe_to_legacy(self):
+        """A stale/hand-edited model_config.engine outside {legacy,
+        claude_agent_sdk} must never select the bridge -- same fail-safe
+        convention as reasoning_effort's own invalid-value handling."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="some-future-engine")
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+
+    def test_platform_credits_specialist_with_sdk_engine_calls_the_bridge(self):
+        """engine is meaningful for platform_credits too, not just byok_api
+        -- both reach the same turn-engine seam."""
+        spec = self._spec(provider="", model="", mode="platform_credits", engine="claude_agent_sdk")
+        mock_agent_provider = AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}, "platform_credits"))
+        result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec, mock_agent_provider=mock_agent_provider)
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+
+    def test_sage_own_turn_consults_its_own_master_engine(self):
+        """Sage's own (master) turn also resolves model_config.engine off
+        its own install -- the same specialist-vs-master resolution
+        reasoning_effort already gets (see
+        test_sage_own_turn_now_consults_its_own_master_reasoning_effort
+        above)."""
+        master_install = {
+            "id": "sage-main-1",
+            "install_metadata": {"model_config": {"mode": "platform_credits", "engine": "claude_agent_sdk"}},
+        }
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+            new=AsyncMock(return_value=master_install),
+        ):
+            result, mock_stream, mock_bridge = self._run_chat(specialist_context=None)
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+        self.assertEqual(result["message"], "SDK reply")
+
+    def test_sage_own_turn_with_no_master_engine_stays_on_legacy(self):
+        master_install = {
+            "id": "sage-main-1",
+            "install_metadata": {"model_config": {"mode": "platform_credits"}},
+        }
+        with patch(
+            "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+            new=AsyncMock(return_value=master_install),
+        ):
+            result, mock_stream, mock_bridge = self._run_chat(specialist_context=None)
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+
+    def test_explicit_caller_supplied_engine_options_wins_over_persisted_config(self):
+        """handle_sage_chat's own engine_options parameter (the pre-existing
+        explicit override -- see its docstring) still wins over the
+        resolved per-agent model_config.engine when a caller supplies it,
+        exactly as documented -- proven here with the two in direct
+        conflict: persisted config says the SDK engine, the explicit
+        caller override says legacy."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="claude_agent_sdk")
+        result, mock_stream, mock_bridge = self._run_chat(
+            specialist_context=spec, engine_options={"engine": "legacy"},
+        )
+
+        mock_stream.assert_called_once()
+        mock_bridge.assert_not_called()
+
+    def test_explicit_caller_supplied_engine_options_can_opt_in_even_when_persisted_config_is_unset(self):
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api")
+        result, mock_stream, mock_bridge = self._run_chat(
+            specialist_context=spec, engine_options={"engine": "claude_agent_sdk"},
+        )
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+
+
 class SageAgentRuntimeSpecialistMemoryLoadTests(unittest.TestCase):
     """The core fix under test: a specialist's turn must load ITS OWN
     MEMORY.md index into its system prompt every turn, the same way Sage
@@ -3066,6 +3474,60 @@ class PostTurnAutoCompactionExceptionLoggingTests(unittest.TestCase):
         self.assertTrue(any("failed to SCHEDULE" in m for m in log_ctx.output))
 
 
+class PostTurnAutoCompactionTaskReferenceTests(unittest.IsolatedAsyncioTestCase):
+    """MAN-266: _schedule_post_turn_auto_compaction used to call
+    asyncio.ensure_future(_run_post_turn_auto_compaction(...)) as a bare
+    statement, discarding the returned Task immediately. The event loop
+    only holds a WEAK reference to a Task (see asyncio.create_task's own
+    "Important: Save a reference to the result" docs note); with nothing
+    else keeping it alive, it could be garbage-collected while still
+    pending -- matching the recurring production
+    'ERROR [asyncio] Task was destroyed but it is pending!' log line this
+    ticket reports. server_modules/tests/test_exception_and_task_lint.py
+    independently confirms this was the file's ONLY unassigned
+    create_task/ensure_future site (it's been removed from that lint
+    test's baseline as part of this fix).
+
+    Fixed by tracking the Task in the module-level
+    _POST_TURN_COMPACTION_TASKS set with a done-callback that discards it
+    on completion (same pattern as routes_gateway.py's
+    _VPS_PROVISION_BACKGROUND_TASKS). This test proves both halves: the
+    task is tracked while running, and untracked once it finishes."""
+
+    async def test_scheduled_task_is_tracked_while_pending_and_untracked_on_completion(self):
+        release = asyncio.Event()
+
+        async def _fake_job(**kwargs):
+            await release.wait()
+
+        with patch.object(sage_agent_runtime_service, "_run_post_turn_auto_compaction", new=_fake_job):
+            sage_agent_runtime_service._schedule_post_turn_auto_compaction(
+                workspace_id="ws-1", tenant_id="default", thread_id="sage-main",
+                provider="deepseek", model="deepseek-chat",
+                ctx_policy_max=0, ctx_policy_action="compact",
+                session_id="sess-1", trace_id="trace-1",
+            )
+            # ensure_future only SCHEDULES the task -- it needs one trip
+            # through the loop before it's actually running and has had a
+            # chance to register itself.
+            await asyncio.sleep(0)
+
+            self.assertEqual(
+                len(sage_agent_runtime_service._POST_TURN_COMPACTION_TASKS), 1,
+                "scheduled task must be held by a strong reference while pending",
+            )
+            tracked_task = next(iter(sage_agent_runtime_service._POST_TURN_COMPACTION_TASKS))
+            self.assertFalse(tracked_task.done())
+
+            release.set()
+            await tracked_task
+
+        self.assertEqual(
+            len(sage_agent_runtime_service._POST_TURN_COMPACTION_TASKS), 0,
+            "the done-callback must discard the task once it completes, so this never grows unbounded",
+        )
+
+
 class ContextPolicyFalsyZeroTests(unittest.TestCase):
     """BUG 5 falsy-zero: capability_presets.PRESET_STANDARD and
     PRESET_OPERATOR (the two most common agent presets) both set
@@ -3425,6 +3887,140 @@ class CollectSageOperatorLoopV3EventsToolResultStatusTests(unittest.TestCase):
         events = [self._trace_event(tool_call_id="call-1", status="waiting_approval", summary="Waiting for approval.")]
         collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
         self.assertEqual(collected["tool_calls"][0]["status"], "completed")
+
+
+class CollectSageOperatorLoopV3EventsMetaToolCallsTests(unittest.TestCase):
+    """MAN-310 skills-delivery: skill.invoked/subagent.invoked trace events
+    (claude_agent_sdk_bridge's honest meta-tool event types) land in their
+    OWN `meta_tool_calls` bucket — never tool_calls (tool_honesty_guard's
+    own input) and never blocked_tools (a real failure)."""
+
+    @staticmethod
+    def _meta_event(*, event_type: str, tool_call_id: str, phase: str, **data) -> dict:
+        return {
+            "type": "trace",
+            "payload": {"event_type": event_type, "tool_call_id": tool_call_id, "data": {"phase": phase, **data}},
+        }
+
+    def test_skill_invoked_never_enters_tool_calls_or_blocked_tools(self) -> None:
+        events = [
+            self._meta_event(event_type="skill.invoked", tool_call_id="c1", phase="started", tool_name="Skill"),
+            self._meta_event(event_type="skill.invoked", tool_call_id="c1", phase="result", status="ok", summary="done"),
+        ]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["tool_calls"], [])
+        self.assertEqual(collected["blocked_tools"], [])
+        self.assertEqual(len(collected["meta_tool_calls"]), 1)
+        entry = collected["meta_tool_calls"][0]
+        self.assertEqual(entry["kind"], "skill")
+        self.assertEqual(entry["status"], "completed")
+        self.assertEqual(entry["summary"], "done")
+
+    def test_subagent_invoked_is_bucketed_with_kind_subagent(self) -> None:
+        events = [self._meta_event(event_type="subagent.invoked", tool_call_id="c2", phase="started", tool_name="Agent")]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["meta_tool_calls"][0]["kind"], "subagent")
+
+    def test_failed_meta_tool_result_is_still_not_a_blocked_tool(self) -> None:
+        events = [
+            self._meta_event(event_type="skill.invoked", tool_call_id="c3", phase="started", tool_name="Skill"),
+            self._meta_event(event_type="skill.invoked", tool_call_id="c3", phase="result", status="failed", summary="broke"),
+        ]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["blocked_tools"], [])
+        self.assertEqual(collected["meta_tool_calls"][0]["status"], "failed")
+
+    def test_a_meta_tool_only_turn_is_still_text_only(self) -> None:
+        # Empyralis's own perspective: a turn that only invoked a skill and
+        # called no Empyralis tool really did no Empyralis-tool work.
+        events = [
+            self._meta_event(event_type="skill.invoked", tool_call_id="c4", phase="started", tool_name="Skill"),
+            {"type": "final", "payload": {"reply": "Here is your answer."}},
+        ]
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["action_execution_mode"], "text_only")
+
+    def test_no_meta_tool_events_yields_an_empty_bucket(self) -> None:
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events([])
+        self.assertEqual(collected["meta_tool_calls"], [])
+
+
+class ResolveSpecialistToolsetSkillsTests(unittest.TestCase):
+    """_resolve_specialist_toolset's own `skills` key — the glue between
+    fleet_tools.resolve_agent_skills and claude_agent_sdk_bridge.run_
+    claude_agent_sdk_turn's `skills=` parameter (see _run_sage_action_loop_
+    v3's _collect_stream_events closure, which forwards this straight
+    through)."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_enabled_skills_are_resolved_onto_the_toolset(self) -> None:
+        bundle = {
+            "install_metadata": {
+                "skills": [
+                    {"name": "On", "description": "d", "body": "b", "kind": "skill", "enabled": True},
+                    {"name": "Off", "description": "d", "body": "b", "kind": "skill", "enabled": False},
+                ],
+            },
+            "tool_toggles": {},
+        }
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ),
+        ):
+            toolset = self._run(sage_agent_runtime_service._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="default", agent_install_id="agent-1",
+            ))
+        self.assertEqual([s["name"] for s in toolset["skills"]], ["On"])
+
+    def test_no_skills_configured_resolves_to_an_empty_list(self) -> None:
+        bundle = {"install_metadata": {}, "tool_toggles": {}}
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=bundle),
+            ),
+        ):
+            toolset = self._run(sage_agent_runtime_service._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="default", agent_install_id="agent-1",
+            ))
+        self.assertEqual(toolset["skills"], [])
+
+    def test_bundle_load_failure_fails_safe_to_no_skills(self) -> None:
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(side_effect=RuntimeError("control plane unavailable")),
+            ),
+        ):
+            toolset = self._run(sage_agent_runtime_service._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="default", agent_install_id="agent-1",
+            ))
+        self.assertEqual(toolset["skills"], [])
+
+    def test_master_agent_path_never_resolves_a_toolset_at_all(self) -> None:
+        # agent_install_id="" is the master/Sage path — _resolve_specialist_
+        # toolset returns None outright, same architectural boundary
+        # persona/instructions already draws (specialist_runtime_context.py).
+        toolset = self._run(sage_agent_runtime_service._resolve_specialist_toolset(
+            workspace_id="ws-1", tenant_id="default", agent_install_id="",
+        ))
+        self.assertIsNone(toolset)
 
 
 if __name__ == "__main__":

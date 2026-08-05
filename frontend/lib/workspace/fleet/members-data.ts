@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { me } from "@/lib/auth/auth-client";
 
 export type WorkspaceRole = "viewer" | "member" | "owner";
 
@@ -139,6 +140,40 @@ export function useWorkspaceMembers(workspaceId: string) {
   }, [refresh]);
 
   return { members, loading, error, refresh };
+}
+
+/** The caller's own workspace role, derived from a member list the caller
+ *  already loaded (matched by user id from /api/auth/me) — moved here from
+ *  ProjectMemberAdd.tsx (its original, and until now only, caller) so
+ *  ProjectSettings.tsx's rename/default-hardware popover can gate its own
+ *  trigger the identical way without a second, drifting copy of this same
+ *  lookup. There is no dedicated "my role" endpoint, and the server is the
+ *  real gate on every mutation regardless of what this computes — this only
+ *  decides whether to render a control that would otherwise always fail for
+ *  a non-owner (CLAUDE.md: "no dead controls"). Undefined while /api/auth/me
+ *  is still in flight, so a gated control stays unrendered rather than
+ *  flashing on then off for a non-owner. */
+export function useOwnRole(members: WorkspaceMember[]): WorkspaceRole | null {
+  const [myUserId, setMyUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void me()
+      .then((data) => {
+        if (cancelled) return;
+        const user = (data as { user?: { id?: string } } | null)?.user;
+        setMyUserId(user?.id ? String(user.id) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setMyUserId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const mine = members.find((m) => m.user_id === myUserId);
+  return mine?.role ?? null;
 }
 
 /** Pending (not yet accepted, not revoked) invites — owner-visible list so an

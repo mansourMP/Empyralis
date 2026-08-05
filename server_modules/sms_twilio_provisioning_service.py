@@ -383,6 +383,24 @@ async def assign_agent_sms_number(
             "TWILIO_SMS_PUBLIC_BASE_URL (or EMPYRALIS_PUBLIC_BASE_URL)."
         )
 
+    # MAN-301: agent_install_id is caller-supplied and must be confirmed to
+    # belong to THIS (tenant_id, workspace_id) before anything is done --
+    # see agent_bindings_repository.agent_install_in_scope for why RLS alone
+    # does not catch a cross-workspace id here (same MAN-206 gap: the write
+    # below stamps the CALLER's own tenant_id/workspace_id, so RLS's INSERT
+    # WITH CHECK passes even though agent_install_id points at another
+    # tenant's agent). Placed here rather than at the very top so the cheap,
+    # purely local "is this deployment configured at all" gates above still
+    # run first -- but strictly before search_available_numbers/
+    # purchase_number, which is where this function stops being free: a real
+    # Twilio number gets bought (and billed) the moment those run.
+    if not await bindings.agent_install_in_scope(
+        agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    ):
+        raise bindings.AgentInstallNotInScopeError(
+            "This agent does not belong to your workspace."
+        )
+
     candidates = await search_available_numbers(country=country, area_code=area_code)
     if not candidates:
         raise SmsNumberUnavailableError(

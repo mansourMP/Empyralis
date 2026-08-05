@@ -33,6 +33,12 @@ export function buildGatewayHeartbeatPayload(input: GatewayHeartbeatPayloadInput
       permission_states: input.inventory.capability_readiness.permission_states,
       passive_services: input.inventory.capability_readiness.passive_services,
       service_statuses: input.inventory.capability_readiness.service_statuses,
+      // The box operator's OWN live full_access opt-in (see service-inventory.ts's
+      // PassiveInventorySnapshot doc comment) — reported on every heartbeat
+      // alongside Docker/Ollama/CLI readiness so the control plane (and Settings >
+      // Hardware) can show real local state, not just what runtime_access_mode it
+      // authorized server-side.
+      shell_full_access_locally_enabled: input.inventory.capability_readiness.shell_full_access_locally_enabled,
     },
     service_inventory: input.inventory.service_inventory,
     native_runtime: input.inventory.native_runtime,

@@ -6,3 +6,6 @@ node_modules
 
 # local preview build artifacts (never commit)
 .next-preview-*/
+# any custom dist dir — a verification/e2e run points Next at one of these,
+# and an unignored 239MB build output shows up as ~55k lines in a diff view
+.next-*/

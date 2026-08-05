@@ -39,6 +39,17 @@ DISPLAY_NAME="${EMPYRALIS_GATEWAY_DISPLAY_NAME:-$(hostname -f 2>/dev/null || hos
 # so they default on here. Overridable for an operator who explicitly
 # wants a channel-free box.
 PERSONAL_CHANNELS_ENABLED="${EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED:-true}"
+# The box operator's LOCAL half of the shell_sandbox full_access opt-in (see
+# empyralis-gateway/src/config.ts's shellFullAccessLocallyEnabled doc
+# comment for the other, server-asserted half). Off by default — sandbox
+# stays the floor unless the pairing command this came from explicitly
+# exported it (GatewayPairPanel.tsx only ever adds that export line when the
+# owner checked the full_access box in the pairing UI). Written into the
+# systemd EnvironmentFile below like every other setting here, not just left
+# in this install script's own one-shot process environment — otherwise a
+# `curl | sh` export would silently vanish the moment this script exits and
+# systemd starts the actual long-running gateway service.
+SHELL_FULL_ACCESS_ENABLED="${EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED:-false}"
 # How long to wait, after the gateway service has been started, for it to
 # phone home and land registration.json. This clock starts AFTER apt, Node 20
 # and the artifact download are already done, so it is purely gateway
@@ -382,6 +393,7 @@ write_env_file() {
     printf 'EMPYRALIS_GATEWAY_BROWSER_PYTHON="python3"\n'
     printf 'EMPYRALIS_AGENT_COMPUTER_INSTALL_DIR=%s\n' "$(shell_quote_env "${CURRENT_DIR}")"
     printf 'EMPYRALIS_GATEWAY_PERSONAL_CHANNELS_ENABLED=%s\n' "$(shell_quote_env "${PERSONAL_CHANNELS_ENABLED}")"
+    printf 'EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED=%s\n' "$(shell_quote_env "${SHELL_FULL_ACCESS_ENABLED}")"
     # BYO-brain: enable cli.install / cli.login.* by default on a
     # user-paired gateway. The flag exists for a hardening story that never
     # applied to a self-paired box; leaving it off dead-ends every user's

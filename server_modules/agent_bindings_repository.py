@@ -262,6 +262,59 @@ def is_inbound_owner_conflict(exc: BaseException) -> bool:
     return "inbound_owner" in constraint or "inbound_owner" in str(exc)
 
 
+class AgentInstallNotInScopeError(RuntimeError):
+    """Raised when a caller-supplied agent_install_id does not resolve to an
+    agent install owned by the caller's own (tenant_id, workspace_id)."""
+
+
+async def agent_install_in_scope(
+    agent_install_id: str, *, tenant_id: str, workspace_id: str,
+) -> bool:
+    """True iff agent_install_id resolves to a real agent install owned by
+    exactly this (tenant_id, workspace_id) pair.
+
+    MAN-206: every channel-bot assignment (Telegram/Discord BYO, so far)
+    takes a caller-supplied agent_install_id and, on success, writes an
+    agent-scoped vault credential PLUS a channel binding row -- both stamped
+    with the CALLER's own tenant_id/workspace_id. Postgres RLS's
+    ``INSERT ... WITH CHECK`` on those writes only verifies that the NEW
+    row's tenant_id/workspace_id matches the caller's session scope, which
+    it always does (assign_byo_bot/assign_agent_discord pass the caller's
+    own scope there) -- it says nothing about whether agent_install_id
+    itself belongs to that scope. Without this check, a caller who has (or
+    leaks/guesses) another tenant's agent_install_id could plant a channel
+    binding and a vault credential against that OTHER tenant's agent, and
+    the hosted-bot webhook (keyed only by agent_install_id) would then route
+    real inbound traffic to it. Call this BEFORE any such write and reject
+    if it returns False.
+
+    Fails closed: a missing pool, an empty id, or a lookup error all return
+    False, never True -- an ownership check that can fail open is not a
+    check.
+    """
+    aid = str(agent_install_id or "").strip()
+    tid = str(tenant_id or "").strip()
+    wid = str(workspace_id or "").strip()
+    if not aid or not tid or not wid:
+        return False
+    try:
+        pool = await control_plane_repository.ensure_control_plane_schema()
+        if pool is None:
+            return False
+        row = await control_plane_repository.rls_fetchrow(
+            pool,
+            "SELECT 1 FROM workspace_agent_installs WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
+            aid,
+            tid,
+            wid,
+            tenant_id=tid,
+            workspace_id=wid,
+        )
+    except Exception:
+        return False
+    return row is not None
+
+
 async def get_agent_install_label(
     agent_install_id: str, *, tenant_id: str, workspace_id: str,
 ) -> Optional[str]:

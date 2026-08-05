@@ -67,6 +67,18 @@ what it needs — 20 agents, 40 projects, a task with 50 comments — then look 
 the real screen. It takes minutes, needs no credentials, and exercises the
 actual render path. A static reproduction proves the mock renders, not the app.
 
+**The one blessed way to bring up a throwaway stack is
+`frontend/scripts/start-e2e-backend.sh`.** Do not hand-roll a backend boot —
+that is exactly how MAN-202 happened: a hand-rolled stack, run from a git
+worktree, silently inherited `DATABASE_URL` from the real repo root's `.env`
+and an agent wiped the founder's local database while believing it was
+isolated. `DATABASE_URL` must always be exported explicitly, pointing at a
+database whose name says it's disposable (e.g. `empyralis_test`) — the
+runtime now refuses to boot a dev/test/local process without it
+(`server_modules/preflight.py`'s `_check_local_stack_database_url`). Never
+set it by copying a value you found somewhere; if you don't know what it
+should be, ask rather than guess.
+
 Python tests passing is not evidence the UI works. A test asserting a function
 returns a dict does not notice that the button calling it fires no request.
 Anything user-facing gets driven in a real browser: click it, watch the network

@@ -72,6 +72,15 @@ export type FleetGateway = {
   created_at?: string | null;
   runtime_access_mode?: string | null;
   runtime_access_label?: string | null;
+  /** The box operator's OWN live full_access opt-in
+   *  (EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED on the gateway's machine),
+   *  reported on every heartbeat — distinct from runtime_access_mode/
+   *  runtime_access_label above, which are only what the SERVER authorized
+   *  at pairing time. true/false once this gateway has heartbeated it at
+   *  least once; null/undefined means "not reported yet" (an older gateway
+   *  build, or one that hasn't heartbeated since this field shipped) — never
+   *  guess a value for that case. */
+  shell_full_access_locally_enabled?: boolean | null;
   llm_runtimes?: LlmRuntimeSummary | null;
   /** Optional — a concurrent backend change adds this to the gateway
    *  registration payload. Absent on older backends/gateway builds; every
@@ -423,6 +432,8 @@ export function GatewayBoxPicker({
   requireLocalModel,
   requireRuntime,
   kind,
+  label,
+  hint,
 }: {
   workspaceId: string;
   value: string;
@@ -442,6 +453,21 @@ export function GatewayBoxPicker({
    *  that specific CLI is installed + authenticated there, and warn if the
    *  selected box doesn't have it. */
   requireRuntime?: CliSubscriptionRuntime;
+  /** Overrides the field label ("Which computer runs it?" by default). Only
+   *  read when `kind` is unset — a `kind` picker's label is a property of
+   *  the box kind (BOX_KIND_COPY), not something a caller should override.
+   *  Used by ProjectSettings.tsx: a project's default isn't phrased as "runs
+   *  it" (there is no single "it" — any agent in the project may inherit
+   *  this box). */
+  label?: string;
+  /** Overrides the trailing hint shown once a box is selected and none of
+   *  the warning states above apply. Same `kind`-unset scoping as `label` —
+   *  a `kind` picker's hint is BOX_KIND_COPY.anyHint. Default (unset) is the
+   *  brain-privacy sentence, which is specifically about an AGENT's own
+   *  completions and wrong for a project-level default (also used for
+   *  tool-dispatch preferred_gateway_id, not just brain hosting) — see
+   *  ProjectSettings.tsx's own override. */
+  hint?: string;
 }) {
   const { gateways: allGateways, loading } = useWorkspaceGateways(workspaceId);
   const gateways = kind ? gatewaysOfKind(allGateways, kind) : allGateways;
@@ -463,7 +489,7 @@ export function GatewayBoxPicker({
 
   return (
     <div style={{ marginTop: 12 }}>
-      <label className="fleet-wizard-label">{copy ? copy.pickerLabel : "Which computer runs it?"}</label>
+      <label className="fleet-wizard-label">{copy ? copy.pickerLabel : (label || "Which computer runs it?")}</label>
       {loading ? (
         <p className="fleet-channel-expand-hint">
           {copy ? `Loading your ${copy.noun}s…` : "Loading your paired computers…"}
@@ -556,8 +582,9 @@ export function GatewayBoxPicker({
             <p className="fleet-channel-expand-hint">{copy.anyHint}</p>
           ) : (
             <p className="fleet-channel-expand-hint">
-              The brain runs on this machine. Empyralis only sends the prompt and receives the reply —
-              it never sees any local credentials.
+              {hint || (
+                "The brain runs on this machine. Empyralis only sends the prompt and receives the reply — it never sees any local credentials."
+              )}
             </p>
           )}
         </>
