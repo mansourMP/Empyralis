@@ -117,6 +117,24 @@ type ServicePresentation = { tone: AgentStatusTone; label: string; reason: strin
  *  resource-gate reason above whenever this box can't run it regardless of
  *  what the probe itself reports — a box that's somehow ready anyway is
  *  trusted over this heuristic, never overridden by it. */
+/** Docker's own probe summary is the RAW `docker info` stderr (e.g. "Cannot
+ *  connect to the Docker daemon at unix:///var/run/docker.sock. Is the
+ *  docker daemon running?") — a diagnostic dump, not something to hand a
+ *  customer as their only signal. This is the same "Docker isn't running,
+ *  start Docker Desktop" plain-language fact the chat-side
+ *  gateway_capability_missing error already gives when a shell call fails
+ *  for this exact reason — this Settings surface says the same thing BEFORE
+ *  a call ever fails, so "check before you try" and "what just happened"
+ *  never disagree. Only overrides "offline"/"degraded" (daemon unreachable
+ *  or unhealthy); "missing" (Docker isn't installed at all) keeps the
+ *  existing bare "Not detected" — self-explanatory, no daemon to start. */
+function dockerNotReadyReason(status: string): string | null {
+  if (status === "offline" || status === "degraded") {
+    return "Docker isn't running on this machine. Start Docker Desktop, then refresh this page to check again.";
+  }
+  return null;
+}
+
 function serviceItemPresentation(
   id: string,
   item: ServiceInventoryItem | undefined,
@@ -128,6 +146,13 @@ function serviceItemPresentation(
   if (id === "ollama") {
     const shortfall = ollamaMemoryShortfallReason(resources);
     if (shortfall) return { tone: "unknown", label: "Unavailable", reason: shortfall };
+  }
+
+  if (id === "docker") {
+    const dockerReason = dockerNotReadyReason(status);
+    if (dockerReason) {
+      return { tone: "degraded", label: status === "degraded" ? "Degraded" : "Not responding", reason: dockerReason };
+    }
   }
 
   const reason = status && status !== "missing" ? item?.summary || null : null;
@@ -155,6 +180,46 @@ function connectionHealthSuffix(tone: AgentStatusTone): string {
     default:
       return "";
   }
+}
+
+type ShellAccessPresentation = { tone: AgentStatusTone; label: string; note: string | null };
+
+/** Shell access row presentation — the authorized-vs-locally-enabled honesty
+ *  fix. runtime_access_mode/runtime_access_label is only ever what the
+ *  SERVER authorized for this gateway at pairing time; shell_full_access_
+ *  locally_enabled is the box operator's own live opt-in
+ *  (EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED), reported on every
+ *  heartbeat. Full Access only actually runs a call when BOTH are true
+ *  (empyralis-gateway/src/shell/runtime.ts's resolveExecutionMode()) —
+ *  showing only the server half, as this row used to, let a customer
+ *  believe full_access was live when the local half was never turned on,
+ *  or the reverse. Default/Custom modes don't carry this ambiguity (the
+ *  local flag is irrelevant unless the server has authorized full_access in
+ *  the first place), so they keep the plain label with no extra note. */
+function shellAccessPresentation(gateway: FleetGateway): ShellAccessPresentation {
+  const label = gateway.runtime_access_label || "Default";
+  if (gateway.runtime_access_mode !== "full_access") {
+    return { tone: "ready", label, note: null };
+  }
+  const locallyEnabled = gateway.shell_full_access_locally_enabled;
+  if (locallyEnabled === true) {
+    return { tone: "ready", label: "Full Access", note: null };
+  }
+  if (locallyEnabled === false) {
+    return {
+      tone: "degraded",
+      label: "Full Access — not enabled on this box",
+      note: "This box is authorized for Full Access, but it hasn't been turned on locally yet — calls fall back to sandboxed execution.",
+    };
+  }
+  // null/undefined: this gateway hasn't heartbeated the field yet (older
+  // build, or hasn't connected since it shipped) — say "unknown", never
+  // guess which way it actually is.
+  return {
+    tone: "unknown",
+    label: "Full Access (authorized)",
+    note: "This computer hasn't reported whether Full Access is turned on locally yet.",
+  };
 }
 
 /** Resource-gauge bar color tier — "" (default/green) below 60%, amber at
@@ -1647,6 +1712,7 @@ export default function GatewayDetailPage() {
   const heartbeatAge = gateway.heartbeat_age_seconds;
   const serviceInventory: ServiceInventoryItem[] = gateway.metadata?.service_inventory || [];
   const byId = new Map(serviceInventory.map((item) => [String(item.id || ""), item]));
+  const shellAccess = shellAccessPresentation(gateway);
 
   // Header sub-line: "darwin-arm64 · Local computer · paired Jul 21, 2026" —
   // platform · location/type · paired date, each segment omitted when this
@@ -1787,9 +1853,28 @@ export default function GatewayDetailPage() {
               <span className="fleet-hw-value">{formatUptime(gateway.latest_connected_at)}</span>
             </div>
             {gateway.runtime_access_label && (
-              <div className="fleet-hw-row">
-                <span className="fleet-hw-label">Shell access</span>
-                <span className="fleet-hw-value">{gateway.runtime_access_label}</span>
+              <div
+                className="fleet-hw-row"
+                style={shellAccess.note ? { flexDirection: "column", alignItems: "stretch", gap: 4 } : undefined}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                  <span className="fleet-hw-label">Shell access</span>
+                  <span className="fleet-hw-value">
+                    {shellAccess.note ? (
+                      <StatusChip tone={shellAccess.tone} label={shellAccess.label} />
+                    ) : (
+                      shellAccess.label
+                    )}
+                  </span>
+                </div>
+                {shellAccess.note && (
+                  <span
+                    className="fleet-list-row-desc"
+                    style={{ whiteSpace: "normal", overflow: "visible", textOverflow: "clip" }}
+                  >
+                    {shellAccess.note}
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -1874,7 +1959,24 @@ export default function GatewayDetailPage() {
             })}
           </div>
 
-          <div className="fleet-detail-section-title">Detected on this machine</div>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+            <div className="fleet-detail-section-title">Detected on this machine</div>
+            {/* Nothing on this page polls for Docker/Ollama/etc. changing —
+                the gateway probes them roughly once a minute and reports on
+                its next heartbeat, but this list only reflects that once
+                registrations are re-fetched. A manual check is the honest
+                "is it ready NOW" affordance (the whole point of this
+                section existing in Settings at all) without inventing an
+                auto-poll loop this page doesn't otherwise have. */}
+            <button
+              type="button"
+              className="fleet-btn"
+              style={{ padding: "4px 10px", fontSize: 12, flexShrink: 0 }}
+              onClick={() => void refresh()}
+            >
+              Refresh
+            </button>
+          </div>
           <p className="fleet-tab-subtitle" style={{ margin: "0 0 10px" }}>
             Read-only — background services this computer already has. Nothing to install here.
           </p>

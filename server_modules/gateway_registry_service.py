@@ -207,6 +207,29 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
     runtime_access_mode = execution_mode_policy.normalize_runtime_access_mode(
         metadata.get("runtime_access_mode")
     )
+    # Hardware-readiness gap: runtime_access_mode/runtime_access_label above are
+    # only ever the SERVER's half of full_access — what this gateway was
+    # authorized to do at pairing time. They say nothing about whether the box
+    # operator's own local opt-in (EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED,
+    # empyralis-gateway/src/config.ts's shellFullAccessLocallyEnabled) is
+    # actually set right now — a customer could believe full_access is live
+    # when the local half was never enabled, or vice versa. The gateway now
+    # reports its own live value on every heartbeat (capability_readiness.
+    # shell_full_access_locally_enabled — see gateway_inventory_service.
+    # sanitize_capability_readiness's generic bool passthrough, and cloud/
+    # heartbeat-payload.ts on the gateway side); surfaced here as a top-level
+    # field, same treatment as runtime_access_mode, so callers never have to
+    # reach into metadata.capability_readiness by hand. None (not False) means
+    # "this gateway hasn't reported it yet" — an older build, or one that
+    # hasn't heartbeated since this field was added — never guessed as false.
+    capability_readiness = metadata.get("capability_readiness")
+    capability_readiness = capability_readiness if isinstance(capability_readiness, dict) else {}
+    raw_shell_full_access_locally_enabled = capability_readiness.get("shell_full_access_locally_enabled")
+    shell_full_access_locally_enabled = (
+        raw_shell_full_access_locally_enabled
+        if isinstance(raw_shell_full_access_locally_enabled, bool)
+        else None
+    )
     return {
         "gateway_id": str(registration.get("gateway_id") or ""),
         "device_id": str(registration.get("device_id") or ""),
@@ -223,6 +246,7 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
         "runtime_access_mode": runtime_access_mode,
         "runtime_access_label": execution_mode_policy.public_runtime_access_label(runtime_access_mode),
         "runtime_access_setup_warning": execution_mode_policy.runtime_access_setup_warning(runtime_access_mode),
+        "shell_full_access_locally_enabled": shell_full_access_locally_enabled,
         "autonomous_agent_setup_warning_acknowledged": bool(
             metadata.get("autonomous_agent_setup_warning_acknowledged")
         ),

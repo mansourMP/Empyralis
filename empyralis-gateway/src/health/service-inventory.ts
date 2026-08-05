@@ -48,6 +48,18 @@ export interface PassiveInventorySnapshot {
     permission_states: Record<string, CapabilityPermissionStatus>;
     passive_services: string[];
     service_statuses: Record<string, PassiveServiceStatus>;
+    // Hardware-readiness gap: the control plane has only ever known what
+    // runtime_access_mode IT authorized for this gateway (server-side
+    // metadata, set at pairing time) — never what the box operator's own
+    // EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED flag (config.ts's
+    // shellFullAccessLocallyEnabled, threaded into GatewayShellRuntime in
+    // index.ts) is ACTUALLY set to right now on this box. A customer could
+    // believe full_access is live when the local half was never enabled, or
+    // vice versa, with no way to tell short of a failed shell.execute call.
+    // Reported here, alongside the rest of this heartbeat-driven snapshot,
+    // so the Settings > Hardware view can show the honest authorized-vs-
+    // locally-enabled distinction instead of only the server's half of it.
+    shell_full_access_locally_enabled: boolean;
   };
 }
 
@@ -81,6 +93,14 @@ export interface PassiveInventoryCollectorDeps {
 export interface PassiveInventoryCollectorOptions {
   requestedCapabilities?: string[];
   localRunnerReady?: boolean;
+  /** The box operator's own full_access opt-in (config.ts's
+   *  shellFullAccessLocallyEnabled) — a per-process constant read once from
+   *  EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED at gateway boot, threaded in
+   *  by the caller (cloud/ws-client.ts) rather than probed here. Never part
+   *  of collectPassiveInventorySnapshot()'s cache key: unlike Docker/Ollama/
+   *  the CLIs, this can't change mid-process, so it's safe to copy straight
+   *  onto every snapshot, cached or fresh, without affecting cache validity. */
+  shellFullAccessLocallyEnabled?: boolean;
   deps?: PassiveInventoryCollectorDeps;
 }
 
@@ -352,6 +372,7 @@ export function buildFastPassiveInventorySnapshot(
       permission_states: permissionStates,
       passive_services: serviceInventory.map((item) => item.id),
       service_statuses: serviceStatuses,
+      shell_full_access_locally_enabled: Boolean(options.shellFullAccessLocallyEnabled),
     },
   };
   return typeof options.localRunnerReady === "boolean"
@@ -939,6 +960,7 @@ export async function collectPassiveInventorySnapshot(
       permission_states: permissionStates,
       passive_services: serviceInventory.map((item) => item.id),
       service_statuses: serviceStatuses,
+      shell_full_access_locally_enabled: Boolean(options.shellFullAccessLocallyEnabled),
     },
   };
   const readySnapshot = typeof options.localRunnerReady === "boolean"

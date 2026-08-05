@@ -56,6 +56,7 @@ test("gateway heartbeat payload carries passive service inventory separately fro
       permission_states: {},
       passive_services: ["postgres"],
       service_statuses: { postgres: "ready" },
+      shell_full_access_locally_enabled: true,
     },
   };
 
@@ -76,6 +77,11 @@ test("gateway heartbeat payload carries passive service inventory separately fro
   assert.deepEqual((payload.capability_readiness as any).blocked, []);
   assert.deepEqual((payload.capability_readiness as any).permission_states, {});
   assert.deepEqual((payload.capability_readiness as any).passive_services, ["postgres"]);
+  // The box operator's own live full_access opt-in must reach the wire
+  // alongside the rest of capability_readiness — see heartbeat-payload.ts's
+  // doc comment on this field for why it can't just be inferred from
+  // runtime_access_mode server-side.
+  assert.equal((payload.capability_readiness as any).shell_full_access_locally_enabled, true);
   assert.equal(((payload.service_inventory as any[])[0]).passive, true);
   assert.equal(((payload.service_inventory as any[])[0]).execution_enabled, false);
   assert.equal((payload.native_runtime as any).system_service_mode, false);
@@ -116,6 +122,7 @@ test("gateway heartbeat payload transmits the gateway's real health state instea
       permission_states: {},
       passive_services: [],
       service_statuses: {},
+      shell_full_access_locally_enabled: false,
     },
   };
 
