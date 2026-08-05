@@ -116,15 +116,30 @@ class ResolveSdkProcessEnvTests(unittest.TestCase):
         )
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
 
-    def test_provider_without_a_native_anthropic_endpoint_gets_no_base_url(self):
-        # openai/gemini/xai ship no Anthropic-Messages endpoint. Emitting
-        # nothing is correct: the turn fails as an auth error against
-        # Anthropic rather than silently talking the wrong protocol.
-        for provider in ("openai", "gemini", "xai", ""):
+    def test_adapter_routed_providers_get_the_loopback_adapters_own_base_url(self):
+        # openai/gemini/xai ship no native Anthropic-Messages endpoint, but
+        # they DO now route through openai_compat_adapter's own in-process
+        # loopback translator (see resolve_sdk_process_env's adapter-routed
+        # branch) — the base_url is that server's own address, never the
+        # provider's real (public) endpoint and never empty.
+        for provider in ("openai", "gemini", "xai"):
             env = claude_agent_sdk_bridge.resolve_sdk_process_env(
                 credentials={"api_key": "k"}, provider=provider,
             )
-            self.assertEqual(env["ANTHROPIC_BASE_URL"], "", f"provider={provider!r}")
+            self.assertTrue(
+                env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"),
+                f"provider={provider!r} got {env['ANTHROPIC_BASE_URL']!r}",
+            )
+
+    def test_a_genuinely_unrecognised_provider_gets_no_base_url(self):
+        # Empty/unknown — not natively Anthropic-compatible, not adapter-
+        # routed — still emits nothing, so the turn fails as an honest auth
+        # error against Anthropic rather than silently talking the wrong
+        # protocol to a made-up address.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "k"}, provider="",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
 
     def test_explicit_override_still_beats_the_provider_mapping(self):
         env = claude_agent_sdk_bridge.resolve_sdk_process_env(

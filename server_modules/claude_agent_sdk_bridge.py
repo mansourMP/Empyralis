@@ -130,6 +130,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 from server_modules import agent_trace_service
 from server_modules import direct_chat_operator_binding_service
 from server_modules import direct_tool_execution_service
+from server_modules import openai_compat_adapter
 from server_modules import secret_redaction_service
 
 LOGGER = logging.getLogger(__name__)
@@ -281,6 +282,7 @@ def resolve_sdk_process_env(
     anthropic_base_url: str = "",
     config_dir: str = "",
     provider: str = "",
+    model: str = "",
 ) -> Dict[str, str]:
     """Build the `env` override for ClaudeAgentOptions — never os.environ,
     never a hardcoded URL. Explicit per-turn overrides win; otherwise falls
@@ -313,6 +315,41 @@ def resolve_sdk_process_env(
     api_key = str(
         anthropic_api_key or creds.get("api_key") or creds.get("anthropic_api_key") or ""
     ).strip()
+    # Adapter-routed providers (openai/gemini/xai/... — anything with no
+    # native Anthropic-Messages endpoint, see openai_compat_adapter.py) never
+    # get the real provider key in the subprocess env at all. The CLI gets a
+    # short-lived, per-turn OPAQUE token instead; the adapter itself holds
+    # the real key in memory and exchanges the opaque token for it only when
+    # making the actual upstream call. Strictly better than the plain
+    # ANTHROPIC_AUTH_TOKEN=api_key path below: a leaked opaque token is
+    # worthless the instant clear_turn_credential runs (see
+    # run_claude_agent_sdk_turn's finally block).
+    if openai_compat_adapter.is_adapter_routed_provider(provider):
+        # `creds` here — not `api_key` — is deliberately the real per-turn
+        # credentials dict for THIS provider (e.g. an OpenAI key), not the
+        # Anthropic-specific `anthropic_api_key` override above: that
+        # parameter means "use this key for an Anthropic-shaped call",
+        # which is not what an adapter-routed provider is.
+        #
+        # Fail-safe, matching every other credential-missing path in this
+        # function: minting can raise (provider_profiles.py's own
+        # credential validation, e.g. no api_key configured yet) and this
+        # function must never propagate that — turn_is_served_by_anthropic
+        # calls this purely to inspect the resolved base_url and has
+        # nothing to do with whether real credentials exist. A genuinely
+        # missing credential still surfaces, just later and naturally, as
+        # an auth error from the real upstream once a turn actually runs —
+        # exactly how a missing Anthropic/DeepSeek api_key already behaves
+        # a few lines below, never by raising out of this resolver.
+        try:
+            env["ANTHROPIC_AUTH_TOKEN"] = openai_compat_adapter.mint_turn_token_for_provider(
+                provider, creds, model,
+            )
+        except Exception as exc:
+            LOGGER.debug(
+                "resolve_sdk_process_env: mint_turn_token_for_provider(%s) failed — "
+                "leaving ANTHROPIC_AUTH_TOKEN blank for this call: %s", provider, exc,
+            )
     # ANTHROPIC_AUTH_TOKEN (rank #2), not ANTHROPIC_API_KEY (rank #3): an
     # API_KEY value the CLI hasn't seen before triggers a one-time
     # interactive "approve this key?" consent gate cached in .claude.json
@@ -322,15 +359,19 @@ def resolve_sdk_process_env(
     # for its Anthropic-Messages-API-compatible endpoint (see this module's
     # docstring) also instructs ANTHROPIC_AUTH_TOKEN for exactly this
     # reason.
-    if api_key:
+    elif api_key:
         env["ANTHROPIC_AUTH_TOKEN"] = api_key
     # An explicit per-turn override wins; otherwise the provider's own
-    # Anthropic-compatible endpoint. creds["base_url"] is deliberately NOT a
-    # fallback here — that is the provider's OpenAI-shaped URL (see
-    # _ANTHROPIC_COMPATIBLE_BASE_URLS), which this client cannot speak.
+    # native Anthropic-compatible endpoint; otherwise — for a provider with
+    # no native endpoint — our own loopback adapter (openai_compat_adapter),
+    # which speaks the CLI's wire format and translates through to whatever
+    # OpenAI-shaped endpoint that provider actually has. creds["base_url"]
+    # is deliberately NOT a fallback here — that is the provider's
+    # OpenAI-shaped URL (see _ANTHROPIC_COMPATIBLE_BASE_URLS), which this
+    # client cannot speak directly.
     base_url = str(
         anthropic_base_url or creds.get("anthropic_base_url") or ""
-    ).strip() or resolve_anthropic_compatible_base_url(provider)
+    ).strip() or resolve_anthropic_compatible_base_url(provider) or openai_compat_adapter.resolve_adapter_routed_base_url(provider)
     if base_url:
         env["ANTHROPIC_BASE_URL"] = base_url
     if config_dir:
@@ -1122,8 +1163,26 @@ async def run_claude_agent_sdk_turn(
     )
 
     config_dir = tempfile.mkdtemp(prefix="empyralis-claude-sdk-")
+    # Every opaque adapter-routed credential token minted for this turn
+    # (_build_options may run more than once — the resume-fallback retry
+    # below calls it a second time — each call mints its own token if the
+    # provider is adapter-routed, and every one of them must be cleared, not
+    # just the last). Cleared unconditionally in the finally block below.
+    minted_adapter_tokens: List[str] = []
+
     try:
         def _build_options(*, resume: str) -> Any:
+            turn_env = resolve_sdk_process_env(
+                credentials=credentials,
+                anthropic_api_key=anthropic_api_key,
+                anthropic_base_url=anthropic_base_url,
+                config_dir=config_dir,
+                provider=provider or "",
+                model=model or "",
+            )
+            minted_token = turn_env.get("ANTHROPIC_AUTH_TOKEN") or ""
+            if minted_token and openai_compat_adapter.is_adapter_routed_provider(provider):
+                minted_adapter_tokens.append(minted_token)
             return ClaudeAgentOptions(
                 system_prompt=system_prompt or None,
                 mcp_servers={_MCP_SERVER_NAME: mcp_server},
@@ -1180,13 +1239,13 @@ async def run_claude_agent_sdk_turn(
                 model=model or None,
                 max_turns=max_turns,
                 resume=resume or None,
-                env=resolve_sdk_process_env(
-                    credentials=credentials,
-                    anthropic_api_key=anthropic_api_key,
-                    anthropic_base_url=anthropic_base_url,
-                    config_dir=config_dir,
-                    provider=provider or "",
-                ),
+                # turn_env, computed once above — NOT a second
+                # resolve_sdk_process_env() call. Calling it twice would
+                # mint a second, different adapter token that never gets
+                # captured into minted_adapter_tokens (so it would never be
+                # cleared) while this options object used a token the
+                # caller never learned about at all.
+                env=turn_env,
             )
 
         async def _consume(sdk_message: Any, *, state: TranslationState) -> List[Dict[str, Any]]:
@@ -1318,6 +1377,8 @@ async def run_claude_agent_sdk_turn(
         return events
     finally:
         shutil.rmtree(config_dir, ignore_errors=True)
+        for _token in minted_adapter_tokens:
+            openai_compat_adapter.clear_turn_credential(_token)
 
 
 def collect_events_via_claude_agent_sdk(**kwargs: Any) -> List[Dict[str, Any]]:
