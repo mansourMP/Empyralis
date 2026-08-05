@@ -59,18 +59,18 @@ Two things this module is NOT:
          a real, buildable feature — but it is a visibility/polish
          enhancement, not a correctness or reliability gap, and per this
          phase's own priority order it does not belong in this pass.
-         Separately: reading claude_agent_sdk's own subprocess_cli.py
-         confirms TodoWrite likely is not even reliably CALLABLE today
-         under this bridge's configuration — `ClaudeAgentOptions.tools` is
-         never set (so the CLI's full built-in toolset, including
-         TodoWrite, is visible to the model), but `allowed_tools` only ever
-         lists this bridge's own `mcp__empyralis__*` tools, `permission_
-         mode` is never set, and no `can_use_tool` callback is registered;
-         in headless/no-TTY execution (exactly how query() runs here) a
-         tool outside `--allowedTools` has no prompt path to be approved
-         through — see PermissionMode's own "dontAsk" doc ("deny if not
-         pre-approved"). A model that reaches for TodoWrite here would most
-         likely see it denied, not silently skip using it.
+         Separately: TodoWrite is not reachable here at all any more.
+         `ClaudeAgentOptions.tools=[]` (set in run_claude_agent_sdk_turn,
+         emitting `--tools ""`) removes the CLI's entire built-in toolset
+         from the model's reach. This paragraph used to argue the opposite
+         — that leaving `tools` unset was probably harmless because
+         `allowed_tools` would keep the built-ins unapproved — and that
+         reasoning was WRONG, expensively: `allowed_tools` governs
+         APPROVAL, not AVAILABILITY. A built-in TaskCreate call really did
+         run, really did succeed in the CLI's own bookkeeping, and was
+         reported to a customer as real Empyralis work. See the comment on
+         the `tools=[]` line itself, and the foreign-tool guard in
+         translate_sdk_message that now backstops it.
       2. Its iteration-budget-extension half (continuous work past
          max_iterations while a plan has open tasks — direct_chat_
          generation_service.py's _continuous_work_enabled /
@@ -151,6 +151,28 @@ _MCP_TOOL_PREFIX = f"mcp__{_MCP_SERVER_NAME}__"
 # come back empty) or silently do the wrong thing, so they are filtered out
 # before ever reaching the SDK, not half-wired.
 _UNSUPPORTED_TOOL_NAMES = frozenset({"task_complete", "update_plan", "query_tool_registry"})
+
+# trace.failed `code` values for the two ways a tool-shaped SDK message can
+# fail to be Empyralis work. Both land in _collect_sage_operator_loop_v3_
+# events' `blocked_tools` (its "trace.failed" branch) rather than its
+# `tool_calls` list — which is the whole point: `tool_calls` is what the
+# customer's Work tab renders as work done AND what tool_honesty_guard
+# checks a reply's claims against, so anything that isn't a real Empyralis
+# tool call must never enter it.
+#
+# _FOREIGN_TOOL_TRACE_CODE: the model called a tool this turn never
+#   registered. This is the MAN-310 regression class in its general form —
+#   the concrete instance was the CLI's own built-in TaskCreate, reachable
+#   because ClaudeAgentOptions.tools defaulted to the full claude_code
+#   preset. tools=[] closes that specific door; this closes the doorway.
+# _ORPHAN_TOOL_RESULT_TRACE_CODE: a ToolResultBlock arrived whose
+#   tool_use_id was never announced by a ToolUseBlock in this stream. The
+#   collector would bucket it under a synthesized entry named
+#   "direct_tool" with status "completed" (see its _tool_entry default) —
+#   a completed row in the work ledger for a call nothing in this turn can
+#   name. Same failure class, different door.
+_FOREIGN_TOOL_TRACE_CODE = "foreign_tool_call"
+_ORPHAN_TOOL_RESULT_TRACE_CODE = "orphan_tool_result"
 
 
 # Credential-shaped env vars claude_agent_sdk's spawned `claude` CLI
@@ -294,6 +316,56 @@ def strip_mcp_tool_prefix(name: str) -> str:
     return token
 
 
+def is_registered_empyralis_tool(
+    raw_name: str, known_tool_names: Optional[frozenset] = None
+) -> bool:
+    """Is `raw_name` — the name EXACTLY as it appeared on a ToolUseBlock,
+    before any prefix stripping — a tool Empyralis registered for this turn?
+
+    Defence in depth behind `ClaudeAgentOptions.tools=[]`. That option is
+    what actually keeps the CLI's own built-ins (TaskCreate, TodoWrite,
+    Read, Write, Bash, Task, WebFetch, ...) out of the model's reach; this
+    is the check that makes a REGRESSION of that option non-silent. A
+    future options change, an ambient MCP server the CLI picks up, or a CLI
+    update that re-adds a built-in would otherwise be translated straight
+    into a genuine-looking tool.started/tool.result pair — which is exactly
+    the failure tool_honesty_guard structurally cannot see, because the
+    trace would corroborate the claim.
+
+    `known_tool_names` holds the STRIPPED Empyralis tool names registered
+    with the SDK MCP server this turn (run_claude_agent_sdk_turn always
+    supplies it). Two conditions, and the strip_mcp_tool_prefix interplay
+    is why both are needed rather than just the second:
+
+      - The name must carry THIS server's `mcp__empyralis__` prefix. The
+        CLI always presents SDK MCP tools that way, and this module already
+        hard-depends on that convention elsewhere (`allowed_tools` is built
+        from it), so requiring it costs nothing. Without this condition a
+        CLI built-in that happened to share a bare name with an Empyralis
+        tool would pass the membership test below, since
+        strip_mcp_tool_prefix deliberately passes an unprefixed name
+        through unchanged.
+      - The stripped remainder must be in `known_tool_names`. This is what
+        catches a FOREIGN MCP server: `mcp__github__create_issue` is not
+        this server's prefix, so strip_mcp_tool_prefix leaves it whole and
+        no whole `mcp__*` string is ever a registered Empyralis tool name.
+
+    `known_tool_names=None` means "not configured" and returns True for any
+    non-empty name — the pure-translation mode translate_sdk_message's own
+    unit tests use, where there is no registered tool set to check against.
+    Production never takes that branch; RunClaudeAgentSdkTurnForeignToolTests
+    pins that run_claude_agent_sdk_turn always populates it.
+    """
+    token = str(raw_name or "").strip()
+    if not token:
+        return False
+    if known_tool_names is None:
+        return True
+    if not token.startswith(_MCP_TOOL_PREFIX):
+        return False
+    return strip_mcp_tool_prefix(token) in known_tool_names
+
+
 def _safe_parse_tool_name(tool_name: str) -> Tuple[str, str]:
     try:
         connector_id, action_id = direct_chat_operator_binding_service.parse_tool_name(tool_name)
@@ -355,6 +427,15 @@ class TranslationState:
     tool_use_names: Dict[str, str] = field(default_factory=dict)
     tool_use_inputs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     reply_text_parts: List[str] = field(default_factory=list)
+    # The STRIPPED Empyralis tool names registered with the SDK MCP server
+    # for this turn — see is_registered_empyralis_tool, which this is fed
+    # to. None ("not configured") disables the check; run_claude_agent_sdk_
+    # turn always sets it, so production is never in that mode.
+    known_tool_names: Optional[frozenset] = None
+    # tool_use_ids already rejected as foreign, so the matching
+    # ToolResultBlock (which carries only the id, never the name) can be
+    # dropped too instead of being recorded against an empty tool name.
+    foreign_tool_use_ids: set = field(default_factory=set)
 
 
 def translate_sdk_message(
@@ -370,8 +451,10 @@ def translate_sdk_message(
     "tool.result", "search.query", "trace.failed" and "plan.item.updated"
     are consumed under "trace" — see that function).
 
-    Pure function of (message, state, trace_context): no I/O, no tool
-    execution. Tool execution happens inside the @tool handlers
+    A function of (message, state, trace_context) alone: no DB, no network,
+    no tool execution (it does log a warning when it rejects a tool-shaped
+    message — see the foreign-tool guard below). Tool execution happens
+    inside the @tool handlers
     build_sdk_tools() registers, which the SDK subprocess calls BEFORE it
     ever emits the UserMessage/ToolResultBlock this function reads back —
     by the time that message arrives, the real tool call (governance,
@@ -424,6 +507,38 @@ def translate_sdk_message(
             raw_name = str(getattr(block, "name", "") or "")
             raw_input = getattr(block, "input", None)
             tool_input = dict(raw_input) if isinstance(raw_input, dict) else {}
+            if not is_registered_empyralis_tool(raw_name, state.known_tool_names):
+                # NOT Empyralis work. Emitting the usual tool.started/
+                # tool.result pair here is precisely how "Task #1 created
+                # successfully" from the CLI's own built-in TaskCreate
+                # became a customer-visible record of work that never
+                # touched the product. Surface it as an anomaly instead:
+                # trace.failed lands in the collector's `blocked_tools`,
+                # never its `tool_calls`, so (a) the Work tab shows a
+                # blocked entry rather than a completed one and (b)
+                # tool_honesty_guard sees NO corroborating tool call and
+                # can catch a reply that claims the work was done.
+                state.foreign_tool_use_ids.add(tool_use_id)
+                LOGGER.warning(
+                    "claude_agent_sdk_bridge: refusing to record non-Empyralis tool %r "
+                    "(tool_use_id=%s) as work — check ClaudeAgentOptions.tools/mcp_servers.",
+                    raw_name[:200], tool_use_id,
+                )
+                foreign_event = _envelope(
+                    "trace.failed",
+                    {
+                        "code": _FOREIGN_TOOL_TRACE_CODE,
+                        "message": (
+                            f"Ignored a call to '{raw_name[:200]}': that is not a tool "
+                            "Empyralis registered for this turn, so nothing it reports "
+                            "is a record of work in this product."
+                        ),
+                    },
+                    tool_call_id=tool_use_id,
+                )
+                if foreign_event is not None:
+                    events.append(foreign_event)
+                continue
             tool_name = strip_mcp_tool_prefix(raw_name)
             state.tool_use_names[tool_use_id] = tool_name
             state.tool_use_inputs[tool_use_id] = tool_input
@@ -464,6 +579,34 @@ def translate_sdk_message(
             if type(block).__name__ != "ToolResultBlock":
                 continue
             tool_use_id = str(getattr(block, "tool_use_id", "") or "")
+            if tool_use_id in state.foreign_tool_use_ids:
+                # Already surfaced as a trace.failed anomaly when the
+                # ToolUseBlock came through. Whatever this result says, it
+                # is another system's bookkeeping — not a tool.result.
+                continue
+            if tool_use_id not in state.tool_use_names:
+                # A result for a call this stream never announced. The
+                # collector's _tool_entry would invent an entry named
+                # "direct_tool" and mark it completed — a green row in the
+                # work ledger for a call nothing here can even name.
+                LOGGER.warning(
+                    "claude_agent_sdk_bridge: tool result for unknown tool_use_id=%s — "
+                    "not recording it as work.", tool_use_id,
+                )
+                orphan_event = _envelope(
+                    "trace.failed",
+                    {
+                        "code": _ORPHAN_TOOL_RESULT_TRACE_CODE,
+                        "message": (
+                            "Ignored a tool result with no matching tool call in this "
+                            "turn — it cannot be attributed to work Empyralis performed."
+                        ),
+                    },
+                    tool_call_id=tool_use_id,
+                )
+                if orphan_event is not None:
+                    events.append(orphan_event)
+                continue
             tool_name = state.tool_use_names.get(tool_use_id, "")
             tool_input = state.tool_use_inputs.get(tool_use_id, {})
             connector_id, action_id = _safe_parse_tool_name(tool_name)
@@ -747,6 +890,13 @@ async def run_claude_agent_sdk_turn(
     )
     mcp_server = create_sdk_mcp_server(name=_MCP_SERVER_NAME, tools=sdk_tools)
     allowed_tools = [f"{_MCP_TOOL_PREFIX}{tool_def.get('name')}" for tool_def in usable_tool_defs]
+    # The one authoritative answer to "is this tool call Empyralis work?" —
+    # the same list allowed_tools is built from, minus the MCP prefix. Fed
+    # to every TranslationState this turn creates; see is_registered_
+    # empyralis_tool.
+    known_tool_names = frozenset(
+        str(tool_def.get("name") or "").strip() for tool_def in usable_tool_defs
+    ) - {""}
 
     config_dir = tempfile.mkdtemp(prefix="empyralis-claude-sdk-")
     try:
@@ -772,6 +922,38 @@ async def run_claude_agent_sdk_turn(
                 # bookkeeping instead of the product's. Work that never
                 # happened must never be reportable as done.
                 tools=[],
+                # Only the MCP server built above. Without this the CLI
+                # ALSO loads whatever MCP configuration it finds ambiently
+                # — a project .mcp.json next to the backend process's cwd,
+                # user/global settings, plugin-provided servers (see
+                # ClaudeAgentOptions.strict_mcp_config's own docstring).
+                # Those servers' tools arrive as ordinary `mcp__*__*`
+                # tool_use blocks that `tools=[]` does NOT remove (it
+                # governs BUILT-INS only), i.e. the exact same
+                # foreign-work-recorded-as-Empyralis-work failure, reached
+                # through a different door. A tenant turn must never
+                # inherit tools from the host machine's config.
+                strict_mcp_config=True,
+                # SDK isolation mode: load NO filesystem settings.
+                # setting_sources defaults to None, which per its own
+                # docstring means "all sources are loaded (matches CLI
+                # defaults)" — user ~/.claude/settings.json, project
+                # .claude/settings.json, .claude/settings.local.json, and
+                # (because "project" is among them) CLAUDE.md files. The
+                # subprocess inherits the BACKEND process's cwd (options.
+                # cwd is never set), so on this repo that meant every
+                # tenant turn silently loaded Empyralis's own CLAUDE.md,
+                # its permission rules, its hooks and its custom slash
+                # commands into the tenant's session. That is host
+                # configuration leaking into multi-tenant execution: not
+                # this workspace's instructions, not this workspace's
+                # permissions, and one more supply line for tools and
+                # behavior Empyralis never registered. CLAUDE_CONFIG_DIR
+                # (resolve_sdk_process_env) already relocates the USER
+                # scope to a fresh directory; only this closes the project
+                # and local scopes, which are cwd-derived and unaffected by
+                # that variable.
+                setting_sources=[],
                 model=model or None,
                 max_turns=max_turns,
                 resume=resume or None,
@@ -809,7 +991,7 @@ async def run_claude_agent_sdk_turn(
         prompt = message if resume_token else render_prompt(message, prior_messages)
         options = _build_options(resume=resume_token)
 
-        state = TranslationState()
+        state = TranslationState(known_tool_names=known_tool_names)
         events: List[Dict[str, Any]] = []
         received_any_message = False
         try:
@@ -836,7 +1018,7 @@ async def run_claude_agent_sdk_turn(
                 "retrying this turn fresh (full history, new session).",
                 resume_token,
             )
-            state = TranslationState()
+            state = TranslationState(known_tool_names=known_tool_names)
             events = []
             fallback_prompt = render_prompt(message, prior_messages)
             fallback_options = _build_options(resume="")
