@@ -55,15 +55,27 @@ function detectPlatform(): string {
   return "macos";
 }
 
-function pairingCommand(token: string, displayName: string, workspaceId: string): string {
+/** fullAccess only ever adds a line — never changes any line above it — so a
+ *  default (sandbox) pairing's command is byte-for-byte what it always was.
+ *  The exported var here is the box operator's LOCAL half of the full_access
+ *  opt-in (see empyralis-gateway/src/config.ts's shellFullAccessLocallyEnabled
+ *  doc comment); the pairing intent request carries the other, server half
+ *  (runtime_access_mode/autonomous_agent_setup_warning_acknowledged, set in
+ *  handleGenerate below from this same fullAccess flag) — both are required
+ *  before any call actually runs unsandboxed. */
+function pairingCommand(token: string, displayName: string, workspaceId: string, fullAccess: boolean): string {
   if (!token) return "Pairing token unavailable";
   const name = displayName.trim() || "My device";
-  return [
+  const lines = [
     `export EMPYRALIS_GATEWAY_PAIRING_TOKEN=${JSON.stringify(token)}`,
     `export EMPYRALIS_GATEWAY_DISPLAY_NAME=${JSON.stringify(name)}`,
     `export EMPYRALIS_WORKSPACE_ID=${JSON.stringify(workspaceId)}`,
-    `curl -fsSL https://get.empyralis.com/gateway | sh`,
-  ].join("\n");
+  ];
+  if (fullAccess) {
+    lines.push(`export EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED=true`);
+  }
+  lines.push(`curl -fsSL https://get.empyralis.com/gateway | sh`);
+  return lines.join("\n");
 }
 
 async function fetchGatewayIds(workspaceId: string): Promise<Set<string>> {
@@ -122,6 +134,15 @@ export function GatewayPairPanel({
   const [intent, setIntent] = useState<PairingIntent | null>(null);
   const [copied, setCopied] = useState(false);
   const [paired, setPaired] = useState<GatewayRegistrationRecord | null>(null);
+  // Full-access opt-in — unchecked by default; sandbox stays the floor (see
+  // empyralis-gateway/src/config.ts's shellFullAccessLocallyEnabled doc
+  // comment). Checking the box IS the explicit acknowledge action: its
+  // label states plainly what full_access does, so a deliberate click is
+  // itself the acknowledgment — no separate confirm step needed. Frozen the
+  // instant `intent` is set (the checkbox unmounts with the rest of the
+  // form), so the command shown to the user always matches what was
+  // actually requested.
+  const [fullAccessAck, setFullAccessAck] = useState(false);
   const knownGatewayIds = useRef<Set<string>>(new Set());
   const pollRef = useRef<number | null>(null);
 
@@ -169,7 +190,13 @@ export function GatewayPairPanel({
           workspace_id: workspaceId,
           display_name: displayName.trim() || undefined,
           platform,
-          runtime_access_mode: "default_guarded",
+          // Sandbox is the floor: only ever escalate the request when the
+          // owner explicitly checked the full_access box below. The
+          // acknowledged flag is only ever sent (never sent as false) when
+          // that opt-in happened — mirrors the same two-field contract
+          // ssh-server-connect-panel.tsx and cloud-vps-setup-panel.tsx send.
+          runtime_access_mode: fullAccessAck ? "full_access" : "default_guarded",
+          ...(fullAccessAck ? { autonomous_agent_setup_warning_acknowledged: true } : {}),
         }),
       });
       if (!res.ok) {
@@ -184,11 +211,11 @@ export function GatewayPairPanel({
     } finally {
       setBusy(false);
     }
-  }, [workspaceId, displayName, platform, startPolling]);
+  }, [workspaceId, displayName, platform, fullAccessAck, startPolling]);
 
   const handleCopy = useCallback(async () => {
     if (!intent?.pairing_token) return;
-    const command = pairingCommand(intent.pairing_token, displayName, workspaceId);
+    const command = pairingCommand(intent.pairing_token, displayName, workspaceId, fullAccessAck);
     try {
       await navigator.clipboard.writeText(command);
       setCopied(true);
@@ -196,7 +223,7 @@ export function GatewayPairPanel({
     } catch {
       setError("Could not copy — select and copy the command manually.");
     }
-  }, [intent, displayName, workspaceId]);
+  }, [intent, displayName, workspaceId, fullAccessAck]);
 
   if (paired) {
     const postPair = renderPostPairNext?.(paired);
@@ -244,6 +271,30 @@ export function GatewayPairPanel({
               </select>
             </label>
           </div>
+          {/* full_access opt-in. Unchecked by default — sandbox (Docker) is
+              the floor for every pairing unless the owner deliberately asks
+              for more. Checking this box is itself the explicit
+              acknowledgment: its own label states plainly what full_access
+              does, so nothing about it is a passive default. */}
+          <label className="gw-pair-panel-fullaccess-toggle">
+            <input
+              type="checkbox"
+              checked={fullAccessAck}
+              onChange={(e) => setFullAccessAck(e.currentTarget.checked)}
+            />
+            <span>Run with full access to this computer (advanced, no sandbox)</span>
+          </label>
+          {fullAccessAck && (
+            <p className="gw-pair-panel-fullaccess-warning">
+              <AlertTriangle size={14} strokeWidth={2} />
+              <span>
+                Commands and file access will run directly on this computer — no container, no
+                sandbox. An agent can read, write, or delete anything your own user account can
+                reach: personal files, browser data, saved logins, SSH keys, other applications.
+                Only enable this on a machine you&apos;re comfortable handing over completely.
+              </span>
+            </p>
+          )}
           <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={handleGenerate} disabled={busy}>
             {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
             {busy ? "Generating…" : "Generate pairing command"}
@@ -256,7 +307,7 @@ export function GatewayPairPanel({
             Run this on the computer you want to connect, then wait — this updates automatically once it's paired.
           </p>
           <pre className="gw-pair-panel-command">
-            <code>{pairingCommand(intent.pairing_token || "", displayName, workspaceId)}</code>
+            <code>{pairingCommand(intent.pairing_token || "", displayName, workspaceId, fullAccessAck)}</code>
           </pre>
           <div className="gw-pair-panel-row">
             <button type="button" className="fleet-btn" onClick={handleCopy}>
