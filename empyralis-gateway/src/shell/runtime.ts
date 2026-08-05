@@ -101,6 +101,23 @@ export function resolveExecutionMode(
   return { mode: "full_access", reason: "owner-enabled single-agent box, authorized by the cloud control plane" };
 }
 
+/** Builds the "neither mode is usable" error for shell.execute /
+ *  filesystem.read_write when sandbox mode was selected and Docker isn't
+ *  ready. `decision.reason` already carries the specific reason full_access
+ *  isn't active for this call — resolveExecutionMode never returns
+ *  "sandbox" without setting one (either "not enabled locally on this box"
+ *  or "server did not authorize full_access for this call"). Folding that
+ *  in turns a dead end ("neither is available", no hint which of
+ *  full_access's two required keys is missing) into an actionable message,
+ *  without any change to how the two keys are resolved. */
+function unavailableExecutionModeMessage(capabilityId: string, decision: ExecutionModeDecision): string {
+  return (
+    `${capabilityId} requires Docker (sandbox mode) or an explicitly enabled and authorized ` +
+    `full_access mode — neither is available on this Gateway right now. Docker is not ready here, ` +
+    `and full_access is not active because: ${decision.reason}.`
+  );
+}
+
 async function isDockerReady(): Promise<boolean> {
   const snapshot = await collectPassiveInventorySnapshot({});
   return snapshot.capability_readiness.service_statuses.docker === "ready";
@@ -166,9 +183,7 @@ export class GatewayShellRuntime {
     if (decision.mode === "sandbox") {
       const ready = await this.dockerReadyCheck();
       if (!ready) {
-        throw new Error(
-          "shell.execute requires Docker (sandbox mode) or an explicitly enabled and authorized full_access mode — neither is available on this Gateway right now.",
-        );
+        throw new Error(unavailableExecutionModeMessage(SHELL_EXECUTE_CAPABILITY, decision));
       }
       const containerName = `empyralis-shell-${crypto.randomUUID()}`;
       const args = buildDockerRunArgs({
@@ -241,9 +256,7 @@ export class GatewayShellRuntime {
     if (decision.mode === "sandbox") {
       const ready = await this.dockerReadyCheck();
       if (!ready) {
-        throw new Error(
-          "filesystem.read_write requires Docker (sandbox mode) or an explicitly enabled and authorized full_access mode — neither is available on this Gateway right now.",
-        );
+        throw new Error(unavailableExecutionModeMessage(FILESYSTEM_READ_WRITE_CAPABILITY, decision));
       }
       const containerName = `empyralis-fs-${crypto.randomUUID()}`;
       const innerArgs = filesystemInnerArgs(mode, relativePath);

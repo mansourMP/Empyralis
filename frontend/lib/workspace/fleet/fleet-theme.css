@@ -4895,6 +4895,38 @@ a.fleet-breadcrumb:hover {
   margin: 0;
 }
 
+/* full_access opt-in checkbox + warning, nested inside the pairing form's
+   own .gw-pair-panel box — a plain tinted note rather than a second bordered
+   box, since a full box-within-a-box would double up on the outer panel's
+   own border/background right where the reader needs the warning to feel
+   like part of the same form, not a separate alert bolted on. */
+.gw-pair-panel-fullaccess-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.gw-pair-panel-fullaccess-toggle input {
+  margin: 0;
+}
+
+.gw-pair-panel-fullaccess-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--warning-text);
+  margin: 0;
+}
+
+.gw-pair-panel-fullaccess-warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
 .gw-pair-panel-command {
   font-size: 12px;
   background: var(--bg-inset);

@@ -151,6 +151,25 @@ test("sandbox mode without a ready Docker daemon fails closed with a clear error
   await assert.rejects(runtime.handleCapabilityInvoke(frame), /requires Docker.*or an explicitly enabled and authorized full_access/);
 });
 
+// Docker-down is one failure; WHY full_access isn't covering for it is a
+// second, distinct fact the box operator needs to act on — these two tests
+// pin the error message to each of the two independent reasons
+// resolveExecutionMode can give for staying in sandbox, so a customer never
+// hits a bare "neither is available" with no idea which of the two
+// full_access keys (the local box flag, or the server-side authorization)
+// is the one missing.
+test("Docker-down error names the LOCAL flag as the reason when full_access isn't enabled on this box at all", async () => {
+  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false, fullAccessLocallyEnabled: false }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" }, SAGE_AUTHORIZED_POLICY);
+  await assert.rejects(runtime.handleCapabilityInvoke(frame), /full_access is not active because: full_access is not enabled locally on this box/);
+});
+
+test("Docker-down error names the SERVER authorization as the reason when the local flag is on but the server didn't authorize this call", async () => {
+  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => false, fullAccessLocallyEnabled: true }));
+  const frame = makeInvokeFrame("shell.execute", { command: "echo hello" }); // no SAGE_AUTHORIZED_POLICY
+  await assert.rejects(runtime.handleCapabilityInvoke(frame), /full_access is not active because: server did not authorize full_access for this call/);
+});
+
 // ── full_access mode: direct host execution, no Docker required ──
 
 test("full_access mode executes shell commands directly on the host", async () => {
