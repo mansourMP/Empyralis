@@ -22,6 +22,13 @@ transformers>=4.48.0
 torch>=2.2.0
 mcp[cli]==1.26.0
 starlette==1.0.1
+# MAN-310: second, selectable Sage turn engine (server_modules/claude_agent_
+# sdk_bridge.py), default off. Verified clean against every pin above with
+# zero version bumps and a clean `pip check` — see spikes/man-310-claude-
+# agent-sdk/requirements-spike.txt. Also requires Node.js + the Claude Code
+# CLI (`claude`) on PATH wherever the flag is actually turned on — the SDK
+# spawns it as a subprocess (claude_agent_sdk_bridge.py's docstring).
+claude-agent-sdk==0.2.130
 croniter>=2.0.0
 sentence-transformers>=3.0.0
 dropbox>=11.36.0

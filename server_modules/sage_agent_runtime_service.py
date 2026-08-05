@@ -17,6 +17,7 @@ from server_modules import tool_result_status
 from server_modules import (
     activity_ledger_service,
     agent_trace_service,
+    claude_agent_sdk_bridge,
     direct_chat_generation_service,
     direct_chat_runtime_exports,
     direct_chat_tool_catalog_service,
@@ -152,6 +153,24 @@ _SAGE_ACTION_LOOP_VERSION = "v2"
 _SAGE_OPERATOR_LOOP_VERSION = "v3"
 _SAGE_ACTION_LOOP_MAX_TOOL_CALLS = 25
 _SAGE_OPERATOR_LOOP_MAX_ITERATIONS = 5  # Cap at 5 to prevent runaway; most tasks finish in 1-3
+
+
+def _resolve_turn_engine_id(engine_options: dict[str, Any] | None) -> str:
+    """MAN-310: the ONE decision point _run_sage_action_loop_v3's
+    _collect_stream_events closure branches on. Pulled out as its own
+    top-level function (rather than left inline in that closure) so the
+    "flag off leaves the legacy path untouched" property has a unit-testable
+    home — see test_claude_agent_sdk_bridge.py's
+    TurnEngineSelectionFlagOffTests. None, {}, a non-dict, or any string
+    other than claude_agent_sdk_bridge.ENGINE_ID all resolve to "" (falsy —
+    every existing caller, which never passes engine_options at all, lands
+    here), which _collect_stream_events treats identically to "take the
+    existing direct_chat_generation_service.stream_provider_backed_direct_
+    chat path, unmodified"."""
+    options = engine_options if isinstance(engine_options, dict) else {}
+    return str(options.get("engine") or "").strip().lower()
+
+
 _SAGE_TASK_ROUTE_MODES = {
     "chat_only",
     "connector_api",
@@ -2984,6 +3003,17 @@ async def _run_sage_action_loop_v3(
     # saves. None (default) = caller didn't resolve one; memory writes this
     # turn stay unattributed, same as before this parameter existed.
     attribution: dict[str, Any] | None = None,
+    # MAN-310: per-turn engine selection at the _collect_stream_events seam
+    # below. None/empty/anything other than {"engine": claude_agent_sdk_
+    # bridge.ENGINE_ID} takes the EXISTING path (direct_chat_generation_
+    # service.stream_provider_backed_direct_chat) completely unchanged —
+    # this parameter's default keeps every caller that doesn't pass it
+    # byte-for-byte identical to before it existed. "anthropic_api_key" /
+    # "anthropic_base_url" are optional per-turn overrides forwarded to
+    # claude_agent_sdk_bridge.resolve_sdk_process_env when the SDK engine is
+    # selected (see that function's docstring for the non-Anthropic-backend
+    # use case) — ignored on the legacy path.
+    engine_options: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     # Phase 4B: when agent_install_id is set this turn runs as that specialist —
     # its tool whitelist, tool-call executor identity, and mid-turn memory
@@ -3294,7 +3324,41 @@ async def _run_sage_action_loop_v3(
         provider=provider,
         model=model,
     )
+    # MAN-310: resolved once, outside the closure, so both branches below
+    # see the identical value — the flag is read exactly once per turn.
+    _engine_options = engine_options if isinstance(engine_options, dict) else {}
+    _selected_engine = _resolve_turn_engine_id(engine_options)
+
     def _collect_stream_events() -> List[Dict[str, Any]]:
+        if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
+            # Second, selectable engine (MAN-310) — the Claude Agent SDK
+            # drives the turn instead of direct_chat_generation_service.
+            # stream_provider_backed_direct_chat below. Same in-scope
+            # variables (generation_services, tools, credentials, ...),
+            # same trace_context, same return contract
+            # (_collect_sage_operator_loop_v3_events parses whatever this
+            # produces identically to the legacy branch's output). The
+            # legacy branch is entirely unreached when this fires, and this
+            # branch is entirely unreached when it doesn't — the two paths
+            # never interact.
+            return claude_agent_sdk_bridge.collect_events_via_claude_agent_sdk(
+                message=message,
+                system_prompt=system_prompt,
+                prior_messages=prior_messages,
+                tool_defs=tools,
+                generation_services=generation_services,
+                workspace_id=workspace_id,
+                thread_id=trace_id,
+                provider=provider,
+                model=model,
+                credentials=credentials,
+                reasoning_effort=reasoning_effort or "",
+                session_ctx=session_ctx,
+                trace_context=trace_context,
+                max_turns=_SAGE_OPERATOR_LOOP_MAX_ITERATIONS,
+                anthropic_api_key=str(_engine_options.get("anthropic_api_key") or "").strip(),
+                anthropic_base_url=str(_engine_options.get("anthropic_base_url") or "").strip(),
+            )
         _gen = direct_chat_generation_service.stream_provider_backed_direct_chat(
             services=generation_services,
                 context={
@@ -4215,6 +4279,15 @@ async def handle_sage_chat(
     request_id: str = "",
     specialist_context: Any = None,
     channel_prior_messages: list | None = None,
+    # MAN-310: per-turn engine selection, forwarded to _run_sage_action_loop_
+    # v3 unchanged. None (default) — the ordinary case for every existing
+    # caller — takes the existing action-loop path exactly as before this
+    # parameter existed. Pass {"engine": "claude_agent_sdk"} to run this ONE
+    # turn through the Claude Agent SDK bridge instead (see
+    # claude_agent_sdk_bridge.py); optional "anthropic_api_key"/
+    # "anthropic_base_url" keys override that engine's credentials/backend
+    # for this turn only.
+    engine_options: dict[str, Any] | None = None,
 ) -> dict:
     # Phase 4: when specialist_context is set, this turn runs as a specialist
     # (its persona, model/provider binding, and memory namespace) instead of the
@@ -5204,6 +5277,7 @@ async def handle_sage_chat(
         reasoning_effort=requested_reasoning_effort,
         credit_idempotency_key=turn_credit_idempotency_key,
         attribution=_turn_attribution,
+        engine_options=engine_options,
     )
     if action_result is not None:
         if "sage_action_loop" not in used_context:
@@ -5282,6 +5356,7 @@ async def handle_sage_chat(
                     preferred_gateway_id=str(getattr(_spec, "preferred_gateway_id", "") or "").strip(),
                     reasoning_effort=requested_reasoning_effort,
                     credit_idempotency_key=turn_credit_idempotency_key,
+                    engine_options=engine_options,
                 )
                 if not isinstance(_corrected, dict):
                     return None
