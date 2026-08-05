@@ -190,6 +190,30 @@ _CREDENTIAL_ENV_KEYS = (
     "CLAUDE_CODE_USE_MANTLE",
 )
 
+# A provider's ordinary profile base_url (provider_profiles.py) is its
+# OpenAI-shaped endpoint — DeepSeek's, for instance, is .../v1. Handing that
+# to the `claude` CLI would point an Anthropic-Messages client at an
+# OpenAI-protocol URL. This maps the providers that ship their OWN native
+# Anthropic-Messages-compatible endpoint to that endpoint instead. Only
+# providers verified against a real turn belong here: per the project's
+# standing rule, a provider is supported only if it publishes a native
+# Anthropic-compatible endpoint — never via a translating proxy. Anthropic
+# itself is absent deliberately (no base_url override; the CLI's own default
+# is correct).
+_ANTHROPIC_COMPATIBLE_BASE_URLS = {
+    "deepseek": "https://api.deepseek.com/anthropic",
+}
+
+
+def resolve_anthropic_compatible_base_url(provider: str) -> str:
+    """The Anthropic-Messages-compatible endpoint for `provider`, or "" when
+    that provider has none (so no ANTHROPIC_BASE_URL is emitted and the CLI
+    talks to Anthropic directly). Never falls back to the provider's
+    OpenAI-shaped profile URL — a wrong protocol is worse than no override,
+    because it fails as an opaque HTTP error rather than an obvious
+    unsupported-provider one."""
+    return _ANTHROPIC_COMPATIBLE_BASE_URLS.get(str(provider or "").strip().lower(), "")
+
 
 def resolve_sdk_process_env(
     *,
@@ -197,6 +221,7 @@ def resolve_sdk_process_env(
     anthropic_api_key: str = "",
     anthropic_base_url: str = "",
     config_dir: str = "",
+    provider: str = "",
 ) -> Dict[str, str]:
     """Build the `env` override for ClaudeAgentOptions — never os.environ,
     never a hardcoded URL. Explicit per-turn overrides win; otherwise falls
@@ -240,9 +265,13 @@ def resolve_sdk_process_env(
     # reason.
     if api_key:
         env["ANTHROPIC_AUTH_TOKEN"] = api_key
+    # An explicit per-turn override wins; otherwise the provider's own
+    # Anthropic-compatible endpoint. creds["base_url"] is deliberately NOT a
+    # fallback here — that is the provider's OpenAI-shaped URL (see
+    # _ANTHROPIC_COMPATIBLE_BASE_URLS), which this client cannot speak.
     base_url = str(
-        anthropic_base_url or creds.get("base_url") or creds.get("anthropic_base_url") or ""
-    ).strip()
+        anthropic_base_url or creds.get("anthropic_base_url") or ""
+    ).strip() or resolve_anthropic_compatible_base_url(provider)
     if base_url:
         env["ANTHROPIC_BASE_URL"] = base_url
     if config_dir:
@@ -734,6 +763,7 @@ async def run_claude_agent_sdk_turn(
                     anthropic_api_key=anthropic_api_key,
                     anthropic_base_url=anthropic_base_url,
                     config_dir=config_dir,
+                    provider=provider or "",
                 ),
             )
 

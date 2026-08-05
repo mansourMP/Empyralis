@@ -89,6 +89,50 @@ class ResolveSdkProcessEnvTests(unittest.TestCase):
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
         self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
 
+    def test_provider_with_a_native_anthropic_endpoint_supplies_the_base_url(self):
+        # Found by driving a real product turn: model_config selects a
+        # provider, and nothing else in the turn carries an Anthropic-shaped
+        # URL — without this the CLI would talk to Anthropic using a
+        # DeepSeek token.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "sk-deepseek"}, provider="deepseek",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-deepseek")
+
+    def test_provider_openai_shaped_profile_url_is_never_used_as_the_base_url(self):
+        # provider_profiles' base_url for deepseek is .../v1 — the OpenAI
+        # protocol. Handing that to an Anthropic-Messages client fails as an
+        # opaque HTTP error, so it must never be the fallback.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "k", "base_url": "https://api.deepseek.com/v1"},
+            provider="deepseek",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://api.deepseek.com/anthropic")
+
+    def test_anthropic_itself_gets_no_base_url_override(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "sk-ant"}, provider="anthropic",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
+
+    def test_provider_without_a_native_anthropic_endpoint_gets_no_base_url(self):
+        # openai/gemini/xai ship no Anthropic-Messages endpoint. Emitting
+        # nothing is correct: the turn fails as an auth error against
+        # Anthropic rather than silently talking the wrong protocol.
+        for provider in ("openai", "gemini", "xai", ""):
+            env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+                credentials={"api_key": "k"}, provider=provider,
+            )
+            self.assertEqual(env["ANTHROPIC_BASE_URL"], "", f"provider={provider!r}")
+
+    def test_explicit_override_still_beats_the_provider_mapping(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "k"}, provider="deepseek",
+            anthropic_base_url="https://gateway.internal/anthropic",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://gateway.internal/anthropic")
+
     def test_config_dir_forwarded_to_both_linux_and_macos_keys(self):
         env = claude_agent_sdk_bridge.resolve_sdk_process_env(config_dir="/tmp/fresh-turn-dir")
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/tmp/fresh-turn-dir")
