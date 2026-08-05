@@ -375,6 +375,16 @@ class TranslateResultMessageTests(unittest.TestCase):
             usage={"input_tokens": 10, "output_tokens": 5},
             result="The final answer.",
         )
+        # served_by_anthropic is now a PRECONDITION of reporting a cost, not
+        # an incidental detail: total_cost_usd is a client-side number the
+        # CLI computes from Anthropic's price table no matter where it was
+        # pointed, so it may only be reported for a turn Anthropic actually
+        # served. This test used to assert the cost came through with no
+        # attribution established at all — the buggy behaviour. It now pins
+        # the honest half of the rule (attributed -> reported); the
+        # unattributed and non-Anthropic halves are pinned in
+        # TotalCostAttributionTests below.
+        state.served_by_anthropic = True
         events = claude_agent_sdk_bridge.translate_sdk_message(
             message, state=state, trace_context=_trace_context(),
         )
@@ -420,6 +430,284 @@ class TranslateResultMessageTests(unittest.TestCase):
         self.assertIn(("trace", "trace.failed"), types_seen)
         final_event = next(e for e in events if e["type"] == "final")
         self.assertEqual(final_event["payload"]["error"], "error_max_turns")
+        # A subtype that really does name a failure is still passed through
+        # verbatim as the persisted trace.failed code — the "success"
+        # fallback below must not have flattened the honest cases too.
+        failed = next(
+            e["payload"] for e in events
+            if e["type"] == "trace" and e["payload"].get("event_type") == "trace.failed"
+        )
+        self.assertEqual(failed["data"]["code"], "error_max_turns")
+
+
+class ResultMessageErrorCodeTruthfulnessTests(unittest.TestCase):
+    """A failure must never file itself under "success".
+
+    Driving the real Claude Code CLI, an API/upstream failure arrives as a
+    ResultMessage with is_error=True and subtype STILL SET TO "success" —
+    the installed SDK documents this itself on ResultMessage.api_error_status
+    ("HTTP status code ... of the failing API call when ``is_error`` is True
+    and ``subtype`` is 'success'"). The bridge copied subtype straight into
+    the persisted trace.failed `code`, and _collect_sage_operator_loop_v3_
+    events renders that code verbatim as the blocked entry's NAME — so the
+    customer's Work tab showed a blocked entry called "success" for a turn
+    that had failed outright.
+    """
+
+    def _translate(self, message):
+        return claude_agent_sdk_bridge.translate_sdk_message(
+            message,
+            state=claude_agent_sdk_bridge.TranslationState(),
+            trace_context=_trace_context(),
+        )
+
+    @staticmethod
+    def _failed_data(events):
+        return next(
+            e["payload"]["data"] for e in events
+            if e["type"] == "trace" and e["payload"].get("event_type") == "trace.failed"
+        )
+
+    def test_api_failure_reported_with_subtype_success_is_not_coded_success(self):
+        message = sdk_types.ResultMessage(
+            subtype="success",  # measured: the CLI does NOT change this on API failure
+            duration_ms=1200,
+            duration_api_ms=1100,
+            is_error=True,
+            num_turns=1,
+            session_id="sess-1",
+            result=None,
+            api_error_status=500,
+        )
+        events = self._translate(message)
+
+        code = self._failed_data(events)["code"]
+        self.assertNotEqual(code, "success")
+        self.assertEqual(code, "provider_generation_failed")
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertNotEqual(final_event["payload"]["error"], "success")
+        self.assertEqual(final_event["payload"]["error"], "provider_generation_failed")
+
+    def test_the_http_status_is_carried_as_detail_not_as_a_new_code(self):
+        message = sdk_types.ResultMessage(
+            subtype="success", duration_ms=10, duration_api_ms=8, is_error=True,
+            num_turns=1, session_id="sess-1", result=None, api_error_status=529,
+        )
+        events = self._translate(message)
+
+        data = self._failed_data(events)
+        self.assertEqual(data["code"], "provider_generation_failed")
+        self.assertIn("529", data["message"])
+
+    def test_blank_subtype_also_falls_back_instead_of_emitting_an_empty_code(self):
+        message = sdk_types.ResultMessage(
+            subtype="", duration_ms=10, duration_api_ms=8, is_error=True,
+            num_turns=1, session_id="sess-1", result=None,
+        )
+        events = self._translate(message)
+        self.assertEqual(self._failed_data(events)["code"], "provider_generation_failed")
+
+    def test_the_failure_reaches_the_real_collector_without_the_word_success(self):
+        # The end the bug was actually visible at: the collector turns a
+        # trace.failed `code` into a blocked entry's name, which is what the
+        # Work tab renders.
+        message = sdk_types.ResultMessage(
+            subtype="success", duration_ms=10, duration_api_ms=8, is_error=True,
+            num_turns=1, session_id="sess-1", result=None, api_error_status=500,
+        )
+        events = self._translate(message)
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+
+        names = [entry.get("name") for entry in collected["blocked_tools"]]
+        self.assertNotIn("success", names)
+        self.assertIn("provider_generation_failed", names)
+        self.assertEqual(collected["tool_calls"], [])
+
+
+class SyntheticAssistantMessageTests(unittest.TestCase):
+    """API-error prose must never ship as the agent's answer.
+
+    claude_agent_sdk.types.AssistantMessage carries a typed `error` field
+    (AssistantMessageError: "authentication_failed" | "billing_error" |
+    "rate_limit" | "invalid_request" | "server_error" | "unknown") and the
+    CLI stamps model="<synthetic>" on messages it fabricated rather than
+    received from a model. Both arrive carrying a TextBlock of API-error
+    prose. The bridge read neither field, so that prose was appended to
+    state.reply_text_parts like ordinary model output and became the reply
+    the customer saw — the provider's error text, in the agent's voice, on a
+    turn presented as having answered.
+    """
+
+    _PROSE = 'API Error: 500 {"type":"error","error":{"type":"api_error"}}'
+
+    def _synthetic(self, *, error="server_error", model="<synthetic>"):
+        return sdk_types.AssistantMessage(
+            content=[sdk_types.TextBlock(text=self._PROSE)],
+            model=model,
+            error=error,
+        )
+
+    def test_errored_assistant_message_never_enters_the_reply(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._synthetic(), state=state, trace_context=_trace_context(),
+        )
+
+        self.assertEqual(state.reply_text_parts, [])
+        self.assertTrue(state.saw_provider_error)
+        failed = [
+            e["payload"] for e in events
+            if e["type"] == "trace" and e["payload"].get("event_type") == "trace.failed"
+        ]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["data"]["code"], "provider_generation_failed")
+        self.assertIn("server_error", failed[0]["data"]["message"])
+
+    def test_synthetic_model_alone_is_enough_to_reject_the_text(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._synthetic(error=None), state=state, trace_context=_trace_context(),
+        )
+        self.assertEqual(state.reply_text_parts, [])
+        self.assertTrue(state.saw_provider_error)
+
+    def test_an_ordinary_assistant_message_is_untouched(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        message = sdk_types.AssistantMessage(
+            content=[sdk_types.TextBlock(text="Here is the answer.")],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        self.assertEqual(events, [])
+        self.assertEqual(state.reply_text_parts, ["Here is the answer."])
+        self.assertFalse(state.saw_provider_error)
+
+    def test_the_same_prose_does_not_return_through_the_result_message(self):
+        # The other door: ResultMessage.result on such a turn is that same
+        # API-error text, and it lands directly on payload["reply"].
+        state = claude_agent_sdk_bridge.TranslationState()
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._synthetic(), state=state, trace_context=_trace_context(),
+        )
+        result_message = sdk_types.ResultMessage(
+            subtype="success", duration_ms=10, duration_api_ms=8, is_error=True,
+            num_turns=1, session_id="sess-1", result=self._PROSE, api_error_status=500,
+        )
+        events += claude_agent_sdk_bridge.translate_sdk_message(
+            result_message, state=state, trace_context=_trace_context(),
+        )
+
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["reply"], "")
+        collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
+        self.assertEqual(collected["final_payload"]["reply"], "")
+        self.assertEqual(collected["tool_calls"], [])
+        self.assertTrue(collected["blocked_tools"])
+
+    def test_a_genuine_partial_reply_on_a_failed_turn_still_survives(self):
+        # Narrowness check: reply suppression above needs BOTH a seen
+        # provider-error message AND is_error. An ordinary error_max_turns
+        # turn carries real model output and must keep it.
+        state = claude_agent_sdk_bridge.TranslationState()
+        state.reply_text_parts.append("I got halfway through.")
+        message = sdk_types.ResultMessage(
+            subtype="error_max_turns", duration_ms=10, duration_api_ms=8, is_error=True,
+            num_turns=5, session_id="sess-1", result=None,
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        final_event = next(e for e in events if e["type"] == "final")
+        self.assertEqual(final_event["payload"]["reply"], "I got halfway through.")
+
+
+class TotalCostAttributionTests(unittest.TestCase):
+    """ResultMessage.total_cost_usd is computed CLIENT-SIDE by the `claude`
+    CLI from ANTHROPIC's price table, whatever endpoint it was actually
+    pointed at. Copied through unconditionally it reported an Anthropic
+    price for tokens Anthropic never served: a canned local response on a
+    DeepSeek-routed turn was billed at $0.0033. A missing number is honest;
+    a wrong one is not, so the key is omitted rather than zeroed."""
+
+    def _final_payload(self, *, served_by_anthropic, total_cost_usd=0.0033):
+        state = claude_agent_sdk_bridge.TranslationState(served_by_anthropic=served_by_anthropic)
+        message = sdk_types.ResultMessage(
+            subtype="success", duration_ms=10, duration_api_ms=8, is_error=False,
+            num_turns=1, session_id="sess-1", result="Done.", total_cost_usd=total_cost_usd,
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        return next(e for e in events if e["type"] == "final")["payload"]
+
+    def test_non_anthropic_turn_reports_no_cost_at_all(self):
+        payload = self._final_payload(served_by_anthropic=False)
+        self.assertNotIn("total_cost_usd", payload)
+        # Not a zero and not an estimate — absent.
+        self.assertIsNone(payload.get("total_cost_usd"))
+
+    def test_unestablished_attribution_reports_no_cost(self):
+        # The default. Fail-safe: nobody said where this turn went, so no
+        # number is emitted.
+        self.assertNotIn("total_cost_usd", self._final_payload(served_by_anthropic=None))
+
+    def test_anthropic_turn_still_reports_the_real_cost(self):
+        payload = self._final_payload(served_by_anthropic=True, total_cost_usd=0.002)
+        self.assertEqual(payload["total_cost_usd"], 0.002)
+
+    def test_provider_with_its_own_anthropic_compatible_endpoint_is_not_anthropic(self):
+        self.assertFalse(claude_agent_sdk_bridge.turn_is_served_by_anthropic(provider="deepseek"))
+        # Guard the premise: this provider really is routed elsewhere.
+        self.assertTrue(claude_agent_sdk_bridge.resolve_anthropic_compatible_base_url("deepseek"))
+
+    def test_anthropic_provider_with_no_override_is_anthropic(self):
+        self.assertTrue(claude_agent_sdk_bridge.turn_is_served_by_anthropic(provider="anthropic"))
+
+    def test_an_explicit_base_url_override_disqualifies_the_cost(self):
+        self.assertFalse(claude_agent_sdk_bridge.turn_is_served_by_anthropic(
+            provider="anthropic", anthropic_base_url="https://api.deepseek.com/anthropic",
+        ))
+
+    def test_an_unrecognised_provider_is_not_assumed_to_be_anthropic(self):
+        self.assertFalse(claude_agent_sdk_bridge.turn_is_served_by_anthropic(provider="openai"))
+
+
+class RunTurnCostAttributionWiringTests(unittest.TestCase):
+    """Pins that production actually populates the signal — the unit tests
+    above would all pass against a bridge that never set it."""
+
+    def _run_turn(self, *, provider, total_cost_usd=0.0033):
+        result_message = sdk_types.ResultMessage(
+            subtype="success", duration_ms=10, duration_api_ms=8, is_error=False,
+            num_turns=1, session_id="sess-1", result="Done.", total_cost_usd=total_cost_usd,
+        )
+        fake_query = _FakeQuery([[result_message]])
+        with (
+            patch("claude_agent_sdk.query", new=fake_query),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            events = asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="hello",
+                system_prompt="Be terse.",
+                prior_messages=None,
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="trace-1",
+                provider=provider,
+                model="claude-sonnet-4-5",
+                credentials={},
+                trace_context=_trace_context(),
+            ))
+        return next(e for e in events if e["type"] == "final")["payload"]
+
+    def test_a_deepseek_routed_turn_emits_no_cost(self):
+        self.assertNotIn("total_cost_usd", self._run_turn(provider="deepseek"))
+
+    def test_an_anthropic_turn_emits_the_cost(self):
+        self.assertEqual(self._run_turn(provider="anthropic", total_cost_usd=0.002)["total_cost_usd"], 0.002)
 
     def test_final_payload_carries_session_id_for_later_resume(self):
         # MAN-310 Phase 2: every real ResultMessage carries a session_id

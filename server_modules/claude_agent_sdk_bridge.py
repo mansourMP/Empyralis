@@ -174,6 +174,43 @@ _UNSUPPORTED_TOOL_NAMES = frozenset({"task_complete", "update_plan", "query_tool
 _FOREIGN_TOOL_TRACE_CODE = "foreign_tool_call"
 _ORPHAN_TOOL_RESULT_TRACE_CODE = "orphan_tool_result"
 
+# The one trace.failed `code` this module uses when the turn failed upstream
+# (the provider/API, not a tool). Deliberately ONE token, not a taxonomy:
+# the collector renders `code` verbatim as the blocked entry's NAME in the
+# customer's Work tab (_collect_sage_operator_loop_v3_events' "trace.failed"
+# branch), so every value here is customer-visible vocabulary that has to
+# mean something. A real SDK subtype (e.g. "error_max_turns") is passed
+# through as-is because the SDK already owns that name; anything else falls
+# back to this rather than being invented here.
+_PROVIDER_GENERATION_FAILED_CODE = "provider_generation_failed"
+
+# ResultMessage.subtype values that do NOT name a failure. "success" is the
+# whole point of this set: measured against the real Claude Code CLI, an
+# API/upstream failure arrives as is_error=True while subtype STAYS
+# "success". The installed SDK documents exactly that on
+# ResultMessage.api_error_status — "HTTP status code (e.g. 429, 500, 529) of
+# the failing API call when ``is_error`` is True and ``subtype`` is
+# 'success'" (venv/lib/python3.12/site-packages/claude_agent_sdk/types.py).
+# Taking subtype at face value therefore persisted a trace.failed row whose
+# code was the literal string "success", and the Work tab rendered a blocked
+# entry NAMED "success". A failure that files itself under "success" is the
+# exact class of untruth this product cannot ship.
+_NON_FAILURE_RESULT_SUBTYPES = frozenset({"success", ""})
+
+# The `model` string the CLI stamps on an assistant message it FABRICATED
+# rather than received from a model — API-error notices, "prompt too long",
+# interrupt notices. Whatever text such a message carries, it is the CLI
+# talking about a failure, never the agent's answer to the customer.
+_SYNTHETIC_ASSISTANT_MODEL = "<synthetic>"
+
+# Provider ids whose turns really are served by Anthropic's own API, so the
+# CLI's client-side total_cost_usd (computed from Anthropic's price table)
+# is a true number rather than a coincidence. "" means the caller named no
+# provider, in which case the CLI has no endpoint to talk to BUT Anthropic's
+# own default — see turn_is_served_by_anthropic, which additionally requires
+# that no ANTHROPIC_BASE_URL override is in effect for the turn.
+_ANTHROPIC_PROVIDER_IDS = frozenset({"", "anthropic"})
+
 
 # Credential-shaped env vars claude_agent_sdk's spawned `claude` CLI
 # subprocess recognizes, in Anthropic's own documented precedence order
@@ -300,6 +337,51 @@ def resolve_sdk_process_env(
         env["CLAUDE_CONFIG_DIR"] = config_dir
         env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = config_dir
     return env
+
+
+def turn_is_served_by_anthropic(
+    *,
+    provider: str = "",
+    anthropic_base_url: str = "",
+    credentials: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Did this turn's model calls actually go to Anthropic's own API?
+
+    Asked for exactly one reason: ResultMessage.total_cost_usd is computed
+    CLIENT-SIDE by the `claude` CLI from ANTHROPIC's price table, for
+    whatever model string it saw. The CLI has no idea it was pointed
+    somewhere else. On a DeepSeek-served turn (or any future adapter-routed
+    provider) that number is not an estimate, it is fiction — a canned local
+    response was billed at $0.0033 in testing. translate_sdk_message
+    therefore only lets total_cost_usd through when this returns True; see
+    TranslationState.served_by_anthropic.
+
+    Two conditions, both required:
+
+      - No ANTHROPIC_BASE_URL is in effect for the turn. This is resolved by
+        calling resolve_sdk_process_env — the SAME function that builds the
+        subprocess env — rather than re-deriving it, so the answer cannot
+        drift from what the CLI is actually pointed at. That function also
+        blanks every credential-shaped key (including the Bedrock/Vertex/
+        Foundry flags), so an empty ANTHROPIC_BASE_URL here provably means
+        the CLI talks to api.anthropic.com and nothing ambient can change
+        that.
+      - The provider names Anthropic (or names nothing at all, which leaves
+        the CLI on its own Anthropic default).
+
+    Anything else — an unrecognised provider, an explicit base-URL override,
+    a provider with its own Anthropic-compatible endpoint — returns False,
+    and the cost is omitted rather than guessed. A missing number is honest;
+    a wrong one is not.
+    """
+    env = resolve_sdk_process_env(
+        credentials=credentials,
+        anthropic_base_url=anthropic_base_url,
+        provider=provider or "",
+    )
+    if env.get("ANTHROPIC_BASE_URL"):
+        return False
+    return str(provider or "").strip().lower() in _ANTHROPIC_PROVIDER_IDS
 
 
 def strip_mcp_tool_prefix(name: str) -> str:
@@ -436,6 +518,25 @@ class TranslationState:
     # ToolResultBlock (which carries only the id, never the name) can be
     # dropped too instead of being recorded against an empty tool name.
     foreign_tool_use_ids: set = field(default_factory=set)
+    # Was this turn actually served by Anthropic's own API? Gates whether
+    # ResultMessage.total_cost_usd — a CLIENT-SIDE number the CLI computes
+    # from Anthropic's price table regardless of where it was pointed — may
+    # be reported as this turn's cost. See turn_is_served_by_anthropic,
+    # which run_claude_agent_sdk_turn always resolves this from.
+    #
+    # None means "nobody established where this turn went", and is treated
+    # exactly like False: the cost is omitted. That default is deliberately
+    # the FAIL-SAFE direction (unlike known_tool_names above, whose None
+    # means "no allowlist configured, don't check") — an unattributable
+    # number must not be emitted just because no one said otherwise.
+    served_by_anthropic: Optional[bool] = None
+    # Set when the CLI hands over an assistant message that is a FAILURE
+    # NOTICE rather than the model's answer (AssistantMessage.error set,
+    # and/or model="<synthetic>"). Its prose is API-error text; see the
+    # guard in translate_sdk_message's AssistantMessage branch, and the use
+    # in the ResultMessage branch that keeps the same prose from arriving as
+    # the reply by the other door (ResultMessage.result).
+    saw_provider_error: bool = False
 
 
 def translate_sdk_message(
@@ -489,6 +590,60 @@ def translate_sdk_message(
     cls_name = type(message).__name__
 
     if cls_name == "AssistantMessage":
+        # An AssistantMessage is not automatically the agent speaking. The
+        # SDK carries a typed `error` field on it (claude_agent_sdk.types.
+        # AssistantMessage.error: AssistantMessageError | None, one of
+        # "authentication_failed" | "billing_error" | "rate_limit" |
+        # "invalid_request" | "server_error" | "unknown"), and the CLI
+        # stamps model="<synthetic>" on messages it fabricated itself. Both
+        # arrive carrying a TextBlock whose text is API-ERROR PROSE.
+        #
+        # That field was never read here. The prose therefore went straight
+        # into state.reply_text_parts alongside genuine model output and,
+        # whenever ResultMessage.result was empty, became the reply the
+        # customer was shown as their agent's answer — the provider's error
+        # page, in the agent's voice, with no indication anything failed.
+        #
+        # Routed to trace.failed instead: it lands in the collector's
+        # `blocked_tools` (never `tool_calls`), so the turn is recorded as
+        # having failed, which is what happened.
+        error_kind = str(getattr(message, "error", "") or "").strip()
+        model_name = str(getattr(message, "model", "") or "").strip()
+        if error_kind or model_name == _SYNTHETIC_ASSISTANT_MODEL:
+            state.saw_provider_error = True
+            notice = " ".join(
+                str(getattr(block, "text", "") or "").strip()
+                for block in list(getattr(message, "content", None) or [])
+                if type(block).__name__ == "TextBlock"
+            ).strip()
+            LOGGER.warning(
+                "claude_agent_sdk_bridge: provider error message (error=%r model=%r) — "
+                "not recording its text as the agent's reply.",
+                error_kind[:100], model_name[:100],
+            )
+            # redact_text, not the raw string: this text comes from an
+            # upstream error path Empyralis does not control, and it is
+            # about to be persisted on a trace event and rendered in the
+            # Work tab. Truncated for the same reason the foreign-tool
+            # guard truncates its name.
+            detail = secret_redaction_service.redact_text(notice)[:500]
+            failed_event = _envelope(
+                "trace.failed",
+                {
+                    "code": _PROVIDER_GENERATION_FAILED_CODE,
+                    "message": (
+                        f"The model provider returned an error ({error_kind or 'unspecified'})"
+                        + (f": {detail}" if detail else ".")
+                    ),
+                },
+            )
+            if failed_event is not None:
+                events.append(failed_event)
+            # Nothing else on this message is the agent's work either — a
+            # fabricated failure notice carries no tool call worth
+            # recording, and inventing one would be the same untruth in a
+            # different column of the ledger.
+            return events
         for block in list(getattr(message, "content", None) or []):
             block_type = type(block).__name__
             if block_type == "TextBlock":
@@ -649,6 +804,21 @@ def translate_sdk_message(
         is_error = bool(getattr(message, "is_error", False) or False)
         result_text = getattr(message, "result", None)
         reply = str(result_text or "").strip() or "".join(state.reply_text_parts).strip()
+        if is_error and state.saw_provider_error:
+            # The other door to the same untruth the AssistantMessage guard
+            # above closes. When this turn already produced a fabricated
+            # provider-error message, ResultMessage.result is that same
+            # API-error prose — and it would land here as `reply`, i.e. as
+            # the customer's answer, on a turn that demonstrably failed.
+            # Dropping it lets the runtime's own honest failure wording
+            # stand instead (sage_agent_runtime_service._run_sage_action_
+            # loop_v3 substitutes TOOLS_LIMITED_NO_REPLY when a turn has an
+            # empty reply and a blocked entry, which the trace.failed
+            # emitted above guarantees). Narrow on purpose: it needs BOTH a
+            # seen provider-error message AND is_error, so an ordinary
+            # error_max_turns turn still returns whatever real partial work
+            # the model produced.
+            reply = ""
         payload: Dict[str, Any] = {"reply": reply}
         # session_id is a required (non-Optional) field on every real
         # ResultMessage the SDK yields — carried through here so the caller
@@ -660,16 +830,48 @@ def translate_sdk_message(
         if session_id:
             payload["session_id"] = session_id
         if is_error:
-            error_code = str(getattr(message, "subtype", "") or "").strip() or "provider_generation_failed"
+            # subtype is NOT a failure taxonomy — see _NON_FAILURE_RESULT_
+            # SUBTYPES. It is "success" on exactly the failures that matter
+            # most (API/upstream), and this used to copy that word into the
+            # persisted trace.failed row's `code`, which the Work tab then
+            # renders as the blocked entry's name. Only a subtype that
+            # actually names a failure ("error_max_turns", "error_during_
+            # execution", ...) is trusted; everything else falls back.
+            raw_subtype = str(getattr(message, "subtype", "") or "").strip()
+            error_code = (
+                raw_subtype
+                if raw_subtype.lower() not in _NON_FAILURE_RESULT_SUBTYPES
+                else _PROVIDER_GENERATION_FAILED_CODE
+            )
             payload["error"] = error_code
-            failed_event = _envelope("trace.failed", {"code": error_code, "message": reply or error_code})
+            # api_error_status is the SDK's own honest detail for exactly
+            # this case ("HTTP status code of the failing API call when
+            # is_error is True and subtype is 'success'"), and its docstring
+            # marks it safe to log (no message content). It goes in the
+            # human-readable message, NOT the code: a per-status code would
+            # be a taxonomy invented here and rendered at the customer.
+            api_error_status = getattr(message, "api_error_status", None)
+            detail = f"HTTP {api_error_status}" if isinstance(api_error_status, int) and api_error_status else ""
+            failed_message = reply or detail or error_code
+            if reply and detail:
+                failed_message = f"{reply} ({detail})"
+            failed_event = _envelope("trace.failed", {"code": error_code, "message": failed_message})
             if failed_event is not None:
                 events.append(failed_event)
         usage = getattr(message, "usage", None)
         if isinstance(usage, dict):
             payload["usage"] = usage
+        # total_cost_usd is computed CLIENT-SIDE by the `claude` CLI from
+        # Anthropic's price table, whatever endpoint it was actually pointed
+        # at. Copied through unconditionally, a DeepSeek-served turn reported
+        # an Anthropic price for tokens Anthropic never served — a canned
+        # local response was billed at $0.0033 in testing. Emitted only when
+        # the turn provably went to Anthropic (turn_is_served_by_anthropic,
+        # resolved once per turn in run_claude_agent_sdk_turn); otherwise the
+        # key is OMITTED rather than zeroed or estimated, so no downstream
+        # reader can mistake a guess for a measurement.
         total_cost_usd = getattr(message, "total_cost_usd", None)
-        if total_cost_usd is not None:
+        if total_cost_usd is not None and state.served_by_anthropic is True:
             payload["total_cost_usd"] = total_cost_usd
         events.append({"type": "final", "payload": payload})
         return events
@@ -897,6 +1099,17 @@ async def run_claude_agent_sdk_turn(
     known_tool_names = frozenset(
         str(tool_def.get("name") or "").strip() for tool_def in usable_tool_defs
     ) - {""}
+    # Resolved ONCE, from the same inputs the subprocess env is built from,
+    # and fed to every TranslationState this turn creates (including the
+    # resume-fallback retry below). This is the only thing that lets
+    # translate_sdk_message report ResultMessage.total_cost_usd — see
+    # turn_is_served_by_anthropic for why a cost from a non-Anthropic turn
+    # is fiction rather than an approximation.
+    served_by_anthropic = turn_is_served_by_anthropic(
+        provider=provider or "",
+        anthropic_base_url=anthropic_base_url,
+        credentials=credentials,
+    )
 
     config_dir = tempfile.mkdtemp(prefix="empyralis-claude-sdk-")
     try:
@@ -991,7 +1204,9 @@ async def run_claude_agent_sdk_turn(
         prompt = message if resume_token else render_prompt(message, prior_messages)
         options = _build_options(resume=resume_token)
 
-        state = TranslationState(known_tool_names=known_tool_names)
+        state = TranslationState(
+            known_tool_names=known_tool_names, served_by_anthropic=served_by_anthropic,
+        )
         events: List[Dict[str, Any]] = []
         received_any_message = False
         try:
@@ -1018,7 +1233,9 @@ async def run_claude_agent_sdk_turn(
                 "retrying this turn fresh (full history, new session).",
                 resume_token,
             )
-            state = TranslationState(known_tool_names=known_tool_names)
+            state = TranslationState(
+                known_tool_names=known_tool_names, served_by_anthropic=served_by_anthropic,
+            )
             events = []
             fallback_prompt = render_prompt(message, prior_messages)
             fallback_options = _build_options(resume="")
