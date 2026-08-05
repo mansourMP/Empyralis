@@ -21,8 +21,10 @@
  * columns scroll independently.
  *
  * WHAT IS NOT HERE, on purpose:
- *  · Rich text. `description` is a plain-text column; it is rendered with
- *    paragraph breaks preserved, not parsed as markdown it may not be.
+ *  · Rich text. `description` is a plain-text column rendered through
+ *    MarkdownLiteText — bold, italic, code, links, and bullet/ordered lists
+ *    are supported. Headings, tables, and blockquotes are out of scope (this
+ *    is a task description, not a document viewer).
  *  · An attachment/image control on the comment composer. Linear's has one;
  *    ours doesn't, because there is no upload endpoint behind a task
  *    comment — task.metadata.comments stores plain text
@@ -146,6 +148,7 @@ import {
   sortTasks,
   type TaskViewOptions as TaskViewOptionsState,
 } from "./task-view-options";
+import { MarkdownLiteText } from "../markdown-lite";
 import "./task-detail.css";
 
 /** Minute precision, not the default's seconds — no decision on this page
@@ -759,9 +762,7 @@ export function TaskDetailView({
 
             {task.description ? (
               <div className="fleet-task-page-desc">
-                {task.description.split(/\n{2,}/).map((para, i) => (
-                  <p key={i}>{para}</p>
-                ))}
+                <MarkdownLiteText text={task.description} />
               </div>
             ) : (
               <p className="fleet-task-page-desc fleet-cell-muted">No description.</p>

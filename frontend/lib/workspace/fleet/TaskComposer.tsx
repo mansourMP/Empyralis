@@ -378,6 +378,9 @@ export function TaskComposer({
             placeholder="Add description…"
             onChange={(e) => setDescription(e.currentTarget.value)}
           />
+          {description.trim() ? (
+            <div className="fleet-composer-hint">Markdown supported — **bold**, *italic*, `code`, [links](url), lists</div>
+          ) : null}
         </div>
 
         <div className="fleet-composer-chips">
