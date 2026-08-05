@@ -43,10 +43,10 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, Copy, Plus } from "lucide-react";
 
-import { me } from "@/lib/auth/auth-client";
 import {
   createWorkspaceInvite,
   buildWorkspaceInviteJoinUrl,
+  useOwnRole,
   WORKSPACE_ROLES,
   type WorkspaceMember,
   type WorkspaceRole,
@@ -58,36 +58,6 @@ function roleLabel(role: WorkspaceRole): string {
   if (role === "owner") return "Owner";
   if (role === "member") return "Member";
   return "Viewer";
-}
-
-/** The caller's own workspace role, derived from the member list the page
- *  already loaded (matched by user id from /api/auth/me) — same derivation
- *  MembersSection.tsx uses for the same reason: there is no dedicated "my
- *  role" endpoint, and the server is the real gate on every mutation below
- *  regardless of what this computes. Undefined while /api/auth/me is still
- *  in flight, so the "+" stays unrendered rather than flashing on then off
- *  for a non-owner. */
-function useOwnRole(members: WorkspaceMember[]): WorkspaceRole | null {
-  const [myUserId, setMyUserId] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void me()
-      .then((data) => {
-        if (cancelled) return;
-        const user = (data as { user?: { id?: string } } | null)?.user;
-        setMyUserId(user?.id ? String(user.id) : null);
-      })
-      .catch(() => {
-        if (!cancelled) setMyUserId(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const mine = members.find((m) => m.user_id === myUserId);
-  return mine?.role ?? null;
 }
 
 export function ProjectMemberAdd({

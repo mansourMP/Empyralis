@@ -1209,6 +1209,50 @@ async def fleet_clear_agent_capability_key(
     return {"ok": True, "capability": cap, "mode": "platform_credits"}
 
 
+def gateway_resolves_in_workspace(gateway_id: str, workspace_id: str) -> Dict[str, Any]:
+    """Confirm `gateway_id` resolves to a real, active, non-revoked Gateway
+    registration paired to this workspace. Factored out of the inline check
+    fleet_configure_agent applies to the agent-level model_config.
+    gateway_binding field (below) so any OTHER caller that needs to validate
+    a gateway id before saving it — today, projects_repository.
+    set_project_default_gateway — applies the identical rule instead of a
+    hand-copied (and inevitably drifting) duplicate.
+
+    Returns {"ok": True} when it resolves, else {"ok": False, "error": "..."}
+    with the exact same message fleet_configure_agent has always returned.
+    Deliberately does NOT include the CLI-installed/authenticated check
+    fleet_configure_agent layers on top for a chosen runtime — that check is
+    runtime-specific (claude_code / codex / ...), which a project-level
+    default has no concept of; only "is this a real box in this workspace"
+    is common ground between the two callers."""
+    _gateway_id = str(gateway_id or "").strip()
+    if not _gateway_id:
+        return {"ok": True}
+    from server_modules import gateway_state_repository
+
+    _registration = gateway_state_repository.get_gateway_registration(_gateway_id)
+    _registration_workspace_id = str((_registration or {}).get("workspace_id") or "").strip()
+    _resolves = (
+        isinstance(_registration, dict)
+        and bool(_registration)
+        and str(_registration.get("status") or "").strip().lower() == "active"
+        and str(_registration.get("device_trust_state") or "").strip().lower() != "revoked"
+        and (
+            not _registration_workspace_id
+            or _registration_workspace_id == (str(workspace_id or "").strip() or "default")
+        )
+    )
+    if not _resolves:
+        return {
+            "ok": False,
+            "error": (
+                f"gateway_binding '{_gateway_id}' does not resolve to a Gateway paired "
+                "to this workspace. Pair a Gateway first, then bind it here."
+            ),
+        }
+    return {"ok": True}
+
+
 async def fleet_configure_agent(
     *,
     actor_id: str,
@@ -1298,29 +1342,15 @@ async def fleet_configure_agent(
         # never dispatch (the turn-time error would otherwise only surface
         # much later, mid-conversation, instead of at save time).
         if mode == "cli_subscription" and isinstance(gateway_binding, str) and gateway_binding.strip():
-            from server_modules import gateway_state_repository, gateway_registry_service
+            from server_modules import gateway_registry_service
 
             _gateway_id = gateway_binding.strip()
+            _resolution = gateway_resolves_in_workspace(_gateway_id, workspace_id)
+            if not _resolution.get("ok"):
+                return _resolution
+            from server_modules import gateway_state_repository
+
             _registration = gateway_state_repository.get_gateway_registration(_gateway_id)
-            _registration_workspace_id = str((_registration or {}).get("workspace_id") or "").strip()
-            _resolves = (
-                isinstance(_registration, dict)
-                and bool(_registration)
-                and str(_registration.get("status") or "").strip().lower() == "active"
-                and str(_registration.get("device_trust_state") or "").strip().lower() != "revoked"
-                and (
-                    not _registration_workspace_id
-                    or _registration_workspace_id == (str(workspace_id or "").strip() or "default")
-                )
-            )
-            if not _resolves:
-                return {
-                    "ok": False,
-                    "error": (
-                        f"gateway_binding '{_gateway_id}' does not resolve to a Gateway paired "
-                        "to this workspace. Pair a Gateway first, then bind it here."
-                    ),
-                }
             # And the CLI itself must be installed AND authenticated on that
             # Gateway — save-time honesty, so users hear "sign it in first"
             # here instead of getting an opaque "Gateway dispatch could not

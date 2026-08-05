@@ -99,6 +99,15 @@ def _row_to_project(row: Any) -> Optional[Dict[str, Any]]:
         "tint": str(metadata.get("tint") or "").strip() or (
             DEFAULT_PROJECT_TINT if r.get("is_default") else identity["tint"]
         ),
+        # Phase U3-K: the project's default Gateway — the box agents in this
+        # project inherit for their brain hardware (cli_subscription/local
+        # gateway_binding) and tool dispatch (preferred_gateway_id) when they
+        # carry none of their own. See set_project_default_gateway below and
+        # specialist_runtime_context.resolve_specialist_runtime_context's
+        # fallback. A raw id only — routes_fleet.py resolves it to a
+        # human-readable label for the API response (repo layer stays free
+        # of the gateway-registry dependency).
+        "default_gateway_id": str(metadata.get("default_gateway_id") or "").strip() or None,
         "created_at": str(r.get("created_at") or "") or None,
         "updated_at": str(r.get("updated_at") or "") or None,
     }
@@ -384,6 +393,76 @@ async def set_project_archived(
         project_id,
         bool(archived),
         tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+    return _row_to_project(row)
+
+
+async def set_project_default_gateway(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+    gateway_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Set — or clear, when `gateway_id` is empty/None — this project's
+    default Gateway (metadata.default_gateway_id). Projects are already the
+    product's collaboration boundary (members live on the project, not a
+    Teams layer above it — see CLAUDE.md); this is the project-level
+    counterpart to the per-agent `model_config.gateway_binding` /
+    `preferred_gateway_id` fields in fleet_tools.fleet_configure_agent,
+    letting every agent in a project share its compute by default instead of
+    each one needing its own separate pairing. specialist_runtime_context.
+    resolve_specialist_runtime_context reads this as a fallback ONLY — an
+    agent's own explicit binding always wins when set.
+
+    Validates the id resolves to a real, active Gateway registered to this
+    workspace before saving, via fleet_tools.gateway_resolves_in_workspace —
+    the exact same rule and error shape fleet_configure_agent already applies
+    to the agent-level field, so a project default can never point at a
+    Gateway the agent-level check would have rejected. Raises ValueError on
+    an unresolvable id (caught by the route the same way every other
+    business-logic failure in this file is). An empty string / None clears
+    the default without any validation — clearing is always safe.
+
+    Merges into `metadata` via a single atomic jsonb_set/remove — same
+    merge-not-replace discipline as project_tasks_service.add_task_comment's
+    own jsonb_set — so other keys already living there (icon, tint, ...)
+    survive untouched rather than being clobbered by a read-modify-write
+    race with a concurrent metadata writer."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return None
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_project_id = str(project_id or "").strip()
+    clean_gateway_id = str(gateway_id or "").strip()
+
+    if clean_gateway_id:
+        from server_modules import fleet_tools
+
+        check = fleet_tools.gateway_resolves_in_workspace(clean_gateway_id, resolved_workspace_id)
+        if not check.get("ok"):
+            raise ValueError(str(check.get("error") or "Gateway does not resolve in this workspace."))
+
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
+        """
+        UPDATE projects
+        SET metadata = CASE
+                WHEN $4::text = '' THEN (COALESCE(metadata, '{}'::jsonb) - 'default_gateway_id')
+                ELSE jsonb_set(COALESCE(metadata, '{}'::jsonb), '{default_gateway_id}', to_jsonb($4::text), true)
+            END,
+            updated_at = NOW()
+        WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+        RETURNING id, tenant_id, workspace_id, name, slug, description,
+                  is_default, archived, metadata, created_at, updated_at
+        """,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_project_id,
+        clean_gateway_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
     )
     return _row_to_project(row)
 

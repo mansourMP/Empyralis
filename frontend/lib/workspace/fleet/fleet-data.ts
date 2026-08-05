@@ -64,6 +64,17 @@ export type FleetProject = {
   icon?: string;
   tint?: string;
   metadata?: Record<string, unknown>;
+  /** U3-K: the Gateway agents in this project inherit when they carry none
+   *  of their own — see specialist_runtime_context.
+   *  resolve_specialist_runtime_context's fallback and ProjectSettings.tsx's
+   *  "Default hardware" control. Null/absent when unset. */
+  default_gateway_id?: string | null;
+  /** Human-readable label for default_gateway_id (routes_fleet.py resolves
+   *  it server-side, same source GatewayBoxPicker's own gatewayLabel() uses)
+   *  — null when unset OR when the id no longer resolves to a live
+   *  registration (deleted box), so the frontend can tell "unset" apart
+   *  from "set but gone" if it ever needs to. */
+  default_gateway_label?: string | null;
   created_at?: string;
 };
 
@@ -319,6 +330,31 @@ export function useFleetProjects(workspaceId: string) {
   );
 
   return { projects, loading, error, refresh };
+}
+
+/** PATCH .../fleet/projects/{id} — rename, archive/unarchive, or set/clear
+ *  the project's default Gateway (routes_fleet.fleet_patch_project,
+ *  owner-only server-side). `default_gateway_id: ""` explicitly clears the
+ *  default; omitting the field leaves it untouched — same "undefined means
+ *  don't touch, empty string means clear" contract patchFleetTask's own
+ *  clear_due_at pairing established for a nullable field on this same kind
+ *  of PATCH. */
+export async function patchFleetProject(
+  workspaceId: string,
+  projectId: string,
+  patch: { name?: string; description?: string; archived?: boolean; default_gateway_id?: string }
+): Promise<FleetProject> {
+  const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    credentials: "include",
+    headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+    body: JSON.stringify(patch),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not update project (HTTP ${res.status})`));
+  }
+  return data.project as FleetProject;
 }
 
 export function useFleetAgentActivity(workspaceId: string, agentId: string | null) {
