@@ -299,6 +299,57 @@ def resolve_anthropic_compatible_base_url(provider: str) -> str:
     return _ANTHROPIC_COMPATIBLE_BASE_URLS.get(str(provider or "").strip().lower(), "")
 
 
+def resolve_ollama_anthropic_base_url(provider: str, credentials: Optional[Dict[str, Any]] = None) -> str:
+    """Ollama's Anthropic-Messages-compatible endpoint for THIS turn — a
+    sibling to resolve_anthropic_compatible_base_url for a provider that
+    cannot live in _ANTHROPIC_COMPATIBLE_BASE_URLS's fixed map. Ollama
+    (v0.14.0+) ships a native Anthropic-Messages-compatible surface too, but
+    unlike DeepSeek's one fixed public URL, Ollama is self-hosted per
+    workspace/credential: the host is whatever this turn's own resolved
+    Ollama credential actually configured (commonly localhost:11434, but
+    provider_profiles.py's "ollama" catalog entry's base_url default is only
+    ever a fallback the LEGACY engine's OpenAICompatibleAdapter._base_url
+    applies — never something this function invents). Returns "" (no
+    override) when this turn's credentials carry no real base_url, same
+    fail-safe contract as resolve_anthropic_compatible_base_url: a guessed
+    localhost could point at a wrong or nonexistent local service on
+    whatever machine happens to be running this backend process.
+
+    Deliberately gated on `provider == "ollama"` (not "ollama_cloud", which
+    is a hosted OpenAI-shaped endpoint with no native Anthropic surface and
+    stays adapter-routed — see openai_compat_adapter.ADAPTER_ROUTED_
+    PROVIDER_IDS): calling this for any other provider is a no-op so it is
+    safe to unconditionally `or` into resolve_sdk_process_env's base_url
+    chain without a separate provider check at every call site.
+
+    credentials["base_url"] is the OpenAI-shaped value every provider
+    profile in this codebase already uses (e.g. "http://localhost:11434/v1"
+    default, or a custom host/port a workspace profile configured) — the
+    exact same key OpenAICompatibleAdapter._base_url reads for the existing
+    (non-SDK) engine's real Ollama calls. Ollama's Anthropic-compatible
+    surface is served at the bare host, not under /v1 (confirmed against
+    Ollama's own setup docs: ANTHROPIC_BASE_URL with no path suffix), so
+    this strips any path/query/fragment down to scheme://host[:port] —
+    tolerating a trailing slash, an already-bare host, or a missing scheme
+    (defaulted to http, never guessed as https, matching Ollama's own local
+    default)."""
+    if str(provider or "").strip().lower() != "ollama":
+        return ""
+    creds = credentials if isinstance(credentials, dict) else {}
+    raw = str(creds.get("base_url") or "").strip()
+    if not raw:
+        return ""
+    scheme_sep = raw.find("://")
+    if scheme_sep == -1:
+        scheme, rest = "http", raw
+    else:
+        scheme, rest = raw[:scheme_sep], raw[scheme_sep + 3:]
+    host = rest.split("/", 1)[0].strip()
+    if not host:
+        return ""
+    return f"{scheme}://{host}"
+
+
 def resolve_sdk_process_env(
     *,
     credentials: Optional[Dict[str, Any]] = None,
@@ -385,17 +436,33 @@ def resolve_sdk_process_env(
     # reason.
     elif api_key:
         env["ANTHROPIC_AUTH_TOKEN"] = api_key
+    # Ollama specifically: provider_profiles.py's "ollama" entry has
+    # auth=["none"] (no real secret ever exists for it), so api_key above is
+    # always "" and this branch is the only thing that ever sets a token for
+    # it. Per Ollama's own setup docs, ANTHROPIC_AUTH_TOKEN is REQUIRED by
+    # the client but its VALUE is ignored server-side — any non-empty string
+    # satisfies it. Leaving it "" (today's generic no-api-key behavior) is
+    # not "no auth needed", it is a value Ollama's docs say the client must
+    # never send blank. "ollama" is a placeholder, never a real secret —
+    # safe to log, safe to leak, authenticates nothing.
+    elif str(provider or "").strip().lower() == "ollama":
+        env["ANTHROPIC_AUTH_TOKEN"] = "ollama"
     # An explicit per-turn override wins; otherwise the provider's own
-    # native Anthropic-compatible endpoint; otherwise — for a provider with
-    # no native endpoint — our own loopback adapter (openai_compat_adapter),
-    # which speaks the CLI's wire format and translates through to whatever
-    # OpenAI-shaped endpoint that provider actually has. creds["base_url"]
-    # is deliberately NOT a fallback here — that is the provider's
-    # OpenAI-shaped URL (see _ANTHROPIC_COMPATIBLE_BASE_URLS), which this
-    # client cannot speak directly.
+    # native Anthropic-compatible endpoint (DeepSeek's fixed map entry, or
+    # Ollama's per-turn-derived one — see resolve_ollama_anthropic_base_url,
+    # which is a no-op for every provider except "ollama"); otherwise — for
+    # a provider with no native endpoint — our own loopback adapter
+    # (openai_compat_adapter), which speaks the CLI's wire format and
+    # translates through to whatever OpenAI-shaped endpoint that provider
+    # actually has. creds["base_url"] is deliberately NOT a direct fallback
+    # here — for most providers that is the OpenAI-shaped URL (see
+    # _ANTHROPIC_COMPATIBLE_BASE_URLS), which this client cannot speak
+    # directly; resolve_ollama_anthropic_base_url is the one place that key
+    # is read, and only for "ollama", precisely because that provider's
+    # native surface is reachable at that same host once /v1 is stripped.
     base_url = str(
         anthropic_base_url or creds.get("anthropic_base_url") or ""
-    ).strip() or resolve_anthropic_compatible_base_url(provider) or openai_compat_adapter.resolve_adapter_routed_base_url(provider)
+    ).strip() or resolve_anthropic_compatible_base_url(provider) or resolve_ollama_anthropic_base_url(provider, creds) or openai_compat_adapter.resolve_adapter_routed_base_url(provider)
     if base_url:
         env["ANTHROPIC_BASE_URL"] = base_url
     if config_dir:

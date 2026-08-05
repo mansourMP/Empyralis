@@ -35,6 +35,7 @@ from claude_agent_sdk import types as sdk_types
 
 from server_modules import agent_trace_service
 from server_modules import claude_agent_sdk_bridge
+from server_modules import openai_compat_adapter
 from server_modules import sage_agent_runtime_service
 
 
@@ -157,6 +158,191 @@ class ResolveSdkProcessEnvTests(unittest.TestCase):
         env = claude_agent_sdk_bridge.resolve_sdk_process_env()
         self.assertNotIn("CLAUDE_CONFIG_DIR", env)
         self.assertNotIn("CLAUDE_SECURESTORAGE_CONFIG_DIR", env)
+
+    # -- Ollama: a native Anthropic-compatible endpoint, but self-hosted
+    # per-workspace rather than DeepSeek's one fixed public URL, so it is
+    # resolved from the turn's own credentials instead of a map entry (see
+    # resolve_ollama_anthropic_base_url) -- MAN-310 follow-up.
+
+    def test_ollama_base_url_is_derived_from_the_turns_own_credential_and_v1_stripped(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"base_url": "http://localhost:11434/v1"}, provider="ollama",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:11434")
+
+    def test_ollama_base_url_never_hardcoded_when_nothing_is_configured(self):
+        # No base_url anywhere in this turn's credentials (the shape
+        # secretless_provider_credentials("ollama", "none") actually
+        # produces for the common case) -- no override is emitted. Guessing
+        # localhost here would be worse than no override: it could point at
+        # a wrong or nonexistent local service on whatever machine the
+        # backend process happens to run on.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"auth_mode": "none"}, provider="ollama",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
+
+    def test_ollama_auth_token_placeholder_is_non_empty_even_with_no_api_key(self):
+        # provider_profiles.py's "ollama" entry has auth=["none"] -- no real
+        # secret ever exists for it -- but Ollama's own setup docs require a
+        # non-empty ANTHROPIC_AUTH_TOKEN (the value itself is ignored
+        # server-side). Today's generic no-api-key behavior alone would
+        # leave this blank; the explicit Ollama branch must fix that.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"auth_mode": "none"}, provider="ollama",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "ollama")
+
+    def test_ollama_auth_token_placeholder_still_applies_with_no_configured_base_url(self):
+        # The auth-token fix and the base-url fix are independent: even when
+        # there is nothing to override ANTHROPIC_BASE_URL with, the token
+        # must still never be blank for this provider.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials=None, provider="ollama",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "ollama")
+
+    def test_ollama_real_api_key_still_beats_the_placeholder(self):
+        # An unlikely but possible shape (a credential that does carry a
+        # real key) must still win over the "ollama" placeholder -- the
+        # placeholder only exists to fill a gap, never to override a real
+        # credential.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "sk-real"}, provider="ollama",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-real")
+
+    def test_ollama_explicit_override_still_beats_the_derived_credential(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"base_url": "http://localhost:11434/v1"}, provider="ollama",
+            anthropic_base_url="https://gateway.internal/anthropic",
+        )
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "https://gateway.internal/anthropic")
+
+    def test_ollama_never_falls_through_to_the_openai_compat_adapter(self):
+        # "ollama" has a native endpoint -- it must never be minted an
+        # opaque adapter token or routed at the loopback adapter's address,
+        # the way openai/gemini/xai are (see
+        # test_adapter_routed_providers_get_the_loopback_adapters_own_base_url
+        # above).
+        with patch.object(
+            openai_compat_adapter, "mint_turn_token_for_provider",
+        ) as mock_mint:
+            env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+                credentials={"base_url": "http://localhost:11434/v1"}, provider="ollama",
+            )
+        mock_mint.assert_not_called()
+        self.assertFalse(env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"))
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://localhost:11434")
+
+    def test_ollama_cloud_is_a_distinct_provider_and_is_unaffected(self):
+        # "ollama_cloud" (the hosted/BYOK offering) is a different provider
+        # id from local "ollama" and has no native Anthropic surface -- it
+        # must still go through the loopback adapter, never this resolver.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "k", "base_url": "http://localhost:11434/v1"},
+            provider="ollama_cloud",
+        )
+        self.assertTrue(env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"))
+
+
+class ResolveOllamaAnthropicBaseUrlTests(unittest.TestCase):
+    """Direct unit tests of the resolver itself, independent of the wiring
+    inside resolve_sdk_process_env -- a realistic range of shapes a
+    workspace's configured Ollama base_url could actually take."""
+
+    def test_localhost_default_with_v1_suffix_is_stripped_to_bare_host(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                "ollama", {"base_url": "http://localhost:11434/v1"},
+            ),
+            "http://localhost:11434",
+        )
+
+    def test_custom_port_is_preserved(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                "ollama", {"base_url": "http://localhost:8080/v1"},
+            ),
+            "http://localhost:8080",
+        )
+
+    def test_remote_host_is_preserved(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                "ollama", {"base_url": "http://192.168.1.50:11434/v1"},
+            ),
+            "http://192.168.1.50:11434",
+        )
+
+    def test_remote_domain_name_over_https_is_preserved(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                "ollama", {"base_url": "https://ollama.internal.example.com:11434/v1"},
+            ),
+            "https://ollama.internal.example.com:11434",
+        )
+
+    def test_value_with_no_v1_suffix_is_left_as_is(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                "ollama", {"base_url": "http://localhost:11434"},
+            ),
+            "http://localhost:11434",
+        )
+
+    def test_trailing_slash_with_no_path_is_stripped(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                "ollama", {"base_url": "http://localhost:11434/"},
+            ),
+            "http://localhost:11434",
+        )
+
+    def test_trailing_slash_after_v1_is_stripped(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                "ollama", {"base_url": "http://localhost:11434/v1/"},
+            ),
+            "http://localhost:11434",
+        )
+
+    def test_no_base_url_configured_returns_no_override(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url("ollama", {"auth_mode": "none"}),
+            "",
+        )
+
+    def test_none_credentials_returns_no_override(self):
+        self.assertEqual(claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url("ollama", None), "")
+
+    def test_blank_base_url_string_returns_no_override(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url("ollama", {"base_url": "   "}),
+            "",
+        )
+
+    def test_non_ollama_provider_is_always_a_no_op_even_with_a_base_url_present(self):
+        # A profile-configured base_url on some OTHER provider's credentials
+        # must never leak through this resolver -- it is gated on provider,
+        # not just on the shape of the credentials dict.
+        for provider in ("", "deepseek", "anthropic", "ollama_cloud", "openai"):
+            self.assertEqual(
+                claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                    provider, {"base_url": "http://localhost:11434/v1"},
+                ),
+                "",
+                f"provider={provider!r} should be a no-op",
+            )
+
+    def test_provider_id_is_case_and_whitespace_insensitive(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_ollama_anthropic_base_url(
+                " Ollama ", {"base_url": "http://localhost:11434/v1"},
+            ),
+            "http://localhost:11434",
+        )
 
 
 class ResolveSdkProcessEnvAmbientLeakTests(unittest.TestCase):
