@@ -702,14 +702,19 @@ PROVIDER_CATALOG = {
         # "model": "deepseek-v4-flash", so a platform-credit customer was
         # silently getting v4-flash under a stale label, not a distinct
         # "deepseek-chat" model. Defaulting to the real current name
-        # instead of an alias. v4-pro verified live against the real
+        # instead of an alias — flash, not pro: founder's call (2026-08-05)
+        # is that DeepSeek is the cheap/simple-task tier by design, not
+        # where complex build work runs (that's the Claude Agent SDK
+        # engine's own frontier models), so the default should match that
+        # cost profile. v4-pro stays selectable (see "models" below) for
+        # whoever explicitly wants the more expensive, higher-reasoning
+        # variant — it's verified working live against the real
         # Anthropic-compatible endpoint this bridge actually uses (thinking
-        # block + final text + clean end_turn) — no behavior change needed
-        # elsewhere, it speaks the same wire shape as every other model
-        # here.
-        "default_model": "deepseek-v4-pro",
+        # block + final text + clean end_turn), same wire shape as every
+        # other model here, no code change needed to support choosing it.
+        "default_model": "deepseek-v4-flash",
         "base_url": "https://api.deepseek.com/v1",
-        "models": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
         "provider_scopes": ["sage_personal", "workspace_api", "studio_safe"],
         "note": "Direct DeepSeek API key using the OpenAI-compatible endpoint.",
     },
