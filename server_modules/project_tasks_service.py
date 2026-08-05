@@ -227,10 +227,36 @@ _TASK_COLUMNS = (
 # redundant by construction and kept anyway: this repo has a live history of
 # cross-tenant leaks, and a scoping clause that is impossible to get wrong
 # costs one index column and removes the question entirely.
+#
+# MAN-294: `pending_wake_due_at`/`pending_wake_delay_reason` are the third
+# rollup, added alongside subtask/labels rather than as a separate per-task
+# read for the same reason those two are here -- a board of 200 cards must
+# stay one round trip. This is the fix for the confirmed production bug
+# where assign_task flips `status` to 'in_progress' the instant a task is
+# assigned, but the scheduler wake behind that assignment can still be
+# sitting deferred (battery/network -- no longer quiet hours; see
+# bounded_scheduler_service.schedule_task_assigned_wakeup's skip_quiet_hours)
+# with no way for a reader of this row to tell. Sourced from the most
+# recent NON-TERMINAL wake request for this task_id whose trigger_kind is
+# one a human actually caused (task_assigned/task_commented) -- self_
+# proposed/event_trigger are ambient, workspace-wide triggers unrelated to
+# what a reader of THIS task believes is happening to it. The trigger_kind/
+# status lists below are a literal copy of bounded_scheduler_service.
+# NON_TERMINAL_WAKE_STATUSES and the two human-triggered kinds, not an
+# import (project_tasks_service already avoids a module-level import of
+# that service to sidestep a load-time cycle -- see assign_task's own
+# deferred `from server_modules import bounded_scheduler_service`) -- keep
+# these four copies (one JOIN below, two RETURNING subqueries further down)
+# in sync by hand if that set ever changes. due_at/metadata->>'...' are
+# read directly off agent_scheduler_wake_requests rather than through
+# control_plane_repository, same as every other rollup value here -- this
+# is one query, not a second repository round trip.
 _TASK_ROLLUP_COLUMNS = (
     "COALESCE(rollup.subtask_count, 0) AS subtask_count, "
     "COALESCE(rollup.subtask_done_count, 0) AS subtask_done_count, "
-    "COALESCE(lbl.labels, '[]'::jsonb) AS labels"
+    "COALESCE(lbl.labels, '[]'::jsonb) AS labels, "
+    "wake.wake_due_at AS pending_wake_due_at, "
+    "wake.delay_reason AS pending_wake_delay_reason"
 )
 
 _TASK_ROLLUP_JOINS = """
@@ -256,12 +282,30 @@ _TASK_ROLLUP_JOINS = """
               AND tl.tenant_id = project_tasks.tenant_id
               AND tl.workspace_id = project_tasks.workspace_id
         ) lbl ON TRUE
+        LEFT JOIN LATERAL (
+            -- MAN-294: w.due_at is aliased to wake_due_at (not left as
+            -- `due_at`) because project_tasks.due_at (the task's own due
+            -- date, unrelated) is already bare `due_at` in _TASK_COLUMNS --
+            -- leaving both named `due_at` makes every plain `due_at`
+            -- reference in this query ambiguous (caught by running this
+            -- exact SQL through EXPLAIN against a real schema, not by
+            -- inspection).
+            SELECT w.due_at AS wake_due_at, w.metadata->>'policy_delay_reason' AS delay_reason
+            FROM agent_scheduler_wake_requests w
+            WHERE w.metadata->>'task_id' = project_tasks.id
+              AND w.tenant_id = project_tasks.tenant_id
+              AND w.workspace_id = project_tasks.workspace_id
+              AND w.trigger_kind IN ('task_assigned', 'task_commented')
+              AND w.status IN ('pending', 'claimed', 'retry_scheduled')
+            ORDER BY w.created_at DESC
+            LIMIT 1
+        ) wake ON TRUE
 """
 
-# The same three rollup values for an INSERT/UPDATE ... RETURNING, where a
-# LATERAL join is not available. Scalar subqueries instead -- same indexes,
-# same single round trip, so a write hands back a fully-formed task rather
-# than one the caller has to re-read to render.
+# The same rollup values for an INSERT/UPDATE ... RETURNING, where a LATERAL
+# join is not available. Scalar subqueries instead -- same indexes, same
+# single round trip, so a write hands back a fully-formed task rather than
+# one the caller has to re-read to render.
 _TASK_ROLLUP_RETURNING = """
                   (SELECT COUNT(*) FROM project_tasks child
                     WHERE child.parent_task_id = project_tasks.id
@@ -283,7 +327,25 @@ _TASK_ROLLUP_RETURNING = """
                      JOIN workspace_labels l ON l.id = tl.label_id
                     WHERE tl.task_id = project_tasks.id
                       AND tl.tenant_id = project_tasks.tenant_id
-                      AND tl.workspace_id = project_tasks.workspace_id) AS labels
+                      AND tl.workspace_id = project_tasks.workspace_id) AS labels,
+                  (SELECT w.due_at
+                     FROM agent_scheduler_wake_requests w
+                    WHERE w.metadata->>'task_id' = project_tasks.id
+                      AND w.tenant_id = project_tasks.tenant_id
+                      AND w.workspace_id = project_tasks.workspace_id
+                      AND w.trigger_kind IN ('task_assigned', 'task_commented')
+                      AND w.status IN ('pending', 'claimed', 'retry_scheduled')
+                    ORDER BY w.created_at DESC
+                    LIMIT 1) AS pending_wake_due_at,
+                  (SELECT w.metadata->>'policy_delay_reason'
+                     FROM agent_scheduler_wake_requests w
+                    WHERE w.metadata->>'task_id' = project_tasks.id
+                      AND w.tenant_id = project_tasks.tenant_id
+                      AND w.workspace_id = project_tasks.workspace_id
+                      AND w.trigger_kind IN ('task_assigned', 'task_commented')
+                      AND w.status IN ('pending', 'claimed', 'retry_scheduled')
+                    ORDER BY w.created_at DESC
+                    LIMIT 1) AS pending_wake_delay_reason
 """
 
 # The full RETURNING tail, assembled once. Appended by plain concatenation
@@ -529,6 +591,21 @@ def _row_to_task(row: Any) -> Optional[Dict[str, Any]]:
         "completed_by_agent_id": str(r.get("completed_by_agent_id") or "").strip() or None,
         "completed_at": str(r.get("completed_at") or "") or None,
         "due_at": str(due_at) if due_at else None,
+        # MAN-294: the most recent still-pending task_assigned/task_commented
+        # wake request for this task, if one exists (see _TASK_ROLLUP_JOINS/
+        # _TASK_ROLLUP_RETURNING above -- computed in the same query as
+        # everything else on this row, never a follow-up read). A task can
+        # read `status: "in_progress"` here while ALSO carrying a future
+        # pending_wake_due_at -- that combination is exactly "the assignee
+        # has not actually started yet", which is the dishonest-status bug
+        # this exists to let a caller correct. None/None on a database
+        # predating this change's deploy, or whenever no non-terminal
+        # human-triggered wake exists for this task (the common case, once
+        # an agent has actually claimed and executed its wake) -- same
+        # deploy-before-migrate, no-key-means-absent posture every sibling
+        # rollup field on this row already takes.
+        "pending_wake_due_at": str(r.get("pending_wake_due_at")) if r.get("pending_wake_due_at") else None,
+        "pending_wake_delay_reason": str(r.get("pending_wake_delay_reason") or "").strip() or None,
         "plan": _coerce_plan(r.get("plan")),
         "metadata": _coerce_metadata(r.get("metadata")),
         "created_at": str(r.get("created_at") or "") or None,

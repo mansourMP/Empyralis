@@ -50,6 +50,7 @@ from server_modules import agent_trace_service
 from server_modules import direct_chat_generation_service
 from server_modules import empyralis_model_tier_contract
 from server_modules import empyralis_model_tier_routing_service
+from server_modules import generation_event_sink
 from server_modules import direct_chat_provider_service
 from server_modules import direct_chat_prompt_service
 from server_modules import direct_chat_response_service
@@ -1127,7 +1128,7 @@ def build_direct_operator_reply(
         assistant_plan_tools=tools,
         tool_registry=tool_registry,
     )
-    yield from direct_chat_generation_service.wrap_generation_with_sink(_direct_gen)
+    yield from generation_event_sink.wrap_generation_with_sink(_direct_gen)
 
 
 def collect_direct_operator_reply(

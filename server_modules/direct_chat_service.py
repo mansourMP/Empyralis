@@ -377,7 +377,7 @@ async def execute_direct_chat_turn_request(
         import queue as _queue
         import threading as _threading
 
-        from server_modules.direct_chat_generation_service import (
+        from server_modules.generation_event_sink import (
             _GENERATION_EVENT_SINK,
         )
 
@@ -488,11 +488,23 @@ async def execute_direct_chat_turn_request(
                 'tool_calls': list(getattr(sage_result, 'tool_calls', None) or []),
                 'provider': getattr(sage_result, 'provider', '') or '',
                 'model': getattr(sage_result, 'model', None),
+                # claude_agent_sdk-engine turns only — see SageTurnResult
+                # .context_usage's own docstring (sage_agent_runtime_contract.py).
+                'context_usage': getattr(sage_result, 'context_usage', None),
             }
 
         # Convert sage result to a single final SSE event.
         reply_text = str((sage_result or {}).get('message') or '').strip()
         error_text = str((sage_result or {}).get('error') or '').strip()
+        # claude_agent_sdk-engine turns only — see handle_sage_chat's own
+        # "context_usage" key (sage_agent_runtime_service.py) for where this
+        # rides in from: run_claude_agent_sdk_turn's best-effort
+        # get_context_usage() attach. None for every other engine/mode,
+        # which never populate the key on their sage_result dict — additive
+        # only, never fabricated.
+        context_usage = (sage_result or {}).get('context_usage')
+        if not isinstance(context_usage, dict):
+            context_usage = None
 
         # Never surface the internal [SILENT] sentinel as user-visible text.
         if reply_text == '[SILENT]' or reply_text.startswith('[SILENT]'):
@@ -510,6 +522,7 @@ async def execute_direct_chat_turn_request(
                     "actions": [],
                     "mode": "error",
                     "error": error_text,
+                    **({"context_usage": context_usage} if context_usage else {}),
                 },
             }
         else:
@@ -520,6 +533,7 @@ async def execute_direct_chat_turn_request(
                     "actions": [],
                     "mode": "answer",
                     "error": "",
+                    **({"context_usage": context_usage} if context_usage else {}),
                 },
             }
 

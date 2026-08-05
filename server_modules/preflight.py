@@ -6,13 +6,16 @@ process never boots half-alive.
 
 Checks
 ------
-1. **Rust runtime kernel** — binary must exist (built or env-var path).
-2. **PostgreSQL** — DATABASE_URL must be set, pool must be reachable,
+1. **Local-stack DATABASE_URL** — a dev/test/local boot must have
+   DATABASE_URL set explicitly; it is never allowed to boot on "whatever
+   the environment happened to contain" (MAN-202/MAN-268).
+2. **Rust runtime kernel** — binary must exist (built or env-var path).
+3. **PostgreSQL** — DATABASE_URL must be set, pool must be reachable,
    and ``workspace_agent_installs`` must have the stage_4b columns.
-3. **Row-Level Security** — every tenant-scoped table (parsed from
+4. **Row-Level Security** — every tenant-scoped table (parsed from
    ``migrations/enable_rls.sql``) must have RLS enabled + FORCEd + a policy,
    or boot fails. Prevents serving traffic with tenant isolation silently off.
-4. **Redis** — REDIS_URL (default ``redis://localhost:6379``) must PONG.
+5. **Redis** — REDIS_URL (default ``redis://localhost:6379``) must PONG.
 """
 
 from __future__ import annotations
@@ -61,6 +64,93 @@ def _redacted_dsn(dsn: str) -> str:
         user, _ = userinfo.split(":", 1)
         return f"{prefix}://{user}:***@{hostport}"
     return f"{prefix}://{userinfo}@{hostport}"
+
+
+# ── local-stack DATABASE_URL (MAN-202 / MAN-268) ────────────────────────
+#
+# server_modules/runtime_config.py used to call a bare load_dotenv(), which
+# lets python-dotenv search UP the directory tree from the process cwd for
+# the nearest ".env". A subagent working inside a git worktree nested under
+# the real checkout (.claude/worktrees/<name>/) has no .env of its own, so
+# that search walked straight past the worktree into the *real* repo root's
+# .env and silently handed a "throwaway" local stack production-adjacent
+# credentials — DATABASE_URL included — while the agent believed it was
+# running in isolation. That is very likely what let an agent wipe the
+# founder's local database, and it was hit again for real running the test
+# suite (MAN-268). The dotenv load itself is now scoped to an explicit path
+# (no more upward search), but that alone only closes the ONE way
+# DATABASE_URL could arrive unexamined. This check makes the precondition
+# itself loud: a dev/test/local boot must have DATABASE_URL set on purpose
+# — from an explicit shell export, or from this exact checkout's own
+# repo-root .env — never merely "whatever the environment happened to
+# contain."
+#
+# Skipped once durable_runtime_required() is true (beta/staging/production):
+# that path already has its own DATABASE_URL requirement via
+# _check_postgres() below, so this would just be a redundant error.
+
+_LOCAL_STACK_ENV_TOKENS = {"dev", "development", "local", "test", "testing"}
+
+
+def _resolved_environment_for_local_stack_check() -> str:
+    return str(
+        os.getenv("EMPYRALIS_DEPLOY_ENV") or os.getenv("ORION_ENV") or os.getenv("ENV") or os.getenv("NODE_ENV") or ""
+    ).strip().lower()
+
+
+def _local_stack_database_url_check_skipped() -> bool:
+    """Deliberate, loud escape hatch (mirrors the Redis/RLS skips).
+
+    Set EMPYRALIS_ALLOW_IMPLICIT_LOCAL_DATABASE_URL=true only when an
+    operator has knowingly chosen to run this dev/test/local boot on the
+    SQLite fallback with no Postgres configured at all. Bypassing is logged
+    at warning level on every boot so it is never a silent choice.
+    """
+    return os.getenv("EMPYRALIS_ALLOW_IMPLICIT_LOCAL_DATABASE_URL", "").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+def _check_local_stack_database_url() -> Optional[str]:
+    """Return ``None`` if DATABASE_URL is explicit, this isn't a dev/test/
+    local boot, or durable Postgres is already required elsewhere.
+
+    Refuses to boot a dev/test/local process with DATABASE_URL unset. See
+    the module-level comment above for why: this is the exact precondition
+    that let python-dotenv's directory-walking search silently resolve a
+    worktree's cwd up to the real repo root's .env.
+    """
+    from server_modules.db import durable_runtime_required as _durable_required  # noqa: PLC0415
+
+    if _durable_required():
+        return None  # beta/staging/production already require DATABASE_URL via _check_postgres()
+
+    if _resolved_environment_for_local_stack_check() not in _LOCAL_STACK_ENV_TOKENS:
+        return None  # not a recognized local/dev/test boot — leave as-is
+
+    if os.getenv("DATABASE_URL", "").strip():
+        return None
+
+    if _local_stack_database_url_check_skipped():
+        LOGGER.warning(
+            "preflight: local-stack DATABASE_URL requirement BYPASSED "
+            "(EMPYRALIS_ALLOW_IMPLICIT_LOCAL_DATABASE_URL set) — this process will run "
+            "on the SQLite fallback with no Postgres configured."
+        )
+        return None
+
+    return (
+        "DATABASE_URL is not set for this dev/test/local boot. Refusing to start rather "
+        "than silently inherit whatever the environment happens to contain — this is the "
+        "exact precondition behind MAN-202/MAN-268, where an unscoped dotenv load let a "
+        "git worktree's cwd walk up to the real repo root's .env and hand a 'throwaway' "
+        "local stack production-adjacent credentials.\n"
+        "  Set DATABASE_URL explicitly to a database you know is disposable, e.g.:\n"
+        "    export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/empyralis_test\n"
+        "  Or set EMPYRALIS_ALLOW_IMPLICIT_LOCAL_DATABASE_URL=true to run on the SQLite "
+        "fallback with no Postgres at all (rarely what you want for the seeded-data UI "
+        "testing workflow described in CLAUDE.md)."
+    )
 
 
 # ── kernel ───────────────────────────────────────────────────────────
@@ -450,29 +540,36 @@ async def run_preflight_checks() -> List[str]:
     """
     errors: List[str] = []
 
-    # 1. Kernel
+    # 1. Local-stack DATABASE_URL must be explicit (MAN-202 / MAN-268) —
+    #    checked first since it's a precondition for the Postgres check below,
+    #    not a reachability problem.
+    local_stack_db_err = _check_local_stack_database_url()
+    if local_stack_db_err:
+        errors.append(local_stack_db_err)
+
+    # 2. Kernel
     kernel_err = _check_kernel()
     if kernel_err:
         errors.append(kernel_err)
 
-    # 2. PostgreSQL
+    # 3. PostgreSQL
     pg_err = await _check_postgres()
     if pg_err:
         errors.append(pg_err)
 
-    # 3. Row-Level Security (tenant isolation) — only meaningful once Postgres
+    # 4. Row-Level Security (tenant isolation) — only meaningful once Postgres
     #    is reachable, so skip if the Postgres check already failed.
     if not pg_err:
         rls_err = await _check_rls()
         if rls_err:
             errors.append(rls_err)
 
-    # 4. Redis
+    # 5. Redis
     redis_err = await _check_redis()
     if redis_err:
         errors.append(redis_err)
 
-    # 5. Platform-credit provider keys (e.g. DeepSeek) — advisory only.
+    # 6. Platform-credit provider keys (e.g. DeepSeek) — advisory only.
     #    Never appended to errors: a dead upstream balance degrades one
     #    feature (agents on platform credits), not the whole platform.
     await _check_platform_credit_keys()

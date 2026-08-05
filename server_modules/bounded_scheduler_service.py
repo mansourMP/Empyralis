@@ -3,15 +3,47 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from server_modules import agent_registry_repository, authority_mandate_service, control_plane_repository, entitlements_service, rust_runtime_kernel_client, workspace_context
 from server_modules.config_loader import config_bool, config_int
 
 
+LOGGER = logging.getLogger(__name__)
+
 DEFAULT_QUIET_HOURS_START = 23
 DEFAULT_QUIET_HOURS_END = 7
+# MAN-294: quiet hours are a WALL-CLOCK concept ("don't wake me between
+# 11pm and 7am MY time") and have no honest meaning without knowing whose
+# wall clock. Before this fix, _is_within_quiet_hours/_next_allowed_wakeup_
+# time called bare datetime.astimezone() -- which converts to the SERVER
+# process's OS timezone, not any customer's. That silently worked in dev
+# (whatever a laptop's local zone happened to be) and silently "worked" in
+# prod too, in the sense that it always returned an answer -- just the
+# WRONG one for every workspace not physically colocated with the VPS.
+# Production runs Etc/UTC, so every workspace's quiet hours were silently
+# evaluated as if the workspace were in UTC, regardless of where its owner
+# actually is; a UTC+8 owner got their entire morning silenced.
+#
+# Neither workspaces nor users store a timezone anywhere in this codebase
+# today (checked: workspace metadata, workspace settings routes, user
+# profile, control_plane_repository -- nothing). Per the ruling on this
+# ticket, the fix is NOT to keep guessing via the server's own clock (that
+# "looks correct" only by accident of where the VPS happens to run) and NOT
+# to invent a guess (geo-IP, Accept-Language, etc.) -- it is to make the
+# default an honest, explicit, documented constant that every workspace
+# gets until it configures a real one via SchedulerPolicyBounds.timezone_name
+# (resolve_scheduler_policy, below -- workspace/install metadata's
+# `scheduler.timezone`, mirroring how `scheduler.quiet_hours` is already
+# threaded through). UTC is the safest such default: it is nobody's silent
+# guess, it is what an unconfigured workspace already defaults to for every
+# other timestamp in this product, and it fails toward "quiet hours land at
+# a boundary most users will notice and can correct" rather than toward the
+# server operator's own timezone leaking into every tenant's evaluation.
+DEFAULT_SCHEDULER_TIMEZONE = "UTC"
 DEFAULT_MAX_EVENT_TRIGGERS_PER_HOUR = 4
 DEFAULT_MAX_SELF_PROPOSED_PER_HOUR = 2
 # STEP 6 (agent-identity plan) / numeric backstops on multi-agent chains:
@@ -76,6 +108,12 @@ class SchedulerPolicyBounds:
     require_network_online: bool
     require_owner_approval_for_privileged_wakeups: bool
     plan_tier: str
+    # MAN-294: the wall-clock quiet_hours_start/end above are meaningless
+    # without this. Defaulted (not required) so every existing construction
+    # site -- tests included -- keeps compiling; resolve_scheduler_policy is
+    # the one path that should ever leave this at the default on purpose,
+    # and only because nothing more specific is configured anywhere yet.
+    timezone_name: str = DEFAULT_SCHEDULER_TIMEZONE
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -148,6 +186,24 @@ def _coerce_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         resolved = default
     return max(minimum, min(maximum, resolved))
+
+
+def _coerce_timezone_name(value: Any, default: str) -> str:
+    """Validate an IANA zone name against the system tzdata, same posture as
+    runs_core.py's own ZoneInfo(timezone_name) try/except -- reject rather
+    than silently coerce, and fall back to the passed-in `default` (always
+    DEFAULT_SCHEDULER_TIMEZONE at every call site today) rather than the
+    server's own zone. A misconfigured/garbled value in workspace or install
+    metadata must not quietly become "whatever this process happens to run
+    on", which is the exact bug this whole fix removes."""
+    token = str(value or "").strip()
+    if not token:
+        return default
+    try:
+        ZoneInfo(token)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return default
+    return token
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -308,6 +364,19 @@ def resolve_scheduler_policy(
         minimum=0,
         maximum=23,
     )
+    # MAN-294: threaded through exactly like quiet_hours above -- install
+    # metadata wins over workspace metadata, both read from the same
+    # `scheduler`/`scheduler_policy`/`plan_limits` metadata keys
+    # _workspace_scheduler_metadata/_install_scheduler_metadata already
+    # merge. No workspace or install has ever set this key (nothing in this
+    # codebase writes `scheduler.timezone` yet), so today every policy
+    # resolves to DEFAULT_SCHEDULER_TIMEZONE -- but the field exists and is
+    # read now, so the day a workspace-settings surface starts writing it,
+    # quiet hours start respecting it with no further change here.
+    timezone_name = _coerce_timezone_name(
+        install_meta.get("timezone") or workspace_meta.get("timezone"),
+        DEFAULT_SCHEDULER_TIMEZONE,
+    )
     return SchedulerPolicyBounds(
         quiet_hours_start=quiet_start,
         quiet_hours_end=quiet_end,
@@ -353,11 +422,30 @@ def resolve_scheduler_policy(
             True,
         ),
         plan_tier=plan_tier,
+        timezone_name=timezone_name,
     )
 
 
+def _scheduler_zone(policy: SchedulerPolicyBounds) -> ZoneInfo:
+    """Resolve policy.timezone_name to a real tzdata zone. policy.timezone_
+    name is already validated by _coerce_timezone_name at construction time
+    (resolve_scheduler_policy), so this only needs a defensive fallback for
+    a SchedulerPolicyBounds built by hand (tests, or a future caller) with a
+    bad string -- same DEFAULT_SCHEDULER_TIMEZONE fallback, never the
+    server's own zone."""
+    try:
+        return ZoneInfo(policy.timezone_name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return ZoneInfo(DEFAULT_SCHEDULER_TIMEZONE)
+
+
 def _is_within_quiet_hours(now_utc: datetime, policy: SchedulerPolicyBounds) -> bool:
-    hour = now_utc.astimezone().hour
+    # MAN-294: was bare now_utc.astimezone(), which converts to the SERVER
+    # PROCESS's OS timezone -- see the DEFAULT_SCHEDULER_TIMEZONE comment
+    # above for why that is wrong for every workspace not colocated with
+    # the VPS. Now explicit: the workspace/install-configured zone, or the
+    # documented UTC default when none is configured.
+    hour = now_utc.astimezone(_scheduler_zone(policy)).hour
     start = int(policy.quiet_hours_start)
     end = int(policy.quiet_hours_end)
     if start == end:
@@ -368,7 +456,8 @@ def _is_within_quiet_hours(now_utc: datetime, policy: SchedulerPolicyBounds) -> 
 
 
 def _next_allowed_wakeup_time(now_utc: datetime, policy: SchedulerPolicyBounds) -> datetime:
-    local_now = now_utc.astimezone()
+    zone = _scheduler_zone(policy)
+    local_now = now_utc.astimezone(zone)
     if not _is_within_quiet_hours(now_utc, policy):
         return now_utc
     end = int(policy.quiet_hours_end)
@@ -389,7 +478,12 @@ def quiet_hours_status_snapshot(
     return {
         "active": active,
         "label": (
-            f"Quiet hours active until {next_allowed_at.astimezone().strftime('%H:%M')}"
+            # MAN-294: was bare next_allowed_at.astimezone() -- same server-
+            # timezone leak as _is_within_quiet_hours/_next_allowed_wakeup_
+            # time, just in the human-readable label rather than the gate
+            # itself. The owner reading "until 07:00" only trusts that
+            # number if it is THEIR 07:00, not the VPS's.
+            f"Quiet hours active until {next_allowed_at.astimezone(_scheduler_zone(policy)).strftime('%H:%M')}"
             if active
             else "Background work can run now"
         ),
@@ -474,10 +568,22 @@ def _apply_policy_to_due_at(
     due_at: datetime,
     policy: SchedulerPolicyBounds,
     device_state: Dict[str, Any],
+    skip_quiet_hours: bool = False,
 ) -> tuple[datetime, Optional[str]]:
+    """MAN-294: `skip_quiet_hours` exists for exactly two callers --
+    schedule_task_assigned_wakeup and schedule_task_commented_wakeup -- and
+    for one reason: quiet hours exist to stop an AMBIENT trigger (a context-
+    engine event, a self-proposed idea) from waking a sleeping device at an
+    hour nobody asked for. A human clicking "Assign" or posting a comment in
+    a browser is demonstrably awake and took an explicit action right now;
+    silently deferring that up to 8 hours is not a quiet-hours protection,
+    it is the assignment/comment quietly not happening, which is the whole
+    bug this fix closes. Battery and network stay gated regardless -- those
+    describe the TARGET DEVICE's ability to do work at all, which an
+    assigning human's own wakefulness has no bearing on."""
     adjusted_due_at = due_at
     reason: Optional[str] = None
-    if _is_within_quiet_hours(adjusted_due_at, policy):
+    if not skip_quiet_hours and _is_within_quiet_hours(adjusted_due_at, policy):
         adjusted_due_at = _next_allowed_wakeup_time(adjusted_due_at, policy)
         reason = "quiet_hours"
     battery_percent = device_state.get("battery_percent")
@@ -693,14 +799,20 @@ async def schedule_task_assigned_wakeup(
     that's the seam direct_chat_generation_service reads at turn start/end
     to seed and persist update_plan's current_plan per-task (Section 4.4).
 
-    Near-immediate, not instant: still runs through the same quiet-hours/
-    battery/network device-state gate every other trigger kind respects
-    (_apply_policy_to_due_at) -- an assignment made at 3am does not wake a
-    quiet-hours-respecting device early just because a human clicked
-    "assign". No approval gate here (unlike propose_self_wakeup's privileged-
-    runtime branch): assigning a task is itself the explicit human action,
-    matching the hard constraint that this feature adds no approval system
-    beyond what the scheduler already has natively."""
+    MAN-294: quiet hours are SKIPPED here (_apply_policy_to_due_at's
+    skip_quiet_hours=True) -- battery and network are still respected. This
+    used to run through the full gate including quiet hours, which meant an
+    assignment made at 3am silently sat until quiet hours ended (up to 8h
+    later) with the UI still saying "In progress" the whole time -- the
+    confirmed production bug this fixed. Quiet hours protect a sleeping
+    DEVICE from an ambient trigger it never asked for; a human clicking
+    "assign" in a browser is, by construction, awake right now, and their
+    explicit action must not be silently deferred by a policy meant for
+    something else. No approval gate here either (unlike propose_self_
+    wakeup's privileged-runtime branch): assigning a task is itself the
+    explicit human action, matching the hard constraint that this feature
+    adds no approval system beyond what the scheduler already has
+    natively."""
     resolved_agent_id = str(agent_id or "").strip()
     resolved_task_id = str(task_id or "").strip()
     resolved_title = str(title or "").strip()
@@ -737,6 +849,9 @@ async def schedule_task_assigned_wakeup(
         due_at=_utc_now(),
         policy=policy,
         device_state=_device_state({}, workspace, master_install),
+        # MAN-294: an explicit human action (clicking "assign") is not an
+        # ambient trigger -- see _apply_policy_to_due_at's own docstring.
+        skip_quiet_hours=True,
     )
     metadata: Dict[str, Any] = {"agent_id": resolved_agent_id, "task_id": resolved_task_id}
     if due_reason:
@@ -795,6 +910,13 @@ async def schedule_task_commented_wakeup(
     blocks or requires sign-off. Returns None (not an error) when a wake is
     deliberately not scheduled -- a debounced burst is the expected, healthy
     case, not a failure the caller needs to react to.
+
+    MAN-294: quiet hours are SKIPPED here too (_apply_policy_to_due_at's
+    skip_quiet_hours=True), same reasoning as schedule_task_assigned_
+    wakeup's own note -- a human posting a comment is an explicit awake
+    action, not an ambient trigger, and must not be silently deferred by a
+    policy meant to protect a sleeping device from triggers it never asked
+    for. Battery and network are still respected.
 
     Bounding is two separate, stacked backstops:
     1. DEBOUNCE (this function's own, short window): if a task_commented
@@ -870,6 +992,9 @@ async def schedule_task_commented_wakeup(
         due_at=_utc_now(),
         policy=policy,
         device_state=_device_state({}, workspace, master_install),
+        # MAN-294: an explicit human action (posting a comment) is not an
+        # ambient trigger -- see _apply_policy_to_due_at's own docstring.
+        skip_quiet_hours=True,
     )
     metadata: Dict[str, Any] = {"agent_id": resolved_agent_id, "task_id": resolved_task_id}
     if due_reason:
@@ -1045,14 +1170,6 @@ def max_task_comment_wake_debounce_seconds() -> int:
     )
 
 
-def _run_sync(coro: Any) -> Any:
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
-
-
 async def scan_due_wake_requests_once(
     *,
     run_workspace_heartbeat: Callable[[List[str], Dict[str, Any]], Any],
@@ -1090,6 +1207,16 @@ async def scan_due_wake_requests_once(
                 {"workspace_id": workspace_id, "tenant_id": tenant_id, "trigger": "schedule"},
             )
         except Exception as exc:
+            # MAN-292: this used to be swallowed into `outcome` with no
+            # logging, and the caller (run_wake_request_scan_forever)
+            # discards the returned `results` list entirely -- so a
+            # per-scope heartbeat failure was invisible everywhere.
+            # LOGGER.exception here (full traceback + scope context) is the
+            # only place this failure is ever recorded now.
+            LOGGER.exception(
+                "wake-request-scanner: workspace heartbeat failed for tenant=%s workspace=%s",
+                tenant_id, workspace_id,
+            )
             outcome = {"acted": False, "summary": f"wake scan failed: {exc}"}
         results.append({"tenant_id": tenant_id, "workspace_id": workspace_id, "result": outcome})
     return {"scanned": len(scopes), "results": results}
@@ -1104,16 +1231,62 @@ def run_wake_request_scan_forever(
     """Daemon-thread entry point -- same shape as run_service's
     run_weekly_scheduler_forever (plain while-not-stopped/sleep loop, started
     once at boot). Not asyncio-native since it's started from a sync
-    bootstrap context; each tick opens and closes its own event loop via
-    _run_sync, matching the sync/async bridge pattern already used in
-    runtime_heartbeat_service for the same reason."""
+    bootstrap context.
+
+    MAN-265 fix: runs on ONE event loop for this thread's entire lifetime
+    instead of the old _run_sync helper, which did
+    asyncio.new_event_loop() / run_until_complete() / loop.close() fresh on
+    EVERY tick. server_modules/db.py's get_pool() caches the Postgres pool
+    keyed by id(current_loop) (db.py:150) precisely so a long-lived worker
+    reuses one pool -- but a brand-new loop object every
+    wake_request_scan_poll_seconds() (default 20s) made every tick look
+    like a new caller to that cache, so it tore down the "stale" pool and
+    paid for a fresh asyncpg.create_pool(...) every single tick, forever.
+    Confirmed live on production: "Postgres pool initialized -- run state
+    will be durable" in ~/.pm2/logs/empyralis-error.log at exact 20-second
+    intervals. One persistent loop here means db.py's per-loop cache
+    actually caches, as designed -- see
+    WakeRequestScannerPersistentLoopTests.test_pool_created_once_across_
+    multiple_ticks in
+    server_modules/tests/test_bounded_scheduler_service.py, which proves
+    the pool is created once across multiple ticks.
+
+    A single tick failure must never be allowed to kill this loop (and
+    therefore the scanner) for good -- that would turn a transient error
+    into a permanent outage, strictly worse than the old wasteful-but-
+    resilient per-tick-loop behavior. So each tick's run_until_complete is
+    individually try/excepted (MAN-292: and now logged, see
+    scan_due_wake_requests_once above and the except below); only
+    stop_event controls whether the loop keeps going.
+    """
     interval = int(poll_seconds) if poll_seconds is not None else wake_request_scan_poll_seconds()
     interval = max(5, interval)
-    while not stop_event.wait(interval):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        while not stop_event.wait(interval):
+            try:
+                loop.run_until_complete(
+                    scan_due_wake_requests_once(run_workspace_heartbeat=run_workspace_heartbeat)
+                )
+            except Exception:
+                LOGGER.exception("wake-request-scanner: tick failed")
+                continue
+    finally:
         try:
-            _run_sync(scan_due_wake_requests_once(run_workspace_heartbeat=run_workspace_heartbeat))
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         except Exception:
-            continue
+            LOGGER.exception("wake-request-scanner: error cleaning up pending tasks during shutdown")
+        finally:
+            try:
+                asyncio.set_event_loop(None)
+            except Exception:
+                LOGGER.debug("wake-request-scanner: asyncio.set_event_loop(None) failed during shutdown", exc_info=True)
+            loop.close()
 
 
 def _extract_context_event_ids(wake_requests: List[Dict[str, Any]]) -> List[str]:

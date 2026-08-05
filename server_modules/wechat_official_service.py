@@ -545,6 +545,20 @@ async def assign_wechat_official(
     if account_kind == ACCOUNT_KIND_WECOM and not _text(agent_id):
         raise RuntimeError("agent_id (WeCom app AgentId) is required for a WeCom account.")
 
+    # MAN-300: agent_install_id is caller-supplied and must be confirmed to
+    # belong to THIS (tenant_id, workspace_id) before anything is written --
+    # see agent_bindings_repository.agent_install_in_scope for why RLS alone
+    # does not catch a cross-workspace id here (same MAN-206 gap: the
+    # inbound webhook below resolves purely by agent_install_id via
+    # get_channel_binding_by_agent_unscoped, so a planted binding would
+    # route real inbound WeChat/WeCom traffic to another tenant's agent).
+    if not await bindings.agent_install_in_scope(
+        agent_install_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    ):
+        raise bindings.AgentInstallNotInScopeError(
+            "This agent does not belong to your workspace."
+        )
+
     # Validate credentials for real -- a bad AppID/Secret pair fails here,
     # exactly like assign_byo_bot's get_me() call validates a Telegram token.
     probe_manager = WeChatAccessTokenManager(account_kind, app_id, app_secret)
