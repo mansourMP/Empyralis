@@ -44,11 +44,49 @@ Two things this module is NOT:
     below) rather than half-reimplemented. task_complete's function is
     already native to the SDK (a turn ends when the model stops calling
     tools; that's the ResultMessage this module already translates).
-    update_plan (continuous-work-past-max-iterations) and query_tool_
-    registry (lazy Tier-2 tool discovery) have no SDK equivalent wired yet —
-    a real, intentional v1 gap, not an oversight; see this module's use in
-    sage_agent_runtime_service.py and the MAN-310 report for what that
-    means in practice.
+    query_tool_registry (lazy Tier-2 tool discovery) has no SDK equivalent
+    wired yet — a real, intentional v1 gap, not an oversight.
+
+    update_plan (MAN-310 Phase 2 investigated this one specifically —
+    verdict: NOT building an equivalent, for two independent reasons):
+      1. Its plan-tracking/visibility half is substantially covered IN
+         SPIRIT by the SDK's own native TodoWrite tool and Claude Code's
+         trained-in planning behavior — the model already tracks multi-step
+         work without Empyralis having to offer a tool or explain the
+         convention in the system prompt, the way the legacy engine must.
+         Translating a TodoWrite call into Empyralis's own "plan.updated"
+         trace event (so it renders in the Work tab the same way) would be
+         a real, buildable feature — but it is a visibility/polish
+         enhancement, not a correctness or reliability gap, and per this
+         phase's own priority order it does not belong in this pass.
+         Separately: reading claude_agent_sdk's own subprocess_cli.py
+         confirms TodoWrite likely is not even reliably CALLABLE today
+         under this bridge's configuration — `ClaudeAgentOptions.tools` is
+         never set (so the CLI's full built-in toolset, including
+         TodoWrite, is visible to the model), but `allowed_tools` only ever
+         lists this bridge's own `mcp__empyralis__*` tools, `permission_
+         mode` is never set, and no `can_use_tool` callback is registered;
+         in headless/no-TTY execution (exactly how query() runs here) a
+         tool outside `--allowedTools` has no prompt path to be approved
+         through — see PermissionMode's own "dontAsk" doc ("deny if not
+         pre-approved"). A model that reaches for TodoWrite here would most
+         likely see it denied, not silently skip using it.
+      2. Its iteration-budget-extension half (continuous work past
+         max_iterations while a plan has open tasks — direct_chat_
+         generation_service.py's _continuous_work_enabled /
+         _plan_has_open_tasks / _continuous_work_budget_allows_more) has NO
+         safe SDK-native equivalent to port without ALSO porting the
+         token-budget gate that makes it safe on the legacy engine. This
+         bridge's ClaudeAgentOptions.max_turns is set once, to the SAME
+         _SAGE_OPERATOR_LOOP_MAX_ITERATIONS every legacy turn that never
+         calls update_plan is ALSO capped at — i.e. today's SDK-engine
+         behavior already matches the legacy engine's own no-plan default,
+         byte for byte. Raising it unconditionally (e.g. to direct_chat_
+         generation_service._CONTINUOUS_WORK_HARD_ITERATION_CAP) without a
+         corresponding "is there still real, budgeted work pending" signal
+         would trade a bounded, well-understood cap for a more expensive
+         one with no matching safety check — a worse reliability/cost
+         posture, not a better one. Left exactly as-is.
 
 Non-Anthropic backend: Anthropic does not officially support pointing the
 SDK/CLI at a non-Anthropic backend — see
@@ -361,6 +399,15 @@ def translate_sdk_message(
         result_text = getattr(message, "result", None)
         reply = str(result_text or "").strip() or "".join(state.reply_text_parts).strip()
         payload: Dict[str, Any] = {"reply": reply}
+        # session_id is a required (non-Optional) field on every real
+        # ResultMessage the SDK yields — carried through here so the caller
+        # (sage_agent_runtime_service._run_sage_action_loop_v3) can persist
+        # it against Empyralis's own thread identity and resume THIS
+        # conversation on a later turn instead of re-folding full history
+        # (see run_claude_agent_sdk_turn's resume_session_id parameter).
+        session_id = str(getattr(message, "session_id", "") or "").strip()
+        if session_id:
+            payload["session_id"] = session_id
         if is_error:
             error_code = str(getattr(message, "subtype", "") or "").strip() or "provider_generation_failed"
             payload["error"] = error_code
@@ -481,16 +528,21 @@ def render_prompt(message: str, prior_messages: Optional[List[Dict[str, Any]]]) 
     """Fold prior turns into a single prompt string for query()'s one-shot
     `prompt` mode.
 
-    v1 simplification, flagged in the MAN-310 report: this does not use
-    ClaudeAgentOptions' session continuity (continue_conversation/resume) or
-    the SDK's streaming-input mode (an AsyncIterable[dict] prompt) — either
-    would be the more native way to carry multi-turn history once this
-    engine is wired to a persistent per-thread SDK session. Folding history
-    into one string keeps the wire format legible for a synchronous
-    request/response turn (exactly how the legacy engine's
-    generate_chat_reply_stream_with_provider_fallback receives prior_
-    messages) with no session-store dependency, at the cost of not
-    benefiting from prompt caching across turns.
+    MAN-310 Phase 2: this is now the FALLBACK path, not the only path. When
+    the caller has a resumable SDK session for this conversation (see
+    run_claude_agent_sdk_turn's resume_session_id parameter), the session
+    itself already carries the history — folding it into the prompt text
+    AGAIN would be sending Empyralis's memory of the conversation and the
+    SDK's own resumed memory of the same conversation at once, which is
+    redundant at best (wasted tokens, a broken prompt-cache prefix on every
+    turn since the folded text keeps growing) and confusing at worst (the
+    model sees its own prior turns twice, once live-in-context from the
+    resumed session and once again as inert transcript text). This function
+    still runs unconditionally on a fresh/unresumable session (no session
+    yet, a stale one, or a resume attempt that failed) — see
+    run_claude_agent_sdk_turn's fallback branch — where it's exactly as
+    necessary as before: query()'s one-shot `prompt` mode has no OTHER way
+    to see anything before this turn.
     """
     prior = prior_messages or []
     if not prior:
@@ -528,6 +580,18 @@ async def run_claude_agent_sdk_turn(
     max_turns: int = 5,
     anthropic_api_key: str = "",
     anthropic_base_url: str = "",
+    # MAN-310 Phase 2: a claude_agent_sdk session id previously captured for
+    # THIS conversation (see sage_agent_runtime_service._sdk_engine_session_
+    # lookup, which is also what verifies it's still safe to resume before
+    # ever passing it here — this function trusts its caller on that). When
+    # set, this turn resumes that session (ClaudeAgentOptions.resume) and
+    # sends ONLY the new message as the prompt — the resumed session already
+    # has everything render_prompt would otherwise fold in, and prompt
+    # caching only pays off when the sent prefix doesn't change turn to
+    # turn. Empty (default) — every existing caller, and any caller with no
+    # resumable session — takes the exact pre-Phase-2 path: render_prompt
+    # folds prior_messages in every time, byte-for-byte unchanged.
+    resume_session_id: str = "",
 ) -> List[Dict[str, Any]]:
     """Drive one turn through claude_agent_sdk.query(), translating every
     yielded message into Empyralis's event dicts. Returns the SAME
@@ -563,24 +627,79 @@ async def run_claude_agent_sdk_turn(
     mcp_server = create_sdk_mcp_server(name=_MCP_SERVER_NAME, tools=sdk_tools)
     allowed_tools = [f"{_MCP_TOOL_PREFIX}{tool_def.get('name')}" for tool_def in usable_tool_defs]
 
-    options = ClaudeAgentOptions(
-        system_prompt=system_prompt or None,
-        mcp_servers={_MCP_SERVER_NAME: mcp_server},
-        allowed_tools=allowed_tools,
-        model=model or None,
-        max_turns=max_turns,
-        env=resolve_sdk_process_env(
-            credentials=credentials,
-            anthropic_api_key=anthropic_api_key,
-            anthropic_base_url=anthropic_base_url,
-        ),
-    )
+    def _build_options(*, resume: str) -> Any:
+        return ClaudeAgentOptions(
+            system_prompt=system_prompt or None,
+            mcp_servers={_MCP_SERVER_NAME: mcp_server},
+            allowed_tools=allowed_tools,
+            model=model or None,
+            max_turns=max_turns,
+            resume=resume or None,
+            env=resolve_sdk_process_env(
+                credentials=credentials,
+                anthropic_api_key=anthropic_api_key,
+                anthropic_base_url=anthropic_base_url,
+            ),
+        )
 
-    prompt = render_prompt(message, prior_messages)
+    async def _consume(sdk_message: Any, *, state: TranslationState) -> List[Dict[str, Any]]:
+        new_events = translate_sdk_message(sdk_message, state=state, trace_context=trace_context)
+        # MAN-310 Phase 2 (trace persistence): translate_sdk_message itself
+        # stays synchronous/pure (see its own docstring — unit-tested
+        # directly, no event loop) and only ever builds the EPHEMERAL
+        # envelope (agent_trace_service.build_ephemeral_envelope,
+        # persisted=False). This async follow-up, run from here where an
+        # event loop is actually available, durably persists the subset of
+        # those envelopes agent_trace_service.PERSISTED_TRACE_EVENT_TYPES
+        # says should survive — matching what the legacy engine's own
+        # _emit_trace_event(persisted=True) call sites already do for the
+        # SAME event types (tool.started/tool.result/search.query/trace.
+        # failed/plan.item.updated). Reuses the envelope's OWN seq/event_id
+        # (see persist_ephemeral_envelope's docstring for why — minting a
+        # second seq here would persist a differently-numbered duplicate of
+        # what a live consumer already saw).
+        for event in new_events:
+            if isinstance(event, dict) and event.get("type") == "trace":
+                await agent_trace_service.persist_ephemeral_envelope(trace_context, event.get("payload"))
+        return new_events
+
+    resume_token = str(resume_session_id or "").strip()
+    prompt = message if resume_token else render_prompt(message, prior_messages)
+    options = _build_options(resume=resume_token)
+
     state = TranslationState()
     events: List[Dict[str, Any]] = []
-    async for sdk_message in query(prompt=prompt, options=options):
-        events.extend(translate_sdk_message(sdk_message, state=state, trace_context=trace_context))
+    received_any_message = False
+    try:
+        async for sdk_message in query(prompt=prompt, options=options):
+            received_any_message = True
+            events.extend(await _consume(sdk_message, state=state))
+    except Exception:
+        if not resume_token or received_any_message:
+            # Either there was nothing to fall back FROM (no resume was
+            # attempted, so this is just a real failure), or the model turn
+            # was already underway — possibly having already called a tool
+            # with a real side effect (sent an email, created a task, ...)
+            # through the SAME in-process executor the legacy engine uses.
+            # Blindly retrying from scratch there could re-run that tool
+            # call a second time. Only a resume that failed before yielding
+            # ANYTHING is safe to retry fresh — that failure mode is "the
+            # CLI couldn't find/load that session id" (e.g. its local
+            # session store was lost to a restart, or this turn landed on a
+            # different machine than the one that captured it), not
+            # "something went wrong partway through the model's work".
+            raise
+        LOGGER.warning(
+            "claude_agent_sdk_bridge: resume=%s failed before yielding any message — "
+            "retrying this turn fresh (full history, new session).",
+            resume_token,
+        )
+        state = TranslationState()
+        events = []
+        fallback_prompt = render_prompt(message, prior_messages)
+        fallback_options = _build_options(resume="")
+        async for sdk_message in query(prompt=fallback_prompt, options=fallback_options):
+            events.extend(await _consume(sdk_message, state=state))
     return events
 
 
