@@ -25,54 +25,6 @@ async function expectNoVisibleLoadingCopy(page) {
   }
 }
 
-async function clickMarkAllRead(page) {
-  const markAllReadButton = page.getByRole('button', { name: 'Mark all read' });
-  await expect(markAllReadButton).toBeVisible();
-  await expect(markAllReadButton).toBeEnabled();
-
-  const markAllReadResponse = page.waitForResponse((response) => {
-    if (response.request().method() !== 'POST') {
-      return false;
-    }
-    return response.url().includes('/api/notifications');
-  });
-
-  await markAllReadButton.click();
-  await markAllReadResponse;
-}
-
-async function seedUnreadNotification(page) {
-  const seedItem = {
-    id: 'notification-seed-e2e',
-    title: 'Seed notification',
-    event_type: 'seed',
-    summary: 'Unread notification used to validate mark-all-read behavior.',
-    text: 'Unread notification used to validate mark-all-read behavior.',
-    channel: 'workspace',
-    read_at: null,
-    created_at: new Date().toISOString(),
-  };
-
-  await page.route('**/api/notifications?**', async (route) => {
-    const url = new URL(route.request().url());
-    const isStreamRequest = url.searchParams.get('stream') === 'true';
-    const isPrimaryListRequest = url.searchParams.get('limit') === '80';
-    if (isStreamRequest || !isPrimaryListRequest) {
-      await route.continue();
-      return;
-    }
-
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        items: [seedItem],
-        count: 1,
-      }),
-    });
-  });
-}
-
 async function resolveApprovalsSurfaceSelector(page) {
   const bootstrapResponse = await page.request.get('/api/workspaces/ws-1/bootstrap');
   expect(bootstrapResponse.ok()).toBeTruthy();
@@ -302,15 +254,24 @@ async function stubChatTrustProviderRequests(page) {
 }
 
 test.describe('workstation data reconciliation', () => {
-  test('notifications mark-all-read updates both list state and status messaging', async ({ page }) => {
-    await loginAsOwner(page);
-    await seedUnreadNotification(page);
-    await mountSurface(page, '/w/ws-1/notifications', '[data-workstation-surface="notifications"]');
-
-    await clickMarkAllRead(page);
-    await expect(page.locator('[data-workstation-surface="notifications"]')).toContainText('Marked all visible notifications as read.');
-  });
-
+  // Deleted, not rewritten — "notifications mark-all-read updates both list
+  // state and status messaging" tested a standalone /notifications surface
+  // (data-workstation-surface="notifications") with a "Mark all read"
+  // button, a POST /api/notifications call, and an inline status message
+  // ("Marked all visible notifications as read."). None of that exists any
+  // more:
+  //   - next.config.ts's LEGACY_REDIRECTS 307s /w/{ws}/notifications to
+  //     /w/{ws}/inbox — there is no notifications route left to mount.
+  //   - The real successor, app/(account)/w/[workspaceId]/inbox/page.tsx,
+  //     has no bulk "mark all read" control and never POSTs to
+  //     /api/notifications. Its own code comment is explicit about why:
+  //     "there's no persistent read-state on activity ledger rows (a
+  //     write-path concern, out of scope here)" — unread state is a
+  //     session-scoped `viewedIds` set plus `markInboxSeenNow` (auto-stamped
+  //     on mount/poll while the Inbox is on screen), not a
+  //     user-triggered action with a confirmation message. This is a
+  //     removed feature, not a renamed one — there is nothing live to
+  //     rewrite the assertions against.
   test('sage chat mounts composer and clears loading copy after route settles', async ({ page }) => {
     await loginAsOwner(page);
     await mountSurface(page, '/w/ws-1/sage', '[data-workstation-surface="chat"]');
