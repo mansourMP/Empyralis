@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -316,6 +317,70 @@ class EntitlementsServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(ctx.exception.reason, "hosted_ai_cap_reached")
+
+    # ── MAN: founder/demo unlimited-credit bypass ─────────────────────────
+    # (EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS) ───────────────────────────
+
+    def _zero_balance_workspace(self, workspace_id: str) -> dict:
+        return {
+            "workspace_id": workspace_id,
+            "metadata": {
+                "billing": {
+                    "plan": "pro",
+                    "hosted_sage_ai_policy": "enabled_with_cap",
+                    "hosted_sage_ai_monthly_cap_usd": 0.0,
+                    "usage": {"hosted_sage_cost_usd_monthly": 0.0},
+                }
+            },
+        }
+
+    def test_hosted_sage_ai_blocks_non_allowlisted_workspace_at_zero_balance(self) -> None:
+        state = entitlements_service.resolve_workspace_entitlement_state(
+            workspace=self._zero_balance_workspace("ws-not-allowed"),
+        )
+
+        with patch.dict(
+            os.environ,
+            {"EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS": "ws-allowed"},
+        ):
+            hosted = entitlements_service.hosted_sage_ai_access_state(state=state)
+
+        self.assertFalse(hosted["allowed"])
+        self.assertEqual(hosted["reason"], "cap_reached")
+        self.assertNotIn("unlimited_credit_bypass", hosted)
+
+    def test_hosted_sage_ai_allows_allowlisted_workspace_at_zero_balance(self) -> None:
+        state = entitlements_service.resolve_workspace_entitlement_state(
+            workspace=self._zero_balance_workspace("ws-allowed"),
+        )
+
+        # Extra whitespace and casing exercise the trim / case-insensitive
+        # matching (same convention as EMPYRALIS_FORCE_LEGACY_ENGINE etc).
+        with patch.dict(
+            os.environ,
+            {"EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS": " Other-WS , WS-Allowed "},
+        ):
+            hosted = entitlements_service.hosted_sage_ai_access_state(state=state)
+
+        self.assertTrue(hosted["allowed"])
+        self.assertIsNone(hosted["reason"])
+        self.assertIsNone(hosted["message"])
+        self.assertTrue(hosted["unlimited_credit_bypass"])
+
+    def test_hosted_sage_ai_unlimited_credit_bypass_is_noop_when_env_unset(self) -> None:
+        state = entitlements_service.resolve_workspace_entitlement_state(
+            workspace=self._zero_balance_workspace("ws-allowed"),
+        )
+
+        original = os.environ.pop("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", None)
+        try:
+            hosted = entitlements_service.hosted_sage_ai_access_state(state=state)
+        finally:
+            if original is not None:
+                os.environ["EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS"] = original
+
+        self.assertFalse(hosted["allowed"])
+        self.assertEqual(hosted["reason"], "cap_reached")
 
     def test_chat_model_tier_policy_applies_free_plan_defaults(self) -> None:
         state = entitlements_service.resolve_workspace_entitlement_state(
