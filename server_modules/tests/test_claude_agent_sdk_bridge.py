@@ -1905,6 +1905,83 @@ class RunClaudeAgentSdkTurnReasoningEffortTests(unittest.TestCase):
         self.assertIsNone(kwargs["effort"])
 
 
+class RunClaudeAgentSdkTurnCostCeilingTests(unittest.TestCase):
+    """MAN-310 spend-safety parity. direct_chat_generation_service's legacy
+    loop enforces a per-run cost ceiling on every turn
+    (_resolve_run_cost_ceiling_usd — an explicit metadata override, else
+    config_defaults_service.default_run_cost_ceiling_usd()); this bridge
+    previously set nothing, so an SDK-engine turn had no ceiling at all.
+    Same faking pattern as RunClaudeAgentSdkTurnBuiltInToolLockdownTests:
+    only claude_agent_sdk's three entrypoints are stubbed, so the real
+    run_claude_agent_sdk_turn builds the real kwargs. No network, no
+    subprocess, no paid call."""
+
+    def _capture_options_kwargs(self, *, responses, max_budget_usd=None):
+        import claude_agent_sdk as real_sdk
+
+        captured: list[Dict[str, Any]] = []
+
+        class _FakeOptions:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        fake_client = _fake_claude_sdk_client(responses)
+        with (
+            patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
+            patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
+            patch.object(real_sdk, "ClaudeSDKClient", new=fake_client),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            kwargs: Dict[str, Any] = dict(
+                message="hello",
+                system_prompt="",
+                prior_messages=None,
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                provider="anthropic",
+                model="claude-x",
+                credentials={"api_key": "sk-test"},
+                trace_context=_trace_context(),
+            )
+            if max_budget_usd is not None:
+                kwargs["max_budget_usd"] = max_budget_usd
+            asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(**kwargs))
+        return captured
+
+    def test_default_ceiling_applies_when_no_override_is_passed(self):
+        captured = self._capture_options_kwargs(responses=[[_result_message()]])
+
+        self.assertEqual(len(captured), 1)
+        kwargs = captured[0]
+        self.assertIn("max_budget_usd", kwargs)
+        self.assertEqual(
+            kwargs["max_budget_usd"],
+            claude_agent_sdk_bridge.config_defaults_service.default_run_cost_ceiling_usd(),
+        )
+        self.assertGreater(kwargs["max_budget_usd"], 0)
+
+    def test_explicit_positive_override_is_used_verbatim(self):
+        captured = self._capture_options_kwargs(
+            responses=[[_result_message()]], max_budget_usd=12.5,
+        )
+
+        self.assertEqual(captured[0]["max_budget_usd"], 12.5)
+
+    def test_non_positive_override_falls_back_to_platform_default(self):
+        captured = self._capture_options_kwargs(
+            responses=[[_result_message()]], max_budget_usd=0,
+        )
+
+        self.assertEqual(
+            captured[0]["max_budget_usd"],
+            claude_agent_sdk_bridge.config_defaults_service.default_run_cost_ceiling_usd(),
+        )
+
+
 class IsRegisteredEmpyralisToolTests(unittest.TestCase):
     """The predicate translate_sdk_message's foreign-tool guard is built on.
     Note the strip_mcp_tool_prefix interplay: that helper only ever strips
