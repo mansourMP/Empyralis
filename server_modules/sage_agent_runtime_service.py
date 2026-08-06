@@ -167,6 +167,19 @@ def _primary_compaction_enabled() -> bool:
     }
 
 
+def _force_legacy_engine_enabled() -> bool:
+    """MAN-312 emergency global kill-switch (EMPYRALIS_FORCE_LEGACY_ENGINE):
+    forces EVERY agent onto the legacy turn engine regardless of any
+    persisted per-agent model_config.engine choice or caller-supplied
+    engine_options, for a whole-fleet rollback off the Claude Agent SDK that
+    doesn't need a code deploy. Same on/off vocabulary as
+    _primary_compaction_enabled above, but opt-IN (default "0") — the SDK
+    stays the production default engine until this is deliberately set."""
+    return str(os.environ.get("EMPYRALIS_FORCE_LEGACY_ENGINE", "0")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _resolve_turn_engine_id(engine_options: dict[str, Any] | None) -> str:
     """MAN-310: the ONE decision point _run_sage_action_loop_v3's
     _collect_stream_events closure branches on. Pulled out as its own
@@ -175,11 +188,21 @@ def _resolve_turn_engine_id(engine_options: dict[str, Any] | None) -> str:
     SDK is the DEFAULT engine in production. When no explicit engine is
     specified (engine_options is None, {}, or has no "engine" key), the
     Claude Agent SDK is used. An explicit "engine": "legacy" selects the
-    legacy path.
+    legacy path — see handle_sage_chat's `requested_engine` resolution
+    (MAN-312) for the one place a persisted per-agent choice turns into
+    that explicit engine_options value.
 
     Tests (detected via PYTEST_CURRENT_TEST) default to the legacy engine
     so existing test mocks keep working. SDK-specific tests pass
-    engine_options={"engine": "claude_agent_sdk"} explicitly."""
+    engine_options={"engine": "claude_agent_sdk"} explicitly.
+
+    MAN-312: EMPYRALIS_FORCE_LEGACY_ENGINE, when set, wins over everything
+    else below — including an explicit engine_options={"engine":
+    "claude_agent_sdk"} request — because it exists specifically for an
+    emergency rollback where per-agent/per-call choices can't be trusted
+    to have been reverted individually in time."""
+    if _force_legacy_engine_enabled():
+        return "legacy"
     options = engine_options if isinstance(engine_options, dict) else {}
     explicit = str(options.get("engine") or "").strip().lower()
     if explicit:
@@ -190,6 +213,23 @@ def _resolve_turn_engine_id(engine_options: dict[str, Any] | None) -> str:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return ""
     return claude_agent_sdk_bridge.ENGINE_ID
+
+
+def _normalize_requested_engine(raw_engine: str) -> str:
+    """MAN-312: the pure normalization half of handle_sage_chat's
+    model_config.engine resolution (see that function's `requested_engine`
+    assignment for the full history/rationale) — split out into its own
+    top-level function so it has a unit-testable home, same reasoning as
+    _resolve_turn_engine_id's own docstring above.
+
+    claude_agent_sdk_bridge.ENGINE_ID ("claude_agent_sdk") and the legacy
+    sentinel ("legacy" — fleet_tools._VALID_ENGINES's other member) are the
+    only two values with defined downstream behavior; anything else —
+    unset, unrecognized, differently-cased input — normalizes to "", i.e.
+    "no explicit choice", which defers to _resolve_turn_engine_id's own
+    default (the SDK in production)."""
+    normalized = str(raw_engine or "").strip().lower()
+    return normalized if normalized in (claude_agent_sdk_bridge.ENGINE_ID, "legacy") else ""
 
 
 _SAGE_TASK_ROUTE_MODES = {
@@ -4944,17 +4984,35 @@ async def handle_sage_chat(
             _raw_reasoning_effort = ""
             _raw_engine = ""
     requested_reasoning_effort = _raw_reasoning_effort if _raw_reasoning_effort in _VALID_REASONING_EFFORTS else ""
-    # MAN-310 Phase 1: model_config.engine, resolved the same specialist-vs-
-    # master way as reasoning effort just above — the ONE place a persisted
-    # per-agent engine choice turns into engine_options; nothing upstream of
-    # this function ever set engine_options before this phase. Only
-    # claude_agent_sdk_bridge.ENGINE_ID itself changes behavior below (at
-    # the _run_sage_action_loop_v3 call sites); an unset value, "legacy", or
-    # anything unrecognized all resolve to "", which keeps engine_options
-    # empty/None and the turn on the existing engine — _resolve_turn_
-    # engine_id's existing "" default, the safety property this phase must
-    # preserve.
-    requested_engine = _raw_engine if _raw_engine == claude_agent_sdk_bridge.ENGINE_ID else ""
+    # MAN-310 Phase 1 (bug fixed under MAN-312 — see below): model_config.
+    # engine, resolved the same specialist-vs-master way as reasoning effort
+    # just above — the ONE place a persisted per-agent engine choice turns
+    # into engine_options; nothing upstream of this function ever set
+    # engine_options before this phase. claude_agent_sdk_bridge.ENGINE_ID
+    # ("claude_agent_sdk") and the legacy sentinel ("legacy" —
+    # fleet_tools._VALID_ENGINES's other member, the value /model's engine
+    # picker persists to pin an agent OFF the SDK) are the only two values
+    # with defined behavior at the _run_sage_action_loop_v3 call sites; an
+    # unset value or anything unrecognized still resolves to "", which
+    # keeps engine_options empty/None and the turn on _resolve_turn_
+    # engine_id's own default (the SDK in production, legacy under pytest).
+    #
+    # MAN-312: a persisted "legacy" used to be discarded here exactly like
+    # an unset value — both collapsed to "", i.e. "no explicit choice" —
+    # which was harmless while "no explicit choice" meant legacy, but once
+    # the SDK became the production default (c96c7138a) "no explicit
+    # choice" started meaning SDK. That silently overrode every agent
+    # explicitly pinned to "legacy" with no way to opt back out. Passing
+    # "legacy" through here as its own engine_options={"engine": "legacy"}
+    # makes _resolve_turn_engine_id's explicit-value branch return "legacy"
+    # (not ""), which is still != claude_agent_sdk_bridge.ENGINE_ID
+    # everywhere that comparison is what selects the SDK branch below, so
+    # the legacy path is taken — restoring the one-way escape hatch without
+    # changing behavior for any value that isn't exactly "legacy" or the
+    # SDK id. The normalization itself lives in _normalize_requested_engine
+    # (a pure function of _raw_engine) so it has its own unit-testable home,
+    # same rationale as _resolve_turn_engine_id's own docstring.
+    requested_engine = _normalize_requested_engine(_raw_engine)
 
     # --- Build Sage prompt/context before any model-backed action loop ---
     # --- Load recent conversation turns from shared thread store ---
@@ -5550,8 +5608,12 @@ async def handle_sage_chat(
     # unchanged — see this function's own docstring) wins over the resolved
     # per-agent model_config.engine above; only when the caller left it
     # unset/empty (every real caller today) does the resolved choice take
-    # effect. Either way an unresolved engine yields None, so both the
-    # regenerate call below and this one stay on the legacy path by default.
+    # effect. An unrecognized/unset requested_engine yields None here, which
+    # keeps both the regenerate call below and this one on
+    # _resolve_turn_engine_id's own default (the SDK in production). A
+    # requested_engine of "legacy" (MAN-312) or claude_agent_sdk_bridge.
+    # ENGINE_ID instead yields an explicit {"engine": ...} dict, which pins
+    # the turn to that engine regardless of the production default.
     _effective_engine_options = (
         engine_options if isinstance(engine_options, dict) and engine_options
         else ({"engine": requested_engine} if requested_engine else None)
