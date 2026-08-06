@@ -2105,19 +2105,18 @@ a.fleet-breadcrumb:hover {
   align-items: center;
   gap: 9px;
   /* MAN-145 item 6: with both label and value at flex-shrink:1/min-width:0,
-     a long adjacent value ("Platform default · deepseek-reasoner" on the
-     Model row, the one PanelRow whose value is a real trigger rather than
-     plain text — see .fleet-panel-row-value--interactive's own
-     overflow:visible below) could pull space from the LABEL instead of
+     a long adjacent value could pull space from the LABEL instead of
      itself, ellipsis-clipping "Model" down to "Mo…" even though the label
      is five letters and every value in this panel is the thing that's
-     actually supposed to truncate. flex-shrink: 0 makes the label a hard
-     floor — every label in this panel is short enough (longest today:
-     "Customer access", ~90px) that it never needs to concede space, so
-     this costs nothing anywhere else and the value keeps 100% of the
-     shrink budget, which is what its own ellipsis (or the model picker
-     trigger's, .fleet-model-picker-trigger span) is already built to
-     handle. */
+     actually supposed to concede space first. flex-shrink: 0 makes the
+     label a hard floor — every label in this panel is short (longest
+     today: "Connectors"/"Cost today", ~75px) that it never needs to
+     concede space, so this costs nothing anywhere else and the value keeps
+     100% of the shrink budget. The Model row's own value used to spend
+     that budget on an ellipsis (.fleet-model-picker-trigger span) that
+     could clip a real "{provider} · {model} · {effort} reasoning" string
+     down to almost nothing at this panel's 320px width — see that
+     selector's own comment for why it wraps instead now. */
   flex-shrink: 0;
   color: var(--text-secondary);
 }
@@ -2141,6 +2140,20 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-panel-row-value {
+  /* flex-grow: 1, not just flex-shrink — the label is flex-shrink:0 (a
+     hard floor, see its own comment above) and this row's justify-content:
+     space-between only turns leftover MAIN-axis space into a GAP between
+     the two items, it never hands that space to either one. Without
+     flex-grow the value stays sized to its own min-content and the whole
+     279px-ish row shows as "Model" hugging the left, a wide empty gap, then
+     a barely-there value box on the right — which is exactly how the Model
+     row's real trigger (.fleet-model-picker-trigger, wrap-enabled below)
+     ended up squeezed down to one character per line even with the row
+     itself nowhere near full. flex-grow:1 makes the value item actually
+     claim that space instead of leaving it stranded as a gap; every
+     plain-text row here stays visually identical since text-align:right
+     still hugs the growed box's right edge. */
+  flex-grow: 1;
   flex-shrink: 1;
   min-width: 0;
   overflow: hidden;
@@ -2187,6 +2200,7 @@ a.fleet-breadcrumb:hover {
   font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
   cursor: pointer;
+  text-align: right;
 }
 
 .fleet-model-picker-trigger:hover {
@@ -2194,10 +2208,24 @@ a.fleet-breadcrumb:hover {
   border-color: var(--border);
 }
 
+/* Wraps instead of ellipsis-truncating — a real provider/model/reasoning-
+   effort summary ("Claude Code · claude-opus-4-1 · Max reasoning") can run
+   well past this panel's value column, and clipping it to a couple of
+   characters left the founder unable to tell what model an agent was even
+   on without opening the popover. Two or three lines in a narrow properties
+   column reads fine; a name cut down to "P" doesn't.
+   `break-word`, not `overflow-wrap: anywhere` — `anywhere` also changes
+   this span's AUTOMATIC MINIMUM SIZE as a flex item (CSS Flexbox §4.5) to
+   near-zero, since the spec then treats it as breakable at every
+   character. Paired with this panel's flex-shrink chain that collapsed
+   "Pro" to "P/r/o", one letter per line, at a fraction of this row's real
+   available width — worse than the ellipsis it replaced. `break-word` only
+   breaks a word that has nowhere else to go, so it doesn't feed that
+   min-size collapse; the actual fix for the width itself is
+   .fleet-panel-row-value's flex-grow: 1 above. */
 .fleet-model-picker-trigger span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: break-word;
+  white-space: normal;
 }
 
 .fleet-model-picker-trigger svg {
