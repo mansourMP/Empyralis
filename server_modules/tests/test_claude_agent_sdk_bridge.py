@@ -3343,5 +3343,80 @@ class RunClaudeAgentSdkTurnSkillsWiringTests(unittest.TestCase):
         self.assertEqual(captured[0]["plugins"], captured[1]["plugins"])
 
 
+class ContextWindowOverrideTests(unittest.TestCase):
+    """apply_context_window_override: the `claude` CLI's own control-protocol
+    get_context_usage() derives maxTokens from an internal table keyed on
+    real Anthropic model ids. Verified empirically (2026-08, disposable local
+    harness, no paid API call) that calling it with ClaudeAgentOptions(
+    model="deepseek-v4-pro") returns maxTokens=rawMaxTokens=200000 — the
+    CLI's unknown-model fallback — even though provider_profiles.py declares
+    deepseek-v4-pro's real window at 1,000,000. This override corrects the
+    payload server-side using provider_profiles.context_window_for_model,
+    Empyralis's real source of truth.
+    """
+
+    def _cli_usage(self, **overrides: Any) -> Dict[str, Any]:
+        base = {
+            "totalTokens": 20000,
+            "maxTokens": 200000,
+            "rawMaxTokens": 200000,
+            "percentage": 10.0,
+            "autoCompactThreshold": 167000,
+            "model": "deepseek-v4-pro",
+        }
+        base.update(overrides)
+        return base
+
+    def test_overrides_unknown_platform_credit_model_to_the_real_window(self):
+        usage = self._cli_usage()
+        result = claude_agent_sdk_bridge.apply_context_window_override(
+            usage, provider="deepseek", model="deepseek-v4-pro",
+        )
+        self.assertEqual(result["maxTokens"], 1_000_000)
+        self.assertEqual(result["rawMaxTokens"], 1_000_000)
+        # percentage recomputed against the corrected denominator, not left
+        # describing the CLI's wrong one.
+        self.assertAlmostEqual(result["percentage"], 2.0)
+        # autoCompactThreshold rescaled proportionally (167000/200000 * 1e6).
+        self.assertEqual(result["autoCompactThreshold"], 835000)
+
+    def test_leaves_a_real_anthropic_model_untouched(self):
+        usage = self._cli_usage(model="claude-3-5-sonnet-20241022")
+        result = claude_agent_sdk_bridge.apply_context_window_override(
+            usage, provider="anthropic", model="claude-3-5-sonnet-20241022",
+        )
+        # provider_profiles' anthropic catalog agrees with the CLI (both
+        # 200000), so nothing changes — same object contents, not a
+        # fabricated "improvement".
+        self.assertEqual(result["maxTokens"], usage["maxTokens"])
+        self.assertEqual(result["percentage"], usage["percentage"])
+
+    def test_never_invents_a_window_for_an_uncatalogued_model(self):
+        usage = self._cli_usage(model="some-brand-new-model-not-in-any-catalog")
+        result = claude_agent_sdk_bridge.apply_context_window_override(
+            usage, provider="deepseek", model="some-brand-new-model-not-in-any-catalog",
+        )
+        # context_window_for_model returns None here (unrecognized model) —
+        # the CLI's own value is our best remaining guess, so it must survive
+        # untouched rather than being overwritten with a fabricated number.
+        self.assertEqual(result["maxTokens"], 200000)
+        self.assertEqual(result, usage)
+
+    def test_missing_or_unknown_provider_is_a_no_op(self):
+        usage = self._cli_usage()
+        result = claude_agent_sdk_bridge.apply_context_window_override(
+            usage, provider=None, model="deepseek-v4-pro",
+        )
+        self.assertEqual(result, usage)
+
+    def test_non_dict_or_zero_total_tokens_does_not_crash(self):
+        usage = self._cli_usage(totalTokens=0)
+        result = claude_agent_sdk_bridge.apply_context_window_override(
+            usage, provider="deepseek", model="deepseek-v4-pro",
+        )
+        self.assertEqual(result["maxTokens"], 1_000_000)
+        self.assertEqual(result["percentage"], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

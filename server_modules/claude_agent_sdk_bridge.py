@@ -134,6 +134,7 @@ from server_modules import config_defaults_service
 from server_modules import direct_chat_operator_binding_service
 from server_modules import direct_tool_execution_service
 from server_modules import openai_compat_adapter
+from server_modules import provider_profiles
 from server_modules import secret_redaction_service
 
 LOGGER = logging.getLogger(__name__)
@@ -1697,6 +1698,67 @@ def render_prompt(message: str, prior_messages: Optional[List[Dict[str, Any]]]) 
     return "Conversation so far:\n" + "\n".join(lines) + f"\n\nuser: {message}"
 
 
+def apply_context_window_override(
+    usage: Dict[str, Any], *, provider: Optional[str], model: Optional[str]
+) -> Dict[str, Any]:
+    """Correct usage["maxTokens"]/["percentage"] for models the `claude` CLI
+    subprocess doesn't recognize.
+
+    get_context_usage() is a control-protocol round trip to Anthropic's own
+    `claude` Node binary, which derives maxTokens/rawMaxTokens from ITS OWN
+    internal model-context-window table — not from provider_profiles.
+    PROVIDER_MODEL_CATALOG, Empyralis's real source of truth. For an
+    Anthropic model that table is authoritative and this is a no-op. For an
+    adapter-routed platform-credit model (e.g. DeepSeek's "deepseek-v4-pro"/
+    "deepseek-v4-flash"), ClaudeAgentOptions.model is set to the raw provider
+    model id — not a real Anthropic model id — so the CLI's table doesn't
+    recognize it. Verified empirically (2026-08, in a disposable local
+    harness, no paid API call): calling client.get_context_usage() with
+    ClaudeAgentOptions(model="deepseek-v4-pro") returns maxTokens=
+    rawMaxTokens=200000 — the CLI's unknown-model fallback — even though
+    provider_profiles.py declares deepseek-v4-pro's real window at
+    1,000,000 tokens. Left uncorrected, every percentage shown to a
+    DeepSeek-served agent would be ~5x too high.
+
+    Only overrides when Empyralis has ITS OWN declared window for this
+    provider/model (context_window_for_model returns non-None) AND that
+    declared window actually differs from what the CLI returned —
+    preserving honesty: never invent a number, never touch usage for a model
+    this repo has no catalog entry for (that path keeps showing the CLI's
+    own value, which is our best remaining guess). Recomputes percentage/
+    autoCompactThreshold consistently with the new maxTokens rather than
+    leave them describing the old denominator.
+    """
+    try:
+        real_window = provider_profiles.context_window_for_model(provider, model)
+    except Exception:
+        real_window = None
+    if not real_window or real_window <= 0:
+        return usage
+    cli_max = usage.get("maxTokens")
+    if not isinstance(cli_max, (int, float)) or cli_max <= 0 or int(cli_max) == real_window:
+        return usage
+
+    updated = dict(usage)
+    updated["maxTokens"] = real_window
+    updated["rawMaxTokens"] = real_window
+    total_tokens = usage.get("totalTokens")
+    if isinstance(total_tokens, (int, float)) and total_tokens >= 0:
+        updated["percentage"] = round((float(total_tokens) / real_window) * 100, 2)
+    # autoCompactThreshold was sized against the CLI's (wrong) window;
+    # rescale it proportionally rather than leave it describing a
+    # denominator that no longer matches maxTokens.
+    old_threshold = usage.get("autoCompactThreshold")
+    if isinstance(old_threshold, (int, float)) and isinstance(cli_max, (int, float)) and cli_max > 0:
+        updated["autoCompactThreshold"] = int(round((float(old_threshold) / float(cli_max)) * real_window))
+    LOGGER.info(
+        "claude_agent_sdk_bridge: overrode context_usage.maxTokens for "
+        "provider=%r model=%r — CLI said %s, Empyralis catalog says %s",
+        provider, model, cli_max, real_window,
+    )
+    return updated
+
+
 async def run_claude_agent_sdk_turn(
     *,
     message: str,
@@ -2070,6 +2132,7 @@ async def run_claude_agent_sdk_turn(
                     )
                 else:
                     if isinstance(usage, dict):
+                        usage = apply_context_window_override(usage, provider=provider, model=model)
                         for event in events:
                             if isinstance(event, dict) and event.get("type") == "final":
                                 payload = event.get("payload")
