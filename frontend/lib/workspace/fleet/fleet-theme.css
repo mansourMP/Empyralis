@@ -2112,11 +2112,9 @@ a.fleet-breadcrumb:hover {
      label a hard floor — every label in this panel is short (longest
      today: "Connectors"/"Cost today", ~75px) that it never needs to
      concede space, so this costs nothing anywhere else and the value keeps
-     100% of the shrink budget. The Model row's own value used to spend
-     that budget on an ellipsis (.fleet-model-picker-trigger span) that
-     could clip a real "{provider} · {model} · {effort} reasoning" string
-     down to almost nothing at this panel's 320px width — see that
-     selector's own comment for why it wraps instead now. */
+     100% of the shrink budget — a wide value (e.g. a long placement or
+     tools string) truncates with an ellipsis instead of squeezing the
+     label down first. */
   flex-shrink: 0;
   color: var(--text-secondary);
 }
@@ -2170,78 +2168,6 @@ a.fleet-breadcrumb:hover {
 .fleet-panel-row-value--muted { color: var(--text-muted); font-weight: var(--weight-medium); }
 .fleet-panel-row-value--accent { color: var(--accent); }
 
-/* The Model row's value is a real trigger (opens AgentModelPickerRow's
-   popover in FleetAgentDetail.tsx), not static text — needs `overflow:
-   visible` so the popover isn't clipped by the plain value span's own
-   ellipsis/overflow:hidden (every other row in this section is single-line
-   read-only text, where that clipping is exactly what's wanted). */
-.fleet-panel-row-value--interactive {
-  overflow: visible;
-}
-
-.fleet-model-picker {
-  position: relative;
-  display: inline-flex;
-  max-width: 100%;
-}
-
-.fleet-model-picker-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  padding: 2px 6px;
-  margin: -2px -6px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  font-weight: var(--weight-semibold);
-  font-variant-numeric: tabular-nums;
-  cursor: pointer;
-  text-align: right;
-}
-
-.fleet-model-picker-trigger:hover {
-  background: var(--bg-card-hover);
-  border-color: var(--border);
-}
-
-/* Wraps instead of ellipsis-truncating — a real provider/model/reasoning-
-   effort summary ("Claude Code · claude-opus-4-1 · Max reasoning") can run
-   well past this panel's value column, and clipping it to a couple of
-   characters left the founder unable to tell what model an agent was even
-   on without opening the popover. Two or three lines in a narrow properties
-   column reads fine; a name cut down to "P" doesn't.
-   `break-word`, not `overflow-wrap: anywhere` — `anywhere` also changes
-   this span's AUTOMATIC MINIMUM SIZE as a flex item (CSS Flexbox §4.5) to
-   near-zero, since the spec then treats it as breakable at every
-   character. Paired with this panel's flex-shrink chain that collapsed
-   "Pro" to "P/r/o", one letter per line, at a fraction of this row's real
-   available width — worse than the ellipsis it replaced. `break-word` only
-   breaks a word that has nowhere else to go, so it doesn't feed that
-   min-size collapse; the actual fix for the width itself is
-   .fleet-panel-row-value's flex-grow: 1 above. */
-.fleet-model-picker-trigger span {
-  overflow-wrap: break-word;
-  white-space: normal;
-}
-
-.fleet-model-picker-trigger svg {
-  flex-shrink: 0;
-  color: var(--text-muted);
-}
-
-/* Wider than the generic .fleet-toolbar-popover default (220px) — this one
-   carries real form fields (provider/model selects, an API key input),
-   which need the extra room to stay legible. Left-aligned regardless of the
-   right-aligned property row it's anchored under. */
-.fleet-model-picker-popover {
-  width: 264px;
-  text-align: left;
-}
-
 /* Composer popover variant of .fleet-toolbar-popover — the composer sits at
    the bottom of the view, so its controls' popovers open UPWARD and
    left-aligned instead of the toolbar default (down + right-aligned). */
@@ -2253,9 +2179,9 @@ a.fleet-breadcrumb:hover {
 }
 
 /* Platform-credit Flash/Pro tier picker — two real options (never a
-   decorative "nothing to pick here" sentence), used by AgentModelPickerRow's
-   popover, the Model tab's own editor, and the composer's compact model
-   control. Neutral until selected — the border is the only signal, no
+   decorative "nothing to pick here" sentence), used by the Model tab's own
+   editor and the composer's compact model control. Neutral until selected —
+   the border is the only signal, no
    second accent surface competing with Send. */
 .fleet-tier-picker {
   display: flex;
