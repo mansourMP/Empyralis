@@ -130,6 +130,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from server_modules import agent_trace_service
+from server_modules import config_defaults_service
 from server_modules import direct_chat_operator_binding_service
 from server_modules import direct_tool_execution_service
 from server_modules import openai_compat_adapter
@@ -1538,6 +1539,19 @@ async def run_claude_agent_sdk_turn(
     # see build_skills_plugin_dir, which returns "" for that input and is
     # the one thing every skills-shaped change below is gated on.
     skills: Optional[Sequence[Dict[str, Any]]] = None,
+    # Per-run spend ceiling parity: direct_chat_generation_service's legacy
+    # loop enforces one on every turn (_resolve_run_cost_ceiling_usd —
+    # metadata["run_cost_ceiling_usd"] override, else config_defaults_
+    # service.default_run_cost_ceiling_usd()); this bridge previously set
+    # NOTHING here, so an SDK-engine turn had no spend ceiling at all — a
+    # runaway loop (or an adversarial prompt driving repeated expensive tool
+    # calls) could spend without limit. None (every existing caller) means
+    # "use the platform default", never "unbounded" — mirrors the legacy
+    # function's own null-coalescing default so both engines share one
+    # spend-safety floor. A caller may still pass an explicit positive
+    # override (e.g. a resolved per-agent ceiling) the same way metadata
+    # carries one on the legacy path.
+    max_budget_usd: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Drive one turn through claude_agent_sdk, translating every yielded
     message into Empyralis's event dicts. Returns the SAME list[dict] shape
@@ -1632,6 +1646,15 @@ async def run_claude_agent_sdk_turn(
         provider=provider or "",
         anthropic_base_url=anthropic_base_url,
         credentials=credentials,
+    )
+
+    # Resolved ONCE, same "explicit override else platform default" shape as
+    # direct_chat_generation_service._resolve_run_cost_ceiling_usd — never
+    # None, never <= 0, so every SDK-engine turn gets a real ceiling even
+    # when no caller has opinions about one yet.
+    effective_max_budget_usd = (
+        max_budget_usd if isinstance(max_budget_usd, (int, float)) and max_budget_usd > 0
+        else config_defaults_service.default_run_cost_ceiling_usd()
     )
 
     config_dir = tempfile.mkdtemp(prefix="empyralis-claude-sdk-")
@@ -1734,6 +1757,12 @@ async def run_claude_agent_sdk_turn(
                 plugins=([{"type": "local", "path": skills_plugin_dir}] if skills_plugin_dir else []),
                 model=model or None,
                 max_turns=max_turns,
+                # Spend-safety parity with the legacy engine (see
+                # effective_max_budget_usd above) — the SDK enforces this
+                # itself mid-turn and stops with an error_max_budget_usd
+                # result rather than Empyralis having to poll cost after
+                # the fact.
+                max_budget_usd=effective_max_budget_usd,
                 resume=resume or None,
                 # turn_env, computed once above — NOT a second
                 # resolve_sdk_process_env() call. Calling it twice would
