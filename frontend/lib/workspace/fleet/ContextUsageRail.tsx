@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { Gauge, X } from "lucide-react";
+import { Gauge } from "lucide-react";
 
 /**
  * One category row from claude_agent_sdk's ContextUsageResponse.categories
@@ -41,25 +41,24 @@ function formatTokenCount(value: unknown): string {
 }
 
 /**
- * Collapsible right-side rail showing the current model and a context-
- * window usage breakdown for THIS conversation's last claude_agent_sdk
- * turn. Closed by default — a single toggle button is the only thing
- * rendered until a person opens it, so it never competes with the compose
- * area for attention (this product's target user is explicitly a
- * non-developer who has no reason to see token accounting by default).
- *
- * `contextUsage` is null for every turn that didn't run on the
- * claude_agent_sdk engine (the legacy tool loop, gateway_brain local/
- * cli_subscription modes) or before any turn has completed yet — the panel
- * says so in plain language rather than rendering a zeroed-out fake chart.
+ * Compact context-usage meter, seated directly in the composer's control
+ * row (attach / model / reasoning effort / THIS / send) — re-seated here
+ * from a detached right-edge column it used to occupy on its own, per the
+ * founder's composer-consolidation call: everything about the turn you're
+ * about to send lives in one control row under the input, not scattered
+ * around the message list. Same data source as before (the last completed
+ * claude_agent_sdk turn's context_usage), same "not available" honesty for
+ * every other engine/mode or before any turn has completed — this only
+ * changes WHERE it renders and how it opens (an anchored popover here,
+ * instead of a slide-out panel next to a permanent toggle strip).
  *
  * `agentInstallId`, when set, means this chat belongs to one specific Fleet
- * agent, which already has its own reasoning-effort picker on its Model tab
- * (FleetAgentDetail.tsx's renderCliReasoningEffortPicker /
- * renderReasoningEffortPicker). Rather than building a second control here,
- * the rail links there — the same modelHref pattern the Chat tab's own
- * toolbar already uses for its read-only model chip. Omitted for Sage's own
- * workspace-wide chat, which has no per-agent Model tab to link to.
+ * agent, which already has its own reasoning-effort control in this same
+ * composer row (see AgentChat.tsx) — the "Change reasoning effort" link
+ * below still points at the Model tab as a fallback for anything that
+ * control doesn't cover (byok_api/cli_subscription's fuller editor).
+ * Omitted for Sage's own workspace-wide chat, which has no per-agent Model
+ * tab to link to.
  */
 export function ContextUsageRail({
   contextUsage,
@@ -71,34 +70,49 @@ export function ContextUsageRail({
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
   const modelHref = agentInstallId && pathname ? pathname.replace(/\/[^/]+$/, "/model") : null;
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  // Same dismissal contract as every other anchored popover in Fleet
+  // (FleetToolbar's filter/sort popover, AgentModelPickerRow, etc.):
+  // outside pointerdown, or Escape.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
   const categories = Array.isArray(contextUsage?.categories) ? contextUsage!.categories : [];
   const percentage = Math.max(0, Math.min(100, Number(contextUsage?.percentage) || 0));
 
   return (
-    <div className={`fleet-context-usage-rail${open ? " is-open" : ""}`}>
+    <div className="fleet-context-usage-inline" ref={ref}>
       <button
         type="button"
-        className="fleet-context-usage-toggle"
+        className={`fleet-context-usage-inline-trigger${open ? " is-active" : ""}`}
         onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={open ? "Hide context usage" : "Show context usage"}
-        title={open ? "Hide context usage" : "Show context usage"}
+        aria-label="Context usage"
+        title={contextUsage ? `Context used: ${percentage.toFixed(0)}%` : "Context usage — not available yet"}
       >
-        <Gauge size={15} strokeWidth={1.75} />
+        <Gauge size={13} strokeWidth={1.75} />
+        {contextUsage && <span className="fleet-context-usage-inline-pct">{Math.round(percentage)}%</span>}
       </button>
       {open && (
-        <div className="fleet-context-usage-panel" role="region" aria-label="Context usage">
+        <div className="fleet-toolbar-popover fleet-context-usage-panel" role="dialog" aria-label="Context usage">
           <div className="fleet-context-usage-panel-header">
             <span className="fleet-context-usage-panel-title">Context usage</span>
-            <button
-              type="button"
-              className="fleet-context-usage-close"
-              onClick={() => setOpen(false)}
-              aria-label="Close context usage"
-            >
-              <X size={14} strokeWidth={1.75} />
-            </button>
           </div>
 
           {!contextUsage ? (
@@ -144,7 +158,7 @@ export function ContextUsageRail({
 
               {modelHref && (
                 <Link href={modelHref} className="fleet-context-usage-reasoning-link">
-                  Change reasoning effort
+                  Full model editor
                 </Link>
               )}
             </>

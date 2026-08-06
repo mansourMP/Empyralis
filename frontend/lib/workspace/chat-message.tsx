@@ -8,6 +8,7 @@ import {
   ChevronRight,
   CircleAlert,
   FileText,
+  Paperclip,
   Search,
   Wrench,
 } from 'lucide-react';
@@ -93,6 +94,27 @@ function effectiveProviderLabel(metadata: Record<string, unknown>): string {
     parts.push(model);
   }
   return parts.join(' · ');
+}
+
+/** AgentChat's send() stamps `metadata.attachments` on the optimistic local
+ *  user turn (SageChatAttachment[] shape); a reloaded turn carries the same
+ *  array back off the server, since upsert_agent_turn persists whatever
+ *  `attachments` /api/turn was sent under this same metadata key. Read
+ *  defensively — a turn from before attachments existed, or one with a
+ *  malformed value, just renders no chips rather than throwing. */
+function messageAttachments(metadata: Record<string, unknown>): { name: string; url: string }[] {
+  const raw = metadata.attachments;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const rec = item as Record<string, unknown>;
+      const name = String(rec.filename ?? rec.name ?? '').trim();
+      const url = String(rec.url ?? rec.uri ?? '').trim();
+      if (!name && !url) return null;
+      return { name: name || 'Attachment', url };
+    })
+    .filter((a): a is { name: string; url: string } => a !== null);
 }
 
 function routeLabel(metadata: Record<string, unknown>): string {
@@ -245,6 +267,7 @@ export const ChatMessage = memo(({
   const providerLabel = effectiveProviderLabel(message.metadata);
   const taskRouteLabel = routeLabel(message.metadata);
   const isIncomplete = message.metadata.incomplete === true || message.status === 'incomplete';
+  const attachments = messageAttachments(message.metadata);
 
   if (displayKind === 'thinking_row') {
     return <ThinkingRow message={message} />;
@@ -349,6 +372,23 @@ export const ChatMessage = memo(({
       <div className="app-chat-message__content">
         <MarkdownLiteText text={text} />
       </div>
+      {attachments.length > 0 && (
+        <div className="app-chat-message__attachments">
+          {attachments.map((a, i) => (
+            a.url ? (
+              <a key={`${a.name}-${i}`} href={a.url} target="_blank" rel="noreferrer" className="app-chat-message__attachment-chip">
+                <Paperclip size={11} strokeWidth={1.9} aria-hidden="true" />
+                <span>{a.name}</span>
+              </a>
+            ) : (
+              <span key={`${a.name}-${i}`} className="app-chat-message__attachment-chip">
+                <Paperclip size={11} strokeWidth={1.9} aria-hidden="true" />
+                <span>{a.name}</span>
+              </span>
+            )
+          ))}
+        </div>
+      )}
       {(timestamp || providerLabel || taskRouteLabel || isIncomplete) ? (
         <div className={`app-chat-message__meta${providerLabel || taskRouteLabel || isIncomplete ? ' app-chat-message__meta--visible' : ''}`}>
           {providerLabel ? (
