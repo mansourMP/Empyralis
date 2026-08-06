@@ -2660,7 +2660,27 @@ async def handle_gateway_websocket(
                     message_type = "channel.outbound.result"
                 else:
                     message_type = resolved_message_type or "response"
-            gateway_state_repository.record_gateway_event(
+            # MAN-309: this fires for EVERY inbound frame -- including every
+            # single heartbeat, before the frame-type branch below even runs
+            # -- and record_gateway_event() enforces via the identical
+            # "gateway-state-decision" rust-kernel command touch_gateway_
+            # session() uses (_enforce_gateway_state_decision("record_event",
+            # ...) -> rust_runtime_kernel_client.run_runtime_kernel ->
+            # subprocess.run). Called inline, that is a synchronous subprocess
+            # spawn on THIS coroutine's thread -- which, since uvicorn runs
+            # this single-vCPU box with no --workers flag (one process, one
+            # event loop, see deploy/empyralis-backend.service), is the SAME
+            # thread that services every other gateway's socket and every
+            # HTTP request the backend handles. asyncio.to_thread moves the
+            # call (kernel decision + the gateway_events INSERT it gates,
+            # both still executed exactly once per frame, nothing skipped or
+            # cached -- the kernel marks this decision "cacheable": false in
+            # gateway_state.rs's record_event_decision(), a real per-call
+            # anti-replay/audit check, not a static gate memoization would be
+            # safe to skip) onto a worker thread so a slow kernel spawn stops
+            # stalling every other gateway's heartbeat ack budget.
+            await asyncio.to_thread(
+                gateway_state_repository.record_gateway_event,
                 gateway_id=gateway_id,
                 session_id=session_id,
                 direction="inbound",
@@ -2834,7 +2854,41 @@ async def handle_gateway_websocket(
                 # server_modules/tests/test_gateway_routes.py::
                 # GatewayRoutesTests::test_heartbeats_over_one_connection_
                 # produce_exactly_one_session_row for the regression coverage.
-                gateway_state_repository.touch_gateway_session(
+                #
+                # MAN-309 follow-up to the MAN-140 paragraph above: removing
+                # the duplicate pre-check halved the subprocess count per
+                # heartbeat but left the *remaining* spawn synchronous and
+                # inline on this coroutine -- still one full fork+exec+wait
+                # (rust_runtime_kernel_client.run_runtime_kernel's
+                # subprocess.run, DEFAULT_TIMEOUT_SECONDS=5) blocking this
+                # single-vCPU box's ONE uvicorn worker (no --workers flag,
+                # deploy/empyralis-backend.service) on every heartbeat, for
+                # every connected gateway. Production evidence: one gateway
+                # logged 1,331 connections and a reconnect storm running
+                # continuously for 30+ hours at a 35-39s cadence -- the
+                # client's own 10s-heartbeat/2-missed-beats dead-socket
+                # detection (empyralis-gateway/src/cloud/ws-client.ts,
+                # maxConsecutiveFailures: 2) firing because THIS call, plus
+                # the record_gateway_event() one just above in the frame
+                # loop, was blocking the ack past its budget under load --
+                # the client correctly, by its own design, concluding a
+                # perfectly healthy connection was dead. asyncio.to_thread
+                # moves the call off the event loop onto a worker thread;
+                # gateway_state_repository._connect() already opens a fresh
+                # per-call sqlite3 connection with check_same_thread=False
+                # and _DB_LOCK is a plain threading.Lock, so this is safe
+                # from any other thread. This does NOT change what runs, how
+                # often, or what it enforces -- the kernel still sees every
+                # single heartbeat's seq/ack pair (touch_session_decision in
+                # empyralis-runtime-kernel/src/gateway_state.rs blocks a
+                # regressed seq/ack -- a real per-call check, which is why
+                # that decision comes back "cacheable": false; caching it
+                # instead of just moving it off-thread would have silently
+                # skipped that regression check for however long the cache
+                # stayed warm). Same last_heartbeat_at write, same cadence,
+                # same enforcement -- only which thread waits on the fork.
+                await asyncio.to_thread(
+                    gateway_state_repository.touch_gateway_session,
                     session_id=session_id,
                     gateway_id=gateway_id,
                     seq=frame_seq,

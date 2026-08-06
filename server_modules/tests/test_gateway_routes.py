@@ -1299,6 +1299,206 @@ class GatewayRoutesTests(unittest.TestCase):
                 "an actual reconnect (new session + new socket) should add exactly one more row",
             )
 
+    def test_heartbeat_kernel_checks_run_off_the_event_loop_thread(self) -> None:
+        """MAN-309 regression.
+
+        touch_gateway_session() (the heartbeat branch's session-touch write)
+        and record_gateway_event() (called for EVERY inbound frame,
+        including every heartbeat, before the frame-type branch even runs)
+        both enforce via the same "gateway-state-decision" rust-kernel
+        command, and that command is a synchronous subprocess spawn
+        (rust_runtime_kernel_client.run_runtime_kernel -> subprocess.run).
+        Called inline on the coroutine handling the websocket, that blocks
+        this process's one and only asyncio event loop -- production runs
+        uvicorn with no --workers flag on a single-vCPU box (see
+        deploy/empyralis-backend.service) -- for as long as the subprocess
+        takes, for every OTHER connected gateway and every HTTP request the
+        backend serves at that moment, not just this one heartbeat.
+
+        Production evidence this was live: gateway
+        a1c6b043-9b6e-4df1-a9bb-cf72c4fcd506 reconnected 1,331 times across
+        32 storm bursts, one running continuously for 30+ hours at a 35-39s
+        cadence, because the client's own dead-socket detection
+        (empyralis-gateway/src/cloud/ws-client.ts, maxConsecutiveFailures: 2)
+        correctly -- by its own design -- concluded a perfectly healthy
+        connection was dead once the ack missed its budget under this
+        blocking.
+
+        The fix moved exactly two call sites onto asyncio.to_thread: the
+        record_gateway_event() call in the per-frame loop, and the
+        touch_gateway_session() call in the gateway.heartbeat branch. This
+        test proves the mechanism directly (which thread each rust-kernel
+        call actually ran on) rather than only its timing symptom, using
+        the connect handshake's mark_session_connected enforcement --
+        deliberately NOT moved, since it is once-per-connect rather than
+        once-per-heartbeat -- as a same-test control for "this thread is the
+        event loop thread, and a call that wasn't moved does still land on
+        it".
+        """
+        # Ordered, one entry per "gateway-state-decision" call, in call
+        # order — NOT a dict-of-sets keyed only by operation, because this
+        # test needs to tell "the connect frame's own touch_session call"
+        # (inline, event-loop thread, out of scope) apart from "a
+        # heartbeat's touch_session call" (offloaded, worker thread) even
+        # though both share the exact same operation name. Call order is
+        # the only thing that distinguishes them here.
+        call_records: list[tuple[str, int]] = []
+
+        def _recording_kernel(command, payload, timeout_seconds=5):
+            payload = payload if isinstance(payload, dict) else {}
+            operation = str(payload.get("operation") or "").strip()
+            if command == "gateway-state-decision" and operation:
+                call_records.append((operation, threading.get_ident()))
+            return _mock_gateway_rust_kernel(command, payload, timeout_seconds=timeout_seconds)
+
+        with patch.object(
+            rust_runtime_kernel_client, "run_runtime_kernel", side_effect=_recording_kernel
+        ):
+            registration_payload = self._register_gateway()
+            gateway_id = registration_payload["gateway"]["gateway_id"]
+            gateway_token = registration_payload["gateway_token"]
+
+            session_response = self.client.post(
+                "/api/gateway/sessions",
+                json={"gateway_id": gateway_id, "gateway_token": gateway_token},
+            )
+            self.assertEqual(session_response.status_code, 200)
+            session_payload = session_response.json()
+
+            ws_path = (
+                f"/api/gateway/ws?gateway_id={gateway_id}"
+                f"&session_token={session_payload['session_token']}"
+            )
+            HEARTBEAT_COUNT = 4
+            with self.client.websocket_connect(ws_path) as websocket:
+                websocket.send_json(
+                    {
+                        "kind": "request",
+                        "id": "req-connect-thread-1",
+                        "type": "gateway.connect",
+                        "ts": "2026-08-07T00:00:00Z",
+                        "scope": session_payload["scope"],
+                        "payload": {
+                            "protocol_version": "v1alpha2",
+                            "gateway_version": "0.1.0",
+                            "device_metadata": {"hostname": "mansur-mac"},
+                            "requested_capabilities": ["screen.read"],
+                            "journal_cursor": 0,
+                            "checkpoint_cursor": 0,
+                        },
+                    }
+                )
+                self.assertTrue(websocket.receive_json()["ok"])  # connect ack
+                websocket.receive_json()  # gateway.hello
+                websocket.receive_json()  # gateway.presence
+
+                # Marks the boundary between the connect handshake (which
+                # deliberately still runs its touch_gateway_session() and
+                # record_gateway_event() calls -- for the connect frame
+                # itself, plus gateway.hello / gateway.presence -- inline,
+                # unchanged, out of this fix's scope) and the per-frame loop
+                # (where this fix applies). Everything at or after this
+                # index in call_records came from a heartbeat or the
+                # disconnect below.
+                post_handshake_call_index = len(call_records)
+
+                for i in range(HEARTBEAT_COUNT):
+                    websocket.send_json(
+                        {
+                            "kind": "request",
+                            "id": f"req-heartbeat-thread-{i}",
+                            "type": "gateway.heartbeat",
+                            "ts": f"2026-08-07T00:00:{i + 1:02d}Z",
+                            "scope": session_payload["scope"],
+                            "payload": {
+                                "health_state": "online",
+                                "journal_cursor": i + 1,
+                                "checkpoint_cursor": i + 1,
+                            },
+                        }
+                    )
+                    self.assertTrue(websocket.receive_json()["ok"])
+
+                websocket.send_json(
+                    {
+                        "kind": "request",
+                        "id": "req-disconnect-thread-1",
+                        "type": "gateway.disconnect",
+                        "ts": "2026-08-07T00:00:20Z",
+                        "scope": session_payload["scope"],
+                        "payload": {"reason": "test_disconnect"},
+                    }
+                )
+                self.assertTrue(websocket.receive_json()["ok"])
+
+        all_operations_seen = {operation for operation, _thread_id in call_records}
+        # Sanity: the mock actually saw every operation this test cares
+        # about. If any of these are missing, the assertions below would
+        # pass vacuously instead of proving anything.
+        for operation in ("mark_session_connected", "touch_session", "record_event"):
+            self.assertIn(
+                operation,
+                all_operations_seen,
+                f"expected at least one 'gateway-state-decision'/{operation} rust-kernel call",
+            )
+
+        # Frequency is unchanged -- nothing was skipped, throttled, or
+        # cached to get this call off the event loop. record_event fires
+        # once for the inbound gateway.connect frame itself, once each for
+        # the two outbound handshake events (gateway.hello, gateway.presence),
+        # once per inbound frame handled by the per-frame loop (HEARTBEAT_
+        # COUNT heartbeats + 1 disconnect) -- HEARTBEAT_COUNT + 4 total;
+        # touch_session fires once for the connect frame plus once per
+        # heartbeat (the disconnect branch calls mark_session_disconnected,
+        # not touch_session) -- HEARTBEAT_COUNT + 1 total.
+        record_event_calls = [pair for pair in call_records if pair[0] == "record_event"]
+        touch_session_calls = [pair for pair in call_records if pair[0] == "touch_session"]
+        self.assertEqual(len(record_event_calls), HEARTBEAT_COUNT + 4)
+        self.assertEqual(len(touch_session_calls), HEARTBEAT_COUNT + 1)
+
+        # The control: mark_session_connected only ever fires from the
+        # connect handshake (deliberately left inline, out of this fix's
+        # scope), so its thread(s) ARE the event-loop thread(s) for this
+        # test run.
+        connect_threads = {
+            thread_id for operation, thread_id in call_records if operation == "mark_session_connected"
+        }
+
+        # The fix: touch_session calls FROM THE HEARTBEAT LOOP and
+        # record_event calls FROM THE PER-FRAME LOOP (both at or after
+        # post_handshake_call_index -- excludes the connect frame's own
+        # touch_session call and the handshake's hello/presence record_event
+        # calls, neither of which this fix touches) must never have run on
+        # the event-loop thread -- asyncio.to_thread moved both onto a
+        # worker thread instead.
+        # (Not asserting an exact total length here: the disconnect frame's
+        # mark_session_disconnected also lands in this slice, and it fires
+        # twice per disconnect -- once from the protocol-layer pre-check,
+        # once from inside mark_gateway_session_disconnected() itself, the
+        # same still-deliberately-undeduped pattern 83ec99fe1 left in place
+        # for connect/disconnect. Irrelevant to this test: filtering by
+        # operation below ignores it either way.)
+        post_handshake_records = call_records[post_handshake_call_index:]
+        post_handshake_touch_session_threads = {
+            thread_id for operation, thread_id in post_handshake_records if operation == "touch_session"
+        }
+        post_handshake_record_event_threads = {
+            thread_id for operation, thread_id in post_handshake_records if operation == "record_event"
+        }
+        self.assertTrue(post_handshake_touch_session_threads, "expected at least one post-handshake touch_session call")
+        self.assertTrue(post_handshake_record_event_threads, "expected at least one post-handshake record_event call")
+        self.assertTrue(
+            post_handshake_touch_session_threads.isdisjoint(connect_threads),
+            f"a heartbeat's touch_session call ran on the event loop thread: "
+            f"{post_handshake_touch_session_threads} intersects {connect_threads}",
+        )
+        self.assertTrue(
+            post_handshake_record_event_threads.isdisjoint(connect_threads),
+            f"a heartbeat/disconnect frame's record_event call ran on the "
+            f"event loop thread: {post_handshake_record_event_threads} "
+            f"intersects {connect_threads}",
+        )
+
     def test_gateway_pairing_intents_are_ttl_limited_and_pending_capped(self) -> None:
         over_limit_response = self.client.post(
             "/api/gateway/pairings/intents",
