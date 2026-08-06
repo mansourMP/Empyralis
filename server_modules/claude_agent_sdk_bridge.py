@@ -920,6 +920,17 @@ class TranslationState:
     # neither of which this is: a deliberately-reopened meta-tool call is
     # neither unattributed nor foreign.
     meta_tool_use_ids: Dict[str, str] = field(default_factory=dict)
+    # StreamEvent (partial-message) bookkeeping — see the "StreamEvent"
+    # branch below. The raw Anthropic stream never repeats the enclosing
+    # message id on each content_block_delta, only on message_start, so it
+    # has to be remembered here to give every delta's ephemeral envelope a
+    # stable item_id to group by (matches how the legacy engine's own
+    # emit_assistant_message_delta/emit_reasoning_summary_delta callers key
+    # theirs). content_block_index -> "thinking" | "text" records which
+    # content block a given index is, since content_block_delta carries only
+    # the index, not the block type — that comes from content_block_start.
+    stream_message_id: Optional[str] = None
+    stream_block_kinds: Dict[int, str] = field(default_factory=dict)
 
 
 def translate_sdk_message(
@@ -1302,8 +1313,115 @@ def translate_sdk_message(
         events.append({"type": "final", "payload": payload})
         return events
 
-    # SystemMessage / StreamEvent / RateLimitEvent: none of these map to a
-    # type _collect_sage_operator_loop_v3_events consumes — dropped.
+    if cls_name == "StreamEvent":
+        # Partial-message fidelity (MAN — SDK streaming fidelity). Only
+        # emitted when ClaudeAgentOptions.include_partial_messages=True
+        # (see _build_options above); message.event is the RAW Anthropic
+        # API stream event dict, undocumented beyond "whatever the
+        # Messages API streaming endpoint sends" — matched by dict key,
+        # same defensive posture as everywhere else in this function.
+        #
+        # Subagent (Task-tool) deltas carry a non-empty parent_tool_use_id
+        # — that is a sub-agent's own thinking/text, not the turn's, and
+        # is dropped here the same way state.reply_text_parts is only ever
+        # fed from the top-level AssistantMessage branch above (which the
+        # SDK never routes subagent output through).
+        if str(getattr(message, "parent_tool_use_id", "") or "").strip():
+            return events
+        raw_event = getattr(message, "event", None)
+        if not isinstance(raw_event, dict):
+            return events
+        wire_type = str(raw_event.get("type") or "")
+
+        if wire_type == "message_start":
+            msg = raw_event.get("message")
+            if isinstance(msg, dict):
+                state.stream_message_id = str(msg.get("id") or "").strip() or state.stream_message_id
+            state.stream_block_kinds = {}
+            return events
+
+        if wire_type == "content_block_start":
+            index = raw_event.get("index")
+            block = raw_event.get("content_block")
+            if isinstance(index, int) and isinstance(block, dict):
+                state.stream_block_kinds[index] = str(block.get("type") or "")
+            return events
+
+        if wire_type == "content_block_stop":
+            index = raw_event.get("index")
+            if isinstance(index, int):
+                state.stream_block_kinds.pop(index, None)
+            return events
+
+        if wire_type != "content_block_delta":
+            # message_delta, message_stop, ping, error, and anything future
+            # the CLI starts forwarding: none map to a type _collect_sage_
+            # operator_loop_v3_events consumes — dropped, same as the other
+            # untranslated message classes below.
+            return events
+
+        index = raw_event.get("index")
+        delta = raw_event.get("delta")
+        if not isinstance(delta, dict):
+            return events
+        delta_type = str(delta.get("type") or "")
+        block_kind = state.stream_block_kinds.get(index) if isinstance(index, int) else None
+        message_id = state.stream_message_id or ""
+        item_id = f"{message_id}:{index}" if message_id else None
+
+        if delta_type == "thinking_delta" and block_kind == "thinking":
+            # Live-only, same as the legacy engine's own reasoning.summary.
+            # delta (agent_trace_service.emit_reasoning_summary_delta,
+            # persisted=False) — never joins PERSISTED_TRACE_EVENT_TYPES,
+            # so persist_ephemeral_envelope (called right after this by
+            # run_claude_agent_sdk_turn for every emitted envelope) is a
+            # no-op for it. Deliberate: this is the model's raw,
+            # unreviewed chain-of-thought token stream, not a claim about
+            # work done — nothing tool_honesty_guard or the response leak
+            # guards need to check ever reaches a persisted row or the
+            # final reply text, because it is never written to either.
+            # ThinkingBlock content in the eventual AssistantMessage (the
+            # coalesced, complete block) is ALSO never appended to
+            # state.reply_text_parts — see the "ThinkingBlock, ServerToolUseBlock,
+            # ServerToolResultBlock" comment above — so this stream and the
+            # final reply can never blend even if a caller mishandled
+            # ordering.
+            thinking_text = str(delta.get("thinking") or "")
+            if thinking_text:
+                delta_event = _envelope(
+                    "reasoning.summary.delta",
+                    {"delta": thinking_text},
+                    item_id=item_id,
+                )
+                if delta_event is not None:
+                    events.append(delta_event)
+            return events
+
+        if delta_type == "text_delta" and block_kind == "text":
+            # Same ephemeral, non-persisted event type the legacy engine's
+            # narration/inventory-reply chunks already use
+            # (emit_assistant_message_delta, persisted=False) — this is a
+            # live-progress echo of text that will also arrive, complete,
+            # in the eventual AssistantMessage.TextBlock this function
+            # already folds into state.reply_text_parts and the turn's
+            # "final" event. Never a second source of truth for the reply.
+            text_piece = str(delta.get("text") or "")
+            if text_piece:
+                delta_event = _envelope(
+                    "assistant.message.delta",
+                    {"message_id": message_id, "delta": text_piece},
+                )
+                if delta_event is not None:
+                    events.append(delta_event)
+            return events
+
+        # input_json_delta (tool-call argument streaming), signature_delta,
+        # and anything else: not a distinct user-facing stream today —
+        # dropped, same as before this branch existed.
+        return events
+
+    # SystemMessage / RateLimitEvent: neither maps to a type
+    # _collect_sage_operator_loop_v3_events consumes — dropped.
     return events
 
 
@@ -1833,6 +1951,19 @@ async def run_claude_agent_sdk_turn(
                 # effort's own docstring for why forwarding it regardless of
                 # provider carries no wire-contract risk.
                 effort=resolve_sdk_effort(reasoning_effort),
+                # Token-by-token fidelity: without this the CLI only ever
+                # emits whole AssistantMessage/UserMessage objects once a
+                # full turn (or full tool call) completes, so a customer's
+                # reply and the model's thinking both arrive in the same
+                # coarse bursts a non-streaming API would produce — the CLI
+                # already streams the underlying Anthropic API response
+                # (including ThinkingBlock deltas) internally, this just
+                # asks it to also hand those partial events to us instead of
+                # swallowing them until the block closes. See the new
+                # "StreamEvent" branch in translate_sdk_message for what's
+                # done with them, and this module's docstring-adjacent notes
+                # there on why thinking deltas are ephemeral-only.
+                include_partial_messages=True,
             )
 
         async def _consume(sdk_message: Any, *, state: TranslationState) -> List[Dict[str, Any]]:
