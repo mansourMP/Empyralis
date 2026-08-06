@@ -290,6 +290,38 @@ def capability_ready_from_any_metadata(capability_id: Any, *sources: Optional[Di
     )
 
 
+def capability_requested_from_metadata(metadata: Dict[str, Any], capability_id: Any) -> bool:
+    """The live counterpart to registration_has_execution_capability()'s static
+    registration.capabilities snapshot. capability_readiness.requested is
+    recomputed by the gateway on every heartbeat tick (empyralis-gateway/src/
+    supervisor/capability-router.ts's syncRequestedCapabilities(), sent via
+    cloud/heartbeat-payload.ts) and reflects the gateway's CURRENT capability
+    set (e.g. shell.execute drops out the instant Docker stops, and reappears
+    the instant it's ready again) — unlike registration.capabilities, which is
+    only refreshed on gateway.connect (see gateway_state_repository.py's
+    update_gateway_registration_state `capabilities` kwarg, only ever passed
+    from the connect handler)."""
+    aliases = execution_capability_aliases(capability_id)
+    if not aliases or not isinstance(metadata, dict):
+        return False
+    readiness = metadata.get("capability_readiness")
+    if not isinstance(readiness, dict):
+        return False
+    requested = readiness.get("requested")
+    if not isinstance(requested, list):
+        return False
+    requested_ids = {_text(item, "").lower() for item in requested if _text(item, "")}
+    return bool(requested_ids.intersection(aliases))
+
+
+def capability_requested_from_any_metadata(capability_id: Any, *sources: Optional[Dict[str, Any]]) -> bool:
+    return any(
+        capability_requested_from_metadata(source, capability_id)
+        for source in sources
+        if isinstance(source, dict)
+    )
+
+
 def inventory_from_metadata(*sources: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for source in sources:
         if not isinstance(source, dict):
