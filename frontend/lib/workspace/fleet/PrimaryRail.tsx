@@ -476,36 +476,33 @@ export function PrimaryRail({
         })}
       </nav>
 
-      {/* Ask AI + Shortcuts — moved here (2026-07) from a floating
-          bottom-right corner pair that, on mobile, sat directly on top of
-          the chat composer's Send button and blocked it. Deliberately does
-          NOT close the mobile drawer when either panel opens: both panels
-          are DOM descendants of .fleet-rail, so on mobile they inherit the
-          rail's own z-index:70 (above the scrim's 65) automatically without
-          needing to out-rank it themselves. Closing the drawer on the same
-          click would instead be actively wrong — .fleet-rail's slide
-          animation is a `transform`, which reparents any position:fixed
-          descendant's containing block to the rail itself, so a closing
-          (translating-away) drawer would carry a just-opened fixed panel
-          off-screen with it. Leaving the drawer open and letting the panel
-          render within it sidesteps that entirely. */}
+      {/* Ask AI — moved here (2026-07) from a floating bottom-right corner
+          spot that, on mobile, sat directly on top of the chat composer's
+          Send button and blocked it. Deliberately does NOT close the mobile
+          drawer when the panel opens: it's a DOM descendant of .fleet-rail,
+          so on mobile it inherits the rail's own z-index:70 (above the
+          scrim's 65) automatically without needing to out-rank it itself.
+          Closing the drawer on the same click would instead be actively
+          wrong — .fleet-rail's slide animation is a `transform`, which
+          reparents any position:fixed descendant's containing block to the
+          rail itself, so a closing (translating-away) drawer would carry a
+          just-opened fixed panel off-screen with it. Leaving the drawer open
+          and letting the panel render within it sidesteps that entirely. */}
       <div className="fleet-rail-utility">
         <SageLauncher workspaceId={workspaceId} open={sageOpen} onOpen={onOpenSage} onClose={onCloseSage} />
       </div>
 
+      {/* System health + Bug report only — Theme and Keyboard shortcuts used
+          to sit here too, but a display toggle and a static shortcuts
+          reference are each set-once/looked-up-occasionally, not something
+          that earns equal billing with live paired-computer/gateway status
+          in the rail's permanent daily row (CLAUDE.md: "most configuration
+          is set once and does not deserve equal billing with the things
+          people look at daily"). Both moved into the account menu below
+          (2026-08) as additional popover rows. */}
       <div className="fleet-rail-controls">
-        <button
-          type="button"
-          className="fleet-rail-control-btn"
-          onClick={onToggleTheme}
-          title={theme === "dark" ? "Switch to light" : "Switch to dark"}
-          aria-label="Toggle theme"
-        >
-          {theme === "dark" ? <Sun size={CONTROL_ICON} strokeWidth={1.75} /> : <Moon size={CONTROL_ICON} strokeWidth={1.75} />}
-        </button>
         <SystemHealthButton workspaceId={workspaceId} />
         <BugReportButton workspaceId={workspaceId} />
-        <FleetHelpButton asControl />
       </div>
 
       {!effectiveCollapsed && (
@@ -522,6 +519,8 @@ export function PrimaryRail({
         ownerEmail={ownerEmail}
         ownerRole={ownerRole}
         collapsed={effectiveCollapsed}
+        theme={theme}
+        onToggleTheme={onToggleTheme}
       />
     </aside>
   );
@@ -535,12 +534,16 @@ function AccountMenu({
   ownerEmail,
   ownerRole,
   collapsed,
+  theme,
+  onToggleTheme,
 }: {
   workspaceId: string;
   ownerName: string;
   ownerEmail: string;
   ownerRole: string;
   collapsed: boolean;
+  theme: FleetTheme;
+  onToggleTheme: () => void;
 }) {
   const { actions: accountShellActions } = useAccountShell();
   const [open, setOpen] = useState(false);
@@ -602,6 +605,16 @@ function AccountMenu({
             <BarChart3 size={14} strokeWidth={1.75} />
             Usage
           </Link>
+          <button
+            type="button"
+            className="fleet-rail-account-popover-row"
+            role="menuitem"
+            onClick={onToggleTheme}
+          >
+            {theme === "dark" ? <Sun size={14} strokeWidth={1.75} /> : <Moon size={14} strokeWidth={1.75} />}
+            {theme === "dark" ? "Switch to light" : "Switch to dark"}
+          </button>
+          <FleetHelpButton />
           <button
             type="button"
             className="fleet-rail-account-popover-row"

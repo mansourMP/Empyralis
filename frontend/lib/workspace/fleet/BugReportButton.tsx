@@ -29,11 +29,10 @@ async function submitBugReport(
 
 /**
  * "Report a bug" rail control (MAN-106) -- a small icon button living in
- * .fleet-rail-controls alongside the theme toggle, System health, and
- * Shortcuts (see PrimaryRail.tsx and SystemHealthButton.tsx/
- * FleetHelpButton.tsx, the two closest siblings this deliberately copies:
+ * .fleet-rail-controls alongside System health (see PrimaryRail.tsx and
+ * SystemHealthButton.tsx, the closest sibling this deliberately copies:
  * same anchored-popover-off-an-icon-button idiom, not a new modal/dialog
- * pattern). Unlike those two, the popover here is a small form rather than
+ * pattern). Unlike that one, the popover here is a small form rather than
  * a read-only panel -- title + description, submitted to
  * POST /api/w/{workspaceId}/fleet/bug-reports, which persists a durable row
  * in the `bug_reports` table (server_modules/bug_report_service.py). No
