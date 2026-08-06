@@ -72,9 +72,10 @@ function relativeHeartbeatAge(seconds: number | null | undefined): string {
  * beyond current in-memory state). The note at the bottom says so instead of
  * faking a number.
  *
- * Placed in .fleet-rail-controls next to the theme toggle and Shortcuts,
- * the rail's existing home for global, always-available controls — same
- * icon-button + popover pattern as FleetHelpButton.
+ * Placed in .fleet-rail-controls next to Bug report — the rail's remaining
+ * home for a control that has to stay visible at all times, unlike the
+ * theme toggle and Shortcuts, which moved into the account menu popover
+ * (2026-08) as a set-once/looked-up-occasionally pair.
  */
 export function SystemHealthButton({ workspaceId }: { workspaceId: string }) {
   const [open, setOpen] = useState(false);

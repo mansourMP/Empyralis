@@ -879,15 +879,16 @@ a.fleet-breadcrumb:hover {
   pointer-events: auto;
 }
 
-/* Ask AI + Shortcuts — pinned to the bottom of the rail, directly above the
-   theme/collapse controls. margin-top:auto lives here (not on
+/* Ask AI — pinned to the bottom of the rail, directly above the system
+   health/bug report controls. margin-top:auto lives here (not on
    .fleet-rail-controls below, which used to carry it) so this row leads the
    whole trailing footer cluster (utility → controls → pulse → owner) that
    gets pushed to the bottom of .fleet-rail's flex column. Same border-top
    treatment as .fleet-rail-owner below, marking it as its own group
-   distinct from the nav list above. Buttons inside compose .fleet-rail-item
-   for identical row styling/hover/collapsed behavior — see SageLauncher.tsx
-   and FleetHelpButton.tsx. */
+   distinct from the nav list above. The button inside composes
+   .fleet-rail-item for identical row styling/hover/collapsed behavior —
+   see SageLauncher.tsx. (Shortcuts used to live in this row too;
+   FleetHelpButton.tsx now renders inside the account menu popover instead.) */
 .fleet-rail-utility {
   display: flex;
   flex-direction: column;
@@ -935,15 +936,6 @@ a.fleet-breadcrumb:hover {
 .fleet-rail-control-btn.is-active {
   background: var(--rail-active);
   color: var(--text-primary);
-}
-
-/* Shortcuts help button in control mode: fills its half of the controls row
-   symmetrically with the theme toggle, while still anchoring its popover. */
-.fleet-help-float--control {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  position: relative;
 }
 
 /* U3-G footer pulse — one whisper-quiet line of fleet vitals above the
@@ -1010,8 +1002,8 @@ a.fleet-breadcrumb:hover {
   padding: 16px 8px 0;
   border-top: 1px solid var(--border);
   /* Same z-index heritage as .fleet-sage-launcher / .fleet-health-float /
-     .fleet-bugreport-float / .fleet-help-float above: position:relative
-     alone doesn't create a stacking context (z-index stays "auto"), so
+     .fleet-bugreport-float above: position:relative alone doesn't create a
+     stacking context (z-index stays "auto"), so
      without an explicit value here .fleet-rail-account-popover's own
      z-index:10 was being compared against THOSE wrappers' z-index:20 one
      level up — and losing. The popover's fill is opaque (var(--bg-card)),
@@ -1165,40 +1157,30 @@ a.fleet-breadcrumb:hover {
   padding: 4px 10px;
 }
 
-/* ── Shortcuts rail row (formerly a floating "?", Linear-style bottom-right) ── */
-/* Trigger button composes .fleet-rail-item for row layout, hover, and
-   collapsed-rail (icon-only) treatment — see FleetHelpButton.tsx. Only the
-   wrapper's positioning and the popover's anchor live here. */
+/* ── Keyboard shortcuts row (account menu popover) ── */
+/* FleetHelpButton.tsx renders as one more .fleet-rail-account-popover-row,
+   plus an inline expand — no second floating popover nested inside this
+   one. The chevron mirrors .fleet-rail-subnav-toggle's rotate-on-expand
+   idiom (100-150ms ease-out, state-change only). */
 
-.fleet-help-float {
-  position: relative;
-  width: 100%;
-  /* UI Contract §7 heritage: needed z-index:20 to clear an open properties
-     drawer/scrim while this floated over the page at bottom-right. Kept at
-     the same value now that it's a rail row, so .fleet-help-popover (an
-     absolute child) still paints above .fleet-shell-panel's content —
-     same reasoning as .fleet-sage-launcher below. */
-  z-index: 20;
-}
-
-.fleet-help-popover {
-  position: absolute;
-  bottom: calc(100% + 10px);
-  left: 0;
-  width: 220px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  box-shadow: 0 12px 32px -12px rgba(0, 0, 0, 0.4);
-  padding: 10px;
-  animation: fleet-fade var(--dur-2) var(--ease-out);
-}
-
-.fleet-help-popover-title {
-  font-size: 12px;
-  font-weight: 500;
+.fleet-rail-account-popover-chevron {
+  margin-left: auto;
   color: var(--text-muted);
-  padding: 2px 4px 8px;
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.fleet-rail-account-popover-chevron.is-expanded {
+  transform: rotate(90deg);
+}
+
+.fleet-rail-account-popover-subgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* Indents under the row's own label — 10px row padding + 14px icon + 10px
+     gap, so the shortcut list reads as a sub-group of "Keyboard shortcuts"
+     rather than a sibling row at the same level as Settings/Usage. */
+  padding: 2px 10px 4px 34px;
 }
 
 .fleet-help-popover-row {
@@ -1222,10 +1204,10 @@ a.fleet-breadcrumb:hover {
 }
 
 /* ── System health rail control (MAN-107) ── */
-/* Same icon-button + anchored-popover pattern as .fleet-help-float above,
-   but lives directly in .fleet-rail-controls (not .fleet-rail-utility) since
-   it's a control-mode-only surface, not also a full nav row — no
-   `asControl`-less variant exists for this one. */
+/* Same icon-button + anchored-popover pattern as .fleet-bugreport-float
+   below — a permanent rail control, not a menu row, since paired-computer/
+   gateway status is the one bottom-cluster item that stays live and visible
+   at all times (see PrimaryRail.tsx's .fleet-rail-controls comment). */
 
 .fleet-health-float {
   position: relative;
@@ -1315,10 +1297,10 @@ a.fleet-breadcrumb:hover {
 }
 
 /* ── Report a bug rail control (MAN-106) ── */
-/* Same icon-button + anchored-popover pattern as .fleet-help-float/
-   .fleet-health-float above, but the popover holds a small form instead of
-   a read-only panel. Buttons inside reuse the shared .fleet-btn/.fleet-
-   btn--accent system rather than inventing a one-off style. */
+/* Same icon-button + anchored-popover pattern as .fleet-health-float above,
+   but the popover holds a small form instead of a read-only panel. Buttons
+   inside reuse the shared .fleet-btn/.fleet-btn--accent system rather than
+   inventing a one-off style. */
 
 .fleet-bugreport-float {
   position: relative;
@@ -1404,7 +1386,7 @@ a.fleet-breadcrumb:hover {
      surface, not a "floating bubble"), which needs to stay above the
      properties drawer (z-index 30) like any other active dialog — the
      .is-open bump below restores that specifically while open. Same
-     z-index heritage as .fleet-help-float above. */
+     z-index heritage as .fleet-health-float above. */
   z-index: 20;
 }
 
@@ -7802,7 +7784,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
      matter which of those dismissal paths fired, instead of chasing each
      one to also close the panel's React state. */
   .fleet-rail:not(.fleet-rail--mobile-open) .fleet-sage-console,
-  .fleet-rail:not(.fleet-rail--mobile-open) .fleet-help-popover,
   .fleet-rail:not(.fleet-rail--mobile-open) .fleet-health-popover {
     display: none;
   }

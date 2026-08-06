@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { HelpCircle } from "lucide-react";
+import { useState } from "react";
+import { ChevronRight, HelpCircle } from "lucide-react";
 
 // One row per chord that actually works. The `g`-chords are driven by
 // PrimaryRail's RAIL_ITEMS — if a destination isn't in the rail, there is no
@@ -19,41 +19,44 @@ const SHORTCUTS: { keys: string; label: string }[] = [
 ];
 
 /**
- * "Shortcuts" rail row, rendered directly below Ask AI at the bottom of
- * PrimaryRail's nav (the fleet-rail-utility group in PrimaryRail.tsx). Its
- * popover is the real keyboard-shortcut reference this app already has
- * (the `g`-then-key chords, j/k, Cmd+K), not a placeholder.
+ * "Keyboard shortcuts" row inside the account menu popover (see AccountMenu
+ * in PrimaryRail.tsx) — the real shortcut reference this app already has
+ * (the `g`-then-key chords, j/k, Cmd+K), not a placeholder. Expands inline,
+ * beneath its own row, rather than opening a second floating popover: it
+ * already lives inside one (the account popover), and a popover-on-a-popover
+ * reads as a bug, not a feature.
  *
- * Was previously a floating "?" pinned to the bottom-right corner of the
- * content area; moved into the rail alongside Ask AI because on mobile that
- * floating pair sat directly on top of the chat composer's Send button.
+ * Previously a standalone control in the rail's permanent bottom-cluster row
+ * (its own floating panel, always visible next to Theme/Activity/Bug
+ * report). Folded into the account menu 2026-08, alongside the theme
+ * toggle — a static shortcuts reference is exactly the kind of set-once,
+ * looked-up-occasionally surface CLAUDE.md calls out as not deserving equal
+ * billing with the things people look at daily.
  */
-export function FleetHelpButton({ asControl = false }: { asControl?: boolean } = {}) {
+export function FleetHelpButton() {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (ref.current?.contains(event.target as Node)) return;
-      setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
 
   return (
-    <div ref={ref} className={`fleet-help-float${asControl ? " fleet-help-float--control" : ""}`}>
+    <>
+      <button
+        type="button"
+        className="fleet-rail-account-popover-row"
+        role="menuitem"
+        aria-haspopup="true"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        title="Keyboard shortcuts"
+      >
+        <HelpCircle size={14} strokeWidth={1.75} />
+        Keyboard shortcuts
+        <ChevronRight
+          size={13}
+          strokeWidth={2}
+          className={`fleet-rail-account-popover-chevron${open ? " is-expanded" : ""}`}
+        />
+      </button>
       {open && (
-        <div className="fleet-help-popover" role="menu" aria-label="Keyboard shortcuts">
-          <div className="fleet-help-popover-title">Keyboard shortcuts</div>
+        <div className="fleet-rail-account-popover-subgroup" role="group" aria-label="Keyboard shortcuts">
           {SHORTCUTS.map((s) => (
             <div key={s.label} className="fleet-help-popover-row">
               <span>{s.label}</span>
@@ -62,24 +65,6 @@ export function FleetHelpButton({ asControl = false }: { asControl?: boolean } =
           ))}
         </div>
       )}
-      <button
-        type="button"
-        className={
-          asControl
-            ? `fleet-rail-control-btn${open ? " is-active" : ""}`
-            : `fleet-rail-item fleet-help-float-btn${open ? " fleet-rail-item--active" : ""}`
-        }
-        onClick={() => setOpen((v) => !v)}
-        title="Keyboard shortcuts"
-        aria-label="Keyboard shortcuts"
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <span className="fleet-rail-item-icon">
-          <HelpCircle size={16} strokeWidth={1.75} />
-        </span>
-        {!asControl && <span className="fleet-rail-item-label">Shortcuts</span>}
-      </button>
-    </div>
+    </>
   );
 }
