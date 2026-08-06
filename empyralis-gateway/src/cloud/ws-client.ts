@@ -49,6 +49,28 @@ import {
 import { collectResourceMetrics } from "../health/resource-metrics";
 
 /**
+ * MAN-309: how much slack a single heartbeat ack gets over the negotiated
+ * heartbeat interval before it counts as a failure. Was accidentally
+ * ~2x (10_000ms interval vs. this.config.heartbeatIntervalMs's stale
+ * 20_000ms default, which requestTimeoutMsFor() used as an unrelated
+ * timeout floor — see that function below) with no relationship to the
+ * ACTUAL server-negotiated cadence; that made a routine dead-connection
+ * detection ~50s instead of the ~40s the interval was tuned for (see
+ * gateway_registry_service.py's DEFAULT_GATEWAY_HEARTBEAT_INTERVAL_SECONDS
+ * comment: "At 10s that detection window roughly halves to ~40s, inside the
+ * [dispatch] deadline"). 1.5x is a deliberate choice, not the accidental
+ * ~2x: with maxConsecutiveFailures: 2 and a 10s interval, 2 consecutive
+ * misses at 1.5x slack lands around (10s*1.5) + 10s + (10s*1.5) ≈ 40s —
+ * back inside that documented deadline — while still giving each single
+ * attempt 50% more time than the raw interval, enough to absorb one GC
+ * pause or load spike without tripping a healthy connection. Going higher
+ * (or raising maxConsecutiveFailures instead, see its call site in
+ * connect()) would push total detection past the ~40s deadline the 20s->10s
+ * interval change was specifically made to get under.
+ */
+const HEARTBEAT_ACK_SLACK_FACTOR = 1.5;
+
+/**
  * Message types that are safe to replay automatically.
  * Only idempotent read-like or declarative state updates.
  */
@@ -142,6 +164,13 @@ export class GatewayWsClient {
   private socketFailureReason: string | null = null;
   private _connectionStartedAt: number | null = null;
   private _lastHeartbeatResponseAt: number | null = null;
+  // MAN-309: the backend's actual, session-negotiated heartbeat cadence
+  // (session.heartbeat_interval_seconds * 1000 from the most recent
+  // gateway.connect), set in connect() below. requestTimeoutMsFor() prefers
+  // this over the static this.config.heartbeatIntervalMs default so the
+  // per-heartbeat ack budget tracks what the server actually asked for
+  // instead of an unrelated env-configured value that can drift from it.
+  private _activeHeartbeatIntervalMs: number | null = null;
   private passiveInventorySnapshot: PassiveInventorySnapshot | null = null;
   private passiveInventoryRefresh: Promise<void> | null = null;
 
@@ -253,6 +282,14 @@ export class GatewayWsClient {
     runtimeMetadata: GatewayRuntimeMetadata,
   ): Promise<GatewaySessionPayload> {
     const session = await this.createSession(identity.gatewayId);
+    // MAN-309: track the server-negotiated cadence as soon as it's known —
+    // see _activeHeartbeatIntervalMs's doc comment and requestTimeoutMsFor()
+    // below for why this floor must track the real session value instead of
+    // the static config default.
+    const negotiatedIntervalMs = Math.round(Number(session.heartbeat_interval_seconds) * 1000);
+    if (Number.isFinite(negotiatedIntervalMs) && negotiatedIntervalMs > 0) {
+      this._activeHeartbeatIntervalMs = negotiatedIntervalMs;
+    }
     try {
       const wsUrl = assertWebSocketUrl(session.ws_url);
       this.socket = await this.openSocket(wsUrl, session.session_token);
@@ -514,7 +551,12 @@ export class GatewayWsClient {
       {
         replayable: false,
         persistOutbox: false,
-        timeoutMs: this.requestTimeoutMsFor("gateway.heartbeat", this.config.heartbeatIntervalMs),
+        // MAN-309: no explicit override here — this.config.heartbeatIntervalMs
+        // used to be passed directly, which is the same stale/unrelated
+        // config default requestTimeoutMsFor()'s own minimum now replaces
+        // with the tracked, server-negotiated interval. Passing it here too
+        // would re-introduce the drift through a second path.
+        timeoutMs: this.requestTimeoutMsFor("gateway.heartbeat"),
       },
     );
     this._lastHeartbeatResponseAt = Date.now();
@@ -984,7 +1026,18 @@ export class GatewayWsClient {
     messageType: GatewayRequestEnvelope["type"],
     explicitTimeoutMs?: number,
   ): number {
-    const minimum = Math.max(this.config.heartbeatIntervalMs, 10_000);
+    // MAN-309: prefer the server-negotiated heartbeat interval (with
+    // HEARTBEAT_ACK_SLACK_FACTOR headroom) over the static config default
+    // as the floor for every timeout computed here — see
+    // _activeHeartbeatIntervalMs's doc comment for why the config default
+    // drifting from the real cadence silently doubled the per-heartbeat ack
+    // budget. Falls back to the config default only before any session has
+    // negotiated a real interval (this process's very first connect
+    // attempt).
+    const negotiatedFloor = this._activeHeartbeatIntervalMs !== null
+      ? Math.round(this._activeHeartbeatIntervalMs * HEARTBEAT_ACK_SLACK_FACTOR)
+      : this.config.heartbeatIntervalMs;
+    const minimum = Math.max(negotiatedFloor, 10_000);
     if (Number.isFinite(explicitTimeoutMs) && Number(explicitTimeoutMs) > 0) {
       return Math.max(Number(explicitTimeoutMs), minimum);
     }
