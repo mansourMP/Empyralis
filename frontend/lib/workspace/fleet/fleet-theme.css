@@ -6535,9 +6535,20 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    cap (max-width var(--content-max) + margin-inline auto). That cap is right
    for text tabs (Overview/Model/…), but it was centering the Work split to
    820px inside a ~1050px body — leaving the big left+right gaps that made it
-   read nothing like the flush Inbox. The two-pane wants the FULL width. */
+   read nothing like the flush Inbox. The two-pane wants the FULL width.
+   The Chat tab (.fleet-agent-chat-panel) gets the same width opt-out, for
+   the same reason — the 820px reading cap was capping and centering the
+   chat column INSIDE a body that's already narrowed by the real Properties
+   flex sibling beside it (.fleet-detail-columns/.fleet-detail-properties —
+   see their own comments above), so on anything wider than about 1050px it
+   left dead horizontal space between the chat column and the Properties
+   panel's left edge. Unlike Work/Memory it keeps .fleet-detail-body's own
+   28px padding (no :has() padding:0 override above) — the composer's own
+   margin already gives it deliberate breathing room, not a flush edge-to-
+   edge two-pane layout. */
 .fleet-detail-body > .fleet-work-root,
-.fleet-detail-body > .fleet-memory-browser {
+.fleet-detail-body > .fleet-memory-browser,
+.fleet-detail-body > .fleet-agent-chat-panel {
   max-width: none;
   margin-inline: 0;
   width: 100%;
@@ -7347,6 +7358,23 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--bg-card);
+  transition: border-color var(--dur-1) var(--ease-out);
+}
+/* Single, calm focus treatment for the whole composer — not the textarea's
+   own outline. Two global rules (.fleet-root *:focus-visible's 2px accent
+   outline, offset 2px, AND globals.css' app-wide :focus-visible box-shadow,
+   also accent, hugging tight) used to BOTH fire on the textarea whenever it
+   was focused — i.e. every time you typed — stacking into a thick doubled
+   accent ring (an outer ring with a gap, an inner one without). That reads
+   as an error/invalid state, not "you're typing," and spends the one accent
+   colour this row reserves for Send (CLAUDE.md: one accent colour, spent on
+   the single primary action). Suppressed below on the textarea itself;
+   replaced by a neutral, single-rule border-color shift on the container —
+   still clearly visible for keyboard users (never bare `outline: none` with
+   nothing to replace it), still collapses under prefers-reduced-motion (the
+   .fleet-root * rule above already zeroes transition-duration). */
+.fleet-sage-chat-composer:focus-within {
+  border-color: var(--border-strong);
 }
 .fleet-sage-chat-input {
   width: 100%;
@@ -7360,6 +7388,10 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   line-height: 1.5;
   max-height: 200px;
   padding: var(--space-2) var(--space-2) 4px;
+}
+.fleet-sage-chat-input:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 .fleet-sage-chat-input::placeholder { color: var(--text-muted); }
 .fleet-agent-composer-attachments {
@@ -7413,14 +7445,16 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 /* Compact model/reasoning-effort chips in the composer row — same idiom as
    .fleet-model-picker-trigger (Properties panel) but sized for a dense
-   control row rather than a property row. */
+   control row rather than a property row. Widened from 140 to 160px to fit
+   the merged "{Tier} · {Reasoning}" label (e.g. "Pro · Extra high") plus its
+   chevron without truncating the common cases. */
 .fleet-composer-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   height: 28px;
   padding: 0 8px;
-  max-width: 140px;
+  max-width: 160px;
   border: 1px solid transparent;
   border-radius: var(--radius-control);
   background: transparent;
@@ -7435,25 +7469,12 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.fleet-composer-chip-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
 .fleet-composer-chip:hover,
 .fleet-composer-chip.is-active {
-  color: var(--text-primary);
-  background: var(--bg-card-hover);
-  border-color: var(--border);
-}
-.fleet-composer-reasoning-select {
-  height: 28px;
-  padding: 0 6px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-  max-width: 108px;
-}
-.fleet-composer-reasoning-select:hover {
   color: var(--text-primary);
   background: var(--bg-card-hover);
   border-color: var(--border);
@@ -7548,11 +7569,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.03em;
-}
-.fleet-context-usage-empty {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-  margin: 0;
 }
 .fleet-context-usage-model {
   font-size: var(--text-sm);

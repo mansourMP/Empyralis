@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ArrowUp, Loader2, Paperclip, X, type LucideIcon } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, Loader2, Paperclip, X, type LucideIcon } from "lucide-react";
 
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -18,6 +18,7 @@ import {
   PLATFORM_CREDITS_TIER_OPTIONS,
   PLATFORM_CREDITS_MODEL_BY_TIER,
   PLATFORM_CREDITS_PROVIDER,
+  PLATFORM_CREDITS_TIER_SUPPORTS_REASONING,
   platformCreditsTierForModel,
 } from "./fleet-model-config";
 import {
@@ -25,6 +26,7 @@ import {
   REASONING_EFFORT_SUPPORTED_MODES,
   CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME,
   normalizeCliRuntime,
+  reasoningEffortLabel,
   runtimeForProvider,
 } from "./fleet-provider-constants";
 
@@ -263,16 +265,28 @@ async function uploadChatAttachment(workspaceId: string, file: File): Promise<Pe
   return res.json();
 }
 
-// ── Composer's compact model control ────────────────────────────────────────
+// ── Composer's compact model + reasoning-effort control ─────────────────────
 //
-// Only platform_credits gets a REAL inline picker here — a genuine
-// two-option choice (Flash/Pro), same PLATFORM_CREDITS_TIER_OPTIONS the
-// Properties panel's picker and the Model tab use, so this can never show a
-// different tier than either of those for the same agent. byok_api/
-// cli_subscription/local need substantially more setup (API keys, gateway
-// pairing) that doesn't belong in a chat footer — those keep linking to the
-// full Model tab editor, same as the old toolbar chip did for every mode.
-function ComposerModelControl({
+// ONE trigger, ONE popover — a single merged "Model" + "Reasoning effort"
+// picker, not two adjacent controls. They used to be separate (a tier-picker
+// popover next to a native <select>), and the two could visually collide:
+// the select's own hover tooltip rendered on top of the tier popover's card
+// text whenever both were live at once. Merging them into one popover makes
+// that collision structurally impossible — there is only ever one open
+// surface here.
+//
+// Only platform_credits gets the REAL inline picker — a genuine two-option
+// tier choice (Flash/Pro, same PLATFORM_CREDITS_TIER_OPTIONS the Properties
+// panel's picker and the Model tab use, so this can never show a different
+// tier than either of those for the same agent) plus, when the selected
+// tier actually supports it, a reasoning-effort section in the SAME
+// popover. byok_api/cli_subscription/local need substantially more setup
+// (API keys, gateway pairing) that doesn't belong in a chat footer — those
+// keep linking to the full Model tab editor, same as before; their own
+// reasoning-effort control (when they have one) renders as the standalone
+// ComposerReasoningEffortControl below instead, since there's no tier
+// popover for it to merge into.
+function ComposerModelReasoningControl({
   workspaceId,
   agentId,
   agent,
@@ -310,24 +324,49 @@ function ComposerModelControl({
     };
   }, [open]);
 
-  async function pick(tier: "flash" | "pro") {
+  const tier = platformCreditsTierForModel(config.model);
+  const reasoningSupported = PLATFORM_CREDITS_TIER_SUPPORTS_REASONING[tier];
+  const reasoningValue = config.reasoning_effort || "";
+
+  async function pickTier(nextTier: "flash" | "pro") {
     setSaving(true);
     try {
       await saveAgentModelConfig(workspaceId, agentId, config, agent.label, {
         mode: "platform_credits",
         provider: PLATFORM_CREDITS_PROVIDER,
-        selectedModel: PLATFORM_CREDITS_MODEL_BY_TIER[tier],
+        selectedModel: PLATFORM_CREDITS_MODEL_BY_TIER[nextTier],
         apiKey: "",
         gatewayBinding: "",
-        reasoningEffort: config.reasoning_effort || "",
+        // Flash has no reasoning-effort vocabulary at all (no dead value
+        // carried into a mode that can't use it) — only Pro keeps whatever
+        // was already set.
+        reasoningEffort: PLATFORM_CREDITS_TIER_SUPPORTS_REASONING[nextTier] ? reasoningValue : "",
       });
-      setOpen(false);
       onSaved?.();
     } catch {
       // Best-effort — the trigger keeps showing the last-known value; a
       // failed save just leaves the popover open with nothing changed, so
       // the owner notices and can retry, same trade-off the Properties
       // panel's own picker makes.
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function pickReasoning(value: string) {
+    setSaving(true);
+    try {
+      await saveAgentModelConfig(workspaceId, agentId, config, agent.label, {
+        mode: "platform_credits",
+        provider: PLATFORM_CREDITS_PROVIDER,
+        selectedModel: config.model || PLATFORM_CREDITS_MODEL_BY_TIER[tier],
+        apiKey: "",
+        gatewayBinding: "",
+        reasoningEffort: value,
+      });
+      onSaved?.();
+    } catch {
+      // Best-effort, same trade-off as pickTier above.
     } finally {
       setSaving(false);
     }
@@ -345,6 +384,9 @@ function ComposerModelControl({
     );
   }
 
+  const tierLabel = PLATFORM_CREDITS_TIER_OPTIONS.find((o) => o.tier === tier)?.label || resolvedModel;
+  const triggerLabel = reasoningSupported ? `${tierLabel} · ${reasoningEffortLabel(reasoningValue)}` : tierLabel;
+
   return (
     <div className="fleet-view-options" ref={ref}>
       <button
@@ -354,42 +396,75 @@ function ComposerModelControl({
         disabled={saving}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title="Change this agent's speed"
+        title={`${agent.label || "This agent"}'s model and reasoning effort`}
       >
-        <span>{resolvedModel}</span>
+        <span>{triggerLabel}</span>
+        <ChevronDown size={12} strokeWidth={2} className="fleet-composer-chip-chevron" />
       </button>
       {open && (
-        <div className="fleet-toolbar-popover fleet-composer-popover" role="dialog" aria-label="Change speed">
-          <div className="fleet-toolbar-popover-label">Speed</div>
-          <div className="fleet-tier-picker">
-            {PLATFORM_CREDITS_TIER_OPTIONS.map((opt) => {
-              const isSelected = platformCreditsTierForModel(config.model) === opt.tier;
-              return (
-                <button
-                  key={opt.tier}
-                  type="button"
-                  className={`fleet-tier-picker-option${isSelected ? " is-selected" : ""}`}
-                  onClick={() => void pick(opt.tier)}
-                  disabled={saving}
-                  aria-pressed={isSelected}
-                >
-                  <span className="fleet-tier-picker-option-label">{opt.label}</span>
-                  <span className="fleet-tier-picker-option-subtitle">{opt.subtitle}</span>
-                </button>
-              );
-            })}
+        <div className="fleet-toolbar-popover fleet-composer-popover" role="dialog" aria-label="Model and reasoning effort">
+          <div className="fleet-toolbar-popover-group">
+            <div className="fleet-toolbar-popover-label">Model</div>
+            <div className="fleet-tier-picker">
+              {PLATFORM_CREDITS_TIER_OPTIONS.map((opt) => {
+                const isSelected = tier === opt.tier;
+                return (
+                  <button
+                    key={opt.tier}
+                    type="button"
+                    className={`fleet-tier-picker-option${isSelected ? " is-selected" : ""}`}
+                    onClick={() => void pickTier(opt.tier)}
+                    disabled={saving}
+                    aria-pressed={isSelected}
+                  >
+                    <span className="fleet-tier-picker-option-label">{opt.label}</span>
+                    <span className="fleet-tier-picker-option-subtitle">{opt.subtitle}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
+          {/* No dead controls: Flash has no reasoning-effort vocabulary at
+              all, so this section simply isn't rendered while it's picked —
+              never a disabled/empty picker underneath the tier cards. */}
+          {reasoningSupported && (
+            <div className="fleet-toolbar-popover-group">
+              <div className="fleet-toolbar-popover-label">Reasoning effort</div>
+              {REASONING_EFFORT_OPTIONS.map((o) => {
+                const isSelected = reasoningValue === o.value;
+                return (
+                  <button
+                    key={o.value || "unset"}
+                    type="button"
+                    className={`fleet-toolbar-popover-option${isSelected ? " is-selected" : ""}`}
+                    onClick={() => void pickReasoning(o.value)}
+                    disabled={saving}
+                    aria-pressed={isSelected}
+                  >
+                    <span className="fleet-toolbar-popover-option-check">
+                      {isSelected ? <Check size={13} strokeWidth={2} /> : null}
+                    </span>
+                    {o.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-// ── Composer's compact reasoning-effort control ─────────────────────────────
+// ── Composer's standalone reasoning-effort control ──────────────────────────
 //
-// Standalone (not nested inside the model control's popover) per the target
-// composer layout: attach, model, reasoning effort, context usage, send —
-// five peer controls in one row. Renders nothing for a mode with no
+// Only reached for byok_api/cli_subscription — platform_credits' reasoning
+// effort lives inside ComposerModelReasoningControl's merged popover above,
+// since that mode already has a tier popover to merge into. These modes
+// don't (their model control is a plain Link to the Model tab, per
+// ComposerModelReasoningControl), so this is its own small trigger +
+// popover — same "no native select next to custom cards" fix, just with
+// nothing else to merge into. Renders nothing for a mode/runtime with no
 // reasoning-effort vocabulary at all (local, or a cli_subscription runtime
 // with none published — cursor_cli) rather than a disabled/dead control.
 function ComposerReasoningEffortControl({
@@ -406,13 +481,32 @@ function ComposerReasoningEffortControl({
   const config = agent.model_config || {};
   const mode = resolveDisplayMode(config);
   const cliRuntime = normalizeCliRuntime(runtimeForProvider(config.provider || ""));
+  const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
 
   const options = mode === "cli_subscription"
     ? CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime]
     : (REASONING_EFFORT_SUPPORTED_MODES.has(mode) ? REASONING_EFFORT_OPTIONS : []);
 
-  async function onChange(value: string) {
+  async function pick(value: string) {
     setSaving(true);
     try {
       await saveAgentModelConfig(workspaceId, agentId, config, agent.label, {
@@ -425,7 +519,7 @@ function ComposerReasoningEffortControl({
       });
       onSaved?.();
     } catch {
-      // Best-effort, same trade-off as ComposerModelControl above.
+      // Best-effort, same trade-off as ComposerModelReasoningControl above.
     } finally {
       setSaving(false);
     }
@@ -433,19 +527,49 @@ function ComposerReasoningEffortControl({
 
   if (options.length === 0) return null;
 
+  const currentValue = config.reasoning_effort || "";
+  const currentLabel = options.find((o) => o.value === currentValue)?.label || reasoningEffortLabel(currentValue);
+
   return (
-    <select
-      className="fleet-composer-reasoning-select"
-      value={config.reasoning_effort || ""}
-      disabled={saving}
-      onChange={(e) => void onChange(e.currentTarget.value)}
-      title="Reasoning effort"
-      aria-label="Reasoning effort"
-    >
-      {options.map((o) => (
-        <option key={o.value || "unset"} value={o.value}>{o.label}</option>
-      ))}
-    </select>
+    <div className="fleet-view-options" ref={ref}>
+      <button
+        type="button"
+        className={`fleet-composer-chip${open ? " is-active" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+        disabled={saving}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title="Reasoning effort"
+      >
+        <span>{currentLabel}</span>
+        <ChevronDown size={12} strokeWidth={2} className="fleet-composer-chip-chevron" />
+      </button>
+      {open && (
+        <div className="fleet-toolbar-popover fleet-composer-popover" role="dialog" aria-label="Reasoning effort">
+          <div className="fleet-toolbar-popover-group">
+            <div className="fleet-toolbar-popover-label">Reasoning effort</div>
+            {options.map((o) => {
+              const isSelected = currentValue === o.value;
+              return (
+                <button
+                  key={o.value || "unset"}
+                  type="button"
+                  className={`fleet-toolbar-popover-option${isSelected ? " is-selected" : ""}`}
+                  onClick={() => void pick(o.value)}
+                  disabled={saving}
+                  aria-pressed={isSelected}
+                >
+                  <span className="fleet-toolbar-popover-option-check">
+                    {isSelected ? <Check size={13} strokeWidth={2} /> : null}
+                  </span>
+                  {o.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -973,14 +1097,18 @@ export function AgentChat({
             )}
           </button>
           {agentInstallId && agent && (
-            <ComposerModelControl
+            <ComposerModelReasoningControl
               workspaceId={workspaceId}
               agentId={agentInstallId}
               agent={agent}
               onSaved={onAgentSaved}
             />
           )}
-          {agentInstallId && agent && (
+          {/* platform_credits' reasoning effort lives INSIDE the merged
+              popover above (it already has a tier popover to merge into) —
+              this standalone control only reaches byok_api/cli_subscription,
+              which have no tier popover of their own. */}
+          {agentInstallId && agent && resolveDisplayMode(agent.model_config || {}) !== "platform_credits" && (
             <ComposerReasoningEffortControl
               workspaceId={workspaceId}
               agentId={agentInstallId}

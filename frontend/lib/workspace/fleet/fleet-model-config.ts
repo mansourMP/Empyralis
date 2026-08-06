@@ -74,6 +74,19 @@ export function platformCreditsTierLabel(model: string | null | undefined): stri
   return platformCreditsTierForModel(model) === "pro" ? "Pro" : "Flash";
 }
 
+/** Whether a platform-credit tier exposes a reasoning-effort control at all —
+ *  mirrors provider_profiles.py's PROVIDER_MODEL_CATALOG "deepseek" entries'
+ *  own supports_reasoning flag (deepseek-v4-flash: False, deepseek-v4-pro:
+ *  True — Flash has no reasoning_levels at all). The composer's merged
+ *  model+reasoning-effort popover reads this to decide whether the
+ *  "Reasoning effort" section renders for the currently selected tier —
+ *  "no dead controls" (CLAUDE.md): Flash never offered a real choice here,
+ *  so the picker must not offer one either. */
+export const PLATFORM_CREDITS_TIER_SUPPORTS_REASONING: Record<PlatformCreditsTier, boolean> = {
+  flash: false,
+  pro: true,
+};
+
 // ── Model summary (read side) ───────────────────────────────────────────────
 
 export function resolveDisplayMode(config: Record<string, any>): ProviderMode {
