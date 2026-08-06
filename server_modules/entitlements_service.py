@@ -195,6 +195,11 @@ class WorkspaceEntitlementState:
     entitlements: Dict[str, Any]
     usage: Dict[str, Any]
     non_gated_capabilities: Dict[str, bool]
+    # workspace_id the state was resolved for (may be "" for ad-hoc/test
+    # states built without a real workspace record). Carried through so
+    # hosted_sage_ai_access_state can check the founder/demo unlimited-
+    # credit allowlist below without an extra DB lookup.
+    workspace_id: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -317,6 +322,25 @@ def _merged_usage(
 
 def _truthy_env(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _unlimited_credit_workspace_ids() -> frozenset[str]:
+    """Founder/demo unlimited-credit workspace allowlist
+    (EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS).
+
+    Comma-separated workspace_ids, read from the environment only — never
+    hardcoded here, never committed. Same comma-split / trimmed /
+    case-insensitive convention as sage_agent_runtime_service.py's
+    EMPYRALIS_PRIMARY_COMPACTION_ENABLED / EMPYRALIS_FORCE_LEGACY_ENGINE env
+    vars. Defaults to empty (disabled) when unset, so this is a no-op for
+    every workspace until someone deliberately sets the var on the server.
+    """
+    raw = os.environ.get("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", "")
+    return frozenset(
+        token.strip().lower()
+        for token in raw.split(",")
+        if token.strip()
+    )
 
 
 def _mobile_beta_override_enabled(*, workspace: Optional[Dict[str, Any]], install: Optional[Dict[str, Any]]) -> bool:
@@ -445,6 +469,7 @@ def resolve_workspace_entitlement_state(
         entitlements=entitlements,
         usage=_merged_usage(workspace, install, billing_usage=billing_usage),
         non_gated_capabilities=dict(NON_GATED_CAPABILITIES),
+        workspace_id=workspace_id,
     )
 
 
@@ -494,6 +519,34 @@ def hosted_sage_ai_access_state(
         monthly_cost_usd=monthly_cost_usd,
         monthly_remaining_usd=remaining_usd,
     )
+
+    # ── Founder/demo unlimited-credit bypass (deliberate, env-gated) ──
+    # NOT a general product feature. Lets a narrow, explicit allowlist of
+    # workspace_ids skip the credit-balance/cap gate entirely, so the
+    # founder's own workspace(s) are never blocked by credit exhaustion
+    # while demoing, testing, or dogfooding the platform. Gated purely by
+    # EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS (see
+    # _unlimited_credit_workspace_ids above) — no workspace_id is
+    # hardcoded in source, and every other workspace's balance/cap check
+    # is completely unaffected: this branch only triggers when that env
+    # var is set on the server AND lists this exact workspace_id.
+    if resolved_state.workspace_id.strip().lower() in _unlimited_credit_workspace_ids():
+        return {
+            "allowed": True,
+            "plan_allows_hosted_ai": plan_allows_hosted_ai,
+            "policy": policy,
+            "monthly_cap_usd": monthly_cap_usd,
+            "monthly_cost_usd": monthly_cost_usd,
+            "monthly_remaining_usd": remaining_usd,
+            "credit_balance_usd": credit_balance_usd,
+            "credit_balance_credits": int(round(credit_balance_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
+            "total_available_usd": total_available_usd,
+            "total_available_credits": int(round(total_available_usd * HOSTED_SAGE_AI_CREDITS_PER_USD)),
+            **credit_fields,
+            "reason": None,
+            "message": None,
+            "unlimited_credit_bypass": True,
+        }
 
     if not plan_allows_hosted_ai:
         return {
