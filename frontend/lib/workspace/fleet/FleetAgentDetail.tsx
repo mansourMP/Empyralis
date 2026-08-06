@@ -8,7 +8,6 @@ import {
   BookOpen,
   Brain,
   Check,
-  ChevronDown,
   ChevronRight,
   Clock,
   Cpu,
@@ -79,7 +78,7 @@ import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { RUNTIME_LABELS } from "./gateway-box-picker";
-import { resolveAgentModelSummary, formatModelSummaryLine, platformCreditsTierLabel } from "./fleet-model-config";
+import { resolveAgentModelSummary, platformCreditsTierLabel } from "./fleet-model-config";
 
 import "./agent-configure-sheet.css";
 
@@ -239,6 +238,100 @@ function CostPeriodToggle({ period, onChange }: { period: CostPeriod; onChange: 
   );
 }
 
+// ── Properties panel's cost breakdown — one row per TIER, not per raw row ──
+//
+// `costMatrix` is raw backend granularity: usage_events_repository.
+// summarize_usage groups by (agent_install_id, provider, model, mode), so a
+// platform-credit agent whose usage was ever recorded under more than one
+// literal `mode` string (e.g. the retired "empyralis_credits"/"empyralis"
+// tokens before "platform_credits" became the one canonical value — see
+// that file's _USAGE_MODE_TO_PAYER) or more than one literal `model` id
+// (the DeepSeek retirement aliases — platformCreditsTierLabel's own doc)
+// comes back as SEVERAL raw rows for what is, to the person looking at this
+// panel, one thing: "this agent's Pro-tier usage." A per-row map (checking
+// `row.payer === "platform_credits"` and rendering each row on its own)
+// fixed the raw-vendor-string leak for any individual row, but never merged
+// rows — an agent whose history crossed that mode rename still showed BOTH
+// "deepseek · deepseek-reasoner $0.0043" (an unattributed row) and
+// "Pro $0.0029" (an attributed one) as two separate lines. Grouped below
+// instead: every row that resolves to a platform-credit tier collapses into
+// ONE row per tier (Flash/Pro), tokens and cost summed across every raw row
+// that contributed to it.
+const PLATFORM_CREDITS_MODE_ALIASES = new Set(["platform_credits", "empyralis_credits", "empyralis"]);
+
+/** Whether a matrix row is platform-credit usage — checked against `payer`
+ *  first (usage_events_repository.summarize_usage already recomputes this
+ *  fresh from the raw `mode` column on every read, via the exact alias set
+ *  mirrored in PLATFORM_CREDITS_MODE_ALIASES above), with a fallback to the
+ *  raw `mode` itself only when `payer` came back missing/"unknown" — belt
+ *  and braces against a backend build that hasn't picked up an alias this
+ *  file already knows about, never a guess beyond these three literal
+ *  tokens. A row whose mode is genuinely something else (blank, or a real
+ *  BYOK/local/subscription mode) stays "unknown"/its own payer and is NOT
+ *  folded into a tier — same honesty rule the backend's own test enforces
+ *  (test_empty_or_missing_mode_is_unknown_not_silently_platform): an
+ *  unattributable row keeps its raw vendor/model name rather than being
+ *  silently merged into someone else's tier total. */
+function isPlatformCreditsUsageRow(row: UsageMatrixRow): boolean {
+  if (row.payer === "platform_credits") return true;
+  if (row.payer && row.payer !== "unknown") return false;
+  return PLATFORM_CREDITS_MODE_ALIASES.has(String(row.mode || "").trim().toLowerCase());
+}
+
+type CostDisplayRow = { key: string; label: string; hint: string; usd_cost: number; pricing_known: boolean };
+
+/** Collapses the raw cost matrix into the rows the Properties panel actually
+ *  renders: platform-credit rows merge into one entry per tier (Flash/Pro),
+ *  everything else (BYOK/local/subscription, or a row that truly can't be
+ *  attributed) passes through one-for-one — real, distinct information
+ *  about who paid, never merged with anyone else's. Sorted by cost
+ *  descending and capped at 5, same as the panel showed before grouping. */
+function buildCostDisplayRows(matrix: UsageMatrixRow[]): CostDisplayRow[] {
+  const tierTotals = new Map<
+    string,
+    { tokens_in: number; tokens_out: number; tokens_cache_read: number; usd_cost: number; pricing_known: boolean }
+  >();
+  const otherRows: CostDisplayRow[] = [];
+  for (const row of matrix) {
+    // Cache read tokens only — cache creation is rare enough (one write per
+    // new prompt prefix, many reads after) that surfacing both would crowd
+    // this single hint line for little signal. Omitted entirely (not
+    // "0 cached") for a row recorded before this dimension existed, or by
+    // an engine that never reports it — the field is optional on
+    // UsageMatrixRow for exactly that.
+    if (isPlatformCreditsUsageRow(row)) {
+      const tier = platformCreditsTierLabel(row.model); // "Flash" | "Pro"
+      const acc = tierTotals.get(tier) || { tokens_in: 0, tokens_out: 0, tokens_cache_read: 0, usd_cost: 0, pricing_known: true };
+      acc.tokens_in += row.tokens_in;
+      acc.tokens_out += row.tokens_out;
+      acc.tokens_cache_read += row.tokens_cache_read || 0;
+      acc.usd_cost += row.usd_cost;
+      acc.pricing_known = acc.pricing_known && row.pricing_known;
+      tierTotals.set(tier, acc);
+    } else {
+      const cacheHint = row.tokens_cache_read ? ` · ${formatNumber(row.tokens_cache_read)} cached` : "";
+      otherRows.push({
+        key: `${row.provider}:${row.model}:${row.mode}`,
+        label: [row.provider, row.model].filter(Boolean).join(" · ") || "Unknown model",
+        hint: `${usagePayerLabel(row.payer)} · ${formatNumber(row.tokens_in)} in / ${formatNumber(row.tokens_out)} out${cacheHint}`,
+        usd_cost: row.usd_cost,
+        pricing_known: row.pricing_known,
+      });
+    }
+  }
+  const tierRows: CostDisplayRow[] = Array.from(tierTotals.entries()).map(([tier, acc]) => {
+    const cacheHint = acc.tokens_cache_read ? ` · ${formatNumber(acc.tokens_cache_read)} cached` : "";
+    return {
+      key: `platform_credits:${tier}`,
+      label: tier,
+      hint: `${usagePayerLabel("platform_credits")} · ${formatNumber(acc.tokens_in)} in / ${formatNumber(acc.tokens_out)} out${cacheHint}`,
+      usd_cost: acc.usd_cost,
+      pricing_known: acc.pricing_known,
+    };
+  });
+  return [...tierRows, ...otherRows].sort((a, b) => b.usd_cost - a.usd_cost).slice(0, 5);
+}
+
 /**
  * Agent detail — a routed page (top tabs + a permanent properties panel that
  * never reflows the content column). Every tab has real data or an
@@ -385,7 +478,6 @@ export function FleetAgentDetail({
 
   const connectedChannels = channels.filter((c) => isChannelConnected(c, slackChannelBinding, telegramBotConnected)).length;
   const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
-  const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(agent?.model_config));
   // Lives in the permanent properties column now, so it's computed once
   // here rather than per-tab — every tab shows the same placement/role,
   // not just Overview. Brain placement (model_config.gateway_binding, for
@@ -515,25 +607,14 @@ export function FleetAgentDetail({
     <PanelSection title="Properties">
       <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
       <PanelRow label="Placement" value={placement.label} tone={HARDWARE_PLACEMENT_PANEL_TONE[placement.tone]} />
-      {/* Not a plain PanelRow: the value is a real picker trigger (opens
-          AgentModelPickerRow's popover), which needs `overflow: visible` on
-          its wrapper to avoid getting clipped by the generic value span's
-          ellipsis styling — see fleet-panel-row-value--interactive in
-          fleet-theme.css. */}
-      <div className="fleet-panel-row">
-        <span className="fleet-panel-row-label">
-          <span>Model</span>
-        </span>
-        <span className="fleet-panel-row-value fleet-panel-row-value--interactive">
-          <AgentModelPickerRow
-            workspaceId={workspaceId}
-            agentId={agentId}
-            agent={agent}
-            resolvedModel={resolvedModel}
-            onSaved={onRenamed}
-          />
-        </span>
-      </div>
+      {/* Model row removed (founder: "model picking some shit like this must
+          not be on the right side, we already moved it to the bottom") —
+          model selection now lives in the composer at the bottom of Chat,
+          plus the full editor on the Configure > Model tab. Having a THIRD
+          picker here duplicated both. AgentModelPickerRow (the popover this
+          row used to open) had no other caller, so it was deleted with this
+          row rather than left as dead code — see ModelTab below for the
+          real editor. */}
       {/* "Tools", not "Customer access": the internal audience/mandate
           vocabulary that name used to expose. What this counts hasn't
           changed — tools an outside customer messaging this agent can
@@ -587,50 +668,15 @@ export function FleetAgentDetail({
           this can still show real rows (e.g. spend from before a mode
           switch) even while the "Cost today" row above is hidden for a
           quiet period — deliberately not gated on costToday. */}
-      {[...costMatrix]
-        .sort((a, b) => b.usd_cost - a.usd_cost)
-        .slice(0, 5)
-        .map((row, i) => {
-          // Never the raw vendor/model string for platform-credit usage —
-          // same rule as the primary model chip (platformCreditsTierLabel's
-          // own doc): "Flash"/"Pro" is the whole public vocabulary there.
-          // Checked against `payer` (the backend's own canonicalization of
-          // the raw `mode` column — usage_events_repository._canonical_
-          // usage_payer folds "platform_credits"/"empyralis_credits"/
-          // "empyralis" into one value), not the raw `mode` field itself:
-          // older usage rows were recorded under those other literal mode
-          // strings before the vocabulary settled, so a strict
-          // `row.mode === "platform_credits"` check silently missed them
-          // and fell through to the raw vendor string ("deepseek ·
-          // deepseek-reasoner") even for an agent whose composer chip
-          // already says "Pro". `payer` is the one field already built to
-          // answer this regardless of which raw token got recorded when.
-          // Every other payer (the owner's own key/subscription/box) keeps
-          // showing the real provider/model — that's their own account, not
-          // a platform secret, and switching an agent's mode later doesn't
-          // retroactively relabel what it actually ran on at the time.
-          const modelLabel = row.payer === "platform_credits"
-            ? platformCreditsTierLabel(row.model)
-            : [row.provider, row.model].filter(Boolean).join(" · ") || "Unknown model";
-          // Cache read tokens only — cache creation is rare enough (one
-          // write per new prompt prefix, many reads after) that surfacing
-          // both would crowd this single hint line for little signal.
-          // Omitted entirely (not "0 cached") for a row recorded before
-          // this dimension existed, or by an engine that never reports it —
-          // the field is optional on UsageMatrixRow for exactly that.
-          const cacheHint = row.tokens_cache_read
-            ? ` · ${formatNumber(row.tokens_cache_read)} cached`
-            : "";
-          return (
-            <PanelRow
-              key={`${row.provider}:${row.model}:${row.mode}:${i}`}
-              label={modelLabel}
-              hint={`${usagePayerLabel(row.payer)} · ${formatNumber(row.tokens_in)} in / ${formatNumber(row.tokens_out)} out${cacheHint}`}
-              value={row.pricing_known ? `$${row.usd_cost.toFixed(4)}` : "Not priced"}
-              tone={row.pricing_known ? "default" : "muted"}
-            />
-          );
-        })}
+      {buildCostDisplayRows(costMatrix).map((row) => (
+        <PanelRow
+          key={row.key}
+          label={row.label}
+          hint={row.hint}
+          value={row.pricing_known ? `$${row.usd_cost.toFixed(4)}` : "Not priced"}
+          tone={row.pricing_known ? "default" : "muted"}
+        />
+      ))}
     </PanelSection>
   );
   // No suppressHydrationWarning needed here: propertiesCollapsed's useState
@@ -893,7 +939,19 @@ export function FleetAgentDetail({
               under "Stop agent" — cutting "‹ Drift" to "‹ Dri" on every tab. */}
           <div className="fleet-detail-header-actions">
             <StopAgentControl workspaceId={workspaceId} agentId={agentId} agent={agent} onChanged={onRenamed} />
-            <button type="button" className="fleet-btn fleet-btn--accent" onClick={() => onChat(agentId)}>
+            {/* The one accent-carrying control on Overview/Work — nothing
+                else in either view claims it: StopAgentControl (above) is
+                plain .fleet-btn (its own confirm dialog is the one place
+                that gets a color, and it's --danger, a different hue for a
+                different signal), and WorkTab's own rows use "accent" only
+                as a neutral status tone, never a button. --accent-fill
+                (solid violet, matching "New agent"/"New project") rather
+                than the quiet --accent hairline: this is the single primary
+                action of the page — the thing every other row and panel
+                exists to lead to — so it gets the same weight those other
+                top-line creation/connection CTAs get, not the softer
+                treatment reserved for routine actions like Save/Invite. */}
+            <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => onChat(agentId)}>
               <MessageSquare size={14} strokeWidth={1.75} />
               <span className="fleet-btn-label">Chat with this agent</span>
             </button>
@@ -1641,7 +1699,7 @@ function ChatTab({
   }, [workspaceId, agentId, threadId]);
 
   // FleetToolbar's dismissal contract, verbatim: outside pointerdown, or Esc
-  // (same as TaskViewOptions.tsx and AgentModelPickerRow above).
+  // (same as TaskViewOptions.tsx).
   useEffect(() => {
     if (!historyOpen) return;
     const onPointerDown = (e: PointerEvent) => {
@@ -3732,342 +3790,6 @@ function cliSubscriptionHint(gateways: FleetGateway[]): string {
     (g) => (["claude_code", "codex", "grok_build", "cursor_cli"] as const).some((r) => gatewayRuntimeReady(g, r)),
   );
   return anyReady ? "A paired computer has a CLI ready" : "No paired computer has a subscription CLI ready";
-}
-
-/** Properties panel's compact Model picker — clicking the "Model" row opens
- *  a small popover (same anchored-popover pattern as FleetToolbar's
- *  filter/sort popover: .fleet-toolbar-popover, click-outside + Escape to
- *  dismiss) that lets the owner pick provider + model from the FULL
- *  catalogue (all BYOK_PROVIDERS, including xai/Grok) without leaving the
- *  panel, or switch mode entirely (platform credits / own key / own
- *  subscription / local). Saves through the exact same saveAgentModelConfig
- *  path as the Model tab — no separate PATCH logic here. Kept intentionally
- *  smaller than the full ModelTab editor (no "Current state" block, no
- *  capability-preset/context-policy section) since this is a quick-switch
- *  surface, not a replacement for the Model tab. */
-function AgentModelPickerRow({
-  workspaceId, agentId, agent, resolvedModel, onSaved,
-}: {
-  workspaceId: string;
-  agentId: string;
-  agent: FleetAgent | null;
-  /** Pre-formatted "{provider} · {model}" summary — same value already
-   *  shown elsewhere, so the closed-state trigger never drifts from it. */
-  resolvedModel: string;
-  onSaved?: () => void;
-}) {
-  const config = agent?.model_config || {};
-  const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<ProviderMode>(resolveDisplayMode(config));
-  const [provider, setProvider] = useState<string>(config.provider || "");
-  const [selectedModel, setSelectedModel] = useState<string>(() =>
-    seedSelectedModel(resolveDisplayMode(config), config.provider || "", config.model || ""),
-  );
-  const [apiKey, setApiKey] = useState("");
-  const [gatewayBinding, setGatewayBinding] = useState<string>(config.gateway_binding || "");
-  const [reasoningEffort, setReasoningEffort] = useState<string>(config.reasoning_effort || "");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const { gateways: cliGateways } = useWorkspaceGateways(workspaceId);
-  const cliRuntime = normalizeCliRuntime(runtimeForProvider(provider));
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  // Re-seed the draft from the agent's real current config every time the
-  // popover opens — mirrors ModelTab's own hydration guard in spirit, but
-  // simpler: this popover fully unmounts its edits on close (no "unsaved
-  // draft survives a close" concern), so a fresh open is always the source
-  // of truth rather than whatever was left over from a previous open.
-  useEffect(() => {
-    if (!open) return;
-    const fresh = agent?.model_config || {};
-    const freshMode = resolveDisplayMode(fresh);
-    setMode(freshMode);
-    setProvider(fresh.provider || "");
-    setSelectedModel(seedSelectedModel(freshMode, fresh.provider || "", fresh.model || ""));
-    setApiKey("");
-    setGatewayBinding(fresh.gateway_binding || "");
-    setReasoningEffort(fresh.reasoning_effort || "");
-    setError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  // Click-outside + Escape to dismiss — identical pattern to
-  // FleetToolbar.tsx's own popover so this behaves exactly like every other
-  // anchored popover in Fleet.
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (e: PointerEvent) => {
-      if (ref.current?.contains(e.target as Node)) return;
-      setOpen(false);
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
-  function onModeChange(next: ProviderMode) {
-    setMode(next);
-    setError(null);
-    if (next === "byok_api") {
-      const p = provider || "anthropic";
-      setProvider(p);
-      setSelectedModel(seedSelectedModel(next, p, ""));
-    } else if (next === "cli_subscription") {
-      const p = provider || "claude_code_cli";
-      setProvider(p);
-      setSelectedModel(seedSelectedModel(next, p, ""));
-    } else if (next === "local") {
-      const p = provider || "ollama";
-      setProvider(p);
-      setSelectedModel(seedSelectedModel(next, p, ""));
-    }
-  }
-
-  function onProviderChange(next: string) {
-    setProvider(next);
-    setError(null);
-    if (mode === "byok_api" || mode === "cli_subscription") {
-      setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(next) ? "" : defaultModelForProvider(next));
-    } else if (mode === "local") {
-      setSelectedModel(defaultModelForProvider(next || "ollama"));
-    }
-  }
-
-  const reasoningEffortSupported = REASONING_EFFORT_SUPPORTED_MODES.has(mode);
-  const localNeedsBox = mode === "local" && !gatewayBinding.trim();
-  // Brain-bound modes (cli_subscription / local) can only run on a paired
-  // computer — there is no machine in "cloud" for a subscription CLI or Ollama
-  // to run on. So don't offer them when the workspace has zero paired boxes
-  // (the founder's rule: cloud never offers "Your subscription"). The agent's
-  // currently-saved mode is always kept in the list so the <select> can render
-  // its own value even if the hardware backing it later went away.
-  const brainModesAvailable = cliGateways.length > 0;
-  const modeOptions: ProviderMode[] = ["platform_credits", "byok_api"];
-  if (brainModesAvailable) modeOptions.push("cli_subscription", "local");
-  if (!modeOptions.includes(mode)) modeOptions.push(mode);
-  const cliSubscriptionNeedsBox = mode === "cli_subscription" && !gatewayBinding.trim();
-
-  async function handleSave() {
-    setSaving(true);
-    setError(null);
-    try {
-      await saveAgentModelConfig(workspaceId, agentId, config, agent?.label, {
-        mode, provider, selectedModel, apiKey, gatewayBinding, reasoningEffort,
-      });
-      setOpen(false);
-      onSaved?.();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="fleet-model-picker" ref={ref}>
-      <button
-        type="button"
-        className="fleet-model-picker-trigger"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        title="Change this agent's model"
-      >
-        <span>{resolvedModel}</span>
-        <ChevronDown size={13} strokeWidth={2} />
-      </button>
-      {open && (
-        <div className="fleet-toolbar-popover fleet-model-picker-popover" role="dialog" aria-label="Change model">
-          <div className="fleet-toolbar-popover-group">
-            <div className="fleet-toolbar-popover-label">Payment</div>
-            <select
-              className="fleet-wizard-input"
-              value={mode}
-              onChange={(e) => onModeChange(e.currentTarget.value as ProviderMode)}
-            >
-              {modeOptions.map((m) => (
-                <option key={m} value={m}>{MODE_LABELS[m]}</option>
-              ))}
-            </select>
-            {!brainModesAvailable && (
-              <p className="fleet-channel-expand-hint" style={{ margin: "4px 0 0" }}>
-                Running on your own Claude/Codex subscription needs a paired computer — add one under Hardware.
-              </p>
-            )}
-          </div>
-
-          {mode === "platform_credits" && (
-            <div className="fleet-toolbar-popover-group">
-              <div className="fleet-toolbar-popover-label">Speed</div>
-              <div className="fleet-tier-picker">
-                {PLATFORM_CREDITS_TIER_OPTIONS.map((opt) => {
-                  const isSelected = platformCreditsTierForModel(selectedModel) === opt.tier;
-                  return (
-                    <button
-                      key={opt.tier}
-                      type="button"
-                      className={`fleet-tier-picker-option${isSelected ? " is-selected" : ""}`}
-                      onClick={() => setSelectedModel(PLATFORM_CREDITS_MODEL_BY_TIER[opt.tier])}
-                      aria-pressed={isSelected}
-                    >
-                      <span className="fleet-tier-picker-option-label">{opt.label}</span>
-                      <span className="fleet-tier-picker-option-subtitle">{opt.subtitle}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>
-                DeepSeek, on the platform. Empyralis pays.
-              </p>
-            </div>
-          )}
-
-          {mode === "byok_api" && (
-            <div className="fleet-toolbar-popover-group">
-              <div className="fleet-toolbar-popover-label">Provider</div>
-              <select
-                className="fleet-wizard-input"
-                value={provider}
-                onChange={(e) => onProviderChange(e.currentTarget.value)}
-              >
-                {BYOK_PROVIDERS.map((p) => (
-                  <option key={p.id} value={p.id}>{p.label}</option>
-                ))}
-              </select>
-              {FREEFORM_MODEL_PROVIDERS.has(provider) ? (
-                <input
-                  className="fleet-wizard-input"
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
-                  placeholder={provider === "azure_openai" ? "e.g. my-gpt4-deployment" : "e.g. llama-3-70b"}
-                />
-              ) : (
-                <select
-                  className="fleet-wizard-input"
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
-                >
-                  {modelsForProvider(provider).map((m) => <option key={m} value={m}>{modelOptionLabel(provider, m)}</option>)}
-                </select>
-              )}
-              <ModelSizeWarning provider={provider} model={selectedModel} />
-              <input
-                className="fleet-wizard-input"
-                type="password"
-                autoComplete="off"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.currentTarget.value)}
-                placeholder={
-                  config.mode === "byok_api" && config.provider === provider
-                    ? "API key (leave blank to keep existing)"
-                    : "API key — required for this provider"
-                }
-              />
-            </div>
-          )}
-
-          {mode === "cli_subscription" && (
-            <div className="fleet-toolbar-popover-group">
-              <div className="fleet-toolbar-popover-label">Subscription</div>
-              <select
-                className="fleet-wizard-input"
-                value={provider}
-                onChange={(e) => onProviderChange(e.currentTarget.value)}
-              >
-                {SUBSCRIPTION_PROVIDERS.map((p) => (
-                  <option key={p.id} value={p.id}>{p.label}</option>
-                ))}
-              </select>
-              {FREEFORM_MODEL_PROVIDERS.has(provider) ? (
-                <input
-                  className="fleet-wizard-input"
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
-                  placeholder="Model id (optional — blank uses the CLI's own default)"
-                />
-              ) : (
-                <select
-                  className="fleet-wizard-input"
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.currentTarget.value)}
-                >
-                  {modelsForProvider(provider).map((m) => <option key={m} value={m}>{modelOptionLabel(provider, m)}</option>)}
-                </select>
-              )}
-              <ModelSizeWarning provider={provider} model={selectedModel} />
-              <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>{cliSubscriptionHint(cliGateways)}</p>
-              <GatewayBoxPicker
-                workspaceId={workspaceId}
-                value={gatewayBinding}
-                onChange={setGatewayBinding}
-                requireRuntime={cliRuntime}
-              />
-            </div>
-          )}
-
-          {mode === "local" && (
-            <div className="fleet-toolbar-popover-group">
-              <div className="fleet-toolbar-popover-label">Ollama model</div>
-              <select
-                className="fleet-wizard-input"
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.currentTarget.value)}
-              >
-                {modelsForProvider("ollama").map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-              <GatewayBoxPicker
-                workspaceId={workspaceId}
-                value={gatewayBinding}
-                onChange={setGatewayBinding}
-                requireLocalModel
-              />
-            </div>
-          )}
-
-          {reasoningEffortSupported && (
-            <div className="fleet-toolbar-popover-group">
-              <div className="fleet-toolbar-popover-label">Reasoning effort</div>
-              <select
-                className="fleet-wizard-input"
-                value={reasoningEffort}
-                onChange={(e) => setReasoningEffort(e.currentTarget.value)}
-              >
-                {REASONING_EFFORT_OPTIONS.map((o) => (
-                  <option key={o.value || "unset"} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {error && <p className="fleet-channel-expand-error" style={{ margin: 0 }}>{error}</p>}
-
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button type="button" className="fleet-btn" onClick={() => setOpen(false)} disabled={saving}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="fleet-btn fleet-btn--accent"
-              onClick={handleSave}
-              disabled={saving || localNeedsBox || cliSubscriptionNeedsBox}
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
-          <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>
-            Full editor, including context policy, lives on the{" "}
-            <strong>Model</strong> tab.
-          </p>
-        </div>
-      )}
-    </div>
-  );
 }
 
 function ModelTab({
