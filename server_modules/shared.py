@@ -84,6 +84,32 @@ async def app_lifespan(_: Any):
             _logging.getLogger(__name__).warning(
                 "Gateway state prune loop startup failed: %s", _prune_startup_exc
             )
+        # Telemetry retention: periodic prune of activity_ledger_events,
+        # agent_secret_access_events, agent_sessions, agent_traces/
+        # agent_trace_events, runtime_outbox, and runtime_sessions -- the
+        # Postgres control-plane analog of the gateway-state prune above.
+        # See server_modules/telemetry_retention_service.py for the full
+        # rationale (why these tables, why not agent_turns, why not the
+        # existing MAN-80 retention job). Same startup/shutdown guarding
+        # convention as the gateway prune block immediately above.
+        try:
+            from server_modules import telemetry_retention_service
+
+            _telemetry_retention_task = asyncio.create_task(telemetry_retention_service.telemetry_retention_loop())
+
+            async def _cancel_telemetry_retention_task() -> None:
+                _telemetry_retention_task.cancel()
+                try:
+                    await _telemetry_retention_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            stack.push_async_callback(_cancel_telemetry_retention_task)
+        except Exception as _telemetry_retention_startup_exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Telemetry retention loop startup failed: %s", _telemetry_retention_startup_exc
+            )
         # Start Telegram background polling for local dev
         try:
             from server_modules import sage_telegram_hosted_service as _hosted

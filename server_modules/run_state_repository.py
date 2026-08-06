@@ -3225,6 +3225,72 @@ async def get_outbox_delivery_status() -> Dict[str, Any]:
     }
 
 
+def _parse_delete_command_tag(status: Any) -> int:
+    """asyncpg's Connection/Pool.execute() returns a command tag string like
+    'DELETE 42' rather than a row count. Falls back to 0 on anything
+    unparseable so a malformed tag degrades the batch loop to 'stop early'
+    rather than raising out of a background retention run."""
+    try:
+        return int(str(status).strip().split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+_PRUNE_DELIVERED_OUTBOX_EVENTS_SQL = """
+    DELETE FROM runtime_outbox
+    WHERE event_id IN (
+        SELECT event_id FROM runtime_outbox
+        WHERE delivered_at IS NOT NULL AND delivered_at < $1
+        ORDER BY delivered_at ASC
+        LIMIT $2
+    )
+"""
+
+
+async def prune_delivered_outbox_events(
+    *, cutoff: Any, batch_size: int, max_batches: int
+) -> int:
+    """Deletes runtime_outbox rows that were successfully delivered
+    (delivered_at IS NOT NULL) more than `cutoff` ago. This is the transactional-
+    outbox / at-least-once-delivery queue for cross-machine runtime events —
+    once delivered_at is set, delivery is done and the row has no further
+    purpose beyond a short debugging window.
+
+    Deliberately does NOT touch:
+      - undelivered rows (delivered_at IS NULL) regardless of age — those may
+        still be due for retry (see claim_due_outbox_events/next_attempt_at);
+        deleting one would silently drop an event a consumer is still owed.
+      - poisoned rows (poisoned_at IS NOT NULL, still delivered_at IS NULL) —
+        these are dead-lettered failures an operator may need to inspect via
+        list_poisoned_outbox_events/get_outbox_delivery_status. Cleaning those
+        up is a deliberate, separate decision this job does not make silently;
+        out of scope here by design, not an oversight.
+
+    Called from server_modules/telemetry_retention_service.py with the same
+    batched-DELETE-loop shape as control_plane_repository.py's prune_* siblings
+    (see that module's telemetry-retention section for the shared rationale on
+    why this bypasses the Rust control-plane kernel gate and why deletes are
+    batched/bounded rather than a single unbounded statement)."""
+    pool = await _read_pool(operation="prune_delivered_outbox_events")
+    if pool is None:
+        return 0
+    safe_batch_size = max(1, int(batch_size or 0))
+    safe_max_batches = max(1, int(max_batches or 0))
+    try:
+        await _ensure_runtime_outbox_table(pool)
+        total_deleted = 0
+        for _ in range(safe_max_batches):
+            status = await pool.execute(_PRUNE_DELIVERED_OUTBOX_EVENTS_SQL, cutoff, safe_batch_size)
+            deleted = _parse_delete_command_tag(status)
+            total_deleted += deleted
+            if deleted < safe_batch_size:
+                break
+        return total_deleted
+    except Exception as exc:
+        LOGGER.warning("Postgres prune_delivered_outbox_events failed: %s", exc)
+        return 0
+
+
 async def list_expired_local_claims() -> list[Dict[str, Any]]:
     pool = await _read_pool(operation="list_expired_local_claims")
     if pool is None:
