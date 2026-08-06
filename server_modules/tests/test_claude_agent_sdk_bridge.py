@@ -642,6 +642,154 @@ class TranslateAssistantMessageTests(unittest.TestCase):
         self.assertEqual(trace_events[0]["payload"]["event_type"], "tool.started")
 
 
+class TranslateStreamEventTests(unittest.TestCase):
+    """StreamEvent (include_partial_messages=True) partial-message fidelity.
+
+    Mirrors the raw Anthropic Messages API streaming sequence a real turn
+    produces: message_start -> content_block_start -> N x
+    content_block_delta -> content_block_stop -> ... -> message_stop. Each
+    helper here builds one sdk_types.StreamEvent the same way claude_agent_
+    sdk's message_parser does (see claude_agent_sdk._internal.message_
+    parser's "stream_event" case: uuid/session_id/event/parent_tool_use_id).
+    """
+
+    def _event(self, raw: Dict[str, Any], *, parent_tool_use_id: Any = None) -> Any:
+        return sdk_types.StreamEvent(
+            uuid="evt-1", session_id="sess-1", event=raw, parent_tool_use_id=parent_tool_use_id,
+        )
+
+    def test_thinking_delta_emits_ephemeral_reasoning_summary_delta(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "message_start", "message": {"id": "msg_1"}}),
+            state=state, trace_context=trace_context,
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}}),
+            state=state, trace_context=trace_context,
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Consid"}}),
+            state=state, trace_context=trace_context,
+        )
+        self.assertEqual(len(events), 1)
+        payload = events[0]["payload"]
+        self.assertEqual(events[0]["type"], "trace")
+        self.assertEqual(payload["event_type"], "reasoning.summary.delta")
+        self.assertEqual(payload["data"], {"delta": "Consid"})
+        self.assertEqual(payload["item_id"], "msg_1:0")
+        # Ephemeral: this event type is never in PERSISTED_TRACE_EVENT_TYPES,
+        # so a caller that runs every emitted envelope through
+        # persist_ephemeral_envelope (as run_claude_agent_sdk_turn does)
+        # will silently no-op on it rather than writing a row.
+        self.assertNotIn("reasoning.summary.delta", agent_trace_service.PERSISTED_TRACE_EVENT_TYPES)
+
+    def test_text_delta_emits_ephemeral_assistant_message_delta(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "message_start", "message": {"id": "msg_2"}}),
+            state=state, trace_context=trace_context,
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}),
+            state=state, trace_context=trace_context,
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hel"}}),
+            state=state, trace_context=trace_context,
+        )
+        self.assertEqual(len(events), 1)
+        payload = events[0]["payload"]
+        self.assertEqual(payload["event_type"], "assistant.message.delta")
+        self.assertEqual(payload["data"], {"message_id": "msg_2", "delta": "Hel"})
+        self.assertNotIn("assistant.message.delta", agent_trace_service.PERSISTED_TRACE_EVENT_TYPES)
+
+    def test_thinking_delta_never_touches_reply_text_parts(self):
+        # The live thinking stream must never blend into the final answer —
+        # state.reply_text_parts is what the "final" event's reply text is
+        # built from (see the AssistantMessage/ResultMessage branches).
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "message_start", "message": {"id": "msg_3"}}),
+            state=state, trace_context=trace_context,
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}}),
+            state=state, trace_context=trace_context,
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hmm"}}),
+            state=state, trace_context=trace_context,
+        )
+        self.assertEqual(state.reply_text_parts, [])
+
+    def test_input_json_delta_is_dropped(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use"}}),
+            state=state, trace_context=trace_context,
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"q\":"}}),
+            state=state, trace_context=trace_context,
+        )
+        self.assertEqual(events, [])
+
+    def test_message_stop_and_ping_are_dropped(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "message_stop"}), state=state, trace_context=trace_context,
+        )
+        self.assertEqual(events, [])
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "ping"}), state=state, trace_context=trace_context,
+        )
+        self.assertEqual(events, [])
+
+    def test_subagent_stream_events_are_dropped(self):
+        # parent_tool_use_id set means this delta belongs to a Task-spawned
+        # sub-agent's own model turn, not the main turn's — never surfaced
+        # as if it were this turn's thinking/text.
+        state = claude_agent_sdk_bridge.TranslationState()
+        trace_context = _trace_context()
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event(
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+                parent_tool_use_id="toolu_task_1",
+            ),
+            state=state, trace_context=trace_context,
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._event(
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "sub-thought"}},
+                parent_tool_use_id="toolu_task_1",
+            ),
+            state=state, trace_context=trace_context,
+        )
+        self.assertEqual(events, [])
+
+    def test_no_trace_context_is_a_silent_no_op(self):
+        state = claude_agent_sdk_bridge.TranslationState()
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "message_start", "message": {"id": "msg_4"}}),
+            state=state, trace_context=None,
+        )
+        claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}}),
+            state=state, trace_context=None,
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            self._event({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "x"}}),
+            state=state, trace_context=None,
+        )
+        self.assertEqual(events, [])
+
+
 class TranslateUserMessageToolResultTests(unittest.TestCase):
     def _seed_started(self, state: claude_agent_sdk_bridge.TranslationState, trace_context) -> None:
         started_message = sdk_types.AssistantMessage(

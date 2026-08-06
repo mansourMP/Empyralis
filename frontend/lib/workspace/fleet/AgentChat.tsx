@@ -641,6 +641,20 @@ export function AgentChat({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  // Live-only "reasoning.summary.delta" trace stream (SDK engine's raw
+  // thinking tokens — see claude_agent_sdk_bridge.py's StreamEvent branch).
+  // Never persisted server-side (EPHEMERAL_TRACE_EVENT_TYPES), so this is
+  // intentionally component state, not part of `messages`: on reload there
+  // is nothing to fetch back, and there shouldn't be — it was scratch
+  // reasoning, not a claim about work done. thinkingText/thinkingActive
+  // reset at the start of every send(); thinkingExpanded deliberately does
+  // NOT reset per turn — it is the user's own open/closed preference
+  // (default collapsed, a quiet status row; expands only on click) and
+  // stays sticky across turns within this session so the surface behaves
+  // predictably rather than snapping shut on every new message.
+  const [thinkingText, setThinkingText] = useState("");
+  const [thinkingActive, setThinkingActive] = useState(false);
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // claude_agent_sdk-engine turns only — see handle_sage_chat's own
   // "context_usage" key (sage_agent_runtime_service.py). null until (and
@@ -713,7 +727,7 @@ export function AgentChat({
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, streamingText]);
+  }, [messages, streamingText, thinkingText, thinkingExpanded]);
 
   const autoGrow = useCallback(() => {
     const el = textareaRef.current;
@@ -746,6 +760,8 @@ export function AgentChat({
       metadata: attachmentsForTurn.length > 0 ? { attachments: attachmentsForTurn } : {},
     }]);
     setStreamingText("");
+    setThinkingText("");
+    setThinkingActive(false);
 
     try {
       if (!sessionRef.current) {
@@ -833,6 +849,19 @@ export function AgentChat({
       // re-deriving or repeating the final answer text.
       let narrationBuffer = "";
       let narrationSeq = 0;
+      // Tracks whether this turn has emitted a legacy-engine "chunk" event —
+      // direct_chat_generation_service.py yields BOTH "chunk" and a trace
+      // "assistant.message.delta" for the exact same delta at the same call
+      // site (its provider-fallback loop), so if "chunk" is already the
+      // reply-text source for this turn, "assistant.message.delta" MUST be
+      // ignored for text or every reply on that engine would render twice.
+      // The claude_agent_sdk engine (claude_agent_sdk_bridge.py's new
+      // StreamEvent branch) never emits "chunk" at all — its only live
+      // reply-text source is "assistant.message.delta" — so this flag lets
+      // the same reader serve both engines without double-rendering either.
+      let sawLegacyChunk = false;
+      let thinkingBuffer = "";
+      let lastThinkingItemId: string | null = null;
       const flushNarration = () => {
         const text = narrationBuffer.trim();
         narrationBuffer = "";
@@ -877,10 +906,63 @@ export function AgentChat({
             const parsed = parseSseBlock(block);
             if (!parsed) continue;
             if (parsed.event === "chunk") {
+              sawLegacyChunk = true;
               const delta = String((parsed.payload as any)?.delta ?? "");
               streamed += delta;
               narrationBuffer += delta;
               setStreamingText(narrationBuffer);
+              if (thinkingBuffer) {
+                // Real reply text has started — the thinking phase is over.
+                // Only flips the status label ("Thinking…" -> "Thought");
+                // does NOT force-collapse the row. Whether it's open or
+                // closed right now is the user's own choice (thinkingExpanded
+                // defaults closed and only a click ever opens it), so there
+                // is nothing here to override.
+                setThinkingActive(false);
+              }
+            } else if (parsed.event === "trace") {
+              const envelope = parsed.payload as Record<string, unknown>;
+              const eventType = String(envelope?.event_type ?? "");
+              const data = (envelope?.data && typeof envelope.data === "object" ? envelope.data : {}) as Record<string, unknown>;
+              if (eventType === "reasoning.summary.delta") {
+                // The model's raw, unreviewed thinking stream — see
+                // claude_agent_sdk_bridge.py's StreamEvent branch. Grouped
+                // by item_id (message_id:block_index) so a later block
+                // starts its own paragraph rather than running into the
+                // previous one's last word; never appended to the reply
+                // buffer, by design — this is scratch, not an answer. Never
+                // touches thinkingExpanded: the row starts as a quiet
+                // "Thinking…" status line and only opens if the user clicks
+                // it, per the founder's decision that this should read as
+                // status, not a wall of streaming text by default.
+                const itemId = envelope?.item_id != null ? String(envelope.item_id) : null;
+                const delta = String(data?.delta ?? "");
+                if (delta) {
+                  if (lastThinkingItemId && itemId && itemId !== lastThinkingItemId) {
+                    thinkingBuffer += "\n\n";
+                  }
+                  lastThinkingItemId = itemId;
+                  thinkingBuffer += delta;
+                  setThinkingText(thinkingBuffer);
+                  setThinkingActive(true);
+                }
+              } else if (eventType === "assistant.message.delta") {
+                // Only ever the reply-text source when this turn's engine
+                // did not already send "chunk" for the same text — see the
+                // sawLegacyChunk comment above.
+                if (!sawLegacyChunk) {
+                  const delta = String(data?.delta ?? "");
+                  streamed += delta;
+                  narrationBuffer += delta;
+                  setStreamingText(narrationBuffer);
+                  if (thinkingBuffer) {
+                    setThinkingActive(false);
+                  }
+                }
+              }
+              // Any other trace event type (tool-call narration, meta-tool
+              // markers, etc.) isn't a distinct row on this surface today —
+              // ignored, same as before "trace" was handled at all.
             } else if (parsed.event === "step") {
               const step = parsed.payload as Record<string, any>;
               if (String(step?.kind ?? "") === "thinking") {
@@ -934,6 +1016,15 @@ export function AgentChat({
       setError(e instanceof Error ? e.message : "Could not send that. Try again.");
     } finally {
       setStreamingText("");
+      // thinkingText is deliberately NOT cleared here — it stays visible,
+      // collapsed, as a clickable "Thought" row under the reply that was
+      // just added to `messages`, so the user can still open it to read
+      // what the model reasoned through. It only gets cleared at the top
+      // of the NEXT send() (this turn's scratch reasoning is now attached
+      // to this turn's reply, not a future one). thinkingExpanded is left
+      // alone entirely — it is the user's sticky open/closed preference,
+      // not turn-scoped state.
+      setThinkingActive(false);
       setSending(false);
       // Even a failed send may have created the thread row (ensure_master_thread
       // runs before the turn executes), so this fires either way.
@@ -1011,6 +1102,34 @@ export function AgentChat({
         ) : (
           <>
             {messages.map((m) => <ChatMessage key={m.id} message={m} />)}
+            {thinkingText && (
+              // The model's raw thinking stream (reasoning.summary.delta
+              // trace events) — subordinate to the reply by design: neutral
+              // colour (no accent — Send is the only accented control),
+              // default-collapsed quiet status row that reads as "Thinking…"
+              // rather than a wall of streaming text, and expands only on
+              // click (thinkingExpanded is a sticky user preference, not
+              // reset per turn — see its declaration above). It survives
+              // past `sending` going false so the row stays clickable after
+              // the turn completes ("Thought"), and is cleared only when the
+              // NEXT send() starts. Never persisted server-side, so a page
+              // reload simply has no row here — that absence is intentional,
+              // not broken: this was scratch reasoning, not an answer.
+              <div className={`fleet-sage-chat-reasoning${thinkingExpanded ? " is-expanded" : ""}`}>
+                <button
+                  type="button"
+                  className="fleet-sage-chat-reasoning-toggle"
+                  onClick={() => setThinkingExpanded((cur) => !cur)}
+                  aria-expanded={thinkingExpanded}
+                >
+                  <ChevronDown size={13} strokeWidth={2} className="fleet-sage-chat-reasoning-chevron" />
+                  {thinkingActive ? "Thinking…" : "Thought"}
+                </button>
+                <div className="fleet-sage-chat-reasoning-body">
+                  <p>{thinkingText}</p>
+                </div>
+              </div>
+            )}
             {sending && streamingText && (
               <ChatMessage
                 message={{
@@ -1027,7 +1146,7 @@ export function AgentChat({
                 }}
               />
             )}
-            {sending && !streamingText && (
+            {sending && !streamingText && !thinkingText && (
               <div className="fleet-sage-chat-thinking">
                 <Loader2 size={14} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
                 Thinking…
