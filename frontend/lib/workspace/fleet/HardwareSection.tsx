@@ -172,9 +172,9 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
   // `window.location.search` rather than `usePathname()` alone; the search
   // half deliberately isn't read through `useSearchParams()` — that hook
   // bails its whole calling tree out to the nearest Suspense boundary during
-  // prerender (see SearchParamsBridge's comment in FleetTabs.tsx), and this
-  // section mounts directly in both hardware/page.tsx and settings/page.tsx
-  // with no such boundary. Passed down to CloudVpsSetupPanel as a prop so
+  // prerender, and this section mounts directly in both hardware/page.tsx
+  // and settings/page.tsx with no such boundary. Passed down to
+  // CloudVpsSetupPanel as a prop so
   // that component itself never has to reach for `window`. Undefined during
   // SSR (window isn't there yet) — harmless, since it's only read later, from
   // an event handler, well after hydration.

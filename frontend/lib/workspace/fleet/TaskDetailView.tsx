@@ -805,7 +805,6 @@ export function TaskDetailView({
                 <a
                   className="fleet-task-detail-parent-link"
                   href={taskDetailHref(parentTask.id)}
-                  data-tab-title={parentTask.title || "Untitled task"}
                   onClick={(event) => {
                     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
                     event.preventDefault();
@@ -879,7 +878,6 @@ export function TaskDetailView({
                         <a
                           className="fleet-task-detail-subtask-row"
                           href={taskDetailHref(st.id)}
-                          data-tab-title={st.title || "Untitled task"}
                           onClick={(event) => {
                             if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
                             event.preventDefault();
@@ -1224,7 +1222,7 @@ export function TaskDetailView({
               <span>Project</span>
             </span>
             <span className="fleet-panel-row-value">
-              <a className="fleet-task-page-side-link" href={projectHref} data-tab-title={projectName}>
+              <a className="fleet-task-page-side-link" href={projectHref}>
                 {projectName}
               </a>
             </span>
@@ -1406,11 +1404,11 @@ export function TaskDetailView({
 }
 
 /** One ↑/↓ nav control (MAN-145 item 4). A real `<a href>` when there is a
- *  target — so ⌘/Ctrl-click and middle-click open it in a background content
- *  tab exactly like every other task link on this page (FleetTabs reads
- *  `a[href]` directly; no `data-tab-href` needed) — and a plain, inert
- *  `<span>` at a boundary (no previous/no next), never a `disabled` anchor
- *  (anchors don't support that attribute) and never a live link to nowhere. */
+ *  target — so ⌘/Ctrl-click and middle-click get genuine browser new-tab
+ *  behaviour for free, exactly like every other task link on this page,
+ *  simply by being a real anchor — and a plain, inert `<span>` at a boundary
+ *  (no previous/no next), never a `disabled` anchor (anchors don't support
+ *  that attribute) and never a live link to nowhere. */
 function TaskNavArrow({
   direction,
   target,
@@ -1439,7 +1437,6 @@ function TaskNavArrow({
       href={href}
       aria-label={label}
       title={target.title ? `${label}: ${target.title}` : label}
-      data-tab-title={target.title || "Untitled task"}
       onClick={(event) => {
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
         event.preventDefault();

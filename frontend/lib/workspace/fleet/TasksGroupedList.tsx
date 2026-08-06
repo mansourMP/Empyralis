@@ -162,7 +162,6 @@ export function TasksGroupedList({
   members,
   grouping = "status",
   display = DEFAULT_TASK_VIEW_OPTIONS.display,
-  taskHref,
   onSelect,
   onStatusChange,
   onCreateTask,
@@ -184,9 +183,6 @@ export function TasksGroupedList({
   grouping?: Exclude<TaskGrouping, "none">;
   /** View-options "Display properties". Defaults to everything on. */
   display?: TaskDisplayState;
-  /** The task's real route, stamped on each row as `data-tab-href` so
-   *  ⌘/Ctrl+click and middle-click open a background content tab (FleetTabs). */
-  taskHref?: (taskId: string) => string;
   onSelect: (taskId: string) => void;
   /** Optional: makes the row's status ring a real control. Omit and the ring
    *  is a read-only glyph. */
@@ -345,7 +341,6 @@ export function TasksGroupedList({
                         agents={agents}
                         members={members}
                         index={index}
-                        href={taskHref?.(task.id)}
                         display={display}
                         rowStyle={rowStyle}
                         onSelect={onSelect}
@@ -420,7 +415,6 @@ function GroupedRow({
   agents,
   members,
   index,
-  href,
   display,
   rowStyle,
   onSelect,
@@ -430,7 +424,6 @@ function GroupedRow({
   agents: FleetAgent[];
   members?: WorkspaceMember[];
   index: number;
-  href?: string;
   display: TaskDisplayState;
   /** The grid tracks for the currently-visible cells, computed once by the
    *  parent rather than per row — every row on the page has the same set. */
@@ -453,14 +446,7 @@ function GroupedRow({
       role="button"
       tabIndex={0}
       aria-label={`${task.title || "Untitled task"} — open details`}
-      data-tab-href={href}
-      data-tab-title={task.title || "Untitled task"}
-      onClick={(e) => {
-        // A modifier click belongs to the tab layer ("open in a background
-        // tab"), never to this row — same guard the board card carries.
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-        onSelect(task.id);
-      }}
+      onClick={() => onSelect(task.id)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();

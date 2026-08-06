@@ -110,7 +110,6 @@ export function AgentsGroupedList({
   projectById,
   grouping,
   display,
-  agentHref,
   onSelect,
 }: {
   /** Scopes the collapse preference. */
@@ -123,7 +122,6 @@ export function AgentsGroupedList({
    *  flat table) for it. */
   grouping: Exclude<AgentGrouping, "none">;
   display: AgentDisplayState;
-  agentHref?: (agentId: string, projectId: string) => string;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState<string[]>([]);
@@ -194,7 +192,6 @@ export function AgentsGroupedList({
                     cost={costByAgent.get(agent.agent_id) || 0}
                     display={display}
                     rowStyle={rowStyle}
-                    href={agentHref?.(agent.agent_id, agent.project_id || "")}
                     onSelect={onSelect}
                   />
                 ))}
@@ -232,7 +229,6 @@ function AgentGroupedRow({
   cost,
   display,
   rowStyle,
-  href,
   onSelect,
 }: {
   agent: FleetAgent;
@@ -240,7 +236,6 @@ function AgentGroupedRow({
   cost: number;
   display: AgentDisplayState;
   rowStyle: CSSProperties;
-  href?: string;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
   const presetRaw = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
@@ -263,12 +258,7 @@ function AgentGroupedRow({
       role="button"
       tabIndex={0}
       aria-label={`${agent.label || "Unnamed agent"} — open details`}
-      data-tab-href={href}
-      data-tab-title={agent.label || "Unnamed agent"}
-      onClick={(e) => {
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-        activate();
-      }}
+      onClick={() => activate()}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();

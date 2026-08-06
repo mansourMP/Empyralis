@@ -94,23 +94,13 @@
   --fleet-float-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 12px 32px -10px rgba(0, 0, 0, 0.55);
 }
 
-/* ── Shell content frame (tab strip > floating panel > topbar + scroll) ────── */
-/* The main-content COLUMN: everything to the right of the primary rail. Two
-   stacked children — the tab strip, bare on the canvas, and the content panel
-   under it. The column exists so the strip spans the content width and NOT the
-   rail (MAN-127 FIX 1). */
-.fleet-shell-column {
-  flex: 1;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-/* The content column floats over the canvas as a bordered panel; the rail
-   stays bare on the canvas to its left, so the gutter is top/right/bottom.
-   Inside .fleet-shell-column the top gutter belongs to the strip instead —
-   see the margin override right below. */
+/* ── Shell content frame (floating panel > topbar + scroll) ──────────────── */
+/* The content panel floats over the canvas, bordered on all four sides; the
+   rail stays bare on the canvas to its left. Direct flex child of
+   `.fleet-root`, sitting to the right of the primary rail — no wrapping
+   column: that wrapper (`.fleet-shell-column`) existed only to stack a now-
+   removed tab strip above this panel (MAN-127-reversal; see
+   FleetContentFrame's header) and is gone along with it. */
 .fleet-shell-panel {
   flex: 1;
   min-width: 0;
@@ -126,13 +116,6 @@
      Shadows stay reserved for genuinely-floating overlays (popovers,
      modals, palette) that sit ABOVE content, never for static structure. */
   overflow: hidden;
-}
-/* The strip above owns the top gutter, so the panel's own top margin goes.
-   The panel's TOP BORDER is then the dividing line between chrome and page —
-   one crisp 1px rule running the full content width, with nothing sitting on
-   top of it. */
-.fleet-shell-column > .fleet-shell-panel {
-  margin-top: 0;
 }
 .fleet-shell-main {
   display: flex;
@@ -7552,13 +7535,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     border-radius: 0;
   }
 
-  /* The panel goes edge-to-edge here, so the strip above it does too — and it
-     keeps a line of its own, since the panel no longer draws one (MAN-127). */
-  .fleet-tabstrip {
-    margin-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-
   .fleet-shell-topbar {
     height: 48px;
     min-height: 48px;
@@ -8991,134 +8967,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--warning-text);
 }
 
-/* ── Main-content tab strip (Safari / VS Code) ────────────────────────────────
-   MAN-127 FIX 1: sits ON THE CANVAS, ABOVE the content panel and outside it —
-   the strip is window chrome, the panel below is the page. It spans the
-   main-content column only, so the primary rail to its left is neither
-   covered by it nor scrolled by it (tabs swap main-content views only).
-
-   The strip draws NO line of its own: the panel's top border directly beneath
-   is the divider, and one line is crisper than two 4px apart. Chrome is
-   deliberately quiet — a tab is navigation furniture, not a card. The active
-   tab is cut from the same material as the panel below it (--bg-panel + the
-   same 1px border), so it reads as the page's own handle; inactive tabs sit
-   bare on the canvas. */
-.fleet-tabstrip {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 40px;
-  min-height: 40px;
-  padding: 8px 6px 4px;
-  margin-right: 8px;
-  background: transparent;
-}
-
-.fleet-tabstrip-list {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  /* Content-sized, NOT flex:1 — a growing scroller ate the strip's whole width
-     and shoved `+` against the far edge. Shrinkable (min-width:0) so a full
-     strip scrolls inside itself with `+` pinned beside the last visible tab. */
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-}
-.fleet-tabstrip-list::-webkit-scrollbar { display: none; }
-
-.fleet-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 4px 0 8px;
-  border-radius: var(--radius-control);
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12.5px;
-  font-weight: var(--weight-medium);
-  max-width: 190px;
-  min-width: 0;
-  flex-shrink: 0;
-  cursor: default;
-  user-select: none;
-}
-/* Hover on the canvas, not inside the panel: --rail-active is the neutral
-   wash that reads on the canvas in both themes (--bg-inset is a PANEL-inset
-   colour and goes the wrong way against --bg-canvas in light mode). */
-.fleet-tab:hover { background: var(--rail-active); color: var(--text-secondary); }
-.fleet-tab:focus-visible {
-  outline: 2px solid var(--accent-ring);
-  outline-offset: -1px;
-}
-.fleet-tab--active {
-  background: var(--bg-panel);
-  border-color: var(--border);
-  color: var(--text-primary);
-}
-
-.fleet-tab-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  color: var(--text-muted);
-}
-.fleet-tab--active .fleet-tab-icon { color: var(--text-secondary); }
-
-.fleet-tab-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-/* Revealed on hover/active only — a permanent row of × glyphs turns the strip
-   into a column of controls instead of a list of places. The slot is always
-   present (opacity, not display), so revealing it never re-flows the strip. */
-.fleet-tab-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  opacity: 0;
-  cursor: pointer;
-}
-.fleet-tab:hover .fleet-tab-close,
-.fleet-tab--active .fleet-tab-close { opacity: 1; }
-.fleet-tab-close:hover { background: var(--bg-card-hover); color: var(--text-primary); }
-
-.fleet-tabstrip-new {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  flex-shrink: 0;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-.fleet-tabstrip-new:hover { background: var(--rail-active); color: var(--text-primary); }
-.fleet-tabstrip-new:focus-visible {
-  outline: 2px solid var(--accent-ring);
-  outline-offset: -1px;
-}
-
 /* ── Task composer (MAN-127 FIX 2) — paper, not a form ───────────────────────
    The old "New task" dialog was three labelled, bordered fields stacked in a
    box. This is a sheet of paper: bare textareas straight on the surface, the
@@ -9896,8 +9744,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    status, each a sticky heading over a stack of one-line rows. It is the third
    shape of the same tasks (see that file's header for why three), and it
    deliberately reuses the vocabulary the other two already established — the
-   status ring, the priority glyph, the tinted agent avatar, the label chip,
-   the `data-tab-href` modifier-click contract.
+   status ring, the priority glyph, the tinted agent avatar, the label chip.
 
    MOTION. The chevron rotates (transform, --dur-2). The section body does NOT
    animate: it unmounts. Animating max-height is layout-triggering — a reflow

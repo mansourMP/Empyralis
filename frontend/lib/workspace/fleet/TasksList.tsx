@@ -75,7 +75,6 @@ export function TasksList({
   tasks,
   agents,
   members,
-  taskHref,
   display = DEFAULT_TASK_VIEW_OPTIONS.display,
   onAssign,
   onSelect,
@@ -86,9 +85,6 @@ export function TasksList({
   /** Workspace members (MAN-64/MAN-70) — valid HUMAN assignees. Absent →
    *  the inline picker offers agents only. */
   members?: WorkspaceMember[];
-  /** The task's real route — stamped as `data-tab-href` so ⌘/Ctrl+click and
-   *  middle-click open it in a background content tab (see FleetTabs). */
-  taskHref?: (taskId: string) => string;
   /** View-options "Display properties". Defaults to everything on, which is
    *  the table this file drew before the popover existed. */
   display?: TaskDisplayState;
@@ -115,7 +111,6 @@ export function TasksList({
           agents={agents}
           members={members}
           index={index}
-          href={taskHref?.(task.id)}
           display={display}
           onAssign={onAssign}
           onSelect={onSelect}
@@ -130,7 +125,6 @@ function TaskRow({
   agents,
   members,
   index,
-  href,
   display,
   onAssign,
   onSelect,
@@ -139,7 +133,6 @@ function TaskRow({
   agents: FleetAgent[];
   members?: WorkspaceMember[];
   index: number;
-  href?: string;
   display: TaskDisplayState;
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
@@ -238,14 +231,7 @@ function TaskRow({
       className="fleet-task-row"
       role="row"
       tabIndex={0}
-      data-tab-href={href}
-      data-tab-title={task.title || "Untitled task"}
-      onClick={(e) => {
-        // See TasksBoard's TaskCard: a modifier click belongs to the tab
-        // layer (background tab), not to this row.
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-        onSelect?.(task.id);
-      }}
+      onClick={() => onSelect?.(task.id)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();

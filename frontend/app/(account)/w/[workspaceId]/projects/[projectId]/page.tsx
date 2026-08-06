@@ -130,32 +130,22 @@ export default function ProjectDetailPage() {
   // Overview | Agents | Tasks — a real ROUTE per view (`${projectBase}`,
   // `${projectBase}/agents`, `${projectBase}/tasks`), not component state.
   //
-  // It used to be `useState`, which is exactly why the in-app ‹ button used
-  // to strand a reader on Overview after opening a task from Tasks: state
-  // lives only as long as this component instance, and navigating to a
-  // task's own page (a different route) unmounts it. Nothing about which
-  // sub-view you were on survived that round trip, because nothing about it
-  // was ever written down anywhere durable.
-  //
-  // Each FleetTab owns its own history stack of urls it has visited (see
-  // fleet-tabs.ts) — a real pathname change pushes a new entry there, same
-  // as any other navigation, so leaving for a task and pressing ‹ now lands
-  // back on the exact view (Overview/Agents/Tasks) you left. A query param
-  // would NOT have worked for this: navigateTab treats a query-only change
-  // on the same pathname as a filter moving and REPLACES the tab's current
-  // history entry instead of pushing (see its own comment) — sub-tab clicks
-  // would have collapsed onto one entry and ‹ would jump straight out of
-  // the project, which is the "back should walk history sensibly" case the
-  // fix also has to satisfy, not just the reported bug.
+  // It used to be `useState`, which is exactly why the browser's own back
+  // button used to strand a reader on Overview after opening a task from
+  // Tasks: state lives only as long as this component instance, and
+  // navigating to a task's own page (a different route) unmounts it.
+  // Nothing about which sub-view you were on survived that round trip,
+  // because nothing about it was ever written down anywhere durable. A real
+  // route fixes it directly: leaving for a task and pressing the browser's
+  // own back button lands back on the exact view (Overview/Agents/Tasks)
+  // you left, because that view is a genuine history entry now.
   const view: "overview" | "agents" | "tasks" =
     pathname === `${projectBase}/agents` ? "agents" : pathname === `${projectBase}/tasks` ? "tasks" : "overview";
   // router.replace, not .push — same choice the agent detail page's own
   // sub-tabs already made (AgentDetailPage's onTabChange, one directory up).
-  // FleetTabs' per-tab history is driven purely by watching the resolved
-  // pathname (see FleetTabsProvider's reconciler effect), so it still gets
-  // its own entry whichever router method lands you on it; .replace only
-  // keeps the BROWSER's own native back/forward from also having to step
-  // through every Overview→Agents→Tasks click one at a time.
+  // Collapses Overview→Agents→Tasks clicks onto one history entry, so the
+  // browser's own back button steps out of the project in one press instead
+  // of walking back through every sub-tab click first.
   const viewHref = (v: "overview" | "agents" | "tasks") => (v === "overview" ? projectBase : `${projectBase}/${v}`);
   // TWO shapes of the same tasks, plus the options that reshape them.
   //
@@ -299,9 +289,8 @@ export default function ProjectDetailPage() {
     },
   ];
 
-  // Same two-uses-one-definition split as taskHref below: `router.push` on a
-  // plain click, and stamped on each row as `data-tab-href` so ⌘/Ctrl+click
-  // and middle-click open a background content tab (see FleetTabs).
+  // Where an agent row goes on a plain click, via `router.push` in
+  // goToAgent below (and the real link ProjectOverview renders for it).
   const agentHref = (agentId: string) =>
     `${projectBase}/agents/${encodeURIComponent(agentId)}/overview`;
 
@@ -360,10 +349,9 @@ export default function ProjectDetailPage() {
   }, [workspaceId, refreshTasks]);
 
   // A task is a PAGE now, not a drawer over this board (MAN-11x): it has its
-  // own route, so it can be deep-linked, ⌘-clicked into a background content
-  // tab, and reached by browser back/forward. taskHref is handed to the board
-  // and the list so each card/row also carries it as `data-tab-href` — that
-  // attribute is what the tab layer reads for modifier clicks.
+  // own route, so it can be deep-linked and reached by browser back/forward.
+  // taskHref is handed to openTask below and to ProjectOverview, which
+  // renders it as a real link.
   const taskHref = useCallback(
     (taskId: string) => `${projectBase}/tasks/${encodeURIComponent(taskId)}`,
     [projectBase],
@@ -425,7 +413,6 @@ export default function ProjectDetailPage() {
               role="tab"
               aria-selected={view === v}
               className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
-              data-tab-href={viewHref(v)}
               onClick={() => router.replace(viewHref(v))}
             >
               {v === "overview" ? "Overview" : v === "agents" ? "Agents" : "Tasks"}
@@ -552,7 +539,6 @@ export default function ProjectDetailPage() {
                 tasks={orderedTasks}
                 agents={inProject}
                 members={members}
-                taskHref={taskHref}
                 display={viewOptions.display}
                 onSelect={openTask}
                 onStatusChange={handleStatusChange}
@@ -566,7 +552,6 @@ export default function ProjectDetailPage() {
                 members={members}
                 grouping={viewOptions.grouping}
                 display={viewOptions.display}
-                taskHref={taskHref}
                 onSelect={openTask}
                 onStatusChange={handleStatusChange}
                 onCreateTask={(status) => setComposer({ status })}
@@ -576,7 +561,6 @@ export default function ProjectDetailPage() {
                 tasks={orderedTasks}
                 agents={inProject}
                 members={members}
-                taskHref={taskHref}
                 display={viewOptions.display}
                 onAssign={handleAssign}
                 onSelect={openTask}
@@ -596,7 +580,7 @@ export default function ProjectDetailPage() {
           ) : shown.length === 0 ? (
             <div className="fleet-page-state-body">No agents match these filters.</div>
           ) : (
-            <AgentsList workspaceId={workspaceId} agents={shown} costByAgent={cost} agentHref={agentHref} onSelect={goToAgent} onAgentStoppedChanged={refresh} />
+            <AgentsList workspaceId={workspaceId} agents={shown} costByAgent={cost} onSelect={goToAgent} onAgentStoppedChanged={refresh} />
           )}
         </div>
 

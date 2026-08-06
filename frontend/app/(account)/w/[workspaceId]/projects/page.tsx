@@ -276,12 +276,7 @@ export default function ProjectsPage() {
                 const lastActive = stats?.lastActive ?? null;
                 const statusSummary = stats ? summarizeStatus(stats.statusCounts) : "";
                 return (
-                  // data-tab-title: a ⌘-clicked row opens a background content
-                  // tab (see FleetTabs), and without this the new tab is
-                  // titled "Project" until someone actually visits it — the
-                  // breadcrumb name registry only learns a project's name from
-                  // the project's own page.
-                  <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-project-row" data-tab-title={p.name}>
+                  <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-project-row">
                     <span className="fleet-project-cell-name">
                       <ProjectIcon icon={p.icon} tint={p.tint} />
                       <span className="fleet-project-cell-name-text">
