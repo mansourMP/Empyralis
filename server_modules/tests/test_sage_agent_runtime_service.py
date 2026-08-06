@@ -3065,6 +3065,87 @@ class SageAgentRuntimeEngineSelectionResolutionTests(unittest.TestCase):
         mock_stream.assert_not_called()
 
 
+class EngineAwareCapabilityManifestIntegrationTests(unittest.TestCase):
+    """fix/agent-task-tools-on-sdk-engine, end to end: handle_sage_chat must
+    build a DIFFERENT system_prompt depending on which engine the turn
+    actually runs on -- the "## Callable Tools" manifest and kernel text
+    must not promise a Tier-2-only tool / query_tool_registry on the SDK
+    engine (no discovery door there at all -- claude_agent_sdk_bridge.
+    _UNSUPPORTED_TOOL_NAMES), while the legacy engine keeps today's
+    behavior byte-for-byte. Proves the actual _tool_discovery_available
+    plumbing added to handle_sage_chat, not just the compiler unit in
+    isolation (see test_sage_instruction_compiler_service.py for that)."""
+
+    @staticmethod
+    def _run_chat(*, engine_options=None):
+        mock_workspace_provider = AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"}))
+        bridge_events = [{"type": "final", "payload": {"reply": "SDK reply", "error": None}}]
+        capability_items = [
+            # Not native this turn (no core/fleet/subagent schema) -- only
+            # ever reachable via a query_tool_registry pull on the legacy
+            # engine.
+            {"tool_id": "slack__post_message", "label": "Post to Slack", "description": "Send a message.", "status": "ready", "type": "tool"},
+        ]
+        with (
+            patch(
+                "server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile",
+                return_value={"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}},
+            ),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", new=mock_workspace_provider),
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_instruction_compiler_service.sage_skills_api.build_sage_capabilities_payload",
+                return_value={"items": capability_items},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch(
+                "server_modules.claude_agent_sdk_bridge.collect_events_via_claude_agent_sdk",
+                return_value=bridge_events,
+            ) as mock_bridge,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter([{
+                "type": "final",
+                "payload": {"reply": "Legacy reply", "actions": [], "error": None},
+            }])
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello",
+                specialist_context=None,
+                engine_options=engine_options,
+            ))
+        return mock_stream, mock_bridge
+
+    def test_legacy_engine_manifest_keeps_todays_behavior(self):
+        mock_stream, mock_bridge = self._run_chat(engine_options={"engine": "legacy"})
+        mock_bridge.assert_not_called()
+        system_prompt = mock_stream.call_args.kwargs["system_prompt"]
+        self.assertIn("## Callable Tools", system_prompt)
+        self.assertIn("slack__post_message", system_prompt)
+        self.assertIn("query_tool_registry finds one", system_prompt)
+
+    def test_sdk_engine_manifest_hides_the_unreachable_tool_and_the_dead_instruction(self):
+        mock_stream, mock_bridge = self._run_chat(engine_options={"engine": "claude_agent_sdk"})
+        mock_stream.assert_not_called()
+        system_prompt = mock_bridge.call_args.kwargs["system_prompt"]
+        self.assertIn("## Callable Tools", system_prompt)
+        self.assertNotIn("slack__post_message", system_prompt)
+        self.assertNotIn("query_tool_registry", system_prompt)
+        self.assertIn("not reachable this turn", system_prompt)
+
+
 class SageAgentRuntimeSpecialistMemoryLoadTests(unittest.TestCase):
     """The core fix under test: a specialist's turn must load ITS OWN
     MEMORY.md index into its system prompt every turn, the same way Sage
@@ -3845,6 +3926,94 @@ class SubagentSpawnToolVisibilityTests(unittest.TestCase):
         role_enum = (params.get("properties") or {}).get("role", {}).get("enum") or []
         self.assertIn("builder", role_enum)
         self.assertNotIn("orchestrator", role_enum)
+
+
+class ProjectTaskToolTier1VisibilityTests(unittest.TestCase):
+    """fix/agent-task-tools-on-sdk-engine: project_task__* must be a
+    STRUCTURAL Tier-1 carve-out for a project-member specialist -- present
+    in the actual assembled tool payload handed to the model, not just
+    discoverable via Tier-2 query_tool_registry (a door the Claude Agent SDK
+    engine does not have at all -- claude_agent_sdk_bridge.
+    _UNSUPPORTED_TOOL_NAMES). Mirrors SubagentSpawnToolVisibilityTests'
+    style: exercises the real _direct_tool_bundle, only its two
+    workspace-lookup side calls patched."""
+
+    _PROJECT_TASK_NAMES = {
+        "project_task__create", "project_task__list", "project_task__get",
+        "project_task__set_parent", "project_task__update", "project_task__comment",
+        "project_task__assign", "project_task__list_labels", "project_task__add_label",
+        "project_task__remove_label",
+    }
+
+    def _toolset(self, *, project_id: str) -> dict:
+        return {
+            "core": sage_agent_runtime_service._core_direct_tool_names(),
+            "connectors": set(),  # "project_task" never bound -- no path to bind it
+            "tools": set(),
+            "raw_tool_toggles": {},
+            "mandate_audience_tools": [],
+            "capability_providers": frozenset(),
+            "agent_install_id": "agent-pixel",
+            "subagents_enabled": False,
+            "project_id": project_id,
+        }
+
+    def _tool_names(self, *, specialist_toolset) -> list[str]:
+        with patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "resolve_workspace_tool_capabilities",
+            return_value=[],
+        ), patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "_resolve_direct_chat_availability",
+            return_value={},
+        ):
+            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+                workspace_id="ws-test",
+                provider="openai",
+                sender_class="owner",
+                specialist_toolset=specialist_toolset,
+            )
+        return [str(t.get("name") or "") for t in tools]
+
+    def test_project_member_specialist_gets_all_project_task_tools_in_tier1(self):
+        names = set(self._tool_names(specialist_toolset=self._toolset(project_id="proj-1")))
+        self.assertTrue(
+            self._PROJECT_TASK_NAMES.issubset(names),
+            f"missing: {self._PROJECT_TASK_NAMES - names}",
+        )
+
+    def test_non_member_specialist_never_gets_project_task_tools(self):
+        names = set(self._tool_names(specialist_toolset=self._toolset(project_id="")))
+        self.assertFalse(names & self._PROJECT_TASK_NAMES, f"unexpected leak: {names & self._PROJECT_TASK_NAMES}")
+
+    def test_master_sage_turn_never_gets_project_task_tools(self):
+        # specialist_toolset=None is the master/Sage path -- the master
+        # identity is workspace-scoped with no single owning project
+        # (skills_service.py raises at execution time for it), so this is
+        # deliberately NOT the fleet__* shape (master-only carve-out) --
+        # it's the opposite scoping.
+        names = set(self._tool_names(specialist_toolset=None))
+        self.assertFalse(names & self._PROJECT_TASK_NAMES, f"unexpected leak: {names & self._PROJECT_TASK_NAMES}")
+
+    def test_project_task_tool_schema_is_well_formed(self):
+        names_and_tools = {}
+        with patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "resolve_workspace_tool_capabilities", return_value=[],
+        ), patch.object(
+            sage_agent_runtime_service.direct_chat_runtime_exports,
+            "_resolve_direct_chat_availability", return_value={},
+        ):
+            tools, _caps, _availability, _blocked = sage_agent_runtime_service._direct_tool_bundle(
+                workspace_id="ws-test", provider="openai", sender_class="owner",
+                specialist_toolset=self._toolset(project_id="proj-1"),
+            )
+        for t in tools:
+            names_and_tools[t.get("name")] = t
+        create_tool = names_and_tools["project_task__create"]
+        self.assertIn("title", (create_tool.get("parameters") or {}).get("properties", {}))
+        self.assertEqual(create_tool.get("connector_id"), "project_task")
 
 
 class CollectSageOperatorLoopV3EventsToolResultStatusTests(unittest.TestCase):

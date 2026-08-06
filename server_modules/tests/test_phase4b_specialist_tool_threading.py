@@ -122,6 +122,100 @@ class SpecialistToolsetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([e.tool_name for e in kept], ["slack__post"])
 
 
+# ── fix/agent-task-tools-on-sdk-engine: project_task__* is intrinsic to
+# project membership, not a bindable connector (it appears nowhere in
+# runtime_config.CONNECTOR_CATALOG, has no ConnectorPicker entry, and
+# nothing ever writes an agent_connector_bindings row for it) — the
+# connector-membership scheme every other tool above is gated on has no
+# path to ever grant it. These tests prove project_id (resolved from the
+# SAME workspace_agent_installs bundle already fetched for tool_toggles/
+# subagents_enabled — zero extra query) is the grant instead, at every
+# layer: toolset resolution, the prompt-time allow-checks, AND the
+# execution-time specialist_guard (a third, independent gate — see
+# UnboundToolDenialTests below).
+
+
+class ProjectTaskGrantTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resolve_specialist_toolset_reads_project_id_from_the_bundle(self):
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value={"tool_toggles": {}, "project_id": "proj-42"}),
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="t1", agent_install_id="install-support"
+            )
+        self.assertEqual(ts["project_id"], "proj-42")
+
+    async def test_resolve_specialist_toolset_project_id_empty_when_bundle_has_none(self):
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value={"tool_toggles": {}}),  # no project_id key at all
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="t1", agent_install_id="install-support"
+            )
+        self.assertEqual(ts["project_id"], "")
+
+    async def test_resolve_specialist_toolset_project_id_fails_safe_on_lookup_error(self):
+        # Same "deny-more, never allow-more" convention as every other field.
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="t1", agent_install_id="install-support"
+            )
+        self.assertEqual(ts.get("project_id"), "")
+
+    def test_specialist_tool_allowed_grants_project_task_by_membership_not_connector(self):
+        ts_member = {
+            "core": set(), "tools": set(), "connectors": set(),  # "project_task" never bound
+            "raw_tool_toggles": {}, "capability_providers": frozenset(), "project_id": "proj-1",
+        }
+        self.assertTrue(sage._specialist_tool_allowed("project_task__list", ts_member))
+        self.assertTrue(sage._specialist_tool_allowed("project_task__create", ts_member))
+
+    def test_specialist_tool_allowed_denies_project_task_with_no_project(self):
+        ts_no_project = {
+            "core": set(), "tools": set(), "connectors": set(),
+            "raw_tool_toggles": {}, "capability_providers": frozenset(), "project_id": "",
+        }
+        self.assertFalse(sage._specialist_tool_allowed("project_task__list", ts_no_project))
+
+    def test_registry_filter_grants_project_task_by_membership(self):
+        class _Entry:
+            def __init__(self, name, connector):
+                self.tool_name = name
+                self.connector_id = connector
+
+        registry = [_Entry("project_task__list", "project_task"), _Entry("slack__post", "slack")]
+        ts_member = {"core": set(), "tools": set(), "connectors": set(), "project_id": "proj-1"}
+        kept = sage._filter_registry_for_specialist(registry, ts_member)
+        self.assertEqual([e.tool_name for e in kept], ["project_task__list"])
+
+        ts_no_project = {"core": set(), "tools": set(), "connectors": set(), "project_id": ""}
+        kept_none = sage._filter_registry_for_specialist(registry, ts_no_project)
+        self.assertEqual(kept_none, [])
+
+
 # ── Capability-gated tools (image_generation today) ─────────────────────────
 # generate_image is decided SOLELY by whether its capability resolved a
 # working provider for this agent — no tool_toggles/connector check applies
@@ -367,6 +461,79 @@ class UnboundToolDenialTests(unittest.TestCase):
                 self._run("discord_bot__send", session_ctx)
             except Exception as exc:  # noqa: BLE001
                 self.assertNotIn("not enabled for this specialist", str(exc))
+
+    # ── fix/agent-task-tools-on-sdk-engine: THIRD, independent gate ────────
+    # _direct_tool_bundle (Tier 1) and _specialist_tool_allowed /
+    # _filter_registry_for_specialist (Tier 2 registry) are prompt-time
+    # concerns -- what the model SEES. This guard is the runtime-side
+    # backstop that actually executes the call, and it re-checks
+    # independently (never just trusts the prompt-time list) -- so
+    # project_task__* needs the SAME project-membership grant here too, or
+    # a project-member specialist would see the tool, call it, and still
+    # get denied with "not enabled for this specialist agent".
+
+    def test_project_member_specialist_passes_the_guard_for_project_task(self):
+        session_ctx = {
+            "workspace_id": "default",
+            "tenant_id": "t1",
+            "active_agent_install_id": "install-support",
+            "specialist_guard": {
+                "agent_install_id": "install-support",
+                "core": ["memory_write"],
+                "connectors": [],  # "project_task" never bound -- no path to bind it
+                "tools": [],
+                "project_id": "proj-1",
+            },
+        }
+        with patch.object(dtx.security_audit_service, "emit_security_audit_event", side_effect=lambda **kw: None):
+            try:
+                self._run("project_task__list", session_ctx)
+            except Exception as exc:  # noqa: BLE001
+                self.assertNotIn("not enabled for this specialist", str(exc))
+
+    def test_non_member_specialist_denied_for_project_task(self):
+        events: list[dict] = []
+        session_ctx = {
+            "workspace_id": "default",
+            "tenant_id": "t1",
+            "active_agent_install_id": "install-support",
+            "specialist_guard": {
+                "agent_install_id": "install-support",
+                "core": ["memory_write"],
+                "connectors": [],
+                "tools": [],
+                "project_id": "",  # no project -- fail-safe default
+            },
+        }
+        with patch.object(
+            dtx.security_audit_service, "emit_security_audit_event",
+            side_effect=lambda **kw: events.append(kw),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._run("project_task__list", session_ctx)
+        self.assertIn("not enabled for this specialist", str(ctx.exception))
+        denied = [e for e in events if e.get("action") == "specialist.tool_denied"]
+        self.assertEqual(len(denied), 1)
+        self.assertEqual(denied[0]["metadata"]["tool_name"], "project_task__list")
+
+    def test_guard_missing_project_id_key_denies_project_task(self):
+        # Back-compat / fail-safe: a specialist_guard built before this fix
+        # (no "project_id" key at all) must still deny, not silently allow.
+        session_ctx = {
+            "workspace_id": "default",
+            "tenant_id": "t1",
+            "active_agent_install_id": "install-support",
+            "specialist_guard": {
+                "agent_install_id": "install-support",
+                "core": ["memory_write"],
+                "connectors": [],
+                "tools": [],
+            },
+        }
+        with patch.object(dtx.security_audit_service, "emit_security_audit_event", side_effect=lambda **kw: None):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._run("project_task__list", session_ctx)
+        self.assertIn("not enabled for this specialist", str(ctx.exception))
 
 
 if __name__ == "__main__":
