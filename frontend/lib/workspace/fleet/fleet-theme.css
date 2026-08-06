@@ -3832,8 +3832,9 @@ a.fleet-breadcrumb:hover {
 }
 
 /* ── Agent detail: tabs on TOP, one navigation (contract: never a right-panel
-   tab list). Below the tab bar sit two columns — the tab content and the
-   properties panel (closed by default). ─────────────────────────────────── */
+   tab list). Below the tab bar sits the tab content, full width, with the
+   Properties panel floating over it as a closed-by-default overlay (see
+   .fleet-detail-columns below). ───────────────────────────────────────── */
 .fleet-detail-tabbar {
   display: flex;
   align-items: center;
@@ -3903,56 +3904,30 @@ a.fleet-breadcrumb:hover {
 .fleet-detail-toptab:hover { background: var(--rail-active); color: var(--text-primary); }
 .fleet-detail-toptab.is-active { background: var(--rail-active); color: var(--text-primary); font-weight: 500; }
 
-/* A real two-column flex row, not an overlay anchor — the properties column
-   (.fleet-detail-properties) is a flex sibling with its own reserved width
-   when expanded, not an absolutely-positioned drawer. Collapsible via the
-   rail toggle in the tab bar (see .fleet-detail-properties-rail-toggle
-   below and .fleet-detail-properties--collapsed above) — collapsing it lets
-   the content sheet reclaim that width, same as the primary rail collapsing
-   lets the page reclaim the nav's width. */
+/* The relative anchor the Properties overlay floats against — same contract
+   as the list pages' .fleet-content-with-panel (see that rule's own comment
+   below): .fleet-detail-body is this container's only normal-flow child and
+   always renders at full width, whether the drawer (an absolutely-
+   positioned child, out of flow entirely) is open or closed. Used to be a
+   real two-column flex row with a permanent, collapsible properties column
+   as a flex sibling — replaced 2026-08 so this page's Properties panel
+   matches the floating-overlay pattern the project detail page already
+   shipped, instead of two diverging implementations of the same panel. */
 .fleet-detail-columns {
-  position: relative; /* anchors the Chat tab's mobile properties drawer below */
+  position: relative; /* anchors the Properties overlay below */
   flex: 1;
   min-height: 0;
-  display: flex;
   overflow: hidden;
 }
 
-/* Properties rail toggle — lives in the tab bar (right-aligned), mirrors
-   .fleet-rail-control-btn--collapse's PanelLeftClose/PanelLeftOpen idiom for
-   the primary rail, just on the right edge instead of the left. Visible at
-   every width the permanent column itself would show at; hidden only in the
-   one case where the column is already replaced by the drawer trigger below
-   (mobile + Chat tab). */
-.fleet-detail-properties-rail-toggle {
-  margin-left: auto;
-  flex-shrink: 0;
-}
-
-/* Chat-tab-only mobile Properties DRAWER toggle (see FleetAgentDetail.tsx) —
-   distinct from the rail toggle above: this one opens the overlay drawer
-   that replaces the permanent column on Chat at <=768px specifically. Inert
-   and hidden on desktop/tablet, where the permanent (collapsible) column
-   above already covers this; shown only alongside the <=768px override
-   below that swaps the permanent column out for this drawer on the Chat tab
-   specifically. */
+/* Properties overlay toggle — lives in the tab bar (right-aligned), the
+   SAME is-active/aria-pressed idiom as FleetToolbar's own list-page
+   Properties toggle (.fleet-icon-btn.is-active above). Opens/closes the
+   floating Properties card for every tab, at every width — never a
+   permanent column. */
 .fleet-detail-properties-toggle {
-  display: none;
   margin-left: auto;
   flex-shrink: 0;
-}
-
-/* Defensive, scoped to the agent-detail page only: this instance of the
-   drawer is a mobile-only affordance for the Chat tab (the permanent column
-   above covers desktop/tablet) — unlike the SAME drawer component's OTHER
-   use on the list pages (FleetToolbar's panelOpen), which stays a toggle at
-   every width and must not be touched by this rule. If mobilePropertiesOpen
-   is still true from a narrower session (e.g. resizing wider without
-   closing it first), force THIS one closed visually rather than letting it
-   float over the permanent column it would otherwise duplicate. */
-.fleet-detail-columns .fleet-properties-drawer,
-.fleet-detail-columns .fleet-properties-scrim {
-  display: none;
 }
 
 .fleet-detail-close--inline { position: static; }
@@ -4195,8 +4170,7 @@ a.fleet-breadcrumb:hover {
 }
 
 .fleet-detail-body {
-  flex: 1;
-  min-width: 0;
+  width: 100%;
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
@@ -4206,52 +4180,14 @@ a.fleet-breadcrumb:hover {
 /* Reading-measure cap: constrain the tab's own content, not this container's
    box, so the vertical scrollbar (when a tab overflows) tracks the sheet's
    true right edge rather than sitting mid-page. Each tab renders exactly one
-   root element here, so this reaches it without per-tab changes. U3-I: the
-   properties column is a real flex sibling now (see .fleet-detail-columns),
-   so its width is already excluded from .fleet-detail-body's own — no more
-   "- 340px" overlay-compensation math needed, just a flat reading-measure
-   cap. */
+   root element here, so this reaches it without per-tab changes. .fleet-
+   detail-body is always full width now (see .fleet-detail-columns above —
+   the Properties panel is a floating overlay, never a flex sibling that
+   would narrow it), so this is a flat reading-measure cap with no overlay-
+   compensation math needed. */
 .fleet-detail-body > * {
   max-width: var(--content-max);
   margin-inline: auto;
-}
-
-/* The properties column on DETAIL pages — a real flex sibling (see
-   .fleet-detail-columns) with its own reserved width, not an absolutely-
-   positioned overlay/drawer (that pattern, .fleet-properties-drawer below,
-   stays for LIST pages' FleetToolbar toggle). Left border, not the drawer's
-   shadow + rounded-corner floating card, since this never floats over the
-   content next to it. Collapsible via .fleet-detail-properties--collapsed
-   (toggled from the tab bar, mirroring .fleet-rail's own collapse) — unlike
-   the primary rail's icon-only 56px collapsed state, there's no useful
-   icon-only mode for a column of label/value rows, so collapsed here means
-   width:0 and the content sheet actually reclaims the space, not a narrow
-   rail. */
-.fleet-detail-properties {
-  width: 320px;
-  flex-shrink: 0;
-  height: 100%;
-  overflow-y: auto;
-  border-left: 1px solid var(--border);
-  padding: 20px 20px 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  transition: width var(--dur-2) var(--ease-out), padding var(--dur-2) var(--ease-out);
-}
-.fleet-detail-properties > div + div {
-  padding-top: 18px;
-  border-top: 1px solid var(--border);
-}
-.fleet-detail-properties--collapsed {
-  width: 0;
-  padding: 0;
-  /* box-sizing:border-box can't shrink a bordered box below its own border
-     width, so a still-1px-wide border-left would clamp this to 1px instead
-     of a true 0 — zero the width too, not just the color. */
-  border-left-width: 0;
-  border-left-color: transparent;
-  overflow: hidden;
 }
 
 .fleet-detail-section-title {
@@ -6638,14 +6574,11 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    read nothing like the flush Inbox. The two-pane wants the FULL width.
    The Chat tab (.fleet-agent-chat-panel) gets the same width opt-out, for
    the same reason — the 820px reading cap was capping and centering the
-   chat column INSIDE a body that's already narrowed by the real Properties
-   flex sibling beside it (.fleet-detail-columns/.fleet-detail-properties —
-   see their own comments above), so on anything wider than about 1050px it
-   left dead horizontal space between the chat column and the Properties
-   panel's left edge. Unlike Work/Memory it keeps .fleet-detail-body's own
-   28px padding (no :has() padding:0 override above) — the composer's own
-   margin already gives it deliberate breathing room, not a flush edge-to-
-   edge two-pane layout. */
+   chat column inside the full-width body, leaving big dead margins on both
+   sides on anything wider than about 1050px. Unlike Work/Memory it keeps
+   .fleet-detail-body's own 28px padding (no :has() padding:0 override
+   above) — the composer's own margin already gives it deliberate breathing
+   room, not a flush edge-to-edge two-pane layout. */
 .fleet-detail-body > .fleet-work-root,
 .fleet-detail-body > .fleet-memory-browser,
 .fleet-detail-body > .fleet-agent-chat-panel {
@@ -8356,42 +8289,19 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 
 /* ── Agent detail (<=768px) — Truth Map mobile pass, 2026-07-11 ────────────
-   .fleet-detail-properties is a permanent 320px flex sibling (U3-I: "never
-   an overlay/toggle") — correct on desktop, but at 390px it leaves the tab
-   body ~70px wide with its own content still trying to render at full
-   measure, wrapping character-by-character. .fleet-detail-toptabs already
-   has overflow-x:auto (container-scoped scroll, no page-level fallback
-   needed) — this just adds the fade affordance and widens the touch
-   targets to match. */
+   .fleet-detail-toptabs already has overflow-x:auto (container-scoped
+   scroll, no page-level fallback needed) — this just adds the fade
+   affordance and widens the touch targets to match. Properties is a
+   floating overlay at every width (see .fleet-detail-columns/.fleet-detail-
+   properties-toggle above), so there is no permanent column to stack or
+   collapse here — .fleet-detail-body just keeps its own desktop scroll
+   behavior, same as the list pages' .fleet-content-main. */
 @media (max-width: 768px) {
-  .fleet-detail-columns {
-    flex-direction: column;
-    overflow-y: auto;
-    overflow-x: hidden;
-  }
   .fleet-detail-body {
-    flex: none;
-    width: 100%;
-    height: auto;
-    overflow: visible;
     padding: 16px;
   }
   .fleet-detail-body > * {
     max-width: 100%;
-  }
-  .fleet-detail-properties {
-    width: 100%;
-    height: auto;
-    flex: none;
-    overflow: visible;
-    border-left: none;
-    border-top: 1px solid var(--border);
-  }
-  /* Collapsed on mobile: fully out of flow (not the desktop 0-width column,
-     which would still leave a stray top border/padding on a stacked block)
-     — same toggle, same localStorage key, just a stacked layout underneath. */
-  .fleet-detail-properties--collapsed {
-    display: none;
   }
 
   /* Blocker: "Stop agent" + "Chat with this agent" together ran ~295px wide
@@ -8494,44 +8404,17 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 
   /* Chat tab: the one tab that needs ITS OWN fixed-height internal scroll +
      a composer that stays pinned in view, unlike every other tab (which
-     now shares one page-level scroll via .fleet-detail-body above).
+     shares one page-level scroll via .fleet-detail-body above).
      .fleet-agent-chat-panel/.fleet-sage-chat's height:100% chain (same one
      desktop already relies on) needs a real height handed down, not
      height:auto — restored here, scoped to just this tab via :has() so the
-     generic stacking rules above stay correct for every other tab. */
-  .fleet-detail-columns:has(.fleet-agent-chat-panel) {
-    overflow: hidden;
-  }
+     generic rules above stay correct for every other tab. Properties itself
+     needs no special-casing here any more: it is a floating overlay at
+     every width (see .fleet-detail-columns above), so it never competed
+     with Chat for stacked space in the first place. */
   .fleet-detail-columns:has(.fleet-agent-chat-panel) .fleet-detail-body {
-    height: 100%;
-    flex: 1;
     overflow: hidden;
     padding: 0;
-  }
-  /* Properties has no room as a stacked-below block here (the chat panel
-     above already claims the full fixed height) — swapped for the toggle
-     drawer instead of just hiding with no access route at all. Never a
-     permanent squeezing column either way (contract): this was a straight
-     display:none before, which hid the data with no route back to it. */
-  .fleet-detail-columns:has(.fleet-agent-chat-panel) .fleet-detail-properties {
-    display: none;
-  }
-  .fleet-detail-properties-toggle {
-    display: inline-flex;
-  }
-  /* The rail toggle collapses/expands the permanent column, which this exact
-     tab+width combination just replaced with the drawer above — nothing left
-     for it to control, so hide it in favor of the drawer trigger only. */
-  .fleet-detail-tabbar:has(+ .fleet-detail-columns .fleet-agent-chat-panel) .fleet-detail-properties-rail-toggle {
-    display: none;
-  }
-  /* Countermand the desktop guard above — this is exactly the width the
-     drawer is for. */
-  .fleet-detail-columns .fleet-properties-drawer {
-    display: flex;
-  }
-  .fleet-detail-columns .fleet-properties-scrim {
-    display: block;
   }
 }
 

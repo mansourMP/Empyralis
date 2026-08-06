@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
@@ -173,11 +173,6 @@ const CONFIGURE_GROUPS: { id: string; label: string; tabs: TabId[] }[] = [
   { id: "compute", label: "Compute", tabs: ["hardware"] },
 ];
 const CONFIGURE_TAB_IDS = new Set<TabId>(CONFIGURE_GROUPS.flatMap((g) => g.tabs));
-
-// Same localStorage-persisted-collapse idiom as the primary rail's
-// COLLAPSED_KEY (fleet-preferences.ts) — a distinct key because this is a
-// per-page (agent detail), not per-account, preference.
-const PROPERTIES_COLLAPSED_KEY = "fleet:agent-detail-properties-collapsed";
 
 // ── Cost period (Day/Week/Month) — shared by the Properties panel's "Cost
 // today" stat and the Model tab's own identical row. summarize_usage
@@ -379,9 +374,21 @@ export function FleetAgentDetail({
   // resolving, so the "overview" fallback below only ever fires for a
   // genuine first paint before routing has resolved at all.
   const activeTab: TabId = initialTab || "overview";
-  // Chat tab's mobile-only properties drawer (see propertiesContent below) —
-  // every other tab keeps the permanent column, so this stays false and unused there.
-  const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
+  // Properties panel — a floating overlay (FleetRightPanel), the SAME
+  // component and behaviour the project/agents LIST pages use for their own
+  // Properties toggle (FleetToolbar's panelOpen), reused directly rather
+  // than diverging into a second implementation. Closed by default, opened
+  // via the single toggle in the tab bar below, for every tab — never a
+  // permanent column that reserves width or reflows the page (founder:
+  // "on the right side it must not be something that is merged on the user
+  // interface, it just should be something that appears just as a node").
+  // This used to be two separate states — a permanent, localStorage-
+  // persisted "rail" collapse for desktop/tablet, plus a second one-off
+  // overlay just for the Chat tab's mobile layout — because the column had
+  // nowhere to go on a narrow Chat screen. Collapsing both onto one overlay
+  // used on every tab/width removes that special case entirely: there is no
+  // longer a column for Chat's mobile layout to have "no room" for.
+  const [propertiesOpen, setPropertiesOpen] = useState(false);
   // ChatTab's New chat/History controls, reported up from that component so
   // they can render in THIS header (next to Configure) instead of a toolbar
   // stacked above the message list — chat history is page-level chrome, not
@@ -389,61 +396,6 @@ export function FleetAgentDetail({
   // activeTab === "chat"), and it clears itself on unmount, so this is
   // never stale content left over from a previous tab.
   const [chatHeaderExtra, setChatHeaderExtra] = useState<ReactNode>(null);
-  // Desktop/tablet Properties RAIL collapse — same persisted-preference
-  // idiom as the primary rail's own collapse (fleet-preferences.ts's
-  // COLLAPSED_KEY). Default when nothing is saved yet: CLOSED.
-  //
-  // This page is genuinely SSR'd (a hard reload or a direct link hits the
-  // server, not just client-side navigation), which rules out the seemingly
-  // obvious "read localStorage straight in the useState initializer, guarded
-  // by typeof window" approach: verified in this exact build that it
-  // produces a real, permanently-stuck-wrong render for a returning visitor
-  // who'd previously left the rail OPEN. The server has no localStorage, so
-  // it always emits the closed markup; hydrating with a client initializer
-  // that reads "open" from localStorage makes React's *state* correct
-  // immediately, but React's hydration reconciler does not patch that class
-  // of attribute/child mismatch to match it — confirmed via the dev
-  // console's own "This won't be patched up" hydration warning, and by
-  // inspecting the live DOM afterward: the aside stayed visually collapsed
-  // (0-width) with the state already reporting expanded, un-fixable by any
-  // later render that merely reaches the same value again (React bails out
-  // on a same-value setState, so nothing ever re-triggers the patch).
-  //
-  // The fix that's actually hydration-safe: the initializer always returns
-  // the SSR-identical default (closed) — server and first client render
-  // agree, so hydration has nothing to patch and no warning fires — and a
-  // useLayoutEffect (not useEffect) performs the real localStorage read as
-  // a genuine value transition immediately after mount, synchronously
-  // before the browser's first paint. That's still the "no open-then-close
-  // flip" contract the initializer alone was meant to deliver (nothing is
-  // visible before this runs), it's just done as an honest post-mount state
-  // change instead of folding it into the value hydration already
-  // committed — so React actually applies it. A no-op on every ordinary
-  // in-app navigation between agents (Link clicks never involve SSR/
-  // hydration at all — the previous value simply carries over or the fresh
-  // instance's effect reads the same localStorage a soft nav would've too).
-  const [propertiesCollapsed, setPropertiesCollapsed] = useState(true);
-  useLayoutEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(PROPERTIES_COLLAPSED_KEY);
-      const shouldBeCollapsed = stored === null ? true : stored === "1";
-      setPropertiesCollapsed((prev) => (prev === shouldBeCollapsed ? prev : shouldBeCollapsed));
-    } catch {
-      /* localStorage unavailable — keep the default (closed) */
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const togglePropertiesCollapsed = useCallback(() => {
-    setPropertiesCollapsed((prev) => {
-      const next = !prev;
-      try {
-        window.localStorage.setItem(PROPERTIES_COLLAPSED_KEY, next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  }, []);
   const { events, loading: activityLoading } = useFleetAgentActivity(workspaceId, agentId);
   const { channels, refresh: refreshChannels, telegramBotConnected, slackChannelBinding } = useFleetAgentChannels(workspaceId, agentId);
   const { connectors } = useFleetAgentConnectors(workspaceId, agentId);
@@ -592,17 +544,10 @@ export function FleetAgentDetail({
     if (sheetOpen) sheetRef.current?.focus();
   }, [sheetOpen]);
 
-  // Permanent — space is ALWAYS reserved, a real flex sibling of the tab
-  // body, never an overlay/toggle (that pattern stays on LIST pages only;
-  // see FleetToolbar's panelOpen/onTogglePanel props). Fills what used to be
-  // a blank right half at every viewport width instead of hiding behind a
-  // click. The one exception is the Chat tab's mobile layout (<=768px):
-  // that tab needs its full viewport height for the pinned composer (see
-  // fleet-theme.css's Chat-tab mobile override), so there isn't room for a
-  // stacked-below column like every other tab gets. Rather than hide
-  // Properties with no access route at all, that combination alone swaps
-  // to the toggle-opened drawer below (mobilePropertiesOpen) — same content,
-  // reused via propertiesContent so both surfaces can never drift apart.
+  // Content for the Properties overlay below (FleetRightPanel) — same
+  // PanelSection/PanelRow shape the project page's own Properties panel
+  // renders, so the two surfaces can never drift apart in markup even
+  // though each computes its own values.
   const propertiesContent = (
     <PanelSection title="Properties">
       <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
@@ -679,31 +624,18 @@ export function FleetAgentDetail({
       ))}
     </PanelSection>
   );
-  // No suppressHydrationWarning needed here: propertiesCollapsed's useState
-  // default (true/closed) is identical on the server and the first client
-  // render (see above), so there is nothing for hydration to mismatch on —
-  // the useLayoutEffect correction happens strictly after hydration commits,
-  // as an ordinary client-side state update.
-  const propertiesPanel = (
-    <aside
-      className={`fleet-detail-properties${propertiesCollapsed ? " fleet-detail-properties--collapsed" : ""}`}
-      aria-label="Properties"
-      aria-hidden={propertiesCollapsed || undefined}
-    >
-      {propertiesContent}
-    </aside>
-  );
-
   const inner = (
     <>
       {/* Tabs live at the TOP, under the breadcrumb — one navigation only.
-          The properties column to the right is a collapsible RIGHT RAIL
-          (fleet-detail-properties-rail-toggle below), mirroring the primary
-          rail's own collapse (PrimaryRail.tsx's fleet-rail-control-btn--
-          collapse) rather than the list pages' overlay toggle (FleetToolbar).
-          The lone exception is a mobile-only Properties DRAWER toggle on the
-          Chat tab (see propertiesContent above) — CSS keeps it hidden except
-          at <=768px, where it replaces the rail toggle for that one tab. */}
+          Properties opens as a floating overlay (FleetRightPanel) via the
+          toggle below — the SAME pattern the project/agents LIST pages use
+          for their own Properties toggle (FleetToolbar's panelOpen), not a
+          second implementation. This used to be a permanent collapsible
+          RIGHT RAIL, a real flex sibling that reserved width whenever
+          expanded — the founder's direction was explicit that the panel
+          "must not be something that is merged on the user interface, it
+          just should be something that appears just as a node", matching
+          the reference already shipped on the project detail page. */}
       <div className="fleet-detail-tabbar">
         {/* Wrap is the non-scrolling fade anchor — .fleet-detail-toptabs
             itself is the horizontal scroller (overflow-x:auto). The old
@@ -762,35 +694,26 @@ export function FleetAgentDetail({
           <Settings size={14} strokeWidth={1.75} />
           <span className="fleet-btn-label">Configure</span>
         </Link>
+        {/* Same is-active/aria-pressed idiom as FleetToolbar's own list-page
+            Properties toggle — a neutral filled state while open, never an
+            accent (this is a view toggle, not a primary action). */}
         <button
           type="button"
-          className="fleet-icon-btn fleet-detail-properties-rail-toggle"
-          onClick={togglePropertiesCollapsed}
-          aria-label={propertiesCollapsed ? "Show properties" : "Hide properties"}
-          aria-expanded={!propertiesCollapsed}
-          title={propertiesCollapsed ? "Show properties" : "Hide properties"}
+          className={`fleet-icon-btn fleet-detail-properties-toggle${propertiesOpen ? " is-active" : ""}`}
+          onClick={() => setPropertiesOpen((v) => !v)}
+          aria-label="Properties"
+          aria-pressed={propertiesOpen}
+          title="Properties"
         >
-          {propertiesCollapsed ? <PanelRightOpen size={16} strokeWidth={1.75} /> : <PanelRightClose size={16} strokeWidth={1.75} />}
+          {propertiesOpen ? <PanelRightClose size={16} strokeWidth={1.75} /> : <PanelRightOpen size={16} strokeWidth={1.75} />}
         </button>
-        {activeTab === "chat" && (
-          <button
-            type="button"
-            className="fleet-icon-btn fleet-detail-properties-toggle"
-            onClick={() => setMobilePropertiesOpen(true)}
-            aria-label="Show properties"
-            title="Properties"
-          >
-            <PanelRightOpen size={16} strokeWidth={1.75} />
-          </button>
-        )}
       </div>
 
-      {/* Columns: main content sheet + the properties rail, a flex sibling
-          that reserves its width while expanded and collapses to zero (the
-          sheet reclaiming that width) via propertiesCollapsed/the rail
-          toggle above — same collapse contract as the primary rail, just on
-          the right edge (desktop/tablet, and every mobile tab except Chat —
-          see propertiesContent above). */}
+      {/* The relative anchor the Properties overlay below floats against —
+          .fleet-detail-body is this container's only normal-flow child and
+          always renders at full width, whether the overlay (an absolutely-
+          positioned child, out of flow entirely) is open or closed. Same
+          contract as the list pages' .fleet-content-with-panel. */}
       <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
           {/* Only the three top-level tabs (plus Chat, reached via
@@ -826,12 +749,9 @@ export function FleetAgentDetail({
             />
           )}
         </div>
-        {propertiesPanel}
-        {activeTab === "chat" && (
-          <FleetRightPanel open={mobilePropertiesOpen} onClose={() => setMobilePropertiesOpen(false)}>
-            {propertiesContent}
-          </FleetRightPanel>
-        )}
+        <FleetRightPanel open={propertiesOpen} onClose={() => setPropertiesOpen(false)}>
+          {propertiesContent}
+        </FleetRightPanel>
       </div>
     </>
   );
@@ -1187,9 +1107,9 @@ function OverviewTab({
       <NowStrip agent={agent} status={status} />
 
       {/* Minimal main column — Status/Placement/Role/Customer access now
-          live in the permanent properties column (see FleetAgentDetail's
-          propertiesPanel); this column is just the THING itself: persona,
-          schedule, activity. */}
+          live in the floating Properties overlay (see FleetAgentDetail's
+          propertiesContent/FleetRightPanel); this column is just the THING
+          itself: persona, schedule, activity. */}
       {!isMaster && agent && (
         <PersonaEditor workspaceId={workspaceId} agentId={agentId} agent={agent} />
       )}
