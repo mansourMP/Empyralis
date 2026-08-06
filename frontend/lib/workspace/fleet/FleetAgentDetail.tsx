@@ -73,7 +73,7 @@ import {
 import { timeAgo, formatDate, formatDateTime, formatTime, formatNumber, usagePayerLabel, type AgentStatusTone, type UsageMatrixRow } from "./fleet-presentation";
 import { StatusChip, StatusDot } from "./fleet-indicators";
 import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./FleetRightPanel";
-import { UsageStat, bucketSeries, type UsageBucket } from "./fleet-sparkline";
+import type { UsageBucket } from "./fleet-sparkline";
 import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
@@ -400,8 +400,15 @@ export function FleetAgentDetail({
   // "Needs sign-in", never a false "Ready" — the header must never claim an
   // agent is runnable when its brain can't produce a turn.
   const status = deriveAgentStatus(agent ?? {}, gateways);
-  const role = agent?.role || "agent";
-  const isMaster = role === "operator";
+  // Role itself no longer has a Properties-panel row: every user-created
+  // agent is seeded role="specialist" (see fleet_tools.py's create path)
+  // and there's no UI to change it, so the row only ever read "Specialist"
+  // — real backend concept (it gates fleet_tools.py's 5 platform-management
+  // tools), just never-varying, unset-by-the-user information for the one
+  // panel that's supposed to be this agent's day-to-day facts. isMaster is
+  // still real and load-bearing below (it's what makes the workspace's one
+  // operator/Sage agent skip the "Tools" row and its delete control).
+  const isMaster = (agent?.role || "agent") === "operator";
   const { tools: agentTools } = useFleetAgentTools(workspaceId, agentId);
   // Truth Map B1 (mirrors ToolsTab's identical requiredConnector/
   // connectorMissing check): a tool bound behind requires_connector does
@@ -508,26 +515,6 @@ export function FleetAgentDetail({
     <PanelSection title="Properties">
       <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
       <PanelRow label="Placement" value={placement.label} tone={HARDWARE_PLACEMENT_PANEL_TONE[placement.tone]} />
-      <PanelRow label="Role" value={<span style={{ textTransform: "capitalize" }}>{role}</span>} />
-      {!isMaster && (
-        <PanelRow
-          label="Customer access"
-          value={`${customerAccessCount} ${customerAccessCount === 1 ? "tool" : "tools"}`}
-          tone={customerAccessCount > 0 ? "default" : "muted"}
-          hint="Everyone who messages this agent is a customer at support-tier — they can request, not command. You, the owner, keep full access."
-        />
-      )}
-      {/* Read-only fact for now — subagents_enabled is already in every
-          FleetAgent API response and was read by nothing. The functional
-          on/off control is being wired separately (backend tool registry +
-          delegation engine); this row exists so the current value is at
-          least visible, and is a straight swap for that real toggle later. */}
-      <PanelRow
-        label="Sub-agents"
-        value={agent?.subagents_enabled ? "Enabled" : "Disabled"}
-        tone={agent?.subagents_enabled ? "default" : "muted"}
-        hint="Whether this agent can delegate work to sub-agents it spins up itself."
-      />
       {/* Not a plain PanelRow: the value is a real picker trigger (opens
           AgentModelPickerRow's popover), which needs `overflow: visible` on
           its wrapper to avoid getting clipped by the generic value span's
@@ -547,18 +534,52 @@ export function FleetAgentDetail({
           />
         </span>
       </div>
-      <UsageStat
-        label={costPeriodLabel(costPeriod)}
-        total={costToday ?? 0}
-        formattedTotal={costToday === null ? "…" : `$${costToday.toFixed(4)}`}
-        values={bucketSeries(costBuckets, "usd_cost")}
-        action={<CostPeriodToggle period={costPeriod} onChange={setCostPeriod} />}
-      />
+      {/* "Tools", not "Customer access": the internal audience/mandate
+          vocabulary that name used to expose. What this counts hasn't
+          changed — tools an outside customer messaging this agent can
+          actually invoke right now (enabled, granted, and not blocked on a
+          missing connector) — only the label, into words a workspace owner
+          recognizes without a tooltip. Still skipped for the operator agent
+          (isMaster): it has no customer-facing surface to count. */}
+      {!isMaster && (
+        <PanelRow
+          label="Tools"
+          value={`${customerAccessCount} ${customerAccessCount === 1 ? "tool" : "tools"}`}
+          tone={customerAccessCount > 0 ? "default" : "muted"}
+          hint="Tools this agent can use when someone outside your workspace messages it. You keep full access regardless."
+        />
+      )}
+      {/* Zero is never shown as a row — an unconnected Channels/Connectors
+          count is noise, not a fact worth a permanent line in a panel
+          that's visible on every tab. Configure > Channels/Connectors is
+          still the place to go connect one; this panel just stops
+          announcing "0" for something not yet set up. */}
+      {connectedChannels > 0 && <PanelRow label="Channels" value={connectedChannels} />}
+      {connectedConnectors > 0 && <PanelRow label="Connectors" value={connectedConnectors} />}
+      {/* Cost lives at the bottom, and stays off the panel entirely for an
+          agent that hasn't spent anything this period — a freshly created
+          agent's Properties shouldn't open on a $0.0000 line before anything
+          has even run. No sparkline here either (that's the workspace/
+          project-level dashboards' job, fleet-sparkline.tsx's UsageStat) —
+          at single-agent scale a 90-day trend line for one number reads as
+          decoration, not information. */}
+      {costToday !== null && costToday > 0 && (
+        <div className="fleet-panel-row">
+          <span className="fleet-panel-row-label" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+            <span>{costPeriodLabel(costPeriod)}</span>
+            <CostPeriodToggle period={costPeriod} onChange={setCostPeriod} />
+          </span>
+          <span className="fleet-panel-row-value">${costToday.toFixed(4)}</span>
+        </div>
+      )}
       {/* Full attribution, not just a total: every real model/source this
           agent has actually billed against, all-time — real tokens at that
           model's real per-1M provider price, whoever pays for it. "Not
           priced" (never a fabricated $0.00) when the source has no per-token
-          price to charge, e.g. a flat CLI subscription turn. */}
+          price to charge, e.g. a flat CLI subscription turn. All-time, so
+          this can still show real rows (e.g. spend from before a mode
+          switch) even while the "Cost today" row above is hidden for a
+          quiet period — deliberately not gated on costToday. */}
       {[...costMatrix]
         .sort((a, b) => b.usd_cost - a.usd_cost)
         .slice(0, 5)
@@ -566,10 +587,22 @@ export function FleetAgentDetail({
           // Never the raw vendor/model string for platform-credit usage —
           // same rule as the primary model chip (platformCreditsTierLabel's
           // own doc): "Flash"/"Pro" is the whole public vocabulary there.
+          // Checked against `payer` (the backend's own canonicalization of
+          // the raw `mode` column — usage_events_repository._canonical_
+          // usage_payer folds "platform_credits"/"empyralis_credits"/
+          // "empyralis" into one value), not the raw `mode` field itself:
+          // older usage rows were recorded under those other literal mode
+          // strings before the vocabulary settled, so a strict
+          // `row.mode === "platform_credits"` check silently missed them
+          // and fell through to the raw vendor string ("deepseek ·
+          // deepseek-reasoner") even for an agent whose composer chip
+          // already says "Pro". `payer` is the one field already built to
+          // answer this regardless of which raw token got recorded when.
           // Every other payer (the owner's own key/subscription/box) keeps
           // showing the real provider/model — that's their own account, not
-          // a platform secret.
-          const modelLabel = row.mode === "platform_credits"
+          // a platform secret, and switching an agent's mode later doesn't
+          // retroactively relabel what it actually ran on at the time.
+          const modelLabel = row.payer === "platform_credits"
             ? platformCreditsTierLabel(row.model)
             : [row.provider, row.model].filter(Boolean).join(" · ") || "Unknown model";
           return (
@@ -582,8 +615,6 @@ export function FleetAgentDetail({
             />
           );
         })}
-      <PanelRow label="Channels" value={connectedChannels} />
-      <PanelRow label="Connectors" value={connectedConnectors} />
     </PanelSection>
   );
   // No suppressHydrationWarning needed here: propertiesCollapsed's useState
@@ -3570,6 +3601,20 @@ function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: strin
         <span className="fleet-config-value">
           {maxTok > 0 ? `${formatNumber(maxTok)} tokens` : "model default"} → {action}
         </span>
+      </div>
+      {/* Moved down from the permanent Properties panel (2026-08): real,
+          live runtime state — runtime_run_delegation_service.py actually
+          blocks a specialist from delegating when this is false, it isn't
+          a stub — but there is still no direct toggle for it anywhere in
+          the UI (fleet_configure_agent's subagents_enabled key is only
+          reachable by asking the agent itself to change it, "Ask AI to
+          configure"). That combination — real state, no control — belongs
+          in the Configure sheet next to the other read-only governance
+          facts (preset/context policy above), not pinned to every tab via
+          the Properties rail. */}
+      <div className="fleet-config-row">
+        <span className="fleet-config-label">Sub-agents</span>
+        <span className="fleet-config-value">{agent?.subagents_enabled ? "Enabled" : "Disabled"}</span>
       </div>
       <div className="fleet-config-row">
         <span className="fleet-config-label" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
