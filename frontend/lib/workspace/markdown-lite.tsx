@@ -13,6 +13,34 @@ import type { ReactNode } from "react";
  * module rather than keeping two copies (or one copy and one gap).
  */
 
+const SAFE_LINK_SCHEMES = new Set(["http:", "https:", "mailto:"]);
+
+/** Guards `[text](url)` links against scheme-based XSS. This renderer turns
+ *  the parenthesized URL straight into `<a href>` with no validation, so a
+ *  chat turn (agent- or user-authored, either way untrusted content by the
+ *  time it reaches this renderer) containing `[click me](javascript:...)`
+ *  would render a real anchor that runs script on click. Allow only
+ *  absolute http/https/mailto links and same-origin relative
+ *  paths/anchors (leading `/` — but not the protocol-relative `//host`
+ *  form, which silently changes host — or `#`); anything else (javascript:,
+ *  data:, vbscript:, a bare scheme-less string, ...) returns null so the
+ *  caller renders the link text as inert plain text instead of a live
+ *  href. */
+function safeMarkdownLiteHref(url: string): string | null {
+  // Strip characters browsers ignore when sniffing a scheme (tabs,
+  // newlines) -- "java\tscript:" is a classic filter-bypass trick -- then
+  // trim surrounding whitespace.
+  const cleaned = url.replace(/[\t\n\r]/g, "").trim();
+  if (!cleaned) return null;
+  if (cleaned.startsWith("#")) return cleaned;
+  if (cleaned.startsWith("/") && !cleaned.startsWith("//")) return cleaned;
+  const schemeMatch = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(cleaned);
+  if (schemeMatch && SAFE_LINK_SCHEMES.has(`${schemeMatch[1].toLowerCase()}:`)) {
+    return cleaned;
+  }
+  return null;
+}
+
 export function renderMarkdownLiteInline(text: string, keyPrefix: string): ReactNode[] {
   const pattern = /`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|\*([^*]+)\*|_([^_]+)_/g;
   const nodes: ReactNode[] = [];
@@ -24,10 +52,15 @@ export function renderMarkdownLiteInline(text: string, keyPrefix: string): React
     if (m[1] !== undefined) {
       nodes.push(<code key={`${keyPrefix}-${i++}`} className="fleet-md-code">{m[1]}</code>);
     } else if (m[2] !== undefined) {
+      const href = safeMarkdownLiteHref(m[3]);
       nodes.push(
-        <a key={`${keyPrefix}-${i++}`} href={m[3]} target="_blank" rel="noreferrer" className="fleet-link">
-          {m[2]}
-        </a>,
+        href ? (
+          <a key={`${keyPrefix}-${i++}`} href={href} target="_blank" rel="noreferrer" className="fleet-link">
+            {m[2]}
+          </a>
+        ) : (
+          <span key={`${keyPrefix}-${i++}`}>{m[2]}</span>
+        ),
       );
     } else if (m[4] !== undefined) {
       nodes.push(<strong key={`${keyPrefix}-${i++}`}>{m[4]}</strong>);

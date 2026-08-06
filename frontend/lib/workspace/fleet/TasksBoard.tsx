@@ -82,7 +82,7 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { CornerDownRight, Plus } from "lucide-react";
 
 import { dueLabel } from "./TasksList";
-import { formatDate, formatDateTime } from "./fleet-presentation";
+import { formatDate, formatDateTime, formatDueDate } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
@@ -382,7 +382,7 @@ function TaskCard({
       : "";
   const dateText = due ? `Due ${due}` : created ? `Created ${created}` : "";
   const dateTitle = due
-    ? `Due ${formatDate(task.due_at as string, { dateStyle: "full" })}`
+    ? `Due ${formatDueDate(task.due_at as string, { dateStyle: "full" })}`
     : created
       ? `Created ${formatDateTime(task.created_at as string)}`
       : "";

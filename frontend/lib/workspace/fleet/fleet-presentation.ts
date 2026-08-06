@@ -21,6 +21,24 @@ export function formatTime(value: string | number | Date, opts?: Intl.DateTimeFo
   return d.toLocaleTimeString(LOCALE, opts);
 }
 
+/** For a date-ONLY field — currently just task.due_at — never for a real
+ *  instant. `_coerce_due_at` (server_modules/project_tasks_service.py)
+ *  parses the bare "YYYY-MM-DD" a date input sends and stamps it midnight
+ *  UTC; it has no meaningful time-of-day. Formatting that through
+ *  formatDate/formatDateTime with no `timeZone` override — correct for
+ *  every real instant on the fleet UI (created_at, updated_at, comment
+ *  timestamps) — reinterprets midnight UTC in the viewer's local timezone,
+ *  so anyone west of UTC sees the calendar day roll back by one: a date
+ *  picked as "Aug 15" stores as 2026-08-15T00:00:00Z and renders as
+ *  "Aug 14". Pinning `timeZone: "UTC"` here formats the SAME calendar date
+ *  the value was stamped with, so it always agrees with the edit input
+ *  (which reads the date via a raw ISO slice, not a localized Date) no
+ *  matter which timezone the viewer is in. */
+export function formatDueDate(value: string | number | Date, opts?: Intl.DateTimeFormatOptions): string {
+  const d = value instanceof Date ? value : new Date(value);
+  return d.toLocaleDateString(LOCALE, { ...opts, timeZone: "UTC" });
+}
+
 export function formatNumber(value: number): string {
   return value.toLocaleString(LOCALE);
 }
