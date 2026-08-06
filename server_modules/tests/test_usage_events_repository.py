@@ -61,6 +61,8 @@ class SummarizeUsageMatrixTests(unittest.IsolatedAsyncioTestCase):
                 "tokens_in": 1500,
                 "tokens_out": 450,
                 "total_tokens": 1950,
+                "tokens_cache_creation": 40,
+                "tokens_cache_read": 200,
                 "usd_cost": 0.00042,
             }
         )
@@ -78,6 +80,8 @@ class SummarizeUsageMatrixTests(unittest.IsolatedAsyncioTestCase):
                         "tokens_in": 1000,
                         "tokens_out": 300,
                         "total_tokens": 1300,
+                        "tokens_cache_creation": 10,
+                        "tokens_cache_read": 150,
                         "usd_cost": 0.00022,
                         "pricing_known": True,
                     },
@@ -90,6 +94,8 @@ class SummarizeUsageMatrixTests(unittest.IsolatedAsyncioTestCase):
                         "tokens_in": 500,
                         "tokens_out": 150,
                         "total_tokens": 650,
+                        "tokens_cache_creation": 30,
+                        "tokens_cache_read": 50,
                         "usd_cost": 0.0,
                         "pricing_known": False,
                     },
@@ -122,8 +128,12 @@ class SummarizeUsageMatrixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(platform_row["payer"], "platform_credits")
         self.assertEqual(platform_row["tokens_in"], 1000)
         self.assertEqual(platform_row["tokens_out"], 300)
+        self.assertEqual(platform_row["tokens_cache_creation"], 10)
+        self.assertEqual(platform_row["tokens_cache_read"], 150)
         self.assertEqual(platform_row["usd_cost"], 0.00022)
         self.assertTrue(platform_row["pricing_known"])
+        self.assertEqual(result["totals"]["tokens_cache_creation"], 40)
+        self.assertEqual(result["totals"]["tokens_cache_read"], 200)
 
         subscription_row = result["matrix"][1]
         self.assertEqual(subscription_row["mode"], "cli_subscription")
@@ -143,6 +153,79 @@ class SummarizeUsageMatrixTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["matrix"], [])
+
+
+class RecordUsageEventCacheTokenTests(unittest.IsolatedAsyncioTestCase):
+    """tokens_cache_creation/tokens_cache_read (Anthropic's cache_creation_
+    input_tokens/cache_read_input_tokens, aka ModelUsage.cacheCreation
+    InputTokens/cacheReadInputTokens) must actually reach the INSERT, not
+    just get computed and dropped."""
+
+    def setUp(self) -> None:
+        global usage_events_repository
+        usage_events_repository = importlib.import_module("server_modules.usage_events_repository")
+        usage_events_repository._SCHEMA_READY = True
+
+    async def test_cache_tokens_are_persisted_in_the_row_and_insert(self) -> None:
+        connection = AsyncMock()
+        connection.execute = AsyncMock()
+
+        with (
+            patch(
+                "server_modules.usage_events_repository._cpr.ensure_control_plane_schema",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "server_modules.usage_events_repository._cpr._scoped_connection",
+                new=_fake_scoped_connection(connection),
+            ),
+        ):
+            row = await usage_events_repository.record_usage_event(
+                tenant_id="tenant-1",
+                workspace_id="workspace-1",
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                tokens_in=1000,
+                tokens_out=200,
+                tokens_cache_creation=10,
+                tokens_cache_read=50,
+                usd_cost=0.0033,
+            )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["tokens_cache_creation"], 10)
+        self.assertEqual(row["tokens_cache_read"], 50)
+        # The actual INSERT call must carry the cache-token values through —
+        # a row dict that "looks right" but whose SQL never mentions the
+        # columns would silently persist zeros.
+        insert_call = connection.execute.call_args_list[-1]
+        insert_args = insert_call.args
+        self.assertIn("tokens_cache_creation", insert_args[0])
+        self.assertIn("tokens_cache_read", insert_args[0])
+        self.assertIn(10, insert_args)
+        self.assertIn(50, insert_args)
+
+    async def test_cache_tokens_default_to_zero(self) -> None:
+        connection = AsyncMock()
+        connection.execute = AsyncMock()
+
+        with (
+            patch(
+                "server_modules.usage_events_repository._cpr.ensure_control_plane_schema",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "server_modules.usage_events_repository._cpr._scoped_connection",
+                new=_fake_scoped_connection(connection),
+            ),
+        ):
+            row = await usage_events_repository.record_usage_event(
+                tenant_id="tenant-1", workspace_id="workspace-1", provider="anthropic",
+                model="claude-sonnet-4-5", tokens_in=100, tokens_out=20,
+            )
+
+        self.assertEqual(row["tokens_cache_creation"], 0)
+        self.assertEqual(row["tokens_cache_read"], 0)
 
 
 if __name__ == "__main__":

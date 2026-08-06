@@ -5802,6 +5802,104 @@ async def handle_sage_chat(
         )
         if not isinstance(context_usage_payload, dict):
             context_usage_payload = None
+        # model_usage (ModelUsage, claude_agent_sdk_bridge.translate_sdk_
+        # message's ResultMessage branch): per-model token + cost breakdown,
+        # rides through the SAME raw_final_payload as context_usage above —
+        # additive only, None for legacy-engine/gateway_brain turns that
+        # never populate this key. Token counts are real regardless of
+        # provider; costUSD entries have already been stripped upstream
+        # (translate_sdk_message) for any turn not provably served by
+        # Anthropic, so nothing here has to re-apply that gate.
+        model_usage_payload = (
+            _raw_final_payload_for_context_usage.get("model_usage")
+            if isinstance(_raw_final_payload_for_context_usage, dict)
+            else None
+        )
+        if not isinstance(model_usage_payload, dict):
+            model_usage_payload = None
+        # Phase 5A metering for the claude_agent_sdk engine's own master-
+        # turn call — this branch (an early return, distinct from the
+        # legacy generate_chat_reply_with_provider_fallback path further
+        # below in this function) never reached record_usage_from_context
+        # at all, so an SDK-engine turn recorded zero usage_events for its
+        # main model call. model_usage_payload (per-model, real token
+        # counts — see its own comment above) is the richer source when
+        # present; the coarse `usage` dict on the same final payload
+        # (translate_sdk_message's ResultMessage.usage passthrough) is the
+        # fallback when model_usage wasn't reported (older CLI). Cache
+        # token counts and each model's real contextWindow go into
+        # `metadata` — usage_events.metadata is the existing JSONB
+        # extension point (see e.g. _ledger_cli_subscription_turn's
+        # tokens_known / gateway_id usage above), not a new column.
+        try:
+            _sdk_tokens_in = 0
+            _sdk_tokens_out = 0
+            _sdk_usage_metadata: Dict[str, Any] = {}
+            if model_usage_payload:
+                _cache_read_total = 0
+                _cache_creation_total = 0
+                _by_model_metadata: Dict[str, Any] = {}
+                for _mu_model, _mu_entry in model_usage_payload.items():
+                    if not isinstance(_mu_entry, dict):
+                        continue
+                    _sdk_tokens_in += int(_mu_entry.get("inputTokens") or 0)
+                    _sdk_tokens_out += int(_mu_entry.get("outputTokens") or 0)
+                    _cache_read_total += int(_mu_entry.get("cacheReadInputTokens") or 0)
+                    _cache_creation_total += int(_mu_entry.get("cacheCreationInputTokens") or 0)
+                    _by_model_metadata[str(_mu_model)] = {
+                        "inputTokens": _mu_entry.get("inputTokens"),
+                        "outputTokens": _mu_entry.get("outputTokens"),
+                        "cacheReadInputTokens": _mu_entry.get("cacheReadInputTokens"),
+                        "cacheCreationInputTokens": _mu_entry.get("cacheCreationInputTokens"),
+                        "contextWindow": _mu_entry.get("contextWindow"),
+                        "canonicalModel": _mu_entry.get("canonicalModel"),
+                    }
+                _sdk_usage_metadata = {
+                    "cache_read_input_tokens": _cache_read_total,
+                    "cache_creation_input_tokens": _cache_creation_total,
+                    "model_usage": _by_model_metadata,
+                    "source": "model_usage",
+                }
+            else:
+                _sdk_usage_raw = (
+                    _raw_final_payload_for_context_usage.get("usage")
+                    if isinstance(_raw_final_payload_for_context_usage, dict)
+                    else None
+                )
+                _sdk_usage_raw = _sdk_usage_raw if isinstance(_sdk_usage_raw, dict) else {}
+                _sdk_tokens_in = int(_sdk_usage_raw.get("input_tokens") or _sdk_usage_raw.get("prompt_tokens") or 0)
+                _sdk_tokens_out = int(_sdk_usage_raw.get("output_tokens") or _sdk_usage_raw.get("completion_tokens") or 0)
+                _sdk_usage_metadata = {"source": "usage"}
+            if _sdk_tokens_in or _sdk_tokens_out:
+                # total_cost_usd was already gated on served_by_anthropic
+                # upstream (claude_agent_sdk_bridge) — the same honesty
+                # rule that governs every costUSD entry in model_usage —
+                # so passing it through here (when present) never smuggles
+                # a client-side Anthropic price onto a non-Anthropic turn;
+                # when absent, usd_cost stays None and the repository's own
+                # pricing lookup (or an honest "unknown") decides.
+                _sdk_total_cost = (
+                    _raw_final_payload_for_context_usage.get("total_cost_usd")
+                    if isinstance(_raw_final_payload_for_context_usage, dict)
+                    else None
+                )
+                from server_modules import usage_events_repository as _usage_repo_sdk_meter
+                await _usage_repo_sdk_meter.record_usage_from_context(
+                    provider=provider or None,
+                    model=requested_model or None,
+                    tokens_in=_sdk_tokens_in,
+                    tokens_out=_sdk_tokens_out,
+                    tokens_cache_creation=int(_sdk_usage_metadata.get("cache_creation_input_tokens") or 0),
+                    tokens_cache_read=int(_sdk_usage_metadata.get("cache_read_input_tokens") or 0),
+                    usd_cost=_sdk_total_cost,
+                    run_id=trace_id or None,
+                    mode="platform_credits",
+                    metadata=_sdk_usage_metadata,
+                )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "claude_agent_sdk engine usage_events metering failed (non-fatal)"
+            )
         daily_operator_payload = (
             dict(action_result.get("daily_operator"))
             if isinstance(action_result.get("daily_operator"), dict)
@@ -6041,6 +6139,9 @@ async def handle_sage_chat(
             # See context_usage_payload's own comment above: only ever
             # non-None for a claude_agent_sdk-engine turn.
             "context_usage": context_usage_payload,
+            # See model_usage_payload's own comment above: only ever
+            # non-None for a claude_agent_sdk-engine turn.
+            "model_usage": model_usage_payload,
         }
 
     # ── B2: Overflow error recovery ──
