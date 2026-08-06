@@ -504,8 +504,17 @@ async def _resolve_cloud_provider(
                 + SAGE_AI_NEEDS_ATTENTION_MESSAGE
             )
         # Platform is configured but blocked (credits exhausted, policy, etc.)
-        _reason_msg = str(_access.get("message") or _access.get("reason") or "unavailable")
-        raise RuntimeError(_reason_msg)
+        # Always lead with the stable `reason` code (e.g. "cap_reached"), not
+        # just the free-text `message` — sage_command_dispatcher.classify_error
+        # keyword-matches on the raw error string, and message wording is
+        # free to change (it already has once, see MAN entitlements copy
+        # pass) without classify_error's bucket keywords being updated to
+        # match. The reason code is a stable contract between this raise and
+        # that classifier; the message stays for human-readable logs/UIs
+        # that read the exception text directly.
+        _reason_code = str(_access.get("reason") or "unavailable")
+        _reason_msg = str(_access.get("message") or _reason_code)
+        raise RuntimeError(f"{_reason_code}: {_reason_msg}")
 
     credentials = direct_chat_credentials(normalized_ws, "deepseek")
     if supports_direct_message_native_chat("deepseek", credentials):
@@ -641,8 +650,17 @@ async def _resolve_agent_cloud_provider(
                 provider=provider,
                 reason=f"platform_credits provider '{provider}' is unavailable or missing credentials.",
             )
+            # "Heads up: " prefix (this file's established convention — see
+            # _friendly_cli_subscription_error's docstring and sage_command_
+            # dispatcher.classify_error's bucket-0 check) marks this as an
+            # already-final, specific, platform-voice message so the
+            # classifier passes it through untouched instead of keyword-
+            # matching it — which used to catch "connection" and mis-route
+            # this to the generic "provider unreachable, try again" reply
+            # even though the real fix is an operator action (vault key or
+            # entitlement), not a retry.
             raise RuntimeError(
-                f"This agent is bound to the {provider} provider, but it isn't "
+                f"Heads up: this agent is bound to the {provider} provider, but it isn't "
                 f"available right now. An operator must fix the connection "
                 f"(vault key or entitlement) or rebind this agent to a "
                 f"different provider from its Model tab."
@@ -666,8 +684,14 @@ async def _resolve_agent_cloud_provider(
                 provider=provider,
                 reason="No provider specified in model_config for BYOK mode.",
             )
+            # "Heads up: " prefix — see the platform_credits branch above for
+            # why: without it, the literal "API key" in this message hits
+            # classify_error's auth-failed bucket ("api key" keyword) even
+            # though nothing was ever misauthenticated — the real problem is
+            # a missing model_config field, an operator fix, not a "verify
+            # your key" retry.
             raise RuntimeError(
-                "This agent is configured to use its own API key (BYOK), "
+                "Heads up: this agent is configured to use its own API key (BYOK), "
                 "but no provider was specified in its model_config. "
                 "An operator must configure the provider via fleet_configure_agent."
             )
@@ -693,8 +717,16 @@ async def _resolve_agent_cloud_provider(
                 provider=provider,
                 reason=f"BYOK provider '{provider}' is unavailable or missing credentials.",
             )
+            # "Heads up: " prefix — same reasoning as the two branches above:
+            # this already lands in classify_error's auth bucket via "API
+            # key", but with is_platform_credits defaulted True at the call
+            # site (direct_chat_service.py doesn't know this was BYOK), it
+            # would wrongly tell the customer their key failed "on the
+            # platform side" instead of naming BYOK ownership as this
+            # message already does. Prefixing skips reclassification
+            # entirely so the accurate, ownership-correct text survives.
             raise RuntimeError(
-                f"This agent is bound to the {provider} provider (BYOK), "
+                f"Heads up: this agent is bound to the {provider} provider (BYOK), "
                 f"but the required API key is not configured. "
                 f"Add the key to your vault or switch this agent to platform_credits."
             )
@@ -749,14 +781,23 @@ async def _resolve_agent_cloud_provider(
                 provider=provider,
                 reason="local mode requires a bound gateway (gateway_binding).",
             )
+            # "Heads up: " prefix — this message hits none of classify_error's
+            # keyword buckets today (a prior wording never had "provider" or
+            # "connection" etc. in it), so it silently falls through to the
+            # generic catch-all instead of this specific, actionable text.
+            # Same fix as the branches above: mark it final so the
+            # classifier never touches it, regardless of future wording.
             raise RuntimeError(
-                "This agent is set to run locally, but no computer is bound to it. "
+                "Heads up: this agent is set to run locally, but no computer is bound to it. "
                 "Bind a paired computer that has Ollama installed, then try again."
             )
         runtime = str(mc.get("runtime") or "ollama").strip().lower() or "ollama"
         return runtime, {"gateway_binding": gateway_binding}, "local"
 
-    # Unknown mode
+    # Unknown mode — should be unreachable in practice (model_config.mode is
+    # validated at write time), but if it's ever hit, "Heads up: " keeps this
+    # honest, specific message out of classify_error's keyword matching
+    # instead of it silently degrading to the generic catch-all.
     await _ledger_provider_unavailable(
         workspace_id=workspace_id,
         agent_id=agent_id,
@@ -765,7 +806,7 @@ async def _resolve_agent_cloud_provider(
         reason=f"Unknown model_config mode: {mode}",
     )
     raise RuntimeError(
-        f"Unknown model_config mode: {mode}. "
+        f"Heads up: Unknown model_config mode: {mode}. "
         f"Valid modes: platform_credits, byok_api, cli_subscription, local."
     )
 
