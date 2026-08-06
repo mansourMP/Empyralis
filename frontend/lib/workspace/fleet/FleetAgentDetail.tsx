@@ -540,8 +540,15 @@ export function FleetAgentDetail({
           actually invoke right now (enabled, granted, and not blocked on a
           missing connector) — only the label, into words a workspace owner
           recognizes without a tooltip. Still skipped for the operator agent
-          (isMaster): it has no customer-facing surface to count. */}
-      {!isMaster && (
+          (isMaster): it has no customer-facing surface to count.
+          Also skipped for any owner-audience agent (Personal Assistant /
+          internal_assistant preset, resolved server-side into
+          agent.audience via fleet_tools.resolve_agent_audience): a
+          "customer messages it" count is not a concept that applies to an
+          agent nobody outside the workspace can ever reach — per founder
+          direction, this row only means something for the external-audience
+          (Customer Support / customer_facing) type. Absent, not zero. */}
+      {!isMaster && agent?.audience === "external" && (
         <PanelRow
           label="Tools"
           value={`${customerAccessCount} ${customerAccessCount === 1 ? "tool" : "tools"}`}
