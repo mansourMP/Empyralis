@@ -7542,15 +7542,14 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-context-usage-inline-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
+  width: 30px;
   height: 30px;
-  padding: 0 8px;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: var(--radius-control);
   background: none;
   color: var(--text-secondary);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
 }
@@ -7560,8 +7559,22 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   background: var(--bg-card-hover);
   border-color: var(--border);
 }
-.fleet-context-usage-inline-pct {
-  color: inherit;
+/* Ring is the control's whole visible face — crisp neutral track + fill,
+   never --accent (Send is this row's one accent surface). The fill's
+   stroke-dashoffset is set inline per-render (the real percentage), so the
+   only thing transitioning on state change is that offset — caught by the
+   existing global `.fleet-root *` prefers-reduced-motion override above,
+   no separate query needed here. */
+.fleet-context-usage-ring {
+  flex-shrink: 0;
+  overflow: visible;
+}
+.fleet-context-usage-ring-track {
+  stroke: var(--border);
+}
+.fleet-context-usage-ring-fill {
+  stroke: currentColor;
+  transition: stroke-dashoffset var(--dur-2) var(--ease-out);
 }
 .fleet-context-usage-panel {
   position: absolute;

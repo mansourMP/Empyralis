@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import Link from "next/link";
-import { Gauge } from "lucide-react";
 
 /**
  * One category row from claude_agent_sdk's ContextUsageResponse.categories
@@ -38,6 +37,58 @@ export interface ContextUsagePayload {
 function formatTokenCount(value: unknown): string {
   const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
   return n.toLocaleString();
+}
+
+/**
+ * The trigger's visible face: a small circular progress ring (SVG
+ * stroke-dasharray fill), reading like the CLI/desktop app's own `/context`
+ * indicator — per the founder's direction, this replaces the old
+ * gauge-icon + text-percentage pair. Purely decorative (aria-hidden): the
+ * accessible percentage lives on the trigger button's own aria-label so
+ * screen readers still get the real number even though the visible face is
+ * a ring, not text. Neutral stroke color, never --accent — this control is
+ * not the row's primary action (Send is), per the one-accent-per-view rule.
+ * Fill width is a plain CSS custom property + transition (not JS-animated),
+ * so it's automatically caught by the existing `.fleet-root *` reduced-
+ * motion override (fleet-theme.css) with no extra media query here.
+ */
+function ContextUsageRing({ percentage }: { percentage: number }) {
+  const size = 16;
+  const stroke = 2;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+
+  return (
+    <svg
+      className="fleet-context-usage-ring"
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle
+        className="fleet-context-usage-ring-track"
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        strokeWidth={stroke}
+      />
+      <circle
+        className="fleet-context-usage-ring-fill"
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={circumference * (1 - percentage / 100)}
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+    </svg>
+  );
 }
 
 /**
@@ -118,11 +169,10 @@ export function ContextUsageRail({
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label="Context usage"
+        aria-label={`Context usage: ${percentage.toFixed(0)}% used`}
         title={`Context used: ${percentage.toFixed(0)}%`}
       >
-        <Gauge size={13} strokeWidth={1.75} />
-        <span className="fleet-context-usage-inline-pct">{Math.round(percentage)}%</span>
+        <ContextUsageRing percentage={percentage} />
       </button>
       {open && (
         <div className="fleet-toolbar-popover fleet-context-usage-panel" role="dialog" aria-label="Context usage">
