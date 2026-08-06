@@ -45,9 +45,12 @@ export function FleetShellDecider({
     return <FleetContentFrame workspaceId={workspaceId}>{children}</FleetContentFrame>;
   }
 
-  // Legacy chrome has no tab strip, so it keeps the plain floating panel it
-  // always had — the box used to be rendered one level up in FleetShell, and
-  // moved down into the two branches when the fleet branch grew a strip that
-  // has to sit OUTSIDE the panel (MAN-127).
+  // Legacy chrome keeps the plain floating panel it always had — the box
+  // used to be rendered one level up in FleetShell and moved down into both
+  // branches here (originally so the fleet branch's now-removed tab strip
+  // could sit above it rather than inside it, MAN-127). Left split even
+  // though the strip is gone: this branch is dead today (every route is in
+  // SHELL_SEGMENTS, see the workspace layout's comment) and not this
+  // change's concern.
   return <div className="fleet-shell-panel">{shellSlot}</div>;
 }

@@ -64,13 +64,6 @@ export function BreadcrumbLabelProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** Read the whole id→name registry. The tab strip (FleetTabs) uses this to
- *  title a tab with the same real name its breadcrumb shows, rather than
- *  keeping a second, drifting copy of "what is this route called". */
-export function useBreadcrumbLabels(): LabelMap {
-  return useContext(BreadcrumbLabelContext).labels;
-}
-
 /** Register a real display name for a dynamic segment (id) so breadcrumbs and
  *  any other consumer can show it instead of the raw id. */
 export function useBreadcrumbLabel(

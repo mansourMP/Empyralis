@@ -105,9 +105,9 @@ import { DEFAULT_TASK_VIEW_OPTIONS, type TaskDisplayState } from "./task-view-op
  *  future board) is ignored rather than half-handled. */
 const DRAG_MIME = "application/x-fleet-task-id";
 
-// taskShortId moved to ./task-status (the tab strip and the routed task page
-// both need it and neither should pull the whole board in). Re-exported so
-// existing importers keep working.
+// taskShortId moved to ./task-status (the routed task page needs it too and
+// shouldn't have to pull the whole board in). Re-exported so existing
+// importers keep working.
 export { taskShortId };
 
 export function TasksBoard({
@@ -116,7 +116,6 @@ export function TasksBoard({
   agents,
   members,
   selectedTaskId,
-  taskHref,
   display = DEFAULT_TASK_VIEW_OPTIONS.display,
   onSelect,
   onStatusChange,
@@ -133,12 +132,6 @@ export function TasksBoard({
    *  so this is display-only here. */
   members?: WorkspaceMember[];
   selectedTaskId?: string | null;
-  /** The task's real route. Stamped on each card as `data-tab-href`, which is
-   *  what makes ⌘/Ctrl+click and middle-click open it in a background content
-   *  tab (see FleetTabs). A card is a drag source, so it stays a <div role=
-   *  "button"> rather than becoming an <a> — the attribute is how it opts into
-   *  link-like modifier gestures without giving up drag-and-drop. */
-  taskHref?: (taskId: string) => string;
   /** Which card elements this reader wants drawn (the view-options popover's
    *  "Display properties"). Defaults to everything on, which is exactly the
    *  card this board drew before the popover existed. */
@@ -303,7 +296,6 @@ export function TasksBoard({
                     index={index}
                     selected={selectedTaskId === task.id}
                     dragging={draggingTaskId === task.id}
-                    href={taskHref?.(task.id)}
                     display={display}
                     onSelect={onSelect}
                     onStatusChange={onStatusChange}
@@ -327,7 +319,6 @@ function TaskCard({
   index,
   selected,
   dragging,
-  href,
   display,
   onSelect,
   onStatusChange,
@@ -342,7 +333,6 @@ function TaskCard({
   index: number;
   selected: boolean;
   dragging: boolean;
-  href?: string;
   display: TaskDisplayState;
   onSelect: (taskId: string) => void;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
@@ -406,8 +396,6 @@ function TaskCard({
       tabIndex={0}
       role="button"
       aria-label={`${task.title || "Untitled task"} — open details`}
-      data-tab-href={href}
-      data-tab-title={task.title || "Untitled task"}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData(DRAG_MIME, task.id);
@@ -415,14 +403,7 @@ function TaskCard({
         onDragStateChange(task.id);
       }}
       onDragEnd={() => onDragStateChange(null)}
-      onClick={(e) => {
-        // A modifier click is the tab layer's ("open in a background tab"),
-        // never this card's. FleetTabs already stops such a click before React
-        // sees it; this is the second, local guard so the card cannot navigate
-        // the current view even if that interception ever stops firing.
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-        onSelect(task.id);
-      }}
+      onClick={() => onSelect(task.id)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();

@@ -31,7 +31,7 @@
  * healthy fleet rather than showing up empty every time.
  */
 
-import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { Fragment, useMemo } from "react";
 
 import {
@@ -69,7 +69,6 @@ export function AgentsBoard({
   costByAgent,
   display,
   selectedAgentId,
-  agentHref,
   onSelect,
 }: {
   agents: FleetAgent[];
@@ -87,7 +86,6 @@ export function AgentsBoard({
    *  "Display properties"). */
   display: AgentDisplayState;
   selectedAgentId?: string | null;
-  agentHref?: (agentId: string, projectId: string) => string;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
   const columns = useMemo(() => {
@@ -124,7 +122,6 @@ export function AgentsBoard({
                 cost={costByAgent.get(agent.agent_id) || 0}
                 display={display}
                 selected={selectedAgentId === agent.agent_id}
-                href={agentHref?.(agent.agent_id, agent.project_id || "")}
                 onSelect={onSelect}
               />
             ))}
@@ -141,7 +138,6 @@ function AgentCard({
   cost,
   display,
   selected,
-  href,
   onSelect,
 }: {
   agent: FleetAgent;
@@ -149,7 +145,6 @@ function AgentCard({
   cost: number;
   display: AgentDisplayState;
   selected: boolean;
-  href?: string;
   onSelect: (agentId: string, projectId: string) => void;
 }) {
   const presetRaw = (agent.capability_preset || agent.purpose_preset || "").toLowerCase().replace(/_/g, " ");
@@ -157,10 +152,7 @@ function AgentCard({
   const st = deriveAgentStatus(agent, gateways);
 
   const activate = () => onSelect(agent.agent_id, agent.project_id || "");
-  const handleClick = (e: MouseEvent) => {
-    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    activate();
-  };
+  const handleClick = () => activate();
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
@@ -237,8 +229,6 @@ function AgentCard({
       tabIndex={0}
       role="button"
       aria-label={`${agent.label || "Unnamed agent"} — open details`}
-      data-tab-href={href}
-      data-tab-title={agent.label || "Unnamed agent"}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
     >

@@ -379,7 +379,6 @@ export function AgentsList({
   costByAgent,
   projectById,
   groupByProject,
-  agentHref,
   onSelect,
   onAgentStoppedChanged,
 }: {
@@ -388,13 +387,6 @@ export function AgentsList({
   costByAgent: Map<string, number>;
   projectById?: Map<string, FleetProject>;
   groupByProject?: boolean;
-  /** The agent's real route — the same one `onSelect` navigates to, handed in
-   *  as a string so each row can stamp it as `data-tab-href` and ⌘/Ctrl+click
-   *  and middle-click open a background content tab here too (see FleetTabs).
-   *  Exactly the shape TasksList/TasksBoard take as `taskHref`. A row can't
-   *  simply BE an <a>: it contains its own stop/delete buttons, and nesting
-   *  those inside a link is invalid and unclickable. */
-  agentHref?: (agentId: string, projectId: string) => string;
   onSelect: (agentId: string, projectId: string) => void;
   /** Called after a stop/resume/delete mutation succeeds — the caller should
    *  re-fetch (useFleetAgents().refresh) so the row's status reflects it (or,
@@ -466,7 +458,6 @@ export function AgentsList({
       index={index}
       cost={costByAgent.get(a.agent_id) || 0}
       gateways={gateways}
-      href={agentHref?.(a.agent_id, a.project_id || "")}
       onSelect={onSelect}
       onStoppedChanged={onAgentStoppedChanged}
       tabIndex={a.agent_id === rovingId ? 0 : -1}
@@ -527,7 +518,6 @@ function AgentRow({
   index,
   cost,
   gateways,
-  href,
   onSelect,
   onStoppedChanged,
   tabIndex,
@@ -537,7 +527,6 @@ function AgentRow({
   index: number;
   cost: number;
   gateways: FleetGateway[];
-  href?: string;
   onSelect: (agentId: string, projectId: string) => void;
   onStoppedChanged?: () => void;
   tabIndex: number;
@@ -649,20 +638,8 @@ function AgentRow({
       role="button"
       className="fleet-agent-row"
       data-agent-id={agent.agent_id}
-      // The tab layer reads these on a modifier/middle click and opens a
-      // background tab instead (FleetTabs' capture-phase interceptor); the
-      // title is passed so that tab is named the agent, not "Agent", before
-      // its page has loaded anything.
-      data-tab-href={href}
-      data-tab-title={href ? agent.label || "Unnamed agent" : undefined}
       tabIndex={tabIndex}
-      onClick={(e) => {
-        // A modifier click belongs to the tab layer, not to this row — the
-        // interceptor already stopped it, this is the belt to that braces
-        // (and matches TasksList/TasksBoard's rows exactly).
-        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-        activate();
-      }}
+      onClick={() => activate()}
       onKeyDown={handleKey}
     >
       <span className="fleet-agent-cell-agent">
