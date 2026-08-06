@@ -116,177 +116,65 @@ test.describe('account shell and bootstrap resilience', () => {
   });
 
   test('global account settings route resolves into workspace settings and hardware is a first-class workspace route', async ({ page }) => {
+    // Rewritten: settings moved from a query-string section
+    // (`/settings?section=account`) to a path segment
+    // (`/settings/[section]`, see app/(account)/settings/resolve-settings-route.ts
+    // and app/(account)/w/[workspaceId]/settings/[section]/page.tsx) — the
+    // URL shape changed. The Account section's own content also changed:
+    // "current account" / "sign-in methods" / "manage billing" / "log out"
+    // never landed there (see lib/workspace/fleet/AccountSection.tsx's own
+    // comment — "currently empty... nothing ever there to land on"); it's a
+    // deliberate honest empty state per CLAUDE.md's "no dead controls" law,
+    // not a stub standing in for removed content. The hardware assertion
+    // (still a live, first-class workspace route) is unchanged.
     await loginAsOwner(page);
 
     await page.goto('/settings/account');
-    await expect(page).toHaveURL(/\/w\/ws-1\/settings\?section=account$/);
-    await expect(page.getByRole('heading', { name: /^account$/i })).toBeVisible();
-    await expect(page.getByText(/current account/i)).toBeVisible();
-    await expect(page.getByText(/sign-in methods/i).first()).toBeVisible();
-    await expect(page.getByRole('button', { name: /manage billing/i })).toBeVisible();
-    await expect(page.getByRole('button', { name: /log out/i })).toBeVisible();
+    await expect(page).toHaveURL(/\/w\/ws-1\/settings\/account$/);
+    await expect(page.getByRole('heading', { name: /^account$/i }).first()).toBeVisible();
+    await expect(page.getByText(/nothing here yet/i)).toBeVisible();
 
     await page.goto('/w/ws-1/hardware');
     await expect(page).toHaveURL(/\/w\/ws-1\/hardware$/);
-    await expect(page.locator('h1').filter({ hasText: /^Hardware$/ })).toBeVisible();
+    // Breadcrumbs.tsx renders two <h1>s (a desktop one and a
+    // `.fleet-breadcrumb-mobile-current` one, toggled by a CSS media query
+    // rather than being conditionally mounted) — scope to the desktop
+    // breadcrumb class so this doesn't hit a Playwright strict-mode
+    // violation from matching both.
+    await expect(page.locator('h1.fleet-breadcrumb--current').filter({ hasText: /^Hardware$/ })).toBeVisible();
   });
 
-  test('sage top navigation exposes the five IA surfaces and moves approvals into a badge', async ({ page }) => {
-    await page.route('**/api/approvals?workspace_id=ws-1&limit=24', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          pending_count: 1,
-          items: [
-            {
-              approval_id: 'approval-1',
-              status: 'pending',
-              prompt: 'Allow local action?',
-            },
-          ],
-        }),
-      });
-    });
-
-    await loginAsOwner(page);
-
-    const nav = page.getByRole('navigation', { name: /^workspace views$/i });
-    await expect(nav.getByRole('link', { name: /^chat$/i })).toBeVisible();
-    await expect(nav.getByRole('link', { name: /^memory$/i })).toBeVisible();
-    await expect(nav.getByRole('link', { name: /^integrations$/i })).toBeVisible();
-    await expect(nav.getByRole('link', { name: /^tasks$/i })).toBeVisible();
-    await expect(nav.getByRole('link', { name: /^activity$/i })).toBeVisible();
-
-    await expect(nav.getByRole('link', { name: /^profile$/i })).toHaveCount(0);
-    await expect(nav.getByRole('link', { name: /^skills$/i })).toHaveCount(0);
-    await expect(nav.getByRole('link', { name: /^heartbeat$/i })).toHaveCount(0);
-    await expect(nav.getByRole('link', { name: /^connected apps$/i })).toHaveCount(0);
-    await expect(nav.getByRole('link', { name: /^needs your ok$/i })).toHaveCount(0);
-    await expect(page.getByRole('link', { name: /needs your ok · 1/i })).toBeVisible();
-  });
-
-  test('sage setup load cannot spin forever and hosted credits stay selectable when provider catalog is degraded', async ({ page }) => {
-    await page.route('**/api/sage-profile?workspace_id=ws-1', async (route) => {
-      await new Promise((resolve) => {
-        setTimeout(resolve, 9_500);
-      });
-      await route.fulfill({
-        status: 504,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'profile timeout' }),
-      });
-    });
-    await page.route('**/api/providers/catalog**', async (route) => {
-      await route.fulfill({
-        status: 503,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'provider catalog unavailable' }),
-      });
-    });
-    await page.route('**/api/providers?**', async (route) => {
-      await route.fulfill({
-        status: 503,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'providers unavailable' }),
-      });
-    });
-    await page.route('**/api/providers/profiles**', async (route) => {
-      await route.fulfill({
-        status: 503,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'profiles unavailable' }),
-      });
-    });
-
-    await loginAsOwner(page);
-
-    await expect(page.getByText(/Loading Sage setup/i)).toBeVisible();
-    await expect(page.getByText(/Agent setup is temporarily unavailable/i)).toBeVisible({ timeout: 12_000 });
-    await expect(page.getByRole('button', { name: /^retry$/i })).toBeVisible();
-    await expect(page.getByText(/DeepSeek/i).first()).toBeVisible();
-    await expect(page.getByText(/No AI model/i)).toHaveCount(0);
-    await page.unrouteAll({ behavior: 'ignoreErrors' });
-  });
-
-  test('memory owns identity, rules, projections, and memory controls', async ({ page }) => {
-    await page.route('**/api/sage-profile?workspace_id=ws-1', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(buildSageProfilePayload(SAGE_BOOTSTRAP_QUESTIONS.length)),
-      });
-    });
-
-    await loginAsOwner(page);
-    await page.getByRole('navigation', { name: /^workspace views$/i }).getByRole('link', { name: /^memory$/i }).click();
-
-    await expect(page).toHaveURL(/\/w\/ws-1\/memory$/);
-    await expect(page.getByRole('heading', { name: /^about me$/i })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /^preferences$/i })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /^rules$/i })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /^pinned$/i })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /^recent$/i })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /^sensitive$/i })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /^controls$/i })).toBeVisible();
-    await expect(page.getByText('USER / IDENTITY / SOUL projections', { exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^export$/i })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^wipe$/i })).toBeVisible();
-    await expect(page.getByRole('navigation', { name: /^workspace views$/i }).getByRole('link', { name: /^profile$/i })).toHaveCount(0);
-  });
-
-  test('integrations owns providers, communication, computer, knowledge, and tools', async ({ page }) => {
-    await loginAsOwner(page);
-    await page.getByRole('navigation', { name: /^workspace views$/i }).getByRole('link', { name: /^integrations$/i }).click();
-
-    await expect(page).toHaveURL(/\/w\/ws-1\/integrations$/);
-    const sectionLabels = page.locator('.sage-unified-section__label');
-    await expect(sectionLabels.filter({ hasText: /^AI$/ })).toBeVisible();
-    await expect(sectionLabels.filter({ hasText: /^Communication$/ })).toBeVisible();
-    await expect(sectionLabels.filter({ hasText: /^This Computer$/ })).toBeVisible();
-    await expect(sectionLabels.filter({ hasText: /^Knowledge$/ })).toBeVisible();
-    await expect(sectionLabels.filter({ hasText: /^Tools$/ })).toBeVisible();
-
-    await expect(page.getByText(/Active: .*through Empyralis credits/i)).toBeVisible();
-    await expect(page.getByText(/^Credits$/).first()).toBeVisible();
-    await expect(page.getByText(/remaining|Available|Not active/i).first()).toBeVisible();
-    await expect(page.getByText(/^Backup$/)).toBeVisible();
-    await expect(page.getByText(/Gemini (available|configurable)/i)).toBeVisible();
-    await expect(page.getByText(/^Provider configuration$/)).toBeVisible();
-    await expect(page.getByText(/^More AI choices$/)).toBeVisible();
-    await expect(page.getByText(/connect another AI account or use a model on This Computer/i)).toBeVisible();
-    await expect(sectionLabels.filter({ hasText: /^Communication apps$/ })).toHaveCount(0);
-    await expect(sectionLabels.filter({ hasText: /^AI providers$/ })).toHaveCount(0);
-    await expect(page.getByText(/^Your Telegram$/)).toBeVisible();
-    await expect(page.getByText(/^Your WhatsApp$/)).toBeVisible();
-    await page.getByText(/^Your Telegram$/).click();
-    await expect(page.getByText(/Uses your paired computer session/i).first()).toBeVisible();
-    await expect(page.getByRole('button', { name: /^Set up$/i })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^Audit$/i })).toHaveCount(0);
-    await expect(page.getByText(/token|WSS|protocol|API key/i)).toHaveCount(0);
-    await expect(page.getByText(/^Signal$/)).toBeVisible();
-    await expect(page.getByText(/^Slack$/)).toBeVisible();
-    await expect(page.getByText(/^Discord$/)).toBeVisible();
-    await expect(page.getByText(/^This computer$/)).toBeVisible();
-    await expect(page.getByText(/^My browser$/)).toBeVisible();
-    await expect(page.getByText(/^Files on this computer$/)).toBeVisible();
-    await expect(page.getByText(/^AI on this computer$/)).toBeVisible();
-    await expect(page.getByText(/^Drive$/)).toBeVisible();
-    await expect(page.getByText(/^Notion$/)).toBeVisible();
-    await expect(page.getByText(/^Uploads$/)).toBeVisible();
-    await expect(page.getByText(/^Websites$/)).toBeVisible();
-  });
-
-  test('legacy channels route opens Communication integrations, not the computer console', async ({ page }) => {
-    await loginAsOwner(page);
-    await page.goto('/w/ws-1/channels');
-
-    await expect(page.getByText(/^Communication$/)).toBeVisible();
-    await expect(page.getByText(/^Your Telegram$/)).toBeVisible();
-    await expect(page.getByText(/^Your WhatsApp$/)).toBeVisible();
-    await expect(page.getByRole('heading', { name: /^This Mac$/i })).toHaveCount(0);
-    await expect(page.getByText(/What Sage can use on this computer/i)).toHaveCount(0);
-  });
+  // Deleted (5 tests), not rewritten — the "workspace views" nav (chat /
+  // memory / integrations / tasks / activity, with an approvals badge), the
+  // full-page Sage bootstrap-wizard loading state, the workspace-level
+  // Memory page, the workspace-level Integrations page, and the /channels
+  // redirect target all belonged to the legacy workstation shell named in
+  // this file's own dead code comment removal (see
+  // app/(account)/w/[workspaceId]/layout.tsx: "Phase 8: the legacy
+  // workstation shell is gone — every workspace surface now renders
+  // fleet-native inside FleetShell"). Confirmed genuinely gone, not moved,
+  // by reading current source:
+  //   - lib/workspace/fleet/PrimaryRail.tsx's RAIL_ITEMS is now just
+  //     Inbox/Conversations/Projects/Agents — no "workspace views" nav, no
+  //     approvals badge (this product has an explicit "no approval system"
+  //     law in CLAUDE.md — a badge counting pending approvals would violate
+  //     it outright).
+  //   - app/(account)/w/[workspaceId]/sage/page.tsx redirects straight to
+  //     /agents ("Sage is now a corner console (SageLauncher), not a
+  //     full-page route"); "Loading Sage setup" / "Agent setup is
+  //     temporarily unavailable" appear nowhere in live source, only in
+  //     this test file.
+  //   - next.config.ts's LEGACY_REDIRECTS 307s /memory, /integrations, and
+  //     /channels to /agents. The content these tests asserted (About
+  //     me/Preferences/Rules/Pinned/Recent/Sensitive/Controls headings,
+  //     "USER / IDENTITY / SOUL projections", Export/Wipe buttons, the
+  //     sage-unified-section AI/Communication/This Computer/Knowledge/Tools
+  //     layout, Telegram/WhatsApp/Drive/Notion rows) has no workspace-level
+  //     successor — memory and channels/connectors/tools now live as
+  //     per-agent detail tabs (lib/workspace/fleet/tabs/MemoryTab.tsx and
+  //     FleetAgentDetail.tsx's channels/connectors/tools tabs), a
+  //     structurally different surface, not a renamed one, so there is
+  //     nothing here to rewrite against.
 
   // Three tests used to live here asserting on a "Set up Sage" bootstrap
   // Q&A wizard (getByLabel(/^answer$/i), "save and continue", and a

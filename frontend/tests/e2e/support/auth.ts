@@ -1,20 +1,18 @@
 // @ts-nocheck
 import { expect, type Page } from '@playwright/test';
 
-// The legacy "workstation shell" (data-workstation-shell / -titlebar /
-// -chat-composer) is gone — FleetShell.tsx's own comment says it plainly:
-// "Phase 8: the legacy workstation shell is gone — every workspace surface
-// now renders fleet-native inside FleetShell." `.fleet-root` is FleetShell's
-// own top-level wrapper, rendered for every workspace route regardless of
-// which page loads under it, so it is the live stand-in for "the shell
-// mounted and is healthy." Landing on the bare workspace route (`/w/{id}`)
-// rather than `/sage` matters too: that route now redirects through /sage
-// (which itself redirects to /agents) only for pre-Fleet bookmarks — the
-// real landing page is Fleet Home.
 async function waitForWorkspaceShell(page: Page, workspaceId: string): Promise<void> {
+  // Phase 8 (see app/(account)/w/[workspaceId]/layout.tsx): the legacy
+  // workstation shell (data-workstation-shell / data-workstation-titlebar)
+  // is gone — every workspace surface now renders fleet-native inside
+  // FleetShell (lib/workspace/fleet/FleetShell.tsx), whose stable root is
+  // `.fleet-root` with a PrimaryRail nav always mounted. `/sage` is also no
+  // longer a real page — it 307-redirects to `/agents` (see
+  // app/(account)/w/[workspaceId]/sage/page.tsx) — so land on `/agents`
+  // instead.
   for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
-      await page.goto(`/w/${workspaceId}`, { waitUntil: 'domcontentloaded' });
+      await page.goto(`/w/${workspaceId}/agents`, { waitUntil: 'domcontentloaded' });
     } catch (error) {
       if (attempt === 5) {
         throw error;
@@ -23,7 +21,8 @@ async function waitForWorkspaceShell(page: Page, workspaceId: string): Promise<v
       continue;
     }
     const shell = page.locator('.fleet-root');
-    if (await shell.count() > 0 && page.url().includes(`/w/${workspaceId}`)) {
+    const rail = page.getByRole('navigation').first();
+    if (await shell.count() > 0 && await rail.count() > 0 && page.url().includes(`/w/${workspaceId}/`)) {
       return;
     }
     await page.waitForTimeout(150 * (attempt + 1));
@@ -47,4 +46,5 @@ export async function loginAsOwner(page: Page, workspaceId = 'ws-1'): Promise<vo
   await loginOwnerSession(page);
   await waitForWorkspaceShell(page, workspaceId);
   await expect(page.locator('.fleet-root')).toBeVisible();
+  await expect(page.locator('nav.fleet-rail-nav')).toBeVisible();
 }
