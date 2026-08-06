@@ -160,12 +160,14 @@ def iter_chat_stream_events(
     *,
     last_event_id: Any,
     normalize_cursor: Callable[[Any], int],
+    idle_wait_seconds: float = 15.0,
 ) -> Any:
     cursor = normalize_cursor(last_event_id)
     condition = session.get("condition")
     if not isinstance(condition, threading.Condition):
         return
     while True:
+        idle = False
         with condition:
             session["last_accessed_at"] = time.time()
             pending = [
@@ -177,8 +179,34 @@ def iter_chat_stream_events(
             if not pending and completed:
                 break
             if not pending:
-                condition.wait(timeout=15.0)
-                continue
+                condition.wait(timeout=idle_wait_seconds)
+                idle = True
+        if idle:
+            # A turn can go quiet for a while mid-flight — e.g. blocked on a
+            # slow/hung gateway tool call (MAN-... "This took too long to
+            # respond" investigation, 2026-08-06: a stuck shell.execute
+            # hardware action left this generator with nothing to yield for
+            # 2-4 minutes). Without SOME byte crossing the wire, an idle
+            # intermediary tears the connection down long before the turn
+            # actually finishes — Cloudflare's default edge timeout for a
+            # proxied connection with no data is well under that (confirmed
+            # empirically against production: nginx logged client-closed 499s
+            # at ~125s into two real hangs). The browser then shows a bare
+            # transport failure while the backend keeps working, unaware
+            # anyone gave up.
+            #
+            # A bare SSE comment line (leading ":") is invisible to any
+            # spec-following consumer and is exactly the mechanism this
+            # codebase's other long-lived SSE endpoints already use (see
+            # routes_agent_traces.py / routes_gateway.py / runtime_events_api.py
+            # / runtime_runtime_api.py, all sse_starlette.EventSourceResponse
+            # with ping=15) — this endpoint uses a plain StreamingResponse
+            # instead, so it gets the same keepalive by hand. AgentChat.tsx's
+            # parseSseBlock already drops "^:"-prefixed lines and blocks with
+            # no "data:" line, so an already-connected client is unaffected;
+            # this only keeps the pipe open while nothing has happened yet.
+            yield b": keepalive\n\n"
+            continue
         for item in pending:
             cursor = int(item.get("seq") or cursor)
             yield f"id: {item['id']}\n".encode("utf-8")
