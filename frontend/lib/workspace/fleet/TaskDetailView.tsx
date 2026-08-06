@@ -205,6 +205,79 @@ function readComments(task: FleetTask): TaskComment[] {
     .filter((c) => String(c.body || "").trim().length > 0);
 }
 
+type TaskActivityEvent = {
+  type: string;
+  actor_type?: string;
+  actor_id?: string;
+  actor_name?: string;
+  timestamp?: string;
+  details?: Record<string, unknown>;
+};
+
+function readActivity(task: FleetTask): TaskActivityEvent[] {
+  const raw = task.metadata?.activity;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((e): e is TaskActivityEvent => Boolean(e) && typeof e === "object" && typeof (e as Record<string, unknown>).type === "string");
+}
+
+type ActivityFeedItem =
+  | { kind: "comment"; comment: TaskComment; ts: string }
+  | { kind: "activity"; event: TaskActivityEvent; ts: string };
+
+function buildActivityFeed(task: FleetTask): ActivityFeedItem[] {
+  const comments: ActivityFeedItem[] = readComments(task).map((c) => ({
+    kind: "comment" as const,
+    comment: c,
+    ts: c.created_at || "",
+  }));
+  const events: ActivityFeedItem[] = readActivity(task).map((e) => ({
+    kind: "activity" as const,
+    event: e,
+    ts: e.timestamp || "",
+  }));
+  return [...comments, ...events].sort((a, b) => b.ts.localeCompare(a.ts));
+}
+
+const ACTIVITY_LABELS: Record<string, string> = {
+  status_changed: "changed status",
+  priority_changed: "changed priority",
+  title_edited: "edited the title",
+  description_edited: "edited the description",
+  due_date_changed: "changed the due date",
+  assigned: "assigned this task",
+  created: "created this task",
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  backlog: "Backlog", todo: "Todo", in_progress: "In Progress",
+  awaiting_input: "Awaiting Input", blocked: "Blocked",
+  in_review: "In Review", done: "Done",
+};
+
+const PRIORITY_LABELS: Record<number, string> = {
+  0: "None", 1: "Urgent", 2: "High", 3: "Medium", 4: "Low",
+};
+
+function describeActivity(event: TaskActivityEvent): string {
+  const label = ACTIVITY_LABELS[event.type] || event.type;
+  const d = event.details || {};
+  if (event.type === "status_changed") {
+    const from = typeof d.from === "string" ? (STATUS_LABELS[d.from] || d.from) : "";
+    const to = typeof d.to === "string" ? (STATUS_LABELS[d.to] || d.to) : "";
+    if (from && to) return `${label} from ${from} to ${to}`;
+    if (to) return `${label} to ${to}`;
+  }
+  if (event.type === "priority_changed") {
+    const from = typeof d.from === "number" ? (PRIORITY_LABELS[d.from] || String(d.from)) : "";
+    const to = typeof d.to === "number" ? (PRIORITY_LABELS[d.to] || String(d.to)) : "";
+    if (from && to) return `${label} from ${from} to ${to}`;
+  }
+  if (event.type === "assigned" && d.assignee_type) {
+    return `${label} to ${d.assignee_type === "agent" ? "an agent" : "a person"}`;
+  }
+  return label;
+}
+
 /** A resolved mention, inline in a comment body — visually distinct from
  *  surrounding text (a neutral pill, same circular identity treatment as
  *  the Assignee row above: AgentSigil for an agent, MemberAvatar for a
@@ -479,7 +552,7 @@ export function TaskDetailView({
         : null,
     [task.status, task.completed_by_agent_id, task.completed_by_user_id, agents, members],
   );
-  const comments = useMemo(() => readComments(task), [task]);
+  const feed = useMemo(() => buildActivityFeed(task), [task]);
 
   // Prev/next (MAN-145 item 4) and the Parent/Sub-tasks reads (item 5) all
   // ride the SAME sibling-task array — see the file header note on why
@@ -548,7 +621,11 @@ export function TaskDetailView({
   const [posting, setPosting] = useState(false);
   const [commentNotice, setCommentNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<TaskComment | null>(null);
-  const displayComments = useMemo(() => (pending ? [...comments, pending] : comments), [comments, pending]);
+  const displayFeed = useMemo(() => {
+    const items = [...feed];
+    if (pending) items.unshift({ kind: "comment" as const, comment: pending, ts: pending.created_at || "" });
+    return items;
+  }, [feed, pending]);
 
   // MAN-145: the composer textarea auto-grows with its content instead of
   // sitting at a fixed 2 rows or exposing a manual resize handle — same
@@ -691,32 +768,51 @@ export function TaskDetailView({
 
             <section className="fleet-task-page-section" aria-label="Activity">
               <h2 className="fleet-task-page-section-title">Activity</h2>
-              {displayComments.length === 0 ? (
+              {displayFeed.length === 0 ? (
                 <div className="fleet-task-page-activity-empty">
                   <MessageSquare size={14} strokeWidth={1.75} />
                   <span>
-                    No comments yet. Post one below — agents working this task can leave
-                    updates here too.
+                    No activity yet. Post a comment below — agents working this task can
+                    leave updates here too.
                   </span>
                 </div>
               ) : (
                 <ul className="fleet-task-page-comments">
-                  {displayComments.map((c, i) => (
-                    <li
-                      key={c.id || i}
-                      className={`fleet-task-page-comment${c === pending ? " is-pending" : ""}`}
-                    >
-                      <div className="fleet-task-page-comment-head">
-                        <CommentAuthorLine author={resolveCommentAuthor(c, agents, members, externalAgents)} />
-                        {c.created_at ? (
-                          <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
-                            {timeAgo(c.created_at) || stamp(c.created_at)}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="fleet-task-page-comment-body">{renderCommentBody(c, agents, members)}</div>
-                    </li>
-                  ))}
+                  {displayFeed.map((item, i) => {
+                    if (item.kind === "activity") {
+                      const e = item.event;
+                      const ts = e.timestamp || "";
+                      return (
+                        <li key={`evt-${i}`} className="fleet-task-page-activity-event">
+                          <span className="fleet-activity-actor">{e.actor_name || e.actor_id || "Someone"}</span>
+                          {" "}
+                          <span className="fleet-activity-action">{describeActivity(e)}</span>
+                          {ts ? (
+                            <span className="fleet-task-page-comment-time" title={stamp(ts)}>
+                              {" · "}{timeAgo(ts) || stamp(ts)}
+                            </span>
+                          ) : null}
+                        </li>
+                      );
+                    }
+                    const c = item.comment;
+                    return (
+                      <li
+                        key={c.id || i}
+                        className={`fleet-task-page-comment${c === pending ? " is-pending" : ""}`}
+                      >
+                        <div className="fleet-task-page-comment-head">
+                          <CommentAuthorLine author={resolveCommentAuthor(c, agents, members, externalAgents)} />
+                          {c.created_at ? (
+                            <span className="fleet-task-page-comment-time" title={stamp(c.created_at)}>
+                              {timeAgo(c.created_at) || stamp(c.created_at)}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="fleet-task-page-comment-body">{renderCommentBody(c, agents, members)}</div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </section>

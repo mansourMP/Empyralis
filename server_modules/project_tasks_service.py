@@ -698,6 +698,152 @@ async def _resolve_parent_task(
     return resolved_parent_id
 
 
+async def _record_task_activity(
+    pool: Any,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    event_type: str,
+    actor_type: str,
+    actor_id: str,
+    details: Dict[str, Any],
+    actor_name: str = "",
+) -> None:
+    """Append an activity event atomically to metadata.activity.
+
+    Same JSONB-append pattern as add_task_comment — one atomic UPDATE, no
+    read-modify-write gap. A failure here is logged and swallowed: activity
+    events are observability, not correctness, and a failed activity write
+    must never block the mutation that triggered it.
+    """
+    event: Dict[str, Any] = {
+        "type": event_type,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if actor_name:
+        event["actor_name"] = actor_name
+    if details:
+        event["details"] = details
+    try:
+        await control_plane_repository.rls_execute(
+            pool,
+            """
+            UPDATE project_tasks
+            SET metadata = jsonb_set(
+                COALESCE(metadata, '{}'::jsonb),
+                '{activity}',
+                COALESCE(metadata->'activity', '[]'::jsonb) || $4::jsonb,
+                true
+            ),
+                updated_at = NOW()
+            WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+            """,
+            tenant_id,
+            workspace_id,
+            task_id,
+            json.dumps([event]),
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+        )
+    except Exception:
+        LOGGER.warning("Failed to record activity event for task %s", task_id, exc_info=True)
+
+
+def _resolve_activity_actor(
+    actor_user_id: Optional[str],
+    actor_agent_id: Optional[str],
+) -> tuple:
+    """Return (actor_type, actor_id) for activity attribution. Returns ("", "")
+    when neither actor is known — a system/internal change with no attributable
+    human or agent."""
+    if actor_user_id:
+        return ("user", actor_user_id)
+    if actor_agent_id:
+        return ("agent", actor_agent_id)
+    return ("", "")
+
+
+async def _maybe_record_change(
+    pool: Any,
+    task: Dict[str, Any],
+    old_row: Any,
+    tenant_id: str,
+    workspace_id: str,
+    task_id: str,
+    actor_type: str,
+    actor_id: str,
+    *,
+    resolved_status: Optional[str] = None,
+    resolved_title: Optional[str] = None,
+    resolved_description: Optional[str] = None,
+    resolved_priority: Optional[Any] = None,
+    resolved_due_at: Optional[Any] = None,
+    clear_due_at: bool = False,
+) -> None:
+    """Compare old vs new values and record an activity event per changed field."""
+    # Status
+    if resolved_status is not None:
+        old_status = str(old_row.get("status") or "").strip()
+        if resolved_status != old_status:
+            await _record_task_activity(
+                pool, tenant_id=tenant_id, workspace_id=workspace_id,
+                task_id=task_id, event_type="status_changed",
+                actor_type=actor_type, actor_id=actor_id,
+                details={"from": old_status or None, "to": resolved_status},
+            )
+    # Title
+    if resolved_title is not None:
+        old_title = str(old_row.get("title") or "").strip()
+        if resolved_title and resolved_title != old_title:
+            await _record_task_activity(
+                pool, tenant_id=tenant_id, workspace_id=workspace_id,
+                task_id=task_id, event_type="title_edited",
+                actor_type=actor_type, actor_id=actor_id,
+                details={"from": old_title or None, "to": resolved_title},
+            )
+    # Description
+    if resolved_description is not None:
+        old_desc = str(old_row.get("description") or "").strip()
+        if resolved_description != old_desc:
+            await _record_task_activity(
+                pool, tenant_id=tenant_id, workspace_id=workspace_id,
+                task_id=task_id, event_type="description_edited",
+                actor_type=actor_type, actor_id=actor_id,
+                details={},
+            )
+    # Priority
+    if resolved_priority is not None:
+        old_priority = old_row.get("priority")
+        # priority is SMALLINT, may be 0 (a real value meaning "none")
+        try:
+            old_p = int(old_priority) if old_priority is not None else 0
+        except (TypeError, ValueError):
+            old_p = 0
+        new_p = int(resolved_priority) if resolved_priority is not None else 0
+        if new_p != old_p:
+            await _record_task_activity(
+                pool, tenant_id=tenant_id, workspace_id=workspace_id,
+                task_id=task_id, event_type="priority_changed",
+                actor_type=actor_type, actor_id=actor_id,
+                details={"from": old_p, "to": new_p},
+            )
+    # Due date
+    if resolved_due_at is not None or clear_due_at:
+        old_due = old_row.get("due_at")
+        old_due_str = str(old_due) if old_due else ""
+        new_due_str = "" if clear_due_at else (str(resolved_due_at) if resolved_due_at else "")
+        if new_due_str != old_due_str:
+            await _record_task_activity(
+                pool, tenant_id=tenant_id, workspace_id=workspace_id,
+                task_id=task_id, event_type="due_date_changed",
+                actor_type=actor_type, actor_id=actor_id,
+                details={"from": old_due_str or None, "to": new_due_str or None},
+            )
+
+
 async def create_task(
     *,
     tenant_id: str,
@@ -796,7 +942,21 @@ async def create_task(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
     )
-    return _row_to_task(row)
+    task = _row_to_task(row)
+    # Best-effort activity event — a failed activity write never blocks creation.
+    if task and created_by:
+        await _record_task_activity(
+            pool,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            task_id=tid,
+            event_type="created",
+            actor_type="user" if not (str(created_by).startswith("agent_") or str(created_by).startswith("ext_agent_")) else "agent",
+            actor_id=str(created_by),
+            actor_name=str(created_by_display_name or created_by)[:120],
+            details={"title": title},
+        )
+    return task
 
 
 async def get_task(
@@ -1331,6 +1491,26 @@ async def update_task(
     resolved_tenant_id = str(tenant_id or "").strip()
     resolved_workspace_id = str(workspace_id or "").strip()
     resolved_status = _normalize_status(status, default="") or None if status is not None else None
+    # Fetch the pre-update row only when we have an attributable actor — an
+    # internal/system patch with no actor (e.g. run_service's failure flip to
+    # 'blocked') neither records activity nor pays the extra round trip.
+    wants_activity = bool(resolved_actor_user_id or resolved_actor_agent_id)
+    old_row = None
+    if wants_activity:
+        old_rows = await control_plane_repository.rls_fetch(
+            pool,
+            """
+            SELECT title, description, status, priority, due_at
+            FROM project_tasks
+            WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+            """,
+            resolved_tenant_id,
+            resolved_workspace_id,
+            str(task_id or "").strip(),
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+        )
+        old_row = old_rows[0] if old_rows else None
     update_sql = (
         """
         UPDATE project_tasks
@@ -1432,7 +1612,23 @@ async def update_task(
             )
         else:
             raise
-    return _row_to_task(row)
+    task = _row_to_task(row)
+    # Record activity events for each field that actually changed.
+    if task and old_row:
+        actor_type, actor_id = _resolve_activity_actor(resolved_actor_user_id, resolved_actor_agent_id)
+        if actor_type:
+            # Compare old vs new to detect real changes.
+            await _maybe_record_change(
+                pool, task, old_row, resolved_tenant_id, resolved_workspace_id,
+                str(task_id or "").strip(), actor_type, actor_id,
+                resolved_status=resolved_status,
+                resolved_title=str(title or "").strip() if title is not None else None,
+                resolved_description=None if description is None else str(description).strip(),
+                resolved_priority=resolved_priority,
+                resolved_due_at=resolved_due_at,
+                clear_due_at=clear_due_at,
+            )
+    return task
 
 
 async def set_task_parent(
@@ -1672,6 +1868,14 @@ async def assign_task(
     updated = _row_to_task(row)
     if updated is None:
         raise ValueError(f"Task {resolved_task_id} not found in this workspace.")
+    # Best-effort activity event.
+    await _record_task_activity(
+        pool, tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id,
+        task_id=resolved_task_id, event_type="assigned",
+        actor_type="agent" if triggered_by == "agent" else "user",
+        actor_id=resolved_agent_id,
+        details={"assignee_type": "agent", "assignee_id": resolved_agent_id},
+    )
     wake_request = None
     wake_error = None
     try:
@@ -1792,6 +1996,13 @@ async def assign_task_to_user(
     updated = _row_to_task(row)
     if updated is None:
         raise ValueError(f"Task {resolved_task_id} not found in this workspace.")
+    # Best-effort activity event.
+    await _record_task_activity(
+        pool, tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id,
+        task_id=resolved_task_id, event_type="assigned",
+        actor_type="user", actor_id=resolved_user_id,
+        details={"assignee_type": "user", "assignee_id": resolved_user_id},
+    )
     # No scheduler call here -- see the docstring above. This is not a
     # try/except around a call that happens to always succeed; the call
     # itself does not exist in this function, in any branch.

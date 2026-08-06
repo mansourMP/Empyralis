@@ -281,13 +281,10 @@ class UpdateTaskSqlWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(update_args[10], "agent-1")
 
     async def test_no_extra_round_trip_on_the_well_formed_happy_path(self):
-        """The FK backstop (see the next test) must never cost the ordinary
-        case a round trip -- a single-item fetchrow queue is enough for a
-        successful done-transition with an actor, exactly the same call
-        budget update_task always had. This is also what protects a fake-
-        pool caller that queues an EXACT number of expected round trips
-        (see test_project_task_native_tools.py's own project_task__update
-        tests) from breaking because this feature quietly added one."""
+        """The FK backstop must never cost the well-formed happy path an extra
+        fetchrow round trip — the old-row fetch for activity attribution uses
+        rls_fetch (a separate queue from fetchrow), so the fetchrow budget is
+        unchanged: exactly 1, the UPDATE itself."""
         pool = _QueuedFakePool(fetchrow_results=[_task_row(status="done", completed_by_agent_id="agent-1")])
         with patch(
             "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
@@ -312,7 +309,7 @@ class UpdateTaskSqlWiringTests(unittest.IsolatedAsyncioTestCase):
                 'insert or update on table "project_tasks" violates foreign key constraint '
                 '"project_tasks_completed_by_agent_id_fkey"'
             ),
-            fetchrow_results=[_task_row(status="done")],  # the RETRY's RETURNING -- no stamp
+            fetchrow_results=[_task_row(status="done")],  # the RETRY's RETURNING — no stamp
         )
         with patch(
             "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",

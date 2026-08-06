@@ -347,3 +347,22 @@ a.fleet-task-detail-nav-btn:hover {
   font-weight: var(--weight-semibold);
   color: var(--text-primary);
 }
+
+/* Activity event rows — lighter than comments, single-line, chronological */
+.fleet-task-page-activity-event {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0;
+  padding: 6px 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.fleet-activity-actor {
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+.fleet-activity-action {
+  color: var(--text-secondary);
+}
