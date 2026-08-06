@@ -155,7 +155,12 @@ export default function TaskDetailPage() {
     setNotice(null);
     setPendingDue(dueAt);
     try {
-      await patchFleetTask(workspaceId, id, { due_at: dueAt });
+      // patchFleetTask's own "due_at alone does not clear -- clear_due_at
+      // pairing established for a nullable field on this same kind" contract
+      // (see fleet-data.ts): dueAt === null means the user cleared the due
+      // date, which requires clear_due_at: true or the backend's
+      // `ELSE due_at` SQL branch silently keeps the old value.
+      await patchFleetTask(workspaceId, id, { due_at: dueAt, clear_due_at: dueAt === null });
       await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not update this task's due date.");

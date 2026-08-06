@@ -26,7 +26,7 @@
 
 import { useState, type CSSProperties } from "react";
 
-import { timeAgo } from "./fleet-presentation";
+import { formatDueDate, timeAgo } from "./fleet-presentation";
 import { AgentSigil } from "./fleet-indicators";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
@@ -55,7 +55,11 @@ export function dueLabel(dueAt: string | null | undefined): string {
   if (!raw) return "";
   const d = new Date(raw);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  // due_at is a date-only field stamped midnight UTC (see formatDueDate's
+  // own doc in fleet-presentation.ts) — formatting it in the viewer's local
+  // timezone (the old `undefined` locale/no timeZone override here) rolls
+  // the calendar day back by one for anyone west of UTC.
+  return formatDueDate(d, { month: "short", day: "numeric" });
 }
 
 /** The width each optional column claims when it is on. The title track is

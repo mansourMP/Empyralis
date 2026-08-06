@@ -124,7 +124,7 @@ import {
   TASK_PRIORITY_LABELS,
 } from "./task-status";
 import { TaskLabelChips, TaskLabelEditor, TaskLabelRowIcon } from "./task-labels";
-import { formatDateTime, timeAgo } from "./fleet-presentation";
+import { formatDateTime, formatDueDate, timeAgo } from "./fleet-presentation";
 import { MemberAvatar } from "./MemberAvatarStack";
 import type { WorkspaceMember } from "./members-data";
 import {
@@ -153,6 +153,14 @@ import "./task-detail.css";
  *  width it does not have. */
 function stamp(value: string): string {
   return formatDateTime(value, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/** due_at is a date-only field (see formatDueDate's own doc in
+ *  fleet-presentation.ts) — pin its display to UTC so it always agrees
+ *  with the edit input regardless of viewer timezone, instead of routing
+ *  it through stamp()'s local-timezone formatting like a real instant. */
+function stampDueDate(value: string): string {
+  return formatDueDate(value, { dateStyle: "medium" });
 }
 
 /** A resolved @-mention (MAN-66) -- written by
@@ -1208,7 +1216,7 @@ export function TaskDetailView({
                 {...(onDueChange ? {
                   role: "button",
                   tabIndex: 0,
-                  "aria-label": task.due_at ? `Due ${stamp(task.due_at)} — click to edit` : "Due date not set — click to edit",
+                  "aria-label": task.due_at ? `Due ${stampDueDate(task.due_at)} — click to edit` : "Due date not set — click to edit",
                   onClick: enterDueEdit,
                   onKeyDown: (e) => {
                     if (e.key === "Enter" || e.key === " ") {
@@ -1218,7 +1226,7 @@ export function TaskDetailView({
                   },
                 } : {})}
               >
-                {task.due_at ? stamp(task.due_at) : "—"}
+                {task.due_at ? stampDueDate(task.due_at) : "—"}
               </span>
             )}
           </div>
