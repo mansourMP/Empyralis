@@ -593,7 +593,7 @@ _CLI_SUBSCRIPTION_RUNTIME_LABEL: Dict[str, str] = {
 # direct_chat, which applies this as a native provider-API param or a
 # system-prompt instruction — see direct_chat_generation_service.py's
 # "Reasoning effort logic" block).
-_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 # cli_subscription's OWN reasoning-effort vocabulary (Phase 1: reasoning-
 # effort control) — DIFFERENT from _VALID_REASONING_EFFORTS above and

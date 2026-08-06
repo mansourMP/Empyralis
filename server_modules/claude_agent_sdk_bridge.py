@@ -236,6 +236,56 @@ _SYNTHETIC_ASSISTANT_MODEL = "<synthetic>"
 # that no ANTHROPIC_BASE_URL override is in effect for the turn.
 _ANTHROPIC_PROVIDER_IDS = frozenset({"", "anthropic"})
 
+# Empyralis's own reasoning-effort vocabulary for the platform_credits/
+# byok_api modes — the ONLY modes that ever reach this bridge (cli_
+# subscription is a completely separate path: empyralis-gateway/src/llm/
+# cli-runner.ts spawns the owner's own paired CLI directly and passes its
+# own --effort/--reasoning-effort flags there; this module never sees that
+# turn). Mirrors frontend/lib/workspace/fleet/fleet-provider-constants.ts's
+# ReasoningEffort type and server_modules/fleet_tools.py's
+# _VALID_REASONING_EFFORTS byte-for-byte — "" is the fifth, unwritten
+# member of both: "no override was stored", never a level in its own right.
+# Now the SDK's complete EffortLevel set (claude_agent_sdk/types.py:
+# Literal["low", "medium", "high", "xhigh", "max"]) — all five are
+# selectable from the picker.
+_VALID_SDK_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+
+def resolve_sdk_effort(reasoning_effort: str) -> Optional[str]:
+    """Map Empyralis's stored `reasoning_effort` onto
+    `ClaudeAgentOptions.effort`, or None to leave the field unset entirely.
+
+    "Model default" (reasoning_effort == "", the REASONING_EFFORT_OPTIONS
+    picker's own "" entry — see fleet-provider-constants.ts) MUST return
+    None here, not a guessed level: `ClaudeAgentOptions.effort` defaults to
+    None, and per its own docstring the SDK/model choose the effort in that
+    case (documented default: "high"). Coercing "" to a specific level would
+    change behavior for every agent that has never touched this control,
+    which "model default" explicitly promises not to do. An unrecognized
+    string (defensive only — fleet_tools.py's own _VALID_REASONING_EFFORTS
+    check already rejects anything outside {"low","medium","high","xhigh"}
+    before it can be saved) is treated the same as "": pass nothing rather
+    than something the SDK might reject.
+
+    Deliberately provider-agnostic: reasoning depth is an SDK-level concept
+    here, not something this bridge maintains a per-provider translation
+    table for. The chosen level is always forwarded to
+    `ClaudeAgentOptions.effort` when the caller made an explicit choice,
+    regardless of which provider ultimately serves the turn. For turns that
+    reach Anthropic's own API this becomes a `--effort` flag to the `claude`
+    CLI subprocess (see claude_agent_sdk's subprocess_cli.py). For
+    adapter-routed providers (openai_compat_adapter.py's
+    translate_anthropic_request_to_openai), the field simply is not part of
+    that function's explicit allowlist of fields it copies onto the
+    outgoing OpenAI-shaped body — it is stripped by omission, the same way
+    `thinking`/`cache_control`/`metadata` already are, so there is no wire
+    contract to get wrong and no 400 risk.
+    """
+    normalized = str(reasoning_effort or "").strip().lower()
+    if normalized not in _VALID_SDK_REASONING_EFFORTS:
+        return None
+    return normalized
+
 
 # Credential-shaped env vars claude_agent_sdk's spawned `claude` CLI
 # subprocess recognizes, in Anthropic's own documented precedence order
@@ -1742,6 +1792,18 @@ async def run_claude_agent_sdk_turn(
                 # cleared) while this options object used a token the
                 # caller never learned about at all.
                 env=turn_env,
+                # The per-agent "Reasoning effort" composer/detail control
+                # (AgentChat.tsx / FleetAgentDetail.tsx, model_config.
+                # reasoning_effort) — previously wired ONLY into build_sdk_
+                # tools' execute_single_direct_tool_call calls (an internal
+                # LLM call made BY a tool), never onto this, the main model
+                # turn, which is what the picker actually claims to control.
+                # Provider-agnostic by design: reasoning depth is an
+                # SDK-level concept, not something Empyralis maintains a
+                # per-provider translation table for. See resolve_sdk_
+                # effort's own docstring for why forwarding it regardless of
+                # provider carries no wire-contract risk.
+                effort=resolve_sdk_effort(reasoning_effort),
             )
 
         async def _consume(sdk_message: Any, *, state: TranslationState) -> List[Dict[str, Any]]:
