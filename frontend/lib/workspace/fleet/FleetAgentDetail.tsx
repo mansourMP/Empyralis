@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { useRouter, usePathname } from "next/navigation";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
+  ArrowLeft,
   BookOpen,
   Brain,
   Check,
@@ -39,7 +40,6 @@ import { HardwareTab } from "./tabs/HardwareTab";
 import { MemoryTab } from "./tabs/MemoryTab";
 import { AgentChat } from "./AgentChat";
 import { GroupedRail, type GroupedRailGroup } from "./GroupedRail";
-import { SageHistoryPanel } from "./SageConsolePanels";
 import {
   defaultAgentThreadId,
   newAgentThreadId,
@@ -78,62 +78,10 @@ import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
-import { providerLabel } from "./fleet-provider-constants";
 import { RUNTIME_LABELS } from "./gateway-box-picker";
+import { resolveAgentModelSummary, formatModelSummaryLine, platformCreditsTierLabel } from "./fleet-model-config";
 
 import "./agent-configure-sheet.css";
-
-/** Single source of truth for "what should this agent's Model summary say" —
- *  used by both the sidebar's permanent one-line Model row and the Model
- *  tab's own Provider/Model fields, so they can't independently drift the
- *  way they did before: the sidebar had no cli_subscription case at all and
- *  fell straight through to "Platform default" even when Codex was
- *  correctly bound to a paired Gateway. */
-function resolveAgentModelSummary(modelConfig: Record<string, any> | undefined | null): {
-  provider: string;
-  model: string;
-  isPlatformDefault: boolean;
-  /** model_config.reasoning_effort, or "" when unset OR when the mode
-   *  doesn't apply it (local — see REASONING_EFFORT_SUPPORTED_MODES).
-   *  cli_subscription now applies it for real too (Phase 1: reasoning-
-   *  effort control — the paired Gateway's llm.generate forwards it into
-   *  the CLI's own --effort / -c model_reasoning_effort= flag), so it's
-   *  included here rather than hidden. Kept off the summary only for
-   *  local, which still has no reasoning-effort control at all today. */
-  reasoningEffort: string;
-} {
-  const config = modelConfig || {};
-  const mode = config.mode;
-  const reasoningEffort = (REASONING_EFFORT_SUPPORTED_MODES.has(mode) || mode === "cli_subscription")
-    ? String(config.reasoning_effort || "")
-    : "";
-  if (mode === "cli_subscription") {
-    const runtime = normalizeCliRuntime(config.runtime);
-    const provider = config.provider ? providerLabel(config.provider) : RUNTIME_LABELS[runtime];
-    return { provider, model: config.model || "CLI default", isPlatformDefault: false, reasoningEffort };
-  }
-  if (mode === "local") {
-    return { provider: "Local", model: config.model || "Ollama", isPlatformDefault: false, reasoningEffort };
-  }
-  if (config.provider || config.model || config.resolved_model) {
-    return {
-      provider: config.provider ? providerLabel(config.provider) : (config.resolved_provider_label || "Platform default"),
-      model: config.model || config.resolved_model || "Default",
-      isPlatformDefault: false,
-      reasoningEffort,
-    };
-  }
-  return { provider: "Platform default", model: "Platform default", isPlatformDefault: true, reasoningEffort };
-}
-
-function formatModelSummaryLine(summary: ReturnType<typeof resolveAgentModelSummary>): string {
-  const base = summary.isPlatformDefault
-    ? "Platform default"
-    : summary.provider === summary.model
-      ? summary.model
-      : `${summary.provider} · ${summary.model}`;
-  return summary.reasoningEffort ? `${base} · ${reasoningEffortLabel(summary.reasoningEffort)} reasoning` : base;
-}
 
 // Properties panel's Placement row used to render placement.label with no
 // tone at all — the one row on that panel that never went red/green, even
@@ -341,6 +289,13 @@ export function FleetAgentDetail({
   // Chat tab's mobile-only properties drawer (see propertiesContent below) —
   // every other tab keeps the permanent column, so this stays false and unused there.
   const [mobilePropertiesOpen, setMobilePropertiesOpen] = useState(false);
+  // ChatTab's New chat/History controls, reported up from that component so
+  // they can render in THIS header (next to Configure) instead of a toolbar
+  // stacked above the message list — chat history is page-level chrome, not
+  // composer content. Only ChatTab ever calls this (gated below by
+  // activeTab === "chat"), and it clears itself on unmount, so this is
+  // never stale content left over from a previous tab.
+  const [chatHeaderExtra, setChatHeaderExtra] = useState<ReactNode>(null);
   // Desktop/tablet Properties RAIL collapse — same persisted-preference
   // idiom as the primary rail's own collapse (fleet-preferences.ts's
   // COLLAPSED_KEY). Default when nothing is saved yet: CLOSED.
@@ -608,7 +563,15 @@ export function FleetAgentDetail({
         .sort((a, b) => b.usd_cost - a.usd_cost)
         .slice(0, 5)
         .map((row, i) => {
-          const modelLabel = [row.provider, row.model].filter(Boolean).join(" · ") || "Unknown model";
+          // Never the raw vendor/model string for platform-credit usage —
+          // same rule as the primary model chip (platformCreditsTierLabel's
+          // own doc): "Flash"/"Pro" is the whole public vocabulary there.
+          // Every other payer (the owner's own key/subscription/box) keeps
+          // showing the real provider/model — that's their own account, not
+          // a platform secret.
+          const modelLabel = row.mode === "platform_credits"
+            ? platformCreditsTierLabel(row.model)
+            : [row.provider, row.model].filter(Boolean).join(" · ") || "Unknown model";
           return (
             <PanelRow
               key={`${row.provider}:${row.model}:${row.mode}:${i}`}
@@ -684,6 +647,11 @@ export function FleetAgentDetail({
             })}
           </nav>
         </div>
+        {/* ChatTab's New chat/History controls — only meaningful on the Chat
+            tab, reported up via onHeaderControlsChange so this header stays
+            the one place chat thread navigation lives (not a toolbar above
+            the message list, not buried in the composer). */}
+        {activeTab === "chat" && chatHeaderExtra}
         {/* Opens the Configure sheet (below) on the other six sections —
             Model, Capabilities, Channels, Connectors, Tools, Hardware —
             grouped Brain/Reach/Compute via the same GroupedRail Settings
@@ -754,7 +722,16 @@ export function FleetAgentDetail({
           {activeTab === "memory" && (
             <MemoryTab workspaceId={workspaceId} agentId={agentId} agent={agent} onChat={() => onChat(agentId)} />
           )}
-          {activeTab === "chat" && <ChatTab key={agentId} workspaceId={workspaceId} agentId={agentId} agent={agent} />}
+          {activeTab === "chat" && (
+            <ChatTab
+              key={agentId}
+              workspaceId={workspaceId}
+              agentId={agentId}
+              agent={agent}
+              onHeaderControlsChange={setChatHeaderExtra}
+              onAgentSaved={onRenamed}
+            />
+          )}
         </div>
         {propertiesPanel}
         {activeTab === "chat" && (
@@ -1543,23 +1520,74 @@ function ScheduleSection({ workspaceId, agentId }: { workspaceId: string; agentI
 //
 // Mirrors SageLauncher.tsx's own New chat/History pair for the Ask AI
 // console — same gating (a control that cannot do anything observable is
-// not rendered), same popover idiom, same underlying GET /api/threads —
-// just scoped to one specialist agent instead of the workspace console.
-function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId: string; agent: FleetAgent | null }) {
+// not rendered), same underlying GET /api/threads — just scoped to one
+// specialist agent instead of the workspace console, and now surfaced in
+// the page HEADER (next to Configure) rather than a toolbar stacked above
+// the message list, which used to compete with the composer for attention.
+// Model/reasoning-effort/context-usage moved into the composer itself (see
+// AgentChat.tsx) — this component now owns only thread selection.
+//
+// THREAD IS A URL PARAM, NOT JUST COMPONENT STATE
+// -------------------------------------------------
+// History rows are real `<a href>` links (cmd-click/middle-click must open
+// a new tab on that exact conversation — this codebase's own "primary
+// navigation is real links" rule), so the open thread has to be something
+// a URL can name. `?thread=<id>` on this same route does that; component
+// state still exists (threadId) so AgentChat's key={threadId} remount and
+// the localStorage-persisted "last open conversation" convenience both
+// keep working exactly as before, it's just now KEPT IN SYNC with the URL
+// via ChatThreadSearchParamBridge below instead of being the sole source
+// of truth.
+function ChatThreadSearchParamBridge({ onChange }: { onChange: (params: { thread: string | null; history: string | null }) => void }) {
+  // Isolated in its own component under a local Suspense boundary (mirrors
+  // FleetTabsProvider's SearchParamsBridge in FleetTabs.tsx) — calling
+  // useSearchParams() bails the calling tree out to its nearest Suspense
+  // boundary during prerender, so it's called HERE, under a boundary that
+  // renders nothing, rather than dragging ChatTab's whole render tree into
+  // one.
+  const searchParams = useSearchParams();
+  const thread = searchParams.get("thread");
+  const history = searchParams.get("history");
+  useEffect(() => {
+    onChange({ thread, history });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thread, history]);
+  return null;
+}
+
+function ChatTab({
+  workspaceId, agentId, agent, onHeaderControlsChange, onAgentSaved,
+}: {
+  workspaceId: string;
+  agentId: string;
+  agent: FleetAgent | null;
+  /** Reports this tab's New chat/History controls up to FleetAgentDetail's
+   *  header (next to Configure) — see that render site for why this lives
+   *  there instead of a toolbar above the message list. */
+  onHeaderControlsChange?: (node: ReactNode) => void;
+  onAgentSaved?: () => void;
+}) {
   const label = agent?.label || "this agent";
   const pathname = usePathname();
-  // Same "swap the last path segment" tabHref uses one level up — this
-  // component doesn't have that closure, but the route shape is identical.
-  const modelHref = pathname.replace(/\/[^/]+$/, "/model");
-  const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(agent?.model_config));
 
   const [threadId, setThreadId] = useState<string>(
     () => readPersistedAgentThreadId(workspaceId, agentId) || defaultAgentThreadId(agentId),
   );
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyFull, setHistoryFull] = useState(false);
   const historyRef = useRef<HTMLDivElement | null>(null);
 
   const { conversations, refresh } = useAgentConversations(workspaceId, agentId, true);
+
+  // The URL wins once Next has actually resolved it (covers a direct link
+  // or cmd-click landing with ?thread= already in the address bar) — the
+  // bridge reports null on the very first render before that's resolved,
+  // so this only ever overrides forward, never resets to the legacy
+  // default just because the param hasn't shown up yet.
+  const onSearchParamsChange = useCallback((params: { thread: string | null; history: string | null }) => {
+    if (params.thread) setThreadId(params.thread);
+    setHistoryFull(params.history === "all");
+  }, []);
 
   useEffect(() => {
     persistAgentThreadId(workspaceId, agentId, threadId);
@@ -1584,15 +1612,10 @@ function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId
     };
   }, [historyOpen]);
 
-  const startNewConversation = useCallback(() => {
-    setThreadId(newAgentThreadId(agentId));
-    setHistoryOpen(false);
-  }, [agentId]);
-
-  const openConversation = useCallback((id: string) => {
-    setThreadId(id);
-    setHistoryOpen(false);
-  }, []);
+  const threadHref = useCallback(
+    (id: string) => `${pathname}?${new URLSearchParams({ thread: id }).toString()}`,
+    [pathname],
+  );
 
   // No dead controls: New chat only once the open conversation actually has
   // a turn recorded (starting a new chat over one that's already empty would
@@ -1600,77 +1623,141 @@ function ChatTab({ workspaceId, agentId, agent }: { workspaceId: string; agentId
   // with this agent to switch back to.
   const currentHasContent = conversations.some((c) => c.id === threadId);
   const hasOtherConversations = conversations.some((c) => c.id !== threadId);
+  const recentConversations = conversations.slice(0, 10);
+  const hasMoreConversations = conversations.length > 10;
 
-  return (
-    <div className="fleet-agent-chat-panel">
-      <div className="fleet-agent-chat-toolbar">
-        {/* Read-only: this agent's model lives on the agent record, not per
-            conversation — no backend override to switch here without
-            faking one. Same resolvedModel string the Properties panel's
-            Model row already shows, so this can't drift from it; the link
-            opens the same real editor that row does. */}
+  const headerControls = (
+    <>
+      {currentHasContent && (
         <Link
-          href={modelHref}
-          className="fleet-agent-chat-model-chip"
-          title={`${label}'s model — change it on the Model tab`}
+          href={threadHref(newAgentThreadId(agentId))}
+          replace
+          className="fleet-icon-btn"
+          onClick={() => setHistoryOpen(false)}
+          aria-label="New chat"
+          title="New chat"
         >
-          <Sparkles size={12} strokeWidth={1.75} />
-          <span>{resolvedModel}</span>
+          <SquarePen size={15} strokeWidth={1.75} />
         </Link>
-        <div className="fleet-sage-console-actions">
-          {currentHasContent && (
-            <button
-              type="button"
-              className="fleet-sage-console-action"
-              onClick={startNewConversation}
-              aria-label="New chat"
-              title="New chat"
+      )}
+      {hasOtherConversations && (
+        <div className="fleet-view-options" ref={historyRef}>
+          <button
+            type="button"
+            className={`fleet-icon-btn${historyOpen ? " is-active" : ""}`}
+            onClick={() => setHistoryOpen((v) => !v)}
+            aria-haspopup="dialog"
+            aria-expanded={historyOpen}
+            aria-label="Conversation history"
+            title="History"
+          >
+            <History size={15} strokeWidth={1.75} />
+          </button>
+          {historyOpen && (
+            <div
+              className="fleet-toolbar-popover fleet-agent-chat-history-popover"
+              role="dialog"
+              aria-label="Conversation history"
             >
-              <SquarePen size={15} strokeWidth={1.75} />
-            </button>
-          )}
-          {hasOtherConversations && (
-            <div className="fleet-view-options" ref={historyRef}>
-              <button
-                type="button"
-                className={`fleet-sage-console-action${historyOpen ? " is-active" : ""}`}
-                onClick={() => setHistoryOpen((v) => !v)}
-                aria-haspopup="dialog"
-                aria-expanded={historyOpen}
-                aria-label="Conversation history"
-                title="History"
-              >
-                <History size={15} strokeWidth={1.75} />
-              </button>
-              {historyOpen && (
-                <div
-                  className="fleet-toolbar-popover fleet-agent-chat-history-popover"
-                  role="dialog"
-                  aria-label="Conversation history"
+              <div className="fleet-toolbar-popover-label">Conversations with {label}</div>
+              <div className="fleet-sage-panel" role="list">
+                {recentConversations.map((c) => {
+                  const isActive = c.id === threadId;
+                  return (
+                    <Link
+                      key={c.id}
+                      href={threadHref(c.id)}
+                      replace
+                      role="listitem"
+                      className={`fleet-sage-history-row${isActive ? " is-active" : ""}`}
+                      onClick={() => setHistoryOpen(false)}
+                    >
+                      <span className="fleet-sage-history-row-title">{c.title}</span>
+                      <span className="fleet-sage-history-row-time">
+                        {isActive ? "Open" : timeAgo(c.lastActivityAt)}
+                      </span>
+                    </Link>
+                  );
+                })}
+              </div>
+              {hasMoreConversations && (
+                <Link
+                  href={`${pathname}?history=all`}
+                  replace
+                  className="fleet-agent-chat-history-see-all"
+                  onClick={() => setHistoryOpen(false)}
                 >
-                  <div className="fleet-toolbar-popover-label">Conversations with {label}</div>
-                  <SageHistoryPanel
-                    conversations={conversations}
-                    activeThreadId={threadId}
-                    onOpen={openConversation}
-                  />
-                </div>
+                  See all {conversations.length} conversations
+                </Link>
               )}
             </div>
           )}
         </div>
+      )}
+    </>
+  );
+
+  useEffect(() => {
+    onHeaderControlsChange?.(headerControls);
+    return () => onHeaderControlsChange?.(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyOpen, conversations, threadId, agentId, pathname]);
+
+  const searchParamsBridge = (
+    <Suspense fallback={null}>
+      <ChatThreadSearchParamBridge onChange={onSearchParamsChange} />
+    </Suspense>
+  );
+
+  if (historyFull) {
+    return (
+      <div className="fleet-agent-chat-panel fleet-agent-chat-history-full">
+        {searchParamsBridge}
+        <div className="fleet-agent-chat-history-full-header">
+          <Link href={threadHref(threadId)} replace className="fleet-btn">
+            <ArrowLeft size={14} strokeWidth={1.75} />
+            <span className="fleet-btn-label">Back to chat</span>
+          </Link>
+          <h2 className="fleet-agent-chat-history-full-title">Conversations with {label}</h2>
+        </div>
+        <div className="fleet-agent-chat-history-full-list">
+          {conversations.map((c) => {
+            const isActive = c.id === threadId;
+            return (
+              <Link
+                key={c.id}
+                href={threadHref(c.id)}
+                replace
+                className={`fleet-sage-history-row${isActive ? " is-active" : ""}`}
+              >
+                <span className="fleet-sage-history-row-title">{c.title}</span>
+                <span className="fleet-sage-history-row-time">
+                  {isActive ? "Open" : timeAgo(c.lastActivityAt)}
+                </span>
+              </Link>
+            );
+          })}
+        </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="fleet-agent-chat-panel">
+      {searchParamsBridge}
       <AgentChat
         key={threadId}
         workspaceId={workspaceId}
         threadId={threadId}
         agentInstallId={agentId}
+        agent={agent}
         emptyIcon={MessageSquare}
         emptyTitle={`Message ${label}`}
         emptyBody={`Your owner test chat with ${label} — full access, not what a real customer would see.`}
         placeholder={`Message ${label}…`}
         sourceTag="fleet_agent_chat"
         onTurnComplete={refresh}
+        onAgentSaved={onAgentSaved}
       />
     </div>
   );
@@ -3409,14 +3496,14 @@ import {
   type FleetGateway,
   type HardwarePlacementTone,
 } from "./gateway-box-picker";
-
-function resolveDisplayMode(config: Record<string, any>): ProviderMode {
-  const mode = config.mode;
-  if (mode === "byok_api") return "byok_api";
-  if (mode === "cli_subscription") return "cli_subscription";
-  if (mode === "local") return "local";
-  return "platform_credits";
-}
+import {
+  resolveDisplayMode,
+  seedSelectedModel,
+  saveAgentModelConfig,
+  PLATFORM_CREDITS_TIER_OPTIONS,
+  PLATFORM_CREDITS_MODEL_BY_TIER,
+  platformCreditsTierForModel,
+} from "./fleet-model-config";
 
 /** Label for a <select> model option — appends "(Recommended)" to the
  *  balanced/mid-tier pick every provider's picker pre-selects (see
@@ -3434,18 +3521,6 @@ function modelOptionLabel(provider: string, modelId: string): string {
 function ModelSizeWarning({ provider, model }: { provider: string; model: string }) {
   if (!isLargeModel(provider, model)) return null;
   return <p className="fleet-channel-expand-error" style={{ margin: 0 }}>{LARGE_MODEL_WARNING}</p>;
-}
-
-/** What `selectedModel` should start as for a given mode+provider+saved value
- *  — the saved value always wins; otherwise the provider's Recommended pick,
- *  or "" for a freeform provider (never fabricate a value the CLI/API
- *  wouldn't recognize) or a mode with no model concept (platform_credits). */
-function seedSelectedModel(mode: ProviderMode, provider: string, savedModel: string): string {
-  if (savedModel) return savedModel;
-  if (mode !== "byok_api" && mode !== "cli_subscription" && mode !== "local") return "";
-  const effectiveProvider = provider || (mode === "local" ? "ollama" : "");
-  if (!effectiveProvider || FREEFORM_MODEL_PROVIDERS.has(effectiveProvider)) return "";
-  return defaultModelForProvider(effectiveProvider);
 }
 
 // Phase 7B: preset / hardware-lock / context-policy / today's cost, shown at
@@ -3596,146 +3671,6 @@ function cliSubscriptionHint(gateways: FleetGateway[]): string {
     (g) => (["claude_code", "codex", "grok_build", "cursor_cli"] as const).some((r) => gatewayRuntimeReady(g, r)),
   );
   return anyReady ? "A paired computer has a CLI ready" : "No paired computer has a subscription CLI ready";
-}
-
-/** A pending (unsaved) edit to an agent's model_config — the shape both the
- *  Model tab's own editor and the Properties panel's compact picker collect
- *  locally before handing off to the single shared save path below. */
-type ModelConfigDraft = {
-  mode: ProviderMode;
-  provider: string;
-  selectedModel: string;
-  apiKey: string;
-  gatewayBinding: string;
-  reasoningEffort: string;
-};
-
-/** The ONE save path for an agent's model_config — used by both the Model
- *  tab's own editor (ModelTab.save(), below) and the Properties panel's
- *  compact picker (AgentModelPickerRow, above), so the two surfaces can
- *  never independently drift the way resolveAgentModelSummary's doc
- *  comment already warns about for the read side. Validates the draft
- *  (throws a user-facing Error on failure — callers own their own
- *  try/catch + saving/error state), writes a new BYOK vault credential
- *  first when a fresh API key is entered exactly like the previous
- *  ModelTab-only version did, then PATCHes model_config. */
-async function saveAgentModelConfig(
-  workspaceId: string,
-  agentId: string,
-  currentConfig: Record<string, any>,
-  agentLabel: string | undefined,
-  draft: ModelConfigDraft,
-): Promise<void> {
-  const { mode, provider, selectedModel, apiKey, gatewayBinding, reasoningEffort } = draft;
-  if (COMING_SOON_MODES.has(mode)) {
-    throw new Error(`${COMING_SOON_NOTE}. This option can’t be saved yet.`);
-  }
-  if (mode === "local" && !gatewayBinding.trim()) {
-    throw new Error("Pick a computer (with Ollama) to run this agent’s local model.");
-  }
-  if (mode === "cli_subscription" && !gatewayBinding.trim()) {
-    throw new Error("Pick a computer to run this agent’s subscription CLI.");
-  }
-  // A blank key is only safe to save when THIS provider already has a
-  // credential in the vault — i.e. byok_api was already persisted for this
-  // exact provider. Otherwise there is no known credential, and patching
-  // mode=byok_api anyway would silently persist a broken config.
-  const hasExistingCredentialForProvider = currentConfig.mode === "byok_api" && currentConfig.provider === provider;
-  if (mode === "byok_api" && !apiKey.trim() && !hasExistingCredentialForProvider) {
-    throw new Error("Enter your API key for this provider — none is saved yet.");
-  }
-  const reasoningEffortSupported = REASONING_EFFORT_SUPPORTED_MODES.has(mode);
-  const canSaveReasoningEffort = reasoningEffortSupported || mode === "cli_subscription";
-
-  async function patchModelConfig(): Promise<void> {
-    const patch: Record<string, any> = { mode };
-    if (mode === "byok_api" || mode === "cli_subscription" || mode === "local") {
-      patch.provider = provider;
-    }
-    // BUG FIX (2026-07-30): this used to read `mode === "byok_api" ||
-    // mode === "local"` — cli_subscription was silently excluded, so even
-    // when the picker above collected a model choice, Save never included it
-    // in the PATCH body. Confirmed live: agent "Compass" (production,
-    // ws_c4601e47c95a) has mode: cli_subscription, a real gateway_binding,
-    // and no `model` key at all — this is why "I can't choose a model" was
-    // reported. The Gateway side (cli-runner.ts buildInvocation) has always
-    // forwarded model_config.model into each CLI's real --model flag; this
-    // was purely a frontend gap between "collected" and "saved".
-    if ((mode === "byok_api" || mode === "cli_subscription" || mode === "local") && selectedModel.trim()) {
-      patch.model = selectedModel.trim();
-    }
-    // BYO-brain Phase 0: forward-wire which box + runtime.
-    if (mode === "cli_subscription" || mode === "local") {
-      if (gatewayBinding) patch.gateway_binding = gatewayBinding;
-      const rt = runtimeForProvider(provider);
-      if (rt) patch.runtime = rt;
-    }
-    // Only for the modes that actually consume it at turn time — this patch
-    // REPLACES model_config wholesale (fleet_tools.py's fleet_configure_agent
-    // does `meta["model_config"] = dict(patch)`, not a merge), so switching
-    // to local and saving correctly drops any previously-set
-    // reasoning_effort instead of leaving a stale, inert value behind.
-    if (canSaveReasoningEffort && reasoningEffort) {
-      patch.reasoning_effort = reasoningEffort;
-    }
-    const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
-      method: "PATCH",
-      credentials: "include",
-      headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
-      body: JSON.stringify({ patch: { model_config: patch } }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
-  }
-
-  if (mode === "byok_api") {
-    if (!apiKey.trim()) {
-      // Reusing existing vault key (hasExistingCredentialForProvider
-      // guaranteed true above) — only patch config.
-      await patchModelConfig();
-    } else {
-      // See the identical comment in FleetCreateAgentWizard.tsx's
-      // submitBrain(): /credentials/vault stores + validates the secret
-      // against the real provider adapter and returns a credential_id;
-      // /providers/profiles is the separate routing layer that makes it
-      // discoverable at turn time. /api/connectors/vault (used here
-      // previously) is the unrelated third-party-app connector vault and
-      // 400s "Unsupported connector" for every LLM provider.
-      const label = `${providerLabel(provider)} — ${agentLabel || "agent"}`;
-      const credRes = await fetch("/api/credentials/vault", {
-        method: "POST",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          provider,
-          label,
-          mode: "byok",
-          credentials: { api_key: apiKey.trim() },
-        }),
-      });
-      const credData = await credRes.json().catch(() => ({}));
-      if (!credRes.ok) throw new Error(credData?.detail || credData?.error || `HTTP ${credRes.status}`);
-
-      const profileRes = await fetch("/api/providers/profiles", {
-        method: "POST",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          provider,
-          label,
-          credential_id: credData?.id,
-          enabled: true,
-        }),
-      });
-      const profileData = await profileRes.json().catch(() => ({}));
-      if (!profileRes.ok) throw new Error(profileData?.detail || profileData?.error || `HTTP ${profileRes.status}`);
-      await patchModelConfig();
-    }
-  } else {
-    await patchModelConfig();
-  }
 }
 
 /** Properties panel's compact Model picker — clicking the "Model" row opens
@@ -3907,9 +3842,29 @@ function AgentModelPickerRow({
           </div>
 
           {mode === "platform_credits" && (
-            <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>
-              DeepSeek, on the platform. Empyralis pays — nothing to pick here.
-            </p>
+            <div className="fleet-toolbar-popover-group">
+              <div className="fleet-toolbar-popover-label">Speed</div>
+              <div className="fleet-tier-picker">
+                {PLATFORM_CREDITS_TIER_OPTIONS.map((opt) => {
+                  const isSelected = platformCreditsTierForModel(selectedModel) === opt.tier;
+                  return (
+                    <button
+                      key={opt.tier}
+                      type="button"
+                      className={`fleet-tier-picker-option${isSelected ? " is-selected" : ""}`}
+                      onClick={() => setSelectedModel(PLATFORM_CREDITS_MODEL_BY_TIER[opt.tier])}
+                      aria-pressed={isSelected}
+                    >
+                      <span className="fleet-tier-picker-option-label">{opt.label}</span>
+                      <span className="fleet-tier-picker-option-subtitle">{opt.subtitle}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="fleet-channel-expand-hint" style={{ margin: 0 }}>
+                DeepSeek, on the platform. Empyralis pays.
+              </p>
+            </div>
           )}
 
           {mode === "byok_api" && (
@@ -4360,12 +4315,30 @@ function ModelTab({
         </p>
       )}
 
-      {/* platform_credits has no provider/model fields (fixed to the
-          platform default) — reasoning effort is the one thing left to
-          configure here, so it gets its own expand block instead of living
-          bare under the mode buttons. */}
+      {/* platform_credits: a real choice between DeepSeek's fast/slow pair
+          (Flash/Pro — see PLATFORM_CREDITS_TIER_OPTIONS's own doc), plus
+          reasoning effort. Never the raw vendor/model string here either —
+          same rule as the primary chip. */}
       {mode === "platform_credits" && (
         <div className="fleet-channel-expand">
+          <label className="fleet-wizard-label">Speed</label>
+          <div className="fleet-tier-picker">
+            {PLATFORM_CREDITS_TIER_OPTIONS.map((opt) => {
+              const isSelected = platformCreditsTierForModel(selectedModel) === opt.tier;
+              return (
+                <button
+                  key={opt.tier}
+                  type="button"
+                  className={`fleet-tier-picker-option${isSelected ? " is-selected" : ""}`}
+                  onClick={() => { setSelectedModel(PLATFORM_CREDITS_MODEL_BY_TIER[opt.tier]); setSaved(false); }}
+                  aria-pressed={isSelected}
+                >
+                  <span className="fleet-tier-picker-option-label">{opt.label}</span>
+                  <span className="fleet-tier-picker-option-subtitle">{opt.subtitle}</span>
+                </button>
+              );
+            })}
+          </div>
           {renderReasoningEffortPicker()}
         </div>
       )}

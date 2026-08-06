@@ -1,12 +1,32 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, Loader2, type LucideIcon } from "lucide-react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { ArrowUp, Loader2, Paperclip, X, type LucideIcon } from "lucide-react";
 
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ChatMessage, type WorkstationChatMessageRecord } from "@/lib/workspace/chat-message";
 import { ContextUsageRail, type ContextUsagePayload } from "./ContextUsageRail";
+import type { FleetAgent } from "./fleet-data";
+import {
+  resolveAgentModelSummary,
+  formatModelSummaryLine,
+  resolveDisplayMode,
+  saveAgentModelConfig,
+  PLATFORM_CREDITS_TIER_OPTIONS,
+  PLATFORM_CREDITS_MODEL_BY_TIER,
+  PLATFORM_CREDITS_PROVIDER,
+  platformCreditsTierForModel,
+} from "./fleet-model-config";
+import {
+  REASONING_EFFORT_OPTIONS,
+  REASONING_EFFORT_SUPPORTED_MODES,
+  CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME,
+  normalizeCliRuntime,
+  runtimeForProvider,
+} from "./fleet-provider-constants";
 
 type RawTurn = Record<string, any>;
 type SseEvent = { event: string; payload: Record<string, unknown> };
@@ -203,6 +223,232 @@ function parseSseBlock(block: string): SseEvent | null {
   }
 }
 
+// ── Attachments ──────────────────────────────────────────────────────────
+//
+// POST /api/sage-chat/attachments (sage_context_files_api.py — despite the
+// "sage-chat" path segment, this is the one workspace-scoped chat-file-
+// upload endpoint in the backend today, already live: workstation-client.ts's
+// own uploadSageChatAttachment calls it). Reused here rather than inventing
+// a second upload pipeline — it saves to the workspace's attachments dir and
+// hands back exactly the shape /api/turn's own attachments array already
+// accepts (_attachments_from_payload in agent_turn.py explicitly reads both
+// "url" and "uri" keys, named for this response). GET
+// /api/sage-chat/attachments/{filename} serves it back, which is what
+// `url` below already points at.
+type PendingAttachment = {
+  file_id: string;
+  filename: string;
+  safe_filename: string;
+  content_type: string;
+  size: number;
+  url: string;
+};
+
+async function uploadChatAttachment(workspaceId: string, file: File): Promise<PendingAttachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`/api/sage-chat/attachments?workspace_id=${encodeURIComponent(workspaceId)}`, {
+    method: "POST",
+    credentials: "include",
+    // No Content-Type override — the browser sets the multipart boundary
+    // itself; buildCookieAuthHeaders still adds the CSRF header this
+    // route's require_member_api_key needs for a cookie-authenticated call.
+    headers: buildCookieAuthHeaders("POST"),
+    body: formData,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(body.slice(0, 200) || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// ── Composer's compact model control ────────────────────────────────────────
+//
+// Only platform_credits gets a REAL inline picker here — a genuine
+// two-option choice (Flash/Pro), same PLATFORM_CREDITS_TIER_OPTIONS the
+// Properties panel's picker and the Model tab use, so this can never show a
+// different tier than either of those for the same agent. byok_api/
+// cli_subscription/local need substantially more setup (API keys, gateway
+// pairing) that doesn't belong in a chat footer — those keep linking to the
+// full Model tab editor, same as the old toolbar chip did for every mode.
+function ComposerModelControl({
+  workspaceId,
+  agentId,
+  agent,
+  onSaved,
+}: {
+  workspaceId: string;
+  agentId: string;
+  agent: FleetAgent;
+  onSaved?: () => void;
+}) {
+  const config = agent.model_config || {};
+  const mode = resolveDisplayMode(config);
+  const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(config));
+  const pathname = usePathname();
+  const modelHref = pathname.replace(/\/[^/]+$/, "/model");
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  // Same dismissal contract as every other anchored popover in Fleet.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  async function pick(tier: "flash" | "pro") {
+    setSaving(true);
+    try {
+      await saveAgentModelConfig(workspaceId, agentId, config, agent.label, {
+        mode: "platform_credits",
+        provider: PLATFORM_CREDITS_PROVIDER,
+        selectedModel: PLATFORM_CREDITS_MODEL_BY_TIER[tier],
+        apiKey: "",
+        gatewayBinding: "",
+        reasoningEffort: config.reasoning_effort || "",
+      });
+      setOpen(false);
+      onSaved?.();
+    } catch {
+      // Best-effort — the trigger keeps showing the last-known value; a
+      // failed save just leaves the popover open with nothing changed, so
+      // the owner notices and can retry, same trade-off the Properties
+      // panel's own picker makes.
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (mode !== "platform_credits") {
+    return (
+      <Link
+        href={modelHref}
+        className="fleet-composer-chip"
+        title={`${agent.label || "This agent"}'s model — change it on the Model tab`}
+      >
+        <span>{resolvedModel}</span>
+      </Link>
+    );
+  }
+
+  return (
+    <div className="fleet-view-options" ref={ref}>
+      <button
+        type="button"
+        className={`fleet-composer-chip${open ? " is-active" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+        disabled={saving}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title="Change this agent's speed"
+      >
+        <span>{resolvedModel}</span>
+      </button>
+      {open && (
+        <div className="fleet-toolbar-popover fleet-composer-popover" role="dialog" aria-label="Change speed">
+          <div className="fleet-toolbar-popover-label">Speed</div>
+          <div className="fleet-tier-picker">
+            {PLATFORM_CREDITS_TIER_OPTIONS.map((opt) => {
+              const isSelected = platformCreditsTierForModel(config.model) === opt.tier;
+              return (
+                <button
+                  key={opt.tier}
+                  type="button"
+                  className={`fleet-tier-picker-option${isSelected ? " is-selected" : ""}`}
+                  onClick={() => void pick(opt.tier)}
+                  disabled={saving}
+                  aria-pressed={isSelected}
+                >
+                  <span className="fleet-tier-picker-option-label">{opt.label}</span>
+                  <span className="fleet-tier-picker-option-subtitle">{opt.subtitle}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Composer's compact reasoning-effort control ─────────────────────────────
+//
+// Standalone (not nested inside the model control's popover) per the target
+// composer layout: attach, model, reasoning effort, context usage, send —
+// five peer controls in one row. Renders nothing for a mode with no
+// reasoning-effort vocabulary at all (local, or a cli_subscription runtime
+// with none published — cursor_cli) rather than a disabled/dead control.
+function ComposerReasoningEffortControl({
+  workspaceId,
+  agentId,
+  agent,
+  onSaved,
+}: {
+  workspaceId: string;
+  agentId: string;
+  agent: FleetAgent;
+  onSaved?: () => void;
+}) {
+  const config = agent.model_config || {};
+  const mode = resolveDisplayMode(config);
+  const cliRuntime = normalizeCliRuntime(runtimeForProvider(config.provider || ""));
+  const [saving, setSaving] = useState(false);
+
+  const options = mode === "cli_subscription"
+    ? CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime]
+    : (REASONING_EFFORT_SUPPORTED_MODES.has(mode) ? REASONING_EFFORT_OPTIONS : []);
+
+  async function onChange(value: string) {
+    setSaving(true);
+    try {
+      await saveAgentModelConfig(workspaceId, agentId, config, agent.label, {
+        mode,
+        provider: config.provider || "",
+        selectedModel: config.model || "",
+        apiKey: "",
+        gatewayBinding: config.gateway_binding || "",
+        reasoningEffort: value,
+      });
+      onSaved?.();
+    } catch {
+      // Best-effort, same trade-off as ComposerModelControl above.
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (options.length === 0) return null;
+
+  return (
+    <select
+      className="fleet-composer-reasoning-select"
+      value={config.reasoning_effort || ""}
+      disabled={saving}
+      onChange={(e) => void onChange(e.currentTarget.value)}
+      title="Reasoning effort"
+      aria-label="Reasoning effort"
+    >
+      {options.map((o) => (
+        <option key={o.value || "unset"} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  );
+}
+
 /**
  * Shared chat surface: a thread with either the workspace master (Sage, when
  * `agentInstallId` is omitted) or one specific specialist agent (when it's
@@ -216,6 +462,7 @@ export function AgentChat({
   workspaceId,
   threadId,
   agentInstallId,
+  agent,
   emptyIcon: EmptyIcon,
   emptyTitle,
   emptyBody,
@@ -224,10 +471,16 @@ export function AgentChat({
   sourceTag,
   liveSyncUrl,
   onTurnComplete,
+  onAgentSaved,
 }: {
   workspaceId: string;
   threadId: string;
   agentInstallId?: string;
+  /** The Fleet agent this chat belongs to — powers the composer's model
+   *  and reasoning-effort controls (both need model_config to know what to
+   *  show/save). Omitted for Sage's own workspace-wide chat, which has no
+   *  model_config of its own; those controls simply don't render then. */
+  agent?: FleetAgent | null;
   emptyIcon: LucideIcon;
   emptyTitle: string;
   emptyBody: string;
@@ -242,6 +495,11 @@ export function AgentChat({
    *  state around this chat (the Ask AI console's conversation list) can
    *  re-read it instead of polling for a change only it caused. */
   onTurnComplete?: () => void;
+  /** Fired after the composer's model/reasoning-effort controls save a
+   *  change, so a caller holding its own copy of `agent` (FleetAgentDetail's
+   *  Properties panel reads the same model_config) can refetch instead of
+   *  drifting until the next poll. */
+  onAgentSaved?: () => void;
 }) {
   const { state } = useAccountShell();
   const account = state.account;
@@ -268,10 +526,17 @@ export function AgentChat({
   // every new send — knowing where context stood a moment ago is still
   // useful while the next turn is in flight.
   const [contextUsage, setContextUsage] = useState<ContextUsagePayload | null>(null);
+  // Uploaded-but-not-yet-sent files — cleared the moment send() fires
+  // (optimistic, same as `draft` itself already is just below) rather than
+  // waiting for the turn to actually complete.
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
   const sessionRef = useRef<{ session_id: string } | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const actor = useMemo(() => (
     account ? { type: "user", id: account.id, display_name: account.displayName || account.email } : null
@@ -336,9 +601,12 @@ export function AgentChat({
   const send = useCallback(async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || sending || !actor) return;
+    const attachmentsForTurn = pendingAttachments;
     setSending(true);
     setError(null);
     setDraft("");
+    setPendingAttachments([]);
+    setAttachmentError(null);
     requestAnimationFrame(autoGrow);
 
     setMessages((cur) => [...cur, {
@@ -351,7 +619,7 @@ export function AgentChat({
       approvals: [],
       interventions: [],
       artifacts: [],
-      metadata: {},
+      metadata: attachmentsForTurn.length > 0 ? { attachments: attachmentsForTurn } : {},
     }]);
     setStreamingText("");
 
@@ -387,6 +655,11 @@ export function AgentChat({
           channel: "web",
           actor,
           message: trimmed,
+          // Matches the shape uploadChatAttachment's own response already
+          // has (SageChatAttachment) — agent_turn.py's _attachments_from_
+          // payload reads "url"/"filename"/"size"/"content_type"/"file_id"
+          // straight off this, no transform needed.
+          attachments: attachmentsForTurn,
           context_hints: {
             source: sourceTag,
             thread_id: threadId,
@@ -542,7 +815,7 @@ export function AgentChat({
       // runs before the turn executes), so this fires either way.
       onTurnComplete?.();
     }
-  }, [sending, actor, workspaceId, tenantId, threadId, agentInstallId, sourceTag, autoGrow, onTurnComplete]);
+  }, [sending, actor, workspaceId, tenantId, threadId, agentInstallId, sourceTag, autoGrow, onTurnComplete, pendingAttachments]);
 
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -551,82 +824,172 @@ export function AgentChat({
     }
   };
 
+  const onAttachClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const onFilesSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.currentTarget.files ?? []);
+    e.currentTarget.value = ""; // allow re-selecting the same file later
+    if (files.length === 0) return;
+    setUploadingAttachment(true);
+    setAttachmentError(null);
+    try {
+      for (const file of files) {
+        const uploaded = await uploadChatAttachment(workspaceId, file);
+        setPendingAttachments((cur) => [...cur, uploaded]);
+      }
+    } catch (err) {
+      setAttachmentError(err instanceof Error ? err.message : "Could not attach that file.");
+    } finally {
+      setUploadingAttachment(false);
+    }
+  }, [workspaceId]);
+
+  const removeAttachment = useCallback((fileId: string) => {
+    setPendingAttachments((cur) => cur.filter((a) => a.file_id !== fileId));
+  }, []);
+
   const showEmptyState = !loading && messages.length === 0 && !streamingText;
 
   return (
-    <div className="fleet-agent-chat-shell">
-      <div className="fleet-sage-chat">
-        <div className="fleet-sage-chat-list" ref={listRef}>
-          {loading ? (
-            <div className="fleet-activity-skeleton" aria-label="Loading conversation">
-              {[60, 42, 70].map((w, i) => (
-                <div key={i} className="fleet-skeleton-row">
-                  <div className="fleet-skeleton-bar" style={{ width: 8 }} />
-                  <div className="fleet-skeleton-bar" style={{ width: `${w}%` }} />
-                </div>
-              ))}
-            </div>
-          ) : showEmptyState ? (
-            <div className="fleet-sage-chat-empty">
-              <span className="fleet-empty-icon"><EmptyIcon size={20} strokeWidth={1.75} /></span>
-              <div className="fleet-tab-state-title">{emptyTitle}</div>
-              <div className="fleet-tab-state-body">{emptyBody}</div>
-              {starterPrompts.length > 0 && (
-                <div className="fleet-sage-chat-suggestions">
-                  {starterPrompts.map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      className="fleet-sage-chat-suggestion"
-                      onClick={() => void send(prompt)}
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : (
-            <>
-              {messages.map((m) => <ChatMessage key={m.id} message={m} />)}
-              {sending && streamingText && (
-                <ChatMessage
-                  message={{
-                    id: "streaming",
-                    role: "assistant",
-                    content: streamingText,
-                    status: null,
-                    createdAt: null,
-                    runId: null,
-                    approvals: [],
-                    interventions: [],
-                    artifacts: [],
-                    metadata: {},
-                  }}
-                />
-              )}
-              {sending && !streamingText && (
-                <div className="fleet-sage-chat-thinking">
-                  <Loader2 size={14} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
-                  Thinking…
-                </div>
-              )}
-            </>
-          )}
-          {error && <p className="fleet-channel-expand-error">{error}</p>}
-        </div>
+    <div className="fleet-sage-chat">
+      <div className="fleet-sage-chat-list" ref={listRef}>
+        {loading ? (
+          <div className="fleet-activity-skeleton" aria-label="Loading conversation">
+            {[60, 42, 70].map((w, i) => (
+              <div key={i} className="fleet-skeleton-row">
+                <div className="fleet-skeleton-bar" style={{ width: 8 }} />
+                <div className="fleet-skeleton-bar" style={{ width: `${w}%` }} />
+              </div>
+            ))}
+          </div>
+        ) : showEmptyState ? (
+          <div className="fleet-sage-chat-empty">
+            <span className="fleet-empty-icon"><EmptyIcon size={20} strokeWidth={1.75} /></span>
+            <div className="fleet-tab-state-title">{emptyTitle}</div>
+            <div className="fleet-tab-state-body">{emptyBody}</div>
+            {starterPrompts.length > 0 && (
+              <div className="fleet-sage-chat-suggestions">
+                {starterPrompts.map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    className="fleet-sage-chat-suggestion"
+                    onClick={() => void send(prompt)}
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            {messages.map((m) => <ChatMessage key={m.id} message={m} />)}
+            {sending && streamingText && (
+              <ChatMessage
+                message={{
+                  id: "streaming",
+                  role: "assistant",
+                  content: streamingText,
+                  status: null,
+                  createdAt: null,
+                  runId: null,
+                  approvals: [],
+                  interventions: [],
+                  artifacts: [],
+                  metadata: {},
+                }}
+              />
+            )}
+            {sending && !streamingText && (
+              <div className="fleet-sage-chat-thinking">
+                <Loader2 size={14} strokeWidth={2} style={{ animation: "spin 1s linear infinite" }} />
+                Thinking…
+              </div>
+            )}
+          </>
+        )}
+        {error && <p className="fleet-channel-expand-error">{error}</p>}
+      </div>
 
-        <div className="fleet-sage-chat-composer">
-          <textarea
-            ref={textareaRef}
-            className="fleet-sage-chat-input"
-            placeholder={placeholder}
-            rows={1}
-            value={draft}
-            disabled={!actor}
-            onChange={(e) => { setDraft(e.currentTarget.value); autoGrow(); }}
-            onKeyDown={onComposerKeyDown}
+      {/* Consolidated composer: textarea, pending-attachment chips, then ONE
+          control row (attach, model, reasoning effort, context usage, send)
+          — see the target layout in the composer-redesign ticket. Model/
+          reasoning-effort only render when this chat belongs to a real
+          Fleet agent (agentInstallId + agent both set) — Sage's own
+          workspace-wide chat has no model_config to control. */}
+      <div className="fleet-sage-chat-composer">
+        <textarea
+          ref={textareaRef}
+          className="fleet-sage-chat-input"
+          placeholder={placeholder}
+          rows={1}
+          value={draft}
+          disabled={!actor}
+          onChange={(e) => { setDraft(e.currentTarget.value); autoGrow(); }}
+          onKeyDown={onComposerKeyDown}
+        />
+        {(pendingAttachments.length > 0 || attachmentError) && (
+          <div className="fleet-agent-composer-attachments">
+            {pendingAttachments.map((a) => (
+              <span key={a.file_id} className="fleet-agent-composer-attachment-chip">
+                <span>{a.filename}</span>
+                <button
+                  type="button"
+                  className="fleet-agent-composer-attachment-remove"
+                  onClick={() => removeAttachment(a.file_id)}
+                  aria-label={`Remove ${a.filename}`}
+                  title={`Remove ${a.filename}`}
+                >
+                  <X size={11} strokeWidth={2} />
+                </button>
+              </span>
+            ))}
+            {attachmentError && <p className="fleet-channel-expand-error" style={{ margin: 0 }}>{attachmentError}</p>}
+          </div>
+        )}
+        <div className="fleet-agent-composer-controls">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => void onFilesSelected(e)}
           />
+          <button
+            type="button"
+            className="fleet-icon-btn"
+            onClick={onAttachClick}
+            disabled={uploadingAttachment || !actor}
+            aria-label="Attach file"
+            title="Attach file"
+          >
+            {uploadingAttachment ? (
+              <Loader2 size={15} strokeWidth={1.75} style={{ animation: "spin 1s linear infinite" }} />
+            ) : (
+              <Paperclip size={15} strokeWidth={1.75} />
+            )}
+          </button>
+          {agentInstallId && agent && (
+            <ComposerModelControl
+              workspaceId={workspaceId}
+              agentId={agentInstallId}
+              agent={agent}
+              onSaved={onAgentSaved}
+            />
+          )}
+          {agentInstallId && agent && (
+            <ComposerReasoningEffortControl
+              workspaceId={workspaceId}
+              agentId={agentInstallId}
+              agent={agent}
+              onSaved={onAgentSaved}
+            />
+          )}
+          <ContextUsageRail contextUsage={contextUsage} agentInstallId={agentInstallId} />
+          <div className="fleet-agent-composer-controls-spacer" />
           <button
             type="button"
             className="fleet-sage-chat-send"
@@ -638,7 +1001,6 @@ export function AgentChat({
           </button>
         </div>
       </div>
-      <ContextUsageRail contextUsage={contextUsage} agentInstallId={agentInstallId} />
     </div>
   );
 }

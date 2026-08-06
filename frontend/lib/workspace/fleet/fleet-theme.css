@@ -2249,6 +2249,62 @@ a.fleet-breadcrumb:hover {
   text-align: left;
 }
 
+/* Composer popover variant of .fleet-toolbar-popover — the composer sits at
+   the bottom of the view, so its controls' popovers open UPWARD and
+   left-aligned instead of the toolbar default (down + right-aligned). */
+.fleet-composer-popover {
+  top: auto;
+  bottom: calc(100% + 6px);
+  right: auto;
+  left: 0;
+}
+
+/* Platform-credit Flash/Pro tier picker — two real options (never a
+   decorative "nothing to pick here" sentence), used by AgentModelPickerRow's
+   popover, the Model tab's own editor, and the composer's compact model
+   control. Neutral until selected — the border is the only signal, no
+   second accent surface competing with Send. */
+.fleet-tier-picker {
+  display: flex;
+  gap: 6px;
+}
+.fleet-tier-picker-option {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-card);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.fleet-tier-picker-option:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-card-hover);
+}
+.fleet-tier-picker-option.is-selected {
+  border-color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+.fleet-tier-picker-option-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+}
+.fleet-tier-picker-option-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 /* ── Shared indicators (dots / chips / tinted tiles) ─────────────────────── */
 
 /* Status as a living signal (U3-B, revised U3-C): fill carries meaning,
@@ -7139,20 +7195,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   text-underline-offset: 2px;
 }
 
-/* Row shell wrapping the chat column and the (collapsed-by-default)
-   context-usage rail — see ContextUsageRail.tsx. Sits exactly where
-   .fleet-sage-chat used to sit as AgentChat's own top-level element, so it
-   takes over that flex:1/min-height:0 contract from BOTH callers (Sage's
-   own flex-column page shell below, and .fleet-agent-chat-panel's column
-   further down); .fleet-sage-chat, now its row child, keeps its own
-   flex:1 column rules to fill the row's height via the row's default
-   align-items:stretch — no separate height rule needed on it. */
-.fleet-agent-chat-shell {
-  display: flex;
-  flex-direction: row;
-  flex: 1;
-  min-height: 0;
-}
 /* SAGE — full-width chat with the Operator. No tabs, no stat cards, no right
    panel, no deployment status, no second header repeating "Sage" (the
    breadcrumb already says it — the Operator badge rides on that crumb via
@@ -7161,7 +7203,10 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    (not height:100%, same reasoning as .fleet-shell-scroll above) is what
    lets flex:1 (list) + flex-shrink:0 (composer) below actually pin the
    composer to the true bottom instead of collapsing to content height and
-   leaving it stranded mid-screen. */
+   leaving it stranded mid-screen. AgentChat's own top-level element again
+   (the context-usage rail that used to sit beside it as a row sibling is
+   now folded into the composer's own control row instead — see
+   ContextUsageRail.tsx). */
 .fleet-sage-chat {
   display: flex;
   flex-direction: column;
@@ -7172,56 +7217,25 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 /* Agent-detail's Chat tab: same component as Sage's own page, but its parent
    here is .fleet-detail-body — a plain overflow:auto block, not a flex
    container — so flex:1 above has nothing to fill. height:100% (same fix
-   .fleet-work-split uses) gives it a definite height to hand down.
-   Column, not row: the toolbar (New chat/History/model chip) is a second,
-   fixed-height child now, stacked above .fleet-sage-chat's own flex:1 —
-   that inner component still owns pinning its composer to the bottom. */
+   .fleet-work-split uses) gives it a definite height to hand down. New
+   chat/History moved out to the page header (FleetAgentDetail's own
+   tabbar, next to Configure) — this panel's only child is .fleet-sage-chat
+   itself now. */
 .fleet-agent-chat-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
 }
-/* ── Chat tab toolbar (New chat / History / model chip) ───────────────────
-   APPENDED BLOCK. Read-only model chip on the left (links to the real
-   editor on the Model tab — no per-conversation override exists to fake
-   here), New chat + History on the right, reusing SageLauncher's own
-   .fleet-sage-console-action geometry and .fleet-toolbar-popover box so
-   this doesn't invent a second popover idiom. Neutral throughout — the
-   composer's Send button below is this view's one accent surface. */
-.fleet-agent-chat-toolbar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-5) 0;
-}
-.fleet-agent-chat-model-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  max-width: 60%;
-  padding: 4px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  text-decoration: none;
-  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
-}
-.fleet-agent-chat-model-chip span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.fleet-agent-chat-model-chip:hover {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-  background: var(--bg-card-hover);
-}
+/* ── Chat tab header controls (New chat / History) ─────────────────────────
+   Moved out of a toolbar above the message list and into the page header
+   itself (FleetAgentDetail's tabbar, next to Configure) — chat history is
+   page-level chrome, not composer content. Model/reasoning-effort/context-
+   usage moved the other direction, INTO the composer (see AgentChat.tsx) —
+   they're properties of the thing you're about to send, not the page. New
+   chat/History reuse the header's own .fleet-icon-btn geometry (same as the
+   Properties rail toggle beside them) and the shared .fleet-toolbar-popover
+   box, so neither invents a second control idiom. */
 /* Wider than the generic .fleet-toolbar-popover default (220px) — a
    conversation title needs more room than a menu option does — and
    height-capped since a busy agent can have many conversations; the list
@@ -7239,6 +7253,51 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* "See all N conversations" — a real link (Next <Link>), styled as a quiet
+   footer row rather than a second accent button; the popover's own rows
+   are the primary content, this is just the escape hatch past the ~10 cap. */
+.fleet-agent-chat-history-see-all {
+  display: block;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  text-decoration: none;
+  text-align: center;
+}
+.fleet-agent-chat-history-see-all:hover {
+  color: var(--text-primary);
+}
+/* Full conversation list (?history=all) — replaces the composer view
+   entirely rather than opening a second popover-of-a-popover; same
+   .fleet-sage-history-row rows as the popover, just uncapped and full-height. */
+.fleet-agent-chat-history-full-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5) 0;
+}
+.fleet-agent-chat-history-full-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
+  margin: 0;
+}
+.fleet-agent-chat-history-full-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.fleet-agent-chat-history-full-list .fleet-sage-history-row {
+  border-radius: var(--radius-control);
+  padding: 8px 10px;
 }
 /* Sits in the breadcrumb row now (see SageChat.tsx's useBreadcrumbBadge), not
    a standalone header block — no margin-left override needed here since the
@@ -7306,11 +7365,18 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   font-size: var(--text-sm);
   padding: var(--space-2) 0;
 }
+/* Composer: textarea on top, an optional row of pending-attachment chips,
+   then ONE control row underneath — attach, model, reasoning effort,
+   context usage, Send. Consolidated here from three previously scattered
+   surfaces (a read-only model chip in a toolbar above the message list, a
+   detached context-usage rail to the right of it, and this composer as
+   just a textarea + Send) — everything about the turn you're about to send
+   now lives in the object you're typing into. Send is the one accent
+   surface in the whole row; every other control is neutral. */
 .fleet-sage-chat-composer {
   flex-shrink: 0;
   display: flex;
-  align-items: flex-end;
-  gap: var(--space-2);
+  flex-direction: column;
   margin: var(--space-4) var(--space-5);
   padding: var(--space-2);
   border: 1px solid var(--border);
@@ -7318,7 +7384,7 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   background: var(--bg-card);
 }
 .fleet-sage-chat-input {
-  flex: 1;
+  width: 100%;
   resize: none;
   border: none;
   outline: none;
@@ -7328,9 +7394,105 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   font-family: inherit;
   line-height: 1.5;
   max-height: 200px;
-  padding: var(--space-2) var(--space-2);
+  padding: var(--space-2) var(--space-2) 4px;
 }
 .fleet-sage-chat-input::placeholder { color: var(--text-muted); }
+.fleet-agent-composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 var(--space-2) 6px;
+}
+.fleet-agent-composer-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-inset);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.fleet-agent-composer-attachment-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-agent-composer-attachment-remove {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.fleet-agent-composer-attachment-remove:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+.fleet-agent-composer-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-top: 2px;
+}
+.fleet-agent-composer-controls-spacer {
+  flex: 1;
+}
+/* Compact model/reasoning-effort chips in the composer row — same idiom as
+   .fleet-model-picker-trigger (Properties panel) but sized for a dense
+   control row rather than a property row. */
+.fleet-composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  max-width: 140px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out), color var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+.fleet-composer-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-composer-chip:hover,
+.fleet-composer-chip.is-active {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+  border-color: var(--border);
+}
+.fleet-composer-reasoning-select {
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  max-width: 108px;
+}
+.fleet-composer-reasoning-select:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+  border-color: var(--border);
+}
 .fleet-sage-chat-send {
   flex-shrink: 0;
   display: flex;
@@ -7350,58 +7512,64 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   cursor: not-allowed;
 }
 
-/* ── Context usage rail (ContextUsageRail.tsx) ─────────────────────────────
-   Collapsed by default: only the 36px toggle strip renders inside
-   .fleet-agent-chat-shell (a row, see above) until a person opens it — it
-   never occupies vertical space in the compose area, which is the whole
-   point (this product's target user is non-developers who have no reason
-   to see token accounting unasked). Neutral throughout, same restraint as
-   the Chat tab's own toolbar — the composer's Send button is still this
+/* ── Context usage meter (ContextUsageRail.tsx) ────────────────────────────
+   Re-seated into the composer's own control row (attach / model / reasoning
+   effort / THIS / send) — used to be a detached right-edge column with its
+   own permanent 36px toggle strip; now it's one more compact control among
+   the others, opening an anchored popover UPWARD (the composer sits at the
+   bottom of the view) instead of a slide-out panel. Neutral throughout,
+   same restraint as every other composer control — Send is still this
    view's one accent surface. */
-.fleet-context-usage-rail {
+.fleet-context-usage-inline {
+  position: relative;
+  display: inline-flex;
   flex-shrink: 0;
-  display: flex;
-  flex-direction: row;
-  height: 100%;
 }
-.fleet-context-usage-toggle {
-  flex-shrink: 0;
-  width: 36px;
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding-top: var(--space-4);
+.fleet-context-usage-inline-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
   background: none;
-  border: none;
-  border-left: 1px solid var(--border);
   color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
 }
-.fleet-context-usage-toggle:hover {
+.fleet-context-usage-inline-trigger:hover,
+.fleet-context-usage-inline-trigger.is-active {
   color: var(--text-primary);
   background: var(--bg-card-hover);
+  border-color: var(--border);
 }
-.fleet-context-usage-rail.is-open .fleet-context-usage-toggle {
-  color: var(--text-primary);
-  background: var(--bg-card);
-  border-left-color: transparent;
+.fleet-context-usage-inline-pct {
+  color: inherit;
 }
 .fleet-context-usage-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
   width: 260px;
-  flex-shrink: 0;
+  z-index: 30;
   overflow-y: auto;
+  max-height: 60vh;
   padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   background: var(--bg-card);
-  border-left: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
   animation: fleet-context-usage-panel-in var(--dur-2) var(--ease-out);
 }
 @keyframes fleet-context-usage-panel-in {
-  from { opacity: 0; transform: translateX(6px); }
-  to { opacity: 1; transform: translateX(0); }
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .fleet-context-usage-panel-header {
   display: flex;
@@ -7415,23 +7583,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.03em;
-}
-.fleet-context-usage-close {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: var(--radius-control);
-  background: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
-}
-.fleet-context-usage-close:hover {
-  color: var(--text-primary);
-  background: var(--bg-card-hover);
 }
 .fleet-context-usage-empty {
   font-size: var(--text-sm);
@@ -7510,19 +7661,12 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--text-primary);
   text-decoration: underline;
 }
-/* Narrow viewports: the panel pushing the chat column aside would crush it
-   to unusable width, so it leaves the flex flow (same escape hatch
-   .fleet-shell-panel's own mobile rule uses below) and overlays instead.
-   The 36px toggle strip stays inline either way. */
-@media (max-width: 768px) {
+/* Narrow viewports: the popover is already anchored (not a slide-out
+   column), just capped so it can't run off the left edge of a small
+   phone screen. */
+@media (max-width: 480px) {
   .fleet-context-usage-panel {
-    position: fixed;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: min(85vw, 300px);
-    z-index: 40;
-    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+    width: min(260px, calc(100vw - 32px));
   }
 }
 
@@ -10234,6 +10378,8 @@ h2.fleet-sage-console-title {
   font-family: inherit;
   font-size: 12px;
   text-align: left;
+  text-decoration: none;
+  color: inherit;
   cursor: pointer;
   transition: background var(--dur-1) var(--ease-out);
 }

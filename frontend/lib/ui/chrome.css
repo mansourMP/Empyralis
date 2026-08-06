@@ -4434,6 +4434,37 @@ body[data-theme='dark'] .app-auth-divider > span[aria-hidden="true"] {
   box-shadow: none;
 }
 
+/* Files sent alongside a turn — metadata.attachments, stamped by
+   AgentChat.tsx's send() and persisted straight through by the backend.
+   Small, quiet chips; a real link when the upload gave back a URL. */
+.app-chat-message__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.app-chat-message__attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  padding: 4px 9px;
+  border: 1px solid var(--app-border-default);
+  border-radius: 999px;
+  background: var(--app-surface-2);
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-decoration: none;
+}
+.app-chat-message__attachment-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+a.app-chat-message__attachment-chip:hover {
+  color: var(--text-primary);
+}
+
 /* Markdown-lite (see lib/workspace/markdown-lite.tsx): bold/italic/code/
    links/lists inside a chat bubble. Defined here (not only in fleet-theme.css,
    which the live chat surface doesn't always have loaded) so the same four
