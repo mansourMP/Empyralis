@@ -92,6 +92,18 @@ def _gateway_connection_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
         connection_status = "degraded"
     else:
         connection_status = "offline"
+    # Live capability_readiness: gateway.heartbeat frames report this on
+    # every heartbeat tick (empyralis-gateway/src/cloud/heartbeat-payload.ts),
+    # but gateway_protocol_service.py's heartbeat handler only ever persists
+    # it onto the CURRENT gateway_sessions row (touch_gateway_session) — the
+    # gateway_registrations row's own metadata.capability_readiness is only
+    # refreshed by the much rarer gateway.state.update frame. Surface the
+    # live session's copy here (already fetched above for reported_health_
+    # state, same "session metadata wins" precedence) so callers building
+    # the public payload can prefer it over the registration's stale copy.
+    live_capability_readiness = latest_session_metadata.get("capability_readiness")
+    if not isinstance(live_capability_readiness, dict) or not live_capability_readiness:
+        live_capability_readiness = None
     return {
         "connection_status": connection_status,
         "reported_health_state": reported_health_state or None,
@@ -101,6 +113,7 @@ def _gateway_connection_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
         "latest_session_status": session_status or None,
         "latest_connected_at": (latest_session or {}).get("connected_at"),
         "latest_disconnected_at": (latest_session or {}).get("disconnected_at"),
+        "live_capability_readiness": live_capability_readiness,
     }
 
 
@@ -204,6 +217,21 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
     from server_modules import gateway_self_update_service
 
     metadata = dict(registration.get("metadata") or {})
+    # MAN-313: registration.metadata.capability_readiness is only ever as
+    # fresh as the last gateway.state.update frame (rare — restart-health-
+    # check, supervisor-install, personal-channel state), NOT the continuous
+    # gateway.heartbeat stream (every ~10s), which the protocol handler only
+    # ever persists onto the live gateway_sessions row. Fold the live
+    # session's copy in here — BEFORE any derivation below reads
+    # metadata["capability_readiness"] — so a capability that only became
+    # available mid-connection (Docker just started) is reflected without a
+    # reconnect. connection_payload is computed once and reused for both this
+    # merge and the **spread below, so this doesn't add a second gateway_
+    # sessions lookup.
+    connection_payload = _gateway_connection_payload(registration)
+    live_capability_readiness = connection_payload.pop("live_capability_readiness", None)
+    if isinstance(live_capability_readiness, dict) and live_capability_readiness:
+        metadata["capability_readiness"] = live_capability_readiness
     runtime_access_mode = execution_mode_policy.normalize_runtime_access_mode(
         metadata.get("runtime_access_mode")
     )
@@ -261,7 +289,7 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
         "token_rotated_at": registration.get("token_rotated_at"),
         "revoked_at": registration.get("revoked_at"),
         "revoked_reason": registration.get("revoked_reason"),
-        **_gateway_connection_payload(registration),
+        **connection_payload,
         **_hardware_presentation(metadata),
         **gateway_self_update_service.gateway_update_status(registration),
     }

@@ -178,8 +178,36 @@ def _policy_payload_for_dispatch(
     }
 
 
-def _has_gateway_capability(registration: Dict[str, Any], capability_id: str) -> bool:
-    return gateway_inventory_service.registration_has_execution_capability(registration, capability_id)
+def _has_gateway_capability(
+    registration: Dict[str, Any],
+    capability_id: str,
+    *,
+    status_payload: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if gateway_inventory_service.registration_has_execution_capability(registration, capability_id):
+        return True
+    # MAN-313: registration.capabilities is a one-time snapshot, only ever
+    # refreshed on gateway.connect (gateway_protocol_service.py's connect
+    # handler passes connect_payload["requested_capabilities"] into
+    # update_gateway_registration_state) — a capability that only becomes
+    # available mid-connection (Docker starts, an operator opts in) stays
+    # invisible here until the gateway reconnects. capability_readiness.
+    # requested is the live counterpart: the gateway recomputes and reports
+    # it on every heartbeat tick (capability-router.ts's
+    # syncRequestedCapabilities()), and gateway_registration_public_payload()
+    # already folds the live session's copy into status_payload["metadata"]
+    # (see gateway_registry_service.py). Falling back to it here means a
+    # capability that just became ready doesn't need a reconnect to become
+    # dispatchable. This can't grant new authority beyond what the connected
+    # gateway itself is self-reporting over its own authenticated session —
+    # same trust level as the static list, just not stale.
+    status_metadata = dict((status_payload or {}).get("metadata") or {})
+    registration_metadata = dict(registration.get("metadata") or {})
+    return gateway_inventory_service.capability_requested_from_any_metadata(
+        capability_id,
+        status_metadata,
+        registration_metadata,
+    )
 
 
 def _permission_statuses_for_gateway(*, gateway_id: str, workspace_id: str) -> Dict[str, str]:
@@ -269,12 +297,18 @@ def gateway_registration_execution_readiness(
     registration_workspace_id = _text(registration.get("workspace_id"))
     if registration_workspace_id and registration_workspace_id != (_text(workspace_id) or "default"):
         return False, "gateway_workspace_mismatch"
-    if not _has_gateway_capability(registration, capability_id):
-        return False, "gateway_capability_missing"
     gateway_id = _text(registration.get("gateway_id"))
+    # Computed once, ahead of the capability check below, so both the
+    # "declared" and "ready" capability checks see the same live snapshot —
+    # gateway_registration_public_payload() already folds the gateway's
+    # latest heartbeat-reported capability_readiness into its "metadata"
+    # field (see gateway_registry_service.py), which is what makes the
+    # capability checks live instead of frozen at last connect/reconnect.
+    status_payload = gateway_registry_service.gateway_registration_public_payload(registration)
+    if not _has_gateway_capability(registration, capability_id, status_payload=status_payload):
+        return False, "gateway_capability_missing"
     if not gateway_protocol_service.gateway_connection_is_live(gateway_id):
         return False, "gateway_offline"
-    status_payload = gateway_registry_service.gateway_registration_public_payload(registration)
     if not bool(status_payload.get("heartbeat_fresh")):
         return False, "gateway_heartbeat_stale"
     connection_status = _text(status_payload.get("connection_status")).lower()
