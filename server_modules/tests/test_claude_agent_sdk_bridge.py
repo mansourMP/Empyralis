@@ -2136,6 +2136,125 @@ class TurnEngineSelectionFlagOffTests(unittest.TestCase):
         )
 
 
+class NormalizeRequestedEngineTests(unittest.TestCase):
+    """MAN-312: _normalize_requested_engine is the pure half of
+    handle_sage_chat's model_config.engine resolution — the piece that used
+    to silently discard a persisted "legacy" value exactly like an unset
+    one, leaving no way to pin a single agent off the SDK once it became
+    the production default (c96c7138a). These pin the fixed normalization
+    directly, without needing to drive the full handle_sage_chat call."""
+
+    def test_unset_normalizes_to_empty(self):
+        self.assertEqual(sage_agent_runtime_service._normalize_requested_engine(""), "")
+
+    def test_unrecognized_value_normalizes_to_empty(self):
+        self.assertEqual(
+            sage_agent_runtime_service._normalize_requested_engine("some_other_value"), "",
+        )
+
+    def test_legacy_passes_through(self):
+        # The core MAN-312 fix: a persisted "legacy" must survive this
+        # normalization step, not collapse to "" alongside "unset".
+        self.assertEqual(
+            sage_agent_runtime_service._normalize_requested_engine("legacy"), "legacy",
+        )
+
+    def test_sdk_engine_id_passes_through(self):
+        self.assertEqual(
+            sage_agent_runtime_service._normalize_requested_engine(claude_agent_sdk_bridge.ENGINE_ID),
+            claude_agent_sdk_bridge.ENGINE_ID,
+        )
+
+    def test_case_and_whitespace_insensitive(self):
+        self.assertEqual(
+            sage_agent_runtime_service._normalize_requested_engine("  Legacy  "), "legacy",
+        )
+
+
+class StoredLegacyEngineForcesLegacyPathTests(unittest.TestCase):
+    """MAN-312 end-to-end (within the engine-selection seam): a stored
+    "legacy" value, once normalized by _normalize_requested_engine, must
+    actually resolve away from the SDK id when it reaches
+    _resolve_turn_engine_id via engine_options — the exact path
+    handle_sage_chat's `_effective_engine_options` construction wires
+    together (requested_engine -> {"engine": requested_engine} ->
+    engine_options)."""
+
+    def test_normalized_legacy_resolves_off_sdk_via_engine_options(self):
+        requested_engine = sage_agent_runtime_service._normalize_requested_engine("legacy")
+        engine_options = {"engine": requested_engine} if requested_engine else None
+        self.assertEqual(engine_options, {"engine": "legacy"})
+        self.assertNotEqual(
+            sage_agent_runtime_service._resolve_turn_engine_id(engine_options),
+            claude_agent_sdk_bridge.ENGINE_ID,
+        )
+
+    def test_unset_raw_engine_still_yields_none_engine_options(self):
+        # Companion negative case: an unset/unrecognized value must still
+        # produce engine_options=None (not an explicit dict) — the
+        # "no explicit choice" outcome _resolve_turn_engine_id's own
+        # production default (SDK) depends on staying reachable.
+        requested_engine = sage_agent_runtime_service._normalize_requested_engine("")
+        engine_options = {"engine": requested_engine} if requested_engine else None
+        self.assertIsNone(engine_options)
+
+
+class ForceLegacyEngineKillSwitchTests(unittest.TestCase):
+    """MAN-312: EMPYRALIS_FORCE_LEGACY_ENGINE is the global emergency
+    rollback lever — forces every turn onto the legacy engine regardless of
+    per-agent config, without a code deploy. Mirrors the on/off vocabulary
+    _primary_compaction_enabled already established in this module."""
+
+    def _clear(self):
+        os.environ.pop("EMPYRALIS_FORCE_LEGACY_ENGINE", None)
+
+    def test_unset_is_disabled(self):
+        self._clear()
+        self.addCleanup(self._clear)
+        self.assertFalse(sage_agent_runtime_service._force_legacy_engine_enabled())
+
+    def test_zero_is_disabled(self):
+        self.addCleanup(self._clear)
+        with patch.dict(os.environ, {"EMPYRALIS_FORCE_LEGACY_ENGINE": "0"}):
+            self.assertFalse(sage_agent_runtime_service._force_legacy_engine_enabled())
+
+    def test_one_is_enabled(self):
+        self.addCleanup(self._clear)
+        with patch.dict(os.environ, {"EMPYRALIS_FORCE_LEGACY_ENGINE": "1"}):
+            self.assertTrue(sage_agent_runtime_service._force_legacy_engine_enabled())
+
+    def test_true_is_enabled_case_insensitive(self):
+        self.addCleanup(self._clear)
+        with patch.dict(os.environ, {"EMPYRALIS_FORCE_LEGACY_ENGINE": "True"}):
+            self.assertTrue(sage_agent_runtime_service._force_legacy_engine_enabled())
+
+    def test_kill_switch_overrides_explicit_sdk_request(self):
+        # The whole point of a global kill-switch: it must win even over an
+        # explicit engine_options={"engine": "claude_agent_sdk"} request,
+        # since the emergency case is exactly one where per-call opt-ins
+        # can't be trusted to have been reverted individually in time.
+        self.addCleanup(self._clear)
+        with patch.dict(os.environ, {"EMPYRALIS_FORCE_LEGACY_ENGINE": "1"}):
+            self.assertNotEqual(
+                sage_agent_runtime_service._resolve_turn_engine_id(
+                    {"engine": "claude_agent_sdk"},
+                ),
+                claude_agent_sdk_bridge.ENGINE_ID,
+            )
+
+    def test_kill_switch_off_leaves_explicit_sdk_request_selected(self):
+        # Negative control: with the switch off, the existing explicit-SDK
+        # behavior (TurnEngineSelectionFlagOffTests.
+        # test_explicit_sdk_engine_is_selected) must be completely
+        # unaffected by this test class existing.
+        self._clear()
+        self.addCleanup(self._clear)
+        self.assertEqual(
+            sage_agent_runtime_service._resolve_turn_engine_id({"engine": "claude_agent_sdk"}),
+            claude_agent_sdk_bridge.ENGINE_ID,
+        )
+
+
 # ── MAN-310 skills-delivery ──────────────────────────────────────────────────
 # Per-agent skills, delivered as real SKILL.md files via a per-turn, per-
 # install temp plugin directory (build_skills_plugin_dir + plugins=[...]),
