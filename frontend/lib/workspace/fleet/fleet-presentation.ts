@@ -63,6 +63,14 @@ export type UsageMatrixRow = {
   events?: number;
   tokens_in: number;
   tokens_out: number;
+  // Cache token dimensions (usage_events.tokens_cache_creation/
+  // tokens_cache_read — Anthropic's cache_creation_input_tokens/
+  // cache_read_input_tokens, aka ModelUsage.cacheCreationInputTokens/
+  // cacheReadInputTokens). Optional: rows recorded before this column
+  // existed, or by a non-SDK engine, simply omit them — never fabricated
+  // as 0 when genuinely unknown.
+  tokens_cache_creation?: number;
+  tokens_cache_read?: number;
   total_tokens?: number;
   usd_cost: number;
   pricing_known: boolean;
