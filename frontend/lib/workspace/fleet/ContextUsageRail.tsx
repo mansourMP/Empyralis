@@ -59,6 +59,19 @@ function formatTokenCount(value: unknown): string {
  * control doesn't cover (byok_api/cli_subscription's fuller editor).
  * Omitted for Sage's own workspace-wide chat, which has no per-agent Model
  * tab to link to.
+ *
+ * No dead controls (CLAUDE.md): renders nothing at all until `contextUsage`
+ * is real data. A bare gauge icon with no percentage next to it — the
+ * previous behavior — reads as a broken control, indistinguishable from a
+ * rendering bug, not as "no data yet." This is a genuinely common state:
+ * context_usage is never persisted with the turn (get_context_usage() rides
+ * only on that one turn's live SSE "final" event — see AgentChat.tsx's own
+ * contextUsage docstring), so it starts null on every fresh page load/thread
+ * open and stays null until a claude_agent_sdk-engine turn completes in
+ * *this* render. Once one has, the meter appears with a real number and
+ * keeps showing the last completed turn's reading (never resets to null on
+ * a new send) — same as before, just no longer visible while there is
+ * nothing to show.
  */
 export function ContextUsageRail({
   contextUsage,
@@ -92,8 +105,10 @@ export function ContextUsageRail({
     };
   }, [open]);
 
-  const categories = Array.isArray(contextUsage?.categories) ? contextUsage!.categories : [];
-  const percentage = Math.max(0, Math.min(100, Number(contextUsage?.percentage) || 0));
+  if (!contextUsage) return null;
+
+  const categories = Array.isArray(contextUsage.categories) ? contextUsage.categories : [];
+  const percentage = Math.max(0, Math.min(100, Number(contextUsage.percentage) || 0));
 
   return (
     <div className="fleet-context-usage-inline" ref={ref}>
@@ -104,10 +119,10 @@ export function ContextUsageRail({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label="Context usage"
-        title={contextUsage ? `Context used: ${percentage.toFixed(0)}%` : "Context usage — not available yet"}
+        title={`Context used: ${percentage.toFixed(0)}%`}
       >
         <Gauge size={13} strokeWidth={1.75} />
-        {contextUsage && <span className="fleet-context-usage-inline-pct">{Math.round(percentage)}%</span>}
+        <span className="fleet-context-usage-inline-pct">{Math.round(percentage)}%</span>
       </button>
       {open && (
         <div className="fleet-toolbar-popover fleet-context-usage-panel" role="dialog" aria-label="Context usage">
@@ -115,53 +130,45 @@ export function ContextUsageRail({
             <span className="fleet-context-usage-panel-title">Context usage</span>
           </div>
 
-          {!contextUsage ? (
-            <p className="fleet-context-usage-empty">
-              Not available for this conversation's engine yet.
-            </p>
-          ) : (
-            <>
-              {contextUsage.model && (
-                <div className="fleet-context-usage-model">{contextUsage.model}</div>
-              )}
-              <div
-                className="fleet-context-usage-meter"
-                role="meter"
-                aria-valuenow={Math.round(percentage)}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label="Context window used"
-              >
-                <div className="fleet-context-usage-meter-fill" style={{ width: `${percentage}%` }} />
-              </div>
-              <div className="fleet-context-usage-totals">
-                {formatTokenCount(contextUsage.totalTokens)} / {formatTokenCount(contextUsage.maxTokens)} tokens
-                <span className="fleet-context-usage-pct"> · {percentage.toFixed(1)}%</span>
-              </div>
+          {contextUsage.model && (
+            <div className="fleet-context-usage-model">{contextUsage.model}</div>
+          )}
+          <div
+            className="fleet-context-usage-meter"
+            role="meter"
+            aria-valuenow={Math.round(percentage)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Context window used"
+          >
+            <div className="fleet-context-usage-meter-fill" style={{ width: `${percentage}%` }} />
+          </div>
+          <div className="fleet-context-usage-totals">
+            {formatTokenCount(contextUsage.totalTokens)} / {formatTokenCount(contextUsage.maxTokens)} tokens
+            <span className="fleet-context-usage-pct"> · {percentage.toFixed(1)}%</span>
+          </div>
 
-              {categories.length > 0 && (
-                <ul className="fleet-context-usage-categories">
-                  {categories.map((cat) => (
-                    <li key={cat.name} className="fleet-context-usage-category">
-                      <span
-                        className="fleet-context-usage-category-swatch"
-                        style={{ background: cat.color || "var(--text-muted)" }}
-                      />
-                      <span className="fleet-context-usage-category-name">{cat.name}</span>
-                      <span className="fleet-context-usage-category-tokens">
-                        {formatTokenCount(cat.tokens)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+          {categories.length > 0 && (
+            <ul className="fleet-context-usage-categories">
+              {categories.map((cat) => (
+                <li key={cat.name} className="fleet-context-usage-category">
+                  <span
+                    className="fleet-context-usage-category-swatch"
+                    style={{ background: cat.color || "var(--text-muted)" }}
+                  />
+                  <span className="fleet-context-usage-category-name">{cat.name}</span>
+                  <span className="fleet-context-usage-category-tokens">
+                    {formatTokenCount(cat.tokens)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
 
-              {modelHref && (
-                <Link href={modelHref} className="fleet-context-usage-reasoning-link">
-                  Full model editor
-                </Link>
-              )}
-            </>
+          {modelHref && (
+            <Link href={modelHref} className="fleet-context-usage-reasoning-link">
+              Full model editor
+            </Link>
           )}
         </div>
       )}
