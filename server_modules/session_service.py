@@ -778,6 +778,72 @@ async def prune_expired_sessions(workspace_id: str, *, limit: int = 50) -> Dict[
     }
 
 
+def _parse_delete_command_tag(status: Any) -> int:
+    """asyncpg's Pool.execute() returns a command tag string like 'DELETE 42'
+    rather than a row count. Falls back to 0 on anything unparseable so a
+    malformed tag degrades the batch loop to 'stop early' rather than raising
+    out of a background retention run."""
+    try:
+        return int(str(status).strip().split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+_PRUNE_EXPIRED_RUNTIME_SESSIONS_SQL = """
+    DELETE FROM runtime_sessions
+    WHERE session_id IN (
+        SELECT session_id FROM runtime_sessions
+        WHERE expires_at < $1
+        ORDER BY expires_at ASC
+        LIMIT $2
+    )
+"""
+
+
+async def prune_expired_runtime_sessions(*, cutoff: Any, batch_size: int, max_batches: int) -> int:
+    """Global, batched, age-based delete of runtime_sessions rows whose
+    expires_at is older than `cutoff` (already expired, and expired more
+    than the retention window ago). Unlike prune_expired_sessions() above --
+    which is per-workspace, scans up to `limit` rows, and calls
+    terminate_session() one row at a time (an N+1 pattern fine for a single
+    workspace's occasional cleanup, not for a global sweep over tens of
+    thousands of rows) -- this is a direct batched DELETE across every
+    tenant/workspace, meant to be called from server_modules.
+    telemetry_retention_service's scheduled sweep. It intentionally does not
+    reuse prune_expired_sessions()'s per-row path.
+
+    Only expires_at gates eligibility -- a row that has not yet expired is a
+    live session by this table's own semantics (get_session() above still
+    resolves it up to expires_at) and is never a candidate no matter how old
+    created_at is, matching the same "never delete a live thing" rule this
+    codebase already applies to gateway_sessions
+    (gateway_state_repository.prune_gateway_state) and agent_sessions
+    (control_plane_repository.prune_expired_agent_sessions).
+
+    This function only touches the authoritative Postgres runtime_sessions
+    table (via db.get_pool(), same pool _ensure_runtime_sessions_table()
+    uses) -- the local SQLite checkpoint mirror
+    (runtime_state_store.delete_runtime_session) is a separate, per-machine,
+    ephemeral store outside this job's scope."""
+    pool = await runtime_db.get_pool()
+    if pool is None:
+        return 0
+    safe_batch_size = max(1, int(batch_size or 0))
+    safe_max_batches = max(1, int(max_batches or 0))
+    try:
+        total_deleted = 0
+        for _ in range(safe_max_batches):
+            status = await pool.execute(_PRUNE_EXPIRED_RUNTIME_SESSIONS_SQL, cutoff, safe_batch_size)
+            deleted = _parse_delete_command_tag(status)
+            total_deleted += deleted
+            if deleted < safe_batch_size:
+                break
+        return total_deleted
+    except Exception as exc:
+        LOGGER.warning("Postgres prune_expired_runtime_sessions failed: %s", exc)
+        return 0
+
+
 async def renew_session(session_id: str, *, ttl_seconds: int | None = None) -> Optional[Dict[str, Any]]:
     token = str(session_id or "").strip()
     if not token:

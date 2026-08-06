@@ -12666,6 +12666,254 @@ async def terminate_agent_session(
         )
 
 
+# ── Telemetry retention: batched, age-based prune for machine-generated
+# tables (activity_ledger_events, agent_secret_access_events, agent_sessions,
+# agent_traces/agent_trace_events) ───────────────────────────────────────────
+#
+# Orchestrated from server_modules/telemetry_retention_service.py (env-var
+# configured windows/batch sizes, scheduled the same way shared.py's
+# _gateway_state_prune_loop already schedules gateway_state_repository.
+# prune_gateway_state() — see that function's own docstring for the MAN-140
+# background). These four are the Postgres, control-plane-repository-owned
+# analog: NOTHING here has ever deleted a row from these tables by age
+# before this (agent_sessions rows are only ever status-flipped to
+# 'terminated' by terminate_agent_session above, never removed; the other
+# three have no delete path at all — verified via grep for `DELETE FROM` on
+# each table name prior to this change).
+#
+# Deliberately NOT routed through _enforce_control_plane_service_decision()
+# the way every user/tenant-facing mutation above it in this module is.
+# Same reasoning gateway_state_repository.prune_gateway_state() documents
+# for its own kernel-gate bypass: there is no "prune"/"retention_delete"
+# operation in the Rust kernel's control-plane-service allowlist (empyralis-
+# runtime-kernel/src/control_plane_service.rs), and adding one to
+# security-critical policy code is out of scope for an internal housekeeping
+# job. This matches the established convention elsewhere in this codebase
+# for exactly this kind of thing — compare runtime_state_store.py's
+# _prune_run_history()/_prune_channel_events(), neither of which goes
+# through any rust-kernel gate either.
+#
+# Every delete below is scoped with bypass_rls=True: a global, cross-tenant
+# age sweep is not a single tenant's row set, so the ordinary per-request
+# tenant/workspace RLS scoping (_scoped_connection(tenant_id=..., workspace_
+# id=...)) does not apply here — this is the same bypass_rls=True escape
+# hatch ~20 other system-level lookups in this module already use (see
+# _apply_connection_scope's own docstring). agent_sessions and agent_secret_
+# access_events both have RLS ENABLED + FORCED (migrations/enable_rls.sql);
+# without bypass_rls=True a delete issued from a connection with no tenant
+# GUC set would silently match zero rows instead of doing the sweep.
+#
+# Batched via a bounded "DELETE ... WHERE pk IN (SELECT pk ... ORDER BY
+# <age column> LIMIT batch_size)" loop, capped at max_batches per call, so a
+# first run against a large backlog cannot hold one lock or spend one I/O
+# burst proportional to the FULL table — it drains at most
+# batch_size * max_batches rows per invocation and picks up the remainder on
+# the next scheduled tick. This is deliberately more conservative than
+# prune_gateway_state()'s single unbounded DELETE, which predates this
+# batching requirement.
+def _parse_delete_command_tag(status: Any) -> int:
+    """asyncpg's Connection.execute() returns a command tag string like
+    'DELETE 42' rather than a row count — this parses that tag. Falls back to
+    0 on anything unparseable rather than raising, since a malformed tag
+    should degrade the loop to 'stop early', never crash the retention run."""
+    try:
+        return int(str(status).strip().split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+async def _run_batched_prune(
+    connection: Any,
+    query: str,
+    *,
+    cutoff: datetime,
+    batch_size: int,
+    max_batches: int,
+) -> int:
+    safe_batch_size = max(1, int(batch_size or 0))
+    safe_max_batches = max(1, int(max_batches or 0))
+    total_deleted = 0
+    for _ in range(safe_max_batches):
+        status = await connection.execute(query, cutoff, safe_batch_size)
+        deleted = _parse_delete_command_tag(status)
+        total_deleted += deleted
+        if deleted < safe_batch_size:
+            break
+    return total_deleted
+
+
+_PRUNE_ACTIVITY_LEDGER_EVENTS_SQL = """
+    DELETE FROM activity_ledger_events
+    WHERE id IN (
+        SELECT id FROM activity_ledger_events
+        WHERE created_at < $1
+        ORDER BY created_at ASC
+        LIMIT $2
+    )
+"""
+
+
+async def prune_activity_ledger_events(
+    *, cutoff: datetime, batch_size: int, max_batches: int
+) -> int:
+    """Deletes activity_ledger_events rows older than `cutoff`. This is the
+    human/agent-facing activity feed (tool calls, delegations, run status,
+    ...) — high write volume, no compliance/audit designation of its own
+    (contrast agent_secret_access_events below), so a comparatively short
+    default retention window is appropriate. See telemetry_retention_service
+    for the configured window."""
+    pool = await ensure_control_plane_schema()
+    if pool is None:
+        return 0
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            return 0
+        return await _run_batched_prune(
+            connection,
+            _PRUNE_ACTIVITY_LEDGER_EVENTS_SQL,
+            cutoff=cutoff,
+            batch_size=batch_size,
+            max_batches=max_batches,
+        )
+
+
+_PRUNE_AGENT_SECRET_ACCESS_EVENTS_SQL = """
+    DELETE FROM agent_secret_access_events
+    WHERE id IN (
+        SELECT id FROM agent_secret_access_events
+        WHERE created_at < $1
+        ORDER BY created_at ASC
+        LIMIT $2
+    )
+"""
+
+
+async def prune_agent_secret_access_events(
+    *, cutoff: datetime, batch_size: int, max_batches: int
+) -> int:
+    """Deletes agent_secret_access_events rows older than `cutoff`.
+
+    This table is a SECURITY AUDIT TRAIL — every time an agent resolved a
+    credential/secret grant (which provider, which tool, allowed or denied),
+    not debug noise. It is deliberately NOT covered by the same short
+    default window as activity_ledger_events; telemetry_retention_service
+    configures it with its own, much longer, independently-overridable
+    retention window (EMPYRALIS_SECRET_ACCESS_AUDIT_RETENTION_DAYS) so
+    shortening the general telemetry window can never silently shorten
+    this one too. Still bounded rather than kept forever: an unbounded
+    audit table on a 2GB-RAM single-VPS box is itself an operational risk
+    (this is exactly the growth pattern that prompted this whole retention
+    pass — 58k rows / 43MB from a workspace population of a handful of
+    people), and a long-but-finite window is the standard security-audit
+    posture (e.g. 6-12 months) rather than "audit trails are never allowed
+    to be deleted." If a future compliance requirement needs these moved to
+    cold storage instead of deleted outright, that is a deliberate design
+    change to make there, not something to bolt on silently here."""
+    pool = await ensure_control_plane_schema()
+    if pool is None:
+        return 0
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            return 0
+        return await _run_batched_prune(
+            connection,
+            _PRUNE_AGENT_SECRET_ACCESS_EVENTS_SQL,
+            cutoff=cutoff,
+            batch_size=batch_size,
+            max_batches=max_batches,
+        )
+
+
+# Only expires_at (never created_at/updated_at) gates eligibility: a session
+# row that has not yet expired is a LIVE session by this table's own
+# semantics (the same "never touch a live thing regardless of age" rule
+# gateway_state_repository.prune_gateway_state() applies to a 'connected'/
+# 'pending' gateway_sessions row) — code elsewhere still resolves a session
+# by id up to its expires_at (session_service.get_session), so deleting it
+# early would surface as a confusing mid-session failure instead of the
+# ordinary "session expired, start a new one" path. expires_at IS NULL rows
+# (should not occur in practice — every writer sets it — but nothing
+# enforces that at the schema level) are left alone rather than guessed at.
+_PRUNE_EXPIRED_AGENT_SESSIONS_SQL = """
+    DELETE FROM agent_sessions
+    WHERE id IN (
+        SELECT id FROM agent_sessions
+        WHERE expires_at IS NOT NULL AND expires_at < $1
+        ORDER BY expires_at ASC
+        LIMIT $2
+    )
+"""
+
+
+async def prune_expired_agent_sessions(
+    *, cutoff: datetime, batch_size: int, max_batches: int
+) -> int:
+    """Deletes agent_sessions rows whose expires_at is older than `cutoff`
+    (i.e. already expired, AND expired more than the retention window ago —
+    not merely expired a moment ago). agent_sessions carries session/actor/
+    channel metadata only, never conversation content (that is agent_turns,
+    explicitly out of scope for this job); agent_turns.session_id is a loose
+    reference with no foreign key against agent_sessions.id, so deleting an
+    old session row here never orphans or breaks a turn's history."""
+    pool = await ensure_control_plane_schema()
+    if pool is None:
+        return 0
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            return 0
+        return await _run_batched_prune(
+            connection,
+            _PRUNE_EXPIRED_AGENT_SESSIONS_SQL,
+            cutoff=cutoff,
+            batch_size=batch_size,
+            max_batches=max_batches,
+        )
+
+
+# Gates on finished_at, never started_at: an agent_traces row with
+# finished_at IS NULL is a trace that is still running (or crashed without
+# ever calling finish_agent_trace) — either way, still a live/ambiguous
+# record, not a closed one, so it is never a delete candidate here
+# regardless of how old started_at is. A trace abandoned by a crash without
+# ever finishing will accumulate rather than being force-closed by this job;
+# that is a deliberate, narrow scope limit (same shape as gateway_sessions'
+# 'connected'/'pending' rows never being pruned) rather than an oversight.
+# Deleting the parent agent_traces row cascades to agent_trace_events via
+# its ON DELETE CASCADE foreign key (trace_id REFERENCES agent_traces(id)),
+# so agent_trace_events never needs (or gets) its own direct DELETE here.
+_PRUNE_FINISHED_AGENT_TRACES_SQL = """
+    DELETE FROM agent_traces
+    WHERE id IN (
+        SELECT id FROM agent_traces
+        WHERE finished_at IS NOT NULL AND finished_at < $1
+        ORDER BY finished_at ASC
+        LIMIT $2
+    )
+"""
+
+
+async def prune_finished_agent_traces(
+    *, cutoff: datetime, batch_size: int, max_batches: int
+) -> int:
+    """Deletes agent_traces rows (and, via cascade, their agent_trace_events
+    children) whose finished_at is older than `cutoff`. Structured execution
+    tracing — tool_call/item/approval/artifact events for observability and
+    debugging — never conversation content."""
+    pool = await ensure_control_plane_schema()
+    if pool is None:
+        return 0
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            return 0
+        return await _run_batched_prune(
+            connection,
+            _PRUNE_FINISHED_AGENT_TRACES_SQL,
+            cutoff=cutoff,
+            batch_size=batch_size,
+            max_batches=max_batches,
+        )
+
+
 async def upsert_agent_turn(
     *,
     tenant_id: str,
