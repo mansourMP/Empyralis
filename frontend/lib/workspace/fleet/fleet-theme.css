@@ -7369,6 +7369,62 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   font-size: var(--text-sm);
   padding: var(--space-2) 0;
 }
+/* The model's raw thinking stream, live-only (never persisted — see
+   AgentChat.tsx's reasoning.summary.delta handling). Deliberately neutral —
+   no accent colour, which per the craft doctrine is reserved for the
+   composer's Send button alone — and visually subordinate to the reply: a
+   quiet bordered strip, not a second message bubble. Collapses to just its
+   toggle row the instant real reply text starts arriving, via the
+   max-height transition below; the user can still reopen it manually while
+   the turn is in flight. */
+.fleet-sage-chat-reasoning {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  margin-bottom: var(--space-2);
+  overflow: hidden;
+}
+.fleet-sage-chat-reasoning-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  text-align: left;
+}
+.fleet-sage-chat-reasoning-toggle:hover {
+  color: var(--text-secondary);
+}
+.fleet-sage-chat-reasoning-chevron {
+  transition: transform 120ms ease-out;
+  transform: rotate(-90deg);
+  flex-shrink: 0;
+}
+.fleet-sage-chat-reasoning.is-expanded .fleet-sage-chat-reasoning-chevron {
+  transform: rotate(0deg);
+}
+.fleet-sage-chat-reasoning-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 130ms ease-out;
+}
+.fleet-sage-chat-reasoning.is-expanded .fleet-sage-chat-reasoning-body {
+  grid-template-rows: 1fr;
+}
+.fleet-sage-chat-reasoning-body > p {
+  overflow: hidden;
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
 /* Composer: textarea on top, an optional row of pending-attachment chips,
    then ONE control row underneath — attach, model, reasoning effort,
    context usage, Send. Consolidated here from three previously scattered
