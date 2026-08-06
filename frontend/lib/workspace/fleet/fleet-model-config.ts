@@ -165,12 +165,24 @@ export function resolveAgentModelSummary(modelConfig: Record<string, any> | unde
 }
 
 export function formatModelSummaryLine(summary: ReturnType<typeof resolveAgentModelSummary>): string {
-  const base = summary.isPlatformDefault
+  const base = formatModelOnlyLabel(summary);
+  return summary.reasoningEffort ? `${base} · ${reasoningEffortLabel(summary.reasoningEffort)} reasoning` : base;
+}
+
+/** Same as formatModelSummaryLine but WITHOUT the reasoning-effort suffix —
+ *  the composer's model button (split from the reasoning button, per the
+ *  founder's composer redesign) must show model identity alone (e.g.
+ *  "Flash"/"Pro" or "OpenAI · gpt-5"), never concatenated with a reasoning
+ *  level — that's the separate reasoning button's own trigger label. The
+ *  sidebar's one-line Model row and the Model tab's "Current state" block
+ *  still want the combined line, so this doesn't replace
+ *  formatModelSummaryLine — it's the composer's own narrower need. */
+export function formatModelOnlyLabel(summary: ReturnType<typeof resolveAgentModelSummary>): string {
+  return summary.isPlatformDefault
     ? "Platform default"
     : summary.provider === summary.model
       ? summary.model
       : `${summary.provider} · ${summary.model}`;
-  return summary.reasoningEffort ? `${base} · ${reasoningEffortLabel(summary.reasoningEffort)} reasoning` : base;
 }
 
 // ── Model save (write side) ─────────────────────────────────────────────────

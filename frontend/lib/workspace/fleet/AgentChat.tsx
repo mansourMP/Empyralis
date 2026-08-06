@@ -12,7 +12,7 @@ import { ContextUsageRail, type ContextUsagePayload } from "./ContextUsageRail";
 import type { FleetAgent } from "./fleet-data";
 import {
   resolveAgentModelSummary,
-  formatModelSummaryLine,
+  formatModelOnlyLabel,
   resolveDisplayMode,
   saveAgentModelConfig,
   PLATFORM_CREDITS_TIER_OPTIONS,
@@ -156,6 +156,20 @@ function liveStepToStepMessage(step: Record<string, any>): WorkstationChatMessag
   const label = String(step.label ?? "").trim() || "Step";
   const detail = String(step.detail ?? "").trim();
   const status = String(step.status ?? "");
+  // The live-step vocabulary (direct_tool_step_payload / this file's own
+  // sdkToolTraceToStep below) is "active" | "done" | "error" — distinct
+  // from transparencyEventsToStepMessages' persisted-event vocabulary
+  // ("failed" | "denied" | "blocked", TRANSPARENCY_ERROR_STATUSES above).
+  // Checking only the persisted set here meant a live tool call that
+  // actually failed (status "error") never got marked failed — it fell
+  // through to the same "active" bucket as an in-flight call, forever. A
+  // failed tool call must read as failed, not silently look the same as
+  // one still running.
+  const stepStatus = status === "error" || TRANSPARENCY_ERROR_STATUSES.has(status)
+    ? "error"
+    : status === "done"
+      ? "done"
+      : "active";
   return {
     id: `step-${String(step.id ?? Math.random())}`,
     role: "system",
@@ -169,9 +183,109 @@ function liveStepToStepMessage(step: Record<string, any>): WorkstationChatMessag
     metadata: {
       display_kind: "activity_step",
       step_kind: stepIconKindForLiveStep(String(step.kind ?? "")),
-      step_status: TRANSPARENCY_ERROR_STATUSES.has(status) ? "error" : "active",
+      step_status: stepStatus,
     },
   };
+}
+
+// ── claude_agent_sdk-engine tool-call activity ───────────────────────────────
+//
+// The legacy engine (direct_chat_generation_service.py) already narrates
+// per-tool-call progress via "step" SSE events (direct_tool_step_payload,
+// handled above) — a human label, an optional detail (the file path, the
+// command, the query), and a status that transitions active -> done/error.
+// The claude_agent_sdk engine never had the frontend half of the same
+// thing: claude_agent_sdk_bridge.py's translate_sdk_message already emits
+// "tool.started"/"tool.result" (plus "subagent.invoked"/"skill.invoked" for
+// the CLI's own Agent/Skill built-ins) on the exact same "trace" SSE
+// channel this file already reads for the thinking stream — they were just
+// dropped ("isn't a distinct row on this surface today — ignored", see the
+// trace handling below this used to sit next to). The backend's own
+// humanization (direct_tool_step_payload's per-connector label/detail
+// rules) only runs for the legacy engine's "step" producer, not for trace
+// events — so the SDK engine's raw {tool_name, args_preview} needs the
+// client-side equivalent below, deliberately mirroring the same
+// connector/action rules direct_tool_step_payload uses server-side (file
+// read/write show the path, shell exec shows the command, web/browser show
+// the query or URL, ...) so both engines read the same way in this
+// transcript. Falls back to a humanized version of the raw tool name with
+// NO invented subject when a tool isn't one of the mapped cases — never a
+// raw JSON dump, never a guessed argument.
+function sdkToolCallSubject(toolName: string, argsPreview: unknown): { label: string; detail: string; kind: string } {
+  const args = (argsPreview && typeof argsPreview === "object" ? argsPreview : {}) as Record<string, unknown>;
+  const text = (v: unknown): string => (typeof v === "string" ? v.trim() : v == null ? "" : String(v));
+  const truncate = (s: string, max = 80): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+  const pick = (...keys: string[]): string => {
+    for (const key of keys) {
+      const v = truncate(text(args[key]));
+      if (v) return v;
+    }
+    return "";
+  };
+
+  switch (toolName) {
+    case "file__read": return { label: "Reading", detail: pick("path", "file_path"), kind: "file" };
+    case "file__write": return { label: "Writing", detail: pick("path", "file_path"), kind: "file" };
+    case "shell__exec": return { label: "Running", detail: pick("command"), kind: "tool" };
+    case "web__search": return { label: "Searching the web for", detail: pick("query"), kind: "browser" };
+    case "web__fetch": return { label: "Fetching", detail: pick("url"), kind: "browser" };
+    case "http_request": return { label: "Requesting", detail: pick("url"), kind: "tool" };
+    case "browser__navigate": return { label: "Navigating to", detail: pick("url"), kind: "browser" };
+    case "browser__extract_text":
+    case "browser__extract_dom": return { label: "Reading the page", detail: "", kind: "browser" };
+    case "screenshot__capture": return { label: "Taking a screenshot", detail: "", kind: "tool" };
+    case "computer__click": return { label: "Clicking", detail: pick("text") || (args.x != null || args.y != null ? `${text(args.x)}, ${text(args.y)}` : ""), kind: "tool" };
+    case "computer__type": return { label: "Typing", detail: pick("text"), kind: "tool" };
+    case "computer__applescript": return { label: "Running AppleScript", detail: "", kind: "tool" };
+    case "computer__clipboard_read": return { label: "Reading the clipboard", detail: "", kind: "tool" };
+    case "computer__clipboard_write": return { label: "Writing the clipboard", detail: pick("text"), kind: "tool" };
+    case "computer__notify": return { label: "Sending a notification", detail: pick("title"), kind: "tool" };
+    case "computer__list_apps": return { label: "Listing apps", detail: "", kind: "tool" };
+    case "computer__launch_app": return { label: "Launching", detail: pick("name_or_path"), kind: "tool" };
+    case "computer__speak": return { label: "Speaking", detail: pick("text"), kind: "tool" };
+    case "computer__ocr": return { label: "Reading the screen", detail: "", kind: "tool" };
+    case "hardware__action": return { label: "Hardware action", detail: pick("action", "capability_id"), kind: "tool" };
+    case "generate_image": return { label: "Generating an image", detail: pick("prompt"), kind: "tool" };
+    case "send_image": return { label: "Sending an image", detail: "", kind: "tool" };
+    case "memory_search": return { label: "Searching memory for", detail: pick("query"), kind: "file" };
+    case "memory_read": return { label: "Reading memory", detail: pick("path", "filename", "key"), kind: "file" };
+    case "memory_write": return { label: "Writing memory", detail: pick("path", "filename", "key"), kind: "file" };
+    case "memory_get": return { label: "Reading memory", detail: pick("key", "path"), kind: "file" };
+    case "memory_update": return { label: "Updating memory", detail: pick("key", "path"), kind: "file" };
+    case "memory_append_daily_note": return { label: "Adding a memory note", detail: "", kind: "file" };
+    case "skill_invoke": return { label: "Running skill", detail: pick("skill_id", "name"), kind: "tool" };
+    case "skill_write": return { label: "Writing skill", detail: pick("skill_id", "name"), kind: "tool" };
+    case "task_complete": return { label: "Marking the task complete", detail: "", kind: "tool" };
+    case "update_plan": return { label: "Updating the plan", detail: "", kind: "tool" };
+    case "query_tool_registry": return { label: "Checking available tools", detail: "", kind: "tool" };
+    case "llm__task": return { label: "Delegating a sub-task", detail: pick("task", "prompt"), kind: "tool" };
+    default: break;
+  }
+
+  const [connector, action] = toolName.includes("__") ? (toolName.split("__", 2) as [string, string]) : ["", ""];
+  if (connector === "project_task") {
+    const labels: Record<string, string> = {
+      create: "Creating a task", get: "Reading a task", list: "Listing tasks", update: "Updating a task",
+      assign: "Assigning a task", comment: "Commenting on a task", add_label: "Labeling a task",
+      remove_label: "Removing a task label", set_parent: "Setting the task's parent", list_labels: "Listing task labels",
+    };
+    return { label: labels[action] || "Task action", detail: pick("title", "task_id", "id"), kind: "tool" };
+  }
+  if (connector === "fleet") {
+    const labels: Record<string, string> = {
+      create_agent: "Creating an agent", list_agents: "Listing agents", get_agent_activity: "Reading agent activity",
+      get_project_activity: "Reading project activity", configure_agent: "Configuring an agent",
+      message_agent: "Messaging an agent", schedule_task: "Scheduling a task",
+    };
+    return { label: labels[action] || "Fleet action", detail: pick("name", "agent_id"), kind: "tool" };
+  }
+  if (connector === "sage_service") {
+    return { label: "Updating service state", detail: pick("service_id", "name"), kind: "tool" };
+  }
+
+  // Unrecognized tool — humanize the raw name, no invented subject.
+  const humanized = toolName.replace(/__|_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()).trim();
+  return { label: humanized || "Tool call", detail: "", kind: "tool" };
 }
 
 // Reuses chat-message.tsx's existing "activity_step" display_kind (already
@@ -265,28 +379,23 @@ async function uploadChatAttachment(workspaceId: string, file: File): Promise<Pe
   return res.json();
 }
 
-// ── Composer's compact model + reasoning-effort control ─────────────────────
+// ── Composer's model control ─────────────────────────────────────────────────
 //
-// ONE trigger, ONE popover — a single merged "Model" + "Reasoning effort"
-// picker, not two adjacent controls. They used to be separate (a tier-picker
-// popover next to a native <select>), and the two could visually collide:
-// the select's own hover tooltip rendered on top of the tier popover's card
-// text whenever both were live at once. Merging them into one popover makes
-// that collision structurally impossible — there is only ever one open
-// surface here.
+// SPLIT from reasoning effort (2026-08-07 revert of the earlier merge — the
+// founder rejected the combined "Model · Reasoning" chip he'd previously
+// asked for reworked: two adjacent controls, not one popover trying to hold
+// both). This one is model ONLY. Its popover is a plain vertical list —
+// one row per option with a checkmark on the active one — the same idiom
+// Claude's own model picker uses ("Fable 5 / Opus 5 ✓ / Sonnet 5 /
+// Haiku 4.5"), not side-by-side cards.
 //
-// Only platform_credits gets the REAL inline picker — a genuine two-option
-// tier choice (Flash/Pro, same PLATFORM_CREDITS_TIER_OPTIONS the Properties
-// panel's picker and the Model tab use, so this can never show a different
-// tier than either of those for the same agent) plus, when the selected
-// tier actually supports it, a reasoning-effort section in the SAME
-// popover. byok_api/cli_subscription/local need substantially more setup
-// (API keys, gateway pairing) that doesn't belong in a chat footer — those
-// keep linking to the full Model tab editor, same as before; their own
-// reasoning-effort control (when they have one) renders as the standalone
-// ComposerReasoningEffortControl below instead, since there's no tier
-// popover for it to merge into.
-function ComposerModelReasoningControl({
+// Only platform_credits gets a real in-composer list (Flash/Pro, the same
+// PLATFORM_CREDITS_TIER_OPTIONS the Properties panel's picker and the Model
+// tab use, so this can never show a different tier than either of those for
+// the same agent). byok_api/cli_subscription/local need substantially more
+// setup (API keys, gateway pairing) that doesn't belong in a chat footer —
+// those keep linking to the full Model tab editor, same as before.
+function ComposerModelControl({
   workspaceId,
   agentId,
   agent,
@@ -299,7 +408,7 @@ function ComposerModelReasoningControl({
 }) {
   const config = agent.model_config || {};
   const mode = resolveDisplayMode(config);
-  const resolvedModel = formatModelSummaryLine(resolveAgentModelSummary(config));
+  const resolvedModel = formatModelOnlyLabel(resolveAgentModelSummary(config));
   const pathname = usePathname();
   const modelHref = pathname.replace(/\/[^/]+$/, "/model");
   const [open, setOpen] = useState(false);
@@ -325,12 +434,11 @@ function ComposerModelReasoningControl({
   }, [open]);
 
   const tier = platformCreditsTierForModel(config.model);
-  const reasoningSupported = PLATFORM_CREDITS_TIER_SUPPORTS_REASONING[tier];
-  const reasoningValue = config.reasoning_effort || "";
 
   async function pickTier(nextTier: "flash" | "pro") {
     setSaving(true);
     try {
+      const reasoningValue = config.reasoning_effort || "";
       await saveAgentModelConfig(workspaceId, agentId, config, agent.label, {
         mode: "platform_credits",
         provider: PLATFORM_CREDITS_PROVIDER,
@@ -343,6 +451,7 @@ function ComposerModelReasoningControl({
         reasoningEffort: PLATFORM_CREDITS_TIER_SUPPORTS_REASONING[nextTier] ? reasoningValue : "",
       });
       onSaved?.();
+      setOpen(false);
     } catch {
       // Best-effort — the trigger keeps showing the last-known value; a
       // failed save just leaves the popover open with nothing changed, so
@@ -353,30 +462,11 @@ function ComposerModelReasoningControl({
     }
   }
 
-  async function pickReasoning(value: string) {
-    setSaving(true);
-    try {
-      await saveAgentModelConfig(workspaceId, agentId, config, agent.label, {
-        mode: "platform_credits",
-        provider: PLATFORM_CREDITS_PROVIDER,
-        selectedModel: config.model || PLATFORM_CREDITS_MODEL_BY_TIER[tier],
-        apiKey: "",
-        gatewayBinding: "",
-        reasoningEffort: value,
-      });
-      onSaved?.();
-    } catch {
-      // Best-effort, same trade-off as pickTier above.
-    } finally {
-      setSaving(false);
-    }
-  }
-
   if (mode !== "platform_credits") {
     return (
       <Link
         href={modelHref}
-        className="fleet-composer-chip"
+        className="fleet-chat-composer-chip"
         title={`${agent.label || "This agent"}'s model — change it on the Model tab`}
       >
         <span>{resolvedModel}</span>
@@ -385,89 +475,67 @@ function ComposerModelReasoningControl({
   }
 
   const tierLabel = PLATFORM_CREDITS_TIER_OPTIONS.find((o) => o.tier === tier)?.label || resolvedModel;
-  const triggerLabel = reasoningSupported ? `${tierLabel} · ${reasoningEffortLabel(reasoningValue)}` : tierLabel;
 
   return (
     <div className="fleet-view-options" ref={ref}>
       <button
         type="button"
-        className={`fleet-composer-chip${open ? " is-active" : ""}`}
+        className={`fleet-chat-composer-chip${open ? " is-active" : ""}`}
         onClick={() => setOpen((v) => !v)}
         disabled={saving}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={`${agent.label || "This agent"}'s model and reasoning effort`}
+        title={`${agent.label || "This agent"}'s model`}
       >
-        <span>{triggerLabel}</span>
-        <ChevronDown size={12} strokeWidth={2} className="fleet-composer-chip-chevron" />
+        <span>{tierLabel}</span>
+        <ChevronDown size={12} strokeWidth={2} className="fleet-chat-composer-chip-chevron" />
       </button>
       {open && (
-        <div className="fleet-toolbar-popover fleet-composer-popover" role="dialog" aria-label="Model and reasoning effort">
-          <div className="fleet-toolbar-popover-group">
-            <div className="fleet-toolbar-popover-label">Model</div>
-            <div className="fleet-tier-picker">
-              {PLATFORM_CREDITS_TIER_OPTIONS.map((opt) => {
-                const isSelected = tier === opt.tier;
-                return (
-                  <button
-                    key={opt.tier}
-                    type="button"
-                    className={`fleet-tier-picker-option${isSelected ? " is-selected" : ""}`}
-                    onClick={() => void pickTier(opt.tier)}
-                    disabled={saving}
-                    aria-pressed={isSelected}
-                  >
-                    <span className="fleet-tier-picker-option-label">{opt.label}</span>
-                    <span className="fleet-tier-picker-option-subtitle">{opt.subtitle}</span>
-                  </button>
-                );
-              })}
-            </div>
+        <div className="fleet-toolbar-popover fleet-composer-popover fleet-composer-model-popover" role="dialog" aria-label="Model">
+          <div className="fleet-composer-model-list">
+            {PLATFORM_CREDITS_TIER_OPTIONS.map((opt) => {
+              const isSelected = tier === opt.tier;
+              return (
+                <button
+                  key={opt.tier}
+                  type="button"
+                  className={`fleet-composer-model-option${isSelected ? " is-selected" : ""}`}
+                  onClick={() => void pickTier(opt.tier)}
+                  disabled={saving}
+                  aria-pressed={isSelected}
+                >
+                  <span className="fleet-composer-model-option-check">
+                    {isSelected ? <Check size={13} strokeWidth={2} /> : null}
+                  </span>
+                  <span className="fleet-composer-model-option-text">
+                    <span className="fleet-composer-model-option-label">{opt.label}</span>
+                    <span className="fleet-composer-model-option-subtitle">{opt.subtitle}</span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
-          {/* No dead controls: Flash has no reasoning-effort vocabulary at
-              all, so this section simply isn't rendered while it's picked —
-              never a disabled/empty picker underneath the tier cards. */}
-          {reasoningSupported && (
-            <div className="fleet-toolbar-popover-group">
-              <div className="fleet-toolbar-popover-label">Reasoning effort</div>
-              {REASONING_EFFORT_OPTIONS.map((o) => {
-                const isSelected = reasoningValue === o.value;
-                return (
-                  <button
-                    key={o.value || "unset"}
-                    type="button"
-                    className={`fleet-toolbar-popover-option${isSelected ? " is-selected" : ""}`}
-                    onClick={() => void pickReasoning(o.value)}
-                    disabled={saving}
-                    aria-pressed={isSelected}
-                  >
-                    <span className="fleet-toolbar-popover-option-check">
-                      {isSelected ? <Check size={13} strokeWidth={2} /> : null}
-                    </span>
-                    {o.label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
         </div>
       )}
     </div>
   );
 }
 
-// ── Composer's standalone reasoning-effort control ──────────────────────────
+// ── Composer's reasoning-effort control ──────────────────────────────────────
 //
-// Only reached for byok_api/cli_subscription — platform_credits' reasoning
-// effort lives inside ComposerModelReasoningControl's merged popover above,
-// since that mode already has a tier popover to merge into. These modes
-// don't (their model control is a plain Link to the Model tab, per
-// ComposerModelReasoningControl), so this is its own small trigger +
-// popover — same "no native select next to custom cards" fix, just with
-// nothing else to merge into. Renders nothing for a mode/runtime with no
-// reasoning-effort vocabulary at all (local, or a cli_subscription runtime
-// with none published — cursor_cli) rather than a disabled/dead control.
-function ComposerReasoningEffortControl({
+// Its own trigger, separate from the model control above (per the founder's
+// split). The popover is a compact slider — "Faster" on the left, "Smarter"
+// on the right, the current level named above it — mirroring Claude's own
+// effort UI, not a list of radio rows.
+//
+// Covers every mode/runtime with a reasoning-effort vocabulary at all:
+// platform_credits' Pro tier and byok_api share REASONING_EFFORT_OPTIONS;
+// cli_subscription has its own runtime-gated vocabulary
+// (CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME). Renders nothing — no dead
+// control — for Flash (no reasoning-effort vocabulary at all), local
+// (Ollama, same), or a cli_subscription runtime with none published
+// (cursor_cli).
+function ComposerReasoningControl({
   workspaceId,
   agentId,
   agent,
@@ -480,6 +548,7 @@ function ComposerReasoningEffortControl({
 }) {
   const config = agent.model_config || {};
   const mode = resolveDisplayMode(config);
+  const tier = platformCreditsTierForModel(config.model);
   const cliRuntime = normalizeCliRuntime(runtimeForProvider(config.provider || ""));
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -502,24 +571,34 @@ function ComposerReasoningEffortControl({
     };
   }, [open]);
 
-  const options = mode === "cli_subscription"
-    ? CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime]
-    : (REASONING_EFFORT_SUPPORTED_MODES.has(mode) ? REASONING_EFFORT_OPTIONS : []);
+  const options = mode === "platform_credits"
+    ? (PLATFORM_CREDITS_TIER_SUPPORTS_REASONING[tier] ? REASONING_EFFORT_OPTIONS : [])
+    : mode === "cli_subscription"
+      ? CLI_REASONING_EFFORT_OPTIONS_BY_RUNTIME[cliRuntime]
+      : (REASONING_EFFORT_SUPPORTED_MODES.has(mode) ? REASONING_EFFORT_OPTIONS : []);
 
   async function pick(value: string) {
     setSaving(true);
     try {
       await saveAgentModelConfig(workspaceId, agentId, config, agent.label, {
         mode,
-        provider: config.provider || "",
-        selectedModel: config.model || "",
+        // platform_credits: provider/model are always the fixed DeepSeek
+        // pair — this control never changes the tier, only the effort
+        // level, so both must be threaded through explicitly (the save
+        // path REPLACES model_config wholesale; leaving these blank would
+        // drop the agent's tier).
+        provider: mode === "platform_credits" ? PLATFORM_CREDITS_PROVIDER : (config.provider || ""),
+        selectedModel: mode === "platform_credits" ? (config.model || PLATFORM_CREDITS_MODEL_BY_TIER[tier]) : (config.model || ""),
         apiKey: "",
         gatewayBinding: config.gateway_binding || "",
         reasoningEffort: value,
       });
       onSaved?.();
     } catch {
-      // Best-effort, same trade-off as ComposerModelReasoningControl above.
+      // Best-effort — the trigger/slider keep showing the last-known value;
+      // a failed save leaves the popover open with nothing changed, so the
+      // owner notices and can retry, same trade-off every other composer
+      // control here makes.
     } finally {
       setSaving(false);
     }
@@ -527,14 +606,24 @@ function ComposerReasoningEffortControl({
 
   if (options.length === 0) return null;
 
+  const values = options.map((o) => o.value);
   const currentValue = config.reasoning_effort || "";
-  const currentLabel = options.find((o) => o.value === currentValue)?.label || reasoningEffortLabel(currentValue);
+  // reasoningEffortLabel (not o.label) for every level — REASONING_EFFORT_
+  // OPTIONS' own "xhigh" label still carries a parenthetical model caveat
+  // ("Extra high (Opus 4.7; falls back to High)") meant for the Model tab's
+  // fuller editor; the founder's ruling was that a composer-row control has
+  // no room and no need for it ("this is not even showing inside the
+  // Claude application"). reasoningEffortLabel is the shared superset map
+  // that already returns the clean "Extra high" for every vocabulary this
+  // control can show (platform_credits/byok_api's xhigh included).
+  const currentIndex = Math.max(0, values.indexOf(currentValue));
+  const currentLabel = reasoningEffortLabel(currentValue);
 
   return (
     <div className="fleet-view-options" ref={ref}>
       <button
         type="button"
-        className={`fleet-composer-chip${open ? " is-active" : ""}`}
+        className={`fleet-chat-composer-chip${open ? " is-active" : ""}`}
         onClick={() => setOpen((v) => !v)}
         disabled={saving}
         aria-haspopup="dialog"
@@ -542,30 +631,29 @@ function ComposerReasoningEffortControl({
         title="Reasoning effort"
       >
         <span>{currentLabel}</span>
-        <ChevronDown size={12} strokeWidth={2} className="fleet-composer-chip-chevron" />
+        <ChevronDown size={12} strokeWidth={2} className="fleet-chat-composer-chip-chevron" />
       </button>
       {open && (
-        <div className="fleet-toolbar-popover fleet-composer-popover" role="dialog" aria-label="Reasoning effort">
-          <div className="fleet-toolbar-popover-group">
-            <div className="fleet-toolbar-popover-label">Reasoning effort</div>
-            {options.map((o) => {
-              const isSelected = currentValue === o.value;
-              return (
-                <button
-                  key={o.value || "unset"}
-                  type="button"
-                  className={`fleet-toolbar-popover-option${isSelected ? " is-selected" : ""}`}
-                  onClick={() => void pick(o.value)}
-                  disabled={saving}
-                  aria-pressed={isSelected}
-                >
-                  <span className="fleet-toolbar-popover-option-check">
-                    {isSelected ? <Check size={13} strokeWidth={2} /> : null}
-                  </span>
-                  {o.label}
-                </button>
-              );
-            })}
+        <div className="fleet-toolbar-popover fleet-composer-popover fleet-composer-reasoning-popover" role="dialog" aria-label="Reasoning effort">
+          <div className="fleet-composer-reasoning-header">
+            <span className="fleet-composer-reasoning-header-label">Effort</span>
+            <span className="fleet-composer-reasoning-header-value">{currentLabel}</span>
+          </div>
+          <input
+            type="range"
+            className="fleet-composer-reasoning-slider"
+            min={0}
+            max={values.length - 1}
+            step={1}
+            value={currentIndex}
+            disabled={saving}
+            onChange={(e) => void pick(values[Number(e.currentTarget.value)] ?? "")}
+            aria-label="Reasoning effort"
+            aria-valuetext={currentLabel}
+          />
+          <div className="fleet-composer-reasoning-scale">
+            <span>Faster</span>
+            <span>Smarter</span>
           </div>
         </div>
       )}
@@ -862,6 +950,14 @@ export function AgentChat({
       let sawLegacyChunk = false;
       let thinkingBuffer = "";
       let lastThinkingItemId: string | null = null;
+      // claude_agent_sdk-engine tool calls only (see sdkToolCallSubject's own
+      // docstring). Keyed by tool_call_id (the SDK's tool_use_id) so the
+      // "tool.result"/*.result trace event — which carries no tool_name of
+      // its own, only a status — can find the SAME row "tool.started"/
+      // *.started already rendered and flip it from active to done/error
+      // in place, exactly like the legacy engine's step_id already does for
+      // "step" events.
+      const sdkToolCallSteps = new Map<string, { label: string; detail: string; kind: string }>();
       const flushNarration = () => {
         const text = narrationBuffer.trim();
         narrationBuffer = "";
@@ -959,10 +1055,63 @@ export function AgentChat({
                     setThinkingActive(false);
                   }
                 }
+              } else if (eventType === "tool.started") {
+                // claude_agent_sdk-engine tool calls (see sdkToolCallSubject's
+                // docstring above) — the same live, per-call activity the
+                // legacy engine's "step" events already render below (see
+                // the "step" branch), just sourced from the trace channel
+                // instead. Tracked by tool_call_id so the matching
+                // "tool.result" below can flip this SAME row to done/error.
+                const toolCallId = envelope?.tool_call_id != null ? String(envelope.tool_call_id) : "";
+                if (toolCallId) {
+                  const rawName = String(data?.tool_name ?? "").trim();
+                  const subject = sdkToolCallSubject(rawName, data?.args_preview);
+                  sdkToolCallSteps.set(toolCallId, subject);
+                  upsertStep({ id: `sdk-${toolCallId}`, kind: subject.kind, label: subject.label, detail: subject.detail, status: "active" });
+                }
+              } else if (eventType === "tool.result") {
+                // Same tool_call_id "tool.started" already used — flips that
+                // SAME row from active to done/error rather than adding a
+                // second row, exactly like the legacy engine's step_id reuse.
+                // A failed tool call reads as failed here, never silently
+                // dropped — see tool_honesty_guard's own reasoning for why
+                // that matters on the backend; this is its frontend mirror.
+                const toolCallId = envelope?.tool_call_id != null ? String(envelope.tool_call_id) : "";
+                const known = toolCallId ? sdkToolCallSteps.get(toolCallId) : undefined;
+                if (toolCallId && known) {
+                  const failed = String(data?.status ?? "") === "failed";
+                  upsertStep({ id: `sdk-${toolCallId}`, kind: known.kind, label: known.label, detail: known.detail, status: failed ? "error" : "done" });
+                }
+              } else if (eventType === "subagent.invoked" || eventType === "skill.invoked") {
+                // The CLI's own deliberately-reopened Agent/Skill built-ins
+                // (_META_TOOL_EVENT_TYPES on the backend) — both halves ride
+                // under this SAME event_type, distinguished by data.phase
+                // ("started" carries tool_name/args_preview like tool.
+                // started; "result" carries status/summary like tool.result).
+                const toolCallId = envelope?.tool_call_id != null ? String(envelope.tool_call_id) : "";
+                if (!toolCallId) {
+                  // no-op — nothing to key this row on.
+                } else if (String(data?.phase ?? "") === "result") {
+                  const known = sdkToolCallSteps.get(toolCallId);
+                  if (known) {
+                    const failed = String(data?.status ?? "") === "failed";
+                    upsertStep({ id: `sdk-${toolCallId}`, kind: known.kind, label: known.label, detail: known.detail, status: failed ? "error" : "done" });
+                  }
+                } else {
+                  const argsPreview = (data?.args_preview && typeof data.args_preview === "object" ? data.args_preview : {}) as Record<string, unknown>;
+                  const subject = {
+                    label: eventType === "skill.invoked" ? "Running skill" : "Delegating to a subagent",
+                    detail: String(argsPreview.skill ?? argsPreview.name ?? argsPreview.subagent_type ?? "").trim(),
+                    kind: "tool",
+                  };
+                  sdkToolCallSteps.set(toolCallId, subject);
+                  upsertStep({ id: `sdk-${toolCallId}`, kind: subject.kind, label: subject.label, detail: subject.detail, status: "active" });
+                }
               }
-              // Any other trace event type (tool-call narration, meta-tool
-              // markers, etc.) isn't a distinct row on this surface today —
-              // ignored, same as before "trace" was handled at all.
+              // Any other trace event type (search.query, plan.item.updated,
+              // trace.failed anomalies, browser.action, ...) isn't a
+              // distinct row on this surface today — ignored, same as
+              // before tool-call activity was handled at all.
             } else if (parsed.event === "step") {
               const step = parsed.payload as Record<string, any>;
               if (String(step?.kind ?? "") === "thinking") {
@@ -1215,20 +1364,22 @@ export function AgentChat({
               <Paperclip size={15} strokeWidth={1.75} />
             )}
           </button>
+          {/* Model and reasoning effort are two SEPARATE controls, side by
+              side — not one merged popover (the founder's explicit
+              correction to an earlier pass). ComposerReasoningControl
+              covers every mode/runtime with a reasoning-effort vocabulary
+              on its own (platform_credits, byok_api, cli_subscription) and
+              renders nothing where there isn't one. */}
           {agentInstallId && agent && (
-            <ComposerModelReasoningControl
+            <ComposerModelControl
               workspaceId={workspaceId}
               agentId={agentInstallId}
               agent={agent}
               onSaved={onAgentSaved}
             />
           )}
-          {/* platform_credits' reasoning effort lives INSIDE the merged
-              popover above (it already has a tier popover to merge into) —
-              this standalone control only reaches byok_api/cli_subscription,
-              which have no tier popover of their own. */}
-          {agentInstallId && agent && resolveDisplayMode(agent.model_config || {}) !== "platform_credits" && (
-            <ComposerReasoningEffortControl
+          {agentInstallId && agent && (
+            <ComposerReasoningControl
               workspaceId={workspaceId}
               agentId={agentInstallId}
               agent={agent}
