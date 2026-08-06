@@ -247,6 +247,139 @@ class ResolveSdkProcessEnvTests(unittest.TestCase):
         self.assertTrue(env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:"))
 
 
+class ResolveSdkProcessEnvCloudProviderTests(unittest.TestCase):
+    """MAN-313: resolve_sdk_process_env's _CREDENTIAL_ENV_KEYS declared seven
+    cloud-auth routing flags (CLAUDE_CODE_USE_BEDROCK/_VERTEX/_FOUNDRY/
+    _ANTHROPIC_AWS/_ANTHROPIC_GOOGLE_CLOUD/_MANTLE, plus CLAUDE_CODE_OAUTH_
+    TOKEN) since MAN-310 but never actually set any of them true — every
+    credential fell through to the generic ANTHROPIC_AUTH_TOKEN=api_key
+    branch, which for Bedrock meant shipping an AWS access key to
+    api.anthropic.com as if it were an Anthropic bearer token. These tests
+    pin the fix for the two flags with a real provider_profiles.py
+    PROVIDER_CATALOG entry AND a real ProviderAdapter (bedrock, vertex) and
+    document why the other five stay correctly unset."""
+
+    def test_bedrock_sets_the_flag_and_routes_aws_credentials(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={
+                "api_key": "AKIAEXAMPLE",
+                "aws_secret_access_key": "secret-example",
+                "aws_session_token": "session-example",
+                "region": "us-west-2",
+            },
+            provider="bedrock",
+        )
+        self.assertEqual(env["CLAUDE_CODE_USE_BEDROCK"], "1")
+        self.assertEqual(env["AWS_ACCESS_KEY_ID"], "AKIAEXAMPLE")
+        self.assertEqual(env["AWS_SECRET_ACCESS_KEY"], "secret-example")
+        self.assertEqual(env["AWS_SESSION_TOKEN"], "session-example")
+        self.assertEqual(env["AWS_REGION"], "us-west-2")
+
+    def test_bedrock_never_leaks_the_aws_key_into_anthropic_auth_token(self):
+        # This is the exact MAN-313 bug: provider_profiles.BedrockAdapter
+        # stores the AWS access key under "api_key" — the SAME field name
+        # the generic elif api_key: branch reads for every other provider —
+        # so before this fix an AWS credential landed on ANTHROPIC_AUTH_
+        # TOKEN and was sent straight to the public Anthropic API.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "AKIAEXAMPLE", "aws_secret_access_key": "secret-example"},
+            provider="bedrock",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
+
+    def test_bedrock_falls_back_to_the_legacy_engines_own_field_aliases(self):
+        # provider_profiles.BedrockAdapter._client also accepts
+        # aws_access_key_id/secret_key/aws_region as aliases — the same
+        # credential dict must authenticate identically on both engines.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={
+                "aws_access_key_id": "AKIAALIAS",
+                "secret_key": "secret-alias",
+                "aws_region": "eu-west-1",
+            },
+            provider="bedrock",
+        )
+        self.assertEqual(env["AWS_ACCESS_KEY_ID"], "AKIAALIAS")
+        self.assertEqual(env["AWS_SECRET_ACCESS_KEY"], "secret-alias")
+        self.assertEqual(env["AWS_REGION"], "eu-west-1")
+
+    def test_bedrock_defaults_region_when_the_credential_carries_none(self):
+        # Matches provider_profiles.BedrockAdapter._client's own default.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "AKIAEXAMPLE", "aws_secret_access_key": "secret"},
+            provider="bedrock",
+        )
+        self.assertEqual(env["AWS_REGION"], "us-east-1")
+
+    def test_vertex_sets_the_flag_and_routes_project_and_region(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"access_token": "ya29.example", "project_id": "my-gcp-project", "location": "us-central1"},
+            provider="vertex",
+        )
+        self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
+        self.assertEqual(env["ANTHROPIC_VERTEX_PROJECT_ID"], "my-gcp-project")
+        self.assertEqual(env["CLOUD_ML_REGION"], "us-central1")
+
+    def test_vertex_never_leaks_the_access_token_into_anthropic_auth_token(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"access_token": "ya29.example", "project_id": "my-gcp-project", "location": "us-central1"},
+            provider="vertex",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
+
+    def test_cloud_providers_never_call_the_openai_compat_adapter(self):
+        # Bedrock/Vertex are native CLAUDE_CODE_USE_* flags, not OpenAI-
+        # shaped endpoints — they must never mint an adapter loopback token
+        # the way openai/gemini/xai do.
+        for provider, credentials in (
+            ("bedrock", {"api_key": "AKIAEXAMPLE", "aws_secret_access_key": "secret"}),
+            ("vertex", {"access_token": "ya29.example", "project_id": "p", "location": "us-central1"}),
+        ):
+            with patch.object(openai_compat_adapter, "mint_turn_token_for_provider") as mock_mint:
+                claude_agent_sdk_bridge.resolve_sdk_process_env(credentials=credentials, provider=provider)
+            mock_mint.assert_not_called()
+
+    def test_bedrock_and_vertex_are_the_only_catalog_backed_cloud_flags(self):
+        # provider_profiles.PROVIDER_CATALOG has no "foundry"/"anthropic_aws"/
+        # "anthropic_google_cloud"/"mantle" entry (verified by grep against
+        # provider_profiles.py — zero hits for any of those four strings),
+        # so CLAUDE_CODE_USE_FOUNDRY/_ANTHROPIC_AWS/_ANTHROPIC_GOOGLE_CLOUD/
+        # _MANTLE have no workspace credential shape that could ever reach
+        # this dispatch. This pins the dispatch table itself so a future
+        # provider_profiles.py addition for one of those four is a visible,
+        # deliberate change here rather than a silent no-op.
+        self.assertEqual(
+            set(claude_agent_sdk_bridge._CLOUD_ROUTED_PROVIDER_ENV_BUILDERS.keys()),
+            {"bedrock", "vertex"},
+        )
+        from server_modules import provider_profiles
+
+        for unbacked in ("foundry", "anthropic_aws", "anthropic_google_cloud", "mantle"):
+            self.assertNotIn(unbacked, provider_profiles.PROVIDER_CATALOG)
+
+    def test_foundry_anthropic_aws_anthropic_google_cloud_mantle_stay_blank(self):
+        # No provider_profiles.py catalog entry exists for any of these, so
+        # no caller can ever pass provider="foundry" (etc.) with a real
+        # credential today — but the flags must still come back blanked
+        # rather than absent, matching every other credential-shaped key
+        # this function returns.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "irrelevant"}, provider="foundry",
+        )
+        self.assertEqual(env["CLAUDE_CODE_USE_FOUNDRY"], "")
+        self.assertEqual(env["CLAUDE_CODE_USE_ANTHROPIC_AWS"], "")
+        self.assertEqual(env["CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD"], "")
+        self.assertEqual(env["CLAUDE_CODE_USE_MANTLE"], "")
+        # An unrecognised provider id still falls through to the generic
+        # api_key path today (unchanged, pre-existing behavior) — this test
+        # only pins that the four unbacked cloud flags specifically never
+        # turn on for it.
+
+
 class ResolveOllamaAnthropicBaseUrlTests(unittest.TestCase):
     """Direct unit tests of the resolver itself, independent of the wiring
     inside resolve_sdk_process_env -- a realistic range of shapes a
@@ -359,11 +492,19 @@ class ResolveSdkProcessEnvAmbientLeakTests(unittest.TestCase):
 
     def test_every_credential_key_is_always_present_and_blank_by_default(self):
         env = claude_agent_sdk_bridge.resolve_sdk_process_env()
-        for key in claude_agent_sdk_bridge._CREDENTIAL_ENV_KEYS:
+        for key in (
+            claude_agent_sdk_bridge._CREDENTIAL_ENV_KEYS
+            + claude_agent_sdk_bridge._CLOUD_PROVIDER_CREDENTIAL_ENV_KEYS
+        ):
             self.assertIn(key, env)
             self.assertEqual(env[key], "")
 
     def test_ambient_environment_variables_never_reach_the_result(self):
+        # Includes the MAN-313 cloud-credential keys too: Empyralis's OWN
+        # backend process plausibly has AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_
+        # KEY set ambiently for its own object storage (see
+        # artifact_service.py's S3-compatible credential fallback) — that
+        # must never leak into a tenant subprocess for a non-Bedrock turn.
         ambient = {
             "ANTHROPIC_API_KEY": "leaked-ambient-key",
             "ANTHROPIC_AUTH_TOKEN": "leaked-ambient-token",
@@ -375,6 +516,12 @@ class ResolveSdkProcessEnvAmbientLeakTests(unittest.TestCase):
             "CLAUDE_CODE_USE_ANTHROPIC_AWS": "1",
             "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "1",
             "CLAUDE_CODE_USE_MANTLE": "1",
+            "AWS_ACCESS_KEY_ID": "leaked-ambient-access-key",
+            "AWS_SECRET_ACCESS_KEY": "leaked-ambient-secret-key",
+            "AWS_SESSION_TOKEN": "leaked-ambient-session-token",
+            "AWS_REGION": "us-leaked-1",
+            "ANTHROPIC_VERTEX_PROJECT_ID": "leaked-ambient-project",
+            "CLOUD_ML_REGION": "us-leaked-1",
         }
         with patch.dict(os.environ, ambient, clear=False):
             # No explicit per-turn credential supplied — this function must
