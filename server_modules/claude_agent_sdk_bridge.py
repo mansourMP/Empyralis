@@ -236,6 +236,67 @@ _SYNTHETIC_ASSISTANT_MODEL = "<synthetic>"
 # that no ANTHROPIC_BASE_URL override is in effect for the turn.
 _ANTHROPIC_PROVIDER_IDS = frozenset({"", "anthropic"})
 
+# Empyralis's own reasoning-effort vocabulary for the platform_credits/
+# byok_api modes — the ONLY modes that ever reach this bridge (cli_
+# subscription is a completely separate path: empyralis-gateway/src/llm/
+# cli-runner.ts spawns the owner's own paired CLI directly and passes its
+# own --effort/--reasoning-effort flags there; this module never sees that
+# turn). Mirrors frontend/lib/workspace/fleet/fleet-provider-constants.ts's
+# ReasoningEffort type and server_modules/fleet_tools.py's
+# _VALID_REASONING_EFFORTS byte-for-byte — "" is the fourth, unwritten
+# member of both: "no override was stored", never a level in its own right.
+# Deliberately NOT the SDK's own full EffortLevel set (which also accepts
+# "max") — Empyralis's UI has never offered "max", so accepting it here
+# would let a value no picker can produce silently become valid.
+_VALID_SDK_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+
+
+def resolve_sdk_effort(reasoning_effort: str, *, served_by_anthropic: bool) -> Optional[str]:
+    """Map Empyralis's stored `reasoning_effort` onto
+    `ClaudeAgentOptions.effort`, or None to leave the field unset entirely.
+
+    "Model default" (reasoning_effort == "", the REASONING_EFFORT_OPTIONS
+    picker's own "" entry — see fleet-provider-constants.ts) MUST return
+    None here, not a guessed level: `ClaudeAgentOptions.effort` defaults to
+    None, and per its own docstring the SDK/model choose the effort in that
+    case (documented default: "high"). Coercing "" to a specific level would
+    change behavior for every agent that has never touched this control,
+    which "model default" explicitly promises not to do. An unrecognized
+    string (defensive only — fleet_tools.py's own _VALID_REASONING_EFFORTS
+    check already rejects anything outside {"low","medium","high","xhigh"}
+    before it can be saved) is treated the same as "": pass nothing rather
+    than something the SDK might reject.
+
+    `served_by_anthropic` gates this to turns that genuinely reach
+    Anthropic's own API (see turn_is_served_by_anthropic — the SAME flag
+    that already gates whether the CLI's total_cost_usd is trustworthy for
+    this turn). Two reasons this bridge does not set `effort` for anything
+    else:
+      - Adapter-routed providers (openai_compat_adapter.py) never read an
+        `effort` field off the incoming Anthropic-shaped request at all
+        (see translate_anthropic_request_to_openai's own docstring: fields
+        it doesn't translate are "stripped by omission") — the OpenAI Chat
+        Completions body it forwards has no reasoning-effort equivalent
+        wired for it, so the value would be silently dropped regardless.
+      - Providers with a genuinely native Anthropic-Messages-compatible
+        endpoint (DeepSeek, Ollama — resolve_anthropic_compatible_base_url)
+        are NOT verified to accept this vocabulary at all: provider_
+        profiles.py's own catalog lists deepseek-v4-pro's reasoning_levels
+        as ["high", "max"], not Empyralis's {"low","medium","high","xhigh"}
+        — direct evidence the scales differ. Sending an Anthropic-flavored
+        "effort":"low" to DeepSeek's real endpoint is unverified: it may be
+        ignored (harmless but pointless) or rejected outright (a 400 that
+        would break a turn that works today). Absent live verification
+        against each such endpoint, the honest choice is the same one this
+        module already makes for cost reporting: omit rather than guess.
+    """
+    normalized = str(reasoning_effort or "").strip().lower()
+    if not served_by_anthropic:
+        return None
+    if normalized not in _VALID_SDK_REASONING_EFFORTS:
+        return None
+    return normalized
+
 
 # Credential-shaped env vars claude_agent_sdk's spawned `claude` CLI
 # subprocess recognizes, in Anthropic's own documented precedence order
@@ -1742,6 +1803,21 @@ async def run_claude_agent_sdk_turn(
                 # cleared) while this options object used a token the
                 # caller never learned about at all.
                 env=turn_env,
+                # The per-agent "Reasoning effort" composer/detail control
+                # (AgentChat.tsx / FleetAgentDetail.tsx, model_config.
+                # reasoning_effort) — previously wired ONLY into build_sdk_
+                # tools' execute_single_direct_tool_call calls (an internal
+                # LLM call made BY a tool), never onto this, the main model
+                # turn, which is what the picker actually claims to control.
+                # served_by_anthropic (computed once above, from the SAME
+                # resolve_sdk_process_env this turn's env already came from)
+                # gates it to turns that genuinely reach Anthropic's own API
+                # — see resolve_sdk_effort's own docstring for why every
+                # other provider on this bridge (adapter-routed, or a
+                # native-Anthropic-compatible-but-non-Anthropic endpoint
+                # like DeepSeek/Ollama) is left exactly as inert as before
+                # rather than guessing at an unverified wire contract.
+                effort=resolve_sdk_effort(reasoning_effort, served_by_anthropic=served_by_anthropic),
             )
 
         async def _consume(sdk_message: Any, *, state: TranslationState) -> List[Dict[str, Any]]:

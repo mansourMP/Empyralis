@@ -1773,6 +1773,141 @@ class RunClaudeAgentSdkTurnBuiltInToolLockdownTests(unittest.TestCase):
         self.assertEqual(kwargs["setting_sources"], [])
 
 
+class ResolveSdkEffortTests(unittest.TestCase):
+    """resolve_sdk_effort — the pure mapping from Empyralis's stored
+    model_config.reasoning_effort onto ClaudeAgentOptions.effort. Previously
+    reasoning_effort was wired only into build_sdk_tools' internal tool-LLM
+    calls, never onto the main turn; these pin the mapping in isolation,
+    before RunClaudeAgentSdkTurnReasoningEffortTests below pins that
+    run_claude_agent_sdk_turn actually calls it."""
+
+    def test_model_default_is_unset(self):
+        # "" is REASONING_EFFORT_OPTIONS' own "Model default" entry
+        # (fleet-provider-constants.ts) — it must mean "don't set `effort`
+        # at all", never a guessed level. ClaudeAgentOptions.effort defaults
+        # to None, so returning None here is what actually preserves that.
+        self.assertIsNone(
+            claude_agent_sdk_bridge.resolve_sdk_effort("", served_by_anthropic=True)
+        )
+
+    def test_every_valid_empyralis_level_passes_through_for_an_anthropic_turn(self):
+        # fleet_tools.py's _VALID_REASONING_EFFORTS — the only four values a
+        # stored model_config.reasoning_effort can ever hold for the
+        # platform_credits/byok_api modes that reach this bridge.
+        for level in ("low", "medium", "high", "xhigh"):
+            with self.subTest(level=level):
+                self.assertEqual(
+                    claude_agent_sdk_bridge.resolve_sdk_effort(level, served_by_anthropic=True),
+                    level,
+                )
+
+    def test_value_is_normalized(self):
+        self.assertEqual(
+            claude_agent_sdk_bridge.resolve_sdk_effort("  HIGH  ", served_by_anthropic=True),
+            "high",
+        )
+
+    def test_unrecognized_value_is_treated_as_unset_not_forwarded(self):
+        # "max" is a real SDK EffortLevel but Empyralis's own picker has
+        # never offered it (REASONING_EFFORT_OPTIONS has no "max" entry) —
+        # a value no UI can produce must not silently become valid here.
+        self.assertIsNone(
+            claude_agent_sdk_bridge.resolve_sdk_effort("max", served_by_anthropic=True)
+        )
+        self.assertIsNone(
+            claude_agent_sdk_bridge.resolve_sdk_effort("banana", served_by_anthropic=True)
+        )
+
+    def test_never_set_when_turn_is_not_served_by_anthropic(self):
+        # A genuinely-valid Empyralis level, but the turn is adapter-routed
+        # or hits a native-Anthropic-compatible-but-non-Anthropic endpoint
+        # (DeepSeek, Ollama) — see resolve_sdk_effort's own docstring for
+        # why that vocabulary is not verified to mean the same thing there.
+        self.assertIsNone(
+            claude_agent_sdk_bridge.resolve_sdk_effort("high", served_by_anthropic=False)
+        )
+
+
+class RunClaudeAgentSdkTurnReasoningEffortTests(unittest.TestCase):
+    """The per-agent "Reasoning effort" control (AgentChat.tsx composer
+    popover / FleetAgentDetail.tsx, model_config.reasoning_effort) reaching
+    the MAIN model turn — not just build_sdk_tools' internal tool-LLM calls,
+    which is all reasoning_effort was wired into before this fix. Same
+    faking pattern as RunClaudeAgentSdkTurnBuiltInToolLockdownTests: only
+    claude_agent_sdk's three entrypoints are stubbed, so the real
+    run_claude_agent_sdk_turn builds the real kwargs. No network, no
+    subprocess, no paid call."""
+
+    def _capture_options_kwargs(self, *, provider, reasoning_effort):
+        import claude_agent_sdk as real_sdk
+
+        captured: list[Dict[str, Any]] = []
+
+        class _FakeOptions:
+            def __init__(self, **kwargs):
+                captured.append(kwargs)
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        fake_client = _fake_claude_sdk_client([[_result_message()]])
+        with (
+            patch.object(real_sdk, "ClaudeAgentOptions", _FakeOptions),
+            patch.object(real_sdk, "create_sdk_mcp_server", return_value=MagicMock()),
+            patch.object(real_sdk, "ClaudeSDKClient", new=fake_client),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            asyncio.run(claude_agent_sdk_bridge.run_claude_agent_sdk_turn(
+                message="hello",
+                system_prompt="",
+                prior_messages=None,
+                tool_defs=[],
+                generation_services=MagicMock(),
+                workspace_id="ws-1",
+                thread_id="thread-1",
+                provider=provider,
+                model="claude-x",
+                credentials={"api_key": "sk-test"},
+                reasoning_effort=reasoning_effort,
+                trace_context=_trace_context(),
+            ))
+        return captured
+
+    def test_explicit_effort_reaches_options_on_an_anthropic_turn(self):
+        kwargs = self._capture_options_kwargs(provider="anthropic", reasoning_effort="high")[0]
+
+        self.assertIn("effort", kwargs)
+        self.assertEqual(kwargs["effort"], "high")
+
+    def test_unset_provider_defaults_to_anthropic_and_still_honors_effort(self):
+        # "" provider means "named nothing", which turn_is_served_by_
+        # anthropic treats as the CLI's own Anthropic default — the same
+        # convention _ANTHROPIC_PROVIDER_IDS already documents.
+        kwargs = self._capture_options_kwargs(provider="", reasoning_effort="xhigh")[0]
+
+        self.assertEqual(kwargs["effort"], "xhigh")
+
+    def test_model_default_leaves_effort_unset(self):
+        # "" (REASONING_EFFORT_OPTIONS' "Model default") must reach
+        # ClaudeAgentOptions as None, not a guessed level — the SDK/model
+        # then choose it themselves, exactly as if this turn never touched
+        # the field at all.
+        kwargs = self._capture_options_kwargs(provider="anthropic", reasoning_effort="")[0]
+
+        self.assertIn("effort", kwargs)
+        self.assertIsNone(kwargs["effort"])
+
+    def test_non_anthropic_provider_never_forwards_effort(self):
+        # DeepSeek is adapter/native-endpoint-routed, not Anthropic's own
+        # API — provider_profiles.py's own catalog shows its reasoning
+        # vocabulary ("high"/"max") does not match Empyralis's picker
+        # ("low"/"medium"/"high"/"xhigh"), so a value picked under this
+        # bridge's Anthropic-shaped assumption must not be forwarded blind.
+        kwargs = self._capture_options_kwargs(provider="deepseek", reasoning_effort="high")[0]
+
+        self.assertIn("effort", kwargs)
+        self.assertIsNone(kwargs["effort"])
+
+
 class IsRegisteredEmpyralisToolTests(unittest.TestCase):
     """The predicate translate_sdk_message's foreign-tool guard is built on.
     Note the strip_mcp_tool_prefix interplay: that helper only ever strips
