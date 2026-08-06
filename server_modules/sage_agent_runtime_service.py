@@ -2346,6 +2346,11 @@ async def _resolve_specialist_toolset(
     # Fail-safe default (MAN-310 skills-delivery): a lookup error must never
     # silently deliver a stale/wrong skill set — no skills this turn instead.
     skills: list[dict[str, Any]] = []
+    # Fail-safe default (fix/agent-task-tools-on-sdk-engine): a lookup error
+    # must never silently grant project_task__* — no project this turn
+    # instead, same "deny-more, never allow-more" convention as every other
+    # field here.
+    project_id = ""
     try:
         from server_modules import agent_bindings_repository as _bind
         rows = await _bind.list_agent_connector_bindings(
@@ -2366,6 +2371,21 @@ async def _resolve_specialist_toolset(
         bundle = await _reg.get_workspace_agent_install_bundle(
             aid, tenant_id=tenant_id or "default", workspace_id=workspace_id
         )
+        # fix/agent-task-tools-on-sdk-engine: "is this agent install a member
+        # of a project" reuses the SAME workspace_agent_installs.project_id
+        # column project_tasks_service.agent_project_id() queries at
+        # execution time (skills_service.py's connector_id == "project_task"
+        # dispatch) — but at ZERO extra cost, since get_workspace_agent_
+        # install_bundle above already SELECTs `wai.*` for this exact
+        # (id, tenant_id, workspace_id), and no table LEFT-JOINed into that
+        # query (agent_definitions / agent_definition_versions /
+        # runtime_profiles / agent_runtime_profiles / workflow_versions)
+        # defines its own project_id column to collide with wai's. A
+        # workspace's own default project counts as membership here (every
+        # agent gets one — see agent_project_id's docstring), matching
+        # exactly what the runtime check at call time will accept.
+        if isinstance(bundle, dict):
+            project_id = str(bundle.get("project_id") or "").strip()
         # The same agent_installs.subagents_enabled resolution fleet_configure_agent
         # writes and fleet_tools.py's own callers already read (default False for a
         # specialist unless explicitly turned on — see resolve_subagents_enabled).
@@ -2452,6 +2472,14 @@ async def _resolve_specialist_toolset(
         # _direct_tool_bundle to decide whether subagent__spawn is even added
         # to the tool list -- never a prompt-level "please don't" instruction.
         "subagents_enabled": subagents_enabled,
+        # fix/agent-task-tools-on-sdk-engine: this specialist's own project
+        # (empty when it has none — fail-safe default above). Consulted by
+        # _direct_tool_bundle (structural Tier-1 project_task__* carve-out,
+        # same shape as the master-only fleet__* one) and by
+        # _specialist_tool_allowed / _filter_registry_for_specialist (Tier-2
+        # registry visibility) — project membership is the grant for these
+        # tools, not a connector binding; see those functions' own comments.
+        "project_id": project_id,
     }
 
 
@@ -2471,6 +2499,21 @@ _ALWAYS_MANDATORY_TOOL_NAMES = frozenset({"task_complete", "query_tool_registry"
 # being unconditionally core — the owner's one visible switch actually
 # covers the capability it claims to.
 _CORE_TOOL_FOLLOWS_TOGGLE = {"web__fetch": "web__search"}
+
+# fix/agent-task-tools-on-sdk-engine: project_task__* (skills_service.py's
+# _builtin_tool_descriptors, connector_id="project_task") is intrinsic to
+# being a member of a project, not a third-party integration an owner
+# opts a connected app into — it appears nowhere in runtime_config.
+# CONNECTOR_CATALOG, has no ConnectorPicker entry, and nothing ever writes
+# an agent_connector_bindings row for it. Gating it on
+# toolset["connectors"] the way every real connector tool is gated (the
+# scheme _specialist_tool_allowed / _filter_registry_for_specialist
+# otherwise uses below) is therefore not a stricter rule than intended —
+# it is a rule with no path to ever pass, permanently. Project
+# membership (toolset["project_id"], set in _resolve_specialist_toolset)
+# is the correct grant instead, checked directly ahead of the generic
+# connector-prefix fallback in both functions below.
+_PROJECT_TASK_CONNECTOR_ID = "project_task"
 
 
 def _core_tool_allowed(name: str, toolset: dict[str, Any]) -> bool:
@@ -2515,7 +2558,9 @@ def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
 
     Everything else: allowed = a core tool whose toggle (if any) isn't
     explicitly off, an explicitly-toggled tool, or a connector tool
-    (``{connector}__{action}``) whose connector is bound.
+    (``{connector}__{action}``) whose connector is bound — EXCEPT
+    project_task__* (see _PROJECT_TASK_CONNECTOR_ID above), which is
+    granted by project membership instead of a connector binding.
     """
     name = str(tool_name or "").strip()
     if not name:
@@ -2528,6 +2573,8 @@ def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
     if name in toolset.get("tools", set()):
         return True
     connector = name.split("__", 1)[0].strip().lower() if "__" in name else ""
+    if connector == _PROJECT_TASK_CONNECTOR_ID:
+        return bool(str(toolset.get("project_id") or "").strip())
     return bool(connector and connector in toolset.get("connectors", set()))
 
 
@@ -2599,6 +2646,12 @@ def _filter_registry_for_specialist(registry: Any, toolset: dict[str, Any], *, w
                 kept.append(entry)
         elif name in toolset.get("tools", set()):
             kept.append(entry)
+        elif connector == _PROJECT_TASK_CONNECTOR_ID:
+            # See _PROJECT_TASK_CONNECTOR_ID's own comment: project
+            # membership is the grant, not a connector binding — this
+            # connector has no binding path to check.
+            if str(toolset.get("project_id") or "").strip():
+                kept.append(entry)
         elif connector and connector in toolset.get("connectors", set()):
             kept.append(entry)
     return kept
@@ -2711,6 +2764,38 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
                 },
                 "connector_id": "subagent",
             })
+        # ── project_task__* (fix/agent-task-tools-on-sdk-engine) ─────────
+        # STRUCTURAL Tier-1 carve-out, same shape as the master-only
+        # fleet__* one above: a project-member specialist gets these
+        # unconditionally, in its own native tools= payload, instead of
+        # relying on Tier-2 lazy discovery (query_tool_registry) to reach
+        # them. That lazy door has no equivalent at all on the Claude
+        # Agent SDK engine (claude_agent_sdk_bridge._UNSUPPORTED_TOOL_
+        # NAMES excludes query_tool_registry from what's registered with
+        # the SDK), so a Tier-2-only grant left a project-member
+        # specialist permanently unable to touch its own project's task
+        # board the moment that engine became the production default —
+        # the bug this fix closes. Gated on project_id (project
+        # membership is the grant here, not a connector binding — see
+        # _PROJECT_TASK_CONNECTOR_ID's own comment above) and skipped
+        # entirely for an agent with no project, since every
+        # project_task__* action raises at execution time for one
+        # anyway (skills_service.py's connector_id == "project_task"
+        # dispatch, agent_project_id() returning falsy).
+        if str(specialist_toolset.get("project_id") or "").strip():
+            _seen_task_names = {t.get("name") for t in tools}
+            for _pt_descriptor in _sage_skills_service._builtin_tool_descriptors():
+                if _pt_descriptor.connector_id != _PROJECT_TASK_CONNECTOR_ID or _pt_descriptor.tool_name in _seen_task_names:
+                    continue
+                _pt_payload = _sage_skills_service._tool_payload_from_descriptor(_pt_descriptor)
+                _pt_params = _pt_payload.get("parameters") if isinstance(_pt_payload.get("parameters"), dict) else {}
+                _pt_tool_def: dict[str, Any] = {"name": _pt_payload["name"], "description": _pt_payload["description"]}
+                if _pt_params:
+                    _pt_tool_def["parameters"] = _pt_params
+                if _pt_payload.get("connector_id"):
+                    _pt_tool_def["connector_id"] = _pt_payload["connector_id"]
+                tools.append(_pt_tool_def)
+                _seen_task_names.add(_pt_descriptor.tool_name)
     # Phase A MCP wiring (docs/design/mcp-applications-plan.md): inject this
     # workspace's enabled+approved MCP tools as Tier-2 registry entries.
     # build_registry_entries() has no workspace_id parameter and deliberately
@@ -3545,6 +3630,15 @@ async def _run_sage_action_loop_v3(
                 # branch re-checks this instead of trusting that the tool
                 # only appears in the list when true (see _direct_tool_bundle).
                 "subagents_enabled": bool(_specialist_toolset.get("subagents_enabled")),
+                # fix/agent-task-tools-on-sdk-engine: THIRD, independent gate
+                # (direct_tool_execution_service.py's own specialist_guard
+                # check) for project_task__* -- see _PROJECT_TASK_CONNECTOR_ID's
+                # comment above for why project membership, not a connector
+                # binding, is the grant. Without this, a project-member
+                # specialist could get project_task__* into its tools=
+                # payload (via _direct_tool_bundle above) and still have
+                # every call denied here at execution time.
+                "project_id": str(_specialist_toolset.get("project_id") or "").strip(),
             }
     import asyncio as _asyncio
 
@@ -5014,6 +5108,29 @@ async def handle_sage_chat(
     # same rationale as _resolve_turn_engine_id's own docstring.
     requested_engine = _normalize_requested_engine(_raw_engine)
 
+    # fix/agent-task-tools-on-sdk-engine: resolved HERE, before any prompt
+    # text is built, using the exact same precedence the actual
+    # _run_sage_action_loop_v3 call site below applies (a caller-supplied
+    # engine_options wins over the resolved per-agent pin) — moved up from
+    # that call site (where it used to be computed) and reused verbatim
+    # there, so the prompt this function writes and the engine that
+    # actually executes the turn can never disagree about which one was
+    # selected.
+    _effective_engine_options = (
+        engine_options if isinstance(engine_options, dict) and engine_options
+        else ({"engine": requested_engine} if requested_engine else None)
+    )
+    # True unless this turn is pinned to the Claude Agent SDK engine, which
+    # has no query_tool_registry / Tier-2 discovery mechanism at all
+    # (claude_agent_sdk_bridge._UNSUPPORTED_TOOL_NAMES) — threaded into both
+    # the master kernel prompt and the specialist capability manifest below
+    # so neither ever tells the model to reach for a tool that engine
+    # cannot register. See sage_instruction_compiler_service.py's
+    # tool_discovery_available parameters for the honesty rationale.
+    _tool_discovery_available = (
+        _resolve_turn_engine_id(_effective_engine_options) != claude_agent_sdk_bridge.ENGINE_ID
+    )
+
     # --- Build Sage prompt/context before any model-backed action loop ---
     # --- Load recent conversation turns from shared thread store ---
     effective_tenant_id = normalized_tenant_id or "default"
@@ -5154,6 +5271,7 @@ async def handle_sage_chat(
             canonical_name=canonical_name,
             linked_channels=linked_channels if linked_channels else None,
             policy_context=_policy_context,
+            tool_discovery_available=_tool_discovery_available,
         )
     except Exception as _exc:
         import logging as _logging
@@ -5366,6 +5484,7 @@ async def handle_sage_chat(
             _spec_manifest_text = sage_instruction_compiler_service.render_capability_manifest_text(
                 _spec_scoped_manifest,
                 char_limit=sage_instruction_compiler_service.SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT,
+                tool_discovery_available=_tool_discovery_available,
             )
             if _spec_manifest_text:
                 _spec_capability_manifest_block = "\n\n" + _spec_manifest_text
@@ -5614,10 +5733,11 @@ async def handle_sage_chat(
     # requested_engine of "legacy" (MAN-312) or claude_agent_sdk_bridge.
     # ENGINE_ID instead yields an explicit {"engine": ...} dict, which pins
     # the turn to that engine regardless of the production default.
-    _effective_engine_options = (
-        engine_options if isinstance(engine_options, dict) and engine_options
-        else ({"engine": requested_engine} if requested_engine else None)
-    )
+    # (fix/agent-task-tools-on-sdk-engine: _effective_engine_options itself
+    # is now computed once, earlier in this function — see
+    # _tool_discovery_available's own comment — and simply reused here so
+    # the prompt already built above can never disagree with the engine
+    # this call site actually selects.)
     # Always run the action loop — the LLM decides whether tools are needed.
     # A keyword heuristic gate would silently skip tools for messages that don't
     # match exact tokens, causing "let me check..." promises with no follow-up.

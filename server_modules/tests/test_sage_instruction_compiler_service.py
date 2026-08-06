@@ -280,6 +280,105 @@ class SageInstructionCompilerServiceTests(unittest.TestCase):
         self.assertNotIn("mcp__docs__write", bundle.system_prompt)
         self.assertEqual(bundle.diagnostics["approval_required_tools"], ["memory_stage_edit"])
 
+    # ── fix/agent-task-tools-on-sdk-engine: engine-aware manifest ───────────
+    # On the Claude Agent SDK engine there is no query_tool_registry at all
+    # (claude_agent_sdk_bridge._UNSUPPORTED_TOOL_NAMES) — a manifest-only
+    # "other" entry (no native schema this turn) can only ever be reached
+    # through that door, so listing one as "callable" on that engine is a
+    # direct lie against this section's own header. tool_discovery_available
+    # defaults True so every pre-existing caller (including every test
+    # above this one) is unaffected; only an explicit False changes anything.
+
+    _NON_NATIVE_TOOL_ITEM = {
+        "label": "Post to Slack",
+        "description": "Send a message to a Slack channel.",
+        "status": "ready",
+        "tool_id": "slack__post_message",
+        "type": "tool",
+    }
+    _SKILL_ITEM = {
+        "label": "acme-quote-builder",
+        "description": "Builds a customer quote from the workspace price list.",
+        "status": "ready",
+        "tool_id": "skill_invoke",
+        "type": "skill",
+        "source": "workspace",
+    }
+
+    def test_capability_manifest_default_still_lists_discovery_only_tools(self) -> None:
+        """Default (tool_discovery_available=True, unset by every caller
+        that existed before this fix) must reproduce today's behavior
+        byte-for-byte — this is the legacy-engine control."""
+        bundle = compiler.build_sage_instruction_bundle(
+            workspace_id="ws-1",
+            message="post an update to the team",
+            provider="deepseek",
+            model="deepseek-chat",
+            capability_payload={"items": [self._NON_NATIVE_TOOL_ITEM, self._SKILL_ITEM]},
+        )
+        self.assertIn("slack__post_message", bundle.system_prompt)
+        self.assertIn("acme-quote-builder", bundle.system_prompt)
+        self.assertNotIn("not reachable this turn", bundle.system_prompt)
+
+    def test_capability_manifest_hides_discovery_only_tools_on_sdk_engine(self) -> None:
+        """tool_discovery_available=False (the Claude Agent SDK engine — no
+        query_tool_registry) must drop the non-native connector tool
+        entirely rather than advertise it as callable. The skill item stays:
+        the SDK engine delivers enabled skills through its own native Skill
+        mechanism (claude_agent_sdk_bridge.build_skills_plugin_dir), which
+        has nothing to do with query_tool_registry."""
+        bundle = compiler.build_sage_instruction_bundle(
+            workspace_id="ws-1",
+            message="post an update to the team",
+            provider="deepseek",
+            model="deepseek-chat",
+            capability_payload={"items": [self._NON_NATIVE_TOOL_ITEM, self._SKILL_ITEM]},
+            tool_discovery_available=False,
+        )
+        self.assertNotIn("slack__post_message", bundle.system_prompt)
+        self.assertIn("acme-quote-builder", bundle.system_prompt)
+        self.assertIn("not reachable this turn", bundle.system_prompt)
+
+    def test_kernel_prompt_drops_query_tool_registry_mention_on_sdk_engine(self) -> None:
+        """The always-injected subsystem-purpose kernel text used to tell
+        every turn 'query_tool_registry finds one the moment a task needs
+        it' regardless of engine — actively wrong advice on an engine where
+        that tool was never registered at all."""
+        bundle_default = compiler.build_sage_instruction_bundle(
+            workspace_id="ws-1", message="hello", provider="deepseek", model="deepseek-chat",
+            capability_payload={"items": []},
+        )
+        self.assertIn("query_tool_registry finds one", bundle_default.system_prompt)
+
+        bundle_sdk = compiler.build_sage_instruction_bundle(
+            workspace_id="ws-1", message="hello", provider="deepseek", model="deepseek-chat",
+            capability_payload={"items": []},
+            tool_discovery_available=False,
+        )
+        self.assertNotIn("query_tool_registry", bundle_sdk.system_prompt)
+        # Replacement line still tells the model connected apps/MCP tools
+        # exist and how to reach the ones it actually has (the Callable
+        # Tools manifest) — not silently dropped with no guidance at all.
+        self.assertIn("Connected apps and MCP tools are your hands", bundle_sdk.system_prompt)
+
+    def test_render_capability_manifest_text_threads_the_same_flag(self) -> None:
+        """The specialist path (sage_agent_runtime_service.py) calls this
+        public entry point directly rather than build_sage_instruction_
+        bundle — proves it takes and honors the same parameter. Manifest
+        items here use the already-built shape (build_model_capability_
+        manifest's own "tool"/"when_to_use" keys), matching what
+        sage_agent_runtime_service.py's specialist branch actually passes."""
+        manifest = [
+            {"tool": "slack__post_message", "label": "Post to Slack", "when_to_use": "Send a message.", "type": "tool"},
+            {"tool": "skill_invoke", "label": "acme-quote-builder", "when_to_use": "Builds a quote.", "type": "skill", "source": "workspace"},
+        ]
+        text_default = compiler.render_capability_manifest_text(manifest)
+        self.assertIn("slack__post_message", text_default)
+
+        text_sdk = compiler.render_capability_manifest_text(manifest, tool_discovery_available=False)
+        self.assertNotIn("slack__post_message", text_sdk)
+        self.assertIn("acme-quote-builder", text_sdk)
+
     def test_retrieved_memory_is_wrapped_as_untrusted_evidence(self) -> None:
         bundle = compiler.build_sage_instruction_bundle(
             workspace_id="ws-1",

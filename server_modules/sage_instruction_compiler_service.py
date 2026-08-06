@@ -439,7 +439,26 @@ def _has_native_schema_this_turn(tool_id: str) -> bool:
     return tool_id.startswith("fleet__")
 
 
-def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) -> str:
+def _capability_manifest_text(
+    capability_manifest: Sequence[Mapping[str, Any]],
+    *,
+    tool_discovery_available: bool = True,
+) -> str:
+    """``tool_discovery_available`` (fix/agent-task-tools-on-sdk-engine):
+    True unless this turn runs on the Claude Agent SDK engine, which has no
+    ``query_tool_registry`` — the Tier-2 lazy-discovery door is not
+    registered with the SDK at all (claude_agent_sdk_bridge.
+    _UNSUPPORTED_TOOL_NAMES). A manifest-only "other" entry below (a
+    connector/MCP/built-in tool without a native schema this turn) can only
+    ever be REACHED by a mid-turn query_tool_registry pull, so on that
+    engine such an entry is not callable this turn at all — full stop.
+    Listing it anyway would directly contradict this section's own header
+    ("Only these tools are callable in this turn"), the same class of
+    defect the tool_honesty_guard exists to catch on the output side. Skill
+    items are never filtered by this flag: the SDK engine delivers enabled
+    skills through its own native Skill mechanism (claude_agent_sdk_bridge.
+    build_skills_plugin_dir) — a live path with nothing to do with
+    query_tool_registry."""
     if not capability_manifest:
         return ""
     lines = [
@@ -467,6 +486,11 @@ def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) 
             native_only_tool_ids.append(tool_id)
         else:
             manifest_only_other.append(item)
+
+    unreachable_this_engine = 0
+    if not tool_discovery_available and manifest_only_other:
+        unreachable_this_engine = len(manifest_only_other)
+        manifest_only_other = []
 
     # Within the reserved skill slice, workspace/global/bundled-filesystem
     # skills (source != "built_in") outrank the ~20 hardcoded
@@ -503,6 +527,11 @@ def _capability_manifest_text(capability_manifest: Sequence[Mapping[str, Any]]) 
     omitted = len(manifest_only_other) + len(skill_items) - len(shown_items)
     if omitted > 0:
         lines.append(f"- ... {omitted} more callable tool(s); use the capability panel or memory tools for details.")
+    if unreachable_this_engine > 0:
+        lines.append(
+            f"- {unreachable_this_engine} more workspace connection(s) exist but are not "
+            "reachable this turn — do not attempt or claim to use them."
+        )
     return "\n".join(lines)
 
 
@@ -510,6 +539,7 @@ def render_capability_manifest_text(
     capability_manifest: Sequence[Mapping[str, Any]],
     *,
     char_limit: int | None = None,
+    tool_discovery_available: bool = True,
 ) -> str:
     """Public entry point for the "## Callable Tools" manifest text, for
     callers outside this module. Added for docs/design/context-engineering-
@@ -522,8 +552,14 @@ def render_capability_manifest_text(
     unscoped. ``char_limit`` (see SPECIALIST_CAPABILITY_MANIFEST_CHAR_LIMIT)
     gives that branch a budget cap of its own — the master path is capped by
     the shared system-context budget already; the specialist branch has no
-    such budget at all, so this function must enforce its own."""
-    text = _capability_manifest_text(capability_manifest)
+    such budget at all, so this function must enforce its own.
+    ``tool_discovery_available`` — see _capability_manifest_text's own
+    docstring — defaults True (every pre-existing caller keeps today's
+    behavior); pass False for a turn running on the Claude Agent SDK
+    engine."""
+    text = _capability_manifest_text(
+        capability_manifest, tool_discovery_available=tool_discovery_available
+    )
     if char_limit is None or not text:
         return text
     clipped, _truncated = _clip_text(text, char_limit, "capability manifest truncated")
@@ -615,25 +651,50 @@ _TIERED_AUTONOMY_STATEMENT = (
 # all. fleet__schedule_task now accepts an omitted agent_id as "schedule
 # myself" (see skills_service.py's ToolDescriptor + dispatcher for that
 # change) — the line below is accurate to that, not aspirational.
-_SUBSYSTEM_PURPOSE_MAP = (
-    "Why each system exists — reason from this, the user will not name a system for you:\n"
-    "- Memory exists so the user never has to repeat themselves across sessions (full "
-    "read/write doctrine right below).\n"
-    "- A visible plan (update_plan) exists so a real multi-step task keeps its own shape "
-    "across a long turn — lay one out before diving into genuinely multi-step work, skip it "
-    "for anything simple.\n"
-    "- Standing schedules exist for recurring work with nobody re-prompting you: when the "
-    "user's actual ask is recurring (\"every morning, check...\") rather than one-off, call "
-    "fleet__schedule_task with no target agent to wake yourself up and run it, instead of "
-    "waiting to be asked again tomorrow.\n"
-    "- Skills are ready-made procedures — reach for one when its description matches the "
-    "task's shape, never because it was named to you.\n"
+_SUBSYSTEM_PURPOSE_MAP_CONNECTED_APPS_LINE_WITH_DISCOVERY = (
     "- Connected apps and MCP tools are your hands in the outside world, chosen the same way; "
     "query_tool_registry finds one the moment a task needs it.\n"
-    "- General compute — shell, files, browser control on your own paired hardware — is a "
-    "standing capability of yours, not a skill to go discover; reach for it directly whenever "
-    "it's the natural way to get something done."
 )
+# fix/agent-task-tools-on-sdk-engine: the Claude Agent SDK engine has no
+# query_tool_registry (claude_agent_sdk_bridge._UNSUPPORTED_TOOL_NAMES) —
+# telling the model to call it on that engine describes a tool that will
+# never appear in its tools=, the same "prompt promises something that
+# isn't there" defect the honesty doctrine (tool_honesty_guard, MAN-303,
+# MAN-263) exists to catch on the output side. This line is dropped
+# instead of rephrased: whatever this turn's engine could actually reach
+# is already named, with real descriptions, in the "## Callable Tools"
+# manifest right below this kernel block — this sentence would only ever
+# add a false promise of MORE, never new accurate information.
+_SUBSYSTEM_PURPOSE_MAP_CONNECTED_APPS_LINE_NO_DISCOVERY = (
+    "- Connected apps and MCP tools are your hands in the outside world — call the ones named "
+    "in your Callable Tools list below when a task needs them.\n"
+)
+
+
+def _subsystem_purpose_map(*, tool_discovery_available: bool = True) -> str:
+    connected_apps_line = (
+        _SUBSYSTEM_PURPOSE_MAP_CONNECTED_APPS_LINE_WITH_DISCOVERY
+        if tool_discovery_available
+        else _SUBSYSTEM_PURPOSE_MAP_CONNECTED_APPS_LINE_NO_DISCOVERY
+    )
+    return (
+        "Why each system exists — reason from this, the user will not name a system for you:\n"
+        "- Memory exists so the user never has to repeat themselves across sessions (full "
+        "read/write doctrine right below).\n"
+        "- A visible plan (update_plan) exists so a real multi-step task keeps its own shape "
+        "across a long turn — lay one out before diving into genuinely multi-step work, skip it "
+        "for anything simple.\n"
+        "- Standing schedules exist for recurring work with nobody re-prompting you: when the "
+        "user's actual ask is recurring (\"every morning, check...\") rather than one-off, call "
+        "fleet__schedule_task with no target agent to wake yourself up and run it, instead of "
+        "waiting to be asked again tomorrow.\n"
+        "- Skills are ready-made procedures — reach for one when its description matches the "
+        "task's shape, never because it was named to you.\n"
+        + connected_apps_line +
+        "- General compute — shell, files, browser control on your own paired hardware — is a "
+        "standing capability of yours, not a skill to go discover; reach for it directly whenever "
+        "it's the natural way to get something done."
+    )
 
 
 def _kernel_prompt(
@@ -642,6 +703,7 @@ def _kernel_prompt(
     model: str | None,
     billing_source: str | None = None,
     ai_tier: str | None = None,
+    tool_discovery_available: bool = True,
 ) -> str:
     # Why-first (item 9): the durability reason now leads the memory rule
     # instead of being buried after the mechanical recipe
@@ -692,13 +754,15 @@ def _kernel_prompt(
             "You are operating inside Empyralis, an environment connecting the user with AI, tools, files, memory, and apps. "
             "The active AI source is Empyralis AI. "
             "Workspace identity and role files may be available through tools or workspace context when relevant.\n\n"
-            + _TIERED_AUTONOMY_STATEMENT + "\n\n" + _SUBSYSTEM_PURPOSE_MAP
+            + _TIERED_AUTONOMY_STATEMENT + "\n\n"
+            + _subsystem_purpose_map(tool_discovery_available=tool_discovery_available)
         ) + memory_rule
     return (
         _FIRST_PRIORITY_STATEMENT + "\n\n"
         "You are operating inside Empyralis, an environment connecting the user with this AI model, tools, files, memory, and apps. "
         "Workspace identity and role files may be available through tools or workspace context when relevant.\n\n"
-        + _TIERED_AUTONOMY_STATEMENT + "\n\n" + _SUBSYSTEM_PURPOSE_MAP
+        + _TIERED_AUTONOMY_STATEMENT + "\n\n"
+        + _subsystem_purpose_map(tool_discovery_available=tool_discovery_available)
     ) + memory_rule
 
 
@@ -869,6 +933,7 @@ def build_sage_instruction_bundle(
     canonical_name: str | None = None,
     linked_channels: list[str] | None = None,
     policy_context: str = "",
+    tool_discovery_available: bool = True,
 ) -> SageInstructionBundle:
     normalized_workspace_id = _coerce_text(workspace_id)
     normalized_message = _coerce_text(message)
@@ -911,6 +976,7 @@ def build_sage_instruction_bundle(
             model=model,
             billing_source=billing_source,
             ai_tier=ai_tier,
+            tool_discovery_available=tool_discovery_available,
         ),
     )
     # Policy context — internalized governance. The agent receives its tier,
@@ -918,7 +984,12 @@ def build_sage_instruction_bundle(
     # decisions. Consumers NEVER see approval buttons or blocked cards.
     if _coerce_text(policy_context):
         append_section("policy_context", policy_context)
-    append_section("capabilities", _capability_manifest_text(capability_manifest))
+    append_section(
+        "capabilities",
+        _capability_manifest_text(
+            capability_manifest, tool_discovery_available=tool_discovery_available
+        ),
+    )
     if root_sections:
         append_section(
             "root_memory_brief",
