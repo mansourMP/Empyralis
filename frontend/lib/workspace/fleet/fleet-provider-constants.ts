@@ -235,19 +235,21 @@ export function defaultModelForProvider(providerId: string): string {
 }
 
 // ── Reasoning effort (Fleet Model tab, model_config.reasoning_effort) ──────
-// Mirrors scripts/orion_local_worker_llm.py's resolve_requested_reasoning_effort
-// and provider_profiles.py's PROVIDER_MODEL_CATALOG reasoning_levels union —
-// "xhigh" ("Extra high") is a real fourth tier for GPT-5.x/Codex-class
-// models, not a typo for "high". "" means no override (provider/model
-// default), same convention as an unset model_config.model.
-export type ReasoningEffort = "" | "low" | "medium" | "high" | "xhigh";
+// The SDK's own EffortLevel set (claude_agent_sdk/types.py:
+// Literal["low", "medium", "high", "xhigh", "max"]) — reasoning depth is an
+// SDK-level concept, so this list is all five levels it accepts, no
+// per-provider narrowing. "" means no override (provider/model default,
+// which the SDK documents as "high"), same convention as an unset
+// model_config.model.
+export type ReasoningEffort = "" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const REASONING_EFFORT_OPTIONS: { value: ReasoningEffort; label: string }[] = [
   { value: "", label: "Model default" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
   { value: "high", label: "High" },
-  { value: "xhigh", label: "Extra high" },
+  { value: "xhigh", label: "Extra high (Opus 4.7; falls back to High)" },
+  { value: "max", label: "Max" },
 ];
 
 // Superset label map — every value ANY reasoning-effort vocabulary in this

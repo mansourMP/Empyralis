@@ -92,7 +92,7 @@ _VALID_MODEL_RUNTIMES = {"claude_code", "codex", "grok_build", "cursor_cli", "ol
 # stream_provider_backed_direct_chat, which applies this natively for
 # models it recognizes as reasoning models, degraded to a system-prompt
 # instruction otherwise.
-_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+_VALID_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 # cli_subscription's OWN reasoning-effort vocabulary — DIFFERENT from
 # _VALID_REASONING_EFFORTS above and DIFFERENT per runtime, verified live
 # against each CLI's own --help. claude_code's `--effort` has no "off"/

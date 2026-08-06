@@ -1786,46 +1786,34 @@ class ResolveSdkEffortTests(unittest.TestCase):
         # (fleet-provider-constants.ts) — it must mean "don't set `effort`
         # at all", never a guessed level. ClaudeAgentOptions.effort defaults
         # to None, so returning None here is what actually preserves that.
-        self.assertIsNone(
-            claude_agent_sdk_bridge.resolve_sdk_effort("", served_by_anthropic=True)
-        )
+        self.assertIsNone(claude_agent_sdk_bridge.resolve_sdk_effort(""))
 
-    def test_every_valid_empyralis_level_passes_through_for_an_anthropic_turn(self):
-        # fleet_tools.py's _VALID_REASONING_EFFORTS — the only four values a
-        # stored model_config.reasoning_effort can ever hold for the
-        # platform_credits/byok_api modes that reach this bridge.
-        for level in ("low", "medium", "high", "xhigh"):
+    def test_every_valid_empyralis_level_passes_through_regardless_of_provider(self):
+        # fleet_tools.py's _VALID_REASONING_EFFORTS — the complete SDK
+        # EffortLevel set (claude_agent_sdk/types.py), all five of which a
+        # stored model_config.reasoning_effort can now hold for the
+        # platform_credits/byok_api modes that reach this bridge. Reasoning
+        # depth is an SDK-level concept: an explicit choice is forwarded no
+        # matter which provider ultimately serves the turn.
+        for level in ("low", "medium", "high", "xhigh", "max"):
             with self.subTest(level=level):
                 self.assertEqual(
-                    claude_agent_sdk_bridge.resolve_sdk_effort(level, served_by_anthropic=True),
+                    claude_agent_sdk_bridge.resolve_sdk_effort(level),
                     level,
                 )
 
     def test_value_is_normalized(self):
         self.assertEqual(
-            claude_agent_sdk_bridge.resolve_sdk_effort("  HIGH  ", served_by_anthropic=True),
+            claude_agent_sdk_bridge.resolve_sdk_effort("  HIGH  "),
             "high",
         )
 
     def test_unrecognized_value_is_treated_as_unset_not_forwarded(self):
-        # "max" is a real SDK EffortLevel but Empyralis's own picker has
-        # never offered it (REASONING_EFFORT_OPTIONS has no "max" entry) —
-        # a value no UI can produce must not silently become valid here.
-        self.assertIsNone(
-            claude_agent_sdk_bridge.resolve_sdk_effort("max", served_by_anthropic=True)
-        )
-        self.assertIsNone(
-            claude_agent_sdk_bridge.resolve_sdk_effort("banana", served_by_anthropic=True)
-        )
-
-    def test_never_set_when_turn_is_not_served_by_anthropic(self):
-        # A genuinely-valid Empyralis level, but the turn is adapter-routed
-        # or hits a native-Anthropic-compatible-but-non-Anthropic endpoint
-        # (DeepSeek, Ollama) — see resolve_sdk_effort's own docstring for
-        # why that vocabulary is not verified to mean the same thing there.
-        self.assertIsNone(
-            claude_agent_sdk_bridge.resolve_sdk_effort("high", served_by_anthropic=False)
-        )
+        # A value no UI can produce (typo/garbage, or a stale stored value
+        # from before the vocabulary was defined) must not silently become
+        # valid here.
+        self.assertIsNone(claude_agent_sdk_bridge.resolve_sdk_effort("banana"))
+        self.assertIsNone(claude_agent_sdk_bridge.resolve_sdk_effort("ultra"))
 
 
 class RunClaudeAgentSdkTurnReasoningEffortTests(unittest.TestCase):
@@ -1896,13 +1884,22 @@ class RunClaudeAgentSdkTurnReasoningEffortTests(unittest.TestCase):
         self.assertIn("effort", kwargs)
         self.assertIsNone(kwargs["effort"])
 
-    def test_non_anthropic_provider_never_forwards_effort(self):
-        # DeepSeek is adapter/native-endpoint-routed, not Anthropic's own
-        # API — provider_profiles.py's own catalog shows its reasoning
-        # vocabulary ("high"/"max") does not match Empyralis's picker
-        # ("low"/"medium"/"high"/"xhigh"), so a value picked under this
-        # bridge's Anthropic-shaped assumption must not be forwarded blind.
+    def test_non_anthropic_provider_still_forwards_explicit_effort(self):
+        # Reasoning depth is an SDK-level concept, not something this bridge
+        # maintains a per-provider translation table for: an explicit
+        # choice reaches ClaudeAgentOptions.effort the same way regardless
+        # of provider. For adapter-routed providers (DeepSeek here),
+        # openai_compat_adapter.py's translate_anthropic_request_to_openai
+        # builds its outgoing body from an explicit allowlist and never
+        # reads an effort-shaped field at all, so the value is stripped by
+        # omission on the wire — forwarding it here carries no 400 risk.
         kwargs = self._capture_options_kwargs(provider="deepseek", reasoning_effort="high")[0]
+
+        self.assertIn("effort", kwargs)
+        self.assertEqual(kwargs["effort"], "high")
+
+    def test_non_anthropic_provider_model_default_still_leaves_effort_unset(self):
+        kwargs = self._capture_options_kwargs(provider="deepseek", reasoning_effort="")[0]
 
         self.assertIn("effort", kwargs)
         self.assertIsNone(kwargs["effort"])
