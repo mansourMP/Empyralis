@@ -1299,6 +1299,35 @@ def translate_sdk_message(
         total_cost_usd = getattr(message, "total_cost_usd", None)
         if total_cost_usd is not None and state.served_by_anthropic is True:
             payload["total_cost_usd"] = total_cost_usd
+        # model_usage: per-model token + cost breakdown (ModelUsage,
+        # types.py:1203), previously dropped entirely. Token counts
+        # (inputTokens/outputTokens/cacheReadInputTokens/
+        # cacheCreationInputTokens/webSearchRequests/contextWindow/
+        # maxOutputTokens/canonicalModel/provider) are real measurements
+        # regardless of which endpoint served the turn — the CLI reports
+        # what it actually counted, not a price-table guess — so those
+        # pass through unconditionally, same as `usage` above.
+        #
+        # costUSD is the ONE key in this dict computed client-side from
+        # Anthropic's price table (identical mechanism to total_cost_usd
+        # above), so it gets the identical honesty gate: stripped out
+        # per-entry unless this turn provably went to Anthropic. Stripping
+        # only the cost key (not the whole entry) keeps the token counts —
+        # which ARE trustworthy — available even on a non-Anthropic turn,
+        # rather than discarding real data to protect one untrustworthy
+        # field.
+        model_usage = getattr(message, "model_usage", None)
+        if isinstance(model_usage, dict) and model_usage:
+            cleaned_model_usage: Dict[str, Any] = {}
+            for model_key, entry in model_usage.items():
+                if not isinstance(entry, dict):
+                    continue
+                cleaned_entry = dict(entry)
+                if state.served_by_anthropic is not True:
+                    cleaned_entry.pop("costUSD", None)
+                cleaned_model_usage[str(model_key)] = cleaned_entry
+            if cleaned_model_usage:
+                payload["model_usage"] = cleaned_model_usage
         events.append({"type": "final", "payload": payload})
         return events
 

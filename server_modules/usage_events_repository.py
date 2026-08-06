@@ -62,10 +62,16 @@ async def record_usage_from_context(
     usd_cost: Optional[float] = None,
     run_id: Optional[str] = None,
     mode: Optional[str] = None,
+    tokens_cache_creation: int = 0,
+    tokens_cache_read: int = 0,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Record a usage_event using the current turn's attribution contextvar.
     No-op (returns None) when no attribution is set or workspace is unknown.
-    `mode` (payer) overrides the contextvar mode when supplied."""
+    `mode` (payer) overrides the contextvar mode when supplied. `metadata`
+    rides straight through to record_usage_event's own JSONB `metadata`
+    column — e.g. per-model contextWindow / canonicalModel breakdown (see
+    sage_agent_runtime_service's claude_agent_sdk-engine metering call)."""
     attr = USAGE_ATTRIBUTION.get()
     if not isinstance(attr, dict) or not str(attr.get("workspace_id") or "").strip():
         return None
@@ -82,6 +88,9 @@ async def record_usage_from_context(
         run_id=run_id or attr.get("run_id"),
         surface=attr.get("surface"),
         usd_cost=usd_cost,
+        tokens_cache_creation=tokens_cache_creation,
+        tokens_cache_read=tokens_cache_read,
+        metadata=metadata,
     )
 
 USAGE_EVENTS_SCHEMA_SQL = """
@@ -107,6 +116,14 @@ CREATE TABLE IF NOT EXISTS usage_events (
 CREATE INDEX IF NOT EXISTS idx_usage_events_ws_created ON usage_events(tenant_id, workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_events_agent ON usage_events(tenant_id, workspace_id, agent_install_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_events_project ON usage_events(tenant_id, workspace_id, project_id, created_at DESC);
+-- MAN: cache token dimensions (Anthropic API's cache_creation_input_tokens /
+-- cache_read_input_tokens, aka ModelUsage.cacheCreationInputTokens /
+-- cacheReadInputTokens from claude_agent_sdk_bridge). Added after the table
+-- already shipped, so ADD COLUMN IF NOT EXISTS rather than a fresh CREATE —
+-- existing rows backfill to 0, which is honest (they predate cache-token
+-- capture, not a real zero-cache turn).
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS tokens_cache_creation BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS tokens_cache_read BIGINT NOT NULL DEFAULT 0;
 """
 
 _SCHEMA_READY = False
@@ -135,15 +152,26 @@ async def record_usage_event(
     surface: Optional[str] = None,
     usd_cost: Optional[float] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    tokens_cache_creation: int = 0,
+    tokens_cache_read: int = 0,
 ) -> Optional[Dict[str, Any]]:
     """Record one LLM call. usd_cost is computed via pricing_registry_service
-    when not supplied. Returns the row dict, or None on failure/no-pool."""
+    when not supplied. Returns the row dict, or None on failure/no-pool.
+
+    tokens_cache_creation/tokens_cache_read are the Anthropic cache-token
+    dimensions (ModelUsage.cacheCreationInputTokens/cacheReadInputTokens) —
+    real, separately-billed token counts, not folded into tokens_in. Stored
+    but not (yet) added into total_tokens/pricing, matching the existing
+    convention that total_tokens/usd_cost track input+output only; callers
+    that want cache cost priced in should keep passing an explicit usd_cost."""
     import json as _json
 
     from server_modules import pricing_registry_service
 
     ti = max(0, int(tokens_in or 0))
     to = max(0, int(tokens_out or 0))
+    tcc = max(0, int(tokens_cache_creation or 0))
+    tcr = max(0, int(tokens_cache_read or 0))
     computed_cost = usd_cost
     pricing_known = usd_cost is not None
     if computed_cost is None:
@@ -164,6 +192,8 @@ async def record_usage_event(
         "mode": (str(mode).strip() or None) if mode else None,
         "tokens_in": ti,
         "tokens_out": to,
+        "tokens_cache_creation": tcc,
+        "tokens_cache_read": tcr,
         "total_tokens": ti + to,
         "usd_cost": float(computed_cost or 0.0),
         "pricing_known": bool(pricing_known),
@@ -182,13 +212,15 @@ async def record_usage_event(
                 """
                 INSERT INTO usage_events (
                     id, tenant_id, workspace_id, agent_install_id, project_id, provider, model, mode,
-                    tokens_in, tokens_out, total_tokens, usd_cost, pricing_known, run_id, surface, metadata
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
+                    tokens_in, tokens_out, total_tokens, usd_cost, pricing_known, run_id, surface, metadata,
+                    tokens_cache_creation, tokens_cache_read
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,$18)
                 """,
                 row["id"], row["tenant_id"], row["workspace_id"], row["agent_install_id"], row["project_id"],
                 row["provider"], row["model"], row["mode"], row["tokens_in"], row["tokens_out"],
                 row["total_tokens"], row["usd_cost"], row["pricing_known"], row["run_id"], row["surface"],
                 _json.dumps(metadata or {}),
+                row["tokens_cache_creation"], row["tokens_cache_read"],
             )
         return row
     except Exception:
@@ -254,7 +286,10 @@ async def summarize_usage(
 
     empty = {
         "ok": True, "scope": scope_norm, "scope_id": scope_id, "period": period_key,
-        "totals": {"events": 0, "tokens_in": 0, "tokens_out": 0, "total_tokens": 0, "usd_cost": 0.0},
+        "totals": {
+            "events": 0, "tokens_in": 0, "tokens_out": 0, "tokens_cache_creation": 0,
+            "tokens_cache_read": 0, "total_tokens": 0, "usd_cost": 0.0,
+        },
         "buckets": [], "by_agent": [], "matrix": [],
     }
     try:
@@ -269,6 +304,8 @@ async def summarize_usage(
                 f"""
                 SELECT count(*) AS events, COALESCE(sum(tokens_in),0) AS tokens_in,
                        COALESCE(sum(tokens_out),0) AS tokens_out, COALESCE(sum(total_tokens),0) AS total_tokens,
+                       COALESCE(sum(tokens_cache_creation),0) AS tokens_cache_creation,
+                       COALESCE(sum(tokens_cache_read),0) AS tokens_cache_read,
                        COALESCE(sum(usd_cost),0) AS usd_cost
                 FROM usage_events WHERE {where_sql}
                 """,
@@ -308,6 +345,8 @@ async def summarize_usage(
                        count(*) AS events,
                        COALESCE(sum(tokens_in),0) AS tokens_in,
                        COALESCE(sum(tokens_out),0) AS tokens_out,
+                       COALESCE(sum(tokens_cache_creation),0) AS tokens_cache_creation,
+                       COALESCE(sum(tokens_cache_read),0) AS tokens_cache_read,
                        COALESCE(sum(total_tokens),0) AS total_tokens,
                        COALESCE(sum(usd_cost),0) AS usd_cost,
                        bool_or(pricing_known) AS pricing_known
@@ -326,6 +365,8 @@ async def summarize_usage(
             "totals": {
                 "events": int(totals["events"]), "tokens_in": int(totals["tokens_in"]),
                 "tokens_out": int(totals["tokens_out"]), "total_tokens": int(totals["total_tokens"]),
+                "tokens_cache_creation": int(totals["tokens_cache_creation"]),
+                "tokens_cache_read": int(totals["tokens_cache_read"]),
                 "usd_cost": round(float(totals["usd_cost"]), 6),
             },
             "buckets": [
@@ -348,6 +389,8 @@ async def summarize_usage(
                     "events": int(r["events"]),
                     "tokens_in": int(r["tokens_in"]),
                     "tokens_out": int(r["tokens_out"]),
+                    "tokens_cache_creation": int(r["tokens_cache_creation"]),
+                    "tokens_cache_read": int(r["tokens_cache_read"]),
                     "total_tokens": int(r["total_tokens"]),
                     "usd_cost": round(float(r["usd_cost"]), 6),
                     "pricing_known": bool(r["pricing_known"]),

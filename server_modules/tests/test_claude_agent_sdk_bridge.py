@@ -788,6 +788,103 @@ class TranslateResultMessageTests(unittest.TestCase):
         self.assertEqual(failed["data"]["code"], "error_max_turns")
 
 
+class ModelUsageForwardingTests(unittest.TestCase):
+    """model_usage (ModelUsage, types.py:1203) was previously dropped
+    entirely by translate_sdk_message. Token counts are real regardless of
+    provider; costUSD is the one client-side-priced field in the dict and
+    gets the SAME honesty gate as total_cost_usd."""
+
+    def _entry(self, **overrides):
+        entry = {
+            "inputTokens": 1000,
+            "outputTokens": 200,
+            "cacheReadInputTokens": 50,
+            "cacheCreationInputTokens": 10,
+            "webSearchRequests": 0,
+            "costUSD": 0.0033,
+            "contextWindow": 200000,
+            "maxOutputTokens": 8192,
+            "canonicalModel": "claude-sonnet-4-5",
+        }
+        entry.update(overrides)
+        return entry
+
+    def _final_payload(self, *, served_by_anthropic, model_usage):
+        state = claude_agent_sdk_bridge.TranslationState(served_by_anthropic=served_by_anthropic)
+        message = sdk_types.ResultMessage(
+            subtype="success", duration_ms=100, duration_api_ms=80, is_error=False,
+            num_turns=1, session_id="sess-1", result="Done.", model_usage=model_usage,
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        return events[0]["payload"]
+
+    def test_token_counts_pass_through_regardless_of_provider(self):
+        payload = self._final_payload(
+            served_by_anthropic=False, model_usage={"claude-sonnet-4-5": self._entry()},
+        )
+        entry = payload["model_usage"]["claude-sonnet-4-5"]
+        self.assertEqual(entry["inputTokens"], 1000)
+        self.assertEqual(entry["outputTokens"], 200)
+        self.assertEqual(entry["cacheReadInputTokens"], 50)
+        self.assertEqual(entry["cacheCreationInputTokens"], 10)
+        self.assertEqual(entry["contextWindow"], 200000)
+        self.assertEqual(entry["maxOutputTokens"], 8192)
+
+    def test_cost_usd_stripped_when_not_served_by_anthropic(self):
+        payload = self._final_payload(
+            served_by_anthropic=False, model_usage={"claude-sonnet-4-5": self._entry()},
+        )
+        entry = payload["model_usage"]["claude-sonnet-4-5"]
+        self.assertNotIn("costUSD", entry)
+        # token counts survive even though the cost was stripped
+        self.assertEqual(entry["inputTokens"], 1000)
+
+    def test_cost_usd_stripped_when_attribution_unknown(self):
+        payload = self._final_payload(
+            served_by_anthropic=None, model_usage={"claude-sonnet-4-5": self._entry()},
+        )
+        self.assertNotIn("costUSD", payload["model_usage"]["claude-sonnet-4-5"])
+
+    def test_cost_usd_kept_when_served_by_anthropic(self):
+        payload = self._final_payload(
+            served_by_anthropic=True, model_usage={"claude-sonnet-4-5": self._entry(costUSD=0.0033)},
+        )
+        self.assertEqual(payload["model_usage"]["claude-sonnet-4-5"]["costUSD"], 0.0033)
+
+    def test_multiple_models_each_get_gated_independently(self):
+        payload = self._final_payload(
+            served_by_anthropic=True,
+            model_usage={
+                "claude-sonnet-4-5": self._entry(costUSD=0.002),
+                "deepseek-chat": self._entry(costUSD=0.0001, canonicalModel="deepseek-chat"),
+            },
+        )
+        # Both entries kept — the gate is on served_by_anthropic for the
+        # WHOLE turn (single upstream per turn today), not per-entry model
+        # identity; this pins current behavior so a future per-model
+        # attribution change has to touch this test deliberately.
+        self.assertEqual(payload["model_usage"]["claude-sonnet-4-5"]["costUSD"], 0.002)
+        self.assertEqual(payload["model_usage"]["deepseek-chat"]["costUSD"], 0.0001)
+
+    def test_missing_model_usage_omits_key_entirely(self):
+        payload = self._final_payload(served_by_anthropic=True, model_usage=None)
+        self.assertNotIn("model_usage", payload)
+
+    def test_empty_model_usage_dict_omits_key(self):
+        payload = self._final_payload(served_by_anthropic=True, model_usage={})
+        self.assertNotIn("model_usage", payload)
+
+    def test_non_dict_entries_are_skipped(self):
+        payload = self._final_payload(
+            served_by_anthropic=True,
+            model_usage={"claude-sonnet-4-5": self._entry(), "garbage": "not-a-dict"},
+        )
+        self.assertIn("claude-sonnet-4-5", payload["model_usage"])
+        self.assertNotIn("garbage", payload["model_usage"])
+
+
 class ResultMessageErrorCodeTruthfulnessTests(unittest.TestCase):
     """A failure must never file itself under "success".
 

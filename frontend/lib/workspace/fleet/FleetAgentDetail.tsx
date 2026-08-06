@@ -612,11 +612,20 @@ export function FleetAgentDetail({
           const modelLabel = row.payer === "platform_credits"
             ? platformCreditsTierLabel(row.model)
             : [row.provider, row.model].filter(Boolean).join(" · ") || "Unknown model";
+          // Cache read tokens only — cache creation is rare enough (one
+          // write per new prompt prefix, many reads after) that surfacing
+          // both would crowd this single hint line for little signal.
+          // Omitted entirely (not "0 cached") for a row recorded before
+          // this dimension existed, or by an engine that never reports it —
+          // the field is optional on UsageMatrixRow for exactly that.
+          const cacheHint = row.tokens_cache_read
+            ? ` · ${formatNumber(row.tokens_cache_read)} cached`
+            : "";
           return (
             <PanelRow
               key={`${row.provider}:${row.model}:${row.mode}:${i}`}
               label={modelLabel}
-              hint={`${usagePayerLabel(row.payer)} · ${formatNumber(row.tokens_in)} in / ${formatNumber(row.tokens_out)} out`}
+              hint={`${usagePayerLabel(row.payer)} · ${formatNumber(row.tokens_in)} in / ${formatNumber(row.tokens_out)} out${cacheHint}`}
               value={row.pricing_known ? `$${row.usd_cost.toFixed(4)}` : "Not priced"}
               tone={row.pricing_known ? "default" : "muted"}
             />
