@@ -288,105 +288,63 @@ test.describe('account shell and bootstrap resilience', () => {
     await expect(page.getByText(/What Sage can use on this computer/i)).toHaveCount(0);
   });
 
-  test('sage setup load failures render a retryable setup card instead of raw backend text', async ({ page }) => {
-    await page.route('**/api/sage-profile?workspace_id=ws-1', async (route) => {
-      await route.fulfill({
-        status: 404,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'Not Found' }),
-      });
-    });
+  // Three tests used to live here asserting on a "Set up Sage" bootstrap
+  // Q&A wizard (getByLabel(/^answer$/i), "save and continue", and a
+  // `.app-chat-status-notice` failure card) embedded inside the old
+  // full-page chat composer. That wizard is gone from the live app —
+  // confirmed by grepping the frontend for its own strings ("Set up Sage",
+  // "save and continue", "current_question", "answered_count"-driven UI):
+  // none of them render anywhere anymore. It lived inside the deleted
+  // ChatComposer cluster (chat-composer.tsx and its orphaned siblings), not
+  // just behind a selector that got renamed. The other tests in this file
+  // ("memory owns identity, rules, projections...") show where owner-profile
+  // editing actually lives today: the Memory page, not a chat-embedded
+  // wizard. Deleted rather than rewritten — there is no live surface left
+  // that plays this wizard's role.
 
-    await loginAsOwner(page);
-
-    await expect(page.locator('.app-chat-status-notice').filter({ hasText: 'Agent setup is temporarily unavailable' })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^retry$/i })).toBeVisible();
-    await expect(page.locator('[data-workstation-chat-composer="root"] textarea')).toHaveAttribute('placeholder', 'Sage setup is temporarily unavailable.');
-    await expect(page.getByText(/^Not Found$/)).toHaveCount(0);
-  });
-
-  test('sage setup answer failures stay inside the setup surface instead of leaking raw notices', async ({ page }) => {
-    await page.route('**/api/sage-profile?workspace_id=ws-1', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(buildSageProfilePayload(0)),
-      });
-    });
-    await page.route('**/api/sage-profile/bootstrap/answer', async (route) => {
-      await route.fulfill({
-        status: 404,
-        contentType: 'application/json',
-        body: JSON.stringify({ detail: 'Not Found' }),
-      });
-    });
-
-    await loginAsOwner(page);
-
-    await page.getByLabel(/^answer$/i).fill('Mansur');
-    await page.getByRole('button', { name: /save and continue/i }).click();
-
-    await expect(page.locator('.app-chat-status-notice').filter({ hasText: 'Agent setup is temporarily unavailable' })).toBeVisible();
-    await expect(page.getByRole('button', { name: /^retry$/i })).toBeVisible();
-    await expect(page.getByText(/^Not Found$/)).toHaveCount(0);
-  });
-
-  test('fresh workspace can complete Sage setup and land in normal chat without raw backend text', async ({ page }) => {
-    let step = 0;
-
-    await page.route('**/api/sage-profile?workspace_id=ws-1', async (route) => {
+  // Real live equivalent of "Sage composer accepts dropped files as
+  // context": AgentChat.tsx (the fleet-composer-redesign's real, live
+  // composer) does not implement drag-and-drop at all — no dragenter/drop
+  // handlers on its composer — so that exact interaction has no live target.
+  // What *is* still real is the underlying capability the old test cared
+  // about: giving the agent a file as context. AgentChat exposes that via
+  // the composer's paperclip attach button, which uploads the file for real
+  // (POST /api/sage-chat/attachments) and shows it as a removable chip
+  // rather than splicing placeholder text into the draft — a materially
+  // better version of the same capability, just reached by click instead of
+  // drag. Rewritten against that real flow, via the Ask AI console (the
+  // live home of the workspace-wide Sage chat since chat stopped being a
+  // full page — see SageLauncher.tsx).
+  test('Ask AI composer attaches a file as context', async ({ page }) => {
+    await page.route('**/api/sage-chat/attachments**', async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(buildSageProfilePayload(step)),
-      });
-    });
-    await page.route('**/api/sage-profile/bootstrap/answer', async (route) => {
-      step += 1;
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(buildSageProfilePayload(step)),
+        body: JSON.stringify({
+          file_id: 'file-e2e-1',
+          filename: 'receipt.png',
+          safe_filename: 'receipt.png',
+          content_type: 'image/png',
+          size: 11,
+          url: '/api/sage-chat/attachments/receipt.png',
+        }),
       });
     });
 
     await loginAsOwner(page);
+    await page.getByRole('button', { name: 'Ask AI' }).click();
 
-    for (const answer of [
-      'Mansur',
-      'I build Empyralis.',
-      'Be direct and concise.',
-      'Keep my work moving.',
-      'Never send external messages without approval.',
-    ]) {
-      const input = page.getByLabel(/^answer$/i);
-      await expect(input).toBeVisible();
-      await input.fill(answer);
-      await page.getByRole('button', { name: /save and continue/i }).click();
-    }
+    const console_ = page.getByRole('dialog', { name: 'Ask AI' });
+    await expect(console_).toBeVisible();
 
-    await expect(page.getByText(/^Set up Sage$/)).toHaveCount(0);
-    await expect(page.locator('[data-workstation-chat-composer="root"] textarea')).toHaveAttribute('placeholder', 'Message Sage...');
-    await expect(page.getByText(/^Not Found$/)).toHaveCount(0);
-  });
-
-  test('Sage composer accepts dropped files as context', async ({ page }) => {
-    await loginAsOwner(page);
-    await page.goto('/w/ws-1/sage');
-
-    const composer = page.locator('[data-workstation-chat-composer="root"] form');
-    const composerInput = page.locator('[data-workstation-chat-composer="root"] textarea');
-    await expect(composer).toBeVisible();
-
-    const dataTransfer = await page.evaluateHandle(() => {
-      const transfer = new DataTransfer();
-      transfer.items.add(new File(['demo image'], 'receipt.png', { type: 'image/png' }));
-      return transfer;
+    const fileInput = console_.locator('input[type="file"]');
+    await fileInput.setInputFiles({
+      name: 'receipt.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from('demo image'),
     });
 
-    await composer.dispatchEvent('dragenter', { dataTransfer });
-    await expect(page.getByText(/^Drop files$/)).toBeVisible();
-    await composer.dispatchEvent('drop', { dataTransfer });
-    await expect(composerInput).toHaveValue(/Use receipt\.png as context:/);
+    await expect(console_.getByText('receipt.png')).toBeVisible();
+    await expect(console_.getByRole('button', { name: 'Remove receipt.png' })).toBeVisible();
   });
 });
