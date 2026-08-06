@@ -37,6 +37,17 @@ ceremony every customer leaves empty.
 **Non-owners never see personal or self-chat threads.** Conservative default,
 enforced without asking.
 
+**Hardware attaches to its owner, never to the project.** Decided 2026-08-06.
+An agent joining a project must never implicitly give that project's members
+hands on the hardware the agent runs on — a person's Mac holds their sessions,
+files, and keys, and a project invite is not physical access. Sharing a
+machine with a project is an explicit per-machine opt-in by the hardware's
+owner, default off. An agent whose task needs hardware nobody opted in runs
+cloud-side with fewer capabilities — a clean degradation, never an error and
+never a silent borrow. The full sharing model: sessions/threads are private to
+the person (always, no setting); the agent (name, config, memory, task
+history) is shared with the project; hardware is per-owner opt-in.
+
 **Conversations are private. Work is shared.** Multiplayer means teammates share
 issues, tasks, status and outcomes — never each other's agent transcripts. How a
 person talks to their agent is like their terminal scrollback: nobody reviews it
