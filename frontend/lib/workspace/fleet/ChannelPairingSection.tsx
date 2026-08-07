@@ -45,7 +45,7 @@ import { Check, Copy, Link2, Trash2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
-import { useOwnRole, useWorkspaceMembers } from "@/lib/workspace/fleet/members-data";
+import { useOwnWorkspaceRole } from "@/lib/workspace/fleet/members-data";
 
 type ChannelProvider = "telegram" | "whatsapp" | "slack" | "sms" | "wechat_official";
 
@@ -122,8 +122,10 @@ async function mutateJson(path: string, method: string, body?: Record<string, un
 }
 
 export function ChannelPairingSection({ workspaceId }: { workspaceId: string }) {
-  const { members } = useWorkspaceMembers(workspaceId);
-  const ownRole = useOwnRole(members);
+  // Role comes from the server-rendered account-shell payload, not a client
+  // fetch — the members round trip this used to do was the same redundant
+  // call that delayed every project control by ~3s until it was removed.
+  const ownRole = useOwnWorkspaceRole(workspaceId);
 
   const [links, setLinks] = useState<ChannelLink[]>([]);
   const [loading, setLoading] = useState(true);
