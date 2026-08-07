@@ -1,5 +1,11 @@
 # Empyralis — standing decisions
 
+**Read this file first — it is your persistent memory for this project.**
+When you learn something durable (a settled decision, a recurring failure
+worth warning the next agent about, an architecture call that will still be
+true next week), add it here yourself, in the existing terse style, without
+waiting to be asked.
+
 Linear is the system of record. Issues, plans, and status live there, not here.
 This file holds only the durable decisions an agent needs *before* it starts
 working — the things that don't change when a ticket closes.
@@ -7,6 +13,40 @@ working — the things that don't change when a ticket closes.
 **Design/audit/gap/research documents are not kept.** They were snapshots of a
 moment; they went stale within a week and agents cited them as present truth.
 Deleted 2026-07-31. Findings become Linear issues; decisions become lines here.
+
+## Positioning
+
+**Empyralis is the owned-context layer for a team, with execution attached.**
+Frontier models are rented and commoditizing — "AI agent platform" stops
+meaning anything once everyone has agents, the same way "has a website"
+stopped meaning anything in 2005. What doesn't commoditize is what a team
+owns: its accumulated context, its skills, its work history, and where its
+agents actually execute. Linear holds issues but no memory, no skills, no
+execution — agents are guests it delegates to. Anthropic holds a session
+that resets and is theirs, not the team's. Empyralis holds the team's
+context and runs the work. Settled 2026-08-07.
+
+Never build a coding surface — Claude Code / Codex / Cursor are the
+execution layer; Empyralis is the layer above them. The board is the
+product; chat is only input. Nothing of value may exist only in a
+conversation.
+
+Target user: someone who runs agents on behalf of other people — a
+developer hosting agents for client businesses, a team lead whose teammates
+consume an agent's output, a person running an agent for family. Not a solo
+developer coding alone — Claude Code already serves that person for free.
+
+**"Agents working alongside a team" and "hosting agents for others" are the
+same product, not two.** Both need: an agent that does real work on a real
+machine, a shared surface where others see the outcome, and private
+conversations. Do not build two systems, two onboardings, or two pricing
+stories for them. The only axis that genuinely differs is who may talk to
+the agent — already modelled as `audience: owner | external`.
+
+**Execution locality.** Identity lives in the workspace; execution happens
+where the agent is placed; the connection carries only jobs and results.
+When hardware reliability is the problem, move the work — never patch the
+connection. A design that round-trips per tool call is treating the symptom.
 
 ## Product laws
 
@@ -70,6 +110,65 @@ the task instead.
   above a group of controls is a signal the design is wrong. Empty states that
   teach are the exception — they have nothing else to show.
 
+## Recurring failure modes in this codebase
+
+These have each bitten more than once. Check for them before trusting that
+something works.
+
+**Built, tested, and never wired.** The most common defect here is not broken
+code — it is complete, correct, tested code with **zero callers**. Confirmed
+instances: `retention_enforcement_job.py`, `session_service.prune_expired_sessions`,
+`_resolve_cloud_provider`'s `check_master_model_config` flag (full
+implementation, docstring instructing callers to pass it, unit tests, never
+passed by anyone), and `_persist_agent_group_policy_config` (the write path
+for channel group policy — its absence is why an agent replied unprompted in
+a public Telegram group and got the owner banned). **Before believing a
+feature exists, grep for its callers.** "The function is there" is not
+evidence it runs.
+
+**"Code exists" is not "reachable on the live path."** Engine dispatch,
+tool bundles, and channel routing have all repeatedly surprised us. An audit
+that reads a function and concludes the feature works is worth little; trace
+from the real entry point to the real call site.
+
+**Silent misrouting beats loud failure, and that is a bug.** A model calling
+the CLI's built-in `TaskCreate` instead of `project_task__create` reported
+"Task #1 created successfully" while `project_tasks` stayed empty — real
+tool, real success, wrong bookkeeping, customer told work was done that
+never happened. Hence `ClaudeAgentOptions.tools=[]` in the SDK bridge:
+agents get Empyralis-native tools only, never the CLI's built-ins. Any
+change that reintroduces built-in tools reintroduces this. When removing or
+renaming a provider/model/route, make stale config **fail loudly** rather
+than fall through to a default — see `model_router`'s deliberate retention of
+a `vertex` branch after Vertex was removed.
+
+**Stale string matching.** An error bucket matched `"ai limit"`; the message
+was reworded to `"AI usage limit reached"` and users got a generic "Something
+went wrong" for five weeks. Match on stable codes, never on prose.
+
+**Branches whose work gets redone on main.** Nine branches were found with
+real commits, all superseded by the same fixes re-implemented directly on
+main days later. If a branch exists, merge it or delete it — leaving it means
+someone rebuilds it.
+
+## Learn from the masters, then verify
+
+Adopting Anthropic's Agent SDK beat the hand-rolled harness. Rejecting
+RAG/embeddings for agentic search followed Claude Code's own documented
+reversal (Boris Cherny: *"Early versions of Claude Code used RAG + a local
+vector db, but we found pretty quickly that agentic search generally works
+better"*). OpenClaw's three-gate channel model (DM pairing → group allowlist
+→ mention gating, consistent defaults across every channel) is the reference
+for channel authorization, and `mention_gating_service.py` is already a port
+of it.
+
+But **do not import a single-operator project's security assumptions into a
+multi-tenant one.** OpenClaw's own docs: *"not a hostile multi-tenant
+security boundary… one trusted operator boundary per gateway."* Their CVE
+record (sandbox escape; a client-asserted `senderIsOwner` flag trusted
+because it arrived over loopback) is what happens when that boundary is
+ignored. Read their source, port the design, never vendor their core.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**
@@ -111,3 +210,20 @@ tab, read the console.
   everyone else's build.
 - Deploys: `docs/DEPLOY-RUNBOOK.md`. Production is a single VPS; the frontend
   build must be detached (`nohup`) or a dropped SSH session kills it.
+- **Apply production migrations as the app's own database role, not as the
+  Postgres superuser.** A superuser-applied migration leaves the new table
+  owned by `postgres`; the app cannot alter its own table on boot and
+  crash-loops. This took production down for ~4 minutes on 2026-08-07. Fix is
+  `ALTER TABLE <t> OWNER TO empyralis_app`, but not making the mistake is
+  cheaper. Also: `migrations/enable_rls.sql` must be re-run after adding any
+  new table — without its policy the table exists with no RLS and reads
+  return nothing.
+- **Cloudflare fronts production**, undocumented in the runbook and in
+  `deploy/nginx-empyralis.conf`, both of which read as though nginx
+  terminates TLS directly. Its ~100s idle timeout — not nginx's 86400s — is
+  the real ceiling on any long request. A silent SSE stream gets cut at
+  ~125s; keepalive comments prevent it.
+- Agent worktrees accumulate and nothing prunes them. 177 of them (plus an
+  11GB `.git`) filled the disk to 100% mid-session on 2026-08-07 and killed
+  several running agents. Prune merged ones periodically; never force-remove
+  one with uncommitted work.
