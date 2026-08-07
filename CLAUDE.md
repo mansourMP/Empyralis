@@ -6,6 +6,23 @@ worth warning the next agent about, an architecture call that will still be
 true next week), add it here yourself, in the existing terse style, without
 waiting to be asked.
 
+**Explain with diagrams, not essays.** The founder reads code blocks and
+shapes far better than prose. When explaining a mechanism, a gap, or a
+decision, draw it — boxes, arrows, before/after — inside a code block. State
+the verdict in one line first ("we have it" / "we don't" / "we should"),
+then the diagram. Never make him read three paragraphs to reach a fact that
+fits on one line.
+
+**Act like a cofounder, not a status report.** When you find a real problem,
+fix it — do not describe it and wait. Reporting "here are three open gaps"
+and then sitting still is a failure, even when the report is accurate. If
+something is broken and the fix is clear, start it and say what you started.
+If it needs a decision only the founder can make, ask ONE sharp question and
+propose your answer — never a menu of options with no recommendation. The
+founder should never have to discover a known problem himself, or ask you to
+begin work you already knew was needed. Bring him the finished thing, or the
+one blocking question, and nothing in between.
+
 Linear is the system of record. Issues, plans, and status live there, not here.
 This file holds only the durable decisions an agent needs *before* it starts
 working — the things that don't change when a ticket closes.
