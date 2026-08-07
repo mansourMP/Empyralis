@@ -1175,7 +1175,8 @@ async def _handle_dm_policy_blocked(
 #
 # DEFAULTS — read this before ever touching either constant below:
 #
-# Two standing rulings govern this, and they are in tension on their face:
+# Two standing rulings governed the MENTION-GATING axis specifically, and
+# were in tension on their face:
 #   Ruling A (2026-07-16): "Groups = see-and-decide, NOT mention-gated. The
 #   agent should SEE every group message and decide to reply or stay silent
 #   by its own judgment ... Do NOT build rigid gates."
@@ -1194,37 +1195,81 @@ async def _handle_dm_policy_blocked(
 # what a naive "preserve exact current behavior" reading of this section
 # would keep as the default.
 #
-# The founder's resolution (2026-07-23), which this section implements
-# instead: Ruling A is explicitly "still in force" and the 2026-07-18/19
-# gate is a rigid gate of exactly the kind Ruling A says not to build.
-# REQUIRE_MENTION_DEFAULT is OFF — restoring Ruling A's see-and-decide
-# default (the agent sees every group message and can choose [SILENT] via
-# its own judgment, given the group context this handler threads through
-# regardless — is_group/chat_label — same as any other turn). This is a
-# DELIBERATE behavior change against the code as it stood before this
-# build, not an oversight: test_personal_channel_group_gate.py's
-# unaddressed-message tests were updated (not merely "no longer applicable")
-# to reflect it, and new tests prove requireMention=True (an explicit,
-# owner-configured, advance-of-time lever — never an AI runtime decision)
-# reproduces the pre-2026-07-23 hard-gate behavior byte-for-byte, so nothing
-# already relying on the old strict gate has lost the ability to have it —
-# it is now an opt-in the owner pulls, not the default everyone is stuck
-# with.
+# The founder's resolution (2026-07-23) restored Ruling A as the default:
+# Ruling A is explicitly "still in force" and the 2026-07-18/19 gate was a
+# rigid gate of exactly the kind Ruling A says not to build. requireMention
+# defaulted OFF — the agent sees every group message and can choose
+# [SILENT] via its own judgment, given the group context this handler
+# threads through regardless (is_group/chat_label — same as any other
+# turn). test_personal_channel_group_gate.py's unaddressed-message tests
+# were updated (not merely "no longer applicable") to reflect it, and tests
+# proved requireMention=True (an explicit, owner-configured lever — never
+# an AI runtime decision) reproduces the pre-2026-07-23 hard-gate behavior
+# byte-for-byte, so nothing relying on the old strict gate lost the ability
+# to have it.
 #
-# GROUP_POLICY_DEFAULT_MODE stays "open": unlike requireMention, the
-# open|allowlist|disabled identity axis does not exist in any form before
-# this build (every group was already implicitly "open" — see
-# docs/OpenClaw.md: "Empyralis's personal-channel group gate has no
-# equivalent allowlist/open/disabled axis"). "open" is therefore the one
-# value that adds NO new restriction beyond what already existed, on
-# EITHER axis this section governs, on top of the requireMention default
-# above — not a second, independent behavior change.
+# SUPERSEDED 2026-08-07 for the two DEFAULT_* constants below (see
+# CHANNEL-GATEWAY-PLAN.md §4/§5 for the full incident writeup) — Ruling A's
+# philosophy is NOT overturned by this, and neither is Ruling B: the agent
+# still gets full group context on every turn it IS given, and this gate
+# still keys ONLY on platform-computed addressing facts (was this message
+# an @mention or a reply-to-agent; which chat is this) — NEVER on message
+# content. What changed is that "unconfigured" stopped being a safe state
+# to leave an owner in by construction. The founder's own personal
+# Telegram account was added to a large public group; requireMention
+# defaulted False AND group_policy's write path
+# (_persist_agent_group_policy_config, below) had ZERO callers anywhere in
+# the codebase — Gate 2 was unconditionally "open" for every agent,
+# permanently, because nothing could ever change it. The agent replied to
+# every message from every stranger in that group until the account got
+# banned. An owner who never opened Settings (because there was nothing
+# there to open) got "reply to literally everyone, everywhere" as their
+# unconfigured starting point — that is the specific thing this change
+# fixes, not Ruling A's see-and-decide philosophy itself. An owner who
+# wants the original behavior back still can: set group_policy to "open"
+# and require_mention to False explicitly, now that
+# update_agent_group_policy_config (below) — wired to a real PATCH route,
+# see routes_personal_channels.py — gives them a real lever to do it,
+# which is the thing that didn't exist before this build.
+#
+# DEFAULT_GROUP_POLICY_MODE / DEFAULT_REQUIRE_MENTION below are the
+# configured-but-unset default for a REAL, resolved agent identity —
+# Telegram Personal / WhatsApp Personal, the only two channels with a
+# per-agent identity table to resolve against (_resolve_agent_id_for_inbound).
+# They do NOT govern the separate unresolved-identity fallback
+# (_unresolved_identity_group_policy_config, below) used for local-bridge
+# channels (Signal/iMessage/WeChat-personal — permanently agent_id="", see
+# LOCAL_BRIDGE_PERSONAL_CHANNELS) — split out for the exact reason
+# DEFAULT_DM_POLICY_MODE's own comment documents already having gone wrong
+# once for dm_policy (ee3fca4f7c): a future change to the resolved-agent
+# default must never silently reach into the unresolved-identity fallback
+# too. UNLIKE dm_policy, the unresolved-identity fallback here is
+# deliberately NOT tightened to match — it stays GROUP_POLICY_OPEN /
+# require_mention=False. Reason: there is no write path that can ever
+# reach a local-bridge channel's group_policy (agent_id is permanently
+# unresolved for it — _persist_agent_group_policy_config always returns
+# False for an unresolved agent_id), so tightening this fallback would
+# silently and PERMANENTLY block every group on Signal/iMessage/
+# WeChat-personal with literally no owner-facing lever to ever undo it —
+# a strictly worse outcome than the incident this section exists to fix.
+# Flagged in this build's own report as a real gap needing a decision
+# (resolve a per-agent identity for local-bridge channels so it CAN be
+# configured, or knowingly accept groups staying open there) rather than
+# one silently made either way by reusing the same constant.
 GROUP_POLICY_OPEN = "open"
 GROUP_POLICY_ALLOWLIST = "allowlist"
 GROUP_POLICY_DISABLED = "disabled"
 GROUP_POLICY_MODES = {GROUP_POLICY_OPEN, GROUP_POLICY_ALLOWLIST, GROUP_POLICY_DISABLED}
-DEFAULT_GROUP_POLICY_MODE = GROUP_POLICY_OPEN
-DEFAULT_REQUIRE_MENTION = False
+# Resolved-but-unconfigured default — SAFE, per CHANNEL-GATEWAY-PLAN.md §5
+# step 2 (2026-08-07): matches OpenClaw's consistent default across every
+# channel, not Telegram's legacy-open behavior. A brand-new agent binding,
+# or an existing one whose owner has never touched group_policy, now
+# starts allowlist/require-mention instead of open/no-mention-check. See
+# scripts/backfill_group_policy_safe_defaults.py for the (not-yet-run,
+# founder-approval-required) migration that pins EXISTING bindings to this
+# same state explicitly rather than leaving them to it only implicitly.
+DEFAULT_GROUP_POLICY_MODE = GROUP_POLICY_ALLOWLIST
+DEFAULT_REQUIRE_MENTION = True
 
 # Reason codes _enforce_group_policy returns when blocking — matches the
 # pre-existing "group_no_mention" literal's style (a short, stable,
@@ -1244,6 +1289,34 @@ def _normalize_group_policy_config(raw: Any) -> Dict[str, Any]:
     return {"mode": mode, "allowlist": allowlist, "require_mention": require_mention}
 
 
+def _unresolved_identity_group_policy_config() -> Dict[str, Any]:
+    """Fallback for _load_agent_group_policy_config when NO real per-agent
+    install could even be identified (agent_id="" /
+    personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID) — the PERMANENT
+    case for every local-bridge channel today (Signal/iMessage/
+    WeChat-personal, see LOCAL_BRIDGE_PERSONAL_CHANNELS and
+    _resolve_agent_id_for_inbound, which has no lookup branch for them at
+    all). Split from DEFAULT_GROUP_POLICY_MODE/DEFAULT_REQUIRE_MENTION on
+    2026-08-07 for the same reason dm_policy's identity-less fallback was
+    split from DEFAULT_DM_POLICY_MODE (see that constant's own comment for
+    the incident where reusing one constant for both silently changed the
+    identity-less fallback too, ee3fca4f7c) — a future change to the
+    resolved-agent default must never silently reach into this one.
+
+    UNLIKE dm_policy's split (which tightens the identity-less fallback to
+    owner_only, safe because the owner's own messages bypass dm_policy
+    entirely before it's even loaded), this fallback is deliberately NOT
+    tightened to match DEFAULT_GROUP_POLICY_MODE's new allowlist default.
+    _persist_agent_group_policy_config always returns False for an
+    unresolved agent_id — there is no write path that can ever reach a
+    local-bridge channel's group_policy today — so tightening this
+    fallback would silently and PERMANENTLY block every group on Signal/
+    iMessage/WeChat-personal with no owner-facing lever to ever undo it.
+    Stays GROUP_POLICY_OPEN/require_mention=False, i.e. today's actual
+    production behavior for these channels, unchanged by this build."""
+    return {"mode": GROUP_POLICY_OPEN, "allowlist": [], "require_mention": False}
+
+
 async def _load_agent_group_policy_config(
     *,
     tenant_id: str,
@@ -1251,26 +1324,20 @@ async def _load_agent_group_policy_config(
     agent_id: str,
     channel_key: str,
 ) -> Dict[str, Any]:
-    """Read-only, safe-by-default — mirrors _load_agent_dm_policy_config
-    exactly, persisted at install_metadata.group_policy[channel_key].
+    """Read-only — mirrors _load_agent_dm_policy_config's shape, persisted
+    at install_metadata.group_policy[channel_key].
 
-    UNLIKE dm_policy, there is no separate stricter "unresolved identity"
-    fallback: dm_policy's owner_only fallback is safe precisely because the
-    owner's own messages bypass dm_policy entirely (is_owner is checked
-    BEFORE dm_policy is even loaded — see _enforce_dm_policy). group_policy
-    has no such owner-bypass story to lean on for a random group's traffic,
-    so a stricter fallback here would silently DISABLE every group for any
-    agent_id that can't resolve — which for local-bridge channels
-    (Signal/iMessage/WeChat, permanently agent_id="" — see
-    LOCAL_BRIDGE_PERSONAL_CHANNELS) is EVERY call, always, forever. That
-    would be a real new restriction violating "deploying this must change
-    zero behavior for existing users", so the unresolved-identity case
-    below returns the exact same default as a resolved-but-never-configured
-    agent, not a stricter one.
+    An unresolved agent identity (see _unresolved_identity_group_policy_config
+    above) returns that dedicated fallback, independent of
+    DEFAULT_GROUP_POLICY_MODE. A RESOLVED agent_id whose install lookup
+    fails, or who simply has no group_policy entry yet, gets
+    DEFAULT_GROUP_POLICY_MODE/DEFAULT_REQUIRE_MENTION (via
+    _normalize_group_policy_config(None) below) — the safe, owner-
+    changeable default, now allowlist/require-mention as of 2026-08-07.
     """
     normalized_agent_id = str(agent_id or "").strip()
     if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
-        return _normalize_group_policy_config(None)
+        return _unresolved_identity_group_policy_config()
     try:
         from server_modules import agent_registry_repository as _repo
 
@@ -1280,7 +1347,7 @@ async def _load_agent_group_policy_config(
             workspace_id=str(workspace_id or "default").strip() or "default",
         )
     except Exception:
-        _logger.warning("group_policy: install lookup failed for agent_id=%s — defaulting to open", normalized_agent_id, exc_info=True)
+        _logger.warning("group_policy: install lookup failed for agent_id=%s — defaulting to DEFAULT_GROUP_POLICY_MODE", normalized_agent_id, exc_info=True)
         return _normalize_group_policy_config(None)
     if not isinstance(install, dict):
         return _normalize_group_policy_config(None)
@@ -1297,7 +1364,13 @@ async def _persist_agent_group_policy_config(
     channel_key: str,
     config: Dict[str, Any],
 ) -> bool:
-    """Write path for a future settings API to call — mirrors
+    """Write path. Had zero callers anywhere in the codebase until
+    2026-08-07 (see CHANNEL-GATEWAY-PLAN.md §4) — wired to a real PATCH
+    route via update_agent_group_policy_config below, the validating
+    public wrapper routes_personal_channels.py calls; do not call this
+    private function directly from a route, call the wrapper instead so a
+    typo'd mode gets a real 400 rather than being silently coerced to the
+    default by _normalize_group_policy_config. Mirrors
     _persist_agent_dm_policy_config's read-modify-write-the-whole-dict
     shape exactly (update_workspace_agent_install merges `metadata`
     shallowly at the TOP level only, so a naive per-channel write would
@@ -1328,6 +1401,90 @@ async def _persist_agent_group_policy_config(
     except Exception:
         _logger.warning("group_policy: persist failed for agent_id=%s channel=%s", normalized_agent_id, channel_key, exc_info=True)
         return False
+
+
+# Channel keys group_policy can ever apply to — WhatsApp/Telegram Personal
+# (resolved per-agent identity, so the write path below is actually
+# reachable) plus the local-bridge set (Signal/iMessage/WeChat-personal —
+# agent_id is permanently unresolved for these, so a write attempted
+# against one of them will always fail with agent_id_unresolved; see
+# _unresolved_identity_group_policy_config's docstring for why that's a
+# real, currently-unfixed gap rather than a bug in this validation).
+GROUP_POLICY_CHANNEL_KEYS = frozenset(
+    {WHATSAPP_PERSONAL_CHANNEL_KEY, TELEGRAM_PERSONAL_CHANNEL_KEY, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
+)
+
+
+async def update_agent_group_policy_config(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    channel_key: str,
+    mode: str,
+    allowlist: Optional[List[str]] = None,
+    require_mention: Optional[bool] = None,
+) -> Optional[Dict[str, Any]]:
+    """Owner-facing write PRIMITIVE for the group_policy gate (Gate 2's
+    allowlist axis + Gate 3's require_mention lever) — the validating,
+    route-callable counterpart to _persist_agent_group_policy_config, which
+    had zero callers anywhere before this build (see
+    CHANNEL-GATEWAY-PLAN.md §4). routes_personal_channels.py's PATCH
+    .../group-policy route is the only intended caller; call this instead
+    of _persist_agent_group_policy_config directly so a bad `mode` gets a
+    real error instead of being silently coerced to the default by
+    _normalize_group_policy_config (correct behavior for a READ path facing
+    possibly-stale stored data, wrong for a WRITE path facing a live
+    caller).
+
+    Raises ValueError for a missing/unresolvable agent_id, an unknown
+    channel_key, or a mode outside GROUP_POLICY_MODES — the caller (the
+    route) maps that to 400. Returns None if the agent install itself
+    could not be found/updated (e.g. agent_id doesn't exist in this
+    workspace) — the caller maps that to 404. This distinction mirrors
+    every other config primitive in this module (see
+    configure_whatsapp_personal_gateway's ValueError contract).
+
+    require_mention=None means "use this build's safe default"
+    (DEFAULT_REQUIRE_MENTION, currently True) rather than silently turning
+    mention-gating off — an owner explicitly loosening it must pass
+    require_mention=False themselves.
+    """
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
+        raise ValueError(
+            "agent_id is required to configure a per-agent group policy — this channel's "
+            "identity may be permanently unresolved (local-bridge channels have no per-agent "
+            "install to write to; see _unresolved_identity_group_policy_config)."
+        )
+    normalized_channel_key = str(channel_key or "").strip().lower()
+    if normalized_channel_key not in GROUP_POLICY_CHANNEL_KEYS:
+        raise ValueError(f"channel_key must be one of {sorted(GROUP_POLICY_CHANNEL_KEYS)}.")
+    normalized_mode = str(mode or "").strip().lower()
+    if normalized_mode not in GROUP_POLICY_MODES:
+        raise ValueError(f"mode must be one of {sorted(GROUP_POLICY_MODES)}.")
+    normalized_allowlist = sorted({str(x).strip() for x in (allowlist or []) if str(x or "").strip()})
+    normalized_require_mention = DEFAULT_REQUIRE_MENTION if require_mention is None else bool(require_mention)
+    config = {
+        "mode": normalized_mode,
+        "allowlist": normalized_allowlist,
+        "require_mention": normalized_require_mention,
+    }
+    persisted = await _persist_agent_group_policy_config(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+        config=config,
+    )
+    if not persisted:
+        return None
+    return await _load_agent_group_policy_config(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+    )
 
 
 def _group_policy_group_id(message: Dict[str, Any], *, remote_jid: str) -> str:

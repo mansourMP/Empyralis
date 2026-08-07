@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -39,6 +39,18 @@ class TelegramPersonalSetupRequest(BaseModel):
     phone_number: Optional[str] = None
     login_code: Optional[str] = None
     password: Optional[str] = None
+
+
+class GroupPolicyUpdateRequest(BaseModel):
+    """Body for PATCH .../group-policy. `mode` is required and validated
+    against personal_channels_service.GROUP_POLICY_MODES by the service
+    layer (a typo gets a real 400, not a silent fallback to the default).
+    `require_mention` omitted means "use this build's safe default" — see
+    update_agent_group_policy_config's own docstring."""
+
+    mode: str = Field(min_length=1)
+    allowlist: List[str] = Field(default_factory=list)
+    require_mention: Optional[bool] = None
 
 
 LOCAL_BRIDGE_CHANNELS: Dict[str, Dict[str, str]] = {
@@ -848,6 +860,140 @@ async def send_local_bridge_personal_message(
         )
         status_code = 409 if "not currently connected" in detail.lower() else 400
         raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
+# ── Group policy (Gate 2 allowlist + Gate 3 require_mention) ───────────
+#
+# Wires personal_channels_service.update_agent_group_policy_config /
+# _persist_agent_group_policy_config to a real route — both had zero
+# callers anywhere in the codebase before this build (see
+# CHANNEL-GATEWAY-PLAN.md §4: the write path existed, but nothing could
+# ever call it, so Gate 2 was permanently stuck open for every agent). The
+# read path (_load_agent_group_policy_config) was already wired into the
+# live inbound handlers; this route is the missing other half.
+#
+# channel_key is generic (not restricted to LOCAL_BRIDGE_CHANNELS like
+# send_local_bridge_personal_message above) because group_policy applies
+# to WhatsApp/Telegram Personal too — validated against
+# personal_channels_service.GROUP_POLICY_CHANNEL_KEYS instead.
+
+
+@router.patch("/personal-channels/{channel_key}/gateways/{gateway_id}/group-policy")
+async def update_personal_channel_group_policy(
+    request: Request,
+    channel_key: str,
+    gateway_id: str,
+    body: GroupPolicyUpdateRequest,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """"member" (not "viewer") — matches configure_whatsapp_personal_gateway
+    / configure_telegram_personal_gateway above: this changes which chats
+    the agent will actually reply in, the same bar as any other channel
+    configuration change. agent_id is a required query param (not part of
+    the body) for the same reason every other route here takes it that
+    way — group_policy is stored per (agent, channel), not per gateway."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    normalized_channel_key = str(channel_key or "").strip().lower()
+    if normalized_channel_key not in personal_channels_service.GROUP_POLICY_CHANNEL_KEYS:
+        raise HTTPException(status_code=404, detail="Personal channel was not found.")
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="member",
+    )
+    normalized_agent_id = str(agent_id or "").strip()
+    try:
+        updated = await personal_channels_service.update_agent_group_policy_config(
+            tenant_id=str(registration.get("tenant_id") or "default"),
+            workspace_id=str(registration.get("workspace_id") or "default"),
+            agent_id=normalized_agent_id,
+            channel_key=normalized_channel_key,
+            mode=body.mode,
+            allowlist=body.allowlist,
+            require_mention=body.require_mention,
+        )
+        if updated is None:
+            detail = "Agent install was not found in this workspace, or the update could not be saved."
+            _emit_personal_channel_audit(
+                action="personal_channel.group_policy.configure",
+                status="denied",
+                registration=registration,
+                current_user=current_user,
+                gateway_id=gateway_id,
+                channel_key=normalized_channel_key,
+                detail=detail,
+                metadata={"agent_id": normalized_agent_id, "requested_mode": body.mode},
+            )
+            raise HTTPException(status_code=404, detail=detail)
+        _emit_personal_channel_audit(
+            action="personal_channel.group_policy.configure",
+            status="success",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            detail="Group policy (allowed chats / mention gate) was updated for a personal-channel agent binding.",
+            metadata={
+                "agent_id": normalized_agent_id,
+                "mode": updated.get("mode"),
+                "require_mention": updated.get("require_mention"),
+                "allowlist_size": len(updated.get("allowlist") or []),
+            },
+        )
+        return {
+            "channel_key": normalized_channel_key,
+            "agent_id": normalized_agent_id,
+            "group_policy": updated,
+        }
+    except ValueError as exc:
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.group_policy.configure",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            detail=detail,
+            metadata={"agent_id": normalized_agent_id, "requested_mode": body.mode},
+        )
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.get("/personal-channels/{channel_key}/gateways/{gateway_id}/group-policy")
+async def get_personal_channel_group_policy(
+    request: Request,
+    channel_key: str,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """Read-only counterpart to the PATCH above — "viewer" is enough, same
+    bar as the other GET status routes in this file. Lets a direct API
+    caller (or a future settings UI) confirm what's actually persisted
+    without needing to trigger a live inbound message first."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    normalized_channel_key = str(channel_key or "").strip().lower()
+    if normalized_channel_key not in personal_channels_service.GROUP_POLICY_CHANNEL_KEYS:
+        raise HTTPException(status_code=404, detail="Personal channel was not found.")
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="viewer",
+    )
+    normalized_agent_id = str(agent_id or "").strip()
+    config = await personal_channels_service._load_agent_group_policy_config(
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=normalized_agent_id,
+        channel_key=normalized_channel_key,
+    )
+    return {
+        "channel_key": normalized_channel_key,
+        "agent_id": normalized_agent_id,
+        "group_policy": config,
+    }
 
 
 # ── Stage 2: Cloud Session Manager inbound ──────────────────────

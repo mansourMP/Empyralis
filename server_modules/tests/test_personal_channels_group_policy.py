@@ -226,29 +226,33 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision["allowed"])
         self.assertEqual(decision["reason"], "group_no_mention")
 
-    async def test_unresolved_identity_never_escalates_to_a_stricter_default_than_a_configured_agent(self) -> None:
-        """UNLIKE dmPolicy (which fails closed to owner_only for an
-        unresolved identity -- see _unresolved_identity_dm_policy_config's
-        docstring), group_policy's unresolved-identity fallback must be the
-        SAME default as a resolved-but-unconfigured agent (open,
-        require_mention=False) -- see
-        _load_agent_group_policy_config's own docstring for why a stricter
-        fallback here would silently disable every group on every
-        local-bridge channel forever."""
-        resolved_default = await personal_channels_service._load_agent_group_policy_config(
+    async def test_unresolved_identity_fallback_is_split_from_the_resolved_agent_default(self) -> None:
+        """UPDATED 2026-08-07 (CHANNEL-GATEWAY-PLAN.md §5 step 2): these two
+        cases are now DELIBERATELY DIFFERENT, split the same way dm_policy
+        already splits _unresolved_identity_dm_policy_config from
+        DEFAULT_DM_POLICY_MODE -- see
+        _unresolved_identity_group_policy_config's own docstring for why.
+
+        An unresolved agent identity (agent_id="" -- the PERMANENT case for
+        every local-bridge channel, which has no write path that could ever
+        reach it) keeps today's actual production behavior: open,
+        require_mention=False, unchanged by this build.
+
+        A RESOLVED agent_id that simply has no install bundle yet (e.g.
+        get_workspace_agent_install_bundle returning None against the real,
+        unmocked repository in this sandbox) is a channel where the write
+        path (update_agent_group_policy_config) IS reachable -- so it gets
+        this build's new safe default: allowlist/require_mention=True."""
+        unresolved_identity_default = await personal_channels_service._load_agent_group_policy_config(
             tenant_id="t", workspace_id="w", agent_id="", channel_key="signal_personal",
         )
-        with_config_lookup_failure = await personal_channels_service._load_agent_group_policy_config(
-            tenant_id="t", workspace_id="w", agent_id="never-installed-agent", channel_key="signal_personal",
+        resolved_but_uninstalled_default = await personal_channels_service._load_agent_group_policy_config(
+            tenant_id="t", workspace_id="w", agent_id="never-installed-agent", channel_key="telegram_personal",
         )
-        self.assertEqual(resolved_default["mode"], "open")
-        self.assertFalse(resolved_default["require_mention"])
-        # A lookup for a real-shaped agent_id that simply has no install
-        # bundle (get_workspace_agent_install_bundle raising/returning
-        # None against the real, unmocked repository in this sandbox) must
-        # land on the exact same open default, never a stricter one.
-        self.assertEqual(with_config_lookup_failure["mode"], "open")
-        self.assertFalse(with_config_lookup_failure["require_mention"])
+        self.assertEqual(unresolved_identity_default["mode"], "open")
+        self.assertFalse(unresolved_identity_default["require_mention"])
+        self.assertEqual(resolved_but_uninstalled_default["mode"], "allowlist")
+        self.assertTrue(resolved_but_uninstalled_default["require_mention"])
 
 
 class MentionGatingResolverUnitTests(unittest.TestCase):
