@@ -73,6 +73,36 @@ CREATE TABLE IF NOT EXISTS personal_channel_telegram_states (
     PRIMARY KEY (gateway_id, channel_key, agent_id)
 );
 
+-- Signal/iMessage/WeChat-personal ("local-bridge" channels — an
+-- externally-authenticated OS-level bridge like signal-cli or Messages.app,
+-- not an in-app phone/QR login) had no per-agent identity table at all
+-- until this one: unlike WhatsApp/Telegram, there is no configure_*
+-- step that names an agent_id up front (see personal_channels_service.py's
+-- _resolve_local_bridge_agent_id docstring for how a row here gets
+-- claimed instead — either an explicit owner action for a channel that has
+-- one, like iMessage's recheck/install routes, or a reverse
+-- preferred_gateway_id lookup for channels that don't, like Signal).
+-- Same (gateway_id, channel_key, agent_id) shape as the WhatsApp/Telegram
+-- tables above so find_agent_id_for_local_bridge_session can reuse their
+-- exact "most recently touched row wins" contract.
+CREATE TABLE IF NOT EXISTS personal_channel_local_bridge_states (
+    gateway_id TEXT NOT NULL,
+    channel_key TEXT NOT NULL,
+    agent_id TEXT NOT NULL DEFAULT '',
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    status TEXT NOT NULL,
+    linked_identity TEXT NULL,
+    connected_at TEXT NULL,
+    last_event_at TEXT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (gateway_id, channel_key, agent_id)
+);
+
 CREATE TABLE IF NOT EXISTS personal_channel_inbound_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gateway_id TEXT NOT NULL,
@@ -602,6 +632,144 @@ def find_agent_id_for_whatsapp_session(
     return str(row["agent_id"] or "") if row is not None else LEGACY_UNSCOPED_AGENT_ID
 
 
+def upsert_local_bridge_state(
+    *,
+    gateway_id: str,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: str,
+    channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
+    provider: str,
+    status: str,
+    linked_identity: Optional[str] = None,
+    connected_at: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    db_path: Optional[Path | str] = None,
+) -> Dict[str, Any]:
+    """Signal/iMessage/WeChat-personal twin of upsert_whatsapp_state /
+    upsert_telegram_state — same shallow-merge-metadata, same
+    ON CONFLICT(gateway_id, channel_key, agent_id) upsert shape."""
+    now_iso = _utc_now_iso()
+    normalized_agent_id = _norm_agent_id(agent_id)
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            existing_row = connection.execute(
+                """
+                SELECT * FROM personal_channel_local_bridge_states
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
+                """,
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), normalized_agent_id),
+            ).fetchone()
+            existing_metadata = (
+                _json_loads(existing_row["metadata"], default={})
+                if existing_row is not None
+                else {}
+            )
+            merged_metadata = dict(existing_metadata or {})
+            merged_metadata.update(dict(metadata or {}))
+            connection.execute(
+                """
+                INSERT INTO personal_channel_local_bridge_states (
+                    gateway_id, channel_key, agent_id, tenant_id, workspace_id, user_id, provider,
+                    status, linked_identity, connected_at, last_event_at, metadata, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gateway_id, channel_key, agent_id) DO UPDATE SET
+                    tenant_id=excluded.tenant_id,
+                    workspace_id=excluded.workspace_id,
+                    user_id=excluded.user_id,
+                    provider=excluded.provider,
+                    status=excluded.status,
+                    linked_identity=excluded.linked_identity,
+                    connected_at=excluded.connected_at,
+                    last_event_at=excluded.last_event_at,
+                    metadata=excluded.metadata,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    str(gateway_id or "").strip(),
+                    str(channel_key or "").strip(),
+                    normalized_agent_id,
+                    str(tenant_id or "").strip(),
+                    str(workspace_id or "").strip(),
+                    str(user_id or "").strip(),
+                    str(provider or "").strip(),
+                    str(status or "").strip() or "idle",
+                    str(linked_identity or "").strip() or None,
+                    str(connected_at or "").strip() or None,
+                    now_iso,
+                    _json_dumps(merged_metadata),
+                    str(existing_row["created_at"] or now_iso) if existing_row is not None else now_iso,
+                    now_iso,
+                ),
+            )
+            connection.commit()
+            row = connection.execute(
+                """
+                SELECT * FROM personal_channel_local_bridge_states
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
+                """,
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), normalized_agent_id),
+            ).fetchone()
+        finally:
+            connection.close()
+    return _local_bridge_state_from_row(row) or {}
+
+
+def get_local_bridge_state(
+    gateway_id: str,
+    *,
+    channel_key: str,
+    agent_id: str = LEGACY_UNSCOPED_AGENT_ID,
+    db_path: Optional[Path | str] = None,
+) -> Optional[Dict[str, Any]]:
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM personal_channel_local_bridge_states
+                WHERE gateway_id = ? AND channel_key = ? AND agent_id = ?
+                """,
+                (str(gateway_id or "").strip(), str(channel_key or "").strip(), _norm_agent_id(agent_id)),
+            ).fetchone()
+        finally:
+            connection.close()
+    return _local_bridge_state_from_row(row)
+
+
+def find_agent_id_for_local_bridge_session(
+    gateway_id: str,
+    *,
+    channel_key: str,
+    db_path: Optional[Path | str] = None,
+) -> str:
+    """Signal/iMessage/WeChat-personal twin of
+    find_agent_id_for_telegram_session/find_agent_id_for_whatsapp_session —
+    same "whoever most recently touched this gateway+channel" contract.
+    Rows here are seeded by personal_channels_service._resolve_local_bridge_agent_id
+    (a reverse preferred_gateway_id lookup, or an explicit owner action for
+    the one local-bridge channel that has one today, iMessage's
+    recheck/install routes) rather than by an in-app configure step, since
+    these channels don't have one — see that function's own docstring."""
+    normalized_channel_key = str(channel_key or "").strip()
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT agent_id FROM personal_channel_local_bridge_states
+                WHERE gateway_id = ? AND channel_key = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (str(gateway_id or "").strip(), normalized_channel_key),
+            ).fetchone()
+        finally:
+            connection.close()
+    return str(row["agent_id"] or "") if row is not None else LEGACY_UNSCOPED_AGENT_ID
+
+
 def record_inbound_message(
     *,
     gateway_id: str,
@@ -977,6 +1145,27 @@ def _telegram_state_from_row(row: sqlite3.Row | None) -> Optional[Dict[str, Any]
         "linked_username": str(row["linked_username"] or "").strip() or None,
         "linked_phone": str(row["linked_phone"] or "").strip() or None,
         "linked_name": str(row["linked_name"] or "").strip() or None,
+        "connected_at": str(row["connected_at"] or "").strip() or None,
+        "last_event_at": str(row["last_event_at"] or "").strip() or None,
+        "metadata": _json_loads(row["metadata"], default={}),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def _local_bridge_state_from_row(row: sqlite3.Row | None) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    return {
+        "gateway_id": str(row["gateway_id"] or ""),
+        "channel_key": str(row["channel_key"] or ""),
+        "agent_id": str(row["agent_id"] or "") or None,
+        "tenant_id": str(row["tenant_id"] or ""),
+        "workspace_id": str(row["workspace_id"] or ""),
+        "user_id": str(row["user_id"] or ""),
+        "provider": str(row["provider"] or ""),
+        "status": str(row["status"] or ""),
+        "linked_identity": str(row["linked_identity"] or "").strip() or None,
         "connected_at": str(row["connected_at"] or "").strip() or None,
         "last_event_at": str(row["last_event_at"] or "").strip() or None,
         "metadata": _json_loads(row["metadata"], default={}),

@@ -42,6 +42,7 @@ import importlib
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, Dict
 from unittest.mock import AsyncMock, patch
 
 from server_modules import personal_channels_service, personal_channels_repository
@@ -54,6 +55,39 @@ _ALLOW_DISPATCH_DECISION = {
     "operation": "protocol_route",
     "next_action": "dispatch_gateway_operation",
 }
+
+
+class _FakeAgentInstallStore:
+    """Minimal in-memory stand-in for agent_registry_repository's
+    get_workspace_agent_install_bundle / update_workspace_agent_install —
+    copied from test_personal_channels_dm_policy.py / test_personal_channels_
+    group_policy.py (same convention: duplicated per-file rather than
+    imported cross-file). Just enough of the real "install_metadata, shallow
+    top-level metadata merge" contract for _load_agent_group_policy_config
+    to correctly round-trip against, used here to prove a RESOLVED
+    local-bridge identity reaches the same real config path WhatsApp/
+    Telegram already do."""
+
+    def __init__(self) -> None:
+        self.installs: Dict[str, Dict[str, Any]] = {}
+
+    async def get_bundle(self, agent_id: str, *, tenant_id: str, workspace_id: str):
+        meta = self.installs.get(agent_id, {})
+        return {"id": agent_id, "install_metadata": dict(meta)}
+
+    async def update(self, agent_id: str, *, tenant_id: str, workspace_id: str, metadata=None, **_kwargs):
+        existing = self.installs.get(agent_id, {})
+        merged = {**existing, **(metadata or {})}
+        self.installs[agent_id] = merged
+        return {"id": agent_id, "install_metadata": dict(merged)}
+
+
+def _patch_agent_install_store(store: "_FakeAgentInstallStore"):
+    return patch.multiple(
+        "server_modules.agent_registry_repository",
+        get_workspace_agent_install_bundle=AsyncMock(side_effect=store.get_bundle),
+        update_workspace_agent_install=AsyncMock(side_effect=store.update),
+    )
 
 
 class TelegramGroupGateTests(unittest.IsolatedAsyncioTestCase):
@@ -383,8 +417,23 @@ class TelegramGroupGateTests(unittest.IsolatedAsyncioTestCase):
 class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
     """Through the LIVE _handle_local_bridge_gateway_channel_inbound —
     Signal/iMessage/WeChat share this one function. Proves the group gate
-    is enforced BEFORE dmPolicy's own (separately, unconditionally
-    blocking, per a pre-existing gap) check."""
+    is enforced BEFORE dmPolicy's own check, for BOTH an unresolved identity
+    (fails closed at the group gate itself, see below) and a resolved one
+    (behaves exactly like WhatsApp/Telegram from then on).
+
+    UPDATED (channel-gate hardening, "the last unscoped channels"): before
+    this build, agent_id="" was the PERMANENT case for every local-bridge
+    inbound message — _resolve_agent_id_for_inbound had no lookup branch for
+    Signal/iMessage/WeChat-personal at all, so every message here landed on
+    _unresolved_identity_group_policy_config's then-OPEN default and always
+    reached dmPolicy. It no longer is: _resolve_local_bridge_agent_id
+    (personal_channels_service.py) now resolves a real agent_id via a
+    reverse preferred_gateway_id lookup. Two of the three tests below were
+    UPDATED to match: an unresolved identity (no agent claims this gateway)
+    now fails CLOSED at the group gate itself for ANY group message,
+    addressed or not — never reaching dmPolicy — and a new test proves a
+    RESOLVED identity restores the full three-gate flow exactly like
+    WhatsApp/Telegram already have."""
 
     def setUp(self) -> None:
         global personal_channels_service, personal_channels_repository
@@ -409,19 +458,22 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
         self.db_patcher.stop()
         self.tmpdir.cleanup()
 
-    async def test_unaddressed_group_message_now_reaches_dm_policy_by_default(self) -> None:
-        """UPDATED 2026-07-23 (see file docstring): with requireMention
-        defaulting OFF, an unaddressed group message is no longer blocked
-        BY THE GROUP GATE — it now reaches dmPolicy exactly like a mentioned
-        one does (test_mentioned_group_message_still_reaches_and_is_blocked_by_dm_policy
-        right below), which for local-bridge channels blocks every sender
-        unconditionally today (a separate, pre-existing gap — real
-        dmPolicy, unmocked, needs no Rust control-plane call for this
-        specific agent_id="" fallback path)."""
+    async def test_unresolved_identity_denies_an_unaddressed_group_message_at_the_group_gate(self) -> None:
+        """No agent has claimed gw-group-2 (no preferred_gateway_id match,
+        no prior claim in personal_channel_local_bridge_states) —
+        _resolve_local_bridge_agent_id genuinely can't resolve an agent_id,
+        so this lands on _unresolved_identity_group_policy_config's
+        LOCAL_BRIDGE_PERSONAL_CHANNELS branch: GROUP_POLICY_DISABLED. The
+        message must be denied AT THE GROUP GATE (group_policy_denied) —
+        dmPolicy must never even run."""
         with (
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
                 return_value=_ALLOW_DISPATCH_DECISION,
+            ),
+            patch(
+                "server_modules.personal_channels_service._enforce_dm_policy",
+                new=AsyncMock(side_effect=AssertionError("dmPolicy must not run — the group gate should deny first")),
             ),
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
@@ -449,30 +501,15 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
                 provider="signal_local_bridge",
                 label="Signal",
             )
-        # Blocked by dmPolicy now (real, unmocked owner_only fallback), NOT
-        # by the group gate — proving the group gate itself let it through.
-        self.assertTrue(result.get("blocked"))
-        self.assertNotEqual(result.get("reason"), "group_no_mention")
-        self.assertIn("policy", result)
-        self.assertEqual(result["policy"].get("mode"), "owner_only")
+        self.assertTrue(result.get("ignored"))
+        self.assertEqual(result.get("reason"), "group_policy_denied")
 
-    async def test_mentioned_group_message_still_reaches_and_is_blocked_by_dm_policy(self) -> None:
-        """Local-bridge channels have no owner-identity resolution at all
-        yet (a separate, pre-existing gap — see
-        _handle_local_bridge_gateway_channel_inbound's own comment), so
-        dmPolicy blocks EVERY sender unconditionally today. This proves the
-        group gate correctly lets an addressed message past ITSELF and on
-        to that next layer — dmPolicy's block must not be mistaken for the
-        group gate never having run, or vice versa. _enforce_dm_policy
-        itself is mocked (see the identically-reasoned comment on
-        TelegramGroupGateTests.test_mentioned_group_message_from_a_stranger_is_still_blocked_by_dm_policy —
-        same real-Rust-control-plane environment gap, confirmed to
-        independently break test_personal_channels_dm_policy.py's own
-        test_local_bridge_stranger_is_blocked_by_default here too)."""
-        blocked_decision = {
-            "allowed": False, "mode": "owner_only", "sender_id": "+15557654321",
-            "is_owner": False, "system_reply": None, "config_changed": False,
-        }
+    async def test_unresolved_identity_denies_even_an_explicitly_mentioned_group_message(self) -> None:
+        """GROUP_POLICY_DISABLED means disabled — proven here with an
+        EXPLICIT @mention, which must not bypass it (mirrors
+        test_personal_channels_group_policy.py's
+        test_group_policy_disabled_blocks_every_group_message_regardless_of_mention).
+        Still no agent claims gw-group-3 in this test."""
         with (
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
@@ -480,8 +517,8 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "server_modules.personal_channels_service._enforce_dm_policy",
-                new=AsyncMock(return_value=blocked_decision),
-            ) as dm_policy_mock,
+                new=AsyncMock(side_effect=AssertionError("dmPolicy must not run — the group gate should deny first")),
+            ),
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
                 new=AsyncMock(side_effect=AssertionError("must not dispatch")),
@@ -489,8 +526,8 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
-                gateway_id="gw-group-2",
-                registration=self.registration,
+                gateway_id="gw-group-3",
+                registration={**self.registration, "gateway_id": "gw-group-3"},
                 payload={
                     "message": {
                         "external_message_id": "sig-group-2",
@@ -508,7 +545,85 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
                 provider="signal_local_bridge",
                 label="Signal",
             )
+        self.assertTrue(result.get("ignored"))
+        self.assertEqual(result.get("reason"), "group_policy_denied")
+
+    async def test_resolved_identity_with_group_allowed_reaches_dm_policy_like_whatsapp_telegram(self) -> None:
+        """Once an agent HAS claimed this gateway+channel (here, seeded
+        directly via upsert_local_bridge_state — the same row
+        _resolve_local_bridge_agent_id's own preferred_gateway_id lookup
+        would populate; see that function's docstring), _resolve_agent_id_for_inbound's
+        fast path finds it, group_policy config is loaded for a REAL agent
+        (not the unresolved fallback), and — with that config's mode
+        explicitly opened for this specific group — the mention gate lets an
+        addressed message through to dmPolicy exactly like WhatsApp/Telegram
+        already do. Proves resolution + the write path (group_policy
+        persisted via install_metadata, read back through the real,
+        unmocked _load_agent_group_policy_config) both work end-to-end for a
+        local-bridge channel for the first time."""
+        personal_channels_repository.upsert_local_bridge_state(
+            gateway_id="gw-group-4",
+            tenant_id="tenant-1",
+            workspace_id="default",
+            user_id="",
+            channel_key="signal_personal",
+            agent_id="agent-signal-claimed",
+            provider="signal_local_bridge",
+            status="linked",
+        )
+        store = _FakeAgentInstallStore()
+        store.installs["agent-signal-claimed"] = {
+            "group_policy": {
+                "signal_personal": {
+                    "mode": "allowlist", "allowlist": ["group:family"], "require_mention": True,
+                },
+            },
+        }
+        blocked_decision = {
+            "allowed": False, "mode": "owner_only", "sender_id": "+15557654321",
+            "is_owner": False, "system_reply": None, "config_changed": False,
+        }
+        with (
+            patch(
+                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                return_value=_ALLOW_DISPATCH_DECISION,
+            ),
+            _patch_agent_install_store(store),
+            patch(
+                "server_modules.personal_channels_service._enforce_dm_policy",
+                new=AsyncMock(return_value=blocked_decision),
+            ) as dm_policy_mock,
+            patch(
+                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                new=AsyncMock(side_effect=AssertionError("must not dispatch")),
+                create=True,
+            ),
+        ):
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
+                gateway_id="gw-group-4",
+                registration={**self.registration, "gateway_id": "gw-group-4"},
+                payload={
+                    "message": {
+                        "external_message_id": "sig-group-4",
+                        "remote_jid": "group:family",
+                        "sender_jid": "+15557654321",
+                        "push_name": "Family Member",
+                        "text": "@sage hello",
+                        "from_me": False,
+                        "is_group": True,
+                        "is_mentioned": True,
+                        "is_reply_to_sage": False,
+                    },
+                },
+                channel_key="signal_personal",
+                provider="signal_local_bridge",
+                label="Signal",
+            )
         dm_policy_mock.assert_awaited_once()
+        # The resolved agent_id was threaded through to dmPolicy too, not
+        # left hardcoded at "" — proving the fix reaches both gates, not
+        # just the group one.
+        self.assertEqual(dm_policy_mock.await_args.kwargs.get("agent_id"), "agent-signal-claimed")
         self.assertTrue(result.get("blocked"))
         self.assertNotEqual(result.get("reason"), "group_no_mention")
         self.assertIn("policy", result)
@@ -710,9 +825,33 @@ class GroupContextThreadingTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_bridge_group_message_threads_is_group_and_chat_label(self) -> None:
         """Signal/iMessage/WeChat all share
         _handle_local_bridge_gateway_channel_inbound — proves the threading
-        holds across all three, not just one."""
+        holds across all three, not just one.
+
+        UPDATED (channel-gate hardening): identity resolution is REAL now
+        (_resolve_local_bridge_agent_id) — an unclaimed gateway would fail
+        closed at the group gate (see LocalBridgeGroupGateTests) before ever
+        reaching the bridge call this test inspects. Each channel_key claims
+        its own gateway_id+agent_id row directly via upsert_local_bridge_state
+        (the same row _resolve_local_bridge_agent_id's own preferred_gateway_id
+        lookup would populate) so _resolve_agent_id_for_inbound's fast path
+        resolves it, and _load_agent_group_policy_config is patched to an
+        explicit open/allowed config — this test's OWN subject is is_group/
+        chat_label threading, not group_policy's gate mechanics (covered
+        separately), so the resolved config is fixed rather than exercised
+        end-to-end here."""
         for channel_key, meta in personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS.items():
             with self.subTest(channel_key=channel_key):
+                agent_id = f"agent-{channel_key}-thread"
+                personal_channels_repository.upsert_local_bridge_state(
+                    gateway_id="gw-thread-1",
+                    tenant_id="tenant-1",
+                    workspace_id="default",
+                    user_id="",
+                    channel_key=channel_key,
+                    agent_id=agent_id,
+                    provider=meta["provider"],
+                    status="linked",
+                )
                 with (
                     patch(
                         "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
@@ -721,6 +860,10 @@ class GroupContextThreadingTests(unittest.IsolatedAsyncioTestCase):
                     patch(
                         "server_modules.personal_channels_service._enforce_dm_policy",
                         new=AsyncMock(return_value=self.allowed_decision),
+                    ),
+                    patch(
+                        "server_modules.personal_channels_service._load_agent_group_policy_config",
+                        new=AsyncMock(return_value={"mode": "open", "allowlist": [], "require_mention": False}),
                     ),
                     patch(
                         "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_personal_channel_reply_async",

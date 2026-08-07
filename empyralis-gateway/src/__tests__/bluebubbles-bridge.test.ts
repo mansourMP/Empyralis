@@ -231,7 +231,17 @@ async function withBlueBubblesGroupGateHarness(
   }
 }
 
-test("iMessage group gate: an unaddressed group chat message is never published", async () => {
+// UPDATED (channel-gate hardening, see CHANNEL-GATEWAY-PLAN.md "the last
+// unscoped channels"): this runtime's own shouldSkip drop was REMOVED —
+// personal_channels_service.py's Signal/iMessage/WeChat-personal identity
+// resolution (_resolve_local_bridge_agent_id) landed, so the backend's
+// _enforce_group_policy is now the ONE shared resolver for this decision,
+// exactly like it already was for WhatsApp/Telegram (see
+// telegram-group-gate.test.ts's identical 2026-07-23 update). This
+// runtime's job is now only to compute and always forward the raw mention
+// FACTS (is_group/is_mentioned/is_reply_to_sage) — never to withhold a
+// message based on them.
+test("iMessage group gate: an unaddressed group chat message is still published, with is_mentioned=false so the backend resolver can decide", async () => {
   await withBlueBubblesGroupGateHarness(async ({ bridge, inbound }) => {
     await fetch(`${bridge.url}/webhook`, {
       method: "POST",
@@ -250,10 +260,13 @@ test("iMessage group gate: an unaddressed group chat message is never published"
         },
       }),
     });
-    // Negative assertion: give the (fast, 25ms) poll loop several cycles to
-    // have picked this up if it were going to, then confirm it never did.
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    assert.equal(inbound.length, 0, "an unaddressed group chat message must never reach publishEvent");
+    await eventually(() => {
+      assert.equal(inbound.length, 1, "an unaddressed group chat message must still reach publishEvent — this runtime no longer decides shouldSkip");
+    });
+    const message = inbound[0].message as Record<string, unknown>;
+    assert.equal(message.is_group, true);
+    assert.equal(message.is_mentioned, false);
+    assert.equal(message.is_reply_to_sage, false);
   });
 });
 
