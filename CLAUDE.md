@@ -148,6 +148,25 @@ tool bundles, and channel routing have all repeatedly surprised us. An audit
 that reads a function and concludes the feature works is worth little; trace
 from the real entry point to the real call site.
 
+**A compiled artifact is a live-path risk `grep` can't see.** `empyralis-runtime-kernel`
+is a Rust binary invoked over subprocess (`rust_runtime_kernel_client.py`) —
+it is never re-read from source, so a correct, merged, tested `.rs` fix
+changes nothing about the running enforcement until something explicitly
+rebuilds it. MAN-306: a 2026-07-28 fix widened `TERMINAL_RUN_STATUSES` so an
+ordinary completed task run's archive write is recognized as terminal, but
+the documented deploy flow (`docs/DEPLOY-RUNBOOK.md`) never ran `cargo
+build` — only `git merge`, `pip install`, `npm run build`, restart — so the
+box kept enforcing the pre-fix policy and every ordinary assignment tripped
+`archive_non_terminal_run_requires_review` for weeks, with no error anywhere
+saying why. Fixed two ways: the deploy runbook now has an explicit rebuild
+step (3a), and `preflight.py`'s `_check_kernel()` now refuses to boot if any
+file under `empyralis-runtime-kernel/src/` (or `Cargo.toml`/`Cargo.lock`) is
+newer than the binary — a source/binary mismatch is now a loud boot failure,
+not a silent policy regression. Any other subprocess-invoked or
+out-of-process compiled dependency this codebase grows needs the same
+staleness gate; `grep`-for-callers doesn't catch drift in an artifact that
+isn't source.
+
 **Silent misrouting beats loud failure, and that is a bug.** A model calling
 the CLI's built-in `TaskCreate` instead of `project_task__create` reported
 "Task #1 created successfully" while `project_tasks` stayed empty — real

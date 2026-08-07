@@ -292,6 +292,75 @@ def runtime_kernel_available() -> bool:
     return runtime_kernel_binary() is not None
 
 
+KERNEL_SOURCE_DIR = REPO_ROOT / "empyralis-runtime-kernel"
+KERNEL_STALENESS_ALLOW_ENV_VAR = "EMPYRALIS_ALLOW_STALE_RUNTIME_KERNEL"
+
+
+def _kernel_source_files() -> list[Path]:
+    """Every file that, if newer than the compiled binary, means the binary
+    was built before the source it's supposed to enforce.
+
+    MAN-306: the Rust kernel is a subprocess-invoked binary
+    (``run_runtime_kernel`` below), never a library loaded from source at
+    import time. A source fix to ``runtime_state_store.rs`` (2026-07-28,
+    "MAN-108 Bug 2" -- widening TERMINAL_RUN_STATUSES so a normal
+    ``status="completed"`` archive is recognized as terminal) landed on
+    `main` and shipped to production via the documented deploy flow, but
+    that flow (``docs/DEPLOY-RUNBOOK.md``) never runs `cargo build` -- only
+    `git merge`, `pip install`, `npm run build`, and a process restart. A
+    binary built before that commit keeps enforcing the OLD policy forever:
+    every ordinary task run that finishes with status="completed" trips
+    `archive_non_terminal_run_requires_review` on archive, exactly as if
+    the fix had never shipped, with no error anywhere saying why -- the
+    binary silently drifts from the source that's supposed to define it.
+    This is the same "code exists but isn't reachable on the live path"
+    failure this codebase has hit before, except the artifact here is a
+    compiled binary rather than an unwired Python function, so `grep` for
+    callers can't catch it -- only comparing the binary's age to its own
+    source can.
+    """
+    if not KERNEL_SOURCE_DIR.is_dir():
+        return []
+    files = [KERNEL_SOURCE_DIR / "Cargo.toml", KERNEL_SOURCE_DIR / "Cargo.lock"]
+    src_dir = KERNEL_SOURCE_DIR / "src"
+    if src_dir.is_dir():
+        files.extend(sorted(src_dir.rglob("*.rs")))
+    return [f for f in files if f.is_file()]
+
+
+def stale_kernel_source_file(binary: Path) -> Optional[Path]:
+    """Return the first source file newer than *binary*, or ``None`` if the
+    binary is at least as new as every file that defines its behavior.
+
+    Pure filesystem mtime comparison -- no `cargo` invocation, so it costs
+    nothing at boot and works even when `cargo` isn't installed on the box
+    serving traffic. Mirrors how `make`/`cargo` itself decide staleness.
+    """
+    try:
+        binary_mtime = binary.stat().st_mtime
+    except OSError:
+        return None
+    newest: Optional[Path] = None
+    newest_mtime = binary_mtime
+    for source_file in _kernel_source_files():
+        try:
+            source_mtime = source_file.stat().st_mtime
+        except OSError:
+            continue
+        if source_mtime > newest_mtime:
+            newest = source_file
+            newest_mtime = source_mtime
+    return newest
+
+
+def runtime_kernel_staleness_allowed() -> bool:
+    return os.environ.get(KERNEL_STALENESS_ALLOW_ENV_VAR, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def run_runtime_kernel(
     command: str,
     payload: Mapping[str, Any],

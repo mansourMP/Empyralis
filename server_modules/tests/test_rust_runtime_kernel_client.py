@@ -1987,3 +1987,134 @@ def test_redact_diagnostics_uses_json_payload(monkeypatch, tmp_path):
     assert response["audit_visibility"] == "standard"
     assert response["cacheable"] is False
     assert json.loads(capture.read_text(encoding="utf-8")) == {"data": {"token": "secret"}}
+
+
+# ── MAN-306: stale-binary detection ─────────────────────────────────────
+#
+# The kernel is a compiled binary invoked over subprocess (run_runtime_kernel
+# above), never re-read from source. A source fix to
+# empyralis-runtime-kernel/src/runtime_state_store.rs (2026-07-28, widening
+# TERMINAL_RUN_STATUSES so status="completed" archives correctly) shipped to
+# `main` and, via the documented deploy flow, to production — but that flow
+# never runs `cargo build`, so a binary built before that commit keeps
+# enforcing the old policy forever. stale_kernel_source_file() is a pure
+# mtime comparison (no `cargo` invocation) that lets preflight catch this at
+# boot instead of it silently misfiring on every ordinary completed run.
+
+
+def _write_kernel_tree(tmp_path):
+    kernel_dir = tmp_path / "empyralis-runtime-kernel"
+    src_dir = kernel_dir / "src"
+    src_dir.mkdir(parents=True)
+    (kernel_dir / "Cargo.toml").write_text("[package]\nname = \"k\"\n", encoding="utf-8")
+    (kernel_dir / "Cargo.lock").write_text("", encoding="utf-8")
+    (src_dir / "runtime_state_store.rs").write_text("// source\n", encoding="utf-8")
+    return kernel_dir
+
+
+def test_stale_kernel_source_file_none_when_binary_built_after_source(monkeypatch, tmp_path):
+    kernel_dir = _write_kernel_tree(tmp_path)
+    monkeypatch.setattr(client, "KERNEL_SOURCE_DIR", kernel_dir)
+    binary = tmp_path / "kernel-binary"
+    binary.write_text("binary", encoding="utf-8")
+    # Binary built strictly after every source file was last touched.
+    now = os.path.getmtime(kernel_dir / "src" / "runtime_state_store.rs")
+    os.utime(binary, (now + 10, now + 10))
+
+    assert client.stale_kernel_source_file(binary) is None
+
+
+def test_stale_kernel_source_file_flags_source_newer_than_binary(monkeypatch, tmp_path):
+    kernel_dir = _write_kernel_tree(tmp_path)
+    monkeypatch.setattr(client, "KERNEL_SOURCE_DIR", kernel_dir)
+    binary = tmp_path / "kernel-binary"
+    binary.write_text("binary", encoding="utf-8")
+    now = os.path.getmtime(binary)
+    # Source edited (e.g. the MAN-108 fix landing via `git merge`) after the
+    # binary now sitting on the box was last built.
+    source_file = kernel_dir / "src" / "runtime_state_store.rs"
+    os.utime(source_file, (now + 10, now + 10))
+
+    stale = client.stale_kernel_source_file(binary)
+
+    assert stale == source_file
+
+
+def test_stale_kernel_source_file_none_when_source_dir_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(client, "KERNEL_SOURCE_DIR", tmp_path / "does-not-exist")
+    binary = tmp_path / "kernel-binary"
+    binary.write_text("binary", encoding="utf-8")
+
+    assert client.stale_kernel_source_file(binary) is None
+
+
+def test_runtime_kernel_staleness_allowed_env_var(monkeypatch):
+    monkeypatch.delenv(client.KERNEL_STALENESS_ALLOW_ENV_VAR, raising=False)
+    assert client.runtime_kernel_staleness_allowed() is False
+
+    monkeypatch.setenv(client.KERNEL_STALENESS_ALLOW_ENV_VAR, "true")
+    assert client.runtime_kernel_staleness_allowed() is True
+
+
+# ── MAN-306: archive_run terminal-status regression guard ──────────────
+#
+# These two run against the REAL compiled kernel binary (this whole module
+# is @pytest.mark.kernel — see conftest.py's _skip_kernel_tests_when_binary_
+# missing) rather than a Python-side mock. The mocked tests in
+# test_run_state_repository_rust_gate.py can't catch a regression here: they
+# supply their own canned "allow"/next_action response, so they'd stay green
+# even if the Rust source's TERMINAL_RUN_STATUSES list regressed back to
+# excluding "completed". Only a real subprocess call to the actual binary
+# can prove the *policy*, not just the plumbing around it, is correct.
+#
+# This does not catch the OTHER half of MAN-306 (a stale, unrebuilt binary
+# in production) -- only stale_kernel_source_file() / preflight._check_kernel()
+# can, since that failure mode is specifically "the source is right but the
+# binary CI/pytest runs against isn't the one production is running."
+
+
+def test_archive_run_completed_status_is_allowed_by_real_kernel():
+    """The ordinary case: an assigned task's run finishes normally
+    (status="completed") and its archive write must not require review.
+    Regression guard for the 2026-07-28 TERMINAL_RUN_STATUSES fix (MAN-108
+    Bug 2) that made this true -- if this ever goes red, the Rust source
+    itself has regressed, independent of whether any given deployment's
+    binary is stale."""
+    response = client.runtime_state_store_decision(
+        operation="archive_run",
+        state_class="run_archive",
+        run_id="run-1",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        status="completed",
+        payload={"run_id": "run-1", "status": "completed"},
+    )
+
+    assert response["decision"] == "allow"
+    assert response["ok"] is True
+    assert response["approval_required"] is False
+    assert response["next_action"] == "write_run_archive"
+
+
+def test_archive_run_genuinely_non_terminal_status_still_requires_review():
+    """The legitimate case this guardrail exists for: something calls
+    archive_run while the run is still actually mid-flight
+    (status="running", never terminal in any vocabulary). That must still
+    require review -- this is a real durability rail (don't durably archive
+    a run that isn't actually over), not something MAN-306's fix should
+    have weakened. Failing loudly and honestly here (a distinct reason
+    string, not a generic block) is what lets a caller report *why*,
+    instead of a bare "something went wrong"."""
+    response = client.runtime_state_store_decision(
+        operation="archive_run",
+        state_class="run_archive",
+        run_id="run-1",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        status="running",
+        payload={"run_id": "run-1", "status": "running"},
+    )
+
+    assert response["decision"] == "require_approval"
+    assert response["approval_required"] is True
+    assert response["reason"] == "archive_non_terminal_run_requires_review"
