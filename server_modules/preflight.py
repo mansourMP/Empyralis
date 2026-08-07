@@ -156,19 +156,53 @@ def _check_local_stack_database_url() -> Optional[str]:
 # ── kernel ───────────────────────────────────────────────────────────
 
 def _check_kernel() -> Optional[str]:
-    """Return ``None`` if the kernel binary is found, or an error string."""
+    """Return ``None`` if the kernel binary is found and fresh, or an error
+    string.
+
+    "Fresh" means: not older than the Rust source that defines its
+    enforcement decisions. MAN-306 — a compiled kernel binary older than
+    ``empyralis-runtime-kernel/src/*.rs`` silently keeps enforcing whatever
+    policy was current when it was last built, forever, with no error
+    anywhere. A source fix (2026-07-28, MAN-108 Bug 2, widening
+    TERMINAL_RUN_STATUSES) shipped through the documented deploy flow
+    without ever running `cargo build`, so the binary kept treating an
+    ordinary completed task run's archive write as non-terminal — exactly
+    reproducing "archive_non_terminal_run_requires_review" on every normal
+    assignment. This check makes that drift a boot-time failure instead of
+    a silent one, the same posture as the DATABASE_URL check above.
+    """
     try:
-        from server_modules.rust_runtime_kernel_client import runtime_kernel_binary, KERNEL_ENV_VAR  # noqa: PLC0415
+        from server_modules.rust_runtime_kernel_client import (  # noqa: PLC0415
+            KERNEL_ENV_VAR,
+            KERNEL_STALENESS_ALLOW_ENV_VAR,
+            runtime_kernel_binary,
+            runtime_kernel_staleness_allowed,
+            stale_kernel_source_file,
+        )
     except ImportError:
         return None  # client module not available — skip check
-    binary = runtime_kernel_binary()
-    if binary is not None:
-        return None
     repo_root = os.environ.get("EMPYRALIS_REPO_ROOT") or os.getcwd()
+    binary = runtime_kernel_binary()
+    if binary is None:
+        return (
+            f"Rust runtime kernel binary not found.\n"
+            f"  Build: cd {repo_root} && cargo build --release --manifest-path empyralis-runtime-kernel/Cargo.toml\n"
+            f"  Or set {KERNEL_ENV_VAR} to the binary path."
+        )
+    if runtime_kernel_staleness_allowed():
+        return None
+    newer_source = stale_kernel_source_file(binary)
+    if newer_source is None:
+        return None
     return (
-        f"Rust runtime kernel binary not found.\n"
-        f"  Build: cd {repo_root} && cargo build --manifest-path empyralis-runtime-kernel/Cargo.toml\n"
-        f"  Or set {KERNEL_ENV_VAR} to the binary path."
+        f"Rust runtime kernel binary is stale: {newer_source} was modified after "
+        f"{binary} was built. A stale binary keeps enforcing whatever policy was "
+        f"compiled in at build time — silently, with no error anywhere else — "
+        f"which is exactly how MAN-306 happened (a binary built before the "
+        f"2026-07-28 TERMINAL_RUN_STATUSES fix kept blocking every ordinary "
+        f"completed task run's archive write as if the fix had never shipped).\n"
+        f"  Rebuild: cd {repo_root} && cargo build --release --manifest-path empyralis-runtime-kernel/Cargo.toml\n"
+        f"  Or set {KERNEL_STALENESS_ALLOW_ENV_VAR}=true to boot anyway (not recommended outside local dev)."
     )
 
 

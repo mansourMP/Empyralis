@@ -28,6 +28,61 @@ class KernelCheckTests(unittest.TestCase):
             self.assertEqual(preflight._check_kernel(), "kernel not found")
 
 
+class KernelStalenessCheckTests(unittest.TestCase):
+    """MAN-306: the Rust kernel is a compiled binary invoked over subprocess,
+    never re-read from source. A binary built before a source fix (e.g. the
+    2026-07-28 TERMINAL_RUN_STATUSES widening) keeps enforcing the old
+    policy forever, silently, since nothing else ever notices. This check
+    turns that drift into a boot-time failure instead."""
+
+    def test_binary_missing_returns_error(self):
+        with patch(
+            "server_modules.rust_runtime_kernel_client.runtime_kernel_binary",
+            return_value=None,
+        ):
+            error = preflight._check_kernel()
+        self.assertIsNotNone(error)
+        self.assertIn("not found", error)
+
+    def test_fresh_binary_returns_none(self):
+        with patch(
+            "server_modules.rust_runtime_kernel_client.runtime_kernel_binary",
+            return_value=MagicMock(),
+        ), patch(
+            "server_modules.rust_runtime_kernel_client.stale_kernel_source_file",
+            return_value=None,
+        ):
+            self.assertIsNone(preflight._check_kernel())
+
+    def test_stale_binary_returns_error_naming_the_newer_source_file(self):
+        fake_source = MagicMock()
+        fake_source.__str__.return_value = "empyralis-runtime-kernel/src/runtime_state_store.rs"
+        with patch(
+            "server_modules.rust_runtime_kernel_client.runtime_kernel_binary",
+            return_value=MagicMock(),
+        ), patch(
+            "server_modules.rust_runtime_kernel_client.stale_kernel_source_file",
+            return_value=fake_source,
+        ), patch.dict(os.environ, {}, clear=True):
+            error = preflight._check_kernel()
+        self.assertIsNotNone(error)
+        self.assertIn("stale", error)
+        self.assertIn("runtime_state_store.rs", error)
+        self.assertIn("cargo build", error)
+
+    def test_stale_binary_allowed_via_env_var_bypass(self):
+        with patch(
+            "server_modules.rust_runtime_kernel_client.runtime_kernel_binary",
+            return_value=MagicMock(),
+        ), patch(
+            "server_modules.rust_runtime_kernel_client.stale_kernel_source_file",
+            return_value=MagicMock(),
+        ), patch.dict(
+            os.environ, {"EMPYRALIS_ALLOW_STALE_RUNTIME_KERNEL": "true"}, clear=True
+        ):
+            self.assertIsNone(preflight._check_kernel())
+
+
 class LocalStackDatabaseUrlCheckTests(unittest.TestCase):
     """MAN-202 / MAN-268: a dev/test/local boot must have DATABASE_URL set
     explicitly, never inherited silently from whatever the environment

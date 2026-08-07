@@ -800,6 +800,128 @@ class RunServiceTests(unittest.TestCase):
         emit_failed_mock.assert_awaited_once()
         finish_mock.assert_awaited_once()
 
+    def test_transition_live_run_status_completed_task_assigned_run_does_not_block_task(self):
+        """MAN-306: the core loop. An ordinary assignment -- a task-assigned
+        wakeup's run that finishes normally -- must archive cleanly and must
+        never touch the task's status. Before the 2026-07-28
+        TERMINAL_RUN_STATUSES fix, a stale/pre-fix kernel treated
+        status="completed" as non-terminal on archive, and archive_run_if_
+        terminal_fn raising there is exactly the kind of failure that must
+        not turn into project_tasks_service.update_task(status="blocked")
+        for a run that actually finished the agent's work. This exercises
+        the real (non-mocked here) archive_run_if_terminal_fn contract: it's
+        only asserted to be *called* with a terminal status, matching what a
+        healthy kernel returns for "completed" (proven separately, against
+        the real compiled binary, by test_archive_run_completed_status_is_
+        allowed_by_real_kernel in test_rust_runtime_kernel_client.py)."""
+        run = {
+            "run_id": "run-1",
+            "status": "running",
+            "_started_mono": 5.0,
+            "logs": queue.Queue(),
+            "result": "Task completed successfully.",
+            "context": {
+                "workspace_id": "workspace-1",
+                "tenant_id": "tenant-1",
+                "metadata": {"trace_id": "trace-1", "task_id": "task-1"},
+            },
+        }
+        archived = []
+
+        with patch("server_modules.run_service.run_state_repository.dispatch_repository_call", side_effect=lambda awaitable, operation: asyncio.run(awaitable)), \
+             patch("server_modules.run_service.outbox_service.emit_run_transition_event"), \
+             patch("server_modules.run_service.outbox_service.emit_artifact_created_event"), \
+             patch("server_modules.run_service.run_async_tool_call", side_effect=lambda coro: asyncio.run(coro)), \
+             patch("server_modules.project_tasks_service.update_task", new=AsyncMock()) as update_task_mock, \
+             patch("server_modules.project_tasks_service.add_task_comment", new=AsyncMock()) as add_comment_mock:
+            transition_live_run_status(
+                "run-1",
+                "completed",
+                run=run,
+                now_mono=7.5,
+                now_iso="2026-04-06T00:00:00Z",
+                terminal_statuses={"completed", "failed", "timeout"},
+                local_queue_lock=__import__("threading").Lock(),
+                local_pending_run_ids=[],
+                local_claimed_runs={},
+                archive_run_if_terminal_fn=lambda run_id, payload: archived.append((run_id, payload["status"])),
+                remove_live_run_state_fn=lambda run_id: None,
+                sync_local_runtime_state_snapshot_fn=lambda: None,
+                persist_live_run_state_fn=lambda run_id, payload: None,
+                run_queue_index={},
+                metrics_add_fn=lambda key, value: None,
+                metrics_inc_fn=lambda key, value=1: None,
+            )
+
+        self.assertEqual(run["status"], "completed")
+        # archive_run_if_terminal_fn was invoked with the terminal status a
+        # healthy kernel accepts -- this is the call a stale kernel binary
+        # would have rejected pre-MAN-306-fix.
+        self.assertEqual(archived, [("run-1", "completed")])
+        update_task_mock.assert_not_awaited()
+        add_comment_mock.assert_not_awaited()
+
+    def test_transition_live_run_status_failed_task_assigned_run_blocks_task_honestly(self):
+        """The legitimate counterpart: a task-assigned run that genuinely
+        did not finish (status="failed") must still flip its task to
+        blocked -- CLAUDE.md is explicit that MAN-306's fix must not just
+        stop mapping failure to blocked -- and the comment left on the task
+        must name the real run and the real failure reason, not a generic
+        "something went wrong". This is the one place in the codebase that
+        maps a run outcome onto task status at all; MAN-306's archive-review
+        state (a durability rail, not a task-facing one -- see
+        test_archive_run_genuinely_non_terminal_status_still_requires_review
+        in test_rust_runtime_kernel_client.py) never reaches this path."""
+        run = {
+            "run_id": "run-1",
+            "status": "running",
+            "_started_mono": 5.0,
+            "logs": queue.Queue(),
+            "execution_outcome": {"summary": "Provider request failed: rate limited."},
+            "context": {
+                "workspace_id": "workspace-1",
+                "tenant_id": "tenant-1",
+                "metadata": {"trace_id": "trace-1", "task_id": "task-1"},
+            },
+        }
+
+        with patch("server_modules.run_service.run_state_repository.dispatch_repository_call", side_effect=lambda awaitable, operation: asyncio.run(awaitable)), \
+             patch("server_modules.run_service.outbox_service.emit_run_transition_event"), \
+             patch("server_modules.run_service.outbox_service.emit_artifact_created_event"), \
+             patch("server_modules.run_service.run_async_tool_call", side_effect=lambda coro: asyncio.run(coro)), \
+             patch("server_modules.project_tasks_service.update_task", new=AsyncMock()) as update_task_mock, \
+             patch("server_modules.project_tasks_service.add_task_comment", new=AsyncMock()) as add_comment_mock:
+            transition_live_run_status(
+                "run-1",
+                "failed",
+                run=run,
+                now_mono=7.5,
+                now_iso="2026-04-06T00:00:00Z",
+                terminal_statuses={"completed", "failed", "timeout"},
+                local_queue_lock=__import__("threading").Lock(),
+                local_pending_run_ids=[],
+                local_claimed_runs={},
+                archive_run_if_terminal_fn=lambda run_id, payload: None,
+                remove_live_run_state_fn=lambda run_id: None,
+                sync_local_runtime_state_snapshot_fn=lambda: None,
+                persist_live_run_state_fn=lambda run_id, payload: None,
+                run_queue_index={},
+                metrics_add_fn=lambda key, value: None,
+                metrics_inc_fn=lambda key, value=1: None,
+            )
+
+        update_task_mock.assert_awaited_once_with(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            task_id="task-1",
+            status="blocked",
+        )
+        add_comment_mock.assert_awaited_once()
+        comment_kwargs = add_comment_mock.await_args.kwargs
+        self.assertEqual(comment_kwargs["task_id"], "task-1")
+        self.assertIn("run-1", comment_kwargs["body"])
+        self.assertIn("Provider request failed: rate limited.", comment_kwargs["body"])
+
     def test_transition_live_run_status_settles_deployed_agent_cost_cap(self):
         run = {
             "run_id": "run-1",
