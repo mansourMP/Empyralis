@@ -46,7 +46,7 @@ import { Check, Copy, Plus } from "lucide-react";
 import {
   createWorkspaceInvite,
   buildWorkspaceInviteJoinUrl,
-  useOwnRole,
+  useOwnWorkspaceRole,
   WORKSPACE_ROLES,
   type WorkspaceMember,
   type WorkspaceRole,
@@ -74,7 +74,13 @@ export function ProjectMemberAdd({
    *  data on every load of this page. */
   workspaceMembers: WorkspaceMember[];
 }) {
-  const ownRole = useOwnRole(workspaceMembers);
+  // Reads the account shell bootstrap (see members-data.ts's
+  // useOwnWorkspaceRole doc comment) instead of matching `workspaceMembers`
+  // against a client-side /api/auth/me call — that pairing used to be why
+  // this trigger sat missing for seconds after a hard refresh (MAN). This
+  // control still isn't in the DOM until it resolves — it just resolves in
+  // the same paint as the rest of the page now, not several seconds later.
+  const ownRole = useOwnWorkspaceRole(workspaceId);
   const { members: projectMembers, loading: projectMembersLoading, refresh: refreshProjectMembers } =
     useProjectMembers(workspaceId, projectId);
 

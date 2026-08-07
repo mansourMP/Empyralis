@@ -25,8 +25,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
-import { me } from "@/lib/auth/auth-client";
-import { useOwnRole, WORKSPACE_ROLE_ORDER, type WorkspaceMember } from "./members-data";
+import { useOwnAccountId, useOwnWorkspaceRole, WORKSPACE_ROLE_ORDER } from "./members-data";
 
 export type ProjectMember = {
   id: string;
@@ -144,37 +143,40 @@ export async function addProjectMember(
  *  otherwise always fail for that reader (CLAUDE.md: "no dead controls"),
  *  never to gate the actual write, which the server still does regardless.
  *
- *  Returns `null` while still resolving (own role, or project membership,
- *  not yet loaded) — same "stay unrendered rather than flash on then off"
- *  contract useOwnRole's own doc comment establishes, so a viewer never sees
- *  a create/edit/delete control blink into view for a moment on page load. */
+ *  ownRole and myUserId now come from useOwnWorkspaceRole/useOwnAccountId
+ *  (members-data.ts) — the account shell bootstrap RootLayout already
+ *  resolved server-side, not a client fetch — so BOTH resolve synchronously
+ *  on the very first render, same paint as the rest of the page. That fixed
+ *  a real bug (MAN: project header's New/invite controls, and this same
+ *  hook's Documents-view callers, sitting empty for 3-4s after a hard
+ *  refresh): the old useOwnRole(workspaceMembers) needed its own
+ *  GET /api/workspaces/{id}/members PLUS a redundant GET /api/auth/me
+ *  before it had an answer, and this hook waited on both before returning
+ *  anything but `null`.
+ *
+ *  The one genuine remaining wait is useProjectMembers — whether THIS
+ *  account has an explicit project_memberships row is per-project data the
+ *  account shell bootstrap has no reason to carry, so it's still a real
+ *  fetch. But an owner's answer never depends on it (enforce_project_access's
+ *  RBAC short-circuit doesn't look at project_memberships for one either),
+ *  and neither does a sub-`member` role's `false` — both branches return
+ *  before touching `projectMembersLoading` below, so only the one case that
+ *  actually needs the project-row lookup (a `member`-role workspace user
+ *  who may or may not have been added to this specific project) still shows
+ *  `null` while it resolves. Same "stay unrendered rather than flash on
+ *  then off" contract as before, just no longer paid by the two cases that
+ *  never needed it. */
 export function useCanWriteProject(
   workspaceId: string,
   projectId: string,
-  workspaceMembers: WorkspaceMember[],
 ): boolean | null {
-  const ownRole = useOwnRole(workspaceMembers);
+  const ownRole = useOwnWorkspaceRole(workspaceId);
+  const myUserId = useOwnAccountId();
   const { members: projectMembers, loading: projectMembersLoading } = useProjectMembers(workspaceId, projectId);
-  const [myUserId, setMyUserId] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    void me()
-      .then((data) => {
-        if (cancelled) return;
-        const user = (data as { user?: { id?: string } } | null)?.user;
-        setMyUserId(user?.id ? String(user.id) : null);
-      })
-      .catch(() => {
-        if (!cancelled) setMyUserId(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  if (ownRole === null || projectMembersLoading) return null;
+  if (ownRole === null) return null;
   if (ownRole === "owner") return true;
   if (WORKSPACE_ROLE_ORDER[ownRole] < WORKSPACE_ROLE_ORDER.member) return false;
+  if (projectMembersLoading) return null;
   return projectMembers.some((m) => m.user_id === myUserId);
 }

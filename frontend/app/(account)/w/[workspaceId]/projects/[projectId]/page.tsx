@@ -210,7 +210,7 @@ export default function ProjectDetailPage() {
   // never a disabled control (CLAUDE.md: no dead controls). See
   // project-members-data.ts's own doc comment for the exact policy this
   // mirrors (auth.enforce_project_access).
-  const canWriteProject = useCanWriteProject(workspaceId, projectId, members);
+  const canWriteProject = useCanWriteProject(workspaceId, projectId);
   // Statuses written but not yet confirmed by a refetch — see
   // handleStatusChange. Empty in the steady state, so this is a no-op merge
   // except for the few hundred ms a PATCH is in flight.
@@ -488,7 +488,7 @@ export default function ProjectDetailPage() {
             default hardware. See ProjectSettings.tsx's own header for why
             this row (not the Agents-only Properties drawer) is this
             control's home. */}
-        <ProjectSettings workspaceId={workspaceId} project={project} workspaceMembers={members} onChanged={refreshProjects} />
+        <ProjectSettings workspaceId={workspaceId} project={project} onChanged={refreshProjects} />
         {/* Far RIGHT (margin-left:auto in the stylesheet, on BOTH
             .fleet-toolbar-actions and .fleet-view-options — see
             fleet-theme.css). Every control in here acts on the right-hand
