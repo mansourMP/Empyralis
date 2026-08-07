@@ -954,6 +954,10 @@ class GatewayRegistrationRenameRequest(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=80)
 
 
+class GatewayProjectSharingOptInRequest(BaseModel):
+    opted_in: bool
+
+
 class DedicatedWorkstationBindRequest(BaseModel):
     workspace_id: Optional[str] = Field(default=None, min_length=1)
     policy_id: str = Field(min_length=1, max_length=160)
@@ -2699,6 +2703,46 @@ async def rename_gateway_registration_route(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/gateway/registrations/{gateway_id}/project-sharing-opt-in")
+async def set_gateway_project_sharing_opt_in_route(
+    gateway_id: str,
+    body: GatewayProjectSharingOptInRequest,
+    current_user=Depends(require_api_key),
+):
+    """The Hardware page's per-machine sharing toggle. Deliberately gated at
+    `minimum_role="viewer"` (workspace membership only), NOT "owner" like
+    rotate/revoke/rename above — the real authorization check here isn't a
+    workspace role at all, it's "are you this specific machine's paired
+    owner", enforced inside gateway_registry_service.
+    set_gateway_project_sharing_opt_in via gateway_state_repository's
+    user_id scope match. A workspace owner-role admin who isn't this box's
+    owner is rejected exactly like any other member — CLAUDE.md's law names
+    the hardware's OWNER, not a workspace role, as the one who can flip
+    this."""
+    registration = gateway_state_repository.get_gateway_registration(gateway_id)
+    if not registration:
+        raise HTTPException(status_code=404, detail="Gateway registration was not found.")
+    registration_workspace_id = str(registration.get("workspace_id") or "").strip() or "default"
+    resolved_workspace_id = enforce_workspace_access(
+        current_user,
+        registration_workspace_id,
+        minimum_role="viewer",
+    )
+    if resolved_workspace_id != registration_workspace_id:
+        raise HTTPException(status_code=403, detail="Workspace is not accessible for this user.")
+    tenant_id = workspace_tenant_id(current_user, resolved_workspace_id)
+    try:
+        return gateway_registry_service.set_gateway_project_sharing_opt_in(
+            gateway_id=gateway_id,
+            opted_in=body.opted_in,
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            user_id=str((current_user or {}).get("user_id") or "").strip(),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @router.post("/gateway/registrations/{gateway_id}/dedicated-workstation/bind")

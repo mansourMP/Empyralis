@@ -1968,6 +1968,98 @@ def rename_gateway_registration(
     return _registration_from_row(row)
 
 
+# Metadata key: whether this gateway's OWNER has explicitly opted this
+# specific machine into project-level compute sharing. Absent -- true for
+# every registration created before this field existed, and for any fresh
+# pairing -- means NOT opted in: deny-by-default, per CLAUDE.md's "Hardware
+# attaches to its owner, never to the project" law. Read by
+# gateway_project_sharing_opted_in below; written only by
+# set_gateway_project_sharing_opt_in, which is owner-scope-checked the same
+# way rename_gateway_registration is just above.
+_PROJECT_SHARING_OPT_IN_METADATA_KEY = "project_sharing_opt_in"
+
+
+def gateway_project_sharing_opted_in(gateway_id: str, *, db_path: Optional[Path | str] = None) -> bool:
+    """True only when this gateway's registration carries an explicit,
+    owner-set `metadata.project_sharing_opt_in = True`. A missing
+    registration, a missing/falsy key, or any other value all resolve to
+    False -- this is the deny-by-default gate both projects_repository.
+    set_project_default_gateway (at SET time) and specialist_runtime_context.
+    resolve_specialist_runtime_context (at EVERY resolution, so a
+    default_gateway_id stored before this field existed -- or before its
+    owner opted in -- is never grandfathered in) must pass before a
+    project's default-gateway fallback is allowed to touch this machine.
+    Never raises -- a lookup failure here fails CLOSED (not opted in),
+    never open."""
+    try:
+        registration = get_gateway_registration(gateway_id, db_path=db_path)
+    except Exception:
+        return False
+    if not registration:
+        return False
+    metadata = registration.get("metadata") if isinstance(registration.get("metadata"), dict) else {}
+    return metadata.get(_PROJECT_SHARING_OPT_IN_METADATA_KEY) is True
+
+
+def set_gateway_project_sharing_opt_in(
+    *,
+    gateway_id: str,
+    opted_in: bool,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: str,
+    db_path: Optional[Path | str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Owner-only per-machine opt-in into project-level compute sharing --
+    the flag gateway_project_sharing_opted_in reads, and the ONLY way it is
+    ever set to True. Default OFF: a fresh pairing, or any registration
+    that predates this field, carries no key at all, which
+    gateway_project_sharing_opted_in already treats as False.
+
+    Scope-checked against tenant_id/workspace_id the same way
+    rename_gateway_registration is above, but user_id is REQUIRED here (not
+    optional) -- sharing this machine's compute with a project is a
+    decision only the box's actual paired owner can make, unlike a
+    cosmetic rename a workspace admin might reasonably do on someone else's
+    behalf. Returns None (no-op) if the registration doesn't exist or the
+    caller isn't its owner -- the service layer above turns that into an
+    honest 403/404, never a silent success."""
+    clean_user_id = str(user_id or "").strip()
+    if not clean_user_id:
+        return None
+    with _DB_LOCK:
+        conn = _connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT * FROM gateway_registrations WHERE gateway_id = ?",
+                (str(gateway_id or "").strip(),),
+            ).fetchone()
+            registration = _registration_from_row(row)
+            if registration is None:
+                return None
+            if not _registration_scope_matches(
+                registration, tenant_id=tenant_id, workspace_id=workspace_id, user_id=clean_user_id,
+            ):
+                return None
+            now_iso = _utc_now_iso()
+            merged_metadata = dict(registration.get("metadata") or {})
+            merged_metadata[_PROJECT_SHARING_OPT_IN_METADATA_KEY] = bool(opted_in)
+            merged_metadata["project_sharing_opt_in_at"] = now_iso
+            merged_metadata["project_sharing_opt_in_by"] = clean_user_id
+            conn.execute(
+                "UPDATE gateway_registrations SET metadata = ?, updated_at = ? WHERE gateway_id = ?",
+                (_json_dumps(merged_metadata), now_iso, str(gateway_id or "").strip()),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM gateway_registrations WHERE gateway_id = ?",
+                (str(gateway_id or "").strip(),),
+            ).fetchone()
+        finally:
+            conn.close()
+    return _registration_from_row(row)
+
+
 def record_gateway_event(
     *,
     gateway_id: str,

@@ -278,6 +278,14 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
         "autonomous_agent_setup_warning_acknowledged": bool(
             metadata.get("autonomous_agent_setup_warning_acknowledged")
         ),
+        # CLAUDE.md's "Hardware attaches to its owner, never to the project"
+        # per-machine opt-in — see gateway_state_repository.
+        # gateway_project_sharing_opted_in (the actual enforcement gate) and
+        # set_gateway_project_sharing_opt_in (the only writer, owner-only).
+        # `is True` (not truthy) so a pre-existing registration with no key
+        # at all reads as an honest False, never an accidental True from
+        # some other truthy leftover value.
+        "project_sharing_opt_in": metadata.get("project_sharing_opt_in") is True,
         "capabilities": list(registration.get("capabilities") or []),
         "llm_runtimes": _llm_runtime_summary(metadata),
         "journal_cursor": int(registration.get("journal_cursor") or 0),
@@ -574,3 +582,39 @@ def rename_gateway_registration(
     if not renamed:
         raise ValueError("Gateway registration was not found.")
     return gateway_registration_public_payload(renamed)
+
+
+def set_gateway_project_sharing_opt_in(
+    *,
+    gateway_id: str,
+    opted_in: bool,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    """The Hardware page's per-machine sharing toggle (CLAUDE.md: "Sharing a
+    machine with a project is an explicit per-machine opt-in by the
+    hardware's owner, default off"). Unlike rename/rotate/revoke above --
+    which a workspace `owner`-ROLE admin may do on any box in the workspace
+    -- this specifically requires the caller to be the box's actual paired
+    user_id, checked by gateway_state_repository.set_gateway_project_sharing_
+    opt_in's scope match. A workspace admin who is not this machine's owner
+    gets the same "not found" ValueError a stranger would -- deliberately
+    indistinguishable from 404, so this never leaks whether a gateway_id is
+    real to someone who has no claim on it."""
+    clean_user_id = str(user_id or "").strip()
+    if not clean_user_id:
+        raise ValueError("A signed-in user is required to change sharing settings.")
+    registration = gateway_state_repository.get_gateway_registration(gateway_id)
+    if not registration:
+        raise ValueError("Gateway registration was not found.")
+    updated = gateway_state_repository.set_gateway_project_sharing_opt_in(
+        gateway_id=gateway_id,
+        opted_in=opted_in,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        user_id=clean_user_id,
+    )
+    if not updated:
+        raise ValueError("Gateway registration was not found, or you are not this machine's owner.")
+    return gateway_registration_public_payload(updated)

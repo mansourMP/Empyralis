@@ -231,12 +231,46 @@ async def resolve_specialist_runtime_context(
                 project_id, exc,
             )
         if project_default_gateway_id:
-            if not gateway_binding and mode in ("cli_subscription", "local"):
-                gateway_binding = project_default_gateway_id
-                source["gateway_binding_from"] = "project_default"
-            if not preferred_gateway_id:
-                preferred_gateway_id = project_default_gateway_id
-                source["preferred_gateway_id_from"] = "project_default"
+            # CLAUDE.md: "Hardware attaches to its owner, never to the
+            # project" — sharing is a per-machine opt-in by the hardware's
+            # OWNER, default off, checked live on EVERY resolution (never
+            # cached, never trusted from set-time). This is what stops a
+            # stale/un-consented project.metadata.default_gateway_id from
+            # ever being grandfathered into access: set_project_default_
+            # gateway already rejects an un-opted-in machine at SET time,
+            # but a value written before that check existed — or whose
+            # owner has since revoked consent — must be caught here too, on
+            # the one path that actually hands hardware to a turn. A denial
+            # leaves gateway_binding/preferred_gateway_id exactly as empty
+            # as they'd be with no project default at all — never an
+            # error, never a silent borrow, just "no fallback applied",
+            # exactly the fail-safe posture the comment above already
+            # documents for a missing project/default/lookup failure. The
+            # agent still runs — cli_subscription/local turns fall through
+            # to their own existing "no gateway bound" handling (same as if
+            # no default existed at all — an unrelated, pre-existing
+            # billing-lane rule this change deliberately leaves alone, see
+            # sage_agent_runtime_service.py's _dispatch_*_gateway_brain
+            # "HARD RULE — no fallback" doctrine); platform_credits/byok_api
+            # turns (the common case) simply run with no preferred_gateway_
+            # id, i.e. cloud-side, which is precisely the "runs cloud-side
+            # with fewer capabilities" degrade the law calls for.
+            from server_modules import gateway_state_repository as gw_state_repo
+
+            if gw_state_repo.gateway_project_sharing_opted_in(project_default_gateway_id):
+                if not gateway_binding and mode in ("cli_subscription", "local"):
+                    gateway_binding = project_default_gateway_id
+                    source["gateway_binding_from"] = "project_default"
+                if not preferred_gateway_id:
+                    preferred_gateway_id = project_default_gateway_id
+                    source["preferred_gateway_id_from"] = "project_default"
+            else:
+                logger.info(
+                    "specialist context: project %s default gateway %s has no owner opt-in — "
+                    "no hardware fallback applied, turn runs cloud-side",
+                    project_id, project_default_gateway_id,
+                )
+                source["project_default_gateway_denied"] = "no_owner_opt_in"
 
     return SpecialistRuntimeContext(
         agent_install_id=active_id,
