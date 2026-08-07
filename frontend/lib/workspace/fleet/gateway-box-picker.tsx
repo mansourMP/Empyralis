@@ -81,6 +81,14 @@ export type FleetGateway = {
    *  build, or one that hasn't heartbeated since this field shipped) — never
    *  guess a value for that case. */
   shell_full_access_locally_enabled?: boolean | null;
+  /** CLAUDE.md's per-machine opt-in: "Hardware attaches to its owner, never
+   *  to the project" — sharing a machine with a project is an explicit,
+   *  default-off opt-in the machine's OWNER sets here (server_modules.
+   *  gateway_registry_service.set_gateway_project_sharing_opt_in). Only
+   *  true when the owner explicitly flipped it on; absent/false (including
+   *  on every registration from before this field existed) means not
+   *  shared — never assume true for a missing value. */
+  project_sharing_opt_in?: boolean;
   llm_runtimes?: LlmRuntimeSummary | null;
   /** Optional — a concurrent backend change adds this to the gateway
    *  registration payload. Absent on older backends/gateway builds; every

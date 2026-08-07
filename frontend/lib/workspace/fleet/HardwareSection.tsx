@@ -403,6 +403,54 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
     );
   };
 
+  // CLAUDE.md's per-machine opt-in ("Hardware attaches to its owner, never
+  // to the project" — sharing is explicit, default off, set by the box's
+  // owner). One toggle, no confirmation dialog — a standing product law
+  // rules out an approve/deny popup here, and this is exactly the kind of
+  // one-time owner-set opt-in that law carves out as fine. The backend
+  // (server_modules.gateway_registry_service.set_gateway_project_sharing_
+  // opt_in) is the real gate — it rejects the write if the signed-in user
+  // isn't this specific machine's paired owner, so a non-owner clicking
+  // this (a workspace admin viewing someone else's box) gets a real error
+  // back, not a silently-ignored toggle.
+  const [sharingBusyId, setSharingBusyId] = useState<string | null>(null);
+  const handleToggleSharing = async (gatewayId: string, next: boolean) => {
+    setSharingBusyId(gatewayId);
+    const applySharing = (opted: boolean) =>
+      setRegs((current) =>
+        current.map((r) =>
+          String(r.gateway_id || r.id || "") === gatewayId ? { ...r, project_sharing_opt_in: opted } : r,
+        ),
+      );
+    applySharing(next);
+    try {
+      const res = await fetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/project-sharing-opt-in`, {
+        method: "POST",
+        credentials: "include",
+        headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+        body: JSON.stringify({ opted_in: next }),
+      });
+      if (!res.ok) {
+        let detail: string | null = null;
+        try {
+          const body = await res.json();
+          if (typeof body?.detail === "string" && body.detail.trim()) detail = body.detail.trim();
+        } catch {
+          // Non-JSON error body — nothing to extract.
+        }
+        throw new Error(detail || "Couldn’t update sharing for this computer.");
+      }
+    } catch (e) {
+      // Revert the optimistic flip — this computer's actual sharing state
+      // never changed if the request failed, so the row must not keep
+      // showing the toggled state.
+      applySharing(!next);
+      setError(e instanceof Error ? e.message : "Couldn’t update sharing for this computer.");
+    } finally {
+      setSharingBusyId(null);
+    }
+  };
+
   const cloudServers = regs.filter((r) => r.hardware_kind === "cloud_vps");
   const devices = regs.filter((r) => r.hardware_kind !== "cloud_vps");
 
@@ -506,6 +554,36 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
             </span>
           ) : null}
           <StatusChip tone={presentation.tone} label={presentation.label} />
+          {/* Per-machine project-sharing opt-in (CLAUDE.md: "Hardware
+              attaches to its owner, never to the project") — default off,
+              set here by the machine's owner, one click, no confirmation
+              dialog (a standing product law rules those out; this IS the
+              law's own carve-out for a one-time owner opt-in). The backend
+              is the real gate: a non-owner's click still reaches the
+              endpoint but gets rejected there, surfaced as the row-level
+              error banner via handleToggleSharing's catch. */}
+          <span
+            style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <span className="fleet-hw-list-version">Share</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={Boolean(r.project_sharing_opt_in)}
+              aria-label={`${r.project_sharing_opt_in ? "Stop sharing" : "Share"} ${
+                r.display_name || r.hardware_label || r.platform || "this computer"
+              } with this workspace's projects`}
+              title={
+                r.project_sharing_opt_in
+                  ? "Shared — projects in this workspace can use this computer as their default. Click to stop sharing."
+                  : "Not shared — projects in this workspace can't use this computer until you share it."
+              }
+              className={`fleet-toggle${r.project_sharing_opt_in ? " is-on" : ""}`}
+              disabled={sharingBusyId === gatewayId}
+              onClick={() => void handleToggleSharing(gatewayId, !r.project_sharing_opt_in)}
+            />
+          </span>
           <HardwareRowMenu
             label={r.display_name || r.hardware_label || r.platform || "computer"}
             isOpen={openMenuId === gatewayId}

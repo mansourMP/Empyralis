@@ -112,13 +112,21 @@ def _bundle(*, metadata=None, project_id="project-1", label="Rex"):
     }
 
 
-def _patched(bundle, project_result=None, project_side_effect=None):
-    """Context manager stack shared by every test below — patches the three
+def _patched(bundle, project_result=None, project_side_effect=None, gateway_opted_in=True):
+    """Context manager stack shared by every test below — patches the four
     repository calls resolve_specialist_runtime_context makes, in the exact
     module paths it imports them from (server_modules.agent_registry_
-    repository / server_modules.projects_repository), so patching works
-    whether the call resolves the module at import time or at call time (this
-    module does both, locally, inside the function body)."""
+    repository / server_modules.projects_repository /
+    server_modules.gateway_state_repository), so patching works whether the
+    call resolves the module at import time or at call time (this module
+    does both, locally, inside the function body).
+
+    gateway_opted_in defaults to True: every pre-existing test in this file
+    predates the hardware-owner-opt-in gate and is exercising the OTHER
+    fallback logic (own-binding-wins, mode scoping, fail-safe lookup
+    failures), so it should behave exactly as before unless a test
+    deliberately passes gateway_opted_in=False to exercise the new gate
+    itself (see GatewayOwnerOptInGateTests below)."""
     kwargs = {}
     if project_side_effect is not None:
         kwargs["side_effect"] = project_side_effect
@@ -134,6 +142,10 @@ def _patched(bundle, project_result=None, project_side_effect=None):
             new=AsyncMock(return_value=bundle),
         ),
         patch("server_modules.projects_repository.get_project", new=AsyncMock(**kwargs)),
+        patch(
+            "server_modules.gateway_state_repository.gateway_project_sharing_opted_in",
+            return_value=gateway_opted_in,
+        ),
     )
 
 
@@ -147,8 +159,8 @@ class ProjectDefaultGatewayFallbackTests(unittest.IsolatedAsyncioTestCase):
                 "preferred_gateway_id": "pref-own",
             },
         )
-        p1, p2, p3 = _patched(bundle, project_result={"default_gateway_id": "gw-project-default"})
-        with p1, p2, p3 as mock_get_project:
+        p1, p2, p3, p4 = _patched(bundle, project_result={"default_gateway_id": "gw-project-default"})
+        with p1, p2, p3 as mock_get_project, p4:
             result = await ctx.resolve_specialist_runtime_context(
                 workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
             )
@@ -162,8 +174,8 @@ class ProjectDefaultGatewayFallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_project_default_used_when_agent_has_none(self):
         """Agent carries neither field -> both inherit the project's default."""
         bundle = _bundle()
-        p1, p2, p3 = _patched(bundle, project_result={"default_gateway_id": "gw-project-default"})
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patched(bundle, project_result={"default_gateway_id": "gw-project-default"})
+        with p1, p2, p3, p4:
             result = await ctx.resolve_specialist_runtime_context(
                 workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
             )
@@ -179,8 +191,8 @@ class ProjectDefaultGatewayFallbackTests(unittest.IsolatedAsyncioTestCase):
         though preferred_gateway_id (tool dispatch, mode-independent) still
         inherits."""
         bundle = _bundle(metadata={"model_config": {"mode": "platform_credits", "gateway_binding": ""}})
-        p1, p2, p3 = _patched(bundle, project_result={"default_gateway_id": "gw-project-default"})
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patched(bundle, project_result={"default_gateway_id": "gw-project-default"})
+        with p1, p2, p3, p4:
             result = await ctx.resolve_specialist_runtime_context(
                 workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
             )
@@ -192,8 +204,8 @@ class ProjectDefaultGatewayFallbackTests(unittest.IsolatedAsyncioTestCase):
         """The project exists but carries no default -> identical to a
         workspace with no U3-K feature at all."""
         bundle = _bundle()
-        p1, p2, p3 = _patched(bundle, project_result={"default_gateway_id": ""})
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patched(bundle, project_result={"default_gateway_id": ""})
+        with p1, p2, p3, p4:
             result = await ctx.resolve_specialist_runtime_context(
                 workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
             )
@@ -206,8 +218,8 @@ class ProjectDefaultGatewayFallbackTests(unittest.IsolatedAsyncioTestCase):
         """An agent with no project at all (project_id="") must not even
         attempt the lookup."""
         bundle = _bundle(project_id="")
-        p1, p2, p3 = _patched(bundle, project_result={"default_gateway_id": "gw-project-default"})
-        with p1, p2, p3 as mock_get_project:
+        p1, p2, p3, p4 = _patched(bundle, project_result={"default_gateway_id": "gw-project-default"})
+        with p1, p2, p3 as mock_get_project, p4:
             result = await ctx.resolve_specialist_runtime_context(
                 workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
             )
@@ -220,8 +232,8 @@ class ProjectDefaultGatewayFallbackTests(unittest.IsolatedAsyncioTestCase):
         """get_project returning None (project id no longer resolves, e.g.
         deleted) must fail safe rather than raise or crash the turn."""
         bundle = _bundle()
-        p1, p2, p3 = _patched(bundle, project_result=None)
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patched(bundle, project_result=None)
+        with p1, p2, p3, p4:
             result = await ctx.resolve_specialist_runtime_context(
                 workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
             )
@@ -234,14 +246,102 @@ class ProjectDefaultGatewayFallbackTests(unittest.IsolatedAsyncioTestCase):
         never propagate out of context resolution — it must degrade to no
         fallback, exactly like "no project default set"."""
         bundle = _bundle()
-        p1, p2, p3 = _patched(bundle, project_side_effect=RuntimeError("db down"))
-        with p1, p2, p3:
+        p1, p2, p3, p4 = _patched(bundle, project_side_effect=RuntimeError("db down"))
+        with p1, p2, p3, p4:
             result = await ctx.resolve_specialist_runtime_context(
                 workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
             )
         self.assertIsNotNone(result)
         self.assertEqual(result.gateway_binding, "")
         self.assertEqual(result.preferred_gateway_id, "")
+
+
+class GatewayOwnerOptInGateTests(unittest.IsolatedAsyncioTestCase):
+    """CLAUDE.md: 'Hardware attaches to its owner, never to the project' —
+    sharing is a per-machine opt-in by the hardware's owner, default off.
+    projects_repository.set_project_default_gateway rejects an un-opted-in
+    machine at SET time (see test_projects_repository_hardware_owner_opt_in.
+    py), but resolution must ALSO re-check live, on every turn — never trust
+    a value that got in before the check existed, or whose owner has since
+    revoked consent. gateway_state_repository.gateway_project_sharing_
+    opted_in is the single gate both paths call; these tests patch it
+    directly (via _patched(..., gateway_opted_in=...)) to isolate THIS
+    gate's behavior from project-lookup mechanics already covered above."""
+
+    async def test_un_opted_in_project_default_grants_no_hardware(self):
+        """The project HAS a default_gateway_id, and the agent has no
+        binding of its own -- but the machine's owner never opted in. Must
+        NOT raise, must NOT fill gateway_binding/preferred_gateway_id, and
+        must record why in `source` (never a silent, unexplained no-op)."""
+        bundle = _bundle()  # mode=cli_subscription, gateway_binding=""
+        p1, p2, p3, p4 = _patched(
+            bundle, project_result={"default_gateway_id": "gw-not-opted-in"}, gateway_opted_in=False,
+        )
+        with p1, p2, p3, p4:
+            result = await ctx.resolve_specialist_runtime_context(
+                workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.gateway_binding, "")
+        self.assertEqual(result.preferred_gateway_id, "")
+        self.assertNotIn("gateway_binding_from", result.source)
+        self.assertNotIn("preferred_gateway_id_from", result.source)
+        self.assertEqual(result.source.get("project_default_gateway_denied"), "no_owner_opt_in")
+
+    async def test_un_opted_in_project_default_denies_platform_credits_agent_too(self):
+        """The common case: a platform_credits specialist with no gateway
+        preference of its own must not be pinned to an un-consented box's
+        preferred_gateway_id either -- it simply runs with none (cloud-
+        side), never a silent borrow of that hardware."""
+        bundle = _bundle(metadata={"model_config": {"mode": "platform_credits", "gateway_binding": ""}})
+        p1, p2, p3, p4 = _patched(
+            bundle, project_result={"default_gateway_id": "gw-not-opted-in"}, gateway_opted_in=False,
+        )
+        with p1, p2, p3, p4:
+            result = await ctx.resolve_specialist_runtime_context(
+                workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
+            )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.gateway_binding, "")
+        self.assertEqual(result.preferred_gateway_id, "")
+
+    async def test_opted_in_project_default_still_grants_hardware(self):
+        """Sanity check on the gate itself: when the flag says opted in,
+        behavior is unchanged from the pre-existing fallback (already
+        covered in detail by ProjectDefaultGatewayFallbackTests, which all
+        pass gateway_opted_in=True via _patched's default)."""
+        bundle = _bundle()
+        p1, p2, p3, p4 = _patched(
+            bundle, project_result={"default_gateway_id": "gw-opted-in"}, gateway_opted_in=True,
+        )
+        with p1, p2, p3, p4:
+            result = await ctx.resolve_specialist_runtime_context(
+                workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
+            )
+        self.assertEqual(result.gateway_binding, "gw-opted-in")
+        self.assertEqual(result.preferred_gateway_id, "gw-opted-in")
+
+    async def test_agents_own_explicit_binding_never_needs_opt_in_check(self):
+        """An agent's own explicit gateway_binding/preferred_gateway_id
+        (set directly on the agent, not inherited from a project default)
+        must never be gated by this check at all -- the opt-in gate only
+        ever applies to the PROJECT-DEFAULT fallback path, never to an
+        agent's own deliberate configuration. gateway_project_sharing_
+        opted_in is mocked to always return False here specifically to
+        prove it is never even consulted for this case."""
+        bundle = _bundle(
+            metadata={
+                "model_config": {"mode": "cli_subscription", "gateway_binding": "gw-own"},
+                "preferred_gateway_id": "pref-own",
+            },
+        )
+        p1, p2, p3, p4 = _patched(bundle, gateway_opted_in=False)
+        with p1, p2, p3, p4:
+            result = await ctx.resolve_specialist_runtime_context(
+                workspace_id="ws-1", tenant_id="t1", active_agent_install_id="install-1",
+            )
+        self.assertEqual(result.gateway_binding, "gw-own")
+        self.assertEqual(result.preferred_gateway_id, "pref-own")
 
 
 if __name__ == "__main__":

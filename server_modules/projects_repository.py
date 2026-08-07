@@ -451,6 +451,17 @@ async def set_project_default_gateway(
     business-logic failure in this file is). An empty string / None clears
     the default without any validation — clearing is always safe.
 
+    ALSO requires the gateway's owner to have explicitly opted this specific
+    machine into project sharing (gateway_state_repository.
+    gateway_project_sharing_opted_in — CLAUDE.md's "Hardware attaches to its
+    owner, never to the project" law: sharing is a per-machine opt-in by the
+    hardware's owner, default off). Belonging to the workspace is not
+    consent; only that flag is. This is defense-in-depth, not the primary
+    enforcement point — resolve_specialist_runtime_context re-checks the
+    SAME flag on every turn, so even if a value already got stored here
+    before this check existed (or the owner later revokes consent), it can
+    never be used without live consent at resolution time either.
+
     Merges into `metadata` via a single atomic jsonb_set/remove — same
     merge-not-replace discipline as project_tasks_service.add_task_comment's
     own jsonb_set — so other keys already living there (icon, tint, ...)
@@ -465,11 +476,16 @@ async def set_project_default_gateway(
     clean_gateway_id = str(gateway_id or "").strip()
 
     if clean_gateway_id:
-        from server_modules import fleet_tools
+        from server_modules import fleet_tools, gateway_state_repository
 
         check = fleet_tools.gateway_resolves_in_workspace(clean_gateway_id, resolved_workspace_id)
         if not check.get("ok"):
             raise ValueError(str(check.get("error") or "Gateway does not resolve in this workspace."))
+        if not gateway_state_repository.gateway_project_sharing_opted_in(clean_gateway_id):
+            raise ValueError(
+                "This machine's owner hasn't shared it with projects yet. Ask them to turn on "
+                "sharing from the machine's Hardware settings, or choose a different machine."
+            )
 
     row = await control_plane_repository.rls_fetchrow(
         pool,

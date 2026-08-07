@@ -66,6 +66,30 @@ def _resolve_gateway_display_name(gateway_id: Optional[str]) -> Optional[str]:
         return None
 
 
+def _default_gateway_shared(gateway_id: Optional[str]) -> bool:
+    """Whether a project's saved default_gateway_id is actually LIVE right
+    now — its owner has opted this machine into project sharing (CLAUDE.md:
+    "Hardware attaches to its owner, never to the project"). A stored value
+    can be inert: it predates the opt-in check, or its owner has since
+    revoked consent, and set_project_default_gateway/
+    resolve_specialist_runtime_context will never hand it to an agent
+    either way. Surfaced separately from default_gateway_label so the
+    frontend can show an honest "not currently shared" state instead of a
+    label that reads as active when it silently isn't — a control whose own
+    state lies about what it does is exactly the "no dead controls" failure
+    mode CLAUDE.md calls out. False (never a guess) on any empty id or
+    lookup failure."""
+    gid = str(gateway_id or "").strip()
+    if not gid:
+        return False
+    try:
+        from server_modules import gateway_state_repository
+
+        return gateway_state_repository.gateway_project_sharing_opted_in(gid)
+    except Exception:
+        return False
+
+
 # ── MAN-115: real per-project ACL wiring ─────────────────────────────────
 # The MAN-70 placeholder ("project member" == "workspace member", no
 # per-project table) is replaced by project_memberships
@@ -326,6 +350,7 @@ async def fleet_projects(
             # fetch — the project settings control and any other reader can
             # show "what's set" from this one response.
             p["default_gateway_label"] = _resolve_gateway_display_name(p.get("default_gateway_id"))
+            p["default_gateway_shared"] = _default_gateway_shared(p.get("default_gateway_id"))
         return {"ok": True, "projects": rows}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "projects": []}
@@ -438,6 +463,7 @@ async def fleet_patch_project(
         if project is None:
             return {"ok": False, "error": "Project not found."}
         project["default_gateway_label"] = _resolve_gateway_display_name(project.get("default_gateway_id"))
+        project["default_gateway_shared"] = _default_gateway_shared(project.get("default_gateway_id"))
         return {"ok": True, "project": project}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
