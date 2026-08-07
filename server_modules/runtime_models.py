@@ -448,7 +448,7 @@ class CredentialUpsertRequest(BaseModel):
             raise HTTPException(status_code=400, detail=f"Unsupported provider '{self.provider}'")
         if not self.label or len(self.label.strip()) < 2:
             raise HTTPException(status_code=400, detail="Credential label is required.")
-        if self.mode not in ["byok", "managed", "vertex"]:
+        if self.mode not in ["byok", "managed"]:
             raise HTTPException(status_code=400, detail="Unsupported credential mode.")
         if not isinstance(self.credentials, dict) or len(self.credentials) == 0:
             raise HTTPException(status_code=400, detail="Credential payload is required.")

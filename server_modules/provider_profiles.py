@@ -455,7 +455,6 @@ WORKSPACE_USER_FACING_AI_PROVIDERS = {
     "openai-codex",
     "anthropic",
     "gemini",
-    "vertex",
     "groq",
     "openrouter",
     "xai",
@@ -587,18 +586,6 @@ PROVIDER_CATALOG = {
         "models": ["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"],
         "provider_scopes": ["sage_personal", "workspace_api", "studio_safe"],
         "note": "Direct Gemini API key or Gemini CLI OAuth.",
-    },
-    "vertex": {
-        "label": "Google Vertex AI",
-        "auth": ["access_token", "project_id", "location"],
-        "auth_modes": [
-            {"id": "access_token", "label": "Access Token", "secret_required": True},
-        ],
-        "default_auth_mode": "access_token",
-        "default_model": "gemini-2.5-flash",
-        "models": ["gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.5-flash"],
-        "provider_scopes": ["sage_personal", "workspace_api", "studio_safe"],
-        "note": "Direct Vertex AI access token with project and region.",
     },
     "groq": {
         "label": "Groq",
@@ -802,14 +789,6 @@ PROVIDER_GOVERNANCE_CATALOG = {
         "residency": "Google-managed cloud regions.",
         "enterprise_risk_note": "Enterprise deployments should align Gemini usage with Google Cloud governance and data-processing terms.",
         "capability_labels": ["Fast", "Tools", "Multimodal"],
-        "local_self_hosted_compatible": False,
-    },
-    "vertex": {
-        "privacy_posture": "Managed Google Cloud API with project-scoped access.",
-        "jurisdiction": "Google Cloud project region",
-        "residency": "Selected Vertex project region.",
-        "enterprise_risk_note": "Region pinning helps, but operators still need to align project policy, logging, and retention controls.",
-        "capability_labels": ["Enterprise", "Tools", "Project-scoped"],
         "local_self_hosted_compatible": False,
     },
     "xai": {
@@ -1185,71 +1164,6 @@ PROVIDER_MODEL_CATALOG = {
             "supports_vision": True,
             "supports_json": True,
             "capability_labels": ["Low cost", "Fast", "Multimodal"],
-        },
-    },
-    "vertex": {
-        "gemini-3-pro-preview": {
-            "label": "Vertex Gemini 3 Pro Preview",
-            "context_window_tokens": 1048576,
-            "supports_tools": True,
-            "supports_vision": True,
-            "supports_json": True,
-            "supports_reasoning": True,
-            "capability_labels": ["Enterprise", "Preview", "Reasoning", "Tools"],
-        },
-        "gemini-3-flash-preview": {
-            "label": "Vertex Gemini 3 Flash Preview",
-            "context_window_tokens": 1048576,
-            "supports_tools": True,
-            "supports_vision": True,
-            "supports_json": True,
-            "supports_reasoning": True,
-            "capability_labels": ["Enterprise", "Preview", "Fast", "Tools"],
-        },
-        "gemini-2.5-flash": {
-            "label": "Vertex Gemini 2.5 Flash",
-            "context_window_tokens": 1000000,
-            "input_cost_per_1k_usd": 0.0003,
-            "output_cost_per_1k_usd": 0.0025,
-            "supports_tools": True,
-            "supports_reasoning": True,
-            "capability_labels": ["Enterprise", "Fast", "Tools"],
-        },
-        "gemini-2.5-flash-lite": {
-            "label": "Vertex Gemini 2.5 Flash-Lite",
-            "context_window_tokens": 1048576,
-            "supports_tools": True,
-            "supports_vision": True,
-            "supports_json": True,
-            "supports_reasoning": True,
-            "capability_labels": ["Enterprise", "Lowest cost", "Fast", "Tools"],
-        },
-        "gemini-2.5-pro": {
-            "label": "Vertex Gemini 2.5 Pro",
-            "context_window_tokens": 1000000,
-            "input_cost_per_1k_usd": 0.00125,
-            "output_cost_per_1k_usd": 0.01,
-            "supports_tools": True,
-            "supports_reasoning": True,
-            "capability_labels": ["Enterprise", "High quality", "Tools"],
-        },
-        "gemini-1.5-pro": {
-            "label": "Vertex Gemini 1.5 Pro",
-            "context_window_tokens": 2000000,
-            "input_cost_per_1k_usd": 0.00125,
-            "output_cost_per_1k_usd": 0.005,
-            "supports_tools": True,
-            "supports_reasoning": True,
-            "capability_labels": ["Enterprise", "Long context", "Tools"],
-        },
-        "gemini-1.5-flash": {
-            "label": "Vertex Gemini 1.5 Flash",
-            "context_window_tokens": 1000000,
-            "input_cost_per_1k_usd": 0.000075,
-            "output_cost_per_1k_usd": 0.0003,
-            "supports_tools": True,
-            "supports_reasoning": False,
-            "capability_labels": ["Enterprise", "Low cost", "Fast"],
         },
     },
     "groq": {
@@ -1868,8 +1782,6 @@ def normalize_provider_model_id(
     if provider_id == "anthropic" and token.startswith("anthropic/"):
         token = token.split("/", 1)[1]
     elif provider_id == "gemini" and token.startswith("gemini/"):
-        token = token.split("/", 1)[1]
-    elif provider_id == "vertex" and token.startswith("vertex_ai/"):
         token = token.split("/", 1)[1]
     elif provider_id in {"qwen", "deepseek", "mistral", "ollama", "ollama_cloud", "groq", "xai", "azure_openai", "custom_openai_compatible"} and "/" in token:
         provider_token, model_token = token.split("/", 1)
@@ -2862,99 +2774,6 @@ class GeminiAdapter(ProviderAdapter):
         return str(result.get("content") or "").strip()
 
 
-class VertexAdapter(ProviderAdapter):
-    provider_id = "vertex"
-
-    def _params(self, credentials: Dict[str, Any]):
-        token = credentials.get("access_token") or ""
-        project = credentials.get("project_id") or ""
-        location = credentials.get("location") or "us-central1"
-        if not token:
-            raise RuntimeError("Vertex access_token is required.")
-        if not project:
-            raise RuntimeError("Vertex requires project_id and location")
-        return str(token), str(project), str(location)
-
-    def validate(self, credentials: Dict[str, Any]) -> Dict[str, Any]:
-        token, project, location = self._params(credentials)
-        url = f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models"
-        res = http_json_request(url, headers={"Authorization": f"Bearer {token}"})
-        return _validation_result("Vertex", res)
-
-    def list_models(self, credentials: Dict[str, Any]) -> List[str]:
-        token, project, location = self._params(credentials)
-        url = f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models"
-        res = http_json_request(url, headers={"Authorization": f"Bearer {token}"})
-        body = res.get("json") or {}
-        out = []
-        for item in body.get("models", []) if isinstance(body.get("models"), list) else []:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name")
-            if isinstance(name, str):
-                out.append(name.split("/")[-1])
-        return sorted(set(out))
-
-    def list_model_records(self, credentials: Dict[str, Any]) -> List[Dict[str, Any]]:
-        token, project, location = self._params(credentials)
-        url = f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models"
-        res = http_json_request(url, headers={"Authorization": f"Bearer {token}"})
-        body = res.get("json") or {}
-        fetched_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        records: List[Dict[str, Any]] = []
-        seen: Set[str] = set()
-        for item in body.get("models", []) if isinstance(body.get("models"), list) else []:
-            record = normalize_live_model_record(
-                self.provider_id,
-                item,
-                source="vertex_models_api",
-                fetched_at=fetched_at,
-            )
-            if not record or record["id"] in seen:
-                continue
-            seen.add(record["id"])
-            records.append(record)
-        return sorted(records, key=lambda item: str(item.get("id") or ""))
-
-    def generate(self, system_prompt: str, user_input: str, model: str, credentials: Dict[str, Any]) -> str:
-        token, project, location = self._params(credentials)
-        url = (
-            f"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}"
-            f"/publishers/google/models/{quote_plus(model)}:generateContent"
-        )
-        payload = {
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": user_input}]}],
-        }
-        res = http_json_request(
-            url,
-            method="POST",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            payload=payload,
-            timeout=60,
-        )
-        body = res.get("json")
-        if not isinstance(body, dict):
-            raise RuntimeError("Vertex returned invalid response.")
-        candidates = body.get("candidates")
-        texts = []
-        if isinstance(candidates, list):
-            for cand in candidates:
-                if not isinstance(cand, dict):
-                    continue
-                content = cand.get("content", {})
-                if not isinstance(content, dict):
-                    continue
-                for part in content.get("parts", []) if isinstance(content.get("parts"), list) else []:
-                    if isinstance(part, dict):
-                        text = part.get("text")
-                        if isinstance(text, str) and text.strip():
-                            texts.append(text.strip())
-        if texts:
-            return "\n".join(texts)
-        raise RuntimeError("Vertex response did not include text content.")
-
-
 class BedrockAdapter(ProviderAdapter):
     provider_id = "bedrock"
 
@@ -3031,7 +2850,6 @@ PROVIDER_ADAPTERS: Dict[str, ProviderAdapter] = {
     "anthropic": AnthropicAdapter(),
     "claude_code_cli": ClaudeCodeCLIAdapter(),
     "gemini": GeminiAdapter(),
-    "vertex": VertexAdapter(),
     "groq": OpenAICompatibleAdapter("groq", "Groq"),
     "openrouter": OpenAICompatibleAdapter("openrouter", "OpenRouter"),
     "xai": OpenAICompatibleAdapter("xai", "xAI"),
@@ -4239,18 +4057,15 @@ def build_provider_runtime_truth(
             issue_code="gemini_cli_oauth_incomplete",
         )
 
-    for provider_id in ("vertex", "qwen", "deepseek", "mistral", "ollama_cloud"):
+    for provider_id in ("qwen", "deepseek", "mistral", "ollama_cloud"):
         entry = _entry(provider_id)
-        if provider_id == "vertex":
-            env_var = ""
-        else:
-            env_var, _ = _resolve_hosted_provider_api_key(
-                provider_id=provider_id,
-                tenant_id=tenant_id,
-                workspace_id=requested_workspace_id,
-                run_id=None,
-                purpose="provider_catalog_truth",
-            )
+        env_var, _ = _resolve_hosted_provider_api_key(
+            provider_id=provider_id,
+            tenant_id=tenant_id,
+            workspace_id=requested_workspace_id,
+            run_id=None,
+            purpose="provider_catalog_truth",
+        )
         if env_var:
             _register_provider_path(
                 entry,

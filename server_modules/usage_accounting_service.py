@@ -620,7 +620,7 @@ def normalize_provider_usage(
         visible_output_tokens = _nonnegative_int(raw.get("output_tokens"))
         reasoning_tokens = _nonnegative_int(raw.get("reasoning_output_tokens") or raw.get("thinking_tokens"))
         thinking_tokens = _nonnegative_int(raw.get("thinking_output_tokens"))
-    elif pid in {"gemini", "vertex"}:
+    elif pid == "gemini":
         prompt_tokens = _nonnegative_int(raw.get("promptTokenCount") or raw.get("prompt_token_count"))
         cache_read_tokens = _nonnegative_int(raw.get("cachedContentTokenCount") or raw.get("cacheReadTokenCount"))
         input_tokens = max(0, prompt_tokens - cache_read_tokens)

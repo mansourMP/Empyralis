@@ -33,7 +33,6 @@ PROVIDER_AUTH_METHODS: Dict[str, List[Choice]] = {
     ],
     "google": [
         Choice("google_gemini_api_key", "Gemini API key", "Direct API key"),
-        Choice("google_vertex_access_token", "Google Vertex access token", "Access token + project/location"),
     ],
     "qwen": [Choice("qwen_oauth", "Qwen OAuth", "OAuth token flow")],
     "chutes": [Choice("chutes_oauth", "Chutes OAuth", "OAuth token flow")],
@@ -47,7 +46,6 @@ AUTH_RUNTIME_PROVIDER: Dict[str, Optional[str]] = {
     "anthropic_setup_token": "anthropic",
     "anthropic_api_key": "anthropic",
     "google_gemini_api_key": "gemini",
-    "google_vertex_access_token": "vertex",
 }
 
 MODEL_FILTER_TO_RUNTIME_PROVIDER: Dict[str, str] = {
@@ -56,7 +54,6 @@ MODEL_FILTER_TO_RUNTIME_PROVIDER: Dict[str, str] = {
     "anthropic": "anthropic",
     "google": "gemini",
     "google-gemini-cli": "gemini",
-    "google-vertex": "vertex",
 }
 
 
@@ -78,7 +75,7 @@ def resolve_model_filter_provider(model_filter_key: str) -> Optional[str]:
     key = (model_filter_key or "").strip().lower()
     if not key or key == "*":
         return None
-    if key in {"openai", "anthropic", "gemini", "vertex"}:
+    if key in {"openai", "anthropic", "gemini"}:
         return key
     return MODEL_FILTER_TO_RUNTIME_PROVIDER.get(key)
 
@@ -112,7 +109,6 @@ def default_model_filter_index(options: List[Choice], runtime_provider: Optional
         return 0
     aliases = {
         "gemini": ["gemini", "google", "google-gemini-cli"],
-        "vertex": ["vertex", "google-vertex"],
         "openai": ["openai", "openai-codex"],
     }.get(provider_key, [provider_key])
     alias_set = set(aliases)

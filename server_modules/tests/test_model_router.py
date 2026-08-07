@@ -16,8 +16,6 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(model_router.resolve_model("gemini-flash"), "gemini/gemini-2.5-flash")
         self.assertEqual(model_router.resolve_model("gemini-pro"), "gemini/gemini-2.5-pro")
         self.assertEqual(model_router.resolve_model("gpt-4o-mini"), "gpt-4o-mini")
-        self.assertEqual(model_router.resolve_model("vertex-gemini-pro"), "vertex_ai/gemini-1.5-pro")
-        self.assertEqual(model_router.resolve_model("gemini-1.5-pro", provider="vertex"), "vertex_ai/gemini-1.5-pro")
         self.assertEqual(model_router.resolve_model("deepseek-chat", provider="deepseek"), "deepseek-chat")
         self.assertEqual(model_router.resolve_model("qwen-plus", provider="qwen"), "qwen-plus")
         self.assertEqual(model_router.resolve_model("mistral-large-latest", provider="mistral"), "mistral-large-latest")
@@ -29,6 +27,17 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(model_router.infer_provider("qwen-plus"), "qwen")
         self.assertEqual(model_router.infer_provider("mistral-large-latest"), "mistral")
         self.assertEqual(model_router.infer_provider("llama3.2"), "ollama")
+
+    def test_infer_provider_flags_leftover_vertex_model_strings_instead_of_openai_default(self):
+        # Vertex AI was removed as a provider entirely. A leftover stored
+        # "vertex_ai/..." (or bare "vertex...") model string must still
+        # resolve to the "vertex" provider id here rather than silently
+        # falling through to the "openai" default below it -- that default
+        # is what provider_catalog_service.resolve_provider_model_selection
+        # relies on to raise "Unsupported provider" instead of misrouting a
+        # leftover Gemini-on-Vertex model string to the OpenAI adapter.
+        self.assertEqual(model_router.infer_provider("vertex_ai/gemini-1.5-pro"), "vertex")
+        self.assertEqual(model_router.infer_provider("vertex-gemini-pro"), "vertex")
 
     def test_normalize_messages_filters_invalid_shapes(self):
         messages = model_router.normalize_messages(
@@ -55,22 +64,18 @@ class ModelRouterTests(unittest.TestCase):
         self.assertIn("gpt-4o-mini", by_alias)
         self.assertIn("claude-sonnet", by_alias)
         self.assertIn("gemini-flash", by_alias)
-        self.assertIn("vertex-gemini-flash", by_alias)
-        self.assertIn("vertex-gemini-pro", by_alias)
+        self.assertNotIn("vertex-gemini-flash", by_alias)
+        self.assertNotIn("vertex-gemini-pro", by_alias)
 
         self.assertEqual(by_alias["gpt-4o-mini"]["provider"], "openai")
         self.assertEqual(by_alias["claude-sonnet"]["provider"], "anthropic")
         self.assertEqual(by_alias["gemini-flash"]["provider"], "gemini")
-        self.assertEqual(by_alias["vertex-gemini-flash"]["provider"], "vertex")
-        self.assertEqual(by_alias["vertex-gemini-pro"]["provider"], "vertex")
 
         self.assertTrue(by_alias["gpt-4o"]["is_global_default"])
         self.assertFalse(by_alias["gpt-4o-mini"]["is_global_default"])
         self.assertFalse(by_alias["claude-haiku"]["is_provider_default"])
         self.assertFalse(by_alias["claude-sonnet"]["is_provider_default"])
         self.assertTrue(by_alias["gemini-flash"]["is_provider_default"])
-        self.assertTrue(by_alias["vertex-gemini-flash"]["is_provider_default"])
-        self.assertFalse(by_alias["vertex-gemini-pro"]["is_provider_default"])
         self.assertFalse(by_alias["gemini-flash"]["is_global_default"])
 
     def test_call_model_sync_returns_normalized_shape(self):
@@ -192,45 +197,19 @@ class ModelRouterTests(unittest.TestCase):
         _, kwargs = http_json_request_mock.call_args
         self.assertEqual(kwargs["payload"]["model"], "deepseek-v4-flash")
 
-    def test_vertex_current_credential_shape_uses_compatibility_fallback(self):
-        resolve_provider_adapter_patcher = patch.object(model_router, "resolve_provider_adapter")
-        resolve_provider_adapter_mock = resolve_provider_adapter_patcher.start()
-        self.addCleanup(resolve_provider_adapter_patcher.stop)
-        class _FakeAdapter:
-            def generate(self, system_prompt, user_input, model, credentials):
-                self.last_call = {
-                    "system_prompt": system_prompt,
-                    "user_input": user_input,
-                    "model": model,
-                    "credentials": credentials,
-                }
-                return "vertex-ok"
-
-        adapter = _FakeAdapter()
-        resolve_provider_adapter_mock.return_value = ("vertex", "vertex", adapter)
-
-        result = model_router.call_model_sync(
-            messages=[
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "user prompt"},
-            ],
-            model="gemini-1.5-pro",
-            provider="vertex",
-            credentials={"access_token": "token", "project_id": "proj", "location": "us-central1"},
-        )
-
-        self.assertEqual(result["content"], "vertex-ok")
-        self.assertEqual(result["provider"], "vertex")
-        self.assertEqual(result["model"], "vertex_ai/gemini-1.5-pro")
-        self.assertEqual(result["usage"]["total_tokens"], 0)
-        self.assertEqual(result["usage"]["estimation_mode"], "provider_usage_missing")
-        self.assertEqual(
-            usage_accounting_service.platform_paid_usage_validation_error(result["usage"]),
-            "missing_provider_token_usage",
-        )
-        self.assertEqual(adapter.last_call["system_prompt"], "system prompt")
-        self.assertEqual(adapter.last_call["user_input"], "user prompt")
-        self.assertEqual(adapter.last_call["model"], "gemini-1.5-pro")
+    def test_vertex_is_no_longer_a_supported_provider(self):
+        # Vertex AI was removed as a provider entirely -- provider_profiles.
+        # resolve_provider_adapter (called for real, not mocked, since this
+        # test exists specifically to prove there is no adapter left to
+        # mock) must reject it loudly rather than routing through the old
+        # legacy-adapter compatibility fallback this test used to cover.
+        with self.assertRaises(RuntimeError):
+            model_router.call_model_sync(
+                messages=[{"role": "user", "content": "hi"}],
+                model="gemini-1.5-pro",
+                provider="vertex",
+                credentials={"access_token": "token", "project_id": "proj", "location": "us-central1"},
+            )
 
 
 if __name__ == "__main__":

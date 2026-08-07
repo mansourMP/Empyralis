@@ -319,7 +319,6 @@ _CREDENTIAL_ENV_KEYS = (
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY",
     "CLAUDE_CODE_USE_ANTHROPIC_AWS",
     "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
@@ -338,11 +337,11 @@ _CREDENTIAL_ENV_KEYS = (
 # fallback, which reads exactly those three names from os.environ for
 # Empyralis's OWN S3-compatible storage, entirely unrelated to any tenant's
 # Bedrock credential). Before this constant existed, a turn for a provider
-# OTHER than bedrock/vertex would omit these keys from options.env entirely
+# OTHER than bedrock would omit these keys from options.env entirely
 # rather than blanking them -- and per this module's documented Transport
 # behavior (env merges ON TOP of the parent process's own environment,
 # never replaces it), an omitted key means the CLI subprocess would inherit
-# whatever this backend process's own ambient AWS/GCP env happens to be.
+# whatever this backend process's own ambient AWS env happens to be.
 # Blanked to "" by default alongside _CREDENTIAL_ENV_KEYS for exactly the
 # same reason: an explicit "" in options.env wins the merge; an absent key
 # does not.
@@ -351,8 +350,6 @@ _CLOUD_PROVIDER_CREDENTIAL_ENV_KEYS = (
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
     "AWS_REGION",
-    "ANTHROPIC_VERTEX_PROJECT_ID",
-    "CLOUD_ML_REGION",
 )
 
 # A provider's ordinary profile base_url (provider_profiles.py) is its
@@ -440,17 +437,19 @@ def resolve_ollama_anthropic_base_url(provider: str, credentials: Optional[Dict[
 # Anthropic bearer token: wrong endpoint, and a real credential handed to a
 # service that was never meant to see it.
 #
-# Only "bedrock" and "vertex" are wired here -- verified against provider_
-# profiles.PROVIDER_CATALOG, the only two of the seven _CREDENTIAL_ENV_KEYS
+# Only "bedrock" is wired here -- verified against provider_profiles.
+# PROVIDER_CATALOG, the only one of the six remaining _CREDENTIAL_ENV_KEYS
 # cloud flags with a real catalog entry AND a real ProviderAdapter
-# (provider_profiles.PROVIDER_ADAPTERS). "foundry"/"anthropic_aws"/
-# "anthropic_google_cloud"/"mantle" have NO provider_profiles.py catalog
-# entry at all (grep confirms zero hits for any of those four strings in
-# that file) -- there is no workspace credential shape that could ever
-# reach this dispatch for them, so CLAUDE_CODE_USE_FOUNDRY/_ANTHROPIC_AWS/
-# _ANTHROPIC_GOOGLE_CLOUD/_MANTLE are correctly left blank by the base env
-# dict below, not a gap this ticket left open. CLAUDE_CODE_OAUTH_TOKEN (the
-# seventh _CREDENTIAL_ENV_KEYS entry) is not a cloud-provider flag and
+# (provider_profiles.PROVIDER_ADAPTERS). Vertex AI was removed as a provider
+# entirely (a curated handful of models beats breadth) -- CLAUDE_CODE_USE_
+# VERTEX is no longer declared in _CREDENTIAL_ENV_KEYS above and there is no
+# "vertex" builder here. "foundry"/"anthropic_aws"/"anthropic_google_cloud"/
+# "mantle" have NO provider_profiles.py catalog entry at all (grep confirms
+# zero hits for any of those four strings in that file) -- there is no
+# workspace credential shape that could ever reach this dispatch for them,
+# so CLAUDE_CODE_USE_FOUNDRY/_ANTHROPIC_AWS/_ANTHROPIC_GOOGLE_CLOUD/_MANTLE
+# are correctly left blank by the base env dict below, not a gap this ticket
+# left open. CLAUDE_CODE_OAUTH_TOKEN is not a cloud-provider flag and
 # doesn't belong in this dispatch either: it carries a `claude setup-token`
 # subscription token, and provider_profiles.py's "anthropic" catalog entry's
 # local_cli auth mode already means "use the CLI's own already-signed-in
@@ -458,19 +457,12 @@ def resolve_ollama_anthropic_base_url(provider: str, credentials: Optional[Dict[
 # or holds for that mode, so nothing here could populate it without
 # inventing a credential shape that doesn't exist.
 #
-# Each builder below returns the CLAUDE_CODE_USE_* flag plus the exact
+# The builder below returns the CLAUDE_CODE_USE_* flag plus the exact
 # credential env var names the CLI's own first-party setup wizard writes for
 # that mode -- verified against the installed @anthropic-ai/claude-code CLI
 # binary (2.1.214) rather than guessed: its settings-writer functions build
-# literal objects shaped exactly like these (`{CLAUDE_CODE_USE_BEDROCK:"1",
-# ..., AWS_REGION:e.region, AWS_ACCESS_KEY_ID:void 0, ...}` for Bedrock;
-# `{CLAUDE_CODE_USE_VERTEX:"1", ANTHROPIC_VERTEX_PROJECT_ID:e.projectId,
-# CLOUD_ML_REGION:e.region, GOOGLE_APPLICATION_CREDENTIALS:void 0, ...}` for
-# Vertex), and its /vertex-setup wizard's own copy ("Application Default
-# Credentials (gcloud auth)" / "Service account key file" /
-# "Use credentials already in my environment") independently confirms Vertex
-# has no raw-bearer-token env var at all -- see _vertex_process_env's own
-# docstring for what that means for this provider's current credential shape.
+# literal objects shaped exactly like this (`{CLAUDE_CODE_USE_BEDROCK:"1",
+# ..., AWS_REGION:e.region, AWS_ACCESS_KEY_ID:void 0, ...}` for Bedrock).
 def _bedrock_process_env(credentials: Dict[str, Any]) -> Dict[str, str]:
     """AWS SDK credential env vars for CLAUDE_CODE_USE_BEDROCK=1: AWS_ACCESS_
     KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION -- the same
@@ -494,39 +486,8 @@ def _bedrock_process_env(credentials: Dict[str, Any]) -> Dict[str, str]:
     return env
 
 
-def _vertex_process_env(credentials: Dict[str, Any]) -> Dict[str, str]:
-    """CLAUDE_CODE_USE_VERTEX=1 plus ANTHROPIC_VERTEX_PROJECT_ID/CLOUD_ML_
-    REGION -- the same two names provider_profiles.VertexAdapter._params
-    reads as project_id/location, and the same names the CLI's own
-    /vertex-setup wizard writes.
-
-    Known, deliberate gap (not silently papered over): the installed CLI's
-    Vertex auth is Google's standard ADC chain ONLY -- GOOGLE_APPLICATION_
-    CREDENTIALS (a service-account key FILE) or ambient `gcloud auth
-    application-default login` (verified directly against the CLI's own
-    /vertex-setup wizard copy -- three choices offered, no fourth, none of
-    them a bearer-token env var). provider_profiles.py's "vertex"
-    PROVIDER_CATALOG entry stores a bare OAuth access_token (auth_modes:
-    access_token) with no matching CLI env var to carry it, so this
-    function correctly routes project_id/region and the CLAUDE_CODE_USE_
-    VERTEX flag (closing the leak into ANTHROPIC_AUTH_TOKEN this ticket
-    exists to fix) but a Vertex turn on THIS engine still cannot fully
-    authenticate on that credential shape alone -- a separate, pre-existing
-    gap in what the "vertex" profile collects, not something an env-var
-    name invented here could paper over."""
-    project_id = str(credentials.get("project_id") or "").strip()
-    location = str(credentials.get("location") or "").strip()
-    env: Dict[str, str] = {"CLAUDE_CODE_USE_VERTEX": "1"}
-    if project_id:
-        env["ANTHROPIC_VERTEX_PROJECT_ID"] = project_id
-    if location:
-        env["CLOUD_ML_REGION"] = location
-    return env
-
-
 _CLOUD_ROUTED_PROVIDER_ENV_BUILDERS: Dict[str, Any] = {
     "bedrock": _bedrock_process_env,
-    "vertex": _vertex_process_env,
 }
 
 
@@ -558,7 +519,7 @@ def resolve_sdk_process_env(
     merge-over-parent-env behavior) — this function never reads os.environ
     itself, so nothing ambient can leak in through it either.
 
-    Cloud-routed providers (currently "bedrock" and "vertex" — see
+    Cloud-routed providers (currently just "bedrock" — see
     _CLOUD_ROUTED_PROVIDER_ENV_BUILDERS) are dispatched to their own
     CLAUDE_CODE_USE_*/credential env vars before anything else in this
     function runs, and never fall through to the generic ANTHROPIC_AUTH_
@@ -579,13 +540,13 @@ def resolve_sdk_process_env(
         anthropic_api_key or creds.get("api_key") or creds.get("anthropic_api_key") or ""
     ).strip()
     cloud_env_builder = _CLOUD_ROUTED_PROVIDER_ENV_BUILDERS.get(str(provider or "").strip().lower())
-    # Cloud-routed providers (bedrock/vertex — see _CLOUD_ROUTED_PROVIDER_
+    # Cloud-routed providers (bedrock — see _CLOUD_ROUTED_PROVIDER_
     # ENV_BUILDERS's own docstring) are checked FIRST and are structurally
     # exclusive with every branch below: api_key is deliberately never
     # consulted for them even though it may be non-empty (Bedrock's own
     # credential shape stores the AWS access key under "api_key" — see
     # provider_profiles.BedrockAdapter._client), because ANTHROPIC_AUTH_
-    # TOKEN=<that value> is exactly the MAN-313 bug (a Bedrock/Vertex
+    # TOKEN=<that value> is exactly the MAN-313 bug (a Bedrock
     # credential sent to api.anthropic.com instead of the real provider).
     if cloud_env_builder is not None:
         env.update(cloud_env_builder(creds))
@@ -693,8 +654,8 @@ def turn_is_served_by_anthropic(
         calling resolve_sdk_process_env — the SAME function that builds the
         subprocess env — rather than re-deriving it, so the answer cannot
         drift from what the CLI is actually pointed at. That function also
-        blanks every credential-shaped key (including the Bedrock/Vertex/
-        Foundry flags), so an empty ANTHROPIC_BASE_URL here provably means
+        blanks every credential-shaped key (including the Bedrock/Foundry
+        flags), so an empty ANTHROPIC_BASE_URL here provably means
         the CLI talks to api.anthropic.com and nothing ambient can change
         that.
       - The provider names Anthropic (or names nothing at all, which leaves

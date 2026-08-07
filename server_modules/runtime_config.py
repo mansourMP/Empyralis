@@ -61,7 +61,6 @@ from server_modules.provider_profiles import (
     OpenAIAdapter,
     AnthropicAdapter,
     GeminiAdapter,
-    VertexAdapter,
     PROVIDER_ADAPTERS,
     PROVIDER_COST_PER_1K,
     estimate_tokens,

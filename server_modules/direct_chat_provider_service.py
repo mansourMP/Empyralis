@@ -360,7 +360,6 @@ def supports_direct_message_native_chat(
         "qwen",
         "deepseek",
         "mistral",
-        "vertex",
         "ollama_cloud",
         "groq",
         "openrouter",

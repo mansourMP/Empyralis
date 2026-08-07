@@ -116,7 +116,6 @@ class DirectChatProviderServiceTests(unittest.TestCase):
             "deepseek",
             "qwen",
             "mistral",
-            "vertex",
             "ollama_cloud",
             "groq",
             "openrouter",

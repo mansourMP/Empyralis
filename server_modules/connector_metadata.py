@@ -240,13 +240,6 @@ def _provider_public_metadata(provider: str, credentials: Dict[str, Any]) -> Dic
         if raw_secret:
             public["credential_last4"] = raw_secret[-4:] if len(raw_secret) >= 4 else raw_secret
             break
-    if provider_id == "vertex":
-        project_id = str(credentials.get("project_id") or "").strip()
-        location = str(credentials.get("location") or "").strip()
-        if project_id:
-            public["project_id"] = project_id
-        if location:
-            public["location"] = location
     return public
 
 

@@ -762,7 +762,7 @@ async def import_vault_credentials(body: VaultImportRequest):
         if provider not in PROVIDER_CATALOG or len(label) < 2:
             skipped += 1
             continue
-        if mode not in ["byok", "managed", "vertex"]:
+        if mode not in ["byok", "managed"]:
             mode = "byok"
         if not isinstance(credentials, dict) or len(credentials) == 0:
             skipped += 1
