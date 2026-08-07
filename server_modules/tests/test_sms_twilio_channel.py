@@ -243,12 +243,21 @@ class SmsInboundWebhookTests(unittest.IsolatedAsyncioTestCase):
         route_message.assert_not_awaited()
 
     async def test_webhook_parses_and_routes_to_agent(self) -> None:
+        """Gate 1: a NUMBER already paired/linked to the workspace (an active
+        channel_pairing_service link for provider="sms") still reaches the
+        agent turn exactly as before — Gate 1 must not block a known sender."""
         headers = [(b"x-twilio-signature", b"validsig")]
         request = _request_from_body(
             b"From=%2B15559998888&To=%2B15550001111&Body=hello+agent&MessageSid=SM42",
             headers=headers,
         )
         route_message = AsyncMock(return_value={"ok": True, "run_id": "run-1", "reply": "Working on it."})
+        pairing_service = mock.MagicMock()
+        pairing_service.authorize_channel_message.return_value = {
+            "authorized": True,
+            "status": "linked",
+            "workspace_id": "default",
+        }
         with (
             patch(
                 "server_modules.sms_twilio_provisioning_service.platform_twilio_credentials",
@@ -261,6 +270,10 @@ class SmsInboundWebhookTests(unittest.IsolatedAsyncioTestCase):
             patch("server_modules.connectors_actions.load_vault", return_value={"credentials": [self._sms_row()]}),
             patch("server_modules.connectors_actions._append_channel_event", return_value=None) as append_event,
             patch("server_modules.agent_channel_router.route_inbound_channel_message", new=route_message),
+            patch(
+                "server_modules.channel_pairing_service.get_channel_pairing_service",
+                return_value=pairing_service,
+            ),
         ):
             response = await connectors_actions.sms_twilio_webhook(request)
 
@@ -277,6 +290,61 @@ class SmsInboundWebhookTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["customer_message"], "hello agent")
         self.assertEqual(kwargs["actor_id"], "+15559998888")
         self.assertFalse(kwargs["allow_master_fallback"])
+        pairing_service.authorize_channel_message.assert_called_once_with(
+            provider="sms",
+            external_subject="+15559998888",
+            workspace_id="default",
+            message_text="hello agent",
+        )
+
+    async def test_webhook_unpaired_number_never_routes_to_agent(self) -> None:
+        """Gate 1 (THE ACTUAL FIX): before this change, any phone number that
+        texted a bound Twilio number reached the agent turn directly — no
+        pairing, no allowlist (CHANNEL-GATEWAY-PLAN.md §5a). An unpaired
+        number must now get a pairing prompt back over SMS and must NEVER
+        reach route_inbound_channel_message (the SMS chokepoint into
+        execute_sage_turn)."""
+        headers = [(b"x-twilio-signature", b"validsig")]
+        request = _request_from_body(
+            b"From=%2B15559998888&To=%2B15550001111&Body=hello+agent&MessageSid=SM43",
+            headers=headers,
+        )
+        route_message = AsyncMock()
+        pairing_service = mock.MagicMock()
+        pairing_service.authorize_channel_message.return_value = {
+            "authorized": False,
+            "status": "pairing_required",
+            "connect_url": "https://app.empyralis.test/continue?source=channel_connect&channel=sms",
+            "reply_text": "This SMS identity is not linked to Empyralis yet. Open this link to connect it: https://app.empyralis.test/continue?source=channel_connect&channel=sms",
+        }
+        with (
+            patch(
+                "server_modules.sms_twilio_provisioning_service.platform_twilio_credentials",
+                return_value={"account_sid": "AC", "auth_token": "tok"},
+            ),
+            patch(
+                "server_modules.connectors.whatsapp_transport_service.WhatsAppTransportService.validate_webhook_signature",
+                return_value=True,
+            ),
+            patch("server_modules.connectors_actions.load_vault", return_value={"credentials": [self._sms_row()]}),
+            patch("server_modules.connectors_actions._append_channel_event", return_value=None),
+            patch("server_modules.agent_channel_router.route_inbound_channel_message", new=route_message),
+            patch(
+                "server_modules.channel_pairing_service.get_channel_pairing_service",
+                return_value=pairing_service,
+            ),
+        ):
+            response = await connectors_actions.sms_twilio_webhook(request)
+
+        route_message.assert_not_awaited()
+        body = response.body.decode("utf-8")
+        self.assertIn("not linked to Empyralis", body)
+        pairing_service.authorize_channel_message.assert_called_once_with(
+            provider="sms",
+            external_subject="+15559998888",
+            workspace_id="default",
+            message_text="hello agent",
+        )
 
     async def test_webhook_unknown_number_replies_empty_twiml(self) -> None:
         headers = [(b"x-twilio-signature", b"validsig")]

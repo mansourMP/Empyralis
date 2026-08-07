@@ -770,6 +770,40 @@ async def handle_inbound_callback(
             remote_jid=mapped["remote_jid"], token_manager=token_manager,
         )
 
+        # ── Gate 1: sender pairing (unknown WeChat user → no turn) ─────────
+        # Same shape as SMS: 1:1 by Tencent's own callback contract (no
+        # groups, verified above by signature check alone), so every
+        # signature-verified sender used to route straight to dispatch —
+        # anyone who messaged this account's WeChat/WeCom OpenID got a full
+        # agent turn. Reuses channel_pairing_service.authorize_channel_message
+        # (same call whatsapp_ingress_service.py makes for WhatsApp Business
+        # operator numbers) rather than a fourth pairing implementation.
+        # provider="wechat_official" is kept distinct from the personal-
+        # gateway "wechat" pairing (channel_pairing_service._display_provider
+        # already anticipates it) since the two are different account types
+        # with different external_subject spaces (OpenID vs. a personal
+        # WeChat account) — merging them would let a pairing issued for one
+        # silently authorize the other.
+        from server_modules.channel_pairing_service import get_channel_pairing_service
+
+        _wechat_pair_resolution = get_channel_pairing_service().authorize_channel_message(
+            provider="wechat_official",
+            external_subject=mapped["sender_jid"],
+            workspace_id=workspace_id,
+            message_text=mapped["text"],
+        )
+        if not bool(_wechat_pair_resolution.get("authorized")):
+            _wechat_pair_reply = str(_wechat_pair_resolution.get("reply_text") or "").strip()
+            _wechat_delivered = False
+            if _wechat_pair_reply:
+                _wechat_delivered = await transport.send_message(_wechat_pair_reply)
+            return {
+                "routed": True,
+                "processed": False,
+                "reason": str(_wechat_pair_resolution.get("status") or "pairing_required"),
+                "reply_sent": _wechat_delivered,
+            }
+
         # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
         # Every WeChat Official/WeCom sender is an external customer talking
         # to the bound agent 1:1 — Tencent's callback contract has no group
