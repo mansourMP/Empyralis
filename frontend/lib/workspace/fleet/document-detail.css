@@ -1,0 +1,170 @@
+/**
+ * Project document detail — read/edit surface for a single markdown
+ * document (DocumentDetailView.tsx). A SEPARATE FILE, not a hunk in
+ * fleet-theme.css, following the same collision-avoidance convention
+ * task-detail.css's own header documents (multiple agents can be live
+ * against this repo at once; a dedicated stylesheet per surface means two
+ * concurrent passes never fight over the same diff region). Imported
+ * directly by DocumentDetailView.tsx, same as task-detail.css is imported
+ * by TaskDetailView.tsx.
+ *
+ * Reuses .fleet-task-page / .fleet-task-page-main / .fleet-task-page-body /
+ * .fleet-task-page-eyebrow / .fleet-task-page-title / .fleet-wizard-input /
+ * .fleet-btn* wholesale for the page shell, header, and controls — nothing
+ * below redefines those. What's actually new here is markdown body
+ * typography (nothing else in this app renders parsed markdown) and the
+ * plain-textarea editor.
+ */
+
+/* ── Markdown body (read mode) ───────────────────────────────────────────
+   Deliberately understated: this is a project's working document, not a
+   marketing page — headings step down in weight rather than blow up in
+   size, and body copy matches .fleet-task-page-desc's own 14px/1.6 rather
+   than introducing a second reading-copy scale. */
+.fleet-doc-body {
+  margin-top: 20px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.fleet-doc-heading {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold, 600);
+  line-height: 1.3;
+  margin: 28px 0 10px;
+}
+.fleet-doc-body > .fleet-doc-heading:first-child { margin-top: 0; }
+h2.fleet-doc-heading { font-size: 19px; }
+h3.fleet-doc-heading { font-size: 16px; }
+h4.fleet-doc-heading,
+h5.fleet-doc-heading,
+h6.fleet-doc-heading { font-size: 14px; }
+
+.fleet-doc-paragraph { margin: 0 0 14px; }
+.fleet-doc-paragraph:last-child { margin-bottom: 0; }
+
+.fleet-doc-inline-code {
+  font-family: var(--app-font-mono, ui-monospace, monospace);
+  font-size: 0.9em;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--text-primary);
+}
+
+.fleet-doc-code {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  overflow-x: auto;
+}
+.fleet-doc-code code {
+  font-family: var(--app-font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre;
+}
+
+.fleet-doc-quote {
+  margin: 0 0 14px;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-muted);
+}
+
+.fleet-doc-list {
+  margin: 0 0 14px;
+  padding-left: 22px;
+}
+.fleet-doc-list li { margin: 4px 0; }
+
+.fleet-doc-hr {
+  margin: 24px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+/* Empty body — a project document that was created but never written into.
+   Same muted-line treatment .fleet-panel-empty already uses elsewhere for
+   "nothing here yet," not a full .fleet-empty teaching block: this state is
+   one click (Edit) away from being fixed by the same reader looking at it,
+   not a first-run condition that needs explaining. */
+.fleet-doc-empty-body {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-top: 20px;
+}
+
+/* ── Header / actions row ────────────────────────────────────────────────
+   Trails the title, right-aligned — same "actions live beside what they
+   act on" placement TaskDetailView's own topbar uses (fleet-task-detail-
+   topbar), just one row lower since a document has no prev/next nav. */
+.fleet-doc-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.fleet-doc-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Edit mode ────────────────────────────────────────────────────────────
+   A title input the same visual weight as the read-mode <h2> it replaces,
+   and a bare, bordered textarea for the body — CLAUDE.md is explicit this
+   is a plain markdown textarea, never a rich editor, so there is nothing
+   here beyond size/spacing/monospace. */
+.fleet-doc-title-input {
+  display: block;
+  width: 100%;
+  margin: 6px 0 0;
+  padding: 4px 0;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  font-size: 24px;
+  font-weight: var(--weight-semibold, 600);
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  font-family: inherit;
+}
+.fleet-doc-title-input:focus-visible {
+  outline: none;
+  border-bottom-color: var(--accent);
+}
+
+.fleet-doc-editor {
+  display: block;
+  width: 100%;
+  min-height: 360px;
+  margin-top: 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font-family: var(--app-font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+}
+.fleet-doc-editor:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.fleet-doc-error {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--destructive);
+}

@@ -18,10 +18,14 @@ import {
   type TaskAssigneeSelection,
 } from "@/lib/workspace/fleet/fleet-data";
 import { useWorkspaceMembers } from "@/lib/workspace/fleet/members-data";
+import { useCanWriteProject } from "@/lib/workspace/fleet/project-members-data";
 import { TasksList } from "@/lib/workspace/fleet/TasksList";
 import { TasksBoard } from "@/lib/workspace/fleet/TasksBoard";
 import { TasksGroupedList } from "@/lib/workspace/fleet/TasksGroupedList";
 import { TaskComposer } from "@/lib/workspace/fleet/TaskComposer";
+import { useFleetDocuments } from "@/lib/workspace/fleet/documents-data";
+import { DocumentsList } from "@/lib/workspace/fleet/DocumentsList";
+import { DocumentComposer } from "@/lib/workspace/fleet/DocumentComposer";
 import { ProjectOverview } from "@/lib/workspace/fleet/ProjectOverview";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
@@ -44,7 +48,7 @@ import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/li
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton } from "@/lib/workspace/fleet/fleet-states";
-import { ListChecks } from "lucide-react";
+import { ListChecks, FileText } from "lucide-react";
 
 const money = (n: number | undefined) => `$${(n ?? 0).toFixed(4)}`;
 
@@ -127,8 +131,9 @@ export default function ProjectDetailPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
-  // Overview | Agents | Tasks — a real ROUTE per view (`${projectBase}`,
-  // `${projectBase}/agents`, `${projectBase}/tasks`), not component state.
+  // Overview | Agents | Tasks | Documents — a real ROUTE per view
+  // (`${projectBase}`, `${projectBase}/agents`, `${projectBase}/tasks`,
+  // `${projectBase}/documents`), not component state.
   //
   // It used to be `useState`, which is exactly why the browser's own back
   // button used to strand a reader on Overview after opening a task from
@@ -137,16 +142,28 @@ export default function ProjectDetailPage() {
   // Nothing about which sub-view you were on survived that round trip,
   // because nothing about it was ever written down anywhere durable. A real
   // route fixes it directly: leaving for a task and pressing the browser's
-  // own back button lands back on the exact view (Overview/Agents/Tasks)
-  // you left, because that view is a genuine history entry now.
-  const view: "overview" | "agents" | "tasks" =
-    pathname === `${projectBase}/agents` ? "agents" : pathname === `${projectBase}/tasks` ? "tasks" : "overview";
+  // own back button lands back on the exact view (Overview/Agents/Tasks/
+  // Documents) you left, because that view is a genuine history entry now.
+  //
+  // Documents is a FOURTH top-level view, not a settings-popover placement
+  // — the founder's own call: a project's markdown knowledge is read and
+  // written often enough to earn equal billing with Tasks, not a click
+  // buried in a gear icon.
+  const view: "overview" | "agents" | "tasks" | "documents" =
+    pathname === `${projectBase}/agents`
+      ? "agents"
+      : pathname === `${projectBase}/tasks`
+        ? "tasks"
+        : pathname === `${projectBase}/documents`
+          ? "documents"
+          : "overview";
   // router.replace, not .push — same choice the agent detail page's own
   // sub-tabs already made (AgentDetailPage's onTabChange, one directory up).
-  // Collapses Overview→Agents→Tasks clicks onto one history entry, so the
-  // browser's own back button steps out of the project in one press instead
-  // of walking back through every sub-tab click first.
-  const viewHref = (v: "overview" | "agents" | "tasks") => (v === "overview" ? projectBase : `${projectBase}/${v}`);
+  // Collapses Overview→Agents→Tasks→Documents clicks onto one history entry,
+  // so the browser's own back button steps out of the project in one press
+  // instead of walking back through every sub-tab click first.
+  const viewHref = (v: "overview" | "agents" | "tasks" | "documents") =>
+    v === "overview" ? projectBase : `${projectBase}/${v}`;
   // TWO shapes of the same tasks, plus the options that reshape them.
   //
   // This used to be a three-way switch — Board | Grouped | List — and that
@@ -188,6 +205,18 @@ export default function ProjectDetailPage() {
   // as "assigned, working" when nothing is running.
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
   const { tasks, loading: tasksLoading, refresh: refreshTasks } = useFleetTasks(workspaceId, projectId);
+  // The Documents view (fourth top-level tab, founder's own call — see the
+  // `view` const above). Only fetched with a real project_id: useFleetDocuments
+  // itself no-ops without one, same guard useFleetTasks's own fetcher uses.
+  const { documents, loading: documentsLoading, refresh: refreshDocuments } = useFleetDocuments(workspaceId, projectId);
+  const [documentComposerOpen, setDocumentComposerOpen] = useState(false);
+  // Write gate: create/edit/delete controls for a document render only when
+  // this resolves `true` — `null` (still loading) and `false` (a viewer, or
+  // a member with no project_memberships row here) both hide them outright,
+  // never a disabled control (CLAUDE.md: no dead controls). See
+  // project-members-data.ts's own doc comment for the exact policy this
+  // mirrors (auth.enforce_project_access).
+  const canWriteProject = useCanWriteProject(workspaceId, projectId, members);
   // Statuses written but not yet confirmed by a refetch — see
   // handleStatusChange. Empty in the steady state, so this is a no-op merge
   // except for the few hundred ms a PATCH is in flight.
@@ -360,6 +389,15 @@ export default function ProjectDetailPage() {
     router.push(taskHref(taskId));
   }, [router, taskHref]);
 
+  // Same real-route treatment as taskHref above — handed to DocumentsList,
+  // which renders it as a real <Link> (cmd-click/middle-click work; see
+  // that file's own header for why it does NOT copy TaskRow's onClick-div
+  // pattern).
+  const documentHref = useCallback(
+    (documentId: string) => `${projectBase}/documents/${encodeURIComponent(documentId)}`,
+    [projectBase],
+  );
+
   return (
     <main className="fleet-content fleet-content--with-panel">
       {/* MAN-145 title-dedup follow-up: this used to render the project's
@@ -398,6 +436,16 @@ export default function ProjectDetailPage() {
           <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setComposer({})}>
             <span className="fleet-btn-plus">+</span> New task
           </button>
+        ) : view === "documents" && canWriteProject ? (
+          // Write-gated, unlike the Agents/Tasks buttons beside it — a
+          // viewer here would open a dialog whose own Create call the
+          // server rejects outright (fleet_create_document's `member`
+          // floor). No dead controls (CLAUDE.md): the button simply isn't
+          // in the DOM for a reader who can't use it, `null` (still
+          // resolving) included.
+          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setDocumentComposerOpen(true)}>
+            <span className="fleet-btn-plus">+</span> New document
+          </button>
         ) : null}
       </HeaderAction>
 
@@ -406,7 +454,7 @@ export default function ProjectDetailPage() {
           this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
         <div className="fleet-segmented" role="tablist" aria-label="Project view">
-          {(["overview", "agents", "tasks"] as const).map((v) => (
+          {(["overview", "agents", "tasks", "documents"] as const).map((v) => (
             <button
               key={v}
               type="button"
@@ -415,7 +463,7 @@ export default function ProjectDetailPage() {
               className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
               onClick={() => router.replace(viewHref(v))}
             >
-              {v === "overview" ? "Overview" : v === "agents" ? "Agents" : "Tasks"}
+              {v === "overview" ? "Overview" : v === "agents" ? "Agents" : v === "tasks" ? "Tasks" : "Documents"}
             </button>
           ))}
         </div>
@@ -566,6 +614,33 @@ export default function ProjectDetailPage() {
                 onSelect={openTask}
               />
             )
+          ) : view === "documents" ? (
+            documentsLoading && documents.length === 0 ? (
+              // rowHeight matches .fleet-task-row's real min-height (52px) —
+              // DocumentsList reuses that exact row, so this skeleton pins
+              // the same height (see FleetListSkeleton's MAN-113 note).
+              <FleetListSkeleton rows={4} rowHeight={52} />
+            ) : documents.length === 0 ? (
+              <div className="fleet-empty">
+                <div className="fleet-empty-icon">
+                  <FileText size={20} strokeWidth={1.75} />
+                </div>
+                <div className="fleet-empty-title">No documents yet</div>
+                <div className="fleet-empty-desc">
+                  Documents are this project's own markdown notes — specs, decisions, anything the
+                  team and its agents should read before starting work here.
+                </div>
+                {canWriteProject ? (
+                  <div className="fleet-empty-actions">
+                    <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setDocumentComposerOpen(true)}>
+                      <span className="fleet-btn-plus">+</span> New document
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <DocumentsList documents={documents} hrefFor={documentHref} />
+            )
           ) : loading && inProject.length === 0 ? (
             // rowHeight matches .fleet-agent-row's real min-height (52px) —
             // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton row
@@ -657,6 +732,16 @@ export default function ProjectDetailPage() {
           initialProjectId={projectId}
           onClose={() => setWizardOpen(false)}
           onCreated={() => { setWizardOpen(false); refresh(); }}
+        />
+      )}
+
+      {documentComposerOpen && (
+        <DocumentComposer
+          workspaceId={workspaceId}
+          projectId={projectId}
+          projectName={project?.name}
+          onClose={() => setDocumentComposerOpen(false)}
+          onCreated={() => { setDocumentComposerOpen(false); refreshDocuments(); }}
         />
       )}
     </main>
