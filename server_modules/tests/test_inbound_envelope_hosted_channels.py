@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest import mock as mock_module
 from unittest.mock import AsyncMock, patch
 
 from server_modules.inbound_envelope import SurfaceKind
@@ -53,6 +54,23 @@ _WECHAT_XML_TEMPLATE = (
 
 def _wechat_body(*, openid: str, content: str, msg_id: str) -> str:
     return _WECHAT_XML_TEMPLATE.format(openid=openid, content=content, msg_id=msg_id)
+
+
+def _authorized_pairing_service():
+    """A channel_pairing_service stand-in whose authorize_channel_message
+    always reports an existing link — used by tests below that exercise
+    behavior DOWNSTREAM of Gate 1 (thread keying, envelope shape, command
+    dispatch) and are not themselves testing the gate. Gate 1 itself (an
+    unpaired sender never reaching the turn) is covered by
+    test_sms_twilio_channel.py, test_wechat_official_service_cross_workspace_ownership.py,
+    and the dedicated Slack/WeChat/SMS gate tests."""
+    service = mock_module.MagicMock()
+    service.authorize_channel_message.return_value = {
+        "authorized": True,
+        "status": "linked",
+        "workspace_id": "ws-1",
+    }
+    return service
 
 
 class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
@@ -81,7 +99,11 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
              patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe):
+             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
+             patch(
+                 "server_modules.channel_pairing_service.get_channel_pairing_service",
+                 return_value=_authorized_pairing_service(),
+             ):
             await wechat.handle_inbound_callback(
                 agent_install_id="agent-1", timestamp="1", nonce="n1", signature="s1",
                 raw_body=_wechat_body(openid="cust-A", content="hi there", msg_id="m1"),
@@ -114,7 +136,11 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
              patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe):
+             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
+             patch(
+                 "server_modules.channel_pairing_service.get_channel_pairing_service",
+                 return_value=_authorized_pairing_service(),
+             ):
             for i in range(3):
                 await wechat.handle_inbound_callback(
                     agent_install_id="agent-1", timestamp="1", nonce=f"n{i}", signature="s",
@@ -134,7 +160,11 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
              patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe):
+             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=_fake_dispatch_sage_reply_safe), \
+             patch(
+                 "server_modules.channel_pairing_service.get_channel_pairing_service",
+                 return_value=_authorized_pairing_service(),
+             ):
             await wechat.handle_inbound_callback(
                 agent_install_id="agent-1", timestamp="1", nonce="n1", signature="s1",
                 raw_body=_wechat_body(openid="cust-A", content="hello", msg_id="m1"),
@@ -159,7 +189,11 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
              patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
              patch("server_modules.sage_command_dispatcher.dispatch_command", new=cmd_mock), \
-             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock):
+             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
+             patch(
+                 "server_modules.channel_pairing_service.get_channel_pairing_service",
+                 return_value=_authorized_pairing_service(),
+             ):
             result = await wechat.handle_inbound_callback(
                 agent_install_id="agent-1", timestamp="1", nonce="n1", signature="s1",
                 raw_body=_wechat_body(openid="cust-A", content="/new", msg_id="m1"),
@@ -169,6 +203,99 @@ class WeChatHostedEnvelopeTests(unittest.IsolatedAsyncioTestCase):
         cmd_mock.assert_not_called()
         reply_mock.assert_awaited_once()
         self.assertEqual(reply_mock.await_args.kwargs.get("message"), "/new")
+
+
+class WeChatOfficialGate1Tests(unittest.IsolatedAsyncioTestCase):
+    """Gate 1 (THE ACTUAL FIX): handle_inbound_callback used to route every
+    signature-verified sender straight to dispatch (CHANNEL-GATEWAY-PLAN.md
+    §5a) — Tencent's callback contract is 1:1 with no groups, so signature
+    verification alone was the entire authorization story. An unpaired
+    OpenID must now get a pairing prompt back over WeChat and must NEVER
+    reach dispatch_sage_reply_safe or dispatch_command (this channel's
+    chokepoints into execute_sage_turn)."""
+
+    def setUp(self) -> None:
+        import server_modules.wechat_official_service as wechat
+
+        self.wechat = wechat
+        self._binding = {"workspace_id": "ws-1"}
+        self._binding_meta = {"account_kind": "official_account", "app_id": "wx-app-1", "agent_id": None}
+        self._creds = {"app_secret": "s3cr3t", "verify_token": "tok"}
+        self._resolved = (self._binding, self._binding_meta, "cred-1", self._creds)
+
+    async def test_unpaired_sender_never_reaches_dispatch(self) -> None:
+        wechat = self.wechat
+        cmd_mock = AsyncMock(return_value="should never be used")
+        reply_mock = AsyncMock(return_value=True)
+        send_mock = AsyncMock(return_value=True)
+
+        pairing_service = mock_module.MagicMock()
+        pairing_service.authorize_channel_message.return_value = {
+            "authorized": False,
+            "status": "pairing_required",
+            "connect_url": "https://app.empyralis.test/continue?source=channel_connect&channel=wechat_official",
+            "reply_text": "This WeChat identity is not linked to Empyralis yet. Open this link to connect it: https://app.empyralis.test/continue?source=channel_connect&channel=wechat_official",
+        }
+
+        with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
+             patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
+             patch("server_modules.sage_command_dispatcher.dispatch_command", new=cmd_mock), \
+             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
+             patch.object(wechat.WeChatOfficialTransport, "send_message", new=send_mock), \
+             patch(
+                 "server_modules.channel_pairing_service.get_channel_pairing_service",
+                 return_value=pairing_service,
+             ):
+            result = await wechat.handle_inbound_callback(
+                agent_install_id="agent-1", timestamp="1", nonce="n1", signature="s1",
+                raw_body=_wechat_body(openid="stranger-1", content="hi who is this", msg_id="m1"),
+            )
+
+        self.assertFalse(result.get("processed"))
+        self.assertEqual(result.get("reason"), "pairing_required")
+        cmd_mock.assert_not_called()
+        reply_mock.assert_not_awaited()
+        send_mock.assert_awaited_once()
+        self.assertIn("not linked to Empyralis", send_mock.await_args.args[0])
+        pairing_service.authorize_channel_message.assert_called_once_with(
+            provider="wechat_official",
+            external_subject="stranger-1",
+            workspace_id="ws-1",
+            message_text="hi who is this",
+        )
+
+    async def test_paired_sender_reaches_dispatch(self) -> None:
+        wechat = self.wechat
+        reply_mock = AsyncMock(return_value=True)
+
+        pairing_service = mock_module.MagicMock()
+        pairing_service.authorize_channel_message.return_value = {
+            "authorized": True,
+            "status": "linked",
+            "workspace_id": "ws-1",
+        }
+
+        with patch.object(wechat, "_resolve_binding_and_credential", new=AsyncMock(return_value=self._resolved)), \
+             patch.object(wechat, "verify_wechat_server_signature", return_value=True), \
+             patch("server_modules.sage_command_dispatcher.dispatch_command", new=AsyncMock(return_value=None)), \
+             patch("server_modules.sage_reply_dispatcher.dispatch_sage_reply_safe", new=reply_mock), \
+             patch(
+                 "server_modules.channel_pairing_service.get_channel_pairing_service",
+                 return_value=pairing_service,
+             ):
+            result = await wechat.handle_inbound_callback(
+                agent_install_id="agent-1", timestamp="1", nonce="n1", signature="s1",
+                raw_body=_wechat_body(openid="cust-known", content="hi again", msg_id="m1"),
+            )
+
+        self.assertTrue(result.get("processed"))
+        reply_mock.assert_awaited_once()
+        pairing_service.authorize_channel_message.assert_called_once_with(
+            provider="wechat_official",
+            external_subject="cust-known",
+            workspace_id="ws-1",
+            message_text="hi again",
+        )
 
 
 # ═══════════════════════════ Telegram hosted ═══════════════════════════
@@ -313,7 +440,20 @@ class SlackEnvelopeTests(unittest.TestCase):
         self.assertTrue(envelope.addressed)
 
     def test_dm_channel_type_is_dm_surface(self) -> None:
+        """Envelope-shape coverage for an ALREADY-PAIRED Slack DM sender —
+        Gate 1 (channel_pairing_service.authorize_channel_message) is mocked
+        authorized here so this test can keep asserting what it always
+        asserted (surface/owner shape). Gate 1 itself — an unpaired Slack DM
+        never reaching route_inbound_channel_message — is covered by
+        SlackDmGate1Tests below."""
         from server_modules import connectors_actions
+
+        pairing_service = mock_module.MagicMock()
+        pairing_service.authorize_channel_message.return_value = {
+            "authorized": True,
+            "status": "linked",
+            "workspace_id": "ws-1",
+        }
 
         with (
             patch("server_modules.connectors_actions._append_channel_event", return_value=None),
@@ -349,6 +489,10 @@ class SlackEnvelopeTests(unittest.TestCase):
                 return_value={"team_id": "T999", "bot_user_id": "BOT"},
             ),
             patch(
+                "server_modules.channel_pairing_service.get_channel_pairing_service",
+                return_value=pairing_service,
+            ),
+            patch(
                 "server_modules.agent_channel_router.route_inbound_channel_message",
                 new=AsyncMock(return_value={"ok": True, "run_id": "run-2", "reply": ""}),
             ) as route_mock,
@@ -378,6 +522,172 @@ class SlackEnvelopeTests(unittest.TestCase):
         self.assertIsNotNone(envelope)
         self.assertEqual(envelope.surface, SurfaceKind.DM)
         self.assertIsNone(envelope.sender.is_owner)
+
+
+class SlackDmGate1Tests(unittest.TestCase):
+    """Gate 1 (THE ACTUAL FIX): slack_connector.should_trigger_agent_run's
+    own comment says a DM "always triggers" — that was true structurally but
+    never checked WHO was DMing the app. Before this change, any Slack user
+    who opened a DM with the installed app got a full agent turn, no pairing,
+    no allowlist (CHANNEL-GATEWAY-PLAN.md §5a). An unpaired DM sender must
+    now get a pairing prompt back in the DM and must NEVER reach
+    route_inbound_channel_message (Slack's chokepoint into
+    execute_sage_turn). A non-DM (channel/group) message is untouched by
+    this gate — see test_channel_message_is_group_surface_with_unverified_owner
+    above, which exercises no pairing mock and still passes."""
+
+    def _slack_webhook_request(self):
+        from starlette.requests import Request
+
+        async def _receive():
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        scope = {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "POST",
+            "path": "/channels/slack/events",
+            "raw_path": b"/channels/slack/events",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 54321),
+            "server": ("127.0.0.1", 8001),
+        }
+        return Request(scope, _receive)
+
+    def test_unpaired_dm_sender_never_reaches_route_inbound_channel_message(self) -> None:
+        from server_modules import connectors_actions
+
+        pairing_service = mock_module.MagicMock()
+        pairing_service.authorize_channel_message.return_value = {
+            "authorized": False,
+            "status": "pairing_required",
+            "connect_url": "https://app.empyralis.test/continue?source=channel_connect&channel=slack",
+            "reply_text": "This Slack identity is not linked to Empyralis yet. Open this link to connect it: https://app.empyralis.test/continue?source=channel_connect&channel=slack",
+        }
+        send_message_mock = mock_module.MagicMock(return_value={"ok": True})
+
+        with (
+            patch("server_modules.connectors_actions._append_channel_event", return_value=None),
+            patch("server_modules.connectors_actions.slack_verify_request_signature", return_value=True),
+            patch(
+                "server_modules.connectors_actions.slack_parse_inbound_event",
+                return_value={
+                    "kind": "event",
+                    "event_id": "Ev2000",
+                    "message_type": "message",
+                    "channel_type": "im",
+                    "channel": "D111",
+                    "user_id": "U-STRANGER",
+                    "text": "hi who is this",
+                },
+            ),
+            patch(
+                "server_modules.connectors_actions.load_vault",
+                return_value={
+                    "credentials": [
+                        {
+                            "id": "cred-slack-3",
+                            "provider": "slack",
+                            "workspace_id": "ws-1",
+                            "tenant_id": "tenant-1",
+                            "metadata": {"team_id": "T222", "trigger_on_all_messages": True},
+                        }
+                    ]
+                },
+            ),
+            patch(
+                "server_modules.connectors_actions.resolve_vault_credential",
+                return_value={"team_id": "T222", "bot_user_id": "BOT"},
+            ),
+            patch(
+                "server_modules.channel_pairing_service.get_channel_pairing_service",
+                return_value=pairing_service,
+            ),
+            patch(
+                "server_modules.connectors_actions.slack_send_channel_message",
+                new=send_message_mock,
+            ),
+            patch(
+                "server_modules.agent_channel_router.route_inbound_channel_message",
+                new=AsyncMock(return_value={"ok": True, "run_id": "should-never-happen", "reply": ""}),
+            ) as route_mock,
+        ):
+            asyncio.run(connectors_actions.slack_events_webhook(self._slack_webhook_request()))
+
+        route_mock.assert_not_awaited()
+        pairing_service.authorize_channel_message.assert_called_once_with(
+            provider="slack",
+            external_subject="U-STRANGER",
+            workspace_id="ws-1",
+            message_text="hi who is this",
+        )
+        send_message_mock.assert_called_once()
+        sent_channel, sent_text = send_message_mock.call_args.args[1], send_message_mock.call_args.args[2]
+        self.assertEqual(sent_channel, "D111")
+        self.assertIn("not linked to Empyralis", sent_text)
+
+    def test_paired_dm_sender_reaches_route_inbound_channel_message(self) -> None:
+        from server_modules import connectors_actions
+
+        pairing_service = mock_module.MagicMock()
+        pairing_service.authorize_channel_message.return_value = {
+            "authorized": True,
+            "status": "linked",
+            "workspace_id": "ws-1",
+        }
+
+        with (
+            patch("server_modules.connectors_actions._append_channel_event", return_value=None),
+            patch("server_modules.connectors_actions.slack_verify_request_signature", return_value=True),
+            patch(
+                "server_modules.connectors_actions.slack_parse_inbound_event",
+                return_value={
+                    "kind": "event",
+                    "event_id": "Ev2001",
+                    "message_type": "message",
+                    "channel_type": "im",
+                    "channel": "D111",
+                    "user_id": "U-KNOWN",
+                    "text": "hi again",
+                },
+            ),
+            patch(
+                "server_modules.connectors_actions.load_vault",
+                return_value={
+                    "credentials": [
+                        {
+                            "id": "cred-slack-4",
+                            "provider": "slack",
+                            "workspace_id": "ws-1",
+                            "tenant_id": "tenant-1",
+                            "metadata": {"team_id": "T333", "trigger_on_all_messages": True},
+                        }
+                    ]
+                },
+            ),
+            patch(
+                "server_modules.connectors_actions.resolve_vault_credential",
+                return_value={"team_id": "T333", "bot_user_id": "BOT"},
+            ),
+            patch(
+                "server_modules.channel_pairing_service.get_channel_pairing_service",
+                return_value=pairing_service,
+            ),
+            patch(
+                "server_modules.agent_channel_router.route_inbound_channel_message",
+                new=AsyncMock(return_value={"ok": True, "run_id": "run-known", "reply": ""}),
+            ) as route_mock,
+        ):
+            asyncio.run(connectors_actions.slack_events_webhook(self._slack_webhook_request()))
+
+        route_mock.assert_awaited_once()
+        pairing_service.authorize_channel_message.assert_called_once_with(
+            provider="slack",
+            external_subject="U-KNOWN",
+            workspace_id="ws-1",
+            message_text="hi again",
+        )
 
 
 # ═══════════════════════════ Console (web) ═══════════════════════════

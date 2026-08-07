@@ -28,6 +28,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest import mock as mock_module
 from unittest.mock import AsyncMock, patch
 
 from server_modules import agent_channel_router
@@ -479,6 +480,20 @@ class DispatchSageReplyConversationMemoryTests(_IsolatedConversationsMixin, unit
         self.assertEqual(turns, [])
 
 
+def _authorized_wechat_pairing_service():
+    """Gate 1 (channel_pairing_service.authorize_channel_message) mocked as
+    already-linked — this module tests durable conversation memory/thread
+    keying DOWNSTREAM of Gate 1, not the gate itself (that's covered by
+    WeChatOfficialGate1Tests in test_inbound_envelope_hosted_channels.py)."""
+    service = mock_module.MagicMock()
+    service.authorize_channel_message.return_value = {
+        "authorized": True,
+        "status": "linked",
+        "workspace_id": "ws-wechat",
+    }
+    return service
+
+
 # ─── WeChat: real end-to-end durable round trip ────────────────────────────
 
 
@@ -519,6 +534,10 @@ class WeChatDurableMemoryTests(_IsolatedConversationsMixin, unittest.IsolatedAsy
                 new=AsyncMock(return_value={"ok": True}),
             ),
             patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock),
+            patch(
+                "server_modules.channel_pairing_service.get_channel_pairing_service",
+                return_value=_authorized_wechat_pairing_service(),
+            ),
         ):
             result_1 = await wechat_official_service.handle_inbound_callback(
                 agent_install_id="agent-wc-1", timestamp="t", nonce="n", signature="s",
@@ -571,6 +590,10 @@ class WeChatDurableMemoryTests(_IsolatedConversationsMixin, unittest.IsolatedAsy
                 new=AsyncMock(return_value={"ok": True}),
             ),
             patch("server_modules.sage_turn_adapter.execute_sage_turn", new=AsyncMock(return_value=turn_result)),
+            patch(
+                "server_modules.channel_pairing_service.get_channel_pairing_service",
+                return_value=_authorized_wechat_pairing_service(),
+            ),
         ):
             await wechat_official_service.handle_inbound_callback(
                 agent_install_id="agent-wc-1", timestamp="t", nonce="n", signature="s",

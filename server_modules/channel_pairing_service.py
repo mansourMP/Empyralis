@@ -136,6 +136,8 @@ def _display_provider(provider: str) -> str:
         "discord": "Discord",
         "slack": "Slack",
         "wechat": "WeChat",
+        "wechat_official": "WeChat",
+        "sms": "SMS",
         "imessage": "iMessage",
     }
     return mapping.get(provider, provider.replace("_", " ").title())

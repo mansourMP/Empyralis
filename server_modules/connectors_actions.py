@@ -1166,6 +1166,45 @@ async def slack_events_webhook(request: Request):
                 if not goal:
                     continue
 
+                # ── Gate 1: DM pairing (unknown Slack user → no turn) ──────
+                # should_trigger_agent_run's own comment is explicit: "A DM
+                # is never a group — always trigger." That covers *whether
+                # this event shape warrants a turn at all* (mention/message,
+                # not a bot echo) but never checked *who* is DMing the app —
+                # any Slack user who finds the app and opens a DM got a full
+                # agent turn, no pairing, no allowlist. Every other channel
+                # with a DM concept (WhatsApp Business operator numbers via
+                # channel_pairing_service.authorize_channel_message below,
+                # Telegram Hosted's is_paired, Discord DM's
+                # get_workspace_for_discord_user) gates this. Slack had none.
+                # Scoped to channel_type == "im" only — group/channel
+                # messages keep their existing connector-match gate
+                # (event_matches_connector), untouched here.
+                _slack_channel_type_gate1 = str(parsed.get("channel_type") or "").strip().lower()
+                if _slack_channel_type_gate1 == "im":
+                    from server_modules.channel_pairing_service import get_channel_pairing_service
+
+                    _slack_pair_resolution = get_channel_pairing_service().authorize_channel_message(
+                        provider="slack",
+                        external_subject=str(parsed.get("user_id") or "").strip(),
+                        workspace_id=workspace_id,
+                        message_text=goal,
+                    )
+                    if not bool(_slack_pair_resolution.get("authorized")):
+                        _slack_pair_reply = str(_slack_pair_resolution.get("reply_text") or "").strip()
+                        if _slack_pair_reply:
+                            try:
+                                slack_send_channel_message(secret, channel_id, _slack_pair_reply)
+                            except Exception as exc:
+                                import logging as _sp_log
+
+                                _sp_log.getLogger(__name__).warning(
+                                    "slack_events_webhook: pairing reply send failed for channel=%s: %s",
+                                    channel_id,
+                                    exc,
+                                )
+                        continue
+
                 # ── Canonical inbound envelope (docs/design/inbound-envelope-design.md) ──
                 # Slack's own channel_type ("im" = DM, "mpim"/"group"/"channel"
                 # = multi-member) is computed by parse_inbound_event but was
@@ -1408,6 +1447,31 @@ async def sms_twilio_webhook(request: Request):
 
         if not body_text:
             return transport.twiml_response("")
+
+        # ── Gate 1: sender pairing (unknown phone number → no turn) ────────
+        # SMS has no group concept (confirmed: this handler never constructs
+        # an InboundEnvelope) so Gate 1 is the whole story here — any number
+        # that texts a bound Twilio number used to reach the agent directly,
+        # no pairing, no allowlist. Reuses channel_pairing_service exactly as
+        # whatsapp_ingress_service.py's _dispatch_operator_envelope already
+        # does for WhatsApp Business operator numbers — same shape (a bound
+        # Twilio number, a bare From/To, no groups), same mechanism, so this
+        # is genuine reuse rather than a fourth pairing implementation. An
+        # unpaired number gets a pairing-code prompt by SMS reply; texting
+        # the code back (bare "EMP-XXXX-XXXX" or "pair EMP-XXXX-XXXX") links
+        # the number to the workspace that issued the code, same as every
+        # other channel_pairing_service consumer.
+        from server_modules.channel_pairing_service import get_channel_pairing_service
+
+        _sms_pair_resolution = get_channel_pairing_service().authorize_channel_message(
+            provider="sms",
+            external_subject=from_number,
+            workspace_id=workspace_id,
+            message_text=body_text,
+        )
+        if not bool(_sms_pair_resolution.get("authorized")):
+            _sms_pair_reply = str(_sms_pair_resolution.get("reply_text") or "").strip()
+            return transport.twiml_response(_sms_pair_reply or "")
 
         # TODO(billing): meter this inbound message + the reply below against
         # workspace credits — check balance via entitlements_service before

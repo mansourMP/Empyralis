@@ -757,7 +757,11 @@ def should_trigger_agent_run(
     channel_type = str(parsed.get("channel_type") or "").strip()
     # A DM is never a group — always trigger, matching every other channel's
     # dm_policy-is-separate-from-group_policy split (personal_channels_
-    # service._enforce_group_policy's own is_group short-circuit).
+    # service._enforce_group_policy's own is_group short-circuit). This is a
+    # structural gate only (message shape, not sender identity) — WHO may DM
+    # the app is enforced downstream in connectors_actions.slack_events_webhook
+    # via channel_pairing_service.authorize_channel_message before any turn
+    # runs (Gate 1).
     if channel_type == "im":
         return True
     # trigger_on_all_messages remains a valid explicit override (unaffected
