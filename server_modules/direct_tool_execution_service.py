@@ -883,18 +883,19 @@ def execute_single_direct_tool_call(
         _guard_tools = set(_spec_guard.get("tools") or [])
         _guard_connectors = set(_spec_guard.get("connectors") or [])
         _tool_connector = str(connector_id or "").strip().lower()
-        # fix/agent-task-tools-on-sdk-engine, feat/document-agent-tools:
-        # project_task__* (the shared project task board — skills_service.py's
-        # connector_id == "project_task" dispatch) and document__* (a
-        # project's owned documents — connector_id == "document") are both
-        # intrinsic to project membership, not a bindable connector — neither
-        # has an agent_connector_bindings row to ever check (see
-        # sage_agent_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS
+        # fix/agent-task-tools-on-sdk-engine, feat/document-agent-tools,
+        # feat/agent-goals: project_task__* (the shared project task board —
+        # skills_service.py's connector_id == "project_task" dispatch),
+        # document__* (a project's owned documents — connector_id ==
+        # "document"), and goal__* (a project's durable goals — connector_id
+        # == "goal") are all intrinsic to project membership, not a bindable
+        # connector — none has an agent_connector_bindings row to ever check
+        # (see sage_agent_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS
         # comment). Gated on the guard's own project_id instead, mirroring
         # the prompt-time grant in _specialist_tool_allowed /
         # _filter_registry_for_specialist.
         _guard_project_id = str(_spec_guard.get("project_id") or "").strip()
-        _guard_project_scoped_connectors = ("project_task", "document")
+        _guard_project_scoped_connectors = ("project_task", "document", "goal")
         _guard_allowed = (
             tool_name in _guard_core
             or tool_name in _guard_tools

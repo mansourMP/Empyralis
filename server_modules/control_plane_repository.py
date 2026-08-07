@@ -1562,6 +1562,36 @@ CREATE TABLE IF NOT EXISTS agent_recurring_schedules (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Durable agent goals ("agent, go negotiate with this supplier and come
+-- back with a solution") -- see migrations/add_agent_goals.sql for the
+-- full rationale. Bounded on BOTH axes from creation (max_attempts and
+-- expires_at are NOT NULL, unlike agent_recurring_schedules' nullable
+-- pair) -- attempt_count is advanced only by the system
+-- (bounded_scheduler_service._fire_goal), never by the model narrating
+-- its own progress.
+CREATE TABLE IF NOT EXISTS agent_goals (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL,
+    master_agent_install_id TEXT NULL REFERENCES workspace_agent_installs(id) ON DELETE SET NULL,
+    title TEXT NOT NULL DEFAULT '',
+    goal_text TEXT NOT NULL,
+    instruction TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'todo',
+    requested_by TEXT NOT NULL DEFAULT 'owner',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    retry_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+    next_fire_at TIMESTAMPTZ NOT NULL,
+    last_fired_at TIMESTAMPTZ NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS agent_channel_events (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -1828,6 +1858,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_scheduler_wake_requests_trigger ON agent_sc
 CREATE INDEX IF NOT EXISTS idx_agent_recurring_schedules_due ON agent_recurring_schedules(status, next_fire_at ASC);
 CREATE INDEX IF NOT EXISTS idx_agent_recurring_schedules_scope ON agent_recurring_schedules(tenant_id, workspace_id, status);
 CREATE INDEX IF NOT EXISTS idx_agent_recurring_schedules_agent ON agent_recurring_schedules(tenant_id, workspace_id, agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_due ON agent_goals(status, next_fire_at ASC);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_scope ON agent_goals(tenant_id, workspace_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_agent ON agent_goals(tenant_id, workspace_id, agent_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_goals_project ON agent_goals(tenant_id, workspace_id, project_id, status);
 CREATE INDEX IF NOT EXISTS idx_agent_channel_events_scope_created ON agent_channel_events(tenant_id, workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_channel_events_session ON agent_channel_events(tenant_id, workspace_id, channel_key, endpoint_key, session_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_channel_events_responder ON agent_channel_events(tenant_id, workspace_id, responder_install_id, created_at DESC);
@@ -14163,6 +14197,7 @@ async def count_agent_scheduler_wake_requests_since(
     task_id: Optional[str] = None,
     agent_id: Optional[str] = None,
     recurring_schedule_id: Optional[str] = None,
+    goal_id: Optional[str] = None,
 ) -> int:
     resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
     resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
@@ -14207,6 +14242,15 @@ async def count_agent_scheduler_wake_requests_since(
         # cap to.
         params.append(str(recurring_schedule_id or "").strip())
         conditions.append(f"metadata->>'recurring_schedule_id' = ${len(params)}")
+    if goal_id:
+        # A goal's own daily wake ceiling (DEFAULT_MAX_GOAL_WAKES_PER_DAY) --
+        # same shape as recurring_schedule_id immediately above, scoped to
+        # metadata->>'goal_id' (stamped onto every wake bounded_scheduler_
+        # service._fire_goal / create_goal creates) so a fast retry cadence
+        # can't turn into an unbounded wake storm just because a goal has no
+        # task_id to pin the existing per-task cap to.
+        params.append(str(goal_id or "").strip())
+        conditions.append(f"metadata->>'goal_id' = ${len(params)}")
     async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
         if connection is None:
             return 0
@@ -14644,6 +14688,296 @@ async def update_agent_recurring_schedule(
         return None
     record = dict(row)
     record["payload"] = _decode_json_object(record.get("payload"))
+    record["metadata"] = _decode_json_object(record.get("metadata"))
+    return record
+
+
+async def append_agent_goal(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+    agent_id: str,
+    master_agent_install_id: Optional[str] = None,
+    title: str = "",
+    goal_text: str,
+    instruction: str = "",
+    status: str = "todo",
+    requested_by: str = "owner",
+    attempt_count: int = 0,
+    max_attempts: int,
+    retry_policy: Optional[Dict[str, Any]] = None,
+    next_fire_at: Any,
+    last_fired_at: Any = None,
+    expires_at: Any,
+    metadata: Optional[Dict[str, Any]] = None,
+    goal_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    resolved_project_id = str(project_id or "").strip()
+    resolved_agent_id = str(agent_id or "").strip()
+    resolved_goal_text = str(goal_text or "").strip()
+    if not resolved_project_id or not resolved_agent_id or not resolved_goal_text:
+        return None
+    resolved_next_fire_at = _coerce_timestamptz(next_fire_at)
+    resolved_expires_at = _coerce_timestamptz(expires_at)
+    if resolved_next_fire_at is None or resolved_expires_at is None:
+        return None
+    resolved_goal_id = str(goal_id or f"goal_{uuid.uuid4().hex[:16]}").strip()
+    now_ts = _utc_now_ts()
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return None
+        await connection.execute(
+            """
+            INSERT INTO agent_goals (
+                id, tenant_id, workspace_id, project_id, agent_id, master_agent_install_id,
+                title, goal_text, instruction, status, requested_by,
+                attempt_count, max_attempts, retry_policy,
+                next_fire_at, last_fired_at, expires_at, metadata, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11,
+                $12, $13, $14::jsonb,
+                $15::timestamptz, $16::timestamptz, $17::timestamptz, $18::jsonb, $19::timestamptz, $19::timestamptz
+            )
+            """,
+            resolved_goal_id,
+            resolved_tenant_id,
+            resolved_workspace_id,
+            resolved_project_id,
+            resolved_agent_id,
+            str(master_agent_install_id or "").strip() or None,
+            str(title or ""),
+            resolved_goal_text,
+            str(instruction or ""),
+            str(status or "todo").strip().lower() or "todo",
+            str(requested_by or "owner").strip().lower() or "owner",
+            int(attempt_count or 0),
+            int(max_attempts),
+            _to_json(retry_policy, default={}),
+            resolved_next_fire_at,
+            _coerce_timestamptz(last_fired_at),
+            resolved_expires_at,
+            _to_json(metadata, default={}),
+            now_ts,
+        )
+        row = await connection.fetchrow(
+            "SELECT * FROM agent_goals WHERE id = $1 LIMIT 1",
+            resolved_goal_id,
+        )
+    if row is None:
+        return None
+    record = dict(row)
+    record["retry_policy"] = _decode_json_object(record.get("retry_policy"))
+    record["metadata"] = _decode_json_object(record.get("metadata"))
+    return record
+
+
+async def get_agent_goal(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal_id: str,
+) -> Optional[Dict[str, Any]]:
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    resolved_goal_id = str(goal_id or "").strip()
+    if not resolved_goal_id:
+        return None
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return None
+        row = await connection.fetchrow(
+            "SELECT * FROM agent_goals WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3 LIMIT 1",
+            resolved_goal_id,
+            resolved_tenant_id,
+            resolved_workspace_id,
+        )
+    if row is None:
+        return None
+    record = dict(row)
+    record["retry_policy"] = _decode_json_object(record.get("retry_policy"))
+    record["metadata"] = _decode_json_object(record.get("metadata"))
+    return record
+
+
+async def list_agent_goals(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    status: Optional[str] = None,
+    statuses: Optional[List[str]] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    conditions = ["tenant_id = $1", "workspace_id = $2"]
+    params: List[Any] = [resolved_tenant_id, resolved_workspace_id]
+    if project_id:
+        params.append(str(project_id or "").strip())
+        conditions.append(f"project_id = ${len(params)}")
+    if agent_id:
+        params.append(str(agent_id or "").strip())
+        conditions.append(f"agent_id = ${len(params)}")
+    if status:
+        params.append(str(status or "").strip().lower())
+        conditions.append(f"status = ${len(params)}")
+    elif statuses:
+        normalized_statuses = [str(item or "").strip().lower() for item in statuses if str(item or "").strip()]
+        if normalized_statuses:
+            params.append(normalized_statuses)
+            conditions.append(f"status = ANY(${len(params)}::text[])")
+    params.append(max(1, int(limit or 100)))
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return []
+        rows = await connection.fetch(
+            f"""
+            SELECT *
+            FROM agent_goals
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at DESC
+            LIMIT ${len(params)}
+            """,
+            *params,
+        )
+    result = []
+    for row in rows:
+        record = dict(row)
+        record["retry_policy"] = _decode_json_object(record.get("retry_policy"))
+        record["metadata"] = _decode_json_object(record.get("metadata"))
+        result.append(record)
+    return result
+
+
+async def list_due_agent_goal_scopes(
+    *,
+    due_before: Any,
+    non_terminal_statuses: List[str],
+    limit: int = 200,
+) -> List[Dict[str, str]]:
+    """System-level scan for which (tenant_id, workspace_id) pairs currently
+    have an active, due goal -- same shape and same reason as list_due_
+    agent_recurring_schedule_scopes above (bypass_rls=True: there is no
+    single tenant scope to apply to a cross-tenant "who has due work"
+    question). The actual read/update of a due goal stays fully RLS-scoped
+    through get_agent_goal/update_agent_goal per (tenant_id, workspace_id)
+    pair returned here."""
+    resolved_due_before = _coerce_timestamptz(due_before)
+    if resolved_due_before is None:
+        return []
+    resolved_statuses = [str(item or "").strip().lower() for item in (non_terminal_statuses or []) if str(item or "").strip()]
+    if not resolved_statuses:
+        return []
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            return []
+        rows = await connection.fetch(
+            """
+            SELECT DISTINCT tenant_id, workspace_id
+            FROM agent_goals
+            WHERE status = ANY($1::text[])
+              AND next_fire_at <= $2::timestamptz
+            LIMIT $3
+            """,
+            resolved_statuses,
+            resolved_due_before,
+            max(1, int(limit or 200)),
+        )
+    return [
+        {"tenant_id": str(row["tenant_id"]), "workspace_id": str(row["workspace_id"])}
+        for row in rows
+        if row["tenant_id"] and row["workspace_id"]
+    ]
+
+
+async def update_agent_goal(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal_id: str,
+    status: Optional[str] = None,
+    title: Optional[str] = None,
+    goal_text: Optional[str] = None,
+    instruction: Optional[str] = None,
+    next_fire_at: Any = None,
+    last_fired_at: Any = None,
+    attempt_count: Optional[int] = None,
+    metadata_patch: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Generic field-patch update, same append-only-history convention as
+    update_agent_recurring_schedule above -- a terminal status (done/
+    cancelled/exhausted) is a status transition on this same row, never a
+    DELETE. Used both by the system (bounded_scheduler_service._fire_goal
+    advancing attempt_count/next_fire_at, or marking a goal 'exhausted')
+    and by the validated agent-facing update_goal wrapper (status/title/
+    goal_text/instruction edits) -- callers decide which fields to pass;
+    this function does not itself validate the status vocabulary."""
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    resolved_goal_id = str(goal_id or "").strip()
+    if not resolved_goal_id:
+        return None
+    now_ts = _utc_now_ts()
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return None
+        existing = await connection.fetchrow(
+            "SELECT * FROM agent_goals WHERE id = $1 LIMIT 1",
+            resolved_goal_id,
+        )
+        if existing is None:
+            return None
+        current_metadata = _coerce_dict(existing.get("metadata"))
+        next_metadata = {**current_metadata, **_coerce_dict(metadata_patch)}
+        next_status = str(status).strip().lower() if status is not None else str(existing.get("status") or "todo")
+        next_title = str(title) if title is not None else str(existing.get("title") or "")
+        next_goal_text = str(goal_text) if goal_text is not None else str(existing.get("goal_text") or "")
+        next_instruction = str(instruction) if instruction is not None else str(existing.get("instruction") or "")
+        next_next_fire_at = _coerce_timestamptz(next_fire_at) if next_fire_at is not None else existing.get("next_fire_at")
+        next_last_fired_at = _coerce_timestamptz(last_fired_at) if last_fired_at is not None else existing.get("last_fired_at")
+        next_attempt_count = int(attempt_count) if attempt_count is not None else int(existing.get("attempt_count") or 0)
+        await connection.execute(
+            """
+            UPDATE agent_goals
+               SET status = $4,
+                   title = $5,
+                   goal_text = $6,
+                   instruction = $7,
+                   next_fire_at = $8::timestamptz,
+                   last_fired_at = $9::timestamptz,
+                   attempt_count = $10,
+                   metadata = $11::jsonb,
+                   updated_at = $12::timestamptz
+             WHERE id = $1
+               AND tenant_id = $2
+               AND workspace_id = $3
+            """,
+            resolved_goal_id,
+            resolved_tenant_id,
+            resolved_workspace_id,
+            next_status,
+            next_title,
+            next_goal_text,
+            next_instruction,
+            next_next_fire_at,
+            next_last_fired_at,
+            next_attempt_count,
+            _to_json(next_metadata, default={}),
+            now_ts,
+        )
+        row = await connection.fetchrow(
+            "SELECT * FROM agent_goals WHERE id = $1 LIMIT 1",
+            resolved_goal_id,
+        )
+    if row is None:
+        return None
+    record = dict(row)
+    record["retry_policy"] = _decode_json_object(record.get("retry_policy"))
     record["metadata"] = _decode_json_object(record.get("metadata"))
     return record
 
