@@ -309,13 +309,15 @@ def _build_workspace_bootstrap_payload(
         "routing_read_enabled": role in {"owner", "admin"},
         "routing_write_enabled": role in {"owner", "admin"},
         "document_workstation_enabled": bool(workspace_traits.get("documentHeavy")),
-        "channel_pairing_enabled": (
-            role in {"member", "owner", "admin"}
-            and (
-                bool(capability_flags.get("telegram_channel_enabled"))
-                or bool(capability_flags.get("whatsapp_channel_enabled"))
-            )
-        ),
+        # Pairing itself isn't plan-gated — only Telegram/WhatsApp channel
+        # *access* is (enforced per-provider in
+        # channel_pairing_service.create_pairing_intent). Slack, SMS, and
+        # WeChat Official have no entitlement flag at all, so tying this to
+        # telegram/whatsapp specifically hid the pairing UI for any workspace
+        # that only uses those three channels — exactly the channels Gate 1
+        # now denies unpaired senders on. Any member+ can see the surface;
+        # per-provider availability is still enforced where it belongs.
+        "channel_pairing_enabled": role in {"member", "owner", "admin"},
     }
     permissions = _membership_permissions(
         role=role,

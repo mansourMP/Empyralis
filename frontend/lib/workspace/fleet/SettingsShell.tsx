@@ -11,6 +11,7 @@ import { EmergencyStopSection } from "@/lib/workspace/fleet/EmergencyStopSection
 import { HardwareSection } from "@/lib/workspace/fleet/HardwareSection";
 import { McpServersSection } from "@/lib/workspace/fleet/McpServersSection";
 import { McpApiKeysSection } from "@/lib/workspace/fleet/McpApiKeysSection";
+import { ChannelPairingSection } from "@/lib/workspace/fleet/ChannelPairingSection";
 import { SETTINGS_SECTIONS, type SettingsSection } from "@/lib/workspace/fleet/settings-sections";
 
 import "./settings-shell.css";
@@ -113,6 +114,12 @@ export function SettingsShell({
               {/* Inbound: external MCP clients connecting IN — its own
                   section now, not an inline block tacked onto the page. */}
               <McpApiKeysSection workspaceId={workspaceId} />
+
+              {/* Inbound: channel senders connecting IN (Slack DMs, SMS,
+                  WeChat Official, Telegram, WhatsApp) — the other inbound
+                  direction, same "Connections" grouping as the MCP API keys
+                  above it. */}
+              <ChannelPairingSection workspaceId={workspaceId} />
             </>
           ) : null}
         </div>

@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from 'next/navigation';
 
 import './continue.css';
 
-const CONTINUE_INTENT_STORAGE_KEY = 'empyralis.continue-intent';
 const UPGRADE_CLICK_SESSION_KEY_PREFIX = 'empyralis.upgrade-click::';
 const IOS_DOWNLOAD_URL = 'https://apps.apple.com/app/id0000000000';
 const ANDROID_DOWNLOAD_URL = 'https://play.google.com/store/apps/details?id=com.empyralis.app';
@@ -124,20 +123,12 @@ function ContinuePageContent() {
   }, [agent, channelAttribution, source]);
 
   function handleContinueOnWeb() {
-    if (typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined') {
-      window.sessionStorage.setItem(
-        CONTINUE_INTENT_STORAGE_KEY,
-        JSON.stringify({
-          source,
-          agent,
-          channel,
-          workspaceId,
-          channelAttribution,
-          capturedAt: Date.now(),
-        }),
-      );
-    }
-
+    // The actual state carrier for this flow is the query string, bounced
+    // through /login -> /signup and back (see both pages' own agent/source/
+    // channel/workspace_id/channel_attribution handling) — not client
+    // storage. A sessionStorage write used to happen here too, but nothing
+    // ever read it back; removed rather than left as a write that looked
+    // like a working feature.
     const nextSearchParams = new URLSearchParams();
     if (agent) {
       nextSearchParams.set('agent', agent);
