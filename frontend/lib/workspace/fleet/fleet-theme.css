@@ -9476,6 +9476,12 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 .fleet-composer-title::placeholder,
 .fleet-composer-desc::placeholder { color: var(--text-muted); }
+.fleet-composer-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
 /* THE rule this whole panel turns on. TWO global rules draw a box on a focused
    field and both have to go here: `.fleet-root *:focus-visible` (a 2px accent
    outline) and globals.css' app-wide `:focus-visible { box-shadow:
