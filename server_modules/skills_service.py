@@ -1575,6 +1575,128 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             audience_safe=True,
             audience_note="Safe: scoped to this agent's own project.",
         ),
+        # document__* (feat/document-agent-tools): the agent-facing side of a
+        # project's owned markdown knowledge (project_documents_repository.py
+        # -- "the owned-context layer for a team, with execution attached,"
+        # CLAUDE.md). Same shape as project_task__* immediately above:
+        # connector_id="document" is granted by PROJECT MEMBERSHIP, not a
+        # connector binding (see sage_agent_runtime_service.py's
+        # _PROJECT_SCOPED_CONNECTOR_IDS), every action below is scoped to the
+        # CALLING agent's own project (resolved server-side from session
+        # identity via project_tasks_service.agent_project_id -- the same
+        # resolver project_task__* uses, since "which project is this agent
+        # in" is one fact, not two), and every write stamps updated_by with
+        # the acting agent's identity so the Documents UI can show who
+        # changed what.
+        #
+        # NOT marked audience_safe: unlike project_task's internal
+        # work-tracking, a project's documents are free-text team knowledge
+        # that may say anything -- CLAUDE.md's "conservative default,
+        # enforced without asking" (written for personal/self-chat threads)
+        # applies just as well here. Omitted (defaults to audience_safe=False)
+        # rather than asserted, so these tools stay owner-only until a human
+        # decision says otherwise.
+        #
+        # document__edit is the one that matters: an exact-string,
+        # unique-match replace modeled on Claude Code's own Edit tool
+        # (server_modules/skills_service.py's connector_id == "document"
+        # dispatch below does the actual uniqueness check) -- it is what lets
+        # an agent change one line of a document instead of regenerating the
+        # whole body, the founder's stated objection to Linear's own
+        # agent-document story.
+        ToolDescriptor(
+            tool_name="document__list",
+            label="List project documents",
+            connector_id="document",
+            action_id="list",
+            description=(
+                "List this project's documents: a table of contents (title, slug, "
+                "who last touched it, when) -- NOT the bodies. Use this first to see "
+                "what already exists before creating something that might duplicate "
+                "it, or to find the slug of the document you want to read or edit. "
+                "Call document__read on a specific slug to get its full content."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+        ),
+        ToolDescriptor(
+            tool_name="document__read",
+            label="Read project document",
+            connector_id="document",
+            action_id="read",
+            description=(
+                "Read one document's full markdown body, by slug or id -- must belong "
+                "to your own project. Provide whichever you have; slug is what "
+                "document__list returns and is the more common case. Read the current "
+                "body before calling document__edit, since old_string must match the "
+                "text EXACTLY as it stands right now."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "The document's slug (from document__list)."},
+                    "id": {"type": "string", "description": "The document's id, if you already have it instead of a slug."},
+                },
+                "required": [],
+            },
+        ),
+        ToolDescriptor(
+            tool_name="document__edit",
+            label="Edit project document",
+            connector_id="document",
+            action_id="edit",
+            description=(
+                "Replace one exact passage in a document with new text -- a targeted, "
+                "line-level edit, never a whole-body rewrite. old_string must appear "
+                "in the document's CURRENT body EXACTLY ONCE: if it appears zero times "
+                "(no match -- often a stale copy of the text, re-read the document with "
+                "document__read first) or more than once (ambiguous -- include more "
+                "surrounding context, e.g. a preceding heading or line, to make the "
+                "match unique), this FAILS LOUDLY with an error and changes nothing. "
+                "It never guesses which occurrence you meant and never falls back to a "
+                "full rewrite. old_string and new_string must differ -- a no-op edit is "
+                "rejected rather than silently 'succeeding'."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "The document's slug (from document__list)."},
+                    "old_string": {
+                        "type": "string",
+                        "description": (
+                            "The exact text to replace. Must match the document's current "
+                            "body character-for-character, and must occur EXACTLY ONCE."
+                        ),
+                    },
+                    "new_string": {"type": "string", "description": "The text to replace it with."},
+                },
+                "required": ["slug", "old_string", "new_string"],
+            },
+        ),
+        ToolDescriptor(
+            tool_name="document__write",
+            label="Create project document",
+            connector_id="document",
+            action_id="write",
+            description=(
+                "Create a NEW document in your project. CREATE ONLY -- this fails if a "
+                "document already exists at the slug your title would produce (the "
+                "error names the existing document); it never overwrites or appends to "
+                "an existing one. To change an existing document, use document__edit "
+                "(a targeted passage replace) instead -- if you truly need to replace "
+                "the entire body, read it first with document__read, then use "
+                "document__edit with the whole current body as old_string. Call "
+                "document__list first if you are not sure whether this document "
+                "already exists."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "The document's title."},
+                    "body": {"type": "string", "description": "Initial markdown body. Optional -- defaults to empty."},
+                },
+                "required": ["title"],
+            },
+        ),
         ToolDescriptor(
             tool_name="browser__navigate",
             label="Browser navigate",
@@ -4409,6 +4531,14 @@ _BUILTIN_DIRECT_TOOL_IDS: frozenset = frozenset(
         # Section 4.6): needs session_ctx to resolve the calling agent's own
         # identity/project, same reasoning as "messaging"/"subagent" above.
         "project_task",
+        # document__* (feat/document-agent-tools): a project's owned
+        # documents, same reasoning as "project_task" immediately above —
+        # needs session_ctx to resolve the calling agent's own identity/
+        # project. Without this, execute_single_direct_tool_call_async
+        # would route document__* into _execute_custom_connector_tool_call_
+        # sync's OAuth-connector lookup below, which has no "document"
+        # connector registered and would error every call.
+        "document",
     }
 )
 
@@ -6126,6 +6256,185 @@ def execute_single_direct_tool_call(
             return json.dumps({"ok": True, **result}, ensure_ascii=False)
 
         raise RuntimeError(f"Unsupported project_task direct tool '{action_id}'.")
+    if connector_id == "document":
+        # document__* (feat/document-agent-tools): agent-facing access to a
+        # project's owned markdown documents (project_documents_repository.py).
+        # Byte-for-byte the same identity/scoping shape as connector_id ==
+        # "project_task" immediately above -- resolve the CALLING agent's own
+        # project server-side (never trust a project id the model might pass
+        # in) via project_tasks_service.agent_project_id, and reject anything
+        # that resolves to a different project rather than silently 404ing,
+        # so a denial reads as "not visible to this agent" instead of leaking
+        # whether some other project's slug/id happens to exist.
+        from server_modules import project_documents_repository as _documents
+        from server_modules import project_tasks_service as _project_tasks
+
+        _caller_agent_id = _agent_install_id_from_direct_tool_context(session_ctx)
+        _caller_tenant_id = _tenant_id_from_direct_tool_context(session_ctx)
+        if not _caller_agent_id:
+            raise RuntimeError(f"Tool 'document__{action_id}' requires a resolvable agent identity.")
+        _caller_project_id = callbacks.run_async_tool_call(
+            _project_tasks.agent_project_id(
+                tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=_caller_agent_id,
+            )
+        )
+        if not _caller_project_id:
+            raise RuntimeError(
+                f"Tool 'document__{action_id}' is unavailable: this agent has no project, so it has no documents."
+            )
+
+        def _document_summary(document: Dict[str, Any]) -> Dict[str, Any]:
+            return {
+                "id": document.get("id"),
+                "title": document.get("title"),
+                "slug": document.get("slug"),
+                "created_at": document.get("created_at"),
+                "updated_at": document.get("updated_at"),
+                "updated_by": document.get("updated_by"),
+            }
+
+        if action_id == "list":
+            docs = callbacks.run_async_tool_call(
+                _documents.list_documents(
+                    tenant_id=_caller_tenant_id,
+                    workspace_id=workspace_id,
+                    project_id=_caller_project_id,
+                    include_body=False,
+                )
+            )
+            return json.dumps(
+                {"ok": True, "documents": [_document_summary(d) for d in docs]}, ensure_ascii=False,
+            )
+
+        if action_id == "read":
+            slug = str(argument_payload.get("slug") or "").strip()
+            document_ref = str(argument_payload.get("id") or "").strip()
+            if not slug and not document_ref:
+                raise RuntimeError("Tool 'document__read' requires slug or id.")
+            if document_ref:
+                document = callbacks.run_async_tool_call(
+                    _documents.get_document(
+                        tenant_id=_caller_tenant_id, workspace_id=workspace_id, document_id=document_ref,
+                    )
+                )
+                if document is None:
+                    raise RuntimeError(f"Document '{document_ref}' not found in your project.")
+                if str(document.get("project_id") or "") != _caller_project_id:
+                    raise RuntimeError(f"Document '{document_ref}' belongs to a different project — not visible to this agent.")
+            else:
+                document = callbacks.run_async_tool_call(
+                    _documents.get_document_by_slug(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        project_id=_caller_project_id,
+                        slug=slug,
+                    )
+                )
+                if document is None:
+                    raise RuntimeError(f"No document with slug '{slug}' in your project. Use document__list to see what exists.")
+            return json.dumps({"ok": True, "document": document}, ensure_ascii=False)
+
+        if action_id == "edit":
+            slug = str(argument_payload.get("slug") or "").strip()
+            old_string = argument_payload.get("old_string")
+            new_string = argument_payload.get("new_string")
+            if not slug:
+                raise RuntimeError("Tool 'document__edit' requires slug.")
+            if not isinstance(old_string, str) or old_string == "":
+                raise RuntimeError("Tool 'document__edit' requires a non-empty old_string.")
+            if not isinstance(new_string, str):
+                raise RuntimeError("Tool 'document__edit' requires new_string.")
+            if old_string == new_string:
+                raise RuntimeError(
+                    "Tool 'document__edit' requires old_string and new_string to differ — there is nothing to change."
+                )
+            document = callbacks.run_async_tool_call(
+                _documents.get_document_by_slug(
+                    tenant_id=_caller_tenant_id,
+                    workspace_id=workspace_id,
+                    project_id=_caller_project_id,
+                    slug=slug,
+                )
+            )
+            if document is None:
+                raise RuntimeError(f"No document with slug '{slug}' in your project. Use document__list to see what exists.")
+            body = str(document.get("body") or "")
+            occurrences = body.count(old_string)
+            # The core guarantee this tool exists for: never guess, never
+            # silently overwrite. Zero matches and multiple matches both
+            # fail loudly, with zero mutation -- see the ToolDescriptor's own
+            # description above, which spells this out for the model so it
+            # knows to re-read or narrow old_string rather than retry blind.
+            if occurrences == 0:
+                raise RuntimeError(
+                    f"old_string not found in document '{slug}'. No changes were made. Re-read the document with "
+                    "document__read — the text may not match exactly, or may have changed since you last saw it."
+                )
+            if occurrences > 1:
+                raise RuntimeError(
+                    f"old_string appears {occurrences} times in document '{slug}' — it must match exactly once. "
+                    "No changes were made. Include more surrounding context (e.g. a nearby heading or line) so the "
+                    "match is unique."
+                )
+            new_body = body.replace(old_string, new_string, 1)
+            updated = callbacks.run_async_tool_call(
+                _documents.update_document(
+                    tenant_id=_caller_tenant_id,
+                    workspace_id=workspace_id,
+                    document_id=document["id"],
+                    body=new_body,
+                    updated_by=_caller_agent_id,
+                )
+            )
+            if updated is None:
+                raise RuntimeError(f"Document '{slug}' could not be updated — it may have just been deleted.")
+            return json.dumps({"ok": True, "document": _document_summary(updated)}, ensure_ascii=False)
+
+        if action_id == "write":
+            title = str(argument_payload.get("title") or "").strip()
+            body = argument_payload.get("body")
+            if not title:
+                raise RuntimeError("Tool 'document__write' requires a title.")
+            # CREATE ONLY: check the slug this title would produce BEFORE
+            # inserting, and fail loudly if it is already taken, rather than
+            # letting create_document's own _unique_slug silently disambiguate
+            # into 'title-2' -- see project_documents_repository.slugify_
+            # title's own docstring for why that default is wrong for an
+            # agent tool. (A concurrent create landing between this check and
+            # the INSERT below is a benign, narrow race: worst case it lands
+            # on an auto-suffixed slug instead of erroring — it can never
+            # overwrite the other write.)
+            candidate_slug = _documents.slugify_title(title)
+            existing = callbacks.run_async_tool_call(
+                _documents.get_document_by_slug(
+                    tenant_id=_caller_tenant_id,
+                    workspace_id=workspace_id,
+                    project_id=_caller_project_id,
+                    slug=candidate_slug,
+                )
+            )
+            if existing is not None:
+                raise RuntimeError(
+                    f"A document already exists at slug '{candidate_slug}' (title: '{existing.get('title')}'). "
+                    "document__write only creates new documents — use document__edit to change the existing one."
+                )
+            try:
+                created = callbacks.run_async_tool_call(
+                    _documents.create_document(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        project_id=_caller_project_id,
+                        title=title,
+                        body=str(body or ""),
+                        slug=candidate_slug,
+                        created_by=_caller_agent_id,
+                    )
+                )
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return json.dumps({"ok": True, "document": _document_summary(created)}, ensure_ascii=False)
+
+        raise RuntimeError(f"Unsupported document direct tool '{action_id}'.")
     if connector_id == "sage_service" and action_id == "list_state":
         service_id = str(argument_payload.get("service_id") or "").strip()
         if not service_id:

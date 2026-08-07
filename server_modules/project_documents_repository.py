@@ -92,6 +92,20 @@ def _slugify(value: Any, *, fallback: str = "document") -> str:
     return text or fallback
 
 
+def slugify_title(title: Any) -> str:
+    """Public wrapper around `_slugify`, exposed so a caller can predict the
+    slug `create_document` would derive from a title WITHOUT creating a row --
+    e.g. skills_service.py's document__write dispatch uses this to check
+    "does a document at this slug already exist" up front and fail with a
+    clear message, rather than letting create_document's own _unique_slug
+    silently disambiguate into 'title-2'. That silent-suffix behavior is
+    correct for the human/UI "New document" flow (always wants a fresh row);
+    it is the wrong behavior for an agent tool, where a title collision
+    usually means the agent should have called document__edit instead of
+    minting a near-duplicate."""
+    return _slugify(title, fallback="document")
+
+
 def _coerce_metadata(value: Any) -> Dict[str, Any]:
     """Postgres JSONB sometimes arrives already-decoded (dict) and sometimes
     as a raw JSON string, depending on the pool's codec setup -- same
