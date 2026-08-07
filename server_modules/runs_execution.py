@@ -5607,8 +5607,39 @@ def _execute_orion_result_via_agent_engine(
     # execution turn must not interleave with (or silently borrow history
     # from) the owner's live console/channel conversation thread.
     thread_id = f"orion-run:{run_id}"
-    sage_result = asyncio.run(
-        execute_sage_turn(
+
+    # MAN-312-adjacent: a task_assigned wakeup's turn must execute AS the
+    # assigned agent, not the workspace master (Sage) -- runtime_heartbeat_
+    # service.build_heartbeat_turn_request threads the assignee's install id
+    # into metadata["active_agent_install_id"] for exactly this (same key
+    # agent_turn.py/run_service.py already read for thread-tagging and
+    # runtime-attachment resolution). Resolve it through the SAME
+    # specialist_runtime_context.resolve_specialist_runtime_context every
+    # other channel (direct chat, Discord/Slack/hosted Telegram via
+    # execute_sage_turn_for_channel) already uses -- not a parallel
+    # resolution path -- so persona/model/memory/gateway binding all match
+    # what that agent would use anywhere else. None (unset metadata, or a
+    # resolution failure/master install) fails safe to today's behavior:
+    # the turn runs as Sage, exactly as before this fix.
+    metadata = context.get("metadata") if isinstance(context.get("metadata"), dict) else {}
+    assigned_agent_install_id = str(metadata.get("active_agent_install_id") or "").strip()
+
+    async def _run_turn() -> Any:
+        specialist_context = None
+        if assigned_agent_install_id:
+            from server_modules.specialist_runtime_context import (
+                resolve_specialist_runtime_context,
+            )
+
+            try:
+                specialist_context = await resolve_specialist_runtime_context(
+                    workspace_id=workspace_id,
+                    tenant_id=tenant_id or "default",
+                    active_agent_install_id=assigned_agent_install_id,
+                )
+            except Exception:
+                specialist_context = None  # fail safe to Sage, same as every other resolution call site
+        return await execute_sage_turn(
             workspace_id=workspace_id,
             tenant_id=tenant_id,
             message=execute_input,
@@ -5617,8 +5648,10 @@ def _execute_orion_result_via_agent_engine(
             channel_origin="orion_run",
             thread_id=thread_id,
             request_id=run_id,
+            specialist_context=specialist_context,
         )
-    )
+
+    sage_result = asyncio.run(_run_turn())
     reply_text = str(getattr(sage_result, "message", "") or "").strip()
     error_text = str(getattr(sage_result, "error", "") or "").strip()
     tool_calls = [

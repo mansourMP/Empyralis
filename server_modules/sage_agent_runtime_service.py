@@ -4808,7 +4808,26 @@ async def handle_sage_chat(
         raise ValueError("message must not be empty")
 
     import sys as _sys
-    print(f"[TRACE_SAGE_ENTRY] ws={normalized_workspace_id} channel={channel_origin or 'sage'} surface={normalized_surface} message_preview={normalized_message[:80]}", flush=True, file=_sys.stderr)
+    # Bug 2 diagnosis (MAN-312-adjacent): specialist resolution is invisible
+    # at this entry point today -- this line used to log only workspace/
+    # channel/surface, so a turn that silently fell back to Sage (specialist_
+    # context=None) and one that genuinely resolved cli_subscription/local
+    # were indistinguishable from server logs alone. Add whether a specialist
+    # resolved at all, its resolved mode, and gateway_binding (the box hosting
+    # the AI brain in local/cli_subscription mode -- see SpecialistRuntimeContext's
+    # own field comment) so a production trace answers "did this turn even
+    # see a specialist, and if so what mode/gateway did IT think it had"
+    # without needing a repro.
+    _trace_spec_resolved = _spec is not None
+    _trace_spec_mode = str(getattr(_spec, "mode", "") or "").strip() if _spec is not None else ""
+    _trace_spec_gateway_binding = str(getattr(_spec, "gateway_binding", "") or "").strip() if _spec is not None else ""
+    print(
+        f"[TRACE_SAGE_ENTRY] ws={normalized_workspace_id} channel={channel_origin or 'sage'} surface={normalized_surface} "
+        f"message_preview={normalized_message[:80]} specialist_resolved={_trace_spec_resolved} "
+        f"specialist_install_id={_spec_install_id or '(none)'} specialist_mode={_trace_spec_mode or '(none)'} "
+        f"gateway_binding={_trace_spec_gateway_binding or '(none)'}",
+        flush=True, file=_sys.stderr,
+    )
 
     trace_id = str(uuid.uuid4())
     # See _turn_credit_idempotency_key's docstring for why this exists and
@@ -4972,7 +4991,35 @@ async def handle_sage_chat(
         used_context.append("mcp_tools")
 
     # --- Call provider ---
-    provider, credentials = await _resolve_cloud_provider(normalized_workspace_id)
+    # Bug 2 (MAN-312-adjacent) root cause: this is the ONE call site that
+    # resolves Sage's OWN turn (see _resolve_cloud_provider's own docstring:
+    # "Callers resolving Sage's OWN turn should pass True explicitly") --
+    # yet until this fix it always used check_master_model_config's default
+    # (False), so the "HONEST BLOCK" that function implements for a master
+    # install misconfigured to cli_subscription/local NEVER actually fired
+    # from here. That block existed and was unit-tested in isolation
+    # (test_core_loop_no_fallback.py's NoFallbackProviderResolutionTests)
+    # but had no real caller opting in -- a master agent (e.g. one renamed
+    # away from "Sage" in the Fleet UI) whose Model tab was saved as
+    # cli_subscription silently kept resolving the platform DeepSeek
+    # default here instead, with no error anywhere: exactly the observed
+    # symptom (claude_agent_sdk_bridge dispatching provider='deepseek' for
+    # an agent the Fleet UI shows as "CLI-subscription"). `_spec is None`
+    # is the correct signal for "this turn IS Sage's own" -- specialist_
+    # runtime_context.resolve_specialist_runtime_context returns None both
+    # when no active install was given AND when the active install IS the
+    # workspace master (its own docstring: "the master (Sage) runs its
+    # normal runtime") -- both cases mean this call is resolving the
+    # master's own turn, never a specialist's. A genuine specialist (_spec
+    # is not None) still gets check_master_model_config=False here,
+    # unchanged -- its own mode/provider resolution happens in the branch
+    # below (or the dedicated local/cli_subscription branches further down),
+    # and this call must never fail because of an unrelated misconfiguration
+    # on Sage's own card (see _resolve_cloud_provider's docstring on cross-
+    # agent coupling).
+    provider, credentials = await _resolve_cloud_provider(
+        normalized_workspace_id, check_master_model_config=(_spec is None)
+    )
     # Phase 4: specialist provider binding override. Opt-in per agent: only a
     # specialist with its OWN model_config override (mode and/or provider
     # set) takes this branch -- one with nothing configured falls straight

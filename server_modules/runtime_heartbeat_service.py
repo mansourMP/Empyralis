@@ -169,6 +169,25 @@ def build_heartbeat_turn_request(
         # most one task per heartbeat tick's tier group in practice (one
         # wakeup per assignment), so the first one found wins -- never
         # silently blended across multiple tasks.
+        #
+        # The SAME payload also carries `agent_id` -- the assignee
+        # schedule_task_assigned_wakeup resolved (bounded_scheduler_service.py
+        # ~868-873), which is a workspace_agent_installs.id, the exact id
+        # space specialist_runtime_context.resolve_specialist_runtime_context
+        # expects as active_agent_install_id (see project_tasks_service.
+        # assign_task's own _agent_install_exists check against that same
+        # table/column). Thread it under the SAME metadata key every other
+        # read site already uses for this
+        # (agent_turn.py's active_agent_install_id fallback for thread
+        # tagging, run_service.py's _trace_root_agent_id_for_metadata and
+        # _runtime_binding_install_id for hardware/gateway attachment
+        # resolution) rather than a new key, so those existing consumers
+        # pick it up for free -- this is the one and only place a
+        # task-assigned wakeup's turn metadata gets built, so there is no
+        # risk of colliding with a value set by another caller for a
+        # different purpose. Without this, _execute_orion_result_via_agent_
+        # engine (runs_execution.py) has nothing to resolve a specialist
+        # context from and the turn runs as the workspace master (Sage).
         for item in wake_requests:
             if not isinstance(item, dict) or str(item.get("trigger_kind") or "").strip() != "task_assigned":
                 continue
@@ -179,6 +198,9 @@ def build_heartbeat_turn_request(
             merged_metadata["task_id"] = task_id
             merged_metadata["assigned_task_title"] = str(task_payload.get("task_title") or "").strip()
             merged_metadata["assigned_task_description"] = str(task_payload.get("task_description") or "").strip()
+            assigned_agent_id = str(task_payload.get("agent_id") or "").strip()
+            if assigned_agent_id:
+                merged_metadata["active_agent_install_id"] = assigned_agent_id
             break
     if recent_changes:
         merged_metadata["context_event_ids"] = [
