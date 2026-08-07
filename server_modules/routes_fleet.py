@@ -1905,6 +1905,96 @@ async def fleet_cancel_agent_schedule_route(
         return {"ok": False, "error": str(exc)}
 
 
+# ── Owner-only RECURRING schedule control ─────────────────────────────────
+# "Every morning at 9am," not a single wake-up -- see bounded_scheduler_
+# service.create_recurring_schedule/fleet_tools.fleet_*_agent_recurring_
+# schedule for the underlying design. Same owner-gating and same split from
+# the agent-callable fleet__schedule_recurring_task tool as the one-shot
+# schedule routes just above.
+
+
+class FleetCreateRecurringScheduleRequest(BaseModel):
+    cron: str = ""
+    instruction: str = ""
+    max_occurrences: Optional[int] = None
+    expires_at: Optional[str] = None
+
+
+@router.get("/api/w/{workspace_id}/fleet/agents/{agent_id}/recurring-schedule")
+async def fleet_list_agent_recurring_schedule_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only list of this agent's active recurring schedules."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_list_agent_recurring_schedules
+
+    try:
+        return await fleet_list_agent_recurring_schedules(
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "schedules": []}
+
+
+@router.post("/api/w/{workspace_id}/fleet/agents/{agent_id}/recurring-schedule")
+async def fleet_create_agent_recurring_schedule_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    body: FleetCreateRecurringScheduleRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only: create a recurring wake schedule for this agent. Always
+    executes at owner tier — see fleet_tools.fleet_create_agent_recurring_schedule."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_create_agent_recurring_schedule
+
+    try:
+        return await fleet_create_agent_recurring_schedule(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+            cron=body.cron,
+            instruction=body.instruction,
+            max_occurrences=body.max_occurrences,
+            expires_at=body.expires_at,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/agents/{agent_id}/recurring-schedule/{schedule_id}")
+async def fleet_cancel_agent_recurring_schedule_route(
+    request: Request,
+    workspace_id: str,
+    agent_id: str,
+    schedule_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only cancel of one of this agent's recurring schedules."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import fleet_cancel_agent_recurring_schedule
+
+    try:
+        return await fleet_cancel_agent_recurring_schedule(
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            actor_label=_actor_label(current_user),
+            workspace_id=resolved_workspace_id,
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            agent_id=agent_id,
+            schedule_id=schedule_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 @router.get("/api/w/{workspace_id}/fleet/agent-activity")
 async def fleet_agent_activity(
     request: Request,

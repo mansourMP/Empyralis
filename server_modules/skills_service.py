@@ -1934,13 +1934,15 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="fleet",
             action_id="schedule_task",
             description=(
-                "Schedule future work so nobody has to re-prompt you — including for "
+                "Schedule ONE future wake-up so nobody has to re-prompt you — including for "
                 "yourself. Omit agent_id to wake YOURSELF at the given time and run the "
-                "instruction (the standing-order case: 'check X every morning', a delayed "
-                "follow-up, a reminder). Pass a different agent's install id to schedule "
-                "that agent instead (fleet management). 'when' accepts 'in N minutes/hours' "
-                "or an ISO-8601 datetime. Underlying mechanism: propose_self_wakeup — a "
-                "self-scheduling primitive, not a queue you're borrowing for this."
+                "instruction (a delayed follow-up, a one-off reminder). Pass a different "
+                "agent's install id to schedule that agent instead (fleet management). "
+                "'when' accepts 'in N minutes/hours' or an ISO-8601 datetime — NOT a cron "
+                "expression. For a RECURRING schedule ('every morning at 9am', 'every "
+                "Monday'), use fleet__schedule_recurring_task instead. Underlying mechanism: "
+                "propose_self_wakeup — a self-scheduling primitive, not a queue you're "
+                "borrowing for this."
             ),
             parameters={
                 "type": "object",
@@ -1971,6 +1973,88 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "agent_id) or for another agent (fleet management, explicit agent_id). "
                 "Owner/operator access."
             ),
+        ),
+        ToolDescriptor(
+            tool_name="fleet__schedule_recurring_task",
+            label="Schedule Recurring Task",
+            connector_id="fleet",
+            action_id="schedule_recurring_task",
+            description=(
+                "Schedule a RECURRING wake-up — 'every morning at 9am', 'every Monday', "
+                "'every 15 minutes' — for yourself (omit agent_id) or another agent "
+                "(fleet management). 'cron' is a standard 5-field cron expression (minute "
+                "hour day month weekday, e.g. '0 9 * * *' for 9am daily), evaluated in the "
+                "WORKSPACE's configured timezone, not UTC. An invalid cron expression "
+                "returns a clear error, never a silent no-op. Bounded by default: expires "
+                "after 90 days unless max_occurrences or expires_at is set. Every fire "
+                "still passes through the same quiet-hours and rate-cap policy as "
+                "fleet__schedule_task — this cannot bypass those by firing more often. "
+                "Use fleet__list_recurring_tasks / fleet__cancel_recurring_task to see or "
+                "stop what's scheduled."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": (
+                            "The agent install id to wake and run this instruction each time. "
+                            "Omit this field entirely to schedule YOURSELF instead of another agent."
+                        ),
+                    },
+                    "cron": {"type": "string", "description": "Standard 5-field cron expression, e.g. '0 9 * * *' for every morning at 9am."},
+                    "instruction": {"type": "string", "description": "What the agent should do each time it wakes."},
+                    "max_occurrences": {"type": "integer", "description": "Optional: stop after this many fires."},
+                    "expires_at": {"type": "string", "description": "Optional ISO-8601 datetime: stop firing after this time. Defaults to 90 days out if neither this nor max_occurrences is set."},
+                },
+                "required": ["cron", "instruction"],
+            },
+            risk_level="moderate",
+            audience_safe=False,
+            audience_note=(
+                "Operator-only: schedules recurring future work — for yourself (self-wakeup, "
+                "no agent_id) or for another agent (fleet management, explicit agent_id). "
+                "Owner/operator access."
+            ),
+        ),
+        ToolDescriptor(
+            tool_name="fleet__list_recurring_tasks",
+            label="List Recurring Tasks",
+            connector_id="fleet",
+            action_id="list_recurring_tasks",
+            description="List active recurring schedules for yourself (omit agent_id) or another agent.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "Omit to list your own recurring schedules."},
+                },
+                "required": [],
+            },
+            risk_level="low",
+            audience_safe=False,
+            audience_note="Operator-only: lists recurring schedules. Owner/operator access.",
+        ),
+        ToolDescriptor(
+            tool_name="fleet__cancel_recurring_task",
+            label="Cancel Recurring Task",
+            connector_id="fleet",
+            action_id="cancel_recurring_task",
+            description=(
+                "Cancel a recurring schedule by id (from fleet__list_recurring_tasks) so it "
+                "stops firing. A status change, not a delete — cancelled schedules keep "
+                "their history."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "Omit to cancel your own recurring schedule."},
+                    "schedule_id": {"type": "string", "description": "The recurring schedule id to cancel."},
+                },
+                "required": ["schedule_id"],
+            },
+            risk_level="moderate",
+            audience_safe=False,
+            audience_note="Operator-only: cancels a recurring schedule. Owner/operator access.",
         ),
         # ── Skills: Level-2 progressive disclosure (docs/design/audit-skills.md §3.4) ──
         # The unified skill catalog (skill_registry.list_skill_definitions,
@@ -6524,6 +6608,9 @@ def execute_single_direct_tool_call(
             fleet_configure_agent,
             fleet_message_agent,
             schedule_task,
+            schedule_recurring_task,
+            list_recurring_tasks,
+            cancel_recurring_task,
             resolve_agent_role,
             OPERATOR_ROLE,
         )
@@ -6675,6 +6762,60 @@ def execute_single_direct_tool_call(
                     instruction=instruction,
                     tenant_id=tenant_id,
                     authority_tier=session_metadata.get("authority_tier"),
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "schedule_recurring_task":
+            # schedule_task's recurring twin -- same agent_id-optional self-
+            # vs-fleet convention and same tier-inheritance reasoning as the
+            # comment on schedule_task above.
+            agent_id = str(argument_payload.get("agent_id") or "").strip()
+            cron = str(argument_payload.get("cron") or "").strip()
+            instruction = str(argument_payload.get("instruction") or "").strip()
+            if not cron or not instruction:
+                raise RuntimeError("Tool 'fleet__schedule_recurring_task' requires cron and instruction (agent_id is optional — omit it to schedule yourself).")
+            max_occurrences = argument_payload.get("max_occurrences")
+            expires_at = str(argument_payload.get("expires_at") or "").strip() or None
+            result = callbacks.run_async_tool_call(
+                schedule_recurring_task(
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    actor_id=actor_id,
+                    cron=cron,
+                    instruction=instruction,
+                    tenant_id=tenant_id,
+                    authority_tier=session_metadata.get("authority_tier"),
+                    max_occurrences=int(max_occurrences) if max_occurrences is not None else None,
+                    expires_at=expires_at,
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "list_recurring_tasks":
+            agent_id = str(argument_payload.get("agent_id") or "").strip()
+            result = callbacks.run_async_tool_call(
+                list_recurring_tasks(
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    actor_id=actor_id,
+                    tenant_id=tenant_id,
+                )
+            )
+            return json.dumps(result, ensure_ascii=False)
+
+        if action_id == "cancel_recurring_task":
+            agent_id = str(argument_payload.get("agent_id") or "").strip()
+            schedule_id = str(argument_payload.get("schedule_id") or "").strip()
+            if not schedule_id:
+                raise RuntimeError("Tool 'fleet__cancel_recurring_task' requires schedule_id.")
+            result = callbacks.run_async_tool_call(
+                cancel_recurring_task(
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    actor_id=actor_id,
+                    schedule_id=schedule_id,
+                    tenant_id=tenant_id,
                 )
             )
             return json.dumps(result, ensure_ascii=False)
