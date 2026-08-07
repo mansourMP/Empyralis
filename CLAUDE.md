@@ -115,6 +115,26 @@ exists in the funded competitor either. Anything that would put one person's
 agent conversation in front of a teammate is out of scope; put the artifact in
 the task instead.
 
+**A goal is a durable retry loop, never a state machine that decides when to
+give up.** Landed 2026-08-08 (`agent_goals`, built on top of
+`bounded_scheduler_service.py`'s existing wake-request machinery — no second
+scheduler; `runs_core.py`'s own unrelated cron scheduler still bypasses quiet
+hours/rate caps and stays untouched). "Go negotiate with this supplier, retry
+with a different offer if rejected, escalate after 3 attempts" is an authored
+instruction injected into every turn that works the goal (the wake-turn
+message-assembly seam `runtime_heartbeat_service.build_heartbeat_turn_request`
+already used for task-assigned wakeups) — never code that computes whether a
+negotiation "failed enough" to escalate. Status vocabulary is
+`project_tasks_service.TASK_STATUS_ORDER` plus exactly two states a task
+can't express: `exhausted` (the bounded attempt/lifetime ceiling was hit —
+system-recorded, the model can never set it) and `cancelled` (deliberately
+abandoned). `attempt_count` is advanced ONLY by the firing code
+(`bounded_scheduler_service._fire_goal`), never by the model narrating its
+own progress — the same honesty posture `tool_honesty_guard` exists for
+elsewhere. `goal__*` is a third member of `_PROJECT_SCOPED_CONNECTOR_IDS`
+alongside `project_task__*`/`document__*` — project membership is the grant,
+not a connector binding.
+
 ## Craft doctrine
 
 - One accent colour, spent on the single primary action in a view. Everything

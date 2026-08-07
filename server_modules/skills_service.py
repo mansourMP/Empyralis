@@ -1697,6 +1697,156 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                 "required": ["title"],
             },
         ),
+        # goal__* (feat/agent-goals): "agent, go to this person and
+        # negotiate ... and if the person says no, either try again, or
+        # offer something different" (the founder's own framing). A goal is
+        # a durable object -- distinct from a task -- that keeps waking its
+        # agent on a bounded, backing-off cadence until it resolves (done),
+        # is deliberately abandoned (cancelled), or its attempt/lifetime
+        # budget runs out (exhausted -- see bounded_scheduler_service.py's
+        # GOAL_STATUS_ORDER for the full vocabulary and why it extends
+        # project_task's). Same shape as project_task__*/document__*
+        # immediately above: connector_id="goal" is granted by PROJECT
+        # MEMBERSHIP, not a connector binding (see
+        # sage_agent_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS),
+        # and every action is scoped to the CALLING agent's own project
+        # (resolved server-side via project_tasks_service.agent_project_id,
+        # the same resolver project_task__*/document__* use). audience_safe:
+        # like project_task, this is internal work-tracking, not a
+        # credential/instruction-bearing surface.
+        ToolDescriptor(
+            tool_name="goal__create",
+            label="Create goal",
+            connector_id="goal",
+            action_id="create",
+            description=(
+                "Create a durable goal for yourself (or a teammate in your project) and "
+                "start working it immediately -- 'go negotiate with this supplier and come "
+                "back with a result', not a one-off task. Unlike a task, a goal keeps waking "
+                "its agent on a bounded, backing-off schedule (roughly hourly at first, "
+                "slower over time) until it is resolved, is explicitly abandoned, or its "
+                "attempt/lifetime budget runs out. Write `instruction` yourself -- this is "
+                "the rule that shapes every retry, e.g. 'if rejected, offer a 10% discount "
+                "instead; escalate to a human after 3 failed attempts.' Leaving it blank "
+                "falls back to a generic default, which will not know your specific "
+                "escalation rule."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "goal_text": {"type": "string", "description": "The outcome to work toward, in plain language."},
+                    "title": {"type": "string", "description": "Short label. Defaults to the start of goal_text."},
+                    "instruction": {
+                        "type": "string",
+                        "description": (
+                            "How to adapt on each retry and when to stop -- e.g. 'try a "
+                            "different offer if rejected; escalate after 3 attempts.' This is "
+                            "injected into every turn you work this goal. Strongly recommended; "
+                            "falls back to a generic default if omitted."
+                        ),
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Who should work this goal -- an agent install id in your project. Defaults to yourself.",
+                    },
+                    "max_attempts": {
+                        "type": "integer",
+                        "description": "Maximum number of retry attempts before the goal stops itself (default 5, max 50).",
+                    },
+                    "lifetime_days": {
+                        "type": "integer",
+                        "description": "Maximum days this goal may stay active before it stops itself (default 14, max 90).",
+                    },
+                },
+                "required": ["goal_text"],
+            },
+            audience_safe=True,
+            audience_note="Safe: internal work-tracking scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="goal__list",
+            label="List project goals",
+            connector_id="goal",
+            action_id="list",
+            description=(
+                "List goals on your project: durable, retried-until-resolved outcomes, as "
+                "opposed to project_task__list's one-shot task board. Each entry reports "
+                "real attempt/status data -- how many attempts have actually run, out of "
+                "the max, and why a finished goal stopped -- never a self-reported summary."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "todo", "in_progress", "awaiting_input", "blocked", "in_review",
+                            "done", "cancelled", "exhausted",
+                        ],
+                        "description": "Optional status filter.",
+                    },
+                },
+                "required": [],
+            },
+            audience_safe=True,
+            audience_note="Safe: read-only, scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="goal__get",
+            label="Get goal",
+            connector_id="goal",
+            action_id="get",
+            description=(
+                "Get one goal by id -- must belong to your own project. Returns its full "
+                "instruction text, attempt_count/max_attempts, next_fire_at, and (once "
+                "resolved) last_outcome_reason -- the honest record of what actually "
+                "happened, not a narrative."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"goal_id": {"type": "string", "description": "The goal id."}},
+                "required": ["goal_id"],
+            },
+            audience_safe=True,
+            audience_note="Safe: read-only, scoped to this agent's own project.",
+        ),
+        ToolDescriptor(
+            tool_name="goal__update",
+            label="Update goal",
+            connector_id="goal",
+            action_id="update",
+            description=(
+                "Update a goal on your project: its status, title, goal text, instruction, "
+                "and/or a short note explaining why. Call this every time you learn "
+                "something that changes the plan -- set status='blocked' or "
+                "'awaiting_input' the moment you are stuck (a blocked goal KEEPS RETRYING "
+                "on its normal schedule, so use these to signal what kind of stuck you "
+                "are, not to pause it). Set status='done' once the outcome is achieved, or "
+                "'cancelled' if you conclude it genuinely cannot be achieved -- both stop "
+                "the goal for good, so always include `note` explaining the outcome. You "
+                "cannot mark a goal 'exhausted' -- that status is reserved for when the "
+                "system's own attempt/lifetime ceiling is hit without you resolving it "
+                "either way."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "goal_id": {"type": "string", "description": "The goal id."},
+                    "status": {
+                        "type": "string",
+                        "enum": ["todo", "in_progress", "awaiting_input", "blocked", "in_review", "done", "cancelled"],
+                        "description": "New status.",
+                    },
+                    "title": {"type": "string", "description": "New title, if changing it."},
+                    "goal_text": {"type": "string", "description": "New goal text, if the outcome you're working toward changed."},
+                    "instruction": {"type": "string", "description": "New escalation instruction, if you're refining it."},
+                    "note": {"type": "string", "description": "A short note on why -- especially important for 'done'/'cancelled'."},
+                },
+                "required": ["goal_id"],
+            },
+            audience_safe=True,
+            audience_note="Safe: scoped to this agent's own project.",
+        ),
         ToolDescriptor(
             tool_name="browser__navigate",
             label="Browser navigate",
@@ -4623,6 +4773,14 @@ _BUILTIN_DIRECT_TOOL_IDS: frozenset = frozenset(
         # sync's OAuth-connector lookup below, which has no "document"
         # connector registered and would error every call.
         "document",
+        # goal__* (feat/agent-goals): a project's durable goals, same
+        # reasoning as "project_task"/"document" immediately above — needs
+        # session_ctx to resolve the calling agent's own identity/project.
+        # Without this, execute_single_direct_tool_call_async would route
+        # goal__* into _execute_custom_connector_tool_call_sync's
+        # OAuth-connector lookup below, which has no "goal" connector
+        # registered and would error every call.
+        "goal",
     }
 )
 
@@ -6519,6 +6677,123 @@ def execute_single_direct_tool_call(
             return json.dumps({"ok": True, "document": _document_summary(created)}, ensure_ascii=False)
 
         raise RuntimeError(f"Unsupported document direct tool '{action_id}'.")
+    if connector_id == "goal":
+        # goal__* (feat/agent-goals): byte-for-byte the same identity/
+        # scoping shape as connector_id == "project_task"/"document" above
+        # -- resolve the CALLING agent's own project server-side (never
+        # trust a project id the model might pass in), and any goal that
+        # resolves to a different project is "not visible to this agent",
+        # never a leaked existence check. list/get/update read or touch any
+        # goal in the CALLER's PROJECT (matching project_task__update's own
+        # "any project member may update any project task" posture, not
+        # restricted to the goal's own assignee) -- create always targets an
+        # agent in that same project too.
+        from server_modules import bounded_scheduler_service as _goals
+        from server_modules import project_tasks_service as _project_tasks
+
+        _caller_agent_id = _agent_install_id_from_direct_tool_context(session_ctx)
+        _caller_tenant_id = _tenant_id_from_direct_tool_context(session_ctx)
+        if not _caller_agent_id:
+            raise RuntimeError(f"Tool 'goal__{action_id}' requires a resolvable agent identity.")
+        _caller_project_id = callbacks.run_async_tool_call(
+            _project_tasks.agent_project_id(
+                tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=_caller_agent_id,
+            )
+        )
+        if not _caller_project_id:
+            raise RuntimeError(
+                f"Tool 'goal__{action_id}' is unavailable: this agent has no project, so it has no goals."
+            )
+
+        def _goal_in_own_project(goal: Optional[Dict[str, Any]], goal_id: str) -> Dict[str, Any]:
+            if goal is None:
+                raise RuntimeError(f"Goal '{goal_id}' not found in your project.")
+            if str(goal.get("project_id") or "") != _caller_project_id:
+                raise RuntimeError(f"Goal '{goal_id}' belongs to a different project — not visible to this agent.")
+            return goal
+
+        if action_id == "create":
+            goal_text = str(argument_payload.get("goal_text") or "").strip()
+            if not goal_text:
+                raise RuntimeError("Tool 'goal__create' requires goal_text.")
+            target_agent_id = str(argument_payload.get("agent_id") or "").strip() or _caller_agent_id
+            if target_agent_id != _caller_agent_id:
+                target_project_id = callbacks.run_async_tool_call(
+                    _project_tasks.agent_project_id(
+                        tenant_id=_caller_tenant_id, workspace_id=workspace_id, agent_id=target_agent_id,
+                    )
+                )
+                if target_project_id != _caller_project_id:
+                    raise RuntimeError(
+                        f"Agent '{target_agent_id}' is not in your project — cannot create a goal for it."
+                    )
+            try:
+                goal = callbacks.run_async_tool_call(
+                    _goals.create_goal(
+                        tenant_id=_caller_tenant_id,
+                        workspace_id=workspace_id,
+                        project_id=_caller_project_id,
+                        agent_id=target_agent_id,
+                        goal_text=goal_text,
+                        title=str(argument_payload.get("title") or ""),
+                        instruction=str(argument_payload.get("instruction") or ""),
+                        requested_by=f"agent:{_caller_agent_id}",
+                        max_attempts=argument_payload.get("max_attempts"),
+                        lifetime_days=argument_payload.get("lifetime_days"),
+                    )
+                )
+            except _goals.SchedulerPolicyError as exc:
+                raise RuntimeError(str(exc)) from exc
+            return json.dumps({"ok": True, "goal": _goals.goal_view(goal)}, ensure_ascii=False)
+
+        if action_id == "list":
+            status = str(argument_payload.get("status") or "").strip() or None
+            rows = callbacks.run_async_tool_call(
+                _goals.list_goals(
+                    tenant_id=_caller_tenant_id,
+                    workspace_id=workspace_id,
+                    project_id=_caller_project_id,
+                    status=status,
+                )
+            )
+            return json.dumps({"ok": True, "goals": [_goals.goal_view(row) for row in rows]}, ensure_ascii=False)
+
+        if action_id == "get":
+            goal_id = str(argument_payload.get("goal_id") or "").strip()
+            if not goal_id:
+                raise RuntimeError("Tool 'goal__get' requires goal_id.")
+            goal = callbacks.run_async_tool_call(
+                _goals.get_goal(tenant_id=_caller_tenant_id, workspace_id=workspace_id, goal_id=goal_id)
+            )
+            goal = _goal_in_own_project(goal, goal_id)
+            return json.dumps({"ok": True, "goal": _goals.goal_view(goal)}, ensure_ascii=False)
+
+        if action_id == "update":
+            goal_id = str(argument_payload.get("goal_id") or "").strip()
+            if not goal_id:
+                raise RuntimeError("Tool 'goal__update' requires goal_id.")
+            existing = callbacks.run_async_tool_call(
+                _goals.get_goal(tenant_id=_caller_tenant_id, workspace_id=workspace_id, goal_id=goal_id)
+            )
+            _goal_in_own_project(existing, goal_id)
+            result = callbacks.run_async_tool_call(
+                _goals.update_goal(
+                    tenant_id=_caller_tenant_id,
+                    workspace_id=workspace_id,
+                    goal_id=goal_id,
+                    status=argument_payload.get("status"),
+                    title=argument_payload.get("title"),
+                    goal_text=argument_payload.get("goal_text"),
+                    instruction=argument_payload.get("instruction"),
+                    note=str(argument_payload.get("note") or ""),
+                    actor=f"agent:{_caller_agent_id}",
+                )
+            )
+            if not result.get("ok"):
+                raise RuntimeError(str(result.get("error") or f"Could not update goal {goal_id}."))
+            return json.dumps(result, ensure_ascii=False)
+
+        raise RuntimeError(f"Unsupported goal direct tool '{action_id}'.")
     if connector_id == "sage_service" and action_id == "list_state":
         service_id = str(argument_payload.get("service_id") or "").strip()
         if not service_id:

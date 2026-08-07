@@ -2525,13 +2525,24 @@ _PROJECT_TASK_CONNECTOR_ID = "project_task"
 # ConnectorPicker UI, no agent_connector_bindings row, same as project_task.
 _DOCUMENT_CONNECTOR_ID = "document"
 
+# feat/agent-goals: goal__* (skills_service.py's _builtin_tool_descriptors,
+# connector_id="goal") is the third tool family granted by PROJECT
+# MEMBERSHIP rather than a connector binding -- same reasoning as
+# _PROJECT_TASK_CONNECTOR_ID/_DOCUMENT_CONNECTOR_ID immediately above. A
+# goal (bounded_scheduler_service.py's agent_goals table) is attached to a
+# project and one of its member agents, intrinsic to being in that project,
+# not a third-party integration: no CONNECTOR_CATALOG entry, no
+# ConnectorPicker UI, no agent_connector_bindings row.
+_GOAL_CONNECTOR_ID = "goal"
+
 # Every connector id whose grant is project membership (toolset["project_id"])
 # rather than a connector binding (toolset["connectors"]) -- grouped into one
 # set so every gate that already special-cases project_task (this function,
 # _filter_registry_for_specialist, the Tier-1 carve-out in _direct_tool_bundle,
 # and direct_tool_execution_service.py's own specialist_guard check) picks up
-# document__* for free instead of needing a parallel branch at each site.
-_PROJECT_SCOPED_CONNECTOR_IDS = frozenset({_PROJECT_TASK_CONNECTOR_ID, _DOCUMENT_CONNECTOR_ID})
+# document__* and goal__* for free instead of needing a parallel branch at
+# each site.
+_PROJECT_SCOPED_CONNECTOR_IDS = frozenset({_PROJECT_TASK_CONNECTOR_ID, _DOCUMENT_CONNECTOR_ID, _GOAL_CONNECTOR_ID})
 
 
 def _core_tool_allowed(name: str, toolset: dict[str, Any]) -> bool:
@@ -2783,8 +2794,8 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
                 },
                 "connector_id": "subagent",
             })
-        # ── project_task__* / document__* (fix/agent-task-tools-on-sdk-engine,
-        # feat/document-agent-tools) ──────────────────────────────────────
+        # ── project_task__* / document__* / goal__* (fix/agent-task-tools-
+        # on-sdk-engine, feat/document-agent-tools, feat/agent-goals) ─────
         # STRUCTURAL Tier-1 carve-out, same shape as the master-only
         # fleet__* one above: a project-member specialist gets these
         # unconditionally, in its own native tools= payload, instead of
@@ -2794,16 +2805,16 @@ def _direct_tool_bundle(*, workspace_id: str, provider: str, sender_class: str =
         # NAMES excludes query_tool_registry from what's registered with
         # the SDK), so a Tier-2-only grant left a project-member
         # specialist permanently unable to touch its own project's task
-        # board (or, now, its own project's documents) the moment that
+        # board (or its documents, or now its goals) the moment that
         # engine became the production default — the bug the project_task
-        # fix closed, and document__* rides the same fix rather than
-        # reopening it. Gated on project_id (project membership is the
-        # grant here, not a connector binding — see
+        # fix closed, and document__*/goal__* ride the same fix rather
+        # than reopening it. Gated on project_id (project membership is
+        # the grant here, not a connector binding — see
         # _PROJECT_SCOPED_CONNECTOR_IDS's own comment above) and skipped
         # entirely for an agent with no project, since every
-        # project_task__*/document__* action raises at execution time for
-        # one anyway (skills_service.py's connector_id in
-        # ("project_task", "document") dispatch, agent_project_id()
+        # project_task__*/document__*/goal__* action raises at execution
+        # time for one anyway (skills_service.py's connector_id in
+        # ("project_task", "document", "goal") dispatch, agent_project_id()
         # returning falsy).
         if str(specialist_toolset.get("project_id") or "").strip():
             _seen_task_names = {t.get("name") for t in tools}
