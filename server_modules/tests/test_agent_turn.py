@@ -27,8 +27,11 @@ from server_modules.agent_turn import (
     resolve_agent_turn_request_from_runtime_context,
     resolve_agent_turn_request_with_fallback,
     resolve_run_start_turn_request,
+    sage_chat_attachment_dict_from_turn_attachment,
+    sage_chat_attachment_dicts_from_turn_attachments,
     serialize_agent_turn_request,
     TurnActor,
+    TurnAttachment,
 )
 from server_modules.run_service import build_run_start_request_from_turn
 from server_modules.runtime_models import RunStartRequest
@@ -46,6 +49,8 @@ class AgentTurnTests(unittest.TestCase):
         global resolve_agent_turn_request_from_runtime_context, resolve_agent_turn_request_with_fallback
         global resolve_run_start_turn_request, serialize_agent_turn_request, TurnActor
         global build_run_start_request_from_turn, RunStartRequest
+        global sage_chat_attachment_dict_from_turn_attachment, sage_chat_attachment_dicts_from_turn_attachments
+        global TurnAttachment
 
         agent_trace_service = importlib.import_module("server_modules.agent_trace_service")
         agent_turn_module = importlib.import_module("server_modules.agent_turn")
@@ -71,8 +76,11 @@ class AgentTurnTests(unittest.TestCase):
         resolve_agent_turn_request_from_runtime_context = agent_turn_module.resolve_agent_turn_request_from_runtime_context
         resolve_agent_turn_request_with_fallback = agent_turn_module.resolve_agent_turn_request_with_fallback
         resolve_run_start_turn_request = agent_turn_module.resolve_run_start_turn_request
+        sage_chat_attachment_dict_from_turn_attachment = agent_turn_module.sage_chat_attachment_dict_from_turn_attachment
+        sage_chat_attachment_dicts_from_turn_attachments = agent_turn_module.sage_chat_attachment_dicts_from_turn_attachments
         serialize_agent_turn_request = agent_turn_module.serialize_agent_turn_request
         TurnActor = agent_turn_module.TurnActor
+        TurnAttachment = agent_turn_module.TurnAttachment
         build_run_start_request_from_turn = importlib.import_module("server_modules.run_service").build_run_start_request_from_turn
         RunStartRequest = importlib.import_module("server_modules.runtime_models").RunStartRequest
 
@@ -1379,6 +1387,75 @@ class AgentTurnTests(unittest.TestCase):
         self.assertEqual(resolution.turn_request.workspace_id, "workspace-1")
         self.assertEqual(resolution.turn_request.message, "Review inbox")
         self.assertEqual(resolution.turn_request.actor.id, "user-1")
+
+    # ── Regression coverage: attaching any file used to crash the turn.
+    # _load_attachment_context (sage_agent_runtime_service.py) calls .get()
+    # on every item in the attachment list it receives — it only ever
+    # understood the flat SageChatAttachment dict shape
+    # ({file_id, filename, safe_filename, content_type, size, url}), never
+    # the TurnAttachment dataclass. A caller that forwarded
+    # AgentTurnRequest.attachments (List[TurnAttachment]) straight into
+    # that pipeline raised AttributeError on every attachment, 100% of the
+    # time. sage_chat_attachment_dict(s)_from_turn_attachment is the fix:
+    # the one conversion boundary between the two type contracts.
+    def test_sage_chat_attachment_dict_from_turn_attachment_round_trips_fields(self):
+        attachment = TurnAttachment(
+            kind="file",
+            uri="https://files.example.com/w/ws-1/attachments/abc123.pdf",
+            name="quarterly-report.pdf",
+            metadata={
+                "safe_filename": "abc123.pdf",
+                "content_type": "application/pdf",
+                "size": 48213,
+                "file_id": "file-abc123",
+            },
+        )
+
+        result = sage_chat_attachment_dict_from_turn_attachment(attachment)
+
+        self.assertEqual(
+            result,
+            {
+                "file_id": "file-abc123",
+                "filename": "quarterly-report.pdf",
+                "safe_filename": "abc123.pdf",
+                "content_type": "application/pdf",
+                "size": 48213,
+                "url": "https://files.example.com/w/ws-1/attachments/abc123.pdf",
+            },
+        )
+        # The output must be a plain dict, not a dataclass — this is exactly
+        # what _load_attachment_context's .get() calls require.
+        self.assertIsInstance(result, dict)
+
+    def test_sage_chat_attachment_dict_from_turn_attachment_falls_back_to_name_and_zero_size(self):
+        # An attachment with sparse metadata (no safe_filename/size/file_id set)
+        # must not raise — every field degrades to a safe default instead.
+        attachment = TurnAttachment(kind="file", uri="https://files.example.com/x.txt", name="x.txt")
+
+        result = sage_chat_attachment_dict_from_turn_attachment(attachment)
+
+        self.assertEqual(result["safe_filename"], "x.txt")
+        self.assertEqual(result["size"], 0)
+        self.assertEqual(result["file_id"], "")
+        self.assertEqual(result["content_type"], "")
+
+    def test_sage_chat_attachment_dicts_from_turn_attachments_handles_none_and_empty(self):
+        self.assertEqual(sage_chat_attachment_dicts_from_turn_attachments(None), [])
+        self.assertEqual(sage_chat_attachment_dicts_from_turn_attachments([]), [])
+
+    def test_sage_chat_attachment_dicts_from_turn_attachments_converts_every_item(self):
+        attachments = [
+            TurnAttachment(kind="file", uri="https://files.example.com/a.txt", name="a.txt"),
+            TurnAttachment(kind="file", uri="https://files.example.com/b.png", name="b.png", metadata={"content_type": "image/png"}),
+        ]
+
+        results = sage_chat_attachment_dicts_from_turn_attachments(attachments)
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(isinstance(item, dict) for item in results))
+        self.assertEqual(results[0]["filename"], "a.txt")
+        self.assertEqual(results[1]["content_type"], "image/png")
 
 
 if __name__ == "__main__":

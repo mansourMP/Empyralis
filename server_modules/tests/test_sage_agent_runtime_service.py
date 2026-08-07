@@ -219,6 +219,96 @@ class SageAgentRuntimeContextLoadingTests(unittest.TestCase):
             self.assertTrue(any(t["id"] == "web-search" for t in result["available_tools"]))
 
 
+class SageAgentRuntimeAttachmentContextTests(unittest.TestCase):
+    """Regression coverage for the crash where _load_attachment_context
+    treated every attachment as a dict and called .get() on it, while the
+    live web-chat path (direct_chat_service.execute_direct_chat_turn_request,
+    which routes through handle_sage_chat) fed it AgentTurnRequest.attachments
+    -- TurnAttachment dataclass instances -- straight through. Every
+    attachment upload raised AttributeError, 100% of the time.
+
+    agent_turn.py's sage_chat_attachment_dict(s)_from_turn_attachment is now
+    the one conversion boundary between the two type contracts (see its own
+    coverage in test_agent_turn.py). _load_attachment_context's contract
+    (list[dict] | None) is unchanged -- these tests exercise it directly
+    with the canonical dict shape every caller must now provide.
+    """
+
+    def test_reads_text_attachment_content_from_the_canonical_dict_shape(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            attachments_dir = Path(tmp_dir)
+            (attachments_dir / "safe-notes.txt").write_text("hello from disk", encoding="utf-8")
+
+            with patch(
+                "server_modules.sage_agent_runtime_service.workspace_context.workspace_attachments_dir",
+                return_value=attachments_dir,
+            ):
+                context = _run(sage_agent_runtime_service._load_attachment_context(
+                    workspace_id="ws-1",
+                    attachments=[
+                        {
+                            "file_id": "file-1",
+                            "filename": "notes.txt",
+                            "safe_filename": "safe-notes.txt",
+                            "content_type": "text/plain",
+                            "size": 16,
+                            "url": "https://files.example.com/safe-notes.txt",
+                        }
+                    ],
+                ))
+
+        self.assertIn("## Attached Files", context)
+        self.assertIn("notes.txt", context)
+        self.assertIn("hello from disk", context)
+
+    def test_skips_attachment_missing_from_disk_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch(
+                "server_modules.sage_agent_runtime_service.workspace_context.workspace_attachments_dir",
+                return_value=Path(tmp_dir),
+            ):
+                context = _run(sage_agent_runtime_service._load_attachment_context(
+                    workspace_id="ws-1",
+                    attachments=[
+                        {
+                            "filename": "ghost.txt",
+                            "safe_filename": "missing-on-disk.txt",
+                            "content_type": "text/plain",
+                        }
+                    ],
+                ))
+
+        self.assertNotIn("ghost.txt", context)
+
+    def test_empty_attachments_returns_empty_string(self):
+        context = _run(sage_agent_runtime_service._load_attachment_context(
+            workspace_id="ws-1",
+            attachments=None,
+        ))
+        self.assertEqual(context, "")
+
+    def test_raises_on_a_bare_turn_attachment_instead_of_the_canonical_dict(self):
+        # Documents the contract: _load_attachment_context is NOT dual-shape
+        # tolerant -- the conversion belongs at the caller boundary
+        # (sage_chat_attachment_dict_from_turn_attachment), never here. A
+        # bare TurnAttachment reaching this function is exactly the bug that
+        # crashed every attachment upload; this guards against silently
+        # "fixing" it with a defensive isinstance branch that would let both
+        # shapes keep flowing through the codebase.
+        from server_modules.agent_turn import TurnAttachment
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch(
+                "server_modules.sage_agent_runtime_service.workspace_context.workspace_attachments_dir",
+                return_value=Path(tmp_dir),
+            ):
+                with self.assertRaises(AttributeError):
+                    _run(sage_agent_runtime_service._load_attachment_context(
+                        workspace_id="ws-1",
+                        attachments=[TurnAttachment(kind="file", uri="https://x/y.txt", name="y.txt")],
+                    ))
+
+
 class SageAgentRuntimeSafetyTests(unittest.TestCase):
     def _setup_mocks(self, *, profile_overrides=None, skills=None, memory_return="", files_return=None):
         mocks = {}

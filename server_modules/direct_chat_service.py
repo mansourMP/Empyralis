@@ -11,6 +11,7 @@ from server_modules.agent_turn import (
     build_agent_turn_session_context,
     resolve_agent_turn_session_identity,
     ensure_direct_chat_turn_request,
+    sage_chat_attachment_dicts_from_turn_attachments,
 )
 from server_modules.api_contract import build_turn_chat_body
 from server_modules import direct_chat_transport_service, failure_policy_service
@@ -422,7 +423,15 @@ async def execute_direct_chat_turn_request(
                     channel_origin=str(turn_request.channel or 'web'),
                     channel_sender_id=sender_id,
                     channel_sender_name=sender_name,
-                    attachments=list(turn_request.attachments) if getattr(turn_request, 'attachments', None) else None,
+                    # turn_request.attachments is List[TurnAttachment] (the
+                    # canonical AgentTurnRequest contract) — execute_sage_turn
+                    # -> handle_sage_chat -> _load_attachment_context is the
+                    # Sage-native pipeline and expects the flat SageChatAttachment
+                    # dict shape (as every channel wrapper produces). Convert at
+                    # this boundary; never hand a bare TurnAttachment across it.
+                    attachments=sage_chat_attachment_dicts_from_turn_attachments(
+                        getattr(turn_request, 'attachments', None)
+                    ) or None,
                     thread_id=thread_id,
                     request_id=client_request_id,
                     specialist_context=specialist_context,

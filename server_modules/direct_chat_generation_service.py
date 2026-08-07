@@ -1406,15 +1406,28 @@ def stream_provider_backed_direct_chat(
             pass
 
     # --- Attachment context injection ---
+    # session_ctx["agent_turn_request"] varies by caller: it's the canonical
+    # AgentTurnRequest dataclass from some callers, serialize_agent_turn_
+    # request()'s dict form from others (bind_agent_turn_request_meta,
+    # build_agent_turn_session_context), and sage_agent_runtime_service.py's
+    # _run_sage_action_loop_v3 builds its own hand-rolled dict equivalent
+    # with the same top-level shape. resolve_agent_turn_request() is the one
+    # normalizer every other consumer of this key already goes through —
+    # reusing it here guarantees turn_request.attachments always comes out
+    # as List[TurnAttachment], never a bare dict, regardless of which caller
+    # built session_ctx. build_attachment_context only ever understood the
+    # dataclass (attribute-access) shape; this boundary is what makes that
+    # true instead of merely assumed — a bare dict reaching it raised
+    # AttributeError on att.metadata, the same class of bug _load_attachment_
+    # context had (sage_agent_runtime_service.py).
     attachment_context = ""
-    _attachments = []
+    _attachments: list = []
     if isinstance(session_ctx, dict):
-        _turn_req = session_ctx.get("agent_turn_request")
-        if _turn_req is not None:
-            if isinstance(_turn_req, dict):
-                _attachments = _turn_req.get("attachments", []) or []
-            else:
-                _attachments = getattr(_turn_req, "attachments", []) or []
+        from server_modules.agent_turn import resolve_agent_turn_request
+
+        _resolved_turn_request = resolve_agent_turn_request(session_ctx.get("agent_turn_request"))
+        if _resolved_turn_request is not None:
+            _attachments = list(_resolved_turn_request.attachments or [])
     if _attachments:
         from server_modules.attachment_utils import build_attachment_context
         attachment_context = build_attachment_context(normalized_workspace_id, _attachments)

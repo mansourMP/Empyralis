@@ -237,12 +237,23 @@ export async function forwardControlPlaneRequest(
   copyForwardableRequestHeaders(request, headers, init.headers);
   const timeoutMs = Number.isFinite(init.timeoutMs) ? Math.max(1, Number(init.timeoutMs)) : null;
 
+  // Read the incoming body as raw bytes, never as text. request.text() decodes
+  // the body as UTF-8 and re-encodes it when handed back to fetch() below —
+  // any byte sequence that isn't valid UTF-8 (any binary upload: images,
+  // PDFs, the multipart bodies attachment uploads use) gets each invalid
+  // byte replaced with U+FFFD, silently corrupting the file in transit while
+  // the request still returns 200. arrayBuffer() passes the exact bytes
+  // through untouched. This is safe for JSON/text bodies too — an
+  // ArrayBuffer round-trips any UTF-8-safe payload byte-for-byte, and the
+  // original content-type header (never touched here) is what tells the
+  // upstream how to interpret it.
   const body =
     init.body !== undefined
       ? init.body
       : request.method === 'GET' || request.method === 'HEAD'
         ? undefined
-        : await request.text();
+        : await request.arrayBuffer();
+  const isEmptyBody = body === '' || (body instanceof ArrayBuffer && body.byteLength === 0);
   const controller = timeoutMs === null ? null : new AbortController();
   const timeoutHandle = controller && timeoutMs !== null
     ? setTimeout(() => {
@@ -256,7 +267,7 @@ export async function forwardControlPlaneRequest(
       cache: 'no-store',
       redirect: 'manual',
       headers,
-      body: body === '' ? undefined : body,
+      body: isEmptyBody ? undefined : body,
       signal: controller?.signal,
     });
 
