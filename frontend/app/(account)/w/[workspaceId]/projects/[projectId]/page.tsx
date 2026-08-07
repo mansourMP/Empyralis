@@ -9,7 +9,6 @@ import {
   useFleetAgents,
   useFleetProjects,
   useFleetTasks,
-  useWorkspaceRoster,
   assignFleetTask,
   assignFleetTaskToUser,
   patchFleetTask,
@@ -26,7 +25,6 @@ import { TaskComposer } from "@/lib/workspace/fleet/TaskComposer";
 import { useFleetDocuments } from "@/lib/workspace/fleet/documents-data";
 import { DocumentsList } from "@/lib/workspace/fleet/DocumentsList";
 import { DocumentComposer } from "@/lib/workspace/fleet/DocumentComposer";
-import { ProjectOverview } from "@/lib/workspace/fleet/ProjectOverview";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
 import { ProjectSettings } from "@/lib/workspace/fleet/ProjectSettings";
@@ -79,8 +77,8 @@ function readFiltersFromLocation(): FilterState {
 export default function ProjectDetailPage() {
   const params = useParams();
   const router = useRouter();
-  // Drives the Overview/Agents/Tasks derivation below — see the `view` const
-  // near updateFilters/projectBase.
+  // Drives the Agents/Tasks/Documents derivation below — see the `view`
+  // const near updateFilters/projectBase.
   const pathname = usePathname() || "";
   const workspaceId = String(params?.workspaceId || "");
   const projectId = String(params?.projectId || "");
@@ -91,9 +89,6 @@ export default function ProjectDetailPage() {
   // MemberAvatarStack already calls for this page's own roster stack, no
   // new endpoint involved (GET /workspaces/{id}/members).
   const { members } = useWorkspaceMembers(workspaceId);
-  // MCP-connected external agents — the lookup that turns an
-  // `ext_agent_<hex16>` author id in the Activity feed into a real name.
-  const { externalAgents } = useWorkspaceRoster(workspaceId);
   const { projects, refresh: refreshProjects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
@@ -117,12 +112,12 @@ export default function ProjectDetailPage() {
       if (next.channel !== "all") sp.set("channel", next.channel);
       if (next.sort !== "last_active") sp.set("sort", next.sort);
       const qs = sp.toString();
-      // The CURRENT pathname, not the hardcoded Overview one: these filters
-      // only ever apply to the Agents view (see the `filters`/sortOptions
-      // wiring below), which now lives at `${projectBase}/agents` — a real
-      // route, not client state (see the `view` const below). Replacing with
-      // `projectBase` would silently bounce the reader back to Overview
-      // every time they touched a filter.
+      // The CURRENT pathname, not a hardcoded route: these filters only
+      // ever apply to the Agents view (see the `filters`/sortOptions wiring
+      // below), which lives at `${projectBase}/agents` — a real route, not
+      // client state (see the `view` const below). Replacing with
+      // `projectBase` would silently bounce the reader onto the default
+      // (Tasks) view every time they touched a filter.
       router.replace(`${pathname}${qs ? `?${qs}` : ""}`);
       return next;
     });
@@ -131,39 +126,38 @@ export default function ProjectDetailPage() {
   const [wizardOpen, setWizardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet.
   const [panelOpen, setPanelOpen] = useState(false);
-  // Overview | Agents | Tasks | Documents — a real ROUTE per view
-  // (`${projectBase}`, `${projectBase}/agents`, `${projectBase}/tasks`,
-  // `${projectBase}/documents`), not component state.
+  // Agents | Tasks | Documents — a real ROUTE per view (`${projectBase}/agents`,
+  // `${projectBase}/tasks`, `${projectBase}/documents`), not component state.
   //
   // It used to be `useState`, which is exactly why the browser's own back
-  // button used to strand a reader on Overview after opening a task from
+  // button used to strand a reader on one view after opening a task from
   // Tasks: state lives only as long as this component instance, and
   // navigating to a task's own page (a different route) unmounts it.
   // Nothing about which sub-view you were on survived that round trip,
   // because nothing about it was ever written down anywhere durable. A real
   // route fixes it directly: leaving for a task and pressing the browser's
-  // own back button lands back on the exact view (Overview/Agents/Tasks/
-  // Documents) you left, because that view is a genuine history entry now.
+  // own back button lands back on the exact view (Agents/Tasks/Documents)
+  // you left, because that view is a genuine history entry now.
   //
-  // Documents is a FOURTH top-level view, not a settings-popover placement
-  // — the founder's own call: a project's markdown knowledge is read and
-  // written often enough to earn equal billing with Tasks, not a click
-  // buried in a gear icon.
-  const view: "overview" | "agents" | "tasks" | "documents" =
+  // Overview was REMOVED (founder's call, 2026-08-07 documents review): "I
+  // don't need overview tab, agents/tasks/documents are already enough, no
+  // point of having this overview shit." Three views, not four. Tasks is the
+  // default landing view — the bare `${projectBase}` URL (what the project
+  // list and the command palette both link to) falls through to it below —
+  // because it's the surface a reader opens a project to act on daily; the
+  // roster/activity Overview used to show is one click away on Agents.
+  const view: "agents" | "tasks" | "documents" =
     pathname === `${projectBase}/agents`
       ? "agents"
-      : pathname === `${projectBase}/tasks`
-        ? "tasks"
-        : pathname === `${projectBase}/documents`
-          ? "documents"
-          : "overview";
+      : pathname === `${projectBase}/documents`
+        ? "documents"
+        : "tasks";
   // router.replace, not .push — same choice the agent detail page's own
   // sub-tabs already made (AgentDetailPage's onTabChange, one directory up).
-  // Collapses Overview→Agents→Tasks→Documents clicks onto one history entry,
-  // so the browser's own back button steps out of the project in one press
-  // instead of walking back through every sub-tab click first.
-  const viewHref = (v: "overview" | "agents" | "tasks" | "documents") =>
-    v === "overview" ? projectBase : `${projectBase}/${v}`;
+  // Collapses Agents→Tasks→Documents clicks onto one history entry, so the
+  // browser's own back button steps out of the project in one press instead
+  // of walking back through every sub-tab click first.
+  const viewHref = (v: "agents" | "tasks" | "documents") => `${projectBase}/${v}`;
   // TWO shapes of the same tasks, plus the options that reshape them.
   //
   // This used to be a three-way switch — Board | Grouped | List — and that
@@ -319,7 +313,7 @@ export default function ProjectDetailPage() {
   ];
 
   // Where an agent row goes on a plain click, via `router.push` in
-  // goToAgent below (and the real link ProjectOverview renders for it).
+  // goToAgent below.
   const agentHref = (agentId: string) =>
     `${projectBase}/agents/${encodeURIComponent(agentId)}/overview`;
 
@@ -355,8 +349,7 @@ export default function ProjectDetailPage() {
   // The first place in this UI a HUMAN can move a task. patchFleetTask has
   // existed in fleet-data.ts since the tasks backend landed and had zero
   // callers anywhere — until this, only an agent calling project_task__update
-  // could change a status, which is why ProjectOverview's own caption says
-  // review attribution isn't a real code path yet.
+  // could change a status, so review attribution isn't a real code path yet.
   const handleStatusChange = useCallback(async (taskId: string, status: FleetTaskStatus) => {
     setTaskNotice(null);
     // Paint the move immediately and reconcile from the server right after:
@@ -379,8 +372,6 @@ export default function ProjectDetailPage() {
 
   // A task is a PAGE now, not a drawer over this board (MAN-11x): it has its
   // own route, so it can be deep-linked and reached by browser back/forward.
-  // taskHref is handed to openTask below and to ProjectOverview, which
-  // renders it as a real link.
   const taskHref = useCallback(
     (taskId: string) => `${projectBase}/tasks/${encodeURIComponent(taskId)}`,
     [projectBase],
@@ -402,7 +393,7 @@ export default function ProjectDetailPage() {
     <main className="fleet-content fleet-content--with-panel">
       {/* MAN-145 title-dedup follow-up: this used to render the project's
           name three times (tab strip, breadcrumb, and this block's own
-          shared <h1> above the Overview/Agents/Tasks tabs). The breadcrumb's
+          shared <h1> above the Agents/Tasks/Documents tabs). The breadcrumb's
           current crumb IS the page's <h1> now, on all three tabs (see
           Breadcrumbs.tsx) — it already carries the project's own icon
           (useBreadcrumbIcon above) and its "· N agents" count
@@ -454,7 +445,7 @@ export default function ProjectDetailPage() {
           this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
         <div className="fleet-segmented" role="tablist" aria-label="Project view">
-          {(["overview", "agents", "tasks", "documents"] as const).map((v) => (
+          {(["agents", "tasks", "documents"] as const).map((v) => (
             <button
               key={v}
               type="button"
@@ -463,7 +454,7 @@ export default function ProjectDetailPage() {
               className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
               onClick={() => router.replace(viewHref(v))}
             >
-              {v === "overview" ? "Overview" : v === "agents" ? "Agents" : v === "tasks" ? "Tasks" : "Documents"}
+              {v === "agents" ? "Agents" : v === "tasks" ? "Tasks" : "Documents"}
             </button>
           ))}
         </div>
@@ -543,19 +534,7 @@ export default function ProjectDetailPage() {
             </div>
           ) : null}
 
-          {view === "overview" ? (
-            <ProjectOverview
-              workspaceId={workspaceId}
-              agents={inProject}
-              tasks={tasks}
-              tasksLoading={tasksLoading}
-              rollup={rollup}
-              members={members}
-              externalAgents={externalAgents}
-              taskHref={taskHref}
-              agentHref={agentHref}
-            />
-          ) : view === "tasks" ? (
+          {view === "tasks" ? (
             tasksLoading && tasks.length === 0 ? (
               // rowHeight matches .fleet-task-row's real min-height (52px) —
               // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton
