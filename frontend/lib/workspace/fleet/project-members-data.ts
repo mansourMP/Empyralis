@@ -123,6 +123,29 @@ export async function addProjectMember(
   return normalizeProjectMember(data.member);
 }
 
+/** The pure decision behind useCanWriteProject below, pulled out so a caller
+ *  that already has its own useProjectMembers(workspaceId, projectId) call
+ *  in flight (the project detail page — see ProjectMemberAdd.tsx's own
+ *  fetch of the same data) can reuse that data directly instead of this
+ *  hook triggering a second, redundant GET of the same endpoint. Browser-
+ *  measured on the project page before this split: TWO independent fetches
+ *  of both /workspaces/{id}/members and this project's /members on every
+ *  load, ~250-400ms each, because useCanWriteProject and ProjectMemberAdd
+ *  each ran their own useProjectMembers with no cache between them. Same
+ *  logic as before, just callable without forcing its own fetch. */
+export function deriveCanWriteProject(
+  ownRole: ReturnType<typeof useOwnWorkspaceRole>,
+  myUserId: string | null,
+  projectMembers: ProjectMember[],
+  projectMembersLoading: boolean,
+): boolean | null {
+  if (ownRole === null) return null;
+  if (ownRole === "owner") return true;
+  if (WORKSPACE_ROLE_ORDER[ownRole] < WORKSPACE_ROLE_ORDER.member) return false;
+  if (projectMembersLoading) return null;
+  return projectMembers.some((m) => m.user_id === myUserId);
+}
+
 /** Can the caller write inside THIS project — create/edit/delete a
  *  document, and by extension anything else gated the same way
  *  fleet_create_document/fleet_patch_document/fleet_delete_document are
@@ -165,7 +188,13 @@ export async function addProjectMember(
  *  who may or may not have been added to this specific project) still shows
  *  `null` while it resolves. Same "stay unrendered rather than flash on
  *  then off" contract as before, just no longer paid by the two cases that
- *  never needed it. */
+ *  never needed it.
+ *
+ *  Single-fetch caller only — the project detail page has its own
+ *  useProjectMembers call already (shared with ProjectMemberAdd) and calls
+ *  deriveCanWriteProject directly instead of this hook, to avoid a second
+ *  fetch of the same data. Use this hook wherever nothing else on the page
+ *  already has that data (e.g. the document detail page). */
 export function useCanWriteProject(
   workspaceId: string,
   projectId: string,
@@ -173,10 +202,5 @@ export function useCanWriteProject(
   const ownRole = useOwnWorkspaceRole(workspaceId);
   const myUserId = useOwnAccountId();
   const { members: projectMembers, loading: projectMembersLoading } = useProjectMembers(workspaceId, projectId);
-
-  if (ownRole === null) return null;
-  if (ownRole === "owner") return true;
-  if (WORKSPACE_ROLE_ORDER[ownRole] < WORKSPACE_ROLE_ORDER.member) return false;
-  if (projectMembersLoading) return null;
-  return projectMembers.some((m) => m.user_id === myUserId);
+  return deriveCanWriteProject(ownRole, myUserId, projectMembers, projectMembersLoading);
 }

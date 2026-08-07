@@ -44,7 +44,7 @@ import { useMemo, useState, type CSSProperties } from "react";
 import { AnimatePresence, motion } from "motion/react";
 
 import { APP_MOTION_TRANSITIONS } from "@/lib/ui/motion";
-import { useWorkspaceMembers, type WorkspaceMember, type WorkspaceRole } from "@/lib/workspace/fleet/members-data";
+import type { WorkspaceMember, WorkspaceRole } from "@/lib/workspace/fleet/members-data";
 import type { FleetTask } from "@/lib/workspace/fleet/fleet-data";
 
 function joinClassNames(...values: Array<string | false | null | undefined>): string {
@@ -162,12 +162,21 @@ function MemberTooltip({
 }
 
 export function MemberAvatarStack({
-  workspaceId,
+  members,
+  loading,
   tasks,
   maxVisible = 5,
   size = "md",
 }: {
-  workspaceId: string;
+  /** The caller's own useWorkspaceMembers(workspaceId) list, passed down
+   *  rather than fetched again here. This component used to call the hook
+   *  itself, which meant every project page load fired the workspace
+   *  members GET twice (once here, once for the page's own copy) with no
+   *  cache between them — browser-measured ~250-400ms each, in parallel but
+   *  still double the backend load and double the chance of visibly
+   *  staggered settling. */
+  members: WorkspaceMember[];
+  loading: boolean;
   /** This project's own tasks (already scoped by the caller via
    *  useFleetTasks(workspaceId, projectId)) — used only to compute real
    *  per-member attribution, never fetched independently by this component. */
@@ -175,7 +184,6 @@ export function MemberAvatarStack({
   maxVisible?: number;
   size?: "sm" | "md" | "lg";
 }) {
-  const { members, loading } = useWorkspaceMembers(workspaceId);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const attribution = useMemo(() => buildAttribution(tasks), [tasks]);
 

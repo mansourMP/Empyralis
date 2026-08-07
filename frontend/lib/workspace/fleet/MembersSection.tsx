@@ -6,13 +6,13 @@
 // platform, so "Invite" mints a link the owner copies and shares however
 // they like — it never sends anything itself.
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Check, Copy, Plus, UserPlus } from "lucide-react";
 
-import { me } from "@/lib/auth/auth-client";
 import {
   createWorkspaceInvite,
   buildWorkspaceInviteJoinUrl,
+  useOwnWorkspaceRole,
   useWorkspaceMembers,
   useWorkspacePendingInvites,
   WORKSPACE_ROLE_ORDER,
@@ -40,39 +40,19 @@ function inviteCreatedAtDate(value: number | string | null): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/** The caller's own role in this workspace, derived from the members list
- *  itself (matched by user id from /api/auth/me) — there is no dedicated
- *  "my role" endpoint, and this avoids inventing one for what is purely a
- *  client-side affordance (greying out roles above your own in the invite
- *  form). The server is the real gate either way: _require_invite_role /
- *  create_workspace_invite_route independently refuse to mint a token for a
- *  role above the inviter's own. */
-function useOwnRole(members: ReturnType<typeof useWorkspaceMembers>["members"]): WorkspaceRole | null {
-  const [myUserId, setMyUserId] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void me().then((data) => {
-      if (cancelled) return;
-      const user = (data as { user?: { id?: string } } | null)?.user;
-      setMyUserId(user?.id ? String(user.id) : null);
-    }).catch(() => {
-      if (!cancelled) setMyUserId(null);
-    });
-    return () => { cancelled = true; };
-  }, []);
-
-  return useMemo(() => {
-    if (!myUserId) return null;
-    const mine = members.find((m) => m.user_id === myUserId);
-    return mine?.role ?? null;
-  }, [members, myUserId]);
-}
-
 export function MembersSection({ workspaceId }: { workspaceId: string }) {
   const { members, loading, error, refresh } = useWorkspaceMembers(workspaceId);
   const { invites, loading: invitesLoading, refresh: refreshInvites } = useWorkspacePendingInvites(workspaceId);
-  const ownRole = useOwnRole(members);
+  // Synchronous, from the account shell bootstrap — see members-data.ts's own
+  // doc comment on this hook for why (it replaced a redundant GET /api/auth/me
+  // + members-list match that used to sit empty for seconds on a hard
+  // refresh, MAN). Also now gates the Invite trigger below: creating an
+  // invite is server-enforced owner-only (create_workspace_invite_route's
+  // minimum_role="owner"), so a non-owner must never see a button that only
+  // ever ends in a 403 — CLAUDE.md's "no dead controls" rule, applied the
+  // same way ProjectMemberAdd.tsx already applies it to its own trigger.
+  const ownRole = useOwnWorkspaceRole(workspaceId);
+  const canInvite = ownRole === "owner";
 
   const [inviteOpen, setInviteOpen] = useState(false);
   const [email, setEmail] = useState("");
@@ -82,11 +62,11 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
   const [freshLink, setFreshLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // Only offer roles at or below the caller's own — a member who happens to
-  // load this page (viewer-minimum-gated GETs) can still see this section,
-  // but the invite form itself should not dangle an option the server will
-  // just reject. Falls back to allowing everything while ownRole is still
-  // loading rather than flashing a form that's briefly wrong either way.
+  // Only offer roles at or below the caller's own — the invite form itself
+  // should not dangle an option the server will just reject. This only ever
+  // renders once canInvite is true (ownRole === "owner"), so the WORKSPACE_
+  // ROLES fallback below is for the one moment ownRole can still be null
+  // (no membership row on record for this account), never a loading state.
   const allowedRoles = useMemo(() => {
     if (!ownRole) return WORKSPACE_ROLES;
     return WORKSPACE_ROLES.filter((r) => WORKSPACE_ROLE_ORDER[r] <= WORKSPACE_ROLE_ORDER[ownRole]);
@@ -129,17 +109,19 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
 
       {error ? <div className="fleet-page-state-body" role="alert" style={{ color: "var(--offline-text)" }}>{error}</div> : null}
 
-      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "var(--space-3)" }}>
-        <button
-          type="button"
-          className="fleet-btn fleet-btn--accent"
-          onClick={() => { setInviteOpen((v) => !v); setInviteError(null); }}
-        >
-          <UserPlus size={14} strokeWidth={1.75} /> Invite
-        </button>
-      </div>
+      {canInvite ? (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "var(--space-3)" }}>
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--accent"
+            onClick={() => { setInviteOpen((v) => !v); setInviteError(null); }}
+          >
+            <UserPlus size={14} strokeWidth={1.75} /> Invite
+          </button>
+        </div>
+      ) : null}
 
-      {inviteOpen ? (
+      {canInvite && inviteOpen ? (
         <div className="fleet-card" style={{ padding: "var(--space-3)", marginBottom: "var(--space-4)" }}>
           <form onSubmit={handleInvite} style={{ display: "flex", gap: "var(--space-2)", flexWrap: "wrap" }}>
             <input

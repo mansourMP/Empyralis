@@ -16,8 +16,8 @@ import {
   type FleetTaskStatus,
   type TaskAssigneeSelection,
 } from "@/lib/workspace/fleet/fleet-data";
-import { useWorkspaceMembers } from "@/lib/workspace/fleet/members-data";
-import { useCanWriteProject } from "@/lib/workspace/fleet/project-members-data";
+import { useOwnAccountId, useOwnWorkspaceRole, useWorkspaceMembers } from "@/lib/workspace/fleet/members-data";
+import { deriveCanWriteProject, useProjectMembers } from "@/lib/workspace/fleet/project-members-data";
 import { TasksList } from "@/lib/workspace/fleet/TasksList";
 import { TasksBoard } from "@/lib/workspace/fleet/TasksBoard";
 import { TasksGroupedList } from "@/lib/workspace/fleet/TasksGroupedList";
@@ -85,10 +85,21 @@ export default function ProjectDetailPage() {
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
   const { agents, loading, refresh } = useFleetAgents(workspaceId);
-  // MAN-64/MAN-70: the pool of valid HUMAN assignees -- the same hook
-  // MemberAvatarStack already calls for this page's own roster stack, no
-  // new endpoint involved (GET /workspaces/{id}/members).
-  const { members } = useWorkspaceMembers(workspaceId);
+  // MAN-64/MAN-70: the pool of valid HUMAN assignees -- the same list
+  // MemberAvatarStack renders for this page's own roster stack, passed down
+  // as a prop rather than fetched a second time there (GET
+  // /workspaces/{id}/members) -- see MemberAvatarStack.tsx's own doc
+  // comment on why that used to be a redundant round trip.
+  const { members, loading: membersLoading } = useWorkspaceMembers(workspaceId);
+  // This project's own project_memberships rows -- likewise the ONE fetch
+  // of GET /fleet/projects/{id}/members for this page, shared by
+  // deriveCanWriteProject below and passed down to ProjectMemberAdd. Used
+  // to be two independent useProjectMembers calls (this page's write gate,
+  // ProjectMemberAdd's own) hitting the same endpoint on every load --
+  // browser-measured ~250-400ms each, doubling both requests and backend
+  // load for no reason.
+  const { members: projectMembers, loading: projectMembersLoading, refresh: refreshProjectMembers } =
+    useProjectMembers(workspaceId, projectId);
   const { projects, refresh: refreshProjects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
@@ -209,8 +220,12 @@ export default function ProjectDetailPage() {
   // a member with no project_memberships row here) both hide them outright,
   // never a disabled control (CLAUDE.md: no dead controls). See
   // project-members-data.ts's own doc comment for the exact policy this
-  // mirrors (auth.enforce_project_access).
-  const canWriteProject = useCanWriteProject(workspaceId, projectId);
+  // mirrors (auth.enforce_project_access). Calls deriveCanWriteProject
+  // directly with this page's own projectMembers fetch above, rather than
+  // useCanWriteProject (which would run its own, redundant, useProjectMembers).
+  const ownWorkspaceRole = useOwnWorkspaceRole(workspaceId);
+  const myAccountId = useOwnAccountId();
+  const canWriteProject = deriveCanWriteProject(ownWorkspaceRole, myAccountId, projectMembers, projectMembersLoading);
   // Statuses written but not yet confirmed by a refetch — see
   // handleStatusChange. Empty in the steady state, so this is a no-op merge
   // except for the few hundred ms a PATCH is in flight.
@@ -475,7 +490,7 @@ export default function ProjectDetailPage() {
             first child of .fleet-content-main, which cost the board a whole
             44px band of dead space between the tab strip and the first
             card; sharing the toolbar's line is what reclaimed that. */}
-        <MemberAvatarStack workspaceId={workspaceId} tasks={tasks} />
+        <MemberAvatarStack members={members} loading={membersLoading} tasks={tasks} />
         {/* The "+" immediately right of the stack (ProjectMemberAdd.tsx).
             Unlike the stack beside it, this reads and writes the REAL
             project_memberships table (MAN-115) — add an existing workspace
@@ -483,7 +498,14 @@ export default function ProjectDetailPage() {
             project. Renders nothing for a non-owner: both routes it calls
             are owner-only, server-enforced, so there is no disabled state
             to design for. */}
-        <ProjectMemberAdd workspaceId={workspaceId} projectId={projectId} workspaceMembers={members} />
+        <ProjectMemberAdd
+          workspaceId={workspaceId}
+          projectId={projectId}
+          workspaceMembers={members}
+          projectMembers={projectMembers}
+          projectMembersLoading={projectMembersLoading}
+          refreshProjectMembers={refreshProjectMembers}
+        />
         {/* U3-K: the same toolbar slot, same owner-only gate — rename +
             default hardware. See ProjectSettings.tsx's own header for why
             this row (not the Agents-only Properties drawer) is this
