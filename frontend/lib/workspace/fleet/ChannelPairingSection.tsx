@@ -26,15 +26,21 @@
 //
 // This is a fresh component, not the pre-existing
 // workspace-channel-pairing-surface.tsx (WorkspaceChannelPairingSurface).
-// That component's only wrapper, <WorkspaceBoundary>, is never mounted
-// anywhere under frontend/app — its whole "Workstation Surface" v2 shell
-// (workspace-boundary.tsx, workspace-services.tsx,
-// workstation-surface-primitives.tsx) is orphaned scaffolding with zero
-// other consumers. Standing that framework up was a much bigger, separate
-// call than fixing tonight's regression, so this follows the pattern every
-// other live Settings → Connections section already uses (see
-// McpApiKeysSection.tsx, MembersSection.tsx): plain fetch + fleet-* CSS,
-// wired straight to the same backend endpoints.
+// That component's only wrapper, <WorkspaceBoundary>, was never mounted
+// anywhere under frontend/app -- its "Workstation Surface" v2 shell
+// (workspace-boundary.tsx, workstation-surface-primitives.tsx,
+// workspace-channel-pairing-surface.tsx, workspace-json-request.ts) was
+// orphaned scaffolding with zero other consumers, verified independently
+// (every exported symbol grepped, not just the filenames) and deleted
+// 2026-08-07. workspace-services.tsx was investigated at the same time and
+// is NOT dead, despite what an earlier draft of this comment implied --
+// resolveWorkspaceApiBaseUrl/WorkspaceApiEnv are real, live exports used by
+// lib/account/account-workspaces-client.ts, which backs workspace creation
+// and invite acceptance; kept. Standing the v2 shell up was a much bigger,
+// separate call than fixing tonight's regression, so this component follows
+// the pattern every other live Settings → Connections section already uses
+// (see McpApiKeysSection.tsx, MembersSection.tsx): plain fetch + fleet-*
+// CSS, wired straight to the same backend endpoints.
 //
 // No approval-prompt UI (standing product law) — a pairing code an owner
 // issues once is the whole mechanism, same shape as the Members section's

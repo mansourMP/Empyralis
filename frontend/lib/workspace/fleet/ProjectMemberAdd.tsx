@@ -51,7 +51,7 @@ import {
   type WorkspaceMember,
   type WorkspaceRole,
 } from "@/lib/workspace/fleet/members-data";
-import { useProjectMembers, addProjectMember } from "@/lib/workspace/fleet/project-members-data";
+import { addProjectMember, type ProjectMember } from "@/lib/workspace/fleet/project-members-data";
 import { MemberAvatar } from "@/lib/workspace/fleet/MemberAvatarStack";
 
 function roleLabel(role: WorkspaceRole): string {
@@ -64,15 +64,28 @@ export function ProjectMemberAdd({
   workspaceId,
   projectId,
   workspaceMembers,
+  projectMembers,
+  projectMembersLoading,
+  refreshProjectMembers,
 }: {
   workspaceId: string;
   projectId: string;
   /** The page's own useWorkspaceMembers(workspaceId) list — passed down
    *  rather than fetched again here. MemberAvatarStack right next to this
-   *  control already does its own fetch of the exact same endpoint; a third
-   *  copy in this file would be a third redundant round trip for the same
-   *  data on every load of this page. */
+   *  control also takes its own copy as a prop now, for the same reason:
+   *  a hook call per component here would be a redundant round trip for
+   *  the same data on every load of this page. */
   workspaceMembers: WorkspaceMember[];
+  /** The page's own useProjectMembers(workspaceId, projectId) — likewise
+   *  passed down rather than fetched again here. The project page also
+   *  feeds this same data into deriveCanWriteProject (project-members-
+   *  data.ts) for its own write-gate, so this used to be TWO independent
+   *  fetches of the identical /fleet/projects/{id}/members response on
+   *  every page load (browser-measured ~250-400ms each) before the fetch
+   *  was lifted to the page and shared. */
+  projectMembers: ProjectMember[];
+  projectMembersLoading: boolean;
+  refreshProjectMembers: () => Promise<void>;
 }) {
   // Reads the account shell bootstrap (see members-data.ts's
   // useOwnWorkspaceRole doc comment) instead of matching `workspaceMembers`
@@ -81,8 +94,6 @@ export function ProjectMemberAdd({
   // control still isn't in the DOM until it resolves — it just resolves in
   // the same paint as the rest of the page now, not several seconds later.
   const ownRole = useOwnWorkspaceRole(workspaceId);
-  const { members: projectMembers, loading: projectMembersLoading, refresh: refreshProjectMembers } =
-    useProjectMembers(workspaceId, projectId);
 
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
