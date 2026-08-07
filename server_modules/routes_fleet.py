@@ -1032,6 +1032,218 @@ async def fleet_set_task_parent(
         return {"ok": False, "error": str(exc)}
 
 
+# ── Project documents: a project's owned, flat markdown knowledge -- the
+# API half of the "owned-context layer for a team" positioning (CLAUDE.md).
+# No RAG endpoint here and none planned for this table: a caller finds a
+# document by listing a project's set (GET below) and reading the one it
+# wants, the same way project_documents_repository.py's own module
+# docstring says an agent should. Documents are project-scoped exactly like
+# tasks -- MAN-115's per-project ACL gates every route below via
+# _enforce_document_project_access, mirroring _enforce_task_project_access
+# above it. See migrations/add_project_documents.sql for the schema.
+
+async def _enforce_document_project_access(
+    current_user: Dict[str, Any],
+    resolved_workspace_id: str,
+    tenant_id: str,
+    document_id: str,
+    *,
+    minimum_role: str = "viewer",
+) -> None:
+    """The document-scoped counterpart of _enforce_task_project_access just
+    above -- same reasoning, same non-raising posture when the document
+    can't be resolved (nothing to leak for a document that isn't there; the
+    route's own call right after this returns its normal not-found
+    result)."""
+    from server_modules import project_documents_repository as documents
+
+    document = await documents.get_document(
+        tenant_id=tenant_id, workspace_id=resolved_workspace_id, document_id=document_id,
+    )
+    project_id = str((document or {}).get("project_id") or "").strip()
+    if not project_id:
+        return
+    await auth_module.enforce_project_access(
+        current_user, resolved_workspace_id, project_id, minimum_role=minimum_role,
+    )
+
+
+@router.get("/api/w/{workspace_id}/fleet/documents")
+async def fleet_list_documents(
+    request: Request,
+    workspace_id: str,
+    project_id: str = Query(..., min_length=1, description="Documents are project-scoped -- required"),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """List a project's documents, alphabetically by title. `viewer` is
+    enough -- reading a project's shared knowledge is the same tier that
+    reads its tasks and its member roster. Gated on the named project (a
+    list call always names one; documents have no cross-project view the
+    way fleet_list_tasks does), so a caller with no project_memberships row
+    for this project sees a 404, not an empty list that would still confirm
+    the project exists. Bodies are omitted from the list response (see
+    project_documents_repository.list_documents's own include_body=False
+    default) -- fetch a single document via GET .../documents/{id} for its
+    content."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await auth_module.enforce_project_access(current_user, resolved_workspace_id, project_id, minimum_role="viewer")
+    from server_modules import project_documents_repository as documents
+
+    try:
+        rows = await documents.list_documents(
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            project_id=project_id,
+        )
+        return {"ok": True, "documents": rows}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "documents": []}
+
+
+@router.get("/api/w/{workspace_id}/fleet/documents/{document_id}")
+async def fleet_get_document(
+    request: Request,
+    workspace_id: str,
+    document_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Fetch one document, including its full body. `viewer` -- same tier
+    the list route requires."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_document_project_access(
+        current_user, resolved_workspace_id, tenant_id, document_id, minimum_role="viewer",
+    )
+    from server_modules import project_documents_repository as documents
+
+    try:
+        document = await documents.get_document(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id, document_id=document_id,
+        )
+        if document is None:
+            return {"ok": False, "error": "Document not found."}
+        return {"ok": True, "document": document}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+class FleetCreateDocumentRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    body: str = ""
+
+
+@router.post("/api/w/{workspace_id}/fleet/documents")
+async def fleet_create_document(
+    request: Request,
+    workspace_id: str,
+    body: FleetCreateDocumentRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Create a document inside a project.
+
+    WHO CAN WRITE: `member` -- project membership is the natural grant for
+    this surface, the same boundary project_task__* tools were given
+    earlier (a project-member specialist gets those tools unconditionally
+    off its own project_id, see sage_agent_runtime_service.py's
+    _direct_tool_bundle). A project's documents are shared, ordinary-work
+    content its members maintain together -- filing one is not a more
+    privileged act than filing a task, so it is gated at the same `member`
+    tier fleet_create_task uses, not `owner`. Gated on the NAMED project
+    (body.project_id is already in hand), matching fleet_create_task's own
+    reasoning: a member cannot create a document in a project they have no
+    project_memberships row for."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    await auth_module.enforce_project_access(current_user, resolved_workspace_id, body.project_id, minimum_role="member")
+    from server_modules import project_documents_repository as documents
+
+    try:
+        document = await documents.create_document(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+            project_id=body.project_id,
+            title=body.title,
+            body=body.body,
+            created_by=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+        return {"ok": True, "document": document}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+class FleetPatchDocumentRequest(BaseModel):
+    title: Optional[str] = None
+    body: Optional[str] = None
+
+
+@router.patch("/api/w/{workspace_id}/fleet/documents/{document_id}")
+async def fleet_patch_document(
+    request: Request,
+    workspace_id: str,
+    document_id: str,
+    body: FleetPatchDocumentRequest,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Edit a document's title and/or body. `member` -- same tier as
+    creation and as fleet_patch_task's own edit route. Gated on the
+    document's OWN project via _enforce_document_project_access, mirroring
+    fleet_patch_task's _enforce_task_project_access: a member cannot edit a
+    document in a project they have no project_memberships row for, just
+    by knowing its document_id."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_document_project_access(
+        current_user, resolved_workspace_id, tenant_id, document_id, minimum_role="member",
+    )
+    from server_modules import project_documents_repository as documents
+
+    try:
+        document = await documents.update_document(
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            document_id=document_id,
+            title=body.title,
+            body=body.body,
+            updated_by=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+        if document is None:
+            return {"ok": False, "error": "Document not found."}
+        return {"ok": True, "document": document}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/documents/{document_id}")
+async def fleet_delete_document(
+    request: Request,
+    workspace_id: str,
+    document_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Delete a document. `member`, not `owner` -- unlike fleet_delete_label
+    (a WORKSPACE-wide vocabulary change every project's board depends on, so
+    owner-gated) a document is scoped to one project and any member of that
+    project already has full read/write on it; letting the same tier delete
+    it is consistent rather than a surprise step up in privilege partway
+    through the CRUD set. Gated on the document's own project, same as
+    patch above."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="member")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_document_project_access(
+        current_user, resolved_workspace_id, tenant_id, document_id, minimum_role="member",
+    )
+    from server_modules import project_documents_repository as documents
+
+    try:
+        deleted = await documents.delete_document(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id, document_id=document_id,
+        )
+        return {"ok": bool(deleted)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 # ── Labels: a per-WORKSPACE vocabulary, not per-project -- a label like
 # "bug" describes a KIND of work and stays the same label when the work
 # moves to another client. `color` is a palette TOKEN NAME, never a hex: the
