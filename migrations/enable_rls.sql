@@ -404,4 +404,21 @@ CREATE POLICY empyralis_project_documents_scope ON project_documents
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- agent_goals is a BRAND NEW table (migrations/add_agent_goals.sql, the
+-- durable "/goal" record -- see that file's own header for the full
+-- rationale). Same posture as task_notifications/project_documents just
+-- above: every call site (control_plane_repository.py's append_agent_goal/
+-- get_agent_goal/list_agent_goals/update_agent_goal/
+-- list_due_agent_goal_scopes) was written against the scoped
+-- rls_fetch/rls_fetchrow/_scoped_connection helpers from the start, so
+-- there is no ordering hazard and RLS ships in the same change that
+-- creates the table.
+ALTER TABLE agent_goals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_goals FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_agent_goals_scope ON agent_goals;
+CREATE POLICY empyralis_agent_goals_scope ON agent_goals
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;

@@ -202,6 +202,33 @@ def build_heartbeat_turn_request(
             if assigned_agent_id:
                 merged_metadata["active_agent_install_id"] = assigned_agent_id
             break
+        # Goals (build step 4, "the instruction layer"): a `goal` wake
+        # request's payload carries goal_id/goal_text/instruction/
+        # attempt_number/max_attempts/status -- the exact same threading
+        # shape task_assigned uses just above (merged_metadata ->
+        # context_hints["metadata"] -> session_ctx -> the resulting turn's
+        # trace metadata), reused rather than inventing a second seam. Also
+        # sets active_agent_install_id from the goal's own agent_id, same
+        # reason task_assigned does: without it the turn runs as the
+        # workspace master (Sage) instead of the specialist the goal
+        # actually belongs to.
+        for item in wake_requests:
+            if not isinstance(item, dict) or str(item.get("trigger_kind") or "").strip() != "goal":
+                continue
+            goal_payload = _wake_request_payload(item)
+            goal_id = str(goal_payload.get("goal_id") or "").strip()
+            if not goal_id:
+                continue
+            merged_metadata["goal_id"] = goal_id
+            merged_metadata["goal_text"] = str(goal_payload.get("goal_text") or "").strip()
+            merged_metadata["goal_instruction"] = str(goal_payload.get("instruction") or "").strip()
+            merged_metadata["goal_attempt_number"] = goal_payload.get("attempt_number")
+            merged_metadata["goal_max_attempts"] = goal_payload.get("max_attempts")
+            merged_metadata["goal_status"] = str(goal_payload.get("status") or "").strip()
+            goal_agent_id = str(goal_payload.get("agent_id") or "").strip()
+            if goal_agent_id:
+                merged_metadata["active_agent_install_id"] = goal_agent_id
+            break
     if recent_changes:
         merged_metadata["context_event_ids"] = [
             str(item.get("id") or "").strip()
@@ -243,6 +270,28 @@ def build_heartbeat_turn_request(
         if task_description:
             task_lines.append(f"Description: {task_description}")
         sections.append("Assigned task:\n" + "\n".join(task_lines))
+    if merged_metadata.get("goal_id"):
+        # THE instruction layer (build step 4): goal_instruction is the
+        # human-authored (or model-authored, via goal__update) escalation
+        # rule -- "retry once, adjust the offer, escalate after 3
+        # attempts" lives here, injected verbatim into every turn that
+        # works this goal, exactly like assigned_task_description is above
+        # for task_assigned wakeups. attempt_number/max_attempts/status are
+        # real system-recorded data (bounded_scheduler_service._fire_goal
+        # is the only writer of attempt_number), never the model's own
+        # claim about how many times it has tried.
+        goal_lines_for_turn = [f"Goal: {str(merged_metadata.get('goal_text') or '').strip()}"]
+        goal_instruction = str(merged_metadata.get("goal_instruction") or "").strip()
+        if goal_instruction:
+            goal_lines_for_turn.append(f"Instruction: {goal_instruction}")
+        attempt_number = merged_metadata.get("goal_attempt_number")
+        max_attempts = merged_metadata.get("goal_max_attempts")
+        if attempt_number is not None and max_attempts is not None:
+            goal_lines_for_turn.append(f"Attempt {attempt_number} of {max_attempts}.")
+        goal_status = str(merged_metadata.get("goal_status") or "").strip()
+        if goal_status:
+            goal_lines_for_turn.append(f"Current status: {goal_status}.")
+        sections.append("Working goal:\n" + "\n".join(goal_lines_for_turn))
     if recent_changes:
         change_lines = []
         for item in recent_changes:

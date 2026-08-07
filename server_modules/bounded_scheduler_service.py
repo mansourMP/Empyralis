@@ -121,6 +121,61 @@ RECURRING_SCHEDULE_HARD_MAX_OCCURRENCES = 3650
 # LIMIT plays for the wake-request scanner above.
 DEFAULT_RECURRING_SCHEDULE_SCAN_LIMIT = 200
 
+# ── Goals ("agent, go negotiate with this supplier and come back with a
+# solution") -- see the "Goals: durable outcomes with bounded retry" section
+# far below for the full design. Bounded on BOTH axes from creation, unlike
+# recurring schedules' nullable pair -- a goal always gets a real
+# max_attempts and a real expires_at, no "forever" branch to reach.
+DEFAULT_GOAL_MAX_ATTEMPTS = 5
+# Hard ceiling even when a caller explicitly asks for more -- create_goal
+# clamps rather than rejects, matching _clamp_recurring_schedule_bounds'
+# own "degrades to the ceiling" posture.
+GOAL_HARD_MAX_ATTEMPTS = 50
+DEFAULT_GOAL_LIFETIME_DAYS = 14
+GOAL_HARD_MAX_LIFETIME_DAYS = 90
+# A goal's own per-goal daily wake ceiling -- same role DEFAULT_MAX_
+# RECURRING_WAKES_PER_DAY plays for recurring schedules, tighter here
+# because a goal's PRIMARY bound is max_attempts (typically far below this),
+# not cadence; this is the safety net under a misconfigured fast retry
+# cadence, not the main bound.
+DEFAULT_MAX_GOAL_WAKES_PER_DAY = 12
+# The backoff shape BETWEEN attempts, reusing RetryPolicy's existing
+# base/max/multiplier encoding rather than inventing a second one (see
+# RetryPolicy/compute_retry_delay above). Deliberately much longer than
+# DEFAULT_RETRY_POLICY's own 30s/3600s pair, which is sized for a
+# scheduler-internal operation retrying within one process's lifetime -- a
+# goal's "attempt" is a full agent turn doing real-world work (a
+# negotiation, a follow-up), and re-trying every 30 seconds would be
+# nonsensical for that shape of work. 1h -> 2h -> 4h ... capped at 24h is a
+# reasonable default cadence for "try again, but not immediately"; not
+# exposed as a goal__create parameter (kept off the tool surface -- "Best,
+# not most") since the model has no principled way to pick a better number
+# than this without real-world experience.
+DEFAULT_GOAL_RETRY_BASE_DELAY_SECONDS = 3600
+DEFAULT_GOAL_RETRY_MAX_DELAY_SECONDS = 86400
+DEFAULT_GOAL_RETRY_BACKOFF_MULTIPLIER = 2.0
+# The fallback instruction layer (build step 4) when a caller creates a
+# goal without authoring its own escalation rule. This is deliberately
+# generic -- the whole point of the instruction field is that a human (or
+# the model itself, via goal__update) writes the SPECIFIC rule ("retry
+# once, offer a different discount tier, escalate after 3 attempts") for
+# this goal; this default only keeps the tool usable without one, mirroring
+# OpenClaw's own `goal` tool default framing (docs/automation/
+# standing-orders.md's reference shape, ported as a default string here
+# rather than a second injected-document mechanism -- see the "Goals" build
+# section below for why).
+DEFAULT_GOAL_INSTRUCTION = (
+    "Work this goal each time you wake. If your last approach was rejected "
+    "or blocked, try a different, reasonable variation before giving up -- "
+    "never repeat an identical request that already failed once. If you "
+    "are genuinely stuck and need information or a decision only a human "
+    "can give, set status to 'awaiting_input' or 'blocked' and say exactly "
+    "what you need. When the goal is achieved, set status to 'done' and "
+    "summarize the outcome. If you conclude the goal cannot be achieved, "
+    "set status to 'cancelled' and say why -- do not keep retrying a dead "
+    "end. You have a limited number of attempts; use them deliberately."
+)
+
 _AMBIENT_MONITOR_REGISTRY_LOCK = threading.Lock()
 _AMBIENT_MONITOR_REGISTRY: dict[str, dict[str, Callable[[], Any]]] = {}
 
@@ -1599,6 +1654,659 @@ async def process_due_recurring_schedules_once(
     return {"scanned": len(results), "results": results}
 
 
+# ── Goals: durable outcomes with bounded retry ───────────────────────────
+# "agent, go to this person and negotiate ... and if the person says no, it
+# would either try again, or offer something different" (the founder's own
+# framing). Built ON TOP OF the exact same wake-request machinery every
+# other trigger kind above uses -- a goal row is only ever a generator of
+# ordinary wake requests, never a second execution path. Every fire goes
+# through _persist_wakeup, same quiet-hours/battery/network/rate-cap
+# enforcement as task_assigned/task_commented/self_proposed/recurring.
+#
+# STRUCTURALLY this is agent_recurring_schedules' twin -- same "a row is
+# bookkeeping about WHEN to next ask for a wake-up" shape, fired from the
+# SAME scan tick (process_due_goals_once, called from scan_due_wake_
+# requests_once below, right alongside process_due_recurring_schedules_
+# once) -- no second scheduler thread. Two things make a goal more than a
+# renamed recurring schedule:
+#   1. a STATUS VOCABULARY (below) a plain reminder has no use for --
+#      todo/in_progress/awaiting_input/blocked/in_review/done are lifted
+#      verbatim from project_tasks_service.TASK_STATUS_ORDER (same words,
+#      same meaning: a goal being worked by an agent moves through the
+#      exact states a task does), plus two goal-specific terminal states
+#      (`exhausted`, `cancelled`) that vocabulary has no way to express --
+#      see GOAL_STATUS_ORDER's own comment.
+#   2. a bounded ATTEMPT COUNTER the system alone advances (_fire_goal,
+#      below, bumps it exactly once per wake it actually persists -- never
+#      the model narrating "I tried again"), with an exponential backoff
+#      between attempts (RetryPolicy/compute_retry_delay, already defined
+#      above for an unrelated scheduler-internal use -- reused here rather
+#      than inventing a second backoff shape) instead of a fixed cron.
+#
+# THE INSTRUCTION LAYER (build step 4): `instruction` is a plain-text
+# column on this row, threaded into the wake turn's message every time the
+# goal fires (see runtime_heartbeat_service.build_heartbeat_turn_request's
+# "Goal:" section) -- this is where a human (or the model itself, via
+# goal__update) writes "retry once, adjust the offer, escalate after 3
+# attempts." Three existing mechanisms were considered and rejected before
+# landing here:
+#   - agent_memory.py: durable but workspace/agent-scoped free text meant
+#     for standing facts and preferences, not a single goal's own
+#     escalation rule -- every goal would need to invent its own naming
+#     convention inside one shared memory file, and nothing would ever
+#     prune it when the goal finished.
+#   - the per-agent skills system (SKILL.md): SDK-engine only (does not
+#     exist on the other engine this codebase still runs), and a skill is
+#     a reusable CAPABILITY the agent chooses to invoke, not a specific
+#     goal's own state -- wrong shape and wrong lifecycle entirely.
+#   - sage_instruction_compiler_service.py: this is Sage's own (the
+#     workspace MASTER agent) system-prompt compiler, with its own budget
+#     and its own char-limit machinery -- docs/design/context-engineering-
+#     plan.md item 10 notes the SPECIALIST branch (the one that actually
+#     works project tasks/goals) has no compiler budget of its own at all
+#     and never routes through this file. Wiring a goal's instruction
+#     through Sage's compiler would mean either growing Sage's own prompt
+#     with every workspace's every active goal, or building a second,
+#     parallel per-specialist compiler -- a fourth concept, not reuse.
+# What already exists and fits exactly: the wake-turn message assembly in
+# runtime_heartbeat_service.build_heartbeat_turn_request, which ALREADY
+# threads a persistent per-trigger instruction into a turn's message for
+# task_assigned wakeups (its "Assigned task:" section, task_description
+# verbatim) -- goals get the same treatment, a new "Goal:" section,
+# reusing the identical mechanism rather than adding a new one.
+GOAL_STATUS_ORDER = (
+    # Lifted verbatim from project_tasks_service.TASK_STATUS_ORDER (copied,
+    # not imported -- project_tasks_service already imports THIS module
+    # lazily inside assign_task, so a module-level import back would be a
+    # cycle; NON_TERMINAL_WAKE_STATUSES/task_commented's own trigger-kind
+    # list above are copied the same way for the same reason). `backlog` is
+    # deliberately not carried over -- a goal is created with explicit
+    # intent to work it immediately, never triaged out of a queue the way
+    # an untouched task can be.
+    "todo",
+    "in_progress",
+    "awaiting_input",
+    "blocked",
+    "in_review",
+    "done",
+    # Goal-specific: the task vocabulary has no way to express either of
+    # these two facts.
+    "cancelled",   # deliberately abandoned before succeeding or exhausting
+                    # the attempt/lifetime budget -- by the agent (it
+                    # concluded the goal is unreachable) or the owner.
+    "exhausted",   # the bounded attempt/lifetime ceiling was hit WITHOUT
+                    # the model ever reporting success or giving up -- a
+                    # system-recorded fact, never model narration. See
+                    # _fire_goal below, the ONLY place this status is ever
+                    # written.
+)
+VALID_GOAL_STATUSES = set(GOAL_STATUS_ORDER)
+DEFAULT_GOAL_STATUS = "todo"
+# Statuses that keep a goal alive -- the scan below only ever wakes a goal
+# sitting in one of these. `blocked`/`awaiting_input` are included
+# DELIBERATELY: "if the person says no, it would either try again, or offer
+# something different" is exactly the blocked-then-retry loop this build
+# exists for, so a blocked goal must keep waking its agent, never go quiet.
+NON_TERMINAL_GOAL_STATUSES = {"todo", "in_progress", "awaiting_input", "blocked", "in_review"}
+TERMINAL_GOAL_STATUSES = {"done", "cancelled", "exhausted"}
+# What the agent-facing goal__update tool may set. `exhausted` is excluded
+# on purpose -- it is the SYSTEM's bounded-give-up signal (_fire_goal
+# alone writes it), kept structurally distinct from the model deciding to
+# stop (which is `done`, having succeeded, or `cancelled`, having concluded
+# the goal is unreachable -- both are honest, attributable outcomes the
+# model chooses; `exhausted` is what happened when nobody decided anything
+# and the ceiling did the deciding instead).
+AGENT_SETTABLE_GOAL_STATUSES = NON_TERMINAL_GOAL_STATUSES | {"done", "cancelled"}
+
+
+def max_goal_wakes_per_day() -> int:
+    """A goal's own daily wake ceiling -- see DEFAULT_MAX_GOAL_WAKES_PER_DAY
+    above. Env-overridable, floored at 1 for the same reason every other cap
+    in this module is."""
+    return max(1, config_int("EMPYRALIS_MAX_GOAL_WAKES_PER_DAY", DEFAULT_MAX_GOAL_WAKES_PER_DAY))
+
+
+def _goal_retry_policy(goal: Dict[str, Any]) -> RetryPolicy:
+    stored = _coerce_dict(goal.get("retry_policy"))
+    max_attempts = _coerce_int(goal.get("max_attempts"), DEFAULT_GOAL_MAX_ATTEMPTS, minimum=1, maximum=GOAL_HARD_MAX_ATTEMPTS)
+    return RetryPolicy(
+        max_retries=max_attempts,
+        base_delay_seconds=_coerce_int(
+            stored.get("base_delay_seconds"), DEFAULT_GOAL_RETRY_BASE_DELAY_SECONDS, minimum=1, maximum=86400,
+        ),
+        max_delay_seconds=_coerce_int(
+            stored.get("max_delay_seconds"), DEFAULT_GOAL_RETRY_MAX_DELAY_SECONDS, minimum=1, maximum=604800,
+        ),
+        backoff_multiplier=float(stored.get("backoff_multiplier") or DEFAULT_GOAL_RETRY_BACKOFF_MULTIPLIER),
+    )
+
+
+def _clamp_goal_bounds(
+    *,
+    now_utc: datetime,
+    max_attempts: Optional[int],
+    lifetime_days: Optional[int],
+) -> tuple[int, datetime]:
+    """Build step 3 (bounded by construction): unlike recurring schedules'
+    nullable max_occurrences/expires_at pair, a goal ALWAYS gets a real
+    max_attempts and a real expires_at -- no unbounded branch exists to
+    reach. Whatever the caller supplies (or omits, landing on the default)
+    is clamped to the hard ceilings so "give me 500 attempts over a year"
+    degrades to the ceiling rather than either erroring or actually running
+    that long unattended."""
+    resolved_max_attempts = _coerce_int(
+        max_attempts, DEFAULT_GOAL_MAX_ATTEMPTS, minimum=1, maximum=GOAL_HARD_MAX_ATTEMPTS,
+    )
+    resolved_lifetime_days = _coerce_int(
+        lifetime_days, DEFAULT_GOAL_LIFETIME_DAYS, minimum=1, maximum=GOAL_HARD_MAX_LIFETIME_DAYS,
+    )
+    resolved_expires_at = now_utc + timedelta(days=resolved_lifetime_days)
+    return resolved_max_attempts, resolved_expires_at
+
+
+def goal_view(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Honest-reporting read shape (build step 6): every field here is real,
+    system-recorded data -- attempt_count is advanced ONLY by _fire_goal,
+    status is either an agent's own explicit tool call or _fire_goal's own
+    exhaustion transition, last_outcome_reason is stamped by the system at
+    the moment a goal turns terminal. Nothing here is the model's own
+    narration of its progress."""
+    metadata = _coerce_dict(row.get("metadata"))
+    retry_policy = _coerce_dict(row.get("retry_policy"))
+    next_fire_at = row.get("next_fire_at")
+    last_fired_at = row.get("last_fired_at")
+    expires_at = row.get("expires_at")
+    created_at = row.get("created_at")
+    status = str(row.get("status") or DEFAULT_GOAL_STATUS).strip().lower()
+    return {
+        "id": str(row.get("id") or ""),
+        "project_id": str(row.get("project_id") or ""),
+        "agent_id": str(row.get("agent_id") or ""),
+        "title": str(row.get("title") or "").strip(),
+        "goal": str(row.get("goal_text") or "").strip(),
+        "instruction": str(row.get("instruction") or "").strip(),
+        "status": status,
+        "resolved": status in TERMINAL_GOAL_STATUSES,
+        "requested_by": str(row.get("requested_by") or "owner").strip().lower(),
+        "attempt_count": int(row.get("attempt_count") or 0),
+        "max_attempts": int(row.get("max_attempts") or DEFAULT_GOAL_MAX_ATTEMPTS),
+        "retry_policy": retry_policy,
+        "next_fire_at": (
+            next_fire_at.isoformat() if hasattr(next_fire_at, "isoformat") else (str(next_fire_at) if next_fire_at else None)
+        ) if status in NON_TERMINAL_GOAL_STATUSES else None,
+        "last_fired_at": last_fired_at.isoformat() if hasattr(last_fired_at, "isoformat") else (str(last_fired_at) if last_fired_at else None),
+        "expires_at": expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at or ""),
+        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at or ""),
+        # Why it stopped (build step 3/6) -- present only once the goal is
+        # terminal; None on a live goal, never a guess.
+        "last_outcome_reason": metadata.get("last_outcome_reason"),
+        "last_skip_reason": metadata.get("last_skip_reason"),
+    }
+
+
+async def create_goal(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+    agent_id: str,
+    goal_text: str,
+    title: str = "",
+    instruction: str = "",
+    authority_tier: Optional[str] = None,
+    requested_by: str = "owner",
+    max_attempts: Optional[int] = None,
+    lifetime_days: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Create a goal for *agent_id* inside *project_id* and fire its FIRST
+    attempt immediately -- same reasoning as schedule_task_assigned_
+    wakeup's own skip_quiet_hours=True: creating a goal is itself an
+    explicit action (an owner saying "go do this now", or an agent deciding
+    to pursue one), not an ambient trigger, so it must not sit deferred by a
+    policy meant to protect a sleeping device from a trigger nobody asked
+    for right now. Every RETRY after this first attempt is ambient (see
+    _fire_goal below) and does respect quiet hours, exactly like a
+    recurring schedule's own fires do.
+
+    FAILS LOUD (SchedulerPolicyError) on a missing agent_id/project_id/
+    goal_text -- never silently drops the request."""
+    resolved_agent_id = str(agent_id or "").strip()
+    resolved_project_id = str(project_id or "").strip()
+    resolved_goal_text = str(goal_text or "").strip()
+    if not resolved_agent_id:
+        raise SchedulerPolicyError("agent_id is required to create a goal.")
+    if not resolved_project_id:
+        raise SchedulerPolicyError("project_id is required to create a goal.")
+    if not resolved_goal_text:
+        raise SchedulerPolicyError("goal_text is required — what outcome should the agent work toward?")
+    workspace, master_install, policy = await _load_scheduler_scope(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    now_utc = _utc_now()
+    resolved_max_attempts, resolved_expires_at = _clamp_goal_bounds(
+        now_utc=now_utc, max_attempts=max_attempts, lifetime_days=lifetime_days,
+    )
+    resolved_instruction = str(instruction or "").strip() or DEFAULT_GOAL_INSTRUCTION
+    retry_policy = RetryPolicy(
+        max_retries=resolved_max_attempts,
+        base_delay_seconds=DEFAULT_GOAL_RETRY_BASE_DELAY_SECONDS,
+        max_delay_seconds=DEFAULT_GOAL_RETRY_MAX_DELAY_SECONDS,
+        backoff_multiplier=DEFAULT_GOAL_RETRY_BACKOFF_MULTIPLIER,
+    )
+    # The first attempt is used immediately (fired below), so next_fire_at
+    # already reflects the delay before attempt #2 -- mirrors _fire_goal's
+    # own post-fire bookkeeping so creation and every subsequent fire follow
+    # the exact same arithmetic.
+    next_fire_at = now_utc + timedelta(seconds=compute_retry_delay(1, retry_policy))
+    resolved_tier = authority_mandate_service.inherit_tier(authority_tier)
+    resolved_title = str(title or "").strip() or resolved_goal_text[:200]
+    record = await control_plane_repository.append_agent_goal(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=resolved_project_id,
+        agent_id=resolved_agent_id,
+        master_agent_install_id=str(_coerce_dict(master_install).get("id") or "").strip() or None,
+        title=resolved_title,
+        goal_text=resolved_goal_text,
+        instruction=resolved_instruction,
+        status="in_progress",
+        requested_by=requested_by,
+        attempt_count=1,
+        max_attempts=resolved_max_attempts,
+        retry_policy=retry_policy.as_dict(),
+        next_fire_at=next_fire_at,
+        last_fired_at=now_utc,
+        expires_at=resolved_expires_at,
+        metadata={},
+    )
+    if not isinstance(record, dict):
+        raise SchedulerPolicyError("Failed to persist goal.")
+    goal_id = str(record.get("id") or "")
+    due_at, due_reason = _apply_policy_to_due_at(
+        due_at=now_utc,
+        policy=policy,
+        device_state=_device_state({}, workspace, master_install),
+        # MAN-294 reasoning, applied here: creating a goal is an explicit
+        # action taken right now, not an ambient trigger.
+        skip_quiet_hours=True,
+    )
+    wake_metadata: Dict[str, Any] = {
+        "agent_id": resolved_agent_id,
+        "project_id": resolved_project_id,
+        "goal_id": goal_id,
+        "authority_tier": resolved_tier,
+    }
+    if due_reason:
+        wake_metadata["policy_delay_reason"] = due_reason
+    wake_record = await _persist_wakeup(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        master_install=master_install,
+        trigger_kind="goal",
+        source="agent_goal",
+        requested_by=str(requested_by or "owner").strip().lower() or "owner",
+        reason="goal_created",
+        summary=f"Goal: {resolved_title}",
+        payload={
+            "goal_id": goal_id,
+            "goal_text": resolved_goal_text,
+            "instruction": resolved_instruction,
+            "agent_id": resolved_agent_id,
+            "project_id": resolved_project_id,
+            "attempt_number": 1,
+            "max_attempts": resolved_max_attempts,
+            "status": "in_progress",
+            "authority_tier": resolved_tier,
+        },
+        policy=policy,
+        due_at=due_at,
+        approval_required=False,
+        status="pending",
+        denial_reason=None,
+        metadata=wake_metadata,
+    )
+    await control_plane_repository.update_agent_goal(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        goal_id=goal_id,
+        metadata_patch={"last_wake_request_id": str(_coerce_dict(wake_record).get("id") or "") or None},
+    )
+    if due_at <= now_utc + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
+        _trigger_ambient_monitor(workspace_id)
+    try:
+        from server_modules import activity_ledger_service
+
+        master_install_id = str(_coerce_dict(master_install).get("id") or "").strip() or None
+        await activity_ledger_service.append_activity_event(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            actor_type="sage" if master_install_id else "system",
+            actor_id=master_install_id or "scheduler",
+            install_id=master_install_id,
+            event_class="delegation",
+            detail_level="timeline_detail",
+            action="goal_created",
+            title="Goal created",
+            summary=resolved_title,
+            status="in_progress",
+            metadata={"goal_id": goal_id, "agent_id": resolved_agent_id, "project_id": resolved_project_id},
+        )
+    except Exception:
+        pass
+    reloaded = await control_plane_repository.get_agent_goal(
+        tenant_id=tenant_id, workspace_id=workspace_id, goal_id=goal_id,
+    )
+    return reloaded or record
+
+
+async def list_goals(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    status: Optional[str] = None,
+    include_terminal: bool = True,
+) -> List[Dict[str, Any]]:
+    if status:
+        rows = await control_plane_repository.list_agent_goals(
+            tenant_id=tenant_id, workspace_id=workspace_id, project_id=project_id, agent_id=agent_id, status=status,
+        )
+        return rows
+    if include_terminal:
+        return await control_plane_repository.list_agent_goals(
+            tenant_id=tenant_id, workspace_id=workspace_id, project_id=project_id, agent_id=agent_id,
+        )
+    return await control_plane_repository.list_agent_goals(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        agent_id=agent_id,
+        statuses=list(NON_TERMINAL_GOAL_STATUSES),
+    )
+
+
+async def get_goal(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal_id: str,
+) -> Optional[Dict[str, Any]]:
+    return await control_plane_repository.get_agent_goal(
+        tenant_id=tenant_id, workspace_id=workspace_id, goal_id=goal_id,
+    )
+
+
+async def update_goal(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    goal_id: str,
+    status: Optional[str] = None,
+    title: Optional[str] = None,
+    goal_text: Optional[str] = None,
+    instruction: Optional[str] = None,
+    note: str = "",
+    actor: str = "agent",
+) -> Dict[str, Any]:
+    """The validated, agent-facing update path (goal__update). Rejects a
+    status outside AGENT_SETTABLE_GOAL_STATUSES loudly rather than silently
+    coercing it -- in particular 'exhausted' can never be set through this
+    function, matching that status's own "system fact, not a choice"
+    contract (see AGENT_SETTABLE_GOAL_STATUSES' docstring above).
+    control_plane_repository.update_agent_goal itself performs no such
+    validation -- it is the generic field-patch primitive _fire_goal also
+    uses to write 'exhausted', so the validation has to live at THIS layer,
+    not the repository's."""
+    existing = await control_plane_repository.get_agent_goal(
+        tenant_id=tenant_id, workspace_id=workspace_id, goal_id=goal_id,
+    )
+    if existing is None:
+        return {"ok": False, "error": f"Goal {goal_id} not found."}
+    current_status = str(existing.get("status") or DEFAULT_GOAL_STATUS).strip().lower()
+    if current_status in TERMINAL_GOAL_STATUSES:
+        return {"ok": False, "error": f"Can't update a goal that's already {current_status}."}
+    resolved_status = None
+    if status is not None:
+        candidate = str(status or "").strip().lower()
+        if candidate not in AGENT_SETTABLE_GOAL_STATUSES:
+            return {
+                "ok": False,
+                "error": (
+                    f"Invalid goal status '{status}'. Must be one of "
+                    f"{sorted(AGENT_SETTABLE_GOAL_STATUSES)}."
+                ),
+            }
+        resolved_status = candidate
+    metadata_patch: Dict[str, Any] = {}
+    if resolved_status in {"done", "cancelled"}:
+        metadata_patch["last_outcome_reason"] = f"{resolved_status}_by_{actor}"
+    if note:
+        metadata_patch["last_note"] = str(note or "").strip()[:2000]
+        metadata_patch["last_note_by"] = actor
+        metadata_patch["last_note_at"] = _utc_now().isoformat().replace("+00:00", "Z")
+    row = await control_plane_repository.update_agent_goal(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        goal_id=goal_id,
+        status=resolved_status,
+        title=title,
+        goal_text=goal_text,
+        instruction=instruction,
+        metadata_patch=metadata_patch or None,
+    )
+    if row is None:
+        return {"ok": False, "error": f"Could not update goal {goal_id}."}
+    return {"ok": True, "goal": goal_view(row)}
+
+
+async def _fire_goal(goal: Dict[str, Any]) -> Dict[str, Any]:
+    """Process one due goal: either propose exactly one ordinary wake
+    request through the standard _persist_wakeup gate, or stop the goal for
+    good (expired/attempts exhausted), or skip this occurrence (daily cap),
+    then advance next_fire_at. A single misbehaving goal must never take
+    down the scan tick -- the caller (process_due_goals_once) wraps this
+    per-goal, same posture as _fire_recurring_schedule's own caller.
+
+    Bounding, mirrored from _fire_recurring_schedule's own shape:
+      1. expires_at reached, OR attempt_count already at max_attempts ->
+         status flips to 'exhausted' (the ONLY place this status is ever
+         written) and the goal never fires again. Checked BEFORE firing, so
+         the Nth attempt (attempt_count going N-1 -> N) is the last real
+         wake; the tick after that finds attempt_count >= max_attempts and
+         stops without ever firing an (N+1)th time.
+      2. the per-goal daily wake cap (max_goal_wakes_per_day) -- skip this
+         occurrence, recompute next_fire_at, do NOT advance attempt_count
+         (a skipped occurrence used no attempt budget).
+      3. otherwise: persist one wake request (skip_quiet_hours=False -- a
+         retry fire is ambient, not a live action taken right now, same
+         reasoning _fire_recurring_schedule already documents), advance
+         attempt_count, compute the NEXT next_fire_at via the goal's own
+         backoff policy, and flip status 'todo' -> 'in_progress' on first
+         real use (mirrors assign_task's own unstarted -> in_progress
+         flip) without touching any other in-flight status (blocked/
+         awaiting_input/in_review all keep waking as themselves -- the
+         model, not this function, decides when those change).
+    """
+    tenant_id = str(goal.get("tenant_id") or "").strip()
+    workspace_id = str(goal.get("workspace_id") or "").strip()
+    goal_id = str(goal.get("id") or "").strip()
+    project_id = str(goal.get("project_id") or "").strip()
+    agent_id = str(goal.get("agent_id") or "").strip()
+    goal_text = str(goal.get("goal_text") or "").strip()
+    instruction = str(goal.get("instruction") or "").strip()
+    title = str(goal.get("title") or "").strip() or goal_text[:200]
+    current_status = str(goal.get("status") or DEFAULT_GOAL_STATUS).strip().lower()
+    now_utc = _utc_now()
+
+    if current_status not in NON_TERMINAL_GOAL_STATUSES:
+        # Defensive only -- process_due_goals_once already filters to
+        # non-terminal statuses, but a race (the model itself resolved the
+        # goal between the scan query and this call) is possible.
+        return {"goal_id": goal_id, "action": "skipped_terminal"}
+
+    workspace, master_install, policy = await _load_scheduler_scope(
+        tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+
+    expires_at = _parse_datetime(goal.get("expires_at"))
+    max_attempts = int(goal.get("max_attempts") or DEFAULT_GOAL_MAX_ATTEMPTS)
+    attempt_count = int(goal.get("attempt_count") or 0)
+    if (expires_at is not None and now_utc >= expires_at) or attempt_count >= max_attempts:
+        outcome_reason = "lifetime_expired" if (expires_at is not None and now_utc >= expires_at) else "max_attempts_reached"
+        await control_plane_repository.update_agent_goal(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            goal_id=goal_id,
+            status="exhausted",
+            metadata_patch={"last_outcome_reason": outcome_reason, "exhausted_at": now_utc.isoformat().replace("+00:00", "Z")},
+        )
+        try:
+            from server_modules import activity_ledger_service
+
+            await activity_ledger_service.append_activity_event(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                actor_type="system",
+                actor_id="scheduler",
+                install_id=None,
+                event_class="delegation",
+                detail_level="timeline_detail",
+                action="goal_exhausted",
+                title="Goal exhausted",
+                summary=f"{title} — {outcome_reason} after {attempt_count} attempt(s)",
+                status="exhausted",
+                metadata={"goal_id": goal_id, "agent_id": agent_id, "project_id": project_id, "reason": outcome_reason},
+            )
+        except Exception:
+            pass
+        return {"goal_id": goal_id, "action": "exhausted", "reason": outcome_reason}
+
+    recent_count = await control_plane_repository.count_agent_scheduler_wake_requests_since(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        since=now_utc - timedelta(hours=24),
+        goal_id=goal_id,
+    )
+    daily_cap = max_goal_wakes_per_day()
+    retry_policy = _goal_retry_policy(goal)
+    if recent_count >= daily_cap:
+        skip_next_fire_at = now_utc + timedelta(hours=1)
+        await control_plane_repository.update_agent_goal(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            goal_id=goal_id,
+            next_fire_at=skip_next_fire_at,
+            metadata_patch={
+                "last_skip_reason": "goal_daily_wake_cap",
+                "last_skip_at": now_utc.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        return {"goal_id": goal_id, "action": "skipped_daily_cap"}
+
+    due_at, due_reason = _apply_policy_to_due_at(
+        due_at=now_utc,
+        policy=policy,
+        device_state=_device_state({}, workspace, master_install),
+        # A retry fire is ambient, not a live human/agent action taken
+        # right now -- unlike create_goal's own first fire, quiet hours are
+        # NOT skipped here. Same reasoning as _fire_recurring_schedule.
+        skip_quiet_hours=False,
+    )
+    new_attempt_count = attempt_count + 1
+    wake_metadata: Dict[str, Any] = {
+        "agent_id": agent_id,
+        "project_id": project_id,
+        "goal_id": goal_id,
+        "authority_tier": authority_mandate_service.normalize_tier(_coerce_dict(goal.get("metadata")).get("authority_tier")),
+    }
+    if due_reason:
+        wake_metadata["policy_delay_reason"] = due_reason
+    record = await _persist_wakeup(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        master_install=master_install,
+        trigger_kind="goal",
+        source="agent_goal",
+        requested_by=str(goal.get("requested_by") or "owner").strip().lower() or "owner",
+        reason="goal_retry",
+        summary=f"Goal: {title} (attempt {new_attempt_count}/{max_attempts})",
+        payload={
+            "goal_id": goal_id,
+            "goal_text": goal_text,
+            "instruction": instruction,
+            "agent_id": agent_id,
+            "project_id": project_id,
+            "attempt_number": new_attempt_count,
+            "max_attempts": max_attempts,
+            "status": current_status,
+            "authority_tier": wake_metadata["authority_tier"],
+        },
+        policy=policy,
+        due_at=due_at,
+        approval_required=False,
+        status="pending",
+        denial_reason=None,
+        metadata=wake_metadata,
+    )
+    if due_at <= now_utc + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
+        _trigger_ambient_monitor(workspace_id)
+    next_fire_at = now_utc + timedelta(seconds=compute_retry_delay(new_attempt_count, retry_policy))
+    next_status = "in_progress" if current_status == "todo" else current_status
+    await control_plane_repository.update_agent_goal(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        goal_id=goal_id,
+        status=next_status,
+        next_fire_at=next_fire_at,
+        last_fired_at=now_utc,
+        attempt_count=new_attempt_count,
+        metadata_patch={"last_skip_reason": None, "last_wake_request_id": str(_coerce_dict(record).get("id") or "") or None},
+    )
+    return {"goal_id": goal_id, "action": "fired", "wake_request_id": str(_coerce_dict(record).get("id") or "")}
+
+
+async def process_due_goals_once(
+    *,
+    limit: int = DEFAULT_RECURRING_SCHEDULE_SCAN_LIMIT,
+) -> Dict[str, Any]:
+    """Cross-workspace tick for due goals -- structurally process_due_
+    recurring_schedules_once's twin: a system-level bypass_rls scan finds
+    which (tenant_id, workspace_id) scopes have due work, then this reloads
+    each due goal through the normal RLS-scoped path and fires it. Called
+    from the SAME daemon tick as the wake-request scan and the recurring-
+    schedule scan (see scan_due_wake_requests_once), not a second thread."""
+    now_utc = _utc_now()
+    non_terminal = list(NON_TERMINAL_GOAL_STATUSES)
+    scopes = await control_plane_repository.list_due_agent_goal_scopes(
+        due_before=now_utc, non_terminal_statuses=non_terminal, limit=limit,
+    )
+    results: List[Dict[str, Any]] = []
+    for scope in scopes:
+        tenant_id = str(scope.get("tenant_id") or "").strip()
+        workspace_id = str(scope.get("workspace_id") or "").strip()
+        if not tenant_id or not workspace_id:
+            continue
+        due_goals = await control_plane_repository.list_agent_goals(
+            tenant_id=tenant_id, workspace_id=workspace_id, statuses=non_terminal,
+        )
+        for goal in due_goals:
+            next_fire_at = _parse_datetime(goal.get("next_fire_at"))
+            if next_fire_at is None or next_fire_at > now_utc:
+                continue
+            try:
+                outcome = await _fire_goal(goal)
+            except Exception:
+                LOGGER.exception(
+                    "goal-scan: fire failed for tenant=%s workspace=%s goal=%s",
+                    tenant_id, workspace_id, goal.get("id"),
+                )
+                outcome = {"goal_id": str(goal.get("id") or ""), "action": "error"}
+            results.append({"tenant_id": tenant_id, "workspace_id": workspace_id, "result": outcome})
+    return {"scanned": len(results), "results": results}
+
+
 async def claim_due_wake_requests(
     *,
     tenant_id: str,
@@ -1681,19 +2389,25 @@ async def scan_due_wake_requests_once(
     single workspace (including authority-tier grouping and the pending ->
     executed status transition on success).
 
-    Also processes due RECURRING schedules first, on this exact same tick --
-    no second daemon thread (see process_due_recurring_schedules_once's own
-    docstring). Firing a recurring schedule only ever creates one ordinary
-    agent_scheduler_wake_requests row; running this step before the
-    wake-request scope scan just below means a schedule that fires THIS
-    tick is picked up by THIS tick's wake-request scan too, not left to wait
-    a full poll interval. A failure here must never block the wake-request
-    scan that already existed -- caught and logged, never re-raised.
+    Also processes due RECURRING schedules and due GOALS first, on this
+    exact same tick -- no second (or third) daemon thread (see process_due_
+    recurring_schedules_once's and process_due_goals_once's own
+    docstrings). Firing either only ever creates one ordinary agent_
+    scheduler_wake_requests row; running these steps before the
+    wake-request scope scan just below means a schedule or goal that fires
+    THIS tick is picked up by THIS tick's wake-request scan too, not left
+    to wait a full poll interval. A failure in either must never block the
+    wake-request scan that already existed, or each other -- each is
+    independently caught and logged, never re-raised.
     """
     try:
         await process_due_recurring_schedules_once()
     except Exception:
         LOGGER.exception("recurring-schedule-scan: tick failed")
+    try:
+        await process_due_goals_once()
+    except Exception:
+        LOGGER.exception("goal-scan: tick failed")
     scopes = await control_plane_repository.list_due_agent_scheduler_wake_request_scopes(
         due_before=_utc_now(),
         limit=limit,
