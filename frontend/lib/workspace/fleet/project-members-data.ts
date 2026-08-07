@@ -25,6 +25,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { me } from "@/lib/auth/auth-client";
+import { useOwnRole, WORKSPACE_ROLE_ORDER, type WorkspaceMember } from "./members-data";
 
 export type ProjectMember = {
   id: string;
@@ -120,4 +122,59 @@ export async function addProjectMember(
 ): Promise<ProjectMember> {
   const data = await projectMembersRequest(workspaceId, projectId, "POST", { user_id: userId });
   return normalizeProjectMember(data.member);
+}
+
+/** Can the caller write inside THIS project — create/edit/delete a
+ *  document, and by extension anything else gated the same way
+ *  fleet_create_document/fleet_patch_document/fleet_delete_document are
+ *  (`member` on the workspace, `enforce_project_access`'s own bypass/row
+ *  check underneath). Mirrors auth.enforce_project_access's actual policy
+ *  (server_modules/auth.py:5236) rather than re-deriving a new one:
+ *    - a workspace OWNER always passes, full stop — enforce_project_access's
+ *      RBAC_ROLE_ORDER short-circuit never even looks at project_memberships
+ *      for one.
+ *    - anyone else needs BOTH a workspace role of `member` or higher (the
+ *      floor enforce_workspace_access itself checks first, before the
+ *      project-row lookup ever runs) AND an explicit project_memberships row
+ *      for this exact project (a `member` on a DIFFERENT project in this
+ *      workspace grants nothing here).
+ *  A `viewer` therefore always reads `false` here, matching the server's own
+ *  `minimum_role="member"` floor on every mutating document route — this
+ *  hook exists purely to decide whether to RENDER a control that would
+ *  otherwise always fail for that reader (CLAUDE.md: "no dead controls"),
+ *  never to gate the actual write, which the server still does regardless.
+ *
+ *  Returns `null` while still resolving (own role, or project membership,
+ *  not yet loaded) — same "stay unrendered rather than flash on then off"
+ *  contract useOwnRole's own doc comment establishes, so a viewer never sees
+ *  a create/edit/delete control blink into view for a moment on page load. */
+export function useCanWriteProject(
+  workspaceId: string,
+  projectId: string,
+  workspaceMembers: WorkspaceMember[],
+): boolean | null {
+  const ownRole = useOwnRole(workspaceMembers);
+  const { members: projectMembers, loading: projectMembersLoading } = useProjectMembers(workspaceId, projectId);
+  const [myUserId, setMyUserId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void me()
+      .then((data) => {
+        if (cancelled) return;
+        const user = (data as { user?: { id?: string } } | null)?.user;
+        setMyUserId(user?.id ? String(user.id) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setMyUserId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (ownRole === null || projectMembersLoading) return null;
+  if (ownRole === "owner") return true;
+  if (WORKSPACE_ROLE_ORDER[ownRole] < WORKSPACE_ROLE_ORDER.member) return false;
+  return projectMembers.some((m) => m.user_id === myUserId);
 }
