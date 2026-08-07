@@ -248,16 +248,18 @@ class ResolveSdkProcessEnvTests(unittest.TestCase):
 
 
 class ResolveSdkProcessEnvCloudProviderTests(unittest.TestCase):
-    """MAN-313: resolve_sdk_process_env's _CREDENTIAL_ENV_KEYS declared seven
-    cloud-auth routing flags (CLAUDE_CODE_USE_BEDROCK/_VERTEX/_FOUNDRY/
+    """MAN-313: resolve_sdk_process_env's _CREDENTIAL_ENV_KEYS declared six
+    cloud-auth routing flags (CLAUDE_CODE_USE_BEDROCK/_FOUNDRY/
     _ANTHROPIC_AWS/_ANTHROPIC_GOOGLE_CLOUD/_MANTLE, plus CLAUDE_CODE_OAUTH_
     TOKEN) since MAN-310 but never actually set any of them true — every
     credential fell through to the generic ANTHROPIC_AUTH_TOKEN=api_key
     branch, which for Bedrock meant shipping an AWS access key to
     api.anthropic.com as if it were an Anthropic bearer token. These tests
-    pin the fix for the two flags with a real provider_profiles.py
-    PROVIDER_CATALOG entry AND a real ProviderAdapter (bedrock, vertex) and
-    document why the other five stay correctly unset."""
+    pin the fix for the one flag with a real provider_profiles.py
+    PROVIDER_CATALOG entry AND a real ProviderAdapter (bedrock) and
+    document why the other four stay correctly unset. (Vertex AI was removed
+    as a provider entirely — see the "vertex is now an unrecognised
+    provider" tests below.)"""
 
     def test_bedrock_sets_the_flag_and_routes_aws_credentials(self):
         env = claude_agent_sdk_bridge.resolve_sdk_process_env(
@@ -313,53 +315,60 @@ class ResolveSdkProcessEnvCloudProviderTests(unittest.TestCase):
         )
         self.assertEqual(env["AWS_REGION"], "us-east-1")
 
-    def test_vertex_sets_the_flag_and_routes_project_and_region(self):
-        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
-            credentials={"access_token": "ya29.example", "project_id": "my-gcp-project", "location": "us-central1"},
-            provider="vertex",
-        )
-        self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
-        self.assertEqual(env["ANTHROPIC_VERTEX_PROJECT_ID"], "my-gcp-project")
-        self.assertEqual(env["CLOUD_ML_REGION"], "us-central1")
-
-    def test_vertex_never_leaks_the_access_token_into_anthropic_auth_token(self):
-        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
-            credentials={"access_token": "ya29.example", "project_id": "my-gcp-project", "location": "us-central1"},
-            provider="vertex",
-        )
-        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
-        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
-        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
-
     def test_cloud_providers_never_call_the_openai_compat_adapter(self):
-        # Bedrock/Vertex are native CLAUDE_CODE_USE_* flags, not OpenAI-
-        # shaped endpoints — they must never mint an adapter loopback token
-        # the way openai/gemini/xai do.
+        # Bedrock is a native CLAUDE_CODE_USE_* flag, not an OpenAI-shaped
+        # endpoint — it must never mint an adapter loopback token the way
+        # openai/gemini/xai do.
         for provider, credentials in (
             ("bedrock", {"api_key": "AKIAEXAMPLE", "aws_secret_access_key": "secret"}),
-            ("vertex", {"access_token": "ya29.example", "project_id": "p", "location": "us-central1"}),
         ):
             with patch.object(openai_compat_adapter, "mint_turn_token_for_provider") as mock_mint:
                 claude_agent_sdk_bridge.resolve_sdk_process_env(credentials=credentials, provider=provider)
             mock_mint.assert_not_called()
 
-    def test_bedrock_and_vertex_are_the_only_catalog_backed_cloud_flags(self):
+    def test_bedrock_is_the_only_catalog_backed_cloud_flag(self):
         # provider_profiles.PROVIDER_CATALOG has no "foundry"/"anthropic_aws"/
         # "anthropic_google_cloud"/"mantle" entry (verified by grep against
         # provider_profiles.py — zero hits for any of those four strings),
         # so CLAUDE_CODE_USE_FOUNDRY/_ANTHROPIC_AWS/_ANTHROPIC_GOOGLE_CLOUD/
         # _MANTLE have no workspace credential shape that could ever reach
         # this dispatch. This pins the dispatch table itself so a future
-        # provider_profiles.py addition for one of those four is a visible,
-        # deliberate change here rather than a silent no-op.
+        # provider_profiles.py addition for one of those four (or a Vertex
+        # re-add) is a visible, deliberate change here rather than a silent
+        # no-op.
         self.assertEqual(
             set(claude_agent_sdk_bridge._CLOUD_ROUTED_PROVIDER_ENV_BUILDERS.keys()),
-            {"bedrock", "vertex"},
+            {"bedrock"},
         )
         from server_modules import provider_profiles
 
-        for unbacked in ("foundry", "anthropic_aws", "anthropic_google_cloud", "mantle"):
+        for unbacked in ("foundry", "anthropic_aws", "anthropic_google_cloud", "mantle", "vertex"):
             self.assertNotIn(unbacked, provider_profiles.PROVIDER_CATALOG)
+
+    def test_orphaned_vertex_credential_never_silently_misroutes(self):
+        # Vertex AI was removed as a provider entirely. A workspace/agent
+        # that still has a stored provider="vertex" credential (access_token/
+        # project_id/location — see the removed provider_profiles.py
+        # "vertex" PROVIDER_CATALOG shape) must NOT have that credential
+        # silently forwarded anywhere once "vertex" is an unrecognised
+        # provider id: it is no longer cloud-routed (not in
+        # _CLOUD_ROUTED_PROVIDER_ENV_BUILDERS) and not adapter-routed
+        # (openai_compat_adapter.ADAPTER_ROUTED_PROVIDER_IDS never included
+        # it), so it falls through to the generic api_key branch — which
+        # stays empty because Vertex's credential shape never populated
+        # "api_key" in the first place. The turn fails loudly downstream
+        # (a real, visible auth error from the CLI) rather than shipping the
+        # access_token to api.anthropic.com or any other wrong endpoint.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"access_token": "ya29.example", "project_id": "my-gcp-project", "location": "us-central1"},
+            provider="vertex",
+        )
+        self.assertEqual(env["CLAUDE_CODE_USE_BEDROCK"], "")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
+        self.assertNotIn("access_token", env.values())
+        self.assertNotIn("my-gcp-project", env.values())
 
     def test_foundry_anthropic_aws_anthropic_google_cloud_mantle_stay_blank(self):
         # No provider_profiles.py catalog entry exists for any of these, so
@@ -511,7 +520,6 @@ class ResolveSdkProcessEnvAmbientLeakTests(unittest.TestCase):
             "ANTHROPIC_BASE_URL": "https://leaked.example.com",
             "CLAUDE_CODE_OAUTH_TOKEN": "leaked-oauth-token",
             "CLAUDE_CODE_USE_BEDROCK": "1",
-            "CLAUDE_CODE_USE_VERTEX": "1",
             "CLAUDE_CODE_USE_FOUNDRY": "1",
             "CLAUDE_CODE_USE_ANTHROPIC_AWS": "1",
             "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "1",
@@ -520,8 +528,6 @@ class ResolveSdkProcessEnvAmbientLeakTests(unittest.TestCase):
             "AWS_SECRET_ACCESS_KEY": "leaked-ambient-secret-key",
             "AWS_SESSION_TOKEN": "leaked-ambient-session-token",
             "AWS_REGION": "us-leaked-1",
-            "ANTHROPIC_VERTEX_PROJECT_ID": "leaked-ambient-project",
-            "CLOUD_ML_REGION": "us-leaked-1",
         }
         with patch.dict(os.environ, ambient, clear=False):
             # No explicit per-turn credential supplied — this function must

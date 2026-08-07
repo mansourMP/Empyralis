@@ -112,15 +112,6 @@ MODEL_PRICING_USD_PER_MILLION: Dict[str, Dict[str, Dict[str, Any]]] = {
         "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
         "gemini-2.0-flash-001": {"input": 0.10, "output": 0.40, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
     },
-    "vertex": {
-        "gemini-3-pro-preview": {"input": None, "output": None, "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"},
-        "gemini-3-flash-preview": {"input": None, "output": None, "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"},
-        "gemini-2.5-flash-lite": {"input": None, "output": None, "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"},
-        "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"},
-        "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"},
-        "gemini-1.5-pro": {"input": 1.25, "output": 5.00, "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"},
-        "gemini-1.5-flash": {"input": 0.10, "output": 0.30, "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"},
-    },
     "ollama": {
         "llama3": {"input": None, "output": None, "source": "local_runtime"},
         "llama3.1:8b": {"input": None, "output": None, "source": "local_runtime"},
@@ -232,7 +223,6 @@ PROVIDER_FALLBACK_USD_PER_1K: Dict[str, Dict[str, Any]] = {
     "anthropic": {"input": 0.0030, "output": 0.0150, "source": "https://docs.anthropic.com/en/docs/about-claude/models/all-models"},
     "claude_code_cli": {"input": 0.0, "output": 0.0, "source": "subscription_cli"},
     "gemini": {"input": 0.0003, "output": 0.0025, "source": "https://ai.google.dev/gemini-api/docs/pricing"},
-    "vertex": {"input": 0.0010, "output": 0.0030, "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"},
     "qwen": {"input": 0.0, "output": 0.0, "source": "https://help.aliyun.com/zh/model-studio/getting-started/models"},
     "deepseek": {"input": 0.00014, "output": 0.00028, "source": "https://api-docs.deepseek.com/quick_start/pricing/"},
     "mistral": {"input": 0.0, "output": 0.0, "source": "https://docs.mistral.ai/models/"},

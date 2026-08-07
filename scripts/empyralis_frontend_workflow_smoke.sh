@@ -64,7 +64,8 @@ jq -e '
   | ($ids | index("openai")) != null
   and ($ids | index("anthropic")) != null
   and ($ids | index("gemini")) != null
-  and ($ids | index("vertex")) != null
+  and ($ids | index("bedrock")) != null
+  and ($ids | index("vertex")) == null
 ' "$providers_json" >/dev/null
 
 profiles_health_json="${tmpdir}/profiles-health.json"

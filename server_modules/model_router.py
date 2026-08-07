@@ -31,8 +31,6 @@ MODEL_ALIASES = {
     "claude-haiku": "anthropic/claude-3-haiku-20240307",
     "gemini-flash": "gemini/gemini-2.5-flash",
     "gemini-pro": "gemini/gemini-2.5-pro",
-    "vertex-gemini-flash": "vertex_ai/gemini-2.5-flash",
-    "vertex-gemini-pro": "vertex_ai/gemini-1.5-pro",
 }
 ALLOWED_MESSAGE_ROLES = {"system", "user", "assistant", "tool"}
 OPENAI_COMPATIBLE_COMPLETION_PROVIDERS = {
@@ -68,6 +66,13 @@ def infer_provider(model_name: Optional[str], provider: Optional[str] = None, pr
         return "anthropic"
     if raw.startswith("gemini/") or raw.startswith("gemini"):
         return "gemini"
+    # "vertex" is not a supported provider id anymore (Vertex AI was removed
+    # entirely), but a legacy stored model string starting with "vertex_ai/"
+    # or "vertex" must still be recognised here rather than silently falling
+    # through to the "openai" default below -- resolve_provider_model_
+    # selection's provider_catalog_entry(raw_provider) lookup then correctly
+    # raises "Unsupported provider" for it instead of misrouting a leftover
+    # Vertex/Gemini model string to the OpenAI adapter.
     if raw.startswith("vertex_ai/") or raw.startswith("vertex"):
         return "vertex"
     if raw.startswith("qwen/") or raw.startswith("qwen"):
@@ -101,8 +106,6 @@ def resolve_model(model_name: Optional[str], provider: Optional[str] = None, pro
         return f"anthropic/{raw}"
     if resolved_provider == "gemini":
         return f"gemini/{raw}"
-    if resolved_provider == "vertex":
-        return f"vertex_ai/{raw}"
     return raw
 
 
@@ -265,8 +268,6 @@ def _legacy_adapter_payload(messages: List[Any]) -> Tuple[str, str]:
 def _use_adapter_compat_fallback(provider: str, credentials: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(credentials, dict):
         return False
-    if provider == "vertex":
-        return bool(str(credentials.get("access_token") or "").strip())
     return provider == "ollama_cloud"
 
 
@@ -281,8 +282,7 @@ def _legacy_adapter_call(
         raise RuntimeError(f"No credential available for provider '{provider}'.")
     _, _, adapter = resolve_provider_adapter(provider, credentials=credentials)
     system_prompt, user_input = _legacy_adapter_payload(messages)
-    adapter_model = model.split("/", 1)[1] if provider == "vertex" and "/" in model else model
-    content = adapter.generate(system_prompt, user_input, adapter_model, credentials)
+    content = adapter.generate(system_prompt, user_input, model, credentials)
     usage = usage_accounting_service.usage_projection_from_record(
         usage_accounting_service.build_usage_accounting_record(
             run_id=None,
@@ -346,8 +346,6 @@ def _provider_kwargs(provider: str, credentials: Optional[Dict[str, Any]]) -> Di
         if not key:
             raise RuntimeError("Gemini credential requires api_key.")
         return {"api_key": key}
-    if provider == "vertex":
-        raise RuntimeError("Vertex model routing requires a direct Vertex credential payload.")
     raise RuntimeError(f"Unsupported provider '{provider}'.")
 
 

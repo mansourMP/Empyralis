@@ -375,7 +375,6 @@ with it.
 | `mistral` | Mistral | API key | No (BYOK) |
 | `ollama_cloud` | Ollama Cloud | API key | No (BYOK) |
 | `custom_openai_compatible` | Custom OpenAI-compatible | API key | No (BYOK) |
-| `vertex` | Google Vertex AI | Access token | No (BYOK) |
 | `claude_code_cli` | Claude Code (Subscription) | Local CLI | No (subscription, hidden) |
 | `openai-codex` | OpenAI Codex | OAuth | No (subscription) |
 | `ollama` | Ollama | Local | No (local) |

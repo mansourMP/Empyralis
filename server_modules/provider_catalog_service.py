@@ -272,8 +272,6 @@ def _normalize_model_token(provider_id: str, model_id: Any) -> str:
         return ANTHROPIC_MODEL_ALIASES.get(token, token)
     if provider_id == "gemini" and token.startswith("gemini/"):
         return token.split("/", 1)[1]
-    if provider_id == "vertex" and token.startswith("vertex_ai/"):
-        return token.split("/", 1)[1]
     if provider_id in {"qwen", "deepseek", "mistral", "ollama", "ollama_cloud", "groq", "xai", "azure_openai", "custom_openai_compatible"} and "/" in token:
         provider_token, model_token = token.split("/", 1)
         if provider_profiles.normalize_provider_id(provider_token) == provider_id:

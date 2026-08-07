@@ -147,7 +147,6 @@ ORION_SETUP_MODEL_PROVIDER_FILTERS: List[Choice] = [
     Choice("google", "google", ""),
     Choice("google-antigravity", "google-antigravity", ""),
     Choice("google-gemini-cli", "google-gemini-cli", ""),
-    Choice("google-vertex", "google-vertex", ""),
     Choice("groq", "groq", ""),
     Choice("huggingface", "huggingface", ""),
     Choice("kimi-coding", "kimi-coding", ""),

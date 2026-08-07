@@ -194,15 +194,6 @@ def create_provider_credential(
     elif provider_id == "gemini":
         api_secret = ui.input(q.Q_CREDENTIAL_GEMINI_API_KEY, required=True, secret=True)
         credentials = {"api_key": api_secret}
-    elif provider_id == "vertex":
-        access_token = ui.input(q.Q_CREDENTIAL_VERTEX_TOKEN, required=True, secret=True)
-        project_id = ui.input(q.Q_CREDENTIAL_VERTEX_PROJECT, required=True)
-        location = ui.input(q.Q_CREDENTIAL_VERTEX_LOCATION, default="us-central1", required=True)
-        credentials = {
-            "access_token": access_token,
-            "project_id": project_id,
-            "location": location,
-        }
     else:
         raw = ui.input(q.Q_CREDENTIAL_JSON, required=True)
         try:

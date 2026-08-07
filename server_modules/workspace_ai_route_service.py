@@ -26,7 +26,6 @@ LOCAL_SUBSCRIPTION_PROVIDER_IDS = {"openai-codex", "claude_code_cli"}
 ENTERPRISE_PROVIDER_IDS = {
     "azure_openai",
     "bedrock",
-    "vertex",
     "litellm",
     "vercel_ai_gateway",
     "custom_openai_compatible",
