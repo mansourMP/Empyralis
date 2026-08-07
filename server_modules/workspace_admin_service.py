@@ -40,12 +40,17 @@ def _current_user_actor_id(current_user: Any) -> str:
     return str(getattr(current_user, "user_id", None) or getattr(current_user, "id", None) or "").strip()
 
 
-def _current_user_tenant_id(current_user: Any, workspace_id: str) -> str:
-    if isinstance(current_user, dict):
-        workspace_access = current_user.get("workspace_access") if isinstance(current_user.get("workspace_access"), dict) else {}
-        scoped = workspace_access.get(workspace_id) if isinstance(workspace_access.get(workspace_id), dict) else {}
-        return str(scoped.get("tenant_id") or current_user.get("tenant_id") or "default").strip() or "default"
-    return "default"
+async def _current_user_tenant_id(current_user: Any, workspace_id: str) -> str:
+    """Authoritative, per-workspace tenant resolution. Previously fell back
+    to current_user.get("tenant_id") -- the same stale users.tenant_id
+    column that caused routes_workspaces.py's invite bug (see CLAUDE.md) --
+    whenever the session's embedded workspace_access entry was missing.
+    Resolving straight from the workspace avoids that trap entirely; the
+    result is TTL-cached in control_plane_repository so this adds no
+    meaningful cost on the already-validated owner path."""
+    return await control_plane_repository.resolve_tenant_id_for_workspace(
+        str(workspace_id or "").strip(), default="default"
+    )
 
 
 def _enforce_control_plane_service_decision(**payload: Any) -> Dict[str, Any]:
@@ -447,7 +452,7 @@ async def upsert_workspace_provider_credential(
     _enforce_control_plane_service_decision(
         operation="secret_reference_write",
         record_type="provider_credential",
-        tenant_id=_current_user_tenant_id(current_user, resolved_workspace_id),
+        tenant_id=await _current_user_tenant_id(current_user, resolved_workspace_id),
         workspace_id=resolved_workspace_id,
         actor_id=_current_user_actor_id(current_user),
         actor_role="owner",

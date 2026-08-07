@@ -146,6 +146,27 @@ a `vertex` branch after Vertex was removed.
 was reworded to `"AI usage limit reached"` and users got a generic "Something
 went wrong" for five weeks. Match on stable codes, never on prose.
 
+**`users.tenant_id` / `users.workspace_id` are not the authoritative tenant.**
+These Postgres columns are written once, at signup, to the user's first/home
+workspace — never updated afterward. The moment a user is invited into a
+*second* workspace bound to a different tenant (the normal multiplayer case),
+they go stale. Trusting them for request-scoped resolution instead of
+resolving per-workspace (`control_plane_repository.resolve_tenant_id_for_workspace`
+/ `auth.workspace_tenant_id`) broke inviting a brand-new email into a
+project — `routes_workspaces.py`'s `_control_plane_tenant_id()` read
+`user["tenant_id"]` first, got the wrong tenant, and a real project lookup
+silently 400'd with "Project not found in this workspace." Fixed 2026-08-08;
+same-shaped bug also found and fixed in `workspace_admin_service.py` and
+`workspace_ai_route_service.py` (both had their own `_current_user_tenant_id`
+reading the same stale field). A schema-level fix (rename the columns to
+`home_tenant_id`/`home_workspace_id` so a future misread fails loudly instead
+of returning a plausible wrong value) is drafted and tested against a
+disposable DB but not applied — needs the founder's sign-off, since it also
+requires updating every legitimate "home tenant" reader
+(`account_shell_service.py`'s cache-key seed, `routes_workspaces.py`'s
+`create_workspace` bootstrap). Before reading `tenant_id` off a user record
+anywhere, resolve it from the workspace instead.
+
 **Branches whose work gets redone on main.** Nine branches were found with
 real commits, all superseded by the same fixes re-implemented directly on
 main days later. If a branch exists, merge it or delete it — leaving it means
