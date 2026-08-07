@@ -119,13 +119,11 @@ def _workspace_capabilities(
         "routing_read_enabled": role in {"owner", "admin"},
         "routing_write_enabled": role in {"owner", "admin"},
         "document_workstation_enabled": bool(workspace_traits.get("documentHeavy")),
-        "channel_pairing_enabled": (
-            role in {"member", "owner", "admin"}
-            and (
-                bool(capability_flags.get("telegram_channel_enabled"))
-                or bool(capability_flags.get("whatsapp_channel_enabled"))
-            )
-        ),
+        # See workspace_bootstrap_service._workspace_capabilities for why this
+        # no longer requires telegram/whatsapp entitlement — pairing itself
+        # isn't plan-gated, and Slack/SMS/WeChat Official have no entitlement
+        # flag at all.
+        "channel_pairing_enabled": role in {"member", "owner", "admin"},
     }
     return workspace_traits, capabilities, capability_flags
 
