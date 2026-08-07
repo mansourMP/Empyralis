@@ -221,6 +221,14 @@ CREATE POLICY empyralis_agent_scheduler_wake_requests_scope ON agent_scheduler_w
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+ALTER TABLE agent_recurring_schedules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_recurring_schedules FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_agent_recurring_schedules_scope ON agent_recurring_schedules;
+CREATE POLICY empyralis_agent_recurring_schedules_scope ON agent_recurring_schedules
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 ALTER TABLE agent_channel_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_channel_events FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS empyralis_agent_channel_events_scope ON agent_channel_events;

@@ -10,6 +10,7 @@ is denied with a policy_denial ledger event.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -2575,23 +2576,53 @@ async def ensure_sage_is_operator(
 # ── Phase V: Proactive scheduling ───────────────────────────────────────
 
 
+def _looks_like_cron(when_str: str) -> bool:
+    """True for anything shaped like a 5-field cron expression (whitespace-
+    separated tokens built only from cron's own charset). Used purely to
+    decide whether an unparseable `when` should raise a specific, actionable
+    error (below) instead of the generic "could not parse" one."""
+    fields = when_str.split()
+    if len(fields) != 5:
+        return False
+    return all(re.fullmatch(r"[0-9*/,\-]+", field) for field in fields)
+
+
 def _parse_when(when: str) -> Any:
-    """Parse a time expression into a UTC datetime.
+    """Parse a ONE-SHOT time expression into a single UTC datetime.
 
     Supported forms:
       - ISO-8601: ``2026-07-04T09:00:00Z``
       - Relative minutes: ``in 2 minutes``, ``in 30 min``
       - Relative hours: ``in 1 hour``, ``in 3 hours``
-      - Cron: ``*/5 * * * *`` (passed through for cron scheduling)
+      - Relative seconds: ``in 30 seconds``
 
-    Returns a ``datetime.datetime`` or ``None`` if unparseable.
+    Returns a ``datetime.datetime``, or ``None`` if `when` is genuinely
+    unparseable gibberish.
+
+    Cron is deliberately NOT handled here, and never silently swallowed: a
+    cron expression describes a RECURRENCE, not a single point in time, and
+    this function's return shape (one datetime) has no honest way to
+    represent that. An earlier version of this docstring claimed cron was
+    "passed through for cron scheduling," but no branch ever matched one —
+    a cron string silently fell through to `return None` and was rejected
+    as unparseable with no explanation at all. Now: a cron-SHAPED string
+    (5 whitespace-separated fields from cron's charset) raises ValueError
+    with an explicit redirect to schedule_recurring_task instead of being
+    swallowed here.
     """
-    import re as _re
     from datetime import datetime, timedelta, timezone as _timezone
 
     when_str = str(when or "").strip()
     if not when_str:
         return None
+
+    if _looks_like_cron(when_str):
+        raise ValueError(
+            f"{when_str!r} looks like a cron expression, which describes a recurring "
+            "schedule, not a single point in time. Use schedule_recurring_task (or the "
+            "owner-facing recurring-schedule route), not schedule_task, for 'every ...' "
+            "schedules."
+        )
 
     # ISO-8601
     if "T" in when_str:
@@ -2602,15 +2633,15 @@ def _parse_when(when: str) -> Any:
             pass
 
     # Relative: "in N minutes/min" or "in N hours/hour"
-    rel = _re.match(r"in\s+(\d+)\s*(minute|minutes|min|m)\w*", when_str, _re.IGNORECASE)
+    rel = re.match(r"in\s+(\d+)\s*(minute|minutes|min|m)\w*", when_str, re.IGNORECASE)
     if rel:
         minutes = int(rel.group(1))
         return datetime.now(_timezone.utc) + timedelta(minutes=minutes)
-    rel_h = _re.match(r"in\s+(\d+)\s*(hour|hours|h)\w*", when_str, _re.IGNORECASE)
+    rel_h = re.match(r"in\s+(\d+)\s*(hour|hours|h)\w*", when_str, re.IGNORECASE)
     if rel_h:
         hours = int(rel_h.group(1))
         return datetime.now(_timezone.utc) + timedelta(hours=hours)
-    rel_s = _re.match(r"in\s+(\d+)\s*(second|seconds|s)\w*", when_str, _re.IGNORECASE)
+    rel_s = re.match(r"in\s+(\d+)\s*(second|seconds|s)\w*", when_str, re.IGNORECASE)
     if rel_s:
         seconds = int(rel_s.group(1))
         return datetime.now(_timezone.utc) + timedelta(seconds=seconds)
@@ -2658,7 +2689,10 @@ async def schedule_task(
     if not resolved_when:
         return {"ok": False, "error": "when is required — e.g. 'in 2 minutes' or '2026-07-04T09:00:00Z'"}
 
-    due_at = _parse_when(resolved_when)
+    try:
+        due_at = _parse_when(resolved_when)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     if due_at is None:
         return {"ok": False, "error": f"Could not parse 'when' expression: {resolved_when!r}. Use 'in N minutes' or ISO-8601 datetime."}
 
@@ -2719,6 +2753,168 @@ async def schedule_task(
     except Exception as exc:
         _log.warning("schedule_task failed: %s", exc)
         return {"ok": False, "error": str(exc)[:300]}
+
+
+async def schedule_recurring_task(
+    *,
+    workspace_id: str,
+    agent_id: str = "",
+    actor_id: str = "",
+    cron: str = "",
+    instruction: str = "",
+    tenant_id: str = "system",
+    authority_tier: Optional[str] = None,
+    max_occurrences: Optional[int] = None,
+    expires_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Schedule RECURRING future work for this agent — "every morning at
+    9am," not a single wake-up. schedule_task's twin for the recurrence
+    case: same agent_id-optional self-vs-fleet convention (omit agent_id to
+    schedule yourself), same authority-tier inheritance, different
+    underlying primitive (bounded_scheduler_service.create_recurring_
+    schedule, not propose_self_wakeup) because a recurrence has to persist
+    its own generator row rather than a single due_at.
+
+    *cron* is a standard 5-field cron expression (minute hour day month
+    weekday), evaluated in the WORKSPACE's configured timezone (not UTC,
+    not the server's) — see bounded_scheduler_service.compute_next_cron_
+    fire_at. An invalid cron expression fails loud with a specific error,
+    never a silent no-op.
+
+    Bounded by default: unless *max_occurrences* or *expires_at* is passed,
+    the schedule expires after DEFAULT_RECURRING_SCHEDULE_LIFETIME_DAYS (90
+    days) rather than running forever — a forgotten recurring job is a real
+    ongoing cost, not a hypothetical one. Both bounds are clamped to a hard
+    ceiling regardless of what's requested.
+
+    Every fire of this schedule creates exactly one ordinary wake request
+    through the same _persist_wakeup gate schedule_task uses — quiet hours,
+    battery/network, and rate caps all still apply; this tool cannot bypass
+    them by scheduling more frequently.
+
+    Returns ``{ok, schedule_id, cron, next_fire_at, instruction}``.
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+
+    resolved_instruction = str(instruction or "").strip()
+    if not resolved_instruction:
+        return {"ok": False, "error": "instruction is required — what should the agent do each time it wakes?"}
+    resolved_cron = str(cron or "").strip()
+    if not resolved_cron:
+        return {"ok": False, "error": "cron is required — a standard 5-field cron expression, e.g. '0 9 * * *' for every morning at 9am."}
+    resolved_agent_id = str(agent_id or actor_id or "").strip()
+    if not resolved_agent_id:
+        return {"ok": False, "error": "agent_id is required (or omit it with actor_id set to schedule yourself)."}
+
+    from server_modules import authority_mandate_service
+    from server_modules.bounded_scheduler_service import create_recurring_schedule, SchedulerPolicyError
+
+    resolved_tier = authority_mandate_service.inherit_tier(authority_tier)
+
+    try:
+        record = await create_recurring_schedule(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            agent_id=resolved_agent_id,
+            cron_expression=resolved_cron,
+            summary=resolved_instruction[:200],
+            instruction=resolved_instruction,
+            authority_tier=resolved_tier,
+            requested_by=agent_id or actor_id or "agent",
+            max_occurrences=max_occurrences,
+            expires_at=expires_at,
+        )
+    except SchedulerPolicyError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        _log.warning("schedule_recurring_task failed: %s", exc)
+        return {"ok": False, "error": str(exc)[:300]}
+
+    schedule_id = str(record.get("id") or "")
+    next_fire_at = record.get("next_fire_at")
+
+    await _ledger_fleet_action(
+        action="schedule_recurring_task",
+        actor_id=actor_id or agent_id or "agent",
+        workspace_id=workspace_id,
+        target_agent_id=resolved_agent_id,
+        metadata={
+            "cron": resolved_cron,
+            "instruction": resolved_instruction[:200],
+            "schedule_id": schedule_id,
+            "next_fire_at": str(next_fire_at),
+            "authority_tier": resolved_tier,
+        },
+    )
+    _log.info(
+        "schedule_recurring_task: agent=%s workspace=%s cron=%s schedule_id=%s next_fire_at=%s",
+        resolved_agent_id, workspace_id, resolved_cron, schedule_id, next_fire_at,
+    )
+    return {
+        "ok": True,
+        "schedule_id": schedule_id,
+        "cron": resolved_cron,
+        "next_fire_at": next_fire_at.isoformat() if hasattr(next_fire_at, "isoformat") else str(next_fire_at),
+        "instruction": resolved_instruction,
+        "detail": "Recurring schedule created. The agent will wake and execute this instruction on the given cron schedule.",
+    }
+
+
+async def list_recurring_tasks(
+    *,
+    workspace_id: str,
+    agent_id: str = "",
+    actor_id: str = "",
+    tenant_id: str = "system",
+) -> Dict[str, Any]:
+    """Agent-facing list of THIS agent's active recurring schedules — the
+    read half of schedule_recurring_task/cancel_recurring_task. Omit
+    agent_id to list your own (mirrors schedule_task's self-vs-fleet
+    convention)."""
+    from server_modules.bounded_scheduler_service import list_recurring_schedules, recurring_schedule_view
+
+    resolved_agent_id = str(agent_id or actor_id or "").strip()
+    if not resolved_agent_id:
+        return {"ok": False, "error": "agent_id is required (or omit it with actor_id set to list your own)."}
+    rows = await list_recurring_schedules(tenant_id=tenant_id, workspace_id=workspace_id, agent_id=resolved_agent_id)
+    return {"ok": True, "agent_id": resolved_agent_id, "schedules": [recurring_schedule_view(row) for row in rows]}
+
+
+async def cancel_recurring_task(
+    *,
+    workspace_id: str,
+    agent_id: str = "",
+    actor_id: str = "",
+    schedule_id: str = "",
+    tenant_id: str = "system",
+) -> Dict[str, Any]:
+    """Agent-facing cancel of one of THIS agent's recurring schedules — "A
+    recurring job nobody can stop is worse than no recurring job" (build
+    requirement). Omit agent_id to cancel your own."""
+    from server_modules.bounded_scheduler_service import cancel_recurring_schedule
+
+    resolved_agent_id = str(agent_id or actor_id or "").strip()
+    if not resolved_agent_id:
+        return {"ok": False, "error": "agent_id is required (or omit it with actor_id set to cancel your own)."}
+    if not str(schedule_id or "").strip():
+        return {"ok": False, "error": "schedule_id is required"}
+    result = await cancel_recurring_schedule(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=resolved_agent_id,
+        schedule_id=schedule_id,
+        cancelled_by=actor_id or agent_id or "agent",
+    )
+    if result.get("ok"):
+        await _ledger_fleet_action(
+            action="recurring_schedule_cancelled",
+            actor_id=actor_id or agent_id or "agent",
+            workspace_id=workspace_id,
+            target_agent_id=resolved_agent_id,
+            metadata={"schedule_id": schedule_id},
+        )
+    return result
 
 
 # ── Phase U2: owner-facing schedule surface ─────────────────────────────────
@@ -2786,7 +2982,10 @@ def fleet_preview_schedule_when(*, when: str) -> Dict[str, Any]:
     — lets the UI show the resolved next run before the owner confirms."""
     from datetime import timezone as _timezone
 
-    resolved = _parse_when(when)
+    try:
+        resolved = _parse_when(when)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     if resolved is None:
         return {
             "ok": False,
@@ -2871,5 +3070,120 @@ async def fleet_cancel_agent_schedule(
             workspace_id=workspace_id,
             target_agent_id=agent_id,
             metadata={"wake_request_id": wake_request_id},
+        )
+    return result
+
+
+# ── Owner-facing recurring-schedule surface ─────────────────────────────────
+# schedule_recurring_task/list_recurring_tasks/cancel_recurring_task above are
+# agent-callable (wired into skills_service.py's fleet dispatcher, like
+# schedule_task). These are their owner-only twins, reached exclusively
+# through the owner-gated REST routes in routes_fleet.py — same split as
+# fleet_create_agent_schedule/fleet_cancel_agent_schedule/fleet_list_agent_
+# schedule above for one-shot wake-ups.
+
+
+async def fleet_list_agent_recurring_schedules(
+    *,
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Owner-facing list of this agent's active recurring schedules."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules.bounded_scheduler_service import list_recurring_schedules
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+
+    rows = await list_recurring_schedules(tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id)
+    return {"ok": True, "agent_id": agent_id, "schedules": [recurring_schedule_view(row) for row in rows]}
+
+
+async def fleet_create_agent_recurring_schedule(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+    cron: str = "",
+    instruction: str = "",
+    max_occurrences: Optional[int] = None,
+    expires_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Owner-only: create a recurring wake schedule for this agent. Always
+    stamps owner tier, same reasoning as fleet_create_agent_schedule above:
+    only reachable through the owner-gated REST route, so this call IS the
+    origin of authority for the schedule it creates."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules import authority_mandate_service
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+
+    return await schedule_recurring_task(
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        actor_id=actor_id or "owner",
+        cron=cron,
+        instruction=instruction,
+        tenant_id=tenant_id,
+        authority_tier=authority_mandate_service.TIER_OWNER,
+        max_occurrences=max_occurrences,
+        expires_at=expires_at,
+    )
+
+
+async def fleet_cancel_agent_recurring_schedule(
+    *,
+    actor_id: str,
+    actor_label: str = "",
+    workspace_id: str,
+    tenant_id: str = "system",
+    agent_id: str = "",
+    schedule_id: str = "",
+) -> Dict[str, Any]:
+    """Owner-only: cancel one of this agent's recurring schedules."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules.bounded_scheduler_service import cancel_recurring_schedule
+
+    if not str(agent_id or "").strip():
+        return {"ok": False, "error": "agent_id is required"}
+    if not str(schedule_id or "").strip():
+        return {"ok": False, "error": "schedule_id is required"}
+
+    bundle = await repo.get_workspace_agent_install_bundle(
+        agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+    )
+    if not bundle:
+        return {"ok": False, "error": f"Agent {agent_id} not found in workspace"}
+
+    result = await cancel_recurring_schedule(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        schedule_id=schedule_id,
+        cancelled_by=actor_id or "owner",
+    )
+    if result.get("ok"):
+        await _ledger_fleet_action(
+            action="recurring_schedule_cancelled",
+            actor_id=actor_id or "owner",
+            workspace_id=workspace_id,
+            target_agent_id=agent_id,
+            metadata={"schedule_id": schedule_id},
         )
     return result

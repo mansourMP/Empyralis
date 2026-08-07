@@ -1533,6 +1533,35 @@ CREATE TABLE IF NOT EXISTS agent_scheduler_wake_requests (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Recurring wake schedules ("every morning at 9am") -- see
+-- migrations/add_recurring_schedules.sql for the full rationale. Each row
+-- is a cron RECURRENCE, not a wake-up itself; the wake-request scanner
+-- daemon (bounded_scheduler_service.scan_due_wake_requests_once) turns a
+-- due row into exactly one ordinary agent_scheduler_wake_requests row
+-- (trigger_kind='recurring') through the existing _persist_wakeup gate, so
+-- every fire still passes through quiet-hours/battery/network/rate-cap
+-- enforcement -- this table never bypasses that.
+CREATE TABLE IF NOT EXISTS agent_recurring_schedules (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    master_agent_install_id TEXT NULL REFERENCES workspace_agent_installs(id) ON DELETE SET NULL,
+    agent_id TEXT NOT NULL,
+    cron_expression TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'active',
+    requested_by TEXT NOT NULL DEFAULT 'owner',
+    next_fire_at TIMESTAMPTZ NOT NULL,
+    last_fired_at TIMESTAMPTZ NULL,
+    occurrence_count INTEGER NOT NULL DEFAULT 0,
+    max_occurrences INTEGER NULL,
+    expires_at TIMESTAMPTZ NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS agent_channel_events (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -1796,6 +1825,9 @@ CREATE INDEX IF NOT EXISTS idx_personal_context_events_entity ON personal_contex
 CREATE INDEX IF NOT EXISTS idx_agent_scheduler_wake_requests_scope_due ON agent_scheduler_wake_requests(tenant_id, workspace_id, status, due_at ASC);
 CREATE INDEX IF NOT EXISTS idx_agent_scheduler_wake_requests_master ON agent_scheduler_wake_requests(tenant_id, workspace_id, master_agent_install_id, due_at ASC);
 CREATE INDEX IF NOT EXISTS idx_agent_scheduler_wake_requests_trigger ON agent_scheduler_wake_requests(tenant_id, workspace_id, trigger_kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_recurring_schedules_due ON agent_recurring_schedules(status, next_fire_at ASC);
+CREATE INDEX IF NOT EXISTS idx_agent_recurring_schedules_scope ON agent_recurring_schedules(tenant_id, workspace_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_recurring_schedules_agent ON agent_recurring_schedules(tenant_id, workspace_id, agent_id, status);
 CREATE INDEX IF NOT EXISTS idx_agent_channel_events_scope_created ON agent_channel_events(tenant_id, workspace_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_channel_events_session ON agent_channel_events(tenant_id, workspace_id, channel_key, endpoint_key, session_key, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_channel_events_responder ON agent_channel_events(tenant_id, workspace_id, responder_install_id, created_at DESC);
@@ -14130,6 +14162,7 @@ async def count_agent_scheduler_wake_requests_since(
     trigger_kind: Optional[str] = None,
     task_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    recurring_schedule_id: Optional[str] = None,
 ) -> int:
     resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
     resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
@@ -14165,6 +14198,15 @@ async def count_agent_scheduler_wake_requests_since(
         # the OLD assignee's still-recent wake row.
         params.append(str(agent_id or "").strip())
         conditions.append(f"metadata->>'agent_id' = ${len(params)}")
+    if recurring_schedule_id:
+        # Recurring schedules' own daily wake ceiling (DEFAULT_MAX_RECURRING_
+        # WAKES_PER_DAY): scoped to metadata->>'recurring_schedule_id', the
+        # field _fire_recurring_schedule stamps onto every wake it creates,
+        # so a misconfigured "every minute" cron can't turn into 1440 wakes
+        # a day just because it has no task_id to pin the existing per-task
+        # cap to.
+        params.append(str(recurring_schedule_id or "").strip())
+        conditions.append(f"metadata->>'recurring_schedule_id' = ${len(params)}")
     async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
         if connection is None:
             return 0
@@ -14345,6 +14387,265 @@ async def update_agent_scheduler_wake_request_status(
             resolved_wake_id,
         )
     return dict(row) if row is not None else None
+
+
+# ── Recurring wake schedules ────────────────────────────────────────────
+# See migrations/add_recurring_schedules.sql for the full rationale. These
+# functions are deliberately NOT wrapped in _enforce_scheduler_wake_
+# repository_decision (the Rust-kernel gate the agent_scheduler_wake_requests
+# functions above go through) -- that gate exists for WAKE decisions
+# specifically, and a recurring-schedule row is only ever bookkeeping about
+# "when to next ask for one." The actual wake decision still happens through
+# _persist_wakeup -> append_agent_scheduler_wake_request above, unchanged,
+# every time a recurring schedule fires (bounded_scheduler_service.
+# _fire_recurring_schedule). Same posture as list_personal_context_events /
+# list_activity_ledger_events just below, which also carry no kernel gate.
+
+
+async def append_agent_recurring_schedule(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    master_agent_install_id: Optional[str] = None,
+    agent_id: str,
+    cron_expression: str,
+    summary: str = "",
+    payload: Optional[Dict[str, Any]] = None,
+    requested_by: str = "owner",
+    next_fire_at: Any,
+    max_occurrences: Optional[int] = None,
+    expires_at: Any = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    schedule_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    resolved_agent_id = str(agent_id or "").strip()
+    resolved_cron = str(cron_expression or "").strip()
+    if not resolved_agent_id or not resolved_cron:
+        return None
+    resolved_next_fire_at = _coerce_timestamptz(next_fire_at)
+    if resolved_next_fire_at is None:
+        return None
+    resolved_schedule_id = str(schedule_id or f"recur_{uuid.uuid4().hex[:16]}").strip()
+    now_ts = _utc_now_ts()
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return None
+        await connection.execute(
+            """
+            INSERT INTO agent_recurring_schedules (
+                id, tenant_id, workspace_id, master_agent_install_id, agent_id, cron_expression,
+                summary, payload, status, requested_by, next_fire_at, last_fired_at,
+                occurrence_count, max_occurrences, expires_at, metadata, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8::jsonb, 'active', $9, $10::timestamptz, NULL,
+                0, $11, $12::timestamptz, $13::jsonb, $14::timestamptz, $14::timestamptz
+            )
+            """,
+            resolved_schedule_id,
+            resolved_tenant_id,
+            resolved_workspace_id,
+            str(master_agent_install_id or "").strip() or None,
+            resolved_agent_id,
+            resolved_cron,
+            str(summary or ""),
+            _to_json(payload, default={}),
+            str(requested_by or "owner").strip().lower() or "owner",
+            resolved_next_fire_at,
+            int(max_occurrences) if max_occurrences is not None else None,
+            _coerce_timestamptz(expires_at),
+            _to_json(metadata, default={}),
+            now_ts,
+        )
+        row = await connection.fetchrow(
+            "SELECT * FROM agent_recurring_schedules WHERE id = $1 LIMIT 1",
+            resolved_schedule_id,
+        )
+    if row is None:
+        return None
+    record = dict(row)
+    record["payload"] = _decode_json_object(record.get("payload"))
+    record["metadata"] = _decode_json_object(record.get("metadata"))
+    return record
+
+
+async def list_agent_recurring_schedules(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    conditions = ["tenant_id = $1", "workspace_id = $2"]
+    params: List[Any] = [resolved_tenant_id, resolved_workspace_id]
+    if agent_id:
+        params.append(str(agent_id or "").strip())
+        conditions.append(f"agent_id = ${len(params)}")
+    if status:
+        params.append(str(status or "").strip().lower())
+        conditions.append(f"status = ${len(params)}")
+    params.append(max(1, int(limit or 100)))
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return []
+        rows = await connection.fetch(
+            f"""
+            SELECT *
+            FROM agent_recurring_schedules
+            WHERE {' AND '.join(conditions)}
+            ORDER BY next_fire_at ASC, created_at ASC
+            LIMIT ${len(params)}
+            """,
+            *params,
+        )
+    result = []
+    for row in rows:
+        record = dict(row)
+        record["payload"] = _decode_json_object(record.get("payload"))
+        record["metadata"] = _decode_json_object(record.get("metadata"))
+        result.append(record)
+    return result
+
+
+async def get_agent_recurring_schedule(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    schedule_id: str,
+) -> Optional[Dict[str, Any]]:
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    resolved_schedule_id = str(schedule_id or "").strip()
+    if not resolved_schedule_id:
+        return None
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return None
+        row = await connection.fetchrow(
+            "SELECT * FROM agent_recurring_schedules WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3 LIMIT 1",
+            resolved_schedule_id,
+            resolved_tenant_id,
+            resolved_workspace_id,
+        )
+    if row is None:
+        return None
+    record = dict(row)
+    record["payload"] = _decode_json_object(record.get("payload"))
+    record["metadata"] = _decode_json_object(record.get("metadata"))
+    return record
+
+
+async def list_due_agent_recurring_schedule_scopes(
+    *,
+    due_before: Any,
+    limit: int = 200,
+) -> List[Dict[str, str]]:
+    """System-level scan for which (tenant_id, workspace_id) pairs currently
+    have an active, due recurring schedule -- same shape and same reason as
+    list_due_agent_scheduler_wake_request_scopes above (bypass_rls=True:
+    there is no single tenant scope to apply to a cross-tenant "who has due
+    work" question). The actual read/update of a due schedule stays fully
+    RLS-scoped through get_agent_recurring_schedule /
+    update_agent_recurring_schedule per (tenant_id, workspace_id) pair
+    returned here."""
+    resolved_due_before = _coerce_timestamptz(due_before)
+    if resolved_due_before is None:
+        return []
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            return []
+        rows = await connection.fetch(
+            """
+            SELECT DISTINCT tenant_id, workspace_id
+            FROM agent_recurring_schedules
+            WHERE status = 'active'
+              AND next_fire_at <= $1::timestamptz
+            LIMIT $2
+            """,
+            resolved_due_before,
+            max(1, int(limit or 200)),
+        )
+    return [
+        {"tenant_id": str(row["tenant_id"]), "workspace_id": str(row["workspace_id"])}
+        for row in rows
+        if row["tenant_id"] and row["workspace_id"]
+    ]
+
+
+async def update_agent_recurring_schedule(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    schedule_id: str,
+    status: Optional[str] = None,
+    next_fire_at: Any = None,
+    last_fired_at: Any = None,
+    occurrence_count: Optional[int] = None,
+    metadata_patch: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Generic field-patch update, append-only-history convention matching
+    update_agent_scheduler_wake_request_status above: cancellation is a
+    status transition (status='cancelled'), never a DELETE -- this table has
+    no DELETE statement anywhere in the codebase either."""
+    resolved_tenant_id = _require_scope_token(tenant_id, "tenant_id")
+    resolved_workspace_id = _require_scope_token(workspace_id, "workspace_id")
+    resolved_schedule_id = str(schedule_id or "").strip()
+    if not resolved_schedule_id:
+        return None
+    now_ts = _utc_now_ts()
+    async with _scoped_connection(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id) as connection:
+        if connection is None:
+            return None
+        existing = await connection.fetchrow(
+            "SELECT * FROM agent_recurring_schedules WHERE id = $1 LIMIT 1",
+            resolved_schedule_id,
+        )
+        if existing is None:
+            return None
+        current_metadata = _coerce_dict(existing.get("metadata"))
+        next_metadata = {**current_metadata, **_coerce_dict(metadata_patch)}
+        next_status = str(status).strip().lower() if status is not None else str(existing.get("status") or "active")
+        next_next_fire_at = _coerce_timestamptz(next_fire_at) if next_fire_at is not None else existing.get("next_fire_at")
+        next_last_fired_at = _coerce_timestamptz(last_fired_at) if last_fired_at is not None else existing.get("last_fired_at")
+        next_occurrence_count = int(occurrence_count) if occurrence_count is not None else int(existing.get("occurrence_count") or 0)
+        await connection.execute(
+            """
+            UPDATE agent_recurring_schedules
+               SET status = $4,
+                   next_fire_at = $5::timestamptz,
+                   last_fired_at = $6::timestamptz,
+                   occurrence_count = $7,
+                   metadata = $8::jsonb,
+                   updated_at = $9::timestamptz
+             WHERE id = $1
+               AND tenant_id = $2
+               AND workspace_id = $3
+            """,
+            resolved_schedule_id,
+            resolved_tenant_id,
+            resolved_workspace_id,
+            next_status,
+            next_next_fire_at,
+            next_last_fired_at,
+            next_occurrence_count,
+            _to_json(next_metadata, default={}),
+            now_ts,
+        )
+        row = await connection.fetchrow(
+            "SELECT * FROM agent_recurring_schedules WHERE id = $1 LIMIT 1",
+            resolved_schedule_id,
+        )
+    if row is None:
+        return None
+    record = dict(row)
+    record["payload"] = _decode_json_object(record.get("payload"))
+    record["metadata"] = _decode_json_object(record.get("metadata"))
+    return record
 
 
 async def list_personal_context_events(

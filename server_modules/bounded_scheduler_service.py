@@ -8,6 +8,8 @@ import threading
 from typing import Any, Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from croniter import croniter
+
 from server_modules import agent_registry_repository, authority_mandate_service, control_plane_repository, entitlements_service, rust_runtime_kernel_client, workspace_context
 from server_modules.config_loader import config_bool, config_int
 
@@ -88,6 +90,36 @@ EVENT_TRIGGER_PRIORITY_THRESHOLD = 60
 IMMEDIATE_TRIGGER_WINDOW_SECONDS = 5
 DEFAULT_WAKE_SCAN_POLL_SECONDS = 20
 DEFAULT_WAKE_SCAN_SCOPE_LIMIT = 200
+# Recurring schedules ("every morning at 9am") -- see
+# migrations/add_recurring_schedules.sql and create_recurring_schedule/
+# _fire_recurring_schedule below for the full design. These constants mirror
+# the STEP 6 per-task backstop above (DEFAULT_MAX_WAKES_PER_TASK_PER_DAY):
+# a recurring schedule fires through the exact same _persist_wakeup gate as
+# every other wake-up, but a cron that fires every minute must not be
+# allowed to bypass the SPIRIT of that per-day cap just because it has no
+# task_id -- so it gets its own dedicated per-schedule daily ceiling, keyed
+# on metadata->>'recurring_schedule_id' rather than task_id.
+DEFAULT_MAX_RECURRING_WAKES_PER_DAY = 24
+# Bounded-by-default lifetime (build step 6): a recurring schedule created
+# with no explicit expires_at/max_occurrences gets this default lifetime
+# rather than running forever. 90 days comfortably covers "remind me every
+# morning" use cases while still forcing an explicit renewal decision
+# instead of an indefinite job nobody remembers exists -- see CLAUDE.md's
+# own agent-worktree-disk-exhaustion note for what "nobody remembers this
+# job exists" costs in practice, applied here to wake/turn volume instead
+# of disk.
+DEFAULT_RECURRING_SCHEDULE_LIFETIME_DAYS = 90
+# Hard ceilings applied even when the caller explicitly asks for more --
+# create_recurring_schedule clamps to these rather than rejecting the
+# request outright, so "give me a year" degrades to "you get a year" instead
+# of an error.
+RECURRING_SCHEDULE_HARD_MAX_LIFETIME_DAYS = 365
+RECURRING_SCHEDULE_HARD_MAX_OCCURRENCES = 3650
+# Rows returned only ever get shown to their owning workspace (list_recurring_
+# schedules is RLS-scoped like everything else); this only bounds a single
+# system-level due-scan tick's batch size, same role DEFAULT_WAKE_SCAN_SCOPE_
+# LIMIT plays for the wake-request scanner above.
+DEFAULT_RECURRING_SCHEDULE_SCAN_LIMIT = 200
 
 _AMBIENT_MONITOR_REGISTRY_LOCK = threading.Lock()
 _AMBIENT_MONITOR_REGISTRY: dict[str, dict[str, Callable[[], Any]]] = {}
@@ -489,6 +521,81 @@ def quiet_hours_status_snapshot(
         ),
         "next_allowed_at": next_allowed_at.isoformat().replace("+00:00", "Z"),
     }
+
+
+# ── Recurring schedules: cron parsing and next-fire computation ─────────
+# Library, not hand-rolled: croniter (already a dependency -- server_modules/
+# runs_core.py has used it in production for its own separate cron-based
+# schedule feature since before this change; requirements.txt already pins
+# croniter>=2.0.0). Cron edge cases (DST transitions, month rollovers,
+# `*/N` on a field that doesn't divide evenly) are exactly the class of bug
+# a hand-rolled parser gets wrong in ways that only show up twice a year --
+# croniter is a maintained, widely-used library built for precisely this,
+# and duplicating its logic here would just be a second, worse
+# implementation of the same thing runs_core.py already trusts.
+_CRON_FIELD_COUNT = 5
+
+
+def parse_cron_expression(cron_expr: str) -> str:
+    """Validate a standard 5-field cron expression (minute hour day month
+    weekday). Returns the normalized (stripped) expression on success.
+
+    FAILS LOUD: raises SchedulerPolicyError with a specific reason on any
+    invalid input -- blank, wrong field count, or a field croniter itself
+    rejects. This is the fix for the exact bug that motivated this feature:
+    fleet_tools._parse_when's docstring claimed a cron string was "passed
+    through for cron scheduling," but no branch ever matched one, so it fell
+    through to `return None` and a cron expression was silently rejected as
+    unparseable with no error at all. That silent-None behavior is now
+    reserved for genuinely non-cron, non-datetime, non-relative `when`
+    strings in _parse_when -- an input that LOOKS like cron shape but is
+    invalid now raises here instead of anywhere silently swallowing it.
+    """
+    token = str(cron_expr or "").strip()
+    if not token:
+        raise SchedulerPolicyError("Cron expression is required and cannot be blank.")
+    fields = token.split()
+    if len(fields) != _CRON_FIELD_COUNT:
+        raise SchedulerPolicyError(
+            f"Cron expression must have exactly {_CRON_FIELD_COUNT} fields "
+            f"(minute hour day month weekday), got {len(fields)}: {token!r}. "
+            "Seconds/year extensions are not supported."
+        )
+    if not croniter.is_valid(token):
+        raise SchedulerPolicyError(f"Invalid cron expression: {token!r}.")
+    return token
+
+
+def compute_next_cron_fire_at(
+    cron_expr: str,
+    policy: SchedulerPolicyBounds,
+    *,
+    after: Optional[datetime] = None,
+) -> datetime:
+    """Resolve a validated cron expression's next fire time, in the
+    WORKSPACE's timezone (policy.timezone_name, same resolve_scheduler_
+    policy/_scheduler_zone this module already uses for quiet hours -- see
+    the MAN-294 comment on DEFAULT_SCHEDULER_TIMEZONE above for why that
+    must never be the server process's own zone). "Every morning at 9am"
+    means 9am in the workspace's timezone, not UTC and not wherever the VPS
+    happens to run.
+
+    DST correctness: croniter is handed a timezone-AWARE reference datetime
+    (via ZoneInfo, not a fixed UTC offset), which is what lets it compute
+    the next WALL-CLOCK match correctly across a DST transition -- a fixed-
+    offset "9am" would silently become 8am or 10am local time the day the
+    clock changes. Reference: runs_core._compute_schedule_next_run_at, which
+    already does exactly this for its own separate cron feature; the same
+    call shape is used deliberately rather than inventing a second one.
+    """
+    validated = parse_cron_expression(cron_expr)
+    zone = _scheduler_zone(policy)
+    reference = (after or _utc_now()).astimezone(zone)
+    iterator = croniter(validated, reference)
+    candidate = iterator.get_next(datetime)
+    if candidate.tzinfo is None:
+        candidate = candidate.replace(tzinfo=zone)
+    return candidate.astimezone(timezone.utc)
 
 
 def register_ambient_monitor(
@@ -1109,6 +1216,389 @@ async def propose_self_wakeup(
     return {"wake_request": record, "policy": policy.as_dict(), "accepted": True}
 
 
+# ── Recurring schedules: create / list / cancel / fire ──────────────────
+# Built ON TOP OF the wake-request machinery above, not beside it: a
+# recurring schedule row is only ever a generator of ordinary wake requests.
+# Every fire goes through _persist_wakeup (via propose_self_wakeup's own
+# gate, reused directly below) -- same quiet-hours, battery/network, and
+# rate-cap enforcement as task_assigned/task_commented/self_proposed. No
+# parallel scheduler thread: _fire_recurring_schedule is called from the
+# SAME daemon tick as the existing wake-request scanner (see
+# scan_due_wake_requests_once below).
+
+RECURRING_SCHEDULE_NON_TERMINAL_STATUSES = {"active"}
+
+
+def max_recurring_wakes_per_day() -> int:
+    """Recurring schedules' own daily wake ceiling -- see
+    DEFAULT_MAX_RECURRING_WAKES_PER_DAY above. Env-overridable, floored at 1
+    for the same reason every other cap in this module is: a misconfigured
+    0/negative override can never mean "unlimited"."""
+    return max(
+        1,
+        config_int("EMPYRALIS_MAX_RECURRING_WAKES_PER_DAY", DEFAULT_MAX_RECURRING_WAKES_PER_DAY),
+    )
+
+
+def _clamp_recurring_schedule_bounds(
+    *,
+    now_utc: datetime,
+    max_occurrences: Optional[int],
+    expires_at: Optional[datetime],
+) -> tuple[Optional[int], datetime]:
+    """Build step 6 (bounded by default): every recurring schedule gets a
+    lifetime bound. If the caller supplied neither max_occurrences nor
+    expires_at, default to DEFAULT_RECURRING_SCHEDULE_LIFETIME_DAYS out.
+    Whatever ends up in play -- caller-supplied or defaulted -- is clamped to
+    the hard ceilings so "give me a year of every-5-minutes wakes" degrades
+    to the ceiling rather than either erroring or actually running for a
+    year unattended."""
+    resolved_max_occurrences = None
+    if max_occurrences is not None:
+        try:
+            resolved_max_occurrences = max(1, min(int(max_occurrences), RECURRING_SCHEDULE_HARD_MAX_OCCURRENCES))
+        except (TypeError, ValueError):
+            resolved_max_occurrences = None
+    hard_ceiling_at = now_utc + timedelta(days=RECURRING_SCHEDULE_HARD_MAX_LIFETIME_DAYS)
+    if expires_at is not None:
+        resolved_expires_at = min(expires_at, hard_ceiling_at)
+    elif resolved_max_occurrences is not None:
+        # An explicit occurrence bound with no explicit expiry still gets the
+        # hard lifetime ceiling as a backstop -- an occurrence cap alone
+        # doesn't protect against a schedule that fires so rarely it would
+        # otherwise still be "active" a decade from now.
+        resolved_expires_at = hard_ceiling_at
+    else:
+        resolved_expires_at = min(
+            now_utc + timedelta(days=DEFAULT_RECURRING_SCHEDULE_LIFETIME_DAYS),
+            hard_ceiling_at,
+        )
+    return resolved_max_occurrences, resolved_expires_at
+
+
+def recurring_schedule_view(row: Dict[str, Any]) -> Dict[str, Any]:
+    payload = _coerce_dict(row.get("payload"))
+    metadata = _coerce_dict(row.get("metadata"))
+    next_fire_at = row.get("next_fire_at")
+    last_fired_at = row.get("last_fired_at")
+    expires_at = row.get("expires_at")
+    created_at = row.get("created_at")
+    return {
+        "id": str(row.get("id") or ""),
+        "agent_id": str(row.get("agent_id") or ""),
+        "cron_expression": str(row.get("cron_expression") or ""),
+        "summary": str(row.get("summary") or "").strip() or str(payload.get("instruction") or "")[:200],
+        "instruction": str(payload.get("instruction") or "").strip(),
+        "status": str(row.get("status") or "active").strip().lower(),
+        "requested_by": str(row.get("requested_by") or "owner").strip().lower(),
+        "next_fire_at": next_fire_at.isoformat() if hasattr(next_fire_at, "isoformat") else str(next_fire_at or ""),
+        "last_fired_at": last_fired_at.isoformat() if hasattr(last_fired_at, "isoformat") else (str(last_fired_at) if last_fired_at else None),
+        "occurrence_count": int(row.get("occurrence_count") or 0),
+        "max_occurrences": row.get("max_occurrences"),
+        "expires_at": expires_at.isoformat() if hasattr(expires_at, "isoformat") else (str(expires_at) if expires_at else None),
+        "created_at": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at or ""),
+        "last_skip_reason": metadata.get("last_skip_reason"),
+    }
+
+
+async def create_recurring_schedule(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    cron_expression: str,
+    summary: str = "",
+    instruction: str = "",
+    authority_tier: Optional[str] = None,
+    requested_by: str = "owner",
+    max_occurrences: Optional[int] = None,
+    expires_at: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Create a recurring wake schedule for *agent_id*. FAILS LOUD
+    (SchedulerPolicyError) on an invalid cron expression or a missing
+    agent_id/instruction -- never silently drops the request, matching this
+    feature's own hard constraint."""
+    resolved_agent_id = str(agent_id or "").strip()
+    resolved_instruction = str(instruction or "").strip()
+    if not resolved_agent_id:
+        raise SchedulerPolicyError("agent_id is required to create a recurring schedule.")
+    if not resolved_instruction:
+        raise SchedulerPolicyError("instruction is required — what should the agent do each time it wakes?")
+    validated_cron = parse_cron_expression(cron_expression)
+    workspace, master_install, policy = await _load_scheduler_scope(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    now_utc = _utc_now()
+    resolved_max_occurrences, resolved_expires_at = _clamp_recurring_schedule_bounds(
+        now_utc=now_utc,
+        max_occurrences=max_occurrences,
+        expires_at=_parse_datetime(expires_at),
+    )
+    next_fire_at = compute_next_cron_fire_at(validated_cron, policy, after=now_utc)
+    resolved_tier = authority_mandate_service.inherit_tier(authority_tier)
+    record = await control_plane_repository.append_agent_recurring_schedule(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        master_agent_install_id=str(_coerce_dict(master_install).get("id") or "").strip() or None,
+        agent_id=resolved_agent_id,
+        cron_expression=validated_cron,
+        summary=str(summary or "").strip() or resolved_instruction[:200],
+        payload={
+            "instruction": resolved_instruction,
+            "agent_id": resolved_agent_id,
+            "authority_tier": resolved_tier,
+        },
+        requested_by=requested_by,
+        next_fire_at=next_fire_at,
+        max_occurrences=resolved_max_occurrences,
+        expires_at=resolved_expires_at,
+        metadata={},
+    )
+    if not isinstance(record, dict):
+        raise SchedulerPolicyError("Failed to persist recurring schedule.")
+    try:
+        from server_modules import activity_ledger_service
+
+        master_install_id = str(_coerce_dict(master_install).get("id") or "").strip() or None
+        await activity_ledger_service.append_activity_event(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            actor_type="sage" if master_install_id else "system",
+            actor_id=master_install_id or "scheduler",
+            install_id=master_install_id,
+            event_class="delegation",
+            detail_level="timeline_detail",
+            action="recurring_schedule_created",
+            title="Recurring wake schedule created",
+            summary=f"{resolved_instruction[:150]} ({validated_cron})",
+            status="active",
+            metadata={
+                "schedule_id": str(record.get("id") or "").strip() or None,
+                "agent_id": resolved_agent_id,
+                "cron_expression": validated_cron,
+            },
+        )
+    except Exception:
+        pass
+    return record
+
+
+async def list_recurring_schedules(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: Optional[str] = None,
+    include_terminal: bool = False,
+) -> List[Dict[str, Any]]:
+    rows = await control_plane_repository.list_agent_recurring_schedules(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+    )
+    if include_terminal:
+        return rows
+    return [
+        row for row in rows
+        if str(row.get("status") or "").strip().lower() in RECURRING_SCHEDULE_NON_TERMINAL_STATUSES
+    ]
+
+
+async def cancel_recurring_schedule(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    schedule_id: str,
+    cancelled_by: str = "owner",
+) -> Dict[str, Any]:
+    """Owner- or agent-initiated cancel. Status transition, not a hard
+    delete -- matches cancel_wake_request's own append-only-history
+    convention above."""
+    existing = await control_plane_repository.get_agent_recurring_schedule(
+        tenant_id=tenant_id, workspace_id=workspace_id, schedule_id=schedule_id,
+    )
+    not_found = {"ok": False, "error": f"Recurring schedule {schedule_id} not found."}
+    if existing is None:
+        return not_found
+    if str(existing.get("agent_id") or "").strip() != str(agent_id or "").strip():
+        return not_found
+    current_status = str(existing.get("status") or "").strip().lower()
+    if current_status not in RECURRING_SCHEDULE_NON_TERMINAL_STATUSES:
+        return {"ok": False, "error": f"Can't cancel a recurring schedule that's already {current_status}."}
+    row = await control_plane_repository.update_agent_recurring_schedule(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        schedule_id=schedule_id,
+        status="cancelled",
+        metadata_patch={"cancelled_by": cancelled_by, "cancelled_at": _utc_now().isoformat().replace("+00:00", "Z")},
+    )
+    if row is None:
+        return {"ok": False, "error": f"Could not cancel recurring schedule {schedule_id}."}
+    return {"ok": True, "schedule": row}
+
+
+async def _fire_recurring_schedule(schedule: Dict[str, Any]) -> Dict[str, Any]:
+    """Process one due recurring schedule: either propose exactly one
+    ordinary wake request through the standard _persist_wakeup gate, or skip
+    this occurrence (daily cap, expired), then always advance next_fire_at.
+
+    A single misbehaving schedule must never take down the scan tick -- the
+    caller (scan_due_wake_requests_once) wraps this per-schedule, same
+    posture as its existing per-workspace heartbeat try/except below.
+
+    Missed-occurrence handling: next_fire_at is always recomputed from NOW,
+    never from the missed slot. If the process was down for two days, a
+    "every hour" schedule fires ONCE on the next tick (not 48 queued
+    catch-up wakes) and resumes its normal cadence from there -- the daily
+    cap above exists to bound a MISCONFIGURED cron, this is what bounds an
+    ordinary OUTAGE.
+    """
+    tenant_id = str(schedule.get("tenant_id") or "").strip()
+    workspace_id = str(schedule.get("workspace_id") or "").strip()
+    schedule_id = str(schedule.get("id") or "").strip()
+    agent_id = str(schedule.get("agent_id") or "").strip()
+    cron_expression = str(schedule.get("cron_expression") or "").strip()
+    payload = _coerce_dict(schedule.get("payload"))
+    instruction = str(payload.get("instruction") or "").strip()
+    now_utc = _utc_now()
+
+    workspace, master_install, policy = await _load_scheduler_scope(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+
+    expires_at = _parse_datetime(schedule.get("expires_at"))
+    max_occurrences = schedule.get("max_occurrences")
+    occurrence_count = int(schedule.get("occurrence_count") or 0)
+    if (expires_at is not None and now_utc >= expires_at) or (
+        max_occurrences is not None and occurrence_count >= int(max_occurrences)
+    ):
+        await control_plane_repository.update_agent_recurring_schedule(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            schedule_id=schedule_id,
+            status="expired",
+        )
+        return {"schedule_id": schedule_id, "action": "expired"}
+
+    recent_count = await control_plane_repository.count_agent_scheduler_wake_requests_since(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        since=now_utc - timedelta(hours=24),
+        recurring_schedule_id=schedule_id,
+    )
+    daily_cap = max_recurring_wakes_per_day()
+    next_fire_at = compute_next_cron_fire_at(cron_expression, policy, after=now_utc)
+    if recent_count >= daily_cap:
+        await control_plane_repository.update_agent_recurring_schedule(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            schedule_id=schedule_id,
+            next_fire_at=next_fire_at,
+            metadata_patch={
+                "last_skip_reason": "recurring_daily_wake_cap",
+                "last_skip_at": now_utc.isoformat().replace("+00:00", "Z"),
+            },
+        )
+        return {"schedule_id": schedule_id, "action": "skipped_daily_cap"}
+
+    due_at, due_reason = _apply_policy_to_due_at(
+        due_at=now_utc,
+        policy=policy,
+        device_state=_device_state({}, workspace, master_install),
+        # Recurring fires are ambient triggers, not a live human action
+        # taken right now -- unlike schedule_task_assigned_wakeup/schedule_
+        # task_commented_wakeup, quiet hours are NOT skipped here. A 2am
+        # cron in an 11pm-7am quiet window is exactly the case quiet hours
+        # exist to defer.
+        skip_quiet_hours=False,
+    )
+    metadata: Dict[str, Any] = {
+        "agent_id": agent_id,
+        "recurring_schedule_id": schedule_id,
+        "authority_tier": authority_mandate_service.normalize_tier(payload.get("authority_tier")),
+    }
+    if due_reason:
+        metadata["policy_delay_reason"] = due_reason
+    record = await _persist_wakeup(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        master_install=master_install,
+        trigger_kind="recurring",
+        source="recurring_schedule",
+        requested_by=str(schedule.get("requested_by") or "owner").strip().lower() or "owner",
+        reason="recurring_schedule",
+        summary=str(schedule.get("summary") or instruction[:200]).strip(),
+        payload={
+            "instruction": instruction,
+            "agent_id": agent_id,
+            "recurring_schedule_id": schedule_id,
+            "authority_tier": metadata["authority_tier"],
+        },
+        policy=policy,
+        due_at=due_at,
+        approval_required=False,
+        status="pending",
+        denial_reason=None,
+        metadata=metadata,
+    )
+    if due_at <= now_utc + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
+        _trigger_ambient_monitor(workspace_id)
+    await control_plane_repository.update_agent_recurring_schedule(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        schedule_id=schedule_id,
+        next_fire_at=next_fire_at,
+        last_fired_at=now_utc,
+        occurrence_count=occurrence_count + 1,
+        metadata_patch={"last_skip_reason": None, "last_wake_request_id": str(_coerce_dict(record).get("id") or "") or None},
+    )
+    return {"schedule_id": schedule_id, "action": "fired", "wake_request_id": str(_coerce_dict(record).get("id") or "")}
+
+
+async def process_due_recurring_schedules_once(
+    *,
+    limit: int = DEFAULT_RECURRING_SCHEDULE_SCAN_LIMIT,
+) -> Dict[str, Any]:
+    """Cross-workspace tick for due recurring schedules -- structurally
+    schedule_due_wake_requests_once's twin: a system-level bypass_rls scan
+    finds which (tenant_id, workspace_id) scopes have due work, then this
+    reloads each due schedule through the normal RLS-scoped path and fires
+    it. Called from the SAME daemon tick as the wake-request scan (see
+    run_wake_request_scan_forever), not a second thread."""
+    now_utc = _utc_now()
+    scopes = await control_plane_repository.list_due_agent_recurring_schedule_scopes(
+        due_before=now_utc,
+        limit=limit,
+    )
+    results: List[Dict[str, Any]] = []
+    for scope in scopes:
+        tenant_id = str(scope.get("tenant_id") or "").strip()
+        workspace_id = str(scope.get("workspace_id") or "").strip()
+        if not tenant_id or not workspace_id:
+            continue
+        due_schedules = await control_plane_repository.list_agent_recurring_schedules(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            status="active",
+        )
+        for schedule in due_schedules:
+            next_fire_at = _parse_datetime(schedule.get("next_fire_at"))
+            if next_fire_at is None or next_fire_at > now_utc:
+                continue
+            try:
+                outcome = await _fire_recurring_schedule(schedule)
+            except Exception:
+                LOGGER.exception(
+                    "recurring-schedule-scan: fire failed for tenant=%s workspace=%s schedule=%s",
+                    tenant_id, workspace_id, schedule.get("id"),
+                )
+                outcome = {"schedule_id": str(schedule.get("id") or ""), "action": "error"}
+            results.append({"tenant_id": tenant_id, "workspace_id": workspace_id, "result": outcome})
+    return {"scanned": len(results), "results": results}
+
+
 async def claim_due_wake_requests(
     *,
     tenant_id: str,
@@ -1190,7 +1680,20 @@ async def scan_due_wake_requests_once(
     single global query, and reuses everything already proven correct for a
     single workspace (including authority-tier grouping and the pending ->
     executed status transition on success).
+
+    Also processes due RECURRING schedules first, on this exact same tick --
+    no second daemon thread (see process_due_recurring_schedules_once's own
+    docstring). Firing a recurring schedule only ever creates one ordinary
+    agent_scheduler_wake_requests row; running this step before the
+    wake-request scope scan just below means a schedule that fires THIS
+    tick is picked up by THIS tick's wake-request scan too, not left to wait
+    a full poll interval. A failure here must never block the wake-request
+    scan that already existed -- caught and logged, never re-raised.
     """
+    try:
+        await process_due_recurring_schedules_once()
+    except Exception:
+        LOGGER.exception("recurring-schedule-scan: tick failed")
     scopes = await control_plane_repository.list_due_agent_scheduler_wake_request_scopes(
         due_before=_utc_now(),
         limit=limit,
@@ -1687,12 +2190,17 @@ async def scheduler_status_snapshot(
 
     exact_jobs = await runs_core.list_schedules(workspace_id=workspace_id)
     items = list(exact_jobs.get("items") or []) if isinstance(exact_jobs, dict) else []
+    recurring = await list_recurring_schedules(tenant_id=tenant_id, workspace_id=workspace_id)
     return {
         "policy": policy.as_dict(),
         "ambient_monitor": ambient_monitor_status(workspace_id),
         "exact_jobs": {
             "count": len(items),
             "items": items[: min(8, len(items))],
+        },
+        "recurring_schedules": {
+            "count": len(recurring),
+            "items": [recurring_schedule_view(row) for row in recurring[: min(8, len(recurring))]],
         },
         "wake_queue": {
             "pending_count": len(pending),
