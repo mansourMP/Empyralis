@@ -758,6 +758,57 @@ def serialize_turn_attachment(attachment: TurnAttachment) -> Dict[str, Any]:
     }
 
 
+def sage_chat_attachment_dict_from_turn_attachment(attachment: TurnAttachment) -> Dict[str, Any]:
+    """Convert a canonical ``TurnAttachment`` into the flat attachment-dict
+    shape the Sage-native pipeline has always used: ``{file_id, filename,
+    safe_filename, content_type, size, url}`` (see ``SageChatAttachment`` in
+    schemas.py, and every channel wrapper — Telegram/WhatsApp/Discord
+    personal-channel media storage — that produces this same shape).
+
+    This is the exact inverse of ``_attachments_from_payload``'s mapping,
+    which folds those flat fields into ``TurnAttachment.metadata``.
+
+    ``AgentTurnRequest.attachments`` (``List[TurnAttachment]``) and the
+    Sage-native pipeline's ``attachments: list[dict]`` (``handle_sage_chat``,
+    ``NormalizedSageTurn``, ``_load_attachment_context`` in
+    sage_agent_runtime_service.py, and channel wrappers) are two distinct,
+    internally-consistent type contracts. Call this at the boundary where
+    the former hands off into the latter — never pass a bare
+    ``TurnAttachment`` across that boundary; every consumer downstream of
+    ``handle_sage_chat`` calls ``.get()`` on each attachment, which raises
+    ``AttributeError`` on a dataclass instance — this is exactly how
+    attaching any file used to crash the turn.
+    """
+    metadata = attachment.metadata or {}
+    name = str(attachment.name or "").strip()
+    safe_filename = str(metadata.get("safe_filename") or "").strip() or name
+    raw_size = metadata.get("size")
+    try:
+        size = int(raw_size) if raw_size is not None else 0
+    except (TypeError, ValueError):
+        size = 0
+    return {
+        "file_id": str(metadata.get("file_id") or "").strip(),
+        "filename": name,
+        "safe_filename": safe_filename,
+        "content_type": str(metadata.get("content_type") or "").strip(),
+        "size": size,
+        "url": str(attachment.uri or "").strip(),
+    }
+
+
+def sage_chat_attachment_dicts_from_turn_attachments(
+    attachments: Optional[List[TurnAttachment]],
+) -> List[Dict[str, Any]]:
+    """List form of ``sage_chat_attachment_dict_from_turn_attachment`` — the
+    one call every boundary handing ``AgentTurnRequest.attachments`` to the
+    Sage-native pipeline (handle_sage_chat / execute_sage_turn) should make.
+    """
+    if not attachments:
+        return []
+    return [sage_chat_attachment_dict_from_turn_attachment(item) for item in attachments]
+
+
 def serialize_agent_turn_request(request: AgentTurnRequest) -> Dict[str, Any]:
     return {
         "tenant_id": str(request.tenant_id or "").strip(),

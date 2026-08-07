@@ -191,6 +191,98 @@ class DirectChatGenerationServiceTests(unittest.TestCase):
         self.assertIn("Looks like the commands ran", events[-1]["payload"]["reply"])
         self.assertIn("uname -a && sw_vers", events[-1]["payload"]["reply"])
 
+    def test_stream_provider_backed_direct_chat_reads_attachments_from_hand_rolled_session_ctx(self) -> None:
+        # Regression test. sage_agent_runtime_service.py's
+        # _run_sage_action_loop_v3 builds session_ctx["agent_turn_request"]
+        # as a hand-rolled dict using the Sage-native SageChatAttachment
+        # shape ({file_id, filename, safe_filename, content_type, size,
+        # url}) -- NOT TurnAttachment's {kind, uri, name, metadata}. The
+        # "Attachment context injection" block used to hand that dict
+        # straight to attachment_utils.build_attachment_context, which only
+        # ever understood attribute access (att.metadata) -- AttributeError
+        # on every attachment, on every turn that reached this point (i.e.
+        # every turn once _load_attachment_context's own instance of the
+        # same bug was fixed). Proves the fix: this now completes cleanly
+        # and the attached file's content reaches the model.
+        import tempfile
+        from pathlib import Path
+
+        services = self._services(stream_events=[])
+        services.generate_chat_reply_stream_with_provider_fallback = lambda **kwargs: iter([
+            {
+                "type": "result",
+                "reply": "Got it.",
+                "usage_masked": {"provider": "openai"},
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "attempted_providers": "openai",
+                "error": "",
+                "tool_calls": [],
+            }
+        ])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            attachments_dir = Path(tmp_dir)
+            (attachments_dir / "safe-notes.txt").write_text("the file says hello", encoding="utf-8")
+
+            with mock.patch(
+                "server_modules.workspace_context.workspace_attachments_dir",
+                return_value=attachments_dir,
+            ):
+                events = list(
+                    direct_chat_generation_service.stream_provider_backed_direct_chat(
+                        services=services,
+                        context={"provider": "openai"},
+                        metadata={"provider": "openai", "model": "gpt-5.4"},
+                        system_prompt="System prompt",
+                        normalized_workspace_id="ws-1",
+                        normalized_requested_provider="openai",
+                        normalized_requested_model="gpt-5.4",
+                        normalized_reasoning_effort="medium",
+                        normalized_thread_id="thread-1",
+                        normalized_message="What does this file say?",
+                        compacted_prior_messages=[],
+                        prior_messages_used=False,
+                        history_mode="none",
+                        connected_systems=[],
+                        tool_capabilities=[],
+                        availability_payload={"ai_ready": True},
+                        tools=[],
+                        direct_chat_credentials={},
+                        proactive_suggestions=[],
+                        tool_loop_session_key="session-1",
+                        fallback_reason=None,
+                        session_ctx={
+                            "agent_turn_request": {
+                                "tenant_id": "tenant-1",
+                                "workspace_id": "ws-1",
+                                "thread_id": "thread-1",
+                                "session_id": "thread-1",
+                                "message": "What does this file say?",
+                                "channel": "sage",
+                                "actor": {"type": "user", "id": "owner"},
+                                "attachments": [
+                                    {
+                                        "file_id": "file-1",
+                                        "filename": "notes.txt",
+                                        "safe_filename": "safe-notes.txt",
+                                        "content_type": "text/plain",
+                                        "size": 20,
+                                        "url": "https://files.example.com/safe-notes.txt",
+                                    }
+                                ],
+                            },
+                        },
+                        trace_context=None,
+                        resolved_chat_max_iterations=3,
+                        direct_tool_result_summary_system_message="Summarize tool results.",
+                        assistant_plan_tools=[],
+                    )
+                )
+
+        self.assertTrue(events, "stream_provider_backed_direct_chat produced no events at all")
+        self.assertEqual(events[-1]["payload"]["reply"], "Got it.")
+
     def test_stream_provider_backed_direct_chat_never_streams_split_fullwidth_dsml(self) -> None:
         # "Checking now." (not "Let me check.") deliberately: this test is
         # about DSML-token stripping across chunk boundaries, not tool

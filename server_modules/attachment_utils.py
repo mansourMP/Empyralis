@@ -1,5 +1,11 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING, List
+
+if TYPE_CHECKING:
+    from server_modules.agent_turn import TurnAttachment
 
 TEXT_MIME_PREFIXES = (
     "text/",
@@ -10,11 +16,17 @@ TEXT_MIME_PREFIXES = (
 MAX_TEXT_CHARS = 8000
 
 
-async def preprocess_image_attachments(workspace_id: str, attachments: list) -> None:
+async def preprocess_image_attachments(workspace_id: str, attachments: "List[TurnAttachment]") -> None:
     """Pre-resolve Gemini vision descriptions for image attachments.
 
     Must be called from an async context before build_attachment_context().
     Mutates attachment metadata in place. No-op if EMPYRALIS_VISION_API_KEY is not set.
+
+    ``attachments`` must be ``List[TurnAttachment]`` (agent_turn.py) — every
+    field below is accessed as an attribute, never via ``.get()``. Callers
+    that only have a serialized/dict form must resolve it first (see
+    ``agent_turn.resolve_agent_turn_request`` for the pattern every other
+    consumer of a session's ``agent_turn_request`` uses).
     """
     vision_key = os.environ.get("EMPYRALIS_VISION_API_KEY")
     if not vision_key:
@@ -51,21 +63,23 @@ async def preprocess_image_attachments(workspace_id: str, attachments: list) -> 
             att.metadata["description"] = f"(Vision processing failed: {e})"
 
 
-def build_attachment_context(workspace_id: str, attachments: list) -> str:
+def build_attachment_context(workspace_id: str, attachments: "List[TurnAttachment]") -> str:
     """Convert attachments to a text block for LLM injection.
 
     Synchronous — no network calls. Text files get content inline.
     Everything else gets a placeholder with filename/type/size.
+
+    ``attachments`` must be ``List[TurnAttachment]`` — see
+    ``preprocess_image_attachments``'s docstring above for the same
+    contract and why it's unambiguous. This function used to accept a bare
+    dict here too (defensively, via ``getattr``/``isinstance`` probing) —
+    that dual-shape tolerance is exactly what let a bare dict ride all the
+    way to `.metadata` (a plain dict has no such attribute) and raise
+    AttributeError; the fix is a single conversion boundary at the caller,
+    not tolerance here.
     """
     if not attachments:
         return ""
-
-    import sys
-    print(f"DEBUG build_attachment_context called: {len(attachments)} attachments", file=sys.stderr)
-    for i, att in enumerate(attachments):
-        print(f"DEBUG att[{i}] type={type(att).__name__}", file=sys.stderr)
-        if isinstance(att, dict):
-            print(f"DEBUG att[{i}] keys={list(att.keys())[:15]}", file=sys.stderr)
 
     from server_modules.workspace_context import workspace_attachments_dir
 
@@ -73,8 +87,8 @@ def build_attachment_context(workspace_id: str, attachments: list) -> str:
     parts = []
 
     for att in attachments:
-        name = str(getattr(att, "name", None) or (att.metadata or {}).get("filename", "unknown")).strip()
-        metadata = getattr(att, "metadata", {}) or {}
+        metadata = att.metadata or {}
+        name = str(att.name or metadata.get("filename") or "unknown").strip()
         safe_name = str(metadata.get("safe_filename") or name).strip()
         content_type = str(metadata.get("content_type", "application/octet-stream")).strip().lower()
         size = metadata.get("size", 0)

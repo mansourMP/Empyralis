@@ -2,7 +2,13 @@ import importlib
 import unittest
 from unittest.mock import patch
 
-from server_modules.agent_turn import build_direct_chat_turn_request, serialize_agent_turn_request
+from server_modules.agent_turn import (
+    AgentTurnRequest,
+    TurnActor,
+    TurnAttachment,
+    build_direct_chat_turn_request,
+    serialize_agent_turn_request,
+)
 from server_modules.agent_trace_service import TraceContext
 from server_modules.direct_chat_service import (
     DirectChatExecutionServices,
@@ -285,6 +291,86 @@ class DirectChatServiceTests(unittest.TestCase):
         self.assertEqual(execution["thread_id"], "thread-1")
         self.assertEqual(execution["client_request_id"], "req-1")
         self.assertTrue(callable(execution["producer"]))
+
+    def test_execute_direct_chat_turn_request_producer_converts_turn_attachments_before_execute_sage_turn(self):
+        # Regression test for the crash where attaching any file raised
+        # AttributeError: 'TurnAttachment' object has no attribute 'get'.
+        # turn_request.attachments is List[TurnAttachment] (the canonical
+        # AgentTurnRequest contract); execute_sage_turn -> handle_sage_chat
+        # -> _load_attachment_context is the Sage-native pipeline and only
+        # ever understood the flat SageChatAttachment dict shape. This test
+        # drives the REAL producer (the live code path for every web-chat
+        # turn — see the module docstring above build_direct_chat_event_
+        # producer) and asserts execute_sage_turn receives plain dicts, not
+        # dataclass instances.
+        turn_request = AgentTurnRequest(
+            tenant_id="tenant-1",
+            workspace_id="workspace-1",
+            thread_id="thread-1",
+            session_id="thread-1",
+            channel="web",
+            actor=TurnActor(type="user", id="user-1", display_name="Alice"),
+            message="What is in this file?",
+            attachments=[
+                TurnAttachment(
+                    kind="file",
+                    uri="https://files.example.com/w/workspace-1/attachments/safe-a.txt",
+                    name="a.txt",
+                    metadata={
+                        "safe_filename": "safe-a.txt",
+                        "content_type": "text/plain",
+                        "size": 5,
+                        "file_id": "file-1",
+                    },
+                )
+            ],
+            execution_mode="sync",
+            response_mode="stream",
+        )
+        services = DirectChatExecutionServices(
+            chat_stream_key=lambda current_user, body: ("user-1:thread-1:req-1", "thread-1", "req-1"),
+            session_manager_enabled=lambda: False,
+            session_manager_factory=lambda: _DummyManager(),
+            build_direct_operator_reply=lambda **kwargs: {"reply": "direct"},
+            build_chat_turn_event_stream=lambda **kwargs: iter(()),
+        )
+
+        execution = __import__("asyncio").run(
+            execute_direct_chat_turn_request(
+                turn_request=turn_request,
+                current_user={"user_id": "user-1"},
+                services=services,
+                chat_body={"thread_id": "thread-1", "client_request_id": "req-1"},
+            )
+        )
+
+        captured: dict = {}
+
+        async def _fake_execute_sage_turn(**kwargs):
+            captured.update(kwargs)
+            return {"message": "ok", "error": None, "tool_calls": [], "provider": "test", "model": None}
+
+        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=_fake_execute_sage_turn):
+            events = list(execution["producer"]())
+
+        self.assertIn("attachments", captured)
+        received_attachments = captured["attachments"]
+        self.assertEqual(len(received_attachments), 1)
+        received = received_attachments[0]
+        self.assertIsInstance(received, dict)
+        self.assertNotIsInstance(received, TurnAttachment)
+        self.assertEqual(received["filename"], "a.txt")
+        self.assertEqual(received["safe_filename"], "safe-a.txt")
+        self.assertEqual(received["content_type"], "text/plain")
+        self.assertEqual(received["file_id"], "file-1")
+        self.assertEqual(received["url"], "https://files.example.com/w/workspace-1/attachments/safe-a.txt")
+
+        # The turn must actually complete (not swallow the attachment and
+        # silently proceed as if nothing was attached).
+        final_events = [e for e in events if isinstance(e, dict) and e.get("type") == "final"]
+        self.assertEqual(len(final_events), 1)
+        self.assertEqual(final_events[0]["payload"]["mode"], "answer")
+        self.assertEqual(final_events[0]["payload"]["reply"], "ok")
 
 
 if __name__ == "__main__":
