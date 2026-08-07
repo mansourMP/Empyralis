@@ -883,20 +883,23 @@ def execute_single_direct_tool_call(
         _guard_tools = set(_spec_guard.get("tools") or [])
         _guard_connectors = set(_spec_guard.get("connectors") or [])
         _tool_connector = str(connector_id or "").strip().lower()
-        # fix/agent-task-tools-on-sdk-engine: project_task__* (the shared
-        # project task board — skills_service.py's connector_id ==
-        # "project_task" dispatch) is intrinsic to project membership, not
-        # a bindable connector — it has no agent_connector_bindings row to
-        # ever check (see sage_agent_runtime_service.py's
-        # _PROJECT_TASK_CONNECTOR_ID comment). Gated on the guard's own
-        # project_id instead, mirroring the prompt-time grant in
-        # _specialist_tool_allowed / _filter_registry_for_specialist.
+        # fix/agent-task-tools-on-sdk-engine, feat/document-agent-tools:
+        # project_task__* (the shared project task board — skills_service.py's
+        # connector_id == "project_task" dispatch) and document__* (a
+        # project's owned documents — connector_id == "document") are both
+        # intrinsic to project membership, not a bindable connector — neither
+        # has an agent_connector_bindings row to ever check (see
+        # sage_agent_runtime_service.py's _PROJECT_SCOPED_CONNECTOR_IDS
+        # comment). Gated on the guard's own project_id instead, mirroring
+        # the prompt-time grant in _specialist_tool_allowed /
+        # _filter_registry_for_specialist.
         _guard_project_id = str(_spec_guard.get("project_id") or "").strip()
+        _guard_project_scoped_connectors = ("project_task", "document")
         _guard_allowed = (
             tool_name in _guard_core
             or tool_name in _guard_tools
             or (bool(_tool_connector) and _tool_connector in _guard_connectors)
-            or (_tool_connector == "project_task" and bool(_guard_project_id))
+            or (_tool_connector in _guard_project_scoped_connectors and bool(_guard_project_id))
         )
         if not _guard_allowed:
             _acting = str(_spec_guard.get("agent_install_id") or "").strip() or None
