@@ -382,4 +382,18 @@ CREATE POLICY empyralis_task_notifications_scope ON task_notifications
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- project_documents is a BRAND NEW table (migrations/add_project_
+-- documents.sql), same posture as task_notifications just above: every
+-- call site in project_documents_repository.py was written against the
+-- scoped rls_fetch/rls_fetchrow/rls_execute helpers from the start, so
+-- there is no ordering hazard and RLS ships in the same change that
+-- creates the table.
+ALTER TABLE project_documents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_documents FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_project_documents_scope ON project_documents;
+CREATE POLICY empyralis_project_documents_scope ON project_documents
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;

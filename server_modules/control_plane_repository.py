@@ -864,6 +864,38 @@ CREATE INDEX IF NOT EXISTS idx_task_notifications_recipient_unread
     ON task_notifications(tenant_id, workspace_id, recipient_user_id)
     WHERE read_at IS NULL;
 
+-- Project documents: a project's owned, flat markdown knowledge -- the
+-- storage half of the "owned-context layer for a team" positioning
+-- (CLAUDE.md). No RAG/embeddings/vector store; an agent finds a document by
+-- listing this project's set, not through a retrieval pipeline. Body lives
+-- HERE (Postgres), not on disk -- the database of record, RLS-scoped,
+-- durable across a machine change, unlike agent_memory.py's local-disk
+-- files or knowledge_sources' on-disk markdown. `id` is stable and never
+-- reused, deliberately, so a later revisions table can hang off it -- this
+-- pass does not build revisions. RLS from day one (see migrations/
+-- enable_rls.sql), same posture as task_notifications above: every query
+-- goes through rls_fetch/rls_fetchrow/rls_execute, no legacy call site to
+-- sequence around. See migrations/add_project_documents.sql for the full
+-- reasoning, including the flat-vs-hierarchy call.
+CREATE TABLE IF NOT EXISTS project_documents (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    created_by TEXT NULL,
+    updated_by TEXT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (project_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_documents_project
+    ON project_documents(tenant_id, workspace_id, project_id, title);
+
 -- Bug reports (MAN-106): a small, honest "report an issue" entry point
 -- reachable from anywhere in the product via a rail icon button (see
 -- frontend/lib/workspace/fleet/BugReportButton.tsx). Deliberately NOT a
