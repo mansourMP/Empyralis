@@ -166,6 +166,49 @@ class AgentChannelRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_call_kwargs["message"], "Review PR #128: fix auth middleware")
         self.assertEqual(_call_kwargs["channel_sender_id"], "github-user-1")
 
+    async def test_whatsapp_routes_through_execute_sage_turn(self):
+        """FIX (channel-audit Defect 2): "whatsapp" was missing from
+        _SAGE_CHANNEL_ORIGIN_MAP entirely, so every WhatsApp Business
+        "public deployed agent" message (whatsapp_ingress_service.py's
+        _dispatch_public_deployed_agent_envelope) fell through to the
+        "Unimplemented channels" branch and got channel_unavailable back —
+        the turn never reached execute_sage_turn. Mirrors
+        test_slack_guild_routes_through_execute_sage_turn /
+        test_discord_guild_routes_through_execute_sage_turn /
+        test_github_routes_through_execute_sage_turn exactly, proving the
+        "authorized" (mapped) case now reaches the model — see
+        test_unimplemented_channel_returns_unavailable for the companion
+        "unauthorized" (unmapped) case, which must still be refused."""
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(
+                message="WhatsApp response from Sage.",
+                trace_id="trace-whatsapp-1",
+                provider="deepseek",
+                model="deepseek-chat",
+            )),
+        ) as execute_mock:
+            result = await agent_channel_router.route_inbound_channel_message(
+                tenant_id="tenant-4",
+                workspace_id="workspace-4",
+                channel_key="whatsapp",
+                endpoint_key="+15551234567",
+                customer_message="What's the status of order #42?",
+                actor_id="+15559876543",
+                actor_display_name="+15559876543",
+                message_id="wa-msg-1",
+            )
+
+        self.assertTrue(result["ok"], f"Expected ok=True, got {result}")
+        self.assertEqual(result["status"], "completed")
+        self.assertIsNotNone(result["run_id"])
+        self.assertEqual(result["reply"], "WhatsApp response from Sage.")
+        execute_mock.assert_awaited_once()
+        _call_kwargs = execute_mock.call_args.kwargs
+        self.assertEqual(_call_kwargs["channel_origin"], "whatsapp_twilio")
+        self.assertEqual(_call_kwargs["message"], "What's the status of order #42?")
+        self.assertEqual(_call_kwargs["channel_sender_id"], "+15559876543")
+
     async def test_customer_message_dict_extracts_text_field(self):
         """When customer_message is a dict, the 'text' field is extracted."""
         with patch(

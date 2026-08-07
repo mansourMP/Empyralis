@@ -120,12 +120,43 @@ async def _resolve_agent_for_inbound(
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Channel keys that route through the main Sage agent pipeline.
+#
+# FIX (channel-audit Defect 2): "whatsapp" was missing entirely.
+# whatsapp_ingress_service.py's _dispatch_public_deployed_agent_envelope
+# (the WhatsApp Business "public deployed agent" mode — a workspace's own
+# Twilio-backed WhatsApp number replying to any customer, the WhatsApp
+# analog of "telegram" -> telegram_hosted below) has always called
+# route_inbound_channel_message(channel_key="whatsapp", ...), but with no
+# entry here channel_origin resolved to None, so every call fell through to
+# the "Unimplemented channels" branch below and returned
+# {"status": "channel_unavailable"} — the turn never reached
+# execute_sage_turn. This mode has been silently dead since it shipped.
+#
+# Origin-specific handling checked for parity before adding this entry (see
+# channel_adapter.ChannelOrigin.WHATSAPP_TWILIO's own comment for the naming
+# precedent): entitlements enforcement
+# (entitlements_service.enforce_channel_surface_access_for_workspace_id) and
+# any Gate 1 dmPolicy/owner-pairing gate are both — by the SAME design, not
+# an oversight only WhatsApp has — absent from every public-deployed-agent
+# dispatch path (confirmed against telegram_ingress_service.py's own
+# _dispatch_public_deployed_agent_envelope, which skips both identically).
+# That's correct for this specific mode: "public deployed agent" traffic is
+# customer-facing by product design — anyone messaging a workspace's own
+# published WhatsApp Business / Telegram bot number is expected traffic,
+# not a candidate for the owner-only personal-channel DM gate, which exists
+# for the OWNER's own personal number instead
+# (personal_channels_service._enforce_dm_policy — a different surface
+# entirely, unaffected by this fix). No caller on this path constructs an
+# InboundEnvelope either (WhatsApp or Telegram), so envelope-based owner-
+# command gating is likewise consistently absent for both, not a WhatsApp-
+# specific gap.
 _SAGE_CHANNEL_ORIGIN_MAP: dict[str, str] = {
     "slack": "slack_guild",
     "discord": "discord_guild",
     "github": "github",
     "telegram": "telegram_hosted",
     "sms": "sms",
+    "whatsapp": "whatsapp_twilio",
 }
 
 

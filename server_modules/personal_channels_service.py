@@ -4324,12 +4324,15 @@ async def handle_cloud_channel_inbound(
             Telegram-specific bridge call regardless of this value, and
             cloud-session-manager/src/ has no whatsapp/ producer at all
             today, so whatsapp_personal never actually arrives here)
-        message: {external_message_id, sender_id, sender_name, text,
-            received_at} today; optionally is_group/is_mentioned/
-            is_reply_to_sage/chat_title if a future upstream adds them (see
-            the group gate below — those fields default to "not a group"
-            when absent, so this stays backward compatible with the current
-            wire shape)
+        message: {external_message_id, sender_id, sender_name,
+            linked_username, text, received_at, is_group, is_mentioned,
+            is_reply_to_sage} on the live wire today (see the group gate
+            below for how those last three are used; missing/false is
+            treated as "not a group" so any caller predating commit
+            aaadcfdf4, which added them, stays compatible). Never carries
+            is_self_chat or a numeric linked user id — see the dmPolicy
+            gate below for why that specifically is what keeps owner
+            identity unresolvable on this path.
         workspace_id: workspace UUID from cloud session (defaults to "default" for backward compat)
     """
     if not _CLOUD_SESSION_MANAGER_ENABLED:
@@ -4370,59 +4373,50 @@ async def handle_cloud_channel_inbound(
         raise ValueError("cloud_channel_inbound requires a non-empty sender_id")
 
     # ── Group/mention gate (backend safety net) ──
-    # WIRE REALITY TODAY: the only live producer of this webhook —
-    # cloud-session-manager/src/telegram/hmac.js::buildSignedInbound, called
-    # from inbound-handler.js — never puts is_group / is_mentioned /
-    # is_reply_to_sage on the wire. The signed `message` body is exactly
-    # {external_message_id, sender_id, sender_name, linked_username, text,
-    # received_at}. So message.get("is_group") is always falsy here in
-    # production today and this block is presently a no-op.
+    # WIRE REALITY (corrected 2026-08-07 — the paragraph below claiming
+    # is_group/is_mentioned/is_reply_to_sage are never on the wire was true
+    # when written but went stale without being updated): commit aaadcfdf4
+    # ("fix the cloud personal-channel path's group/broadcast/self-chat
+    # gaps", 2026-07-19 — predates this comment's own 2026-07-23 authoring
+    # date) taught cloud-session-manager/src/telegram/hmac.js::buildSignedInbound
+    # to forward is_group / is_mentioned / is_reply_to_sage on the signed
+    # `message` body. The signed body today is {external_message_id,
+    # sender_id, sender_name, linked_username, text, received_at, is_group,
+    # is_mentioned, is_reply_to_sage} — see that function's own doc comment.
+    # So this gate is a genuine, live backend safety net for group/mention
+    # gating today, not a no-op — it engages on this path exactly like it
+    # does for the three Gateway handlers above.
     #
-    # It is a no-op because the signal is stripped upstream, NOT because
-    # groups can't reach this function. GramJS's NewMessage handler
-    # (cloud-session-manager/src/telegram/client-factory.js) fires for
-    # group/channel chats too and computes a real isGroup; inbound-
-    # handler.js:79-123 already gates on it there (isGroup && !isMentioned
-    # && !isReplyToSage -> drop the message before it is ever forwarded —
-    # added in 927d2c7c "add Saved Messages support + group chat gating",
-    # explicitly to prevent "credit drain and Telegram spam risk from
-    # replying to every group message", i.e. the same prior incident this
-    # backend gate exists for). It then omits is_group/entities/
-    # reply_to_msg_id when building the HTTP body, so even an addressed
-    # group message that passes that gate arrives here indistinguishable
-    # from a DM — and its sender_id is the individual member's JID (not the
-    # group's), so a reply would route to a 1:1 chat with that member, not
-    # back into the group (a separate, pre-existing routing quirk, not a
-    # group-gating one).
+    # It still exists as defense-in-depth even though inbound-handler.js
+    # already has its OWN gate that drops an unaddressed group message
+    # before this function is ever called (isGroup && !isMentioned &&
+    # !isReplyToSage -> skip, added in 927d2c7c "add Saved Messages support
+    # + group chat gating", explicitly to prevent "credit drain and
+    # Telegram spam risk from replying to every group message" — the same
+    # prior incident this backend gate exists for): if cloud-session-
+    # manager's JS gate ever regresses, or a future producer of this same
+    # webhook doesn't replicate it, this is what stops an unaddressed group
+    # message from reaching a live agent turn. The cloud-session-manager
+    # path should not be the one ingestion path in this file that trusts a
+    # single upstream gate with zero redundancy.
     #
-    # This block exists as the same defense-in-depth backend safety net the
-    # three Gateway handlers above already have — each states "the Gateway-
-    # side filter is the primary gate; this is a backend safety net in case
-    # the Gateway bypasses it for any reason" (see
-    # _handle_telegram_gateway_channel_inbound /
-    # _handle_whatsapp_gateway_channel_inbound /
-    # _handle_local_bridge_gateway_channel_inbound). The cloud-session-
-    # manager path should not be the one ingestion path in this file that
-    # trusts a single upstream gate with zero redundancy: if
-    # cloud-session-manager's JS gate ever regresses, or some future
-    # producer of this same webhook doesn't replicate it, this is what
-    # stops an unaddressed group message from reaching a live agent turn.
+    # Two things NOT on the wire even after aaadcfdf4, both relevant to the
+    # dmPolicy gate right below this one: entities/reply_to_msg_id (so this
+    # side can't independently recompute is_mentioned/is_reply_to_sage, only
+    # trust what inbound-handler.js precomputed) and is_self_chat (see the
+    # dmPolicy gate's own comment for why that absence — not this gate's
+    # concern — is what makes owner identity unresolvable on this path
+    # today). Also still true: an addressed group message's sender_id is
+    # the individual member's JID (not the group's), so a reply would route
+    # to a 1:1 chat with that member, not back into the group (a separate,
+    # pre-existing routing quirk, not a group-gating one).
     #
-    # For this to ever actually engage, the upstream payload must start
-    # setting message.is_group (bool) and either message.is_mentioned
-    # (bool, precomputed) or message.entities (raw, for this side to
-    # compute it) plus message.is_reply_to_sage (bool) or
-    # message.reply_to_msg_id paired with a sent-message-id set. Missing
-    # is_group defaults to False deliberately — a DM (the only shape the
-    # wire actually sends today) must never be silently dropped by this
-    # gate.
-    #
-    # Now routed through _enforce_group_policy — the same ONE shared
-    # resolver the three Gateway handlers use — instead of its own inline
-    # copy, so this stays a genuine no-op today (agent_id="": no per-agent
-    # identity resolves on this path, same as the local-bridge handler) but
-    # picks up group_policy/requireMention consistently the moment the
-    # upstream wire ever does start sending these fields.
+    # Routed through _enforce_group_policy — the same ONE shared resolver
+    # the three Gateway handlers use — instead of its own inline copy
+    # (agent_id="": no per-agent identity resolves on this path, same as
+    # the local-bridge handler, so group_policy/requireMention config falls
+    # back to that resolver's own unresolved-identity default rather than a
+    # per-agent one).
     group_decision = await _enforce_group_policy(
         registration={"tenant_id": "default", "workspace_id": resolved_workspace_id},
         channel_key=channel_key,
@@ -4436,6 +4430,95 @@ async def handle_cloud_channel_inbound(
             "reason": group_decision["reason"],
             "channel_key": channel_key,
             "session_id": session_id,
+        }
+
+    # Read BEFORE the dmPolicy gate below — mirrors the Gateway handlers'
+    # identical ordering (see _handle_telegram_gateway_channel_inbound).
+    # Will be empty for essentially every cloud session today: no
+    # configure/claim step ever writes a row keyed by this "cloud:<id>"
+    # gateway_id (see _resolve_agent_id_for_inbound's docstring — the fast
+    # path is an indexed lookup only, populated by
+    # _claim_agent_channel_state, which nothing on this path calls). That is
+    # exactly why the fail-closed owner_only fallback below is intentional,
+    # not a bug.
+    existing_state = personal_channels_repository.get_telegram_state(
+        f"cloud:{session_id}", channel_key=channel_key, agent_id="",
+    )
+
+    # ── dmPolicy gate (Gate 1): MUST run before any reply — including a
+    # control-command reply — is generated. See _enforce_dm_policy's
+    # docstring; reused verbatim, same function, same contract as the three
+    # Gateway handlers above. This was the actual defect: this function had
+    # a group gate but NO dm gate at all, so any stranger who messaged the
+    # owner's cloud-hosted Telegram session reached a live agent turn
+    # unconditionally — the exact incident this whole effort exists to
+    # prevent, just on a second, default-enabled ingestion path.
+    #
+    # ENFORCEABILITY ON THIS WIRE: the signed message body this path
+    # receives (cloud-session-manager/src/telegram/hmac.js::buildSignedInbound)
+    # carries sender_id, sender_name, linked_username, text, received_at,
+    # is_group, is_mentioned, is_reply_to_sage — but never is_self_chat, and
+    # never a numeric linked user id (only the linked account's username,
+    # which cannot be compared against a numeric sender_id). Combined with
+    # existing_state above always being empty and agent_id always being ""
+    # on this path (no per-agent identity resolves here — see the group
+    # gate's own comment above), _is_owner_message can never resolve True
+    # here, and _load_agent_dm_policy_config's unresolved-identity fallback
+    # is always owner_only with an empty allowlist. So this gate blocks
+    # EVERY sender on this path today — including the genuine owner's own
+    # self-chat messages — until a real agent_id and an owner-identity
+    # signal (is_self_chat and/or a linked numeric user id on the wire) are
+    # wired for the cloud path. That is the correct fail-closed behavior
+    # for a path that cannot currently authenticate its senders; passing
+    # every sender through as before is exactly the live security gap this
+    # fixes.
+    dm_decision = await _enforce_dm_policy(
+        registration={"tenant_id": "default", "workspace_id": resolved_workspace_id},
+        channel_key=channel_key,
+        agent_id="",
+        message=message,
+        remote_jid=remote_jid,
+        existing_state=existing_state,
+        label="Telegram",
+    )
+    if not dm_decision["allowed"]:
+        _dm_sender_id = str(dm_decision.get("sender_id") or "")
+        _emit_automatic_reply_audit(
+            action=f"personal_channel.{channel_key.split('_', 1)[0]}.dm_policy",
+            status="pairing_challenge" if dm_decision.get("system_reply") else "blocked",
+            registration={"tenant_id": "default", "workspace_id": resolved_workspace_id},
+            gateway_id=f"cloud:{session_id}",
+            channel_key=channel_key,
+            provider="telegram_gramjs",
+            detail=f"Cloud-session inbound message dropped by dmPolicy (mode={dm_decision.get('mode')}).",
+            metadata={
+                "remote_jid": remote_jid,
+                "inbound_external_message_id": external_message_id,
+                "dm_policy_mode": dm_decision.get("mode"),
+                "sender_id_hash": hashlib.sha256(_dm_sender_id.encode("utf-8")).hexdigest()[:16] if _dm_sender_id else None,
+            },
+            idempotency_key=f"personal_channel.dm_policy.cloud:{session_id}:{channel_key}:{external_message_id}",
+        )
+        system_reply = str(dm_decision.get("system_reply") or "").strip()
+        if system_reply:
+            # Same one-time pairing-challenge dispatch as the Gateway path's
+            # _handle_dm_policy_blocked, adapted to this path's HTTP
+            # dispatch (dispatch_cloud_channel_outbound) instead of the
+            # Gateway WebSocket (gateway_protocol_service.dispatch_channel_outbound)
+            # — the two transports don't share a delivery mechanism, only
+            # the policy gate itself, which is fully reused above.
+            await dispatch_cloud_channel_outbound(
+                session_id=session_id,
+                text=system_reply,
+                remote_jid=remote_jid,
+            )
+        return {
+            "ignored": True,
+            "blocked": True,
+            "reason": "dm_policy",
+            "channel_key": channel_key,
+            "session_id": session_id,
+            "policy": {"gate": "dm_policy", **dm_decision},
         }
 
     # ── Shared command dispatcher ──
@@ -4456,28 +4539,29 @@ async def handle_cloud_channel_inbound(
         return {"status": "command_handled", "session_id": session_id, "reply_text": _cmd_reply[:200]}
 
     # Build Sage reply using the existing bridge — same as Gateway path.
-    # is_owner intentionally NOT passed here (stays at its safe default of
-    # False/guarded): this Stage 2 cloud-session-manager path has no
-    # dmPolicy/_is_owner_message equivalent that robustly resolves owner
-    # identity the way the Gateway-based handlers below do — see
-    # HARD CONSTRAINTS in fix/owner-aware-provenance: uncertain identity
-    # must default to the guarded/external path, never to owner trust.
+    # is_owner now wired from dm_decision (the dmPolicy gate above, which
+    # this path previously never ran at all — see that gate's own comment).
+    # In practice this still always evaluates to False today: the same
+    # enforceability gap that makes the gate itself fail-closed
+    # (no is_self_chat, no numeric linked user id on this wire, no resolved
+    # agent_id) means _is_owner_message can never return True here either.
+    # Passing the real decision through rather than a hardcoded False is
+    # forward-compatible plumbing for when that gap closes — see HARD
+    # CONSTRAINTS in fix/owner-aware-provenance: uncertain identity must
+    # default to the guarded/external path, never to owner trust, which
+    # dm_decision["is_owner"] already guarantees by construction.
     #
-    # is_group/chat_label: the SAME "family group" bug fix as the three
-    # Gateway handlers (see _handle_telegram_gateway_channel_inbound's
-    # matching build_telegram_personal_reply call) — this used to build the
-    # reply with zero group signal even for a message that had ALREADY
-    # passed the is_group/is_mentioned gate above, so the model was never
-    # told an addressed group turn was a group turn at all (it reached
-    # _personal_channel_guard_metadata's Chat-Type/Group-Name branch with
-    # is_group hardcoded False, the exact class of bug this fix line
-    # closes). Wired from the same message.get("is_group")/"chat_title"
-    # fields the gate above reads; per this function's own docstring the
-    # live wire never sets them today (cloud-session-manager strips them
-    # upstream), so this is forward-compatible plumbing, not a behavior
-    # change against current production traffic — identical in spirit to
-    # the Gateway handlers' own "safe no-op today" comments on this same
-    # field.
+    # is_group: the SAME "family group" bug fix as the three Gateway
+    # handlers (see _handle_telegram_gateway_channel_inbound's matching
+    # build_telegram_personal_reply call) — this used to build the reply
+    # with zero group signal even for a message that had ALREADY passed the
+    # is_group/is_mentioned gate above, so the model was never told an
+    # addressed group turn was a group turn at all. Wired from
+    # message.get("is_group"), which commit aaadcfdf4 made a real signal on
+    # this wire (see the group gate's own comment above) — no longer a
+    # forward-compatible no-op. chat_label remains None: cloud-session-
+    # manager's hmac.js still never puts a chat_title/chat label on the
+    # wire, unlike is_group/is_mentioned/is_reply_to_sage.
     reply = await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
         workspace_id=resolved_workspace_id,
         gateway_id=f"cloud:{session_id}",
@@ -4485,6 +4569,7 @@ async def handle_cloud_channel_inbound(
         text=text,
         push_name=push_name,
         source_event_id=external_message_id,
+        is_owner=bool(dm_decision.get("is_owner")),
         is_group=bool(message.get("is_group")),
         chat_label=str(message.get("chat_title") or "").strip() or None,
         was_addressed=group_decision.get("was_addressed"),

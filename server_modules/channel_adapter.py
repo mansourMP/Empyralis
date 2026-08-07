@@ -19,6 +19,14 @@ class ChannelOrigin(str, Enum):
     TELEGRAM_HOSTED = "telegram_hosted"
     TELEGRAM_PERSONAL = "telegram_personal"
     WHATSAPP_PERSONAL = "whatsapp_personal"
+    # "Public deployed agent" mode: a workspace's own WhatsApp Business
+    # number (Twilio-backed — see whatsapp_ingress_service.py's account_sid/
+    # message_sid handling) replying to any customer who messages it, the
+    # WhatsApp analog of TELEGRAM_HOSTED. Named to match the existing
+    # connection-id this same surface already uses in
+    # connection_readiness_service.py's _EXTERNAL_ACCOUNT_CONNECTION_IDS /
+    # _CERTIFICATION_REQUIREMENTS ("whatsapp_twilio"), not a new coinage.
+    WHATSAPP_TWILIO = "whatsapp_twilio"
     DISCORD_PERSONAL = "discord_personal"
     IMESSAGE_PERSONAL = "imessage_personal"
     WECHAT_PERSONAL = "wechat_personal"

@@ -63,6 +63,7 @@ _PLATFORM_LABELS: Dict[str, str] = {
     "telegram_hosted": "Telegram",
     "telegram_personal": "Telegram",
     "whatsapp_personal": "WhatsApp",
+    "whatsapp_twilio": "WhatsApp",
     "signal_personal": "Signal",
     "imessage_personal": "iMessage",
     "wechat_personal": "WeChat",

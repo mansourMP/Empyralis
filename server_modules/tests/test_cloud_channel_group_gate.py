@@ -32,17 +32,26 @@ test_personal_channel_group_gate.py's file docstring for the full history).
 An unaddressed group message is therefore no longer hard-blocked by
 default here either — see the updated test below.
 
-No personal_channels_repository / sqlite involved: unlike the Gateway
-handlers, handle_cloud_channel_inbound never touches that repository at all,
-so this harness only needs to mock the function's direct collaborators
-(command dispatcher short-circuit via plain non-slash text, the Sage bridge
-reply builder, and the outbound HTTP dispatch to cloud-session-manager).
+UPDATED (Gate 1 fix, cloud-audit-defects): handle_cloud_channel_inbound now
+also runs the dmPolicy gate (_enforce_dm_policy) — see
+test_cloud_channel_dm_policy.py for that gate's own tests, including the
+security defect it closes (this path previously had NO dm gate at all, so
+any stranger who messaged the owner's cloud-hosted Telegram session reached
+a live agent turn unconditionally). That gate is orthogonal to the group
+gate under test here, so it's mocked to ALLOW in this file's setUp — same
+convention test_personal_channel_group_gate.py's GroupContextThreadingTests
+already uses for the Gateway handlers. This file also now touches
+personal_channels_repository (the dm gate's existing_state lookup), so
+setUp gives it an isolated tmp sqlite DB rather than the real
+~/.empyralis/state one.
 """
 
 from __future__ import annotations
 
 import importlib
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from server_modules import personal_channels_service
@@ -52,14 +61,38 @@ class CloudChannelGroupGateTests(unittest.IsolatedAsyncioTestCase):
     """Through the LIVE personal_channels_service.handle_cloud_channel_inbound."""
 
     def setUp(self) -> None:
-        global personal_channels_service
+        global personal_channels_service, personal_channels_repository
         personal_channels_service = importlib.import_module("server_modules.personal_channels_service")
+        personal_channels_repository = importlib.import_module("server_modules.personal_channels_repository")
         # Hermetic regardless of the runner's environment — this module-level
         # flag is read at call time, not import time.
         self.enabled_patcher = patch.object(personal_channels_service, "_CLOUD_SESSION_MANAGER_ENABLED", True)
         self.enabled_patcher.start()
 
+        self.tmpdir = tempfile.TemporaryDirectory()
+        db_path = Path(self.tmpdir.name) / "personal-channels.sqlite3"
+        personal_channels_repository.init_personal_channels_db(db_path)
+        self.db_patcher = patch.object(personal_channels_repository, "PERSONAL_CHANNELS_DB_FILE", db_path)
+        self.db_patcher.start()
+
+        # dmPolicy is orthogonal to the group gate under test in this file
+        # (see test_cloud_channel_dm_policy.py for that gate's own tests) —
+        # mocked to ALLOW here purely so a message that passes the group
+        # gate actually reaches the bridge call these tests inspect,
+        # isolating ONE thing: group/mention gating.
+        self.dm_allow_patcher = patch(
+            "server_modules.personal_channels_service._enforce_dm_policy",
+            new=AsyncMock(return_value={
+                "allowed": True, "mode": "open", "sender_id": "111222",
+                "is_owner": False, "system_reply": None, "config_changed": False,
+            }),
+        )
+        self.dm_allow_patcher.start()
+
     def tearDown(self) -> None:
+        self.dm_allow_patcher.stop()
+        self.db_patcher.stop()
+        self.tmpdir.cleanup()
         self.enabled_patcher.stop()
 
     async def test_unaddressed_group_message_is_seen_by_default_see_and_decide(self) -> None:

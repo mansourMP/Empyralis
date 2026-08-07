@@ -162,11 +162,23 @@ test("start(): subscribes over imsg rpc and publishes an inbound DM through the 
   }
 });
 
-test("group gate: an unaddressed group message is never published", async () => {
+// UPDATED (channel-audit Defect 3): this runtime's own shouldSkip drop was
+// REMOVED — it was a second, parallel copy of the exact gate
+// local-bridge-runtime.ts's LocalBridgePersonalChannelRuntime already had
+// removed in commit 53e3abf40, left behind because this in-process `imsg`
+// RPC transport is a distinct code path from that class's BlueBubbles-over-
+// HTTP one (see telegram-group-gate.test.ts's identical 2026-07-23 update,
+// and bluebubbles-bridge.test.ts / signal-cli-bridge.test.ts's matching
+// 53e3abf40 update for the other two local-bridge transports). The backend's
+// _enforce_group_policy is now the ONE shared resolver for this decision —
+// this runtime's job is only to compute and always forward the raw mention
+// FACTS (is_group/is_mentioned/is_reply_to_sage), never to withhold a
+// message based on them.
+test("group gate: an unaddressed group message is still published, with is_mentioned=false so the backend resolver can decide", async () => {
   const fake = makeFakeImsgChild();
   wireAutoRespond(fake);
   const runtime = new ImsgIMessagePersonalChannelRuntime(imessageConfig(), { spawnImpl: () => fake.child });
-  const inbound: unknown[] = [];
+  const inbound: GatewayChannelInboundPayload[] = [];
   runtime.setPublisher({
     publishStateUpdate: async () => undefined,
     publishEvent: async (_type, payload) => {
@@ -188,8 +200,13 @@ test("group gate: an unaddressed group message is never published", async () => 
         is_group: true,
       },
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(inbound.length, 0, "an unaddressed group message must never reach publishEvent");
+    await eventually(() => {
+      assert.equal(inbound.length, 1, "an unaddressed group message must still reach publishEvent — this runtime no longer decides shouldSkip");
+    });
+    const message = inbound[0].message as Record<string, unknown>;
+    assert.equal(message.is_group, true);
+    assert.equal(message.is_mentioned, false);
+    assert.equal(message.is_reply_to_sage, false);
   } finally {
     await runtime.stop();
   }
