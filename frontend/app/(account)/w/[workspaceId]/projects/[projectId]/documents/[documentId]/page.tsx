@@ -3,16 +3,19 @@
 /**
  * A document's own page — /w/{ws}/projects/{projectId}/documents/{documentId}.
  * Structural sibling of tasks/[taskId]/page.tsx: this page owns the data and
- * the writes, DocumentDetailView draws the layout.
+ * the writes, DocumentDetailView draws the layout (and, since 2026-08-07,
+ * the autosave debounce that decides WHEN a write fires — this file only
+ * ever sends the patch it's handed).
  *
  * UNLIKE useFleetTasks, documents are not read out of a shared polled cache
  * — the list route never carries a body (see documents-data.ts's own file
  * header), so a document's OWN page has to fetch it directly via
- * fetchFleetDocument. Refetched after every save/delete via the same
- * function, not merged optimistically — a document's body is a single
- * textarea a person is done typing into when they click Save, so there is
- * no "in-flight while polling" gap the tasks board's pendingStatus overlay
- * exists to paper over.
+ * fetchFleetDocument, once, on mount. A save does NOT refetch: handleSave
+ * folds the PATCH response straight into `document` instead, because
+ * DocumentDetailView's own autosave can fire every ~900ms while a person is
+ * still typing the next word, and a refetch landing mid-keystroke would
+ * fight the in-place editor over what's on screen. See that file's own note
+ * on exactly when it does (and does not) reseed its draft from this prop.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -83,12 +86,21 @@ export default function DocumentDetailPage() {
   );
   useBreadcrumbLabel(documentId, document?.title || undefined);
 
+  // Applies an autosave patch and folds the server's own response straight
+  // into `document` — NOT a `load()` refetch. Autosave fires on a ~900ms
+  // debounce while a person may still be mid-keystroke on the next word; a
+  // full refetch here would replace `document.title`/`document.body` on
+  // every save, and DocumentDetailView reseeds its draft from those whenever
+  // `document.id` changes... which it doesn't here (same id, same object
+  // identity churn avoided) so this is safe by construction rather than by
+  // coincidence — see that file's own note on why it only reseeds on a
+  // genuinely different document.
   const handleSave = useCallback(
     async (patch: { title: string; body: string }) => {
-      await patchFleetDocument(workspaceId, documentId, patch);
-      await load();
+      const updated = await patchFleetDocument(workspaceId, documentId, patch);
+      setDocument(updated);
     },
-    [workspaceId, documentId, load],
+    [workspaceId, documentId],
   );
 
   const handleDelete = useCallback(async () => {

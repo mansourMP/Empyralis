@@ -14,6 +14,15 @@
  * below redefines those. What's actually new here is markdown body
  * typography (nothing else in this app renders parsed markdown) and the
  * plain-textarea editor.
+ *
+ * DIRECT EDITING (2026-08-07): the title/body are now live form controls
+ * ALWAYS, for a canWrite reader — no more Edit-mode toggle, so there is no
+ * more separate "edit mode" section below; .fleet-doc-title-input and
+ * .fleet-doc-editor apply unconditionally now. Delete moved into the "⋯"
+ * menu (DocumentMenu, in the .tsx file) built on the SAME
+ * .fleet-list-row-menu* primitive HardwareSection.tsx's row menu already
+ * defined in fleet-theme.css — nothing new to style for the menu itself,
+ * only the inline delete-confirm swap inside it (bottom of this file).
  */
 
 /* ── Markdown body (read mode) ───────────────────────────────────────────
@@ -26,6 +35,18 @@
   font-size: 14px;
   line-height: 1.65;
   color: var(--text-secondary);
+}
+
+/* The global reset (app/globals.css: `a { color: inherit; text-decoration:
+   none; }`) makes a markdown [link](url) render indistinguishable from
+   plain text otherwise — this is the one accent-colour use in the whole
+   read surface, same underline-on-hover convention .fleet-link already
+   uses elsewhere. */
+.fleet-doc-body a {
+  color: var(--accent);
+}
+.fleet-doc-body a:hover {
+  text-decoration: underline;
 }
 
 .fleet-doc-heading {
@@ -100,15 +121,25 @@ h6.fleet-doc-heading { font-size: 14px; }
   margin-top: 20px;
 }
 
-/* ── Header / actions row ────────────────────────────────────────────────
-   Trails the title, right-aligned — same "actions live beside what they
-   act on" placement TaskDetailView's own topbar uses (fleet-task-detail-
-   topbar), just one row lower since a document has no prev/next nav. */
-.fleet-doc-actions {
+/* ── Header row ───────────────────────────────────────────────────────────
+   Title (input for a writer, <h2> for a viewer) on the left, the "⋯" menu
+   trigger pinned to the right end, aligned with the title's own baseline —
+   the founder's own placement call for the overflow menu that replaced the
+   standing red Delete button. flex-start (not center) so a long title that
+   wraps to two lines doesn't drag the trigger down with it. */
+.fleet-doc-header-row {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+/* The "⋯" trigger sits one row above the title's own text baseline
+   (.fleet-doc-title-input/.fleet-task-page-title both carry their own
+   top spacing) — nudge it down to align optically rather than mechanically. */
+.fleet-doc-header-row > .fleet-list-row-menu-wrap {
+  flex: none;
+  margin-top: 4px;
 }
 
 .fleet-doc-meta {
@@ -118,11 +149,51 @@ h6.fleet-doc-heading { font-size: 14px; }
   font-variant-numeric: tabular-nums;
 }
 
-/* ── Edit mode ────────────────────────────────────────────────────────────
-   A title input the same visual weight as the read-mode <h2> it replaces,
-   and a bare, bordered textarea for the body — CLAUDE.md is explicit this
-   is a plain markdown textarea, never a rich editor, so there is nothing
-   here beyond size/spacing/monospace. */
+/* Save failed — the one state on this line that must not read as quiet
+   background chrome. Same warning token .fleet-page-state-body's inline
+   task-assign notice already uses elsewhere on this page family. */
+.fleet-doc-meta--error {
+  color: var(--warning-text);
+  font-variant-numeric: initial;
+}
+
+/* ── Inline delete confirm, inside the "⋯" menu ──────────────────────────
+   A second "screen" swapped into the SAME menu panel (.fleet-list-row-menu)
+   rather than a second popover or a modal — see DocumentDetailView.tsx's own
+   DocumentMenu header for why a modal/approval-style gate is wrong here. */
+.fleet-doc-menu-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px;
+}
+
+.fleet-doc-menu-confirm-text {
+  padding: 4px 4px 2px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.fleet-doc-menu-confirm-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.fleet-doc-menu-confirm-actions > .fleet-list-row-menu-item {
+  flex: 1;
+  text-align: center;
+}
+
+.fleet-doc-menu-confirm-error {
+  padding: 0 4px;
+  font-size: var(--text-xs);
+  color: var(--app-danger);
+}
+
+/* Title input, always live for a canWrite reader — no separate "edit mode"
+   any more (see file header). Same visual weight the read-mode <h2> it
+   replaces used to carry, so a viewer-to-writer role change doesn't shift
+   the page's own type scale. */
 .fleet-doc-title-input {
   display: block;
   width: 100%;
@@ -161,10 +232,4 @@ h6.fleet-doc-heading { font-size: 14px; }
 .fleet-doc-editor:focus-visible {
   outline: 2px solid var(--accent-ring);
   outline-offset: 1px;
-}
-
-.fleet-doc-error {
-  margin: 12px 0 0;
-  font-size: 13px;
-  color: var(--destructive);
 }

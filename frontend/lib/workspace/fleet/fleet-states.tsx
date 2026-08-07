@@ -17,8 +17,7 @@ export function FleetListSkeleton({
    *  .fleet-agent-row / .fleet-task-row, both `min-height: 52px`) so this
    *  placeholder doesn't reflow the page when the fetch resolves and the
    *  real list swaps in. Every caller standing in for a *list* passes this:
-   *  52 for agent/task/project rows, 44 for .fleet-inbox-row, 64 for
-   *  ProjectOverview's two-line .fleet-activity-item. Left unset, rows fall
+   *  52 for agent/task/project rows, 44 for .fleet-inbox-row. Left unset, rows fall
    *  back to ~37px (12px bar + 12px top/bottom padding), which is right only
    *  for the plain `.fleet-list-row` shape — today that's Billing, whose
    *  ~37.8px .fleet-usage-legend-row already matches within a pixel.
