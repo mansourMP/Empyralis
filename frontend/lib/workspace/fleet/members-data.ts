@@ -31,7 +31,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
-import { me } from "@/lib/auth/auth-client";
+import { useAccountShell } from "@/lib/shell/account-shell-context";
 
 export type WorkspaceRole = "viewer" | "member" | "owner";
 
@@ -142,38 +142,43 @@ export function useWorkspaceMembers(workspaceId: string) {
   return { members, loading, error, refresh };
 }
 
-/** The caller's own workspace role, derived from a member list the caller
- *  already loaded (matched by user id from /api/auth/me) — moved here from
- *  ProjectMemberAdd.tsx (its original, and until now only, caller) so
- *  ProjectSettings.tsx's rename/default-hardware popover can gate its own
- *  trigger the identical way without a second, drifting copy of this same
- *  lookup. There is no dedicated "my role" endpoint, and the server is the
- *  real gate on every mutation regardless of what this computes — this only
- *  decides whether to render a control that would otherwise always fail for
- *  a non-owner (CLAUDE.md: "no dead controls"). Undefined while /api/auth/me
- *  is still in flight, so a gated control stays unrendered rather than
- *  flashing on then off for a non-owner. */
-export function useOwnRole(members: WorkspaceMember[]): WorkspaceRole | null {
-  const [myUserId, setMyUserId] = useState<string | null>(null);
+/** The caller's own role in ONE specific workspace — read straight off the
+ *  account shell bootstrap (frontend/lib/server/load-account-shell-session.ts)
+ *  that RootLayout already resolves server-side, before this component (or
+ *  any client component) gets its first paint. See account-shell-store.ts's
+ *  WorkspaceMembershipRecord.role and workspace-membership-model.ts.
+ *
+ *  This REPLACES the old useOwnRole(members), which matched a workspace's
+ *  member LIST (its own client fetch, GET /api/workspaces/{id}/members)
+ *  against a user id from a second, redundant client fetch (GET
+ *  /api/auth/me) — two round trips to answer a question the server had
+ *  already answered before the page ever mounted. That was MAN's
+ *  "3-4 second empty header on refresh" bug (project page's New/invite
+ *  controls, ProjectSettings' rename trigger): useCanWriteProject and its
+ *  siblings sat on `null` (correctly — CLAUDE.md forbids a control flashing
+ *  on then off) until BOTH of those finished, one of them waterfalled
+ *  behind whatever else was still loading on the page. The account shell
+ *  index has no such wait: it is populated synchronously from a prop on the
+ *  very first render (AccountShellProvider's useReducer lazy-initializer),
+ *  client AND server, so a gate that reads it resolves in the same paint
+ *  the rest of the page does.
+ *
+ *  `null` only when this account has no membership row for `workspaceId` at
+ *  all — shouldn't happen behind the workspace's own route guard, but stays
+ *  the safe "don't render" answer if it ever does (same contract as before:
+ *  never flash a control that then disappears). */
+export function useOwnWorkspaceRole(workspaceId: string): WorkspaceRole | null {
+  const { state } = useAccountShell();
+  return state.workspaceMembershipIndex[workspaceId]?.role ?? null;
+}
 
-  useEffect(() => {
-    let cancelled = false;
-    void me()
-      .then((data) => {
-        if (cancelled) return;
-        const user = (data as { user?: { id?: string } } | null)?.user;
-        setMyUserId(user?.id ? String(user.id) : null);
-      })
-      .catch(() => {
-        if (!cancelled) setMyUserId(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const mine = members.find((m) => m.user_id === myUserId);
-  return mine?.role ?? null;
+/** The caller's own account id, same source as useOwnWorkspaceRole above —
+ *  replaces a redundant client-side GET /api/auth/me with data the account
+ *  shell bootstrap already carries (`account.id`), synchronously, from the
+ *  first render. */
+export function useOwnAccountId(): string | null {
+  const { state } = useAccountShell();
+  return state.account?.id ?? null;
 }
 
 /** Pending (not yet accepted, not revoked) invites — owner-visible list so an

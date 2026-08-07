@@ -22,7 +22,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import { useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
-import { useWorkspaceMembers } from "@/lib/workspace/fleet/members-data";
 import { useCanWriteProject } from "@/lib/workspace/fleet/project-members-data";
 import {
   fetchFleetDocument,
@@ -45,10 +44,9 @@ export default function DocumentDetailPage() {
   const projectHref = `${base}/projects/${encodeURIComponent(projectId)}`;
   const documentsHref = `${projectHref}/documents`;
 
-  const { members } = useWorkspaceMembers(workspaceId);
   const { projects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
-  const canWrite = useCanWriteProject(workspaceId, projectId, members);
+  const canWrite = useCanWriteProject(workspaceId, projectId);
 
   const [document, setDocument] = useState<FleetDocument | null>(null);
   const [loading, setLoading] = useState(true);

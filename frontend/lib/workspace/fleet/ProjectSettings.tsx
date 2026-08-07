@@ -15,8 +15,11 @@
  * default_gateway_id one) — a non-owner never sees the trigger at all, not
  * a disabled one. CLAUDE.md: "If a control cannot be used in the current
  * state, it is not rendered." Reuses ProjectMemberAdd.tsx's exact popover
- * idiom (trigger, dismissal, section shape) and its useOwnRole gate (now
- * shared via members-data.ts) rather than inventing a second one.
+ * idiom (trigger, dismissal, section shape) and its useOwnWorkspaceRole
+ * gate (members-data.ts) rather than inventing a second one — that gate
+ * reads the account shell bootstrap directly now, not a workspace member
+ * list, so this trigger no longer needs one passed in at all (see the MAN
+ * "3-4s empty header" fix note on useOwnWorkspaceRole's own doc comment).
  *
  * Rename: fleet_patch_project has accepted `name`/`description` since
  * MAN-64/70, but no frontend surface ever called it for a PROJECT — a
@@ -41,27 +44,25 @@ import { useEffect, useRef, useState } from "react";
 import { Settings2 } from "lucide-react";
 
 import { patchFleetProject, type FleetProject } from "./fleet-data";
-import { useOwnRole, type WorkspaceMember } from "./members-data";
+import { useOwnWorkspaceRole } from "./members-data";
 import { GatewayBoxPicker } from "./gateway-box-picker";
 
 export function ProjectSettings({
   workspaceId,
   project,
-  workspaceMembers,
   onChanged,
 }: {
   workspaceId: string;
   /** Undefined while the page's own useFleetProjects() is still loading —
    *  the trigger stays unrendered rather than opening onto an empty/stale
-   *  popover (same "don't render until real" discipline useOwnRole's own
-   *  doc comment applies to the role check). */
+   *  popover (same "don't render until real" discipline useOwnWorkspaceRole's
+   *  own doc comment applies to the role check). */
   project: FleetProject | undefined;
-  workspaceMembers: WorkspaceMember[];
   /** Called after any successful save so the caller's project list
    *  refetches — this popover has no own poll, it only writes. */
   onChanged?: () => void;
 }) {
-  const ownRole = useOwnRole(workspaceMembers);
+  const ownRole = useOwnWorkspaceRole(workspaceId);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
 
