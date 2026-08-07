@@ -390,21 +390,29 @@ export class LocalBridgePersonalChannelRuntime implements PersonalChannelRuntime
           if (!this.rememberInboundEvent(eventKey)) {
             continue;
           }
-          // Group gate: skip group messages unless mentioned or replying to
-          // Sage — same contract as WhatsApp/Telegram (see their runtime.ts
-          // handleMessagesUpsert/handleInboundMessage). The event is still
-          // remembered (above) so a gated message isn't re-fetched and
-          // re-evaluated on every subsequent poll. Whether this ever
-          // actually fires depends entirely on the third-party bridge
-          // (signal-cli-bridge.ts / bluebubbles-bridge.ts / a WeChat bridge)
-          // populating is_group/is_mentioned/is_reply_to_sage in its
-          // /events JSON — see mapInboundEvent below.
-          if (event.message.is_group && !event.message.is_mentioned && !event.message.is_reply_to_sage) {
-            continue;
-          }
-          // Start the "thinking" typing indicator the instant a message
-          // clears the group gate — before waiting on the backend
-          // round-trip that actually produces a reply. Claimed and stopped
+          // Group gate: REMOVED as a gateway-side DECISION (see
+          // personal_channels_service.py's _resolve_local_bridge_agent_id /
+          // CHANNEL-GATEWAY-PLAN.md "the last unscoped channels" — Signal/
+          // iMessage/WeChat-personal now resolve a real per-agent identity
+          // the same way WhatsApp/Telegram already did when their own
+          // equivalent gate was removed from telegram/runtime.ts and
+          // whatsapp/runtime.ts on 2026-07-23). This runtime still forwards
+          // the raw mention FACTS the bridge computed (is_group/is_mentioned/
+          // is_reply_to_sage) — that computation is unavoidably
+          // platform-specific and stays here (see mapInboundEvent below).
+          // What moved is WHO DECIDES shouldSkip from those facts:
+          // personal_channels_service.py's _enforce_group_policy (via
+          // mention_gating_service.resolve_inbound_mention_decision) is the
+          // ONE shared resolver for every personal-gateway channel, backend
+          // group_policy/require_mention config included — this local-bridge
+          // family was the last channel family still deciding it here,
+          // inconsistently with WhatsApp/Telegram, and (until identity
+          // resolved for it) with no owner-facing way to configure it either
+          // way. The event is still remembered (above) so a re-poll never
+          // re-publishes the same external_message_id twice.
+          // Start the "thinking" typing indicator the instant a message is
+          // admitted — before waiting on the backend round-trip that
+          // actually produces (or withholds) a reply. Claimed and stopped
           // in handleChannelOutbound once that reply is ready to send. See
           // startTypingForChat's doc comment for why this only ever
           // best-effort no-ops on bridges that don't support it.

@@ -73,12 +73,16 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         self.registration = {"tenant_id": "tenant-1", "workspace_id": "ws-1"}
 
     async def test_default_is_open_and_lets_an_unaddressed_group_message_through(self) -> None:
-        """The behavior-preserving-mechanism default: no config saved at
-        all (agent_id="" -- unresolved identity, the permanent case for
-        local-bridge channels) must still allow an unaddressed group
-        message through THIS gate -- see
-        DEFAULT_GROUP_POLICY_MODE/DEFAULT_REQUIRE_MENTION's own doc
-        comment in personal_channels_service.py for why."""
+        """UNCHANGED, out of this build's scope: WhatsApp/Telegram Personal's
+        own "Sage's legacy Connect tab" case -- a channel bound
+        workspace-wide rather than to one specific agent
+        (PersonalChannelConnectPanel.tsx's agentGatewayId===undefined path) --
+        still resolves through _unresolved_identity_group_policy_config's
+        non-local-bridge branch and keeps its pre-existing open/
+        no-mention-check behavior. See that function's own docstring for why
+        this is deliberately NOT the same fallback local-bridge channels now
+        get (test_unresolved_local_bridge_identity_fails_closed_and_denies_a_group_message
+        below)."""
         decision = await personal_channels_service._enforce_group_policy(
             registration=self.registration,
             channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
@@ -90,6 +94,31 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(decision["reason"])
         self.assertEqual(decision["mode"], "open")
         self.assertFalse(decision["require_mention"])
+
+    async def test_unresolved_local_bridge_identity_fails_closed_and_denies_a_group_message(self) -> None:
+        """UPDATED 2026-08 (channel-gate hardening, "the last unscoped
+        channels"): a genuinely unresolved LOCAL-BRIDGE identity (agent_id=""
+        -- LEGACY_UNSCOPED_AGENT_ID, paired with a
+        LOCAL_BRIDGE_PERSONAL_CHANNELS channel_key) now fails CLOSED, not
+        open. This was exactly the incident: an unresolved identity used to
+        default to open/no-mention-check, permanently and unconfigurably,
+        and an agent replied unprompted in a large public group until the
+        account got banned. See
+        _unresolved_identity_group_policy_config's own docstring -- this
+        fallback is now channel-aware specifically so this fix does not also
+        change WhatsApp/Telegram's own separate agent_id="" case (see the
+        test right above)."""
+        decision = await personal_channels_service._enforce_group_policy(
+            registration=self.registration,
+            channel_key="signal_personal",
+            agent_id="",
+            message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
+            remote_jid="group:family",
+        )
+        self.assertFalse(decision["allowed"])
+        self.assertEqual(decision["reason"], "group_policy_denied")
+        self.assertEqual(decision["mode"], "disabled")
+        self.assertTrue(decision["require_mention"])
 
     async def test_a_direct_message_always_bypasses_regardless_of_config(self) -> None:
         decision = await personal_channels_service._enforce_group_policy(
@@ -227,30 +256,38 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision["reason"], "group_no_mention")
 
     async def test_unresolved_identity_fallback_is_split_from_the_resolved_agent_default(self) -> None:
-        """UPDATED 2026-08-07 (CHANNEL-GATEWAY-PLAN.md §5 step 2): these two
-        cases are now DELIBERATELY DIFFERENT, split the same way dm_policy
-        already splits _unresolved_identity_dm_policy_config from
+        """UPDATED 2026-08-07 (CHANNEL-GATEWAY-PLAN.md §5 step 2), then
+        UPDATED AGAIN 2026-08 ("the last unscoped channels") once Signal/
+        iMessage/WeChat-personal gained real identity resolution
+        (_resolve_local_bridge_agent_id) -- these two cases remain
+        DELIBERATELY DIFFERENT, split the same way dm_policy already
+        splits _unresolved_identity_dm_policy_config from
         DEFAULT_DM_POLICY_MODE -- see
         _unresolved_identity_group_policy_config's own docstring for why.
 
-        An unresolved agent identity (agent_id="" -- the PERMANENT case for
-        every local-bridge channel, which has no write path that could ever
-        reach it) keeps today's actual production behavior: open,
-        require_mention=False, unchanged by this build.
+        An unresolved agent identity (agent_id="" -- LEGACY_UNSCOPED_AGENT_ID;
+        no longer the PERMANENT case for local-bridge channels, but still a
+        real, reachable case whenever resolution genuinely can't land) now
+        fails CLOSED: disabled, require_mention=True. This channel_key is
+        deliberately still signal_personal here -- proving the fallback is
+        keyed on the identity itself (agent_id=="") being unresolved, not
+        on which channel_key it's paired with.
 
         A RESOLVED agent_id that simply has no install bundle yet (e.g.
         get_workspace_agent_install_bundle returning None against the real,
         unmocked repository in this sandbox) is a channel where the write
         path (update_agent_group_policy_config) IS reachable -- so it gets
-        this build's new safe default: allowlist/require_mention=True."""
+        this build's new safe default: allowlist/require_mention=True --
+        the SAME values, but for a different reason (a configurable, if
+        unconfigured, default -- not a fail-closed dead end)."""
         unresolved_identity_default = await personal_channels_service._load_agent_group_policy_config(
             tenant_id="t", workspace_id="w", agent_id="", channel_key="signal_personal",
         )
         resolved_but_uninstalled_default = await personal_channels_service._load_agent_group_policy_config(
             tenant_id="t", workspace_id="w", agent_id="never-installed-agent", channel_key="telegram_personal",
         )
-        self.assertEqual(unresolved_identity_default["mode"], "open")
-        self.assertFalse(unresolved_identity_default["require_mention"])
+        self.assertEqual(unresolved_identity_default["mode"], "disabled")
+        self.assertTrue(unresolved_identity_default["require_mention"])
         self.assertEqual(resolved_but_uninstalled_default["mode"], "allowlist")
         self.assertTrue(resolved_but_uninstalled_default["require_mention"])
 

@@ -708,11 +708,16 @@ DEFAULT_DM_POLICY_MODE = DM_POLICY_OPEN
 def _unresolved_identity_dm_policy_config() -> Dict[str, Any]:
     """Fail-closed fallback for _load_agent_dm_policy_config when NO real
     per-agent install could even be identified: no agent_id resolved at all
-    (personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID — the permanent
-    case for every local-bridge channel today, Signal/iMessage/WeChat, which
-    has no per-agent state table to resolve an owner identity against yet;
-    see _handle_local_bridge_gateway_channel_inbound's dmPolicy-gate
-    comment), or an install lookup that failed / returned nothing.
+    (personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID). Until this
+    build this was the permanent case for every local-bridge channel
+    (Signal/iMessage/WeChat), which had no per-agent state table to resolve
+    an owner identity against at all. It no longer is —
+    _resolve_local_bridge_agent_id now resolves a real agent_id for these
+    three the same way WhatsApp/Telegram always have — but this fallback
+    stays reachable whenever that resolution genuinely can't land (an
+    ambiguous or not-yet-claimed preferred_gateway_id, or an install lookup
+    that failed / returned nothing); see that function's own docstring for
+    the full contract.
 
     Deliberately NOT DEFAULT_DM_POLICY_MODE: that constant is the
     configured-but-unset default for a REAL agent an owner can actually go
@@ -1233,29 +1238,32 @@ async def _handle_dm_policy_blocked(
 # which is the thing that didn't exist before this build.
 #
 # DEFAULT_GROUP_POLICY_MODE / DEFAULT_REQUIRE_MENTION below are the
-# configured-but-unset default for a REAL, resolved agent identity —
-# Telegram Personal / WhatsApp Personal, the only two channels with a
-# per-agent identity table to resolve against (_resolve_agent_id_for_inbound).
+# configured-but-unset default for a REAL, resolved agent identity. As of
+# this build (see _resolve_local_bridge_agent_id) that now includes
+# Signal/iMessage/WeChat-personal (LOCAL_BRIDGE_PERSONAL_CHANNELS) alongside
+# Telegram Personal / WhatsApp Personal — all five channels resolve through
+# _resolve_agent_id_for_inbound and land here once resolved, so a
+# newly-claimed local-bridge binding gets the exact same safe
+# allowlist/require-mention starting point WhatsApp/Telegram already do,
+# configurable the same way (update_agent_group_policy_config,
+# GROUP_POLICY_CHANNEL_KEYS already included the local-bridge keys before
+# this build — only the identity resolution to ever reach that write path
+# was missing).
+#
 # They do NOT govern the separate unresolved-identity fallback
-# (_unresolved_identity_group_policy_config, below) used for local-bridge
-# channels (Signal/iMessage/WeChat-personal — permanently agent_id="", see
-# LOCAL_BRIDGE_PERSONAL_CHANNELS) — split out for the exact reason
-# DEFAULT_DM_POLICY_MODE's own comment documents already having gone wrong
-# once for dm_policy (ee3fca4f7c): a future change to the resolved-agent
-# default must never silently reach into the unresolved-identity fallback
-# too. UNLIKE dm_policy, the unresolved-identity fallback here is
-# deliberately NOT tightened to match — it stays GROUP_POLICY_OPEN /
-# require_mention=False. Reason: there is no write path that can ever
-# reach a local-bridge channel's group_policy (agent_id is permanently
-# unresolved for it — _persist_agent_group_policy_config always returns
-# False for an unresolved agent_id), so tightening this fallback would
-# silently and PERMANENTLY block every group on Signal/iMessage/
-# WeChat-personal with literally no owner-facing lever to ever undo it —
-# a strictly worse outcome than the incident this section exists to fix.
-# Flagged in this build's own report as a real gap needing a decision
-# (resolve a per-agent identity for local-bridge channels so it CAN be
-# configured, or knowingly accept groups staying open there) rather than
-# one silently made either way by reusing the same constant.
+# (_unresolved_identity_group_policy_config, below) — split out for the
+# exact reason DEFAULT_DM_POLICY_MODE's own comment documents already
+# having gone wrong once for dm_policy (ee3fca4f7c): a future change to the
+# resolved-agent default must never silently reach into the
+# unresolved-identity fallback too. That fallback is no longer the
+# PERMANENT state for local-bridge channels (identity resolves for them
+# now, in the common case), but it remains reachable — an ambiguous or
+# not-yet-claimed preferred_gateway_id (see _resolve_local_bridge_agent_id),
+# or any lookup failure — and per CHANNEL-GATEWAY-PLAN.md §"the last
+# unscoped channels", any path that can still produce a genuinely unknown
+# identity must fail CLOSED, not open. See
+# _unresolved_identity_group_policy_config's own docstring for the fix
+# (2026-08-07: flipped from GROUP_POLICY_OPEN to GROUP_POLICY_DISABLED).
 GROUP_POLICY_OPEN = "open"
 GROUP_POLICY_ALLOWLIST = "allowlist"
 GROUP_POLICY_DISABLED = "disabled"
@@ -1289,31 +1297,48 @@ def _normalize_group_policy_config(raw: Any) -> Dict[str, Any]:
     return {"mode": mode, "allowlist": allowlist, "require_mention": require_mention}
 
 
-def _unresolved_identity_group_policy_config() -> Dict[str, Any]:
+def _unresolved_identity_group_policy_config(channel_key: str = "") -> Dict[str, Any]:
     """Fallback for _load_agent_group_policy_config when NO real per-agent
     install could even be identified (agent_id="" /
-    personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID) — the PERMANENT
-    case for every local-bridge channel today (Signal/iMessage/
-    WeChat-personal, see LOCAL_BRIDGE_PERSONAL_CHANNELS and
-    _resolve_agent_id_for_inbound, which has no lookup branch for them at
-    all). Split from DEFAULT_GROUP_POLICY_MODE/DEFAULT_REQUIRE_MENTION on
-    2026-08-07 for the same reason dm_policy's identity-less fallback was
-    split from DEFAULT_DM_POLICY_MODE (see that constant's own comment for
-    the incident where reusing one constant for both silently changed the
-    identity-less fallback too, ee3fca4f7c) — a future change to the
-    resolved-agent default must never silently reach into this one.
+    personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID).
 
-    UNLIKE dm_policy's split (which tightens the identity-less fallback to
-    owner_only, safe because the owner's own messages bypass dm_policy
-    entirely before it's even loaded), this fallback is deliberately NOT
-    tightened to match DEFAULT_GROUP_POLICY_MODE's new allowlist default.
-    _persist_agent_group_policy_config always returns False for an
-    unresolved agent_id — there is no write path that can ever reach a
-    local-bridge channel's group_policy today — so tightening this
-    fallback would silently and PERMANENTLY block every group on Signal/
-    iMessage/WeChat-personal with no owner-facing lever to ever undo it.
-    Stays GROUP_POLICY_OPEN/require_mention=False, i.e. today's actual
-    production behavior for these channels, unchanged by this build."""
+    CHANNEL-AWARE as of this build — two genuinely different situations
+    both land on agent_id="", and conflating them would either reopen the
+    local-bridge incident or silently regress a real, separately-decided
+    WhatsApp/Telegram path:
+
+    - LOCAL_BRIDGE_PERSONAL_CHANNELS (Signal/iMessage/WeChat-personal): until
+      this build, agent_id="" was the PERMANENT case for these three —
+      _resolve_agent_id_for_inbound had no lookup branch for them at all. It
+      no longer is: _resolve_local_bridge_agent_id now resolves a real
+      agent_id for them, either from an explicit owner action (iMessage's
+      recheck/install routes) or a reverse preferred_gateway_id lookup. This
+      fallback is still reachable whenever that resolution genuinely can't
+      land (an ambiguous or not-yet-claimed preferred_gateway_id, or an
+      install-lookup failure — see _resolve_local_bridge_agent_id's own
+      docstring), and for THESE channels it now fails CLOSED
+      (GROUP_POLICY_DISABLED/require_mention=True): this was literally the
+      incident (CHANNEL-GATEWAY-PLAN.md's "the last unscoped channels") — an
+      unresolved identity defaulting open, permanently and unconfigurably,
+      let an agent reply unprompted in a large public group until the
+      account got banned. A genuinely unknown local-bridge identity has no
+      "the owner already configured this specific agent" story to lean on,
+      so it must fail closed rather than open, matching dm_policy's own
+      identity-less fallback (_unresolved_identity_dm_policy_config, already
+      owner_only). Unlike the pre-this-build state, this is no longer a dead
+      end: it means the gateway isn't (yet, or unambiguously) claimed by any
+      agent's preferred_gateway_id — a real, fixable configuration gap.
+
+    - Every other caller (WhatsApp/Telegram Personal's own agent_id=""
+      case): a SEPARATE, pre-existing, deliberate product state — "Sage's
+      own legacy Connect tab" binds a channel workspace-wide rather than to
+      one specific agent (PersonalChannelConnectPanel.tsx's
+      agentGatewayId===undefined path), which is not the incident this
+      build fixes and is out of this build's scope to change. Stays
+      GROUP_POLICY_OPEN/require_mention=False — today's actual, unchanged,
+      separately-decided behavior for that path."""
+    if str(channel_key or "").strip() in LOCAL_BRIDGE_PERSONAL_CHANNELS:
+        return {"mode": GROUP_POLICY_DISABLED, "allowlist": [], "require_mention": True}
     return {"mode": GROUP_POLICY_OPEN, "allowlist": [], "require_mention": False}
 
 
@@ -1328,7 +1353,7 @@ async def _load_agent_group_policy_config(
     at install_metadata.group_policy[channel_key].
 
     An unresolved agent identity (see _unresolved_identity_group_policy_config
-    above) returns that dedicated fallback, independent of
+    above) returns that dedicated, channel-aware fallback, independent of
     DEFAULT_GROUP_POLICY_MODE. A RESOLVED agent_id whose install lookup
     fails, or who simply has no group_policy entry yet, gets
     DEFAULT_GROUP_POLICY_MODE/DEFAULT_REQUIRE_MENTION (via
@@ -1337,7 +1362,7 @@ async def _load_agent_group_policy_config(
     """
     normalized_agent_id = str(agent_id or "").strip()
     if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
-        return _unresolved_identity_group_policy_config()
+        return _unresolved_identity_group_policy_config(channel_key)
     try:
         from server_modules import agent_registry_repository as _repo
 
@@ -1404,12 +1429,16 @@ async def _persist_agent_group_policy_config(
 
 
 # Channel keys group_policy can ever apply to — WhatsApp/Telegram Personal
-# (resolved per-agent identity, so the write path below is actually
-# reachable) plus the local-bridge set (Signal/iMessage/WeChat-personal —
-# agent_id is permanently unresolved for these, so a write attempted
-# against one of them will always fail with agent_id_unresolved; see
-# _unresolved_identity_group_policy_config's docstring for why that's a
-# real, currently-unfixed gap rather than a bug in this validation).
+# plus the local-bridge set (Signal/iMessage/WeChat-personal). The WRITE
+# path (this route/function) always worked for all five: it takes agent_id
+# as an explicit, caller-supplied argument (the owner naming which agent's
+# policy they're editing, from routes_personal_channels.py's own query
+# param), never _resolve_agent_id_for_inbound. What was genuinely broken
+# until this build was the READ side at INBOUND time: local-bridge messages
+# always resolved to LEGACY_UNSCOPED_AGENT_ID, so whatever an owner
+# configured here was persisted correctly but never actually consulted for
+# a real incoming message (see _resolve_local_bridge_agent_id, which closes
+# that gap).
 GROUP_POLICY_CHANNEL_KEYS = frozenset(
     {WHATSAPP_PERSONAL_CHANNEL_KEY, TELEGRAM_PERSONAL_CHANNEL_KEY, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
 )
@@ -1453,9 +1482,9 @@ async def update_agent_group_policy_config(
     normalized_agent_id = str(agent_id or "").strip()
     if not normalized_agent_id or normalized_agent_id == personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
         raise ValueError(
-            "agent_id is required to configure a per-agent group policy — this channel's "
-            "identity may be permanently unresolved (local-bridge channels have no per-agent "
-            "install to write to; see _unresolved_identity_group_policy_config)."
+            "agent_id is required to configure a per-agent group policy — pass the specific "
+            "agent install this policy applies to (group_policy is stored per agent+channel, "
+            "not per gateway)."
         )
     normalized_channel_key = str(channel_key or "").strip().lower()
     if normalized_channel_key not in GROUP_POLICY_CHANNEL_KEYS:
@@ -1794,6 +1823,31 @@ def _claim_agent_channel_state(
             provider=TELEGRAM_PERSONAL_PROVIDER,
             status="connecting",
         )
+    elif channel_key in LOCAL_BRIDGE_PERSONAL_CHANNELS:
+        # Local-bridge twin — used by an explicit owner action that already
+        # names a real agent_id (today: recheck_imessage_personal_gateway /
+        # install_imessage_imsg_gateway, whose routes accept agent_id as a
+        # query param). This is a MORE authoritative identity signal than
+        # _resolve_local_bridge_agent_id's own preferred_gateway_id
+        # fallback (an explicit action by the agent's own owner, not an
+        # inference), so it's checked first by that function's fast path
+        # via the same row.
+        existing = personal_channels_repository.get_local_bridge_state(
+            str(gateway_id or "").strip(), channel_key=channel_key, agent_id=normalized_agent_id,
+        )
+        if existing is not None:
+            return
+        personal_channels_repository.upsert_local_bridge_state(
+            gateway_id=str(gateway_id or "").strip(),
+            tenant_id=str(registration.get("tenant_id") or "").strip(),
+            workspace_id=str(registration.get("workspace_id") or "").strip(),
+            user_id=str(registration.get("user_id") or "").strip(),
+            channel_key=channel_key,
+            agent_id=normalized_agent_id,
+            provider=LOCAL_BRIDGE_PERSONAL_CHANNELS.get(channel_key, {}).get("provider", channel_key),
+            status="connecting",
+            metadata={"resolved_via": "explicit_owner_action"},
+        )
 
 
 def _resolve_agent_id_for_inbound(gateway_id: str, channel_key: str) -> str:
@@ -1805,7 +1859,16 @@ def _resolve_agent_id_for_inbound(gateway_id: str, channel_key: str) -> str:
     LEGACY_UNSCOPED_AGENT_ID (empty string) when that's ambiguous or there
     is none — execute_sage_turn_for_channel already treats that as "run as
     Sage," the pre-existing behavior, so an ambiguous lookup never breaks a
-    turn, it just doesn't get specialist-scoped."""
+    turn, it just doesn't get specialist-scoped.
+
+    This is the FAST path only — an indexed row lookup, no I/O beyond
+    SQLite. For Signal/iMessage/WeChat-personal (LOCAL_BRIDGE_PERSONAL_CHANNELS)
+    it only finds a row once something has already claimed one; see
+    _resolve_local_bridge_agent_id (async, does the actual claiming) for the
+    real inbound-handler entry point for those three channels — this
+    synchronous function alone is not enough for them the way it is for
+    WhatsApp/Telegram, which get an explicit agent_id at configure time
+    (_claim_agent_channel_state)."""
     normalized_gateway_id = str(gateway_id or "").strip()
     if channel_key == WHATSAPP_PERSONAL_CHANNEL_KEY:
         return personal_channels_repository.find_agent_id_for_whatsapp_session(
@@ -1815,7 +1878,113 @@ def _resolve_agent_id_for_inbound(gateway_id: str, channel_key: str) -> str:
         return personal_channels_repository.find_agent_id_for_telegram_session(
             normalized_gateway_id, channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
         )
+    if channel_key in LOCAL_BRIDGE_PERSONAL_CHANNELS:
+        return personal_channels_repository.find_agent_id_for_local_bridge_session(
+            normalized_gateway_id, channel_key=channel_key,
+        )
     return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
+
+
+async def _resolve_local_bridge_agent_id(
+    *,
+    gateway_id: str,
+    channel_key: str,
+    registration: Dict[str, Any],
+) -> str:
+    """The real inbound-resolution entry point for Signal/iMessage/
+    WeChat-personal — _resolve_agent_id_for_inbound's fast path alone isn't
+    enough for these three, because unlike WhatsApp/Telegram there is no
+    configure_*_personal_gateway step that names a real agent_id up front
+    (_claim_agent_channel_state). These are OS-level bridges authenticated
+    entirely outside Empyralis (signal-cli, Messages.app) — there is no
+    "the owner just told us who this is" moment for most of them.
+
+    What DOES already unambiguously answer "which agent owns this gateway's
+    local-bridge channel" is the SAME mechanism the product already uses in
+    the opposite direction for these exact channels: install_metadata.
+    preferred_gateway_id. FleetAgentDetail.tsx's own doc comment on
+    CHANNEL_DOORS states it directly — "'Full account' doors bind to THIS
+    agent's own preferred_gateway_id ... never to a workspace-wide/
+    Sage-routed session" — Signal/iMessage's full-account doors are already
+    product-documented as belonging to whichever agent points its own
+    preferred_gateway_id at this box. Reusing it here for inbound
+    resolution is the existing convention, not a new one.
+
+    Fast path: _resolve_agent_id_for_inbound's indexed row lookup, populated
+    by a PRIOR call to this function (or, for iMessage specifically, by an
+    explicit owner action — see recheck_imessage_personal_gateway/
+    install_imessage_imsg_gateway, which call _claim_agent_channel_state
+    directly with the agent_id their own route already receives, a more
+    authoritative signal than this fallback and checked first via the same
+    row).
+
+    Slow path (only runs until the fast path has something to find):
+    reverse-scans this gateway's own tenant/workspace fleet for agent
+    installs whose preferred_gateway_id equals this gateway_id. Exactly one
+    match claims and persists a row (personal_channel_local_bridge_states),
+    so every later message on this gateway+channel hits the fast path
+    instead. Zero or multiple matches is genuinely ambiguous (no agent has
+    claimed this box, or more than one has — the "multi-agent-per-box" case
+    noted in find_agent_id_for_telegram_session's own docstring as not yet
+    resolvable) — returns LEGACY_UNSCOPED_AGENT_ID and claims nothing, so a
+    later, unambiguous state doesn't have a wrong row to override.
+
+    UNLIKE WhatsApp/Telegram's own ambiguous-lookup fallback (which only
+    costs specialist-scoping — the turn still runs as Sage), an unresolved
+    result here also denies the group/DM gates by construction (see
+    _unresolved_identity_group_policy_config / _unresolved_identity_dm_policy_config)
+    rather than defaulting open — there is no "the owner already configured
+    this specific agent" story to lean on for a gateway nobody has claimed,
+    or that more than one agent claims."""
+    resolved = _resolve_agent_id_for_inbound(gateway_id, channel_key)
+    if resolved and resolved != personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
+        return resolved
+    normalized_gateway_id = str(gateway_id or "").strip()
+    if not normalized_gateway_id:
+        return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
+    tenant_id = str(registration.get("tenant_id") or "default").strip() or "default"
+    workspace_id = str(registration.get("workspace_id") or "default").strip() or "default"
+    try:
+        from server_modules import agent_registry_repository as _repo
+
+        installs = await _repo.list_workspace_agent_installs(tenant_id=tenant_id, workspace_id=workspace_id)
+    except Exception:
+        _logger.warning(
+            "local_bridge: preferred_gateway_id lookup failed for gateway_id=%s channel=%s",
+            normalized_gateway_id, channel_key, exc_info=True,
+        )
+        return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
+    matches = sorted({
+        str(install.get("id") or "").strip()
+        for install in installs
+        if isinstance(install, dict)
+        and bool(install.get("enabled"))
+        and str((install.get("metadata") or {}).get("preferred_gateway_id") or "").strip() == normalized_gateway_id
+        and str(install.get("id") or "").strip()
+    })
+    if len(matches) != 1:
+        if len(matches) > 1:
+            _logger.warning(
+                "local_bridge: gateway_id=%s is preferred_gateway_id for %d agents (%s) — "
+                "ambiguous, leaving channel=%s identity unresolved (fails closed rather than "
+                "guessing which agent owns it).",
+                normalized_gateway_id, len(matches), matches, channel_key,
+            )
+        return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
+    resolved_agent_id = matches[0]
+    provider = LOCAL_BRIDGE_PERSONAL_CHANNELS.get(channel_key, {}).get("provider", channel_key)
+    personal_channels_repository.upsert_local_bridge_state(
+        gateway_id=normalized_gateway_id,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        user_id=str(registration.get("user_id") or "").strip(),
+        channel_key=channel_key,
+        agent_id=resolved_agent_id,
+        provider=provider,
+        status="linked",
+        metadata={"resolved_via": "preferred_gateway_id"},
+    )
+    return resolved_agent_id
 
 
 def _personal_channel_state(gateway_id: str, channel_key: str) -> Optional[Dict[str, Any]]:
@@ -3308,6 +3477,17 @@ async def _handle_local_bridge_gateway_channel_inbound(
     # keep the previous from_me-always-ignored behavior until they do).
     if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
         return {"ignored": True, "reason": "from_me", "channel_key": channel_key}
+    # Resolved BEFORE the group gate (needed by it — group_policy is
+    # per-agent config) exactly like the WhatsApp/Telegram handlers resolve
+    # agent_id before their own group gate. Unlike those two, there is no
+    # in-app configure step that already claimed a row for most local-bridge
+    # channels, so this can genuinely still come back unresolved (ambiguous
+    # or unclaimed preferred_gateway_id) — see _resolve_local_bridge_agent_id's
+    # own docstring for the full contract, including why that now fails
+    # CLOSED (denies) rather than open.
+    agent_id = await _resolve_local_bridge_agent_id(
+        gateway_id=gateway_id, channel_key=channel_key, registration=registration,
+    )
     # Group gate: _enforce_group_policy — the ONE shared resolver, replacing
     # what used to be an inline `if is_group and not is_mentioned and not
     # is_reply_to_sage: skip` here — identical contract to the WhatsApp/
@@ -3315,15 +3495,10 @@ async def _handle_local_bridge_gateway_channel_inbound(
     # ever true here depends on the specific bridge (signal-cli-bridge.ts,
     # bluebubbles-bridge.ts, or a third-party WeChat bridge) actually
     # computing them — see local-bridge-runtime.ts's mapInboundEvent.
-    # agent_id="": local-bridge channels don't resolve a per-agent identity
-    # (see the dmPolicy comment further down) — the group_policy loader's
-    # unresolved-identity fallback returns the same open default as a
-    # resolved-but-unconfigured agent (see _load_agent_group_policy_config's
-    # own docstring for why that's deliberate, unlike dmPolicy).
     group_decision = await _enforce_group_policy(
         registration=registration,
         channel_key=channel_key,
-        agent_id="",
+        agent_id=agent_id,
         message=message,
         remote_jid=remote_jid,
     )
@@ -3336,6 +3511,7 @@ async def _handle_local_bridge_gateway_channel_inbound(
     inbound, created = personal_channels_repository.record_inbound_message(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=channel_key,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         remote_jid=remote_jid,
         sender_jid=str(message.get("sender_jid") or "").strip() or None,
@@ -3349,23 +3525,21 @@ async def _handle_local_bridge_gateway_channel_inbound(
             "media_kinds": [str(item.get("kind") or "").strip() for item in media_items] or None,
         },
     )
-    # ── dmPolicy gate ── Local-bridge channels (Signal/iMessage/WeChat)
-    # don't yet resolve a per-agent owner identity (no equivalent of
-    # WhatsApp's linked_jid/is_self_chat, no agent-scoped state table — a
-    # separate, pre-existing gap). existing_state=None + agent_id="" means
-    # this always evaluates to _unresolved_identity_dm_policy_config's
-    # hardcoded owner_only, with no owner signal available, i.e. every
-    # sender is blocked until that gap is closed — strictly SAFER than the
-    # pre-dmPolicy behavior (reply to everyone, unconditionally), never
-    # worse. (This comment was FALSE from ee3fca4f7c until the fallback
-    # split below it: agent_id="" used to resolve through
-    # DEFAULT_DM_POLICY_MODE, i.e. open — every local-bridge stranger got
-    # an automatic reply. See _unresolved_identity_dm_policy_config's
-    # docstring for the fix.)
+    # ── dmPolicy gate ── MUST run before any reply (including a
+    # control-command reply) is generated. See _enforce_dm_policy's
+    # docstring. existing_state stays None: local-bridge channels don't
+    # populate an equivalent of WhatsApp's linked_jid, so
+    # _channel_owner_linked_id already returns "" for them regardless — only
+    # message["is_self_chat"] can establish is_owner here, exactly as
+    # before. When agent_id is still unresolved (see the comment above),
+    # this evaluates through _unresolved_identity_dm_policy_config's
+    # hardcoded owner_only with no owner signal available, i.e. every
+    # sender is blocked — strictly SAFER than the pre-dmPolicy behavior
+    # (reply to everyone, unconditionally), never worse.
     dm_decision = await _enforce_dm_policy(
         registration=registration,
         channel_key=channel_key,
-        agent_id="",
+        agent_id=agent_id,
         message=message,
         remote_jid=remote_jid,
         existing_state=None,
@@ -3378,7 +3552,7 @@ async def _handle_local_bridge_gateway_channel_inbound(
             inbound=inbound,
             channel_key=channel_key,
             provider=provider,
-            agent_id="",
+            agent_id=agent_id,
             external_message_id=external_message_id,
             remote_jid=remote_jid,
             duplicate=not created,
@@ -3407,7 +3581,7 @@ async def _handle_local_bridge_gateway_channel_inbound(
         channel_key=channel_key,
         provider=provider,
         registration=registration,
-        agent_id="",
+        agent_id=agent_id,
         text=text,
         media_items=media_items,
     )
@@ -3425,11 +3599,6 @@ async def _handle_local_bridge_gateway_channel_inbound(
         label=label,
         trace_id=trace_id,
         attachments=attachments,
-        # Local-bridge channels don't yet resolve a per-agent owner identity
-        # (see the dm_decision comment above) — dm_decision["is_owner"] is
-        # always False here today, but threaded through (rather than
-        # hardcoded) so this can never silently drift out of sync with
-        # _enforce_dm_policy's own logic if that gap is closed later.
         is_owner=bool(dm_decision.get("is_owner")),
         # Same forward-compatible defaults as Telegram above: the local
         # bridge (Signal/iMessage/WeChat on Agent Computer) doesn't resolve
@@ -3527,6 +3696,18 @@ async def recheck_imessage_personal_gateway(
         IMESSAGE_PERSONAL_CHANNEL_KEY,
         IMESSAGE_PERSONAL_PROVIDER,
     )
+    # Claim identity for this (gateway_id, channel_key) under the real
+    # agent_id the route already received — iMessage's one genuine in-app
+    # action for a channel family that otherwise has none (see
+    # _resolve_local_bridge_agent_id's docstring). Mirrors
+    # configure_whatsapp_personal_gateway/configure_telegram_personal_gateway's
+    # own _claim_agent_channel_state call: seed the row BEFORE the round
+    # trip, so even a probe that reports back "not connected yet" still
+    # resolves inbound messages to the right agent from this point on.
+    _claim_agent_channel_state(
+        gateway_id=gateway_id, channel_key=IMESSAGE_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id, registration=registration,
+    )
     run_id = f"gateway-imessage-recheck-{uuid4().hex[:12]}"
     trace_id = f"gateway-imessage-recheck-{uuid4().hex[:12]}"
     _enforce_personal_gateway_config_decision(
@@ -3583,6 +3764,12 @@ async def install_imessage_imsg_gateway(
     channel_lane_contract_service.assert_personal_gateway_channel(
         IMESSAGE_PERSONAL_CHANNEL_KEY,
         IMESSAGE_PERSONAL_PROVIDER,
+    )
+    # See recheck_imessage_personal_gateway's identical claim call above —
+    # same reasoning applies to the install action.
+    _claim_agent_channel_state(
+        gateway_id=gateway_id, channel_key=IMESSAGE_PERSONAL_CHANNEL_KEY,
+        agent_id=agent_id, registration=registration,
     )
     run_id = f"gateway-imessage-install-{uuid4().hex[:12]}"
     trace_id = f"gateway-imessage-install-{uuid4().hex[:12]}"
