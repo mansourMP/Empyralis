@@ -2727,6 +2727,141 @@ class SageAgentRuntimeSpecialistProviderResolutionTests(unittest.TestCase):
         self.assertEqual(result["message"], "local reply")
 
 
+class SageAgentRuntimeMasterModelConfigCheckTests(unittest.TestCase):
+    """Bug 2 (MAN-312-adjacent) regression.
+
+    handle_sage_chat's own call to _resolve_cloud_provider (the "--- Call
+    provider ---" line) is the ONE call site meant to resolve Sage's own
+    turn -- see that function's own docstring: "Callers resolving Sage's
+    OWN turn should pass True explicitly". Before this fix it always relied
+    on check_master_model_config's default (False), so the HONEST BLOCK
+    _resolve_cloud_provider implements for a master install misconfigured
+    to cli_subscription/local (see test_core_loop_no_fallback.py's
+    NoFallbackProviderResolutionTests, which exercises that block in
+    isolation) never actually fired from a real handle_sage_chat call: a
+    master agent (e.g. one renamed away from "Sage" in the Fleet UI, shown
+    with a "CLI-subscription" gateway binding) whose Model tab was saved as
+    cli_subscription kept silently resolving the platform DeepSeek default
+    here, with no error anywhere -- production logs showed its turns
+    dispatching through claude_agent_sdk_bridge with provider='deepseek'
+    despite the Fleet UI claiming CLI-subscription.
+
+    `_spec is None` is the correct signal for "this call is resolving the
+    master's own turn": specialist_runtime_context.resolve_specialist_
+    runtime_context returns None both when no active install was given AND
+    when the active install IS the workspace master ("the master (Sage)
+    runs its normal runtime") -- never for a genuine specialist. A genuine
+    specialist must still get check_master_model_config=False, unchanged,
+    so an unrelated misconfiguration on Sage's own card can never cross-
+    contaminate a specialist's turn (SageAgentRuntimeSpecialistProvider
+    ResolutionTests already covers that half from the specialist side)."""
+
+    def test_master_turn_opts_into_the_master_model_config_check(self):
+        with (
+            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile") as mock_profile,
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files") as mock_files,
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block") as mock_mem,
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                new=AsyncMock(return_value=("openai", {"api_key": "test-key"})),
+            ) as mock_provider,
+            patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_profile.return_value = {"profile": {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}}
+            mock_files.return_value = {}
+            mock_mem.return_value = ""
+            mock_generate.return_value = ("Hello there", {"model": "gpt-4o"}, "openai", "")
+
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hi",
+            ))
+
+        mock_provider.assert_awaited_once_with("ws-1", check_master_model_config=True)
+
+    def test_specialist_turn_does_not_check_master_model_config(self):
+        spec = SpecialistRuntimeContext(
+            agent_install_id="agent-1",
+            agent_label="Research Agent",
+            agent_kind="specialist",
+            persona="You are a research specialist.",
+        )
+        stream_events = [{
+            "type": "final",
+            "payload": {"reply": "Reply", "actions": [], "error": None},
+        }]
+        with (
+            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.memory_service.get_memory", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service._resolve_cloud_provider",
+                new=AsyncMock(return_value=("deepseek", {"api_key": "sk-workspace-default"})),
+            ) as mock_provider,
+            patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability",
+                return_value={"runtime_ok": True, "local_gateway_online": True},
+            ),
+            patch(
+                "server_modules.sage_agent_runtime_service.direct_chat_generation_service.stream_provider_backed_direct_chat",
+            ) as mock_stream,
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            mock_stream.return_value = iter(stream_events)
+            _run(sage_agent_runtime_service.handle_sage_chat(
+                workspace_id="ws-1", message="hello", specialist_context=spec,
+            ))
+
+        mock_provider.assert_awaited_once_with("ws-1", check_master_model_config=False)
+
+    def test_master_turn_with_cli_subscription_model_config_raises_honest_error(self):
+        """End-to-end proof at the handle_sage_chat level (not just the
+        isolated _resolve_cloud_provider unit tests): a workspace whose
+        master/Sage install was saved with model_config.mode=
+        "cli_subscription" (the Fleet Model tab has no master/operator
+        guard, so that PATCH succeeds) must now surface an honest error
+        naming cli_subscription the moment its own turn resolves a
+        provider -- never silently fall through to the platform DeepSeek
+        default the way production logs showed."""
+        master_install = {
+            "id": "sage-main-1",
+            "metadata": {"model_config": {"mode": "cli_subscription", "runtime": "codex"}},
+        }
+        with (
+            patch("server_modules.sage_agent_runtime_service.sage_profile_service.list_sage_profile", return_value={"profile": {}}),
+            patch("server_modules.sage_agent_runtime_service.workspace_context.read_workspace_context_files", return_value={}),
+            patch("server_modules.sage_agent_runtime_service.sage_memory_service.build_sage_memory_context_block", return_value=""),
+            patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={})),
+            patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
+            patch(
+                "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+                new=AsyncMock(return_value="tenant-1"),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_master_agent_install",
+                new=AsyncMock(return_value=master_install),
+            ),
+            patch("server_modules.sage_agent_runtime_service.persist_interaction"),
+            patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
+            patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                _run(sage_agent_runtime_service.handle_sage_chat(
+                    workspace_id="ws-1", message="hi",
+                ))
+
+        self.assertIn("cli_subscription", str(ctx.exception))
+
+
 class SageAgentRuntimeReasoningEffortResolutionTests(unittest.TestCase):
     """Fleet Model tab's reasoning-effort picker (model_config.
     reasoning_effort) -- proves the value actually reaches the generation

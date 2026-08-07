@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, patch
 
 from server_modules import runs_execution
 from server_modules.sage_agent_runtime_contract import SageTurnResult
+from server_modules.specialist_runtime_context import SpecialistRuntimeContext
 
 
 def _heartbeat_shaped_context(**metadata_overrides) -> dict:
@@ -194,6 +195,104 @@ class ResultGenerateRoutesThroughToolCapableEngineTests(unittest.TestCase):
                 sage_result=SageTurnResult(message="", error="No AI provider is configured for workspace ws-1.")
             )
         self.assertIn("No AI provider is configured", str(ctx.exception))
+
+
+class ResultGenerateThreadsAssignedAgentIdentityTests(unittest.TestCase):
+    """Bug 1 (MAN-312-adjacent) regression: a task_assigned wakeup's turn
+    must execute AS the assigned agent, not the workspace master (Sage).
+
+    bounded_scheduler_service.schedule_task_assigned_wakeup captures the
+    assignee in the wake request's payload["agent_id"] (a workspace_agent_
+    installs.id). runtime_heartbeat_service.build_heartbeat_turn_request
+    now threads that id into merged_metadata["active_agent_install_id"] --
+    the SAME metadata key agent_turn.py/run_service.py already read for
+    thread-tagging and runtime-attachment resolution -- which flows through
+    run_service.build_turn_seed_from_request into the DAG's own
+    context["metadata"], read here by _execute_orion_result_via_agent_
+    engine. These tests prove that id is resolved through the SAME
+    specialist_runtime_context.resolve_specialist_runtime_context every
+    other channel uses (not a parallel path) and threaded into the
+    execute_sage_turn call as specialist_context -- and that its absence,
+    or a resolution failure, fails safe to specialist_context=None (today's
+    unchanged master/Sage behavior)."""
+
+    def _run_result_generate_with_metadata(self, *, metadata_overrides, resolve_specialist_side_effect=None, resolve_specialist_return=None):
+        run_id = "run-task-assigned-1"
+        log_queue = queue.Queue()
+        node = {"id": "result.generate", "kind": "result_generate", "deps": ["plan.approval"]}
+        state = {"plan_text": "1. Read the task\n2. Do the work"}
+        context = _heartbeat_shaped_context(**metadata_overrides)
+        resolve_kwargs = {}
+        if resolve_specialist_side_effect is not None:
+            resolve_kwargs["side_effect"] = resolve_specialist_side_effect
+        else:
+            resolve_kwargs["return_value"] = resolve_specialist_return
+        with (
+            patch(
+                "server_modules.sage_turn_adapter.execute_sage_turn",
+                new=AsyncMock(return_value=SageTurnResult(message="done")),
+            ) as mock_execute_sage_turn,
+            patch(
+                "server_modules.specialist_runtime_context.resolve_specialist_runtime_context",
+                new=AsyncMock(**resolve_kwargs),
+            ) as mock_resolve_specialist,
+        ):
+            runs_execution._execute_orion_dag_node(run_id, context, log_queue, node, state)
+        return mock_execute_sage_turn, mock_resolve_specialist
+
+    def test_assigned_agent_id_in_metadata_resolves_and_threads_specialist_context(self):
+        """The core routing assertion: an assignee id threaded into
+        context["metadata"]["active_agent_install_id"] must reach
+        execute_sage_turn as specialist_context, resolved through the exact
+        same resolver interactive chat uses -- not a reimplemented lookup."""
+        spec = SpecialistRuntimeContext(
+            agent_install_id="agent-assignee-1",
+            agent_label="Ops Agent",
+            agent_kind="specialist",
+            persona="You are the Ops agent.",
+        )
+        mock_execute_sage_turn, mock_resolve_specialist = self._run_result_generate_with_metadata(
+            metadata_overrides={"active_agent_install_id": "agent-assignee-1"},
+            resolve_specialist_return=spec,
+        )
+
+        mock_resolve_specialist.assert_awaited_once()
+        resolve_kwargs = mock_resolve_specialist.await_args.kwargs
+        self.assertEqual(resolve_kwargs["active_agent_install_id"], "agent-assignee-1")
+        self.assertEqual(resolve_kwargs["workspace_id"], "ws-1")
+        self.assertEqual(resolve_kwargs["tenant_id"], "tenant-1")
+
+        self.assertTrue(mock_execute_sage_turn.called)
+        self.assertIs(mock_execute_sage_turn.call_args.kwargs["specialist_context"], spec)
+
+    def test_no_assigned_agent_id_never_calls_the_resolver_and_runs_as_master(self):
+        """An ordinary heartbeat tick (no task_assigned wake request, so no
+        active_agent_install_id in metadata -- the common case) must be
+        byte-for-byte unchanged: no resolver call, specialist_context=None,
+        the turn runs as Sage exactly like before this fix."""
+        mock_execute_sage_turn, mock_resolve_specialist = self._run_result_generate_with_metadata(
+            metadata_overrides={},
+            resolve_specialist_return=None,
+        )
+
+        mock_resolve_specialist.assert_not_awaited()
+        self.assertTrue(mock_execute_sage_turn.called)
+        self.assertIsNone(mock_execute_sage_turn.call_args.kwargs["specialist_context"])
+
+    def test_resolution_failure_fails_safe_to_master_not_a_raised_error(self):
+        """A resolver exception (DB hiccup, unknown install, etc.) must
+        never break the turn -- same fail-safe convention as every other
+        resolve_specialist_runtime_context call site (direct_chat_service.
+        execute_direct_chat_turn_request, sage_turn_adapter.
+        execute_sage_turn_for_channel)."""
+        mock_execute_sage_turn, mock_resolve_specialist = self._run_result_generate_with_metadata(
+            metadata_overrides={"active_agent_install_id": "agent-unknown"},
+            resolve_specialist_side_effect=RuntimeError("install not found"),
+        )
+
+        mock_resolve_specialist.assert_awaited_once()
+        self.assertTrue(mock_execute_sage_turn.called)
+        self.assertIsNone(mock_execute_sage_turn.call_args.kwargs["specialist_context"])
 
 
 if __name__ == "__main__":

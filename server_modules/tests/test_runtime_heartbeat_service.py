@@ -158,6 +158,71 @@ class RuntimeHeartbeatServiceTests(unittest.TestCase):
         self.assertEqual(turn_request["context_hints"]["metadata"]["source"], "heartbeat")
         self.assertEqual(turn_request["authority_tier"], "owner")
 
+    def test_build_heartbeat_turn_request_threads_assigned_agent_id_from_task_assigned_wake_payload(self):
+        """Bug 1 (MAN-312-adjacent): schedule_task_assigned_wakeup's wake
+        request payload carries agent_id (the assignee's workspace_agent_
+        installs.id) -- this must land in context_hints["metadata"]
+        ["active_agent_install_id"], the same key agent_turn.py/run_
+        service.py already read for thread-tagging and runtime-attachment
+        resolution, so runs_execution._execute_orion_result_via_agent_
+        engine has something to resolve a specialist context from. Without
+        this, a task-assigned wakeup's turn has no way to know who it was
+        assigned to and silently runs as the workspace master (Sage)."""
+        turn_request = runtime_heartbeat_service.build_heartbeat_turn_request(
+            build_inbound_agent_turn_request=lambda **kwargs: kwargs,
+            tasks=[],
+            metadata={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+            pending_started=[],
+            authority_tier="owner",
+            wake_requests=[{
+                "id": "wake-1",
+                "trigger_kind": "task_assigned",
+                "payload": {
+                    "agent_id": "agent-assignee-1",
+                    "task_id": "task-1",
+                    "task_title": "Ship the thing",
+                    "task_description": "Do it.",
+                },
+            }],
+        )
+
+        metadata = turn_request["context_hints"]["metadata"]
+        self.assertEqual(metadata["active_agent_install_id"], "agent-assignee-1")
+        self.assertEqual(metadata["task_id"], "task-1")
+
+    def test_build_heartbeat_turn_request_omits_active_agent_install_id_for_plain_heartbeat_tick(self):
+        """The overwhelming common case -- an ordinary heartbeat tick with
+        no task_assigned wake request -- must be completely unaffected: no
+        active_agent_install_id key at all, so the turn runs as Sage
+        exactly like before this fix."""
+        turn_request = runtime_heartbeat_service.build_heartbeat_turn_request(
+            build_inbound_agent_turn_request=lambda **kwargs: kwargs,
+            tasks=["Check inbox"],
+            metadata={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+            pending_started=[],
+            authority_tier="owner",
+        )
+        self.assertNotIn("active_agent_install_id", turn_request["context_hints"]["metadata"])
+
+    def test_build_heartbeat_turn_request_task_assigned_wake_without_agent_id_omits_key(self):
+        """Defensive: a task_assigned payload missing agent_id (shouldn't
+        happen -- schedule_task_assigned_wakeup always sets it -- but must
+        never silently invent a value) leaves active_agent_install_id
+        unset, same as the no-wake-request case."""
+        turn_request = runtime_heartbeat_service.build_heartbeat_turn_request(
+            build_inbound_agent_turn_request=lambda **kwargs: kwargs,
+            tasks=[],
+            metadata={"workspace_id": "ws-1", "tenant_id": "tenant-1"},
+            pending_started=[],
+            authority_tier="owner",
+            wake_requests=[{
+                "id": "wake-1",
+                "trigger_kind": "task_assigned",
+                "payload": {"task_id": "task-1", "task_title": "Ship it"},
+            }],
+        )
+        self.assertNotIn("active_agent_install_id", turn_request["context_hints"]["metadata"])
+
     def test_build_heartbeat_turn_request_normalizes_garbage_tier_to_audience(self):
         turn_request = runtime_heartbeat_service.build_heartbeat_turn_request(
             build_inbound_agent_turn_request=lambda **kwargs: kwargs,
