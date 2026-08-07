@@ -41,6 +41,9 @@ class WorkspaceAiRouteControlPlaneRustGateTests(unittest.IsolatedAsyncioTestCase
             workspace_ai_route_service.provider_profiles,
             "provider_requires_credential",
             return_value=True,
+        ), mock.patch(
+            "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+            new=mock.AsyncMock(return_value="tenant-1"),
         ), mock.patch.object(
             workspace_ai_route_service.rust_runtime_kernel_client,
             "run_runtime_kernel_enforced",
@@ -75,6 +78,12 @@ class WorkspaceAiRouteControlPlaneRustGateTests(unittest.IsolatedAsyncioTestCase
         self.assertEqual(command, "control-plane-service-decision")
         self.assertEqual(payload["operation"], "workspace_ai_route_update")
         self.assertEqual(payload["record_type"], "workspace_ai_route")
+        # tenant_id now comes from the authoritative, per-workspace resolver
+        # (control_plane_repository.resolve_tenant_id_for_workspace, mocked
+        # above) -- NOT from current_user["tenant_id"], which used to be
+        # trusted directly and is exactly the stale-users.tenant_id bug this
+        # test would otherwise still be encoding as "correct" (see
+        # CLAUDE.md / routes_workspaces.py's _control_plane_tenant_id).
         self.assertEqual(payload["tenant_id"], "tenant-1")
         self.assertEqual(payload["workspace_id"], "ws-1")
         self.assertEqual(payload["actor_id"], "owner-1")

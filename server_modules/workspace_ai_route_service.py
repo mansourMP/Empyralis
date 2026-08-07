@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-from server_modules import auth as auth_module
 from server_modules import connectors_core
 from server_modules import empyralis_model_tier_contract
 from server_modules import empyralis_model_tier_routing_service
@@ -59,19 +58,19 @@ def _current_user_actor_id(current_user: Any) -> str:
     return "workspace_ai_route_service"
 
 
-def _current_user_tenant_id(current_user: Any, workspace_id: str) -> str:
-    if isinstance(current_user, dict):
-        token = _read_string(current_user.get("tenant_id"))
-        if token:
-            return token
-    try:
-        token = auth_module.workspace_tenant_id(current_user, workspace_id)
-    except Exception:
-        token = ""
-    return _read_string(token) or _read_string(workspace_id) or "default"
+async def _current_user_tenant_id(current_user: Any, workspace_id: str) -> str:
+    """Authoritative, per-workspace tenant resolution. Previously read
+    current_user.get("tenant_id") first -- the same stale users.tenant_id
+    column that caused routes_workspaces.py's invite bug (see CLAUDE.md).
+    Do not reintroduce a user-record read here."""
+    from server_modules import control_plane_repository
+
+    return await control_plane_repository.resolve_tenant_id_for_workspace(
+        str(workspace_id or "").strip(), default="default"
+    )
 
 
-def _enforce_workspace_ai_route_update(
+async def _enforce_workspace_ai_route_update(
     *,
     workspace_id: str,
     current_user: Any,
@@ -82,7 +81,7 @@ def _enforce_workspace_ai_route_update(
     payload = {
         "operation": "workspace_ai_route_update",
         "record_type": "workspace_ai_route",
-        "tenant_id": _current_user_tenant_id(current_user, workspace_id),
+        "tenant_id": await _current_user_tenant_id(current_user, workspace_id),
         "workspace_id": workspace_id,
         "actor_id": _current_user_actor_id(current_user),
         "actor_role": "owner",
@@ -664,7 +663,7 @@ async def update_workspace_default_ai_route(
             }
             profiles.append(target_profile)
 
-    _enforce_workspace_ai_route_update(
+    await _enforce_workspace_ai_route_update(
         workspace_id=normalized_workspace_id,
         current_user=current_user,
         selected_kind=selected_kind,

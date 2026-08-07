@@ -146,17 +146,19 @@ def _control_plane_actor_id(current_user: Any, user: Optional[Dict[str, Any]] = 
     return "workspace_route"
 
 
-def _control_plane_tenant_id(current_user: Any, workspace_id: str, user: Optional[Dict[str, Any]] = None) -> str:
-    record = user if isinstance(user, dict) else {}
-    for source in (record, current_user if isinstance(current_user, dict) else {}):
-        token = str(source.get("tenant_id") or "").strip()
-        if token:
-            return token
-    try:
-        token = auth_module.workspace_tenant_id(current_user, workspace_id)
-    except Exception:
-        token = ""
-    return str(token or workspace_id or "default").strip()
+async def _control_plane_tenant_id(current_user: Any, workspace_id: str, user: Optional[Dict[str, Any]] = None) -> str:
+    """Authoritative, per-workspace tenant resolution -- the same shared
+    helper routes_fleet.py's _resolve_tenant() uses. Deliberately does NOT
+    read tenant_id off the user record: users.tenant_id is a stale legacy
+    default (see CLAUDE.md) that does not track workspace membership and a
+    prior version of this function trusted it first, which sent invites for
+    a brand-new user's project lookup to the wrong tenant and produced
+    "Project not found in this workspace." current_user/user are accepted
+    only for call-site compatibility and are no longer consulted -- do not
+    reintroduce a user-record read here."""
+    return await control_plane_repository.resolve_tenant_id_for_workspace(
+        str(workspace_id or "").strip(), default="default"
+    )
 
 
 def _enforce_control_plane_route_decision(**payload: Any) -> Dict[str, Any]:
@@ -425,7 +427,7 @@ async def update_workspace(
     _enforce_control_plane_route_decision(
         operation="workspace_update",
         record_type="workspace",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
+        tenant_id=await _control_plane_tenant_id(current_user, resolved_workspace_id),
         workspace_id=resolved_workspace_id,
         actor_id=_control_plane_actor_id(current_user),
         actor_role="owner",
@@ -627,7 +629,7 @@ async def workspace_routing_update(
     _enforce_control_plane_route_decision(
         operation="workspace_routing_update",
         record_type="workspace_routing",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
+        tenant_id=await _control_plane_tenant_id(current_user, resolved_workspace_id),
         workspace_id=resolved_workspace_id,
         actor_id=_control_plane_actor_id(current_user),
         actor_role="owner",
@@ -677,7 +679,7 @@ async def workspace_policies_update(
     _enforce_control_plane_route_decision(
         operation="workspace_policy_update",
         record_type="workspace_policy",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
+        tenant_id=await _control_plane_tenant_id(current_user, resolved_workspace_id),
         workspace_id=resolved_workspace_id,
         actor_id=_control_plane_actor_id(current_user),
         actor_role="owner",
@@ -727,7 +729,7 @@ async def workspace_sage_tool_policy_update(
     _enforce_control_plane_route_decision(
         operation="sage_tool_policy_update",
         record_type="sage_tool_policy",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
+        tenant_id=await _control_plane_tenant_id(current_user, resolved_workspace_id),
         workspace_id=resolved_workspace_id,
         actor_id=_control_plane_actor_id(current_user),
         actor_role="owner",
@@ -785,7 +787,7 @@ async def workspace_provider_credential_delete(
     _enforce_control_plane_route_decision(
         operation="secret_reference_write",
         record_type="provider_credential",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
+        tenant_id=await _control_plane_tenant_id(current_user, resolved_workspace_id),
         workspace_id=resolved_workspace_id,
         actor_id=_control_plane_actor_id(current_user),
         actor_role="owner",
@@ -824,7 +826,7 @@ async def workspace_provider_models_refresh(
     _enforce_control_plane_route_decision(
         operation="provider_models_refresh",
         record_type="provider_models",
-        tenant_id=_control_plane_tenant_id(current_user, resolved_workspace_id),
+        tenant_id=await _control_plane_tenant_id(current_user, resolved_workspace_id),
         workspace_id=resolved_workspace_id,
         actor_id=_control_plane_actor_id(current_user),
         actor_role="owner",
@@ -951,7 +953,7 @@ async def create_workspace_invite_route(
     if auth_module.RBAC_ROLE_ORDER[requested_role] > auth_module.RBAC_ROLE_ORDER[inviter_role]:
         raise HTTPException(status_code=403, detail="Cannot invite a role above your own.")
 
-    tenant_id = _control_plane_tenant_id(current_user, resolved_workspace_id, user)
+    tenant_id = await _control_plane_tenant_id(current_user, resolved_workspace_id, user)
 
     clean_project_id = str(body.project_id or "").strip() or None
     if clean_project_id:
