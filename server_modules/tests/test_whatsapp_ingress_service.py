@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from server_modules.connectors.whatsapp_ingress_service import WhatsAppIngressService
 
@@ -141,6 +141,75 @@ class WhatsAppIngressServiceTests(unittest.TestCase):
         self.assertEqual(len(persisted), 1)
         self.assertTrue(any(evt["direction"] == "inbound" for evt in record_events))
         self.assertTrue(any(evt["direction"] == "outbound" for evt in record_events))
+
+    def test_public_deployed_agent_free_text_reaches_execute_sage_turn_end_to_end(self) -> None:
+        """FIX (channel-audit Defect 2), end to end. Unlike
+        test_public_deployed_agent_free_text_routes_to_canonical_channel_router
+        above (which mocks _route_inbound_channel_message itself, so it only
+        proves the call site's own arguments look right — true both before
+        and after this fix, since the bug lived one layer deeper), this
+        exercises the REAL agent_channel_router.route_inbound_channel_message,
+        only mocking execute_sage_turn — the actual boundary of "did the
+        message reach the model." Before the fix, "whatsapp" had no entry in
+        _SAGE_CHANNEL_ORIGIN_MAP, so this real router call would have hit the
+        "Unimplemented channels" branch and returned channel_unavailable
+        without ever calling execute_sage_turn, and ingest_webhook would
+        have returned "" (no reply text) rather than the model's reply."""
+        record_events = []
+        state_patches = []
+        processed = []
+        persisted = []
+        service = self._make_service(
+            record_events=record_events,
+            state_patches=state_patches,
+            processed=processed,
+            persisted=persisted,
+            match={
+                "entry": {
+                    "id": "entry-1",
+                    "tenant_id": "tenant-1",
+                    "label": "Parts Pro WhatsApp",
+                    "metadata": {
+                        "source": "deployed_agent",
+                        "deployed_agent_id": "dagent-1",
+                        "deployed_agent_name": "Parts Pro",
+                        "channel_registry_bindings": {
+                            "whatsapp": {"endpoint_key": "whatsapp:+200"},
+                        },
+                    },
+                },
+                "secret": {"from_number": "whatsapp:+200"},
+                "connector_id": "conn-1",
+                "workspace_id": "ws-1",
+            },
+        )
+
+        from server_modules.sage_agent_runtime_contract import SageTurnResult
+
+        with patch(
+            "server_modules.sage_turn_adapter.execute_sage_turn",
+            new=AsyncMock(return_value=SageTurnResult(
+                message="I can help with brake pads.",
+                trace_id="trace-wa-e2e-1",
+                provider="deepseek",
+                model="deepseek-chat",
+            )),
+        ) as execute_mock:
+            result = service.ingest_webhook(
+                {
+                    "AccountSid": "AC123",
+                    "MessageSid": "SM123",
+                    "From": "whatsapp:+100",
+                    "To": "whatsapp:+200",
+                    "Body": "Need brake pads",
+                }
+            )
+
+        execute_mock.assert_awaited_once()
+        self.assertEqual(execute_mock.call_args.kwargs["channel_origin"], "whatsapp_twilio")
+        self.assertEqual(execute_mock.call_args.kwargs["message"], "Need brake pads")
+        self.assertEqual(execute_mock.call_args.kwargs["channel_sender_id"], "whatsapp:+100")
+        self.assertEqual(result, "I can help with brake pads.")
 
     def test_operator_run_action_schedules_durable_delivery(self) -> None:
         record_events = []

@@ -490,13 +490,36 @@ export class ImsgIMessagePersonalChannelRuntime implements PersonalChannelRuntim
     if (!this.rememberInboundEvent(eventKey)) {
       return;
     }
-    // Group gate: same contract as LocalBridgePersonalChannelRuntime.
-    // pollInboundEvents -- skip an unaddressed group message, but only
-    // after the dedupe above already remembered it, so it isn't
-    // re-evaluated on a duplicate notification.
-    if (event.is_group && !event.is_mentioned && !event.is_reply_to_sage) {
-      return;
-    }
+    // Group gate: REMOVED as a gateway-side DECISION (see
+    // local-bridge-runtime.ts's pollInboundEvents — the exact same removal,
+    // commit 53e3abf40 "resolve agent identity for Signal/iMessage/WeChat-
+    // personal"). That commit's message claimed "the backend is now the one
+    // place that decides, for every channel," but this runtime — a second,
+    // parallel iMessage transport (in-process `imsg` RPC, distinct from the
+    // BlueBubbles-over-HTTP path LocalBridgePersonalChannelRuntime drives)
+    // — still had its own copy of the same hard drop, left behind by that
+    // commit. Confirmed safe to remove the same way: this runtime reports
+    // the identical channel_key ("imessage_personal") and provider
+    // ("bluebubbles_local_bridge" — see this file's own doc comment above
+    // for why the provider string is unchanged even though the transport
+    // isn't BlueBubbles) as the HTTP path, so the backend dispatches BOTH
+    // transports to the exact same handler
+    // (_LocalBridgePersonalChannelHandler, registered once per channel_key,
+    // not per provider) and channel_lane_contract_service's provider check
+    // passes identically for both. personal_channels_service.py's
+    // _handle_local_bridge_gateway_channel_inbound now resolves a real
+    // per-agent identity (_resolve_local_bridge_agent_id) and runs
+    // _enforce_group_policy — the ONE shared resolver every personal-
+    // gateway channel uses — before a group message ever reaches a model
+    // turn, so removing this gateway-side copy does not open a hole; it
+    // closes the one place the backend's group allowlist was still
+    // structurally unreachable for an owner on this transport. This
+    // runtime's job is now only to compute and always forward the raw
+    // mention FACTS (is_group/is_mentioned/is_reply_to_sage) below — never
+    // to withhold a message based on them. (is_mentioned is currently
+    // always false here — see mapImsgMessageToBridgeEvent — pre-existing
+    // and unrelated to this fix: only is_reply_to_sage can pass an
+    // addressed iMessage group message on this transport today.)
     const inbound: GatewayChannelInboundPayload = {
       channel_key: this.config.channelKey,
       provider: this.config.provider,
