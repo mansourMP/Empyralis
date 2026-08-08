@@ -21,7 +21,33 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import routes_health, run_state_repository, runtime_runtime_api
+
+def _api():
+    """Resolve the module fresh on every call, never at import time.
+
+    Sibling test modules `importlib.reload()` parts of `server_modules`, which
+    swaps the object in `sys.modules` while a module-level `from ... import X`
+    keeps pointing at the dead one.  A test that binds at import time then
+    patches by dotted path patches the NEW module and exercises the OLD one --
+    it passes alone and fails inside the suite.  Every module below is resolved
+    at call time, and every patch targets the object the code under test will
+    actually reach.
+    """
+    from server_modules import runtime_runtime_api
+
+    return runtime_runtime_api
+
+
+def _health_routes():
+    from server_modules import routes_health
+
+    return routes_health
+
+
+def _repo():
+    from server_modules import run_state_repository
+
+    return run_state_repository
 
 
 def _worker(worker_id: str, tenant_id: str, workspace_id: str, **overrides):
@@ -99,21 +125,26 @@ def _operator_user():
 
 class _StatusRouteScopeTests(unittest.TestCase):
     def setUp(self) -> None:
+        api = _api()
+        # Patch the module OBJECTS `runtime_runtime_api` holds references to,
+        # not dotted paths that may resolve to a reloaded twin.
         patches = [
-            patch("server_modules.local_queue.recover_orphaned_local_runs_on_startup"),
-            patch(
-                "server_modules.local_queue.handle_get_local_workers_status",
+            patch.object(api.local_queue, "recover_orphaned_local_runs_on_startup"),
+            patch.object(
+                api.local_queue,
+                "handle_get_local_workers_status",
                 return_value=FLEET_STATUS,
             ),
-            patch(
-                "server_modules.outbox_service.get_outbox_delivery_status",
+            patch.object(
+                api.outbox_service,
+                "get_outbox_delivery_status",
                 return_value={"undelivered_count": 0},
             ),
             # workspace_tenant_id() resolves the tenant PER WORKSPACE (never off
             # the stale users.tenant_id column); stub the workspace->tenant
             # lookup rather than the resolution path itself.
             patch(
-                "server_modules.auth.tenant_id_for_workspace",
+                f"{api.workspace_tenant_id.__module__}.tenant_id_for_workspace",
                 side_effect=lambda workspace_id: {"ws-a": "tenant-a", "ws-b": "tenant-b"}[workspace_id],
             ),
         ]
@@ -122,7 +153,7 @@ class _StatusRouteScopeTests(unittest.TestCase):
             self.addCleanup(item.stop)
 
     def test_tenant_a_user_never_sees_tenant_b_machine(self):
-        payload = runtime_runtime_api.scoped_runtime_status_payload(_tenant_a_user())
+        payload = _api().scoped_runtime_status_payload(_tenant_a_user())
 
         machine_ids = [item.get("machine_id") for item in payload["items"]]
         self.assertEqual(machine_ids, ["worker-a"])
@@ -134,14 +165,14 @@ class _StatusRouteScopeTests(unittest.TestCase):
     def test_summary_is_recomputed_from_the_scoped_items(self):
         # Reporting the whole fleet's counts beside a filtered item list is
         # still a cross-tenant disclosure, just an arithmetic one.
-        payload = runtime_runtime_api.scoped_runtime_status_payload(_tenant_a_user())
+        payload = _api().scoped_runtime_status_payload(_tenant_a_user())
 
         self.assertEqual(payload["summary"]["known"], 1)
         self.assertEqual(payload["summary"]["online"], 1)
         self.assertEqual(payload["summary"]["busy"], 0)
 
     def test_capability_queue_drops_foreign_worker_ids(self):
-        payload = runtime_runtime_api.scoped_runtime_status_payload(_tenant_a_user())
+        payload = _api().scoped_runtime_status_payload(_tenant_a_user())
 
         self.assertEqual(payload["capability_queue"], {"read_write_files": ["worker-a"]})
 
@@ -155,7 +186,7 @@ class _StatusRouteScopeTests(unittest.TestCase):
             "workspace_access": {},
         }
 
-        payload = runtime_runtime_api.scoped_runtime_status_payload(stranger)
+        payload = _api().scoped_runtime_status_payload(stranger)
 
         self.assertEqual(payload["items"], [])
         self.assertEqual(payload["summary"]["known"], 0)
@@ -165,7 +196,7 @@ class _StatusRouteScopeTests(unittest.TestCase):
         # scripts poll this route with X-API-Key: $ORION_API_KEY and act on
         # summary.online -- scoping them to nothing would make the auto-recover
         # daemon restart a healthy runtime in a loop.
-        payload = runtime_runtime_api.scoped_runtime_status_payload(_operator_user())
+        payload = _api().scoped_runtime_status_payload(_operator_user())
 
         machine_ids = sorted(item.get("machine_id") for item in payload["items"])
         self.assertEqual(machine_ids, ["worker-a", "worker-b"])
@@ -173,7 +204,7 @@ class _StatusRouteScopeTests(unittest.TestCase):
         self.assertEqual(payload["view"], "global_operator")
 
     def test_legacy_local_workers_route_is_scoped_too(self):
-        payload = runtime_runtime_api.scoped_legacy_local_workers_status_payload(_tenant_a_user())
+        payload = _api().scoped_legacy_local_workers_status_payload(_tenant_a_user())
 
         self.assertEqual([item.get("machine_id") for item in payload["items"]], ["worker-a"])
         self.assertEqual(payload["known"], 1)
@@ -208,21 +239,18 @@ class _ReliabilityRouteScopeTests(unittest.TestCase):
                 return rows
             return [row for row in rows if row["workspace_id"] in set(workspace_ids)]
 
+        api = _api()
         patches = [
-            patch(
-                "server_modules.runtime_runtime_api.run_state_repository.sync_list_live_runs_by_state",
-                side_effect=_live,
-            ),
-            patch(
-                "server_modules.runtime_runtime_api.run_state_repository.sync_list_run_archive",
-                side_effect=_archive,
-            ),
-            patch(
-                "server_modules.runtime_runtime_api.runs_output._serialize_run_snapshot",
+            patch.object(api.run_state_repository, "sync_list_live_runs_by_state", side_effect=_live),
+            patch.object(api.run_state_repository, "sync_list_run_archive", side_effect=_archive),
+            patch.object(
+                api.runs_output,
+                "_serialize_run_snapshot",
                 side_effect=lambda run_id, item: dict(item),
             ),
-            patch(
-                "server_modules.outbox_service.get_outbox_delivery_status",
+            patch.object(
+                api.outbox_service,
+                "get_outbox_delivery_status",
                 return_value={"undelivered_count": 0},
             ),
         ]
@@ -237,7 +265,7 @@ class _ReliabilityRouteScopeTests(unittest.TestCase):
         self.fail("reliability payload carried no incomplete_run_ids section")
 
     def test_tenant_a_user_never_sees_tenant_b_run_ids(self):
-        payload = runtime_runtime_api.scoped_runtime_reliability_payload(_tenant_a_user())
+        payload = _api().scoped_runtime_reliability_payload(_tenant_a_user())
 
         ids = self._incomplete_ids(payload)
         self.assertIn("run-a", ids)
@@ -247,13 +275,13 @@ class _ReliabilityRouteScopeTests(unittest.TestCase):
     def test_workspace_predicate_reaches_the_sql_not_just_a_python_filter(self):
         # Filtering in Python after a LIMITed global read would silently return
         # an empty page whenever other tenants fill the limit.
-        runtime_runtime_api.scoped_runtime_reliability_payload(_tenant_a_user())
+        _api().scoped_runtime_reliability_payload(_tenant_a_user())
 
         self.assertEqual(self.live_calls, [["ws-a"]])
         self.assertEqual(self.archive_calls, [["ws-a"]])
 
     def test_operator_principal_still_gets_the_global_snapshot(self):
-        payload = runtime_runtime_api.scoped_runtime_reliability_payload(_operator_user())
+        payload = _api().scoped_runtime_reliability_payload(_operator_user())
 
         ids = self._incomplete_ids(payload)
         self.assertIn("run-a", ids)
@@ -282,7 +310,7 @@ class _InternalHealthScopeTests(unittest.TestCase):
     }
 
     def test_tenant_a_user_never_sees_tenant_b_workspace_hotspots(self):
-        scoped = routes_health.scope_internal_health_payload(self.HEALTH, _tenant_a_user())
+        scoped = _health_routes().scope_internal_health_payload(self.HEALTH, _tenant_a_user())
 
         local_queue = scoped["scale_safety_baseline"]["local_queue"]
         self.assertEqual(local_queue["workspace_hotspots"], [{"workspace_id": "ws-a", "count": 4}])
@@ -293,7 +321,7 @@ class _InternalHealthScopeTests(unittest.TestCase):
         self.assertNotIn("ws-b", repr(scoped))
 
     def test_scoping_does_not_mutate_the_shared_payload(self):
-        routes_health.scope_internal_health_payload(self.HEALTH, _tenant_a_user())
+        _health_routes().scope_internal_health_payload(self.HEALTH, _tenant_a_user())
 
         self.assertEqual(
             len(self.HEALTH["scale_safety_baseline"]["local_queue"]["workspace_hotspots"]),
@@ -301,7 +329,7 @@ class _InternalHealthScopeTests(unittest.TestCase):
         )
 
     def test_operator_principal_still_sees_every_hotspot(self):
-        scoped = routes_health.scope_internal_health_payload(self.HEALTH, _operator_user())
+        scoped = _health_routes().scope_internal_health_payload(self.HEALTH, _operator_user())
 
         self.assertEqual(
             scoped["scale_safety_baseline"]["local_queue"]["workspace_hotspots"],
@@ -309,8 +337,9 @@ class _InternalHealthScopeTests(unittest.TestCase):
         )
 
     def test_route_handler_applies_the_scope(self):
-        with patch("server_modules.health_core.health", new=AsyncMock(return_value=self.HEALTH)):
-            scoped = asyncio.run(routes_health.internal_health(current_user=_tenant_a_user()))
+        routes = _health_routes()
+        with patch.object(routes.core, "health", new=AsyncMock(return_value=self.HEALTH)):
+            scoped = asyncio.run(_health_routes().internal_health(current_user=_tenant_a_user()))
 
         self.assertNotIn("ws-b", repr(scoped))
 
@@ -320,26 +349,23 @@ class _RepositoryFailsClosedTests(unittest.TestCase):
 
     def test_list_fleet_workers_refuses_an_unscoped_read(self):
         with self.assertRaises(ValueError):
-            asyncio.run(run_state_repository.list_fleet_workers())
+            asyncio.run(_repo().list_fleet_workers())
 
     def test_sync_list_fleet_workers_refuses_an_unscoped_read(self):
         # The sync wrapper must raise on its own: `_run_sync` swallows an
         # exception into `fallback`, so validation only inside the coroutine
         # would turn a forgotten scope into a silent empty list.
         with self.assertRaises(ValueError):
-            run_state_repository.sync_list_fleet_workers()
+            _repo().sync_list_fleet_workers()
 
     def test_list_fleet_queue_partitions_refuses_an_unscoped_read(self):
         with self.assertRaises(ValueError):
-            asyncio.run(run_state_repository.list_fleet_queue_partitions())
+            asyncio.run(_repo().list_fleet_queue_partitions())
 
     def test_a_deliberate_global_read_is_allowed_when_named(self):
-        with patch(
-            "server_modules.run_state_repository._read_pool",
-            new=AsyncMock(return_value=None),
-        ):
+        with patch.object(_repo(), "_read_pool", new=AsyncMock(return_value=None)):
             self.assertEqual(
-                asyncio.run(run_state_repository.list_fleet_workers(include_all_tenants=True)),
+                asyncio.run(_repo().list_fleet_workers(include_all_tenants=True)),
                 [],
             )
 
@@ -350,12 +376,9 @@ class _RepositoryFailsClosedTests(unittest.TestCase):
             {"run_id": "run-a", "workspace_id": "ws-a"},
             {"run_id": "run-b-secret", "workspace_id": "ws-b"},
         ]
-        with patch(
-            "server_modules.run_state_repository.list_live_runs",
-            new=AsyncMock(return_value=rows),
-        ):
+        with patch.object(_repo(), "list_live_runs", new=AsyncMock(return_value=rows)):
             scoped = asyncio.run(
-                run_state_repository.list_live_runs_by_state([], workspace_ids=["ws-a"])
+                _repo().list_live_runs_by_state([], workspace_ids=["ws-a"])
             )
 
         self.assertEqual([row["run_id"] for row in scoped], ["run-a"])
@@ -363,16 +386,17 @@ class _RepositoryFailsClosedTests(unittest.TestCase):
     def test_empty_workspace_scope_returns_nothing_rather_than_everything(self):
         # An empty allow-list means "this caller may see no workspace" and must
         # never be widened back into "no filter".
-        with patch(
-            "server_modules.run_state_repository._read_pool",
+        with patch.object(
+            _repo(),
+            "_read_pool",
             new=AsyncMock(side_effect=AssertionError("must not reach the database")),
         ):
             self.assertEqual(
-                asyncio.run(run_state_repository.list_run_archive(workspace_ids=[])),
+                asyncio.run(_repo().list_run_archive(workspace_ids=[])),
                 [],
             )
             self.assertEqual(
-                asyncio.run(run_state_repository.list_live_runs_by_state(["failed"], workspace_ids=[])),
+                asyncio.run(_repo().list_live_runs_by_state(["failed"], workspace_ids=[])),
                 [],
             )
 
