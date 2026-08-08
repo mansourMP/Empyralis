@@ -21,7 +21,10 @@ from server_modules.shared import PROFILES_LOCK, PROVIDER_PROFILES
 DEFAULT_MODEL = "gpt-4o"
 OPENAI_CHAT_COMPLETIONS_URL = os.getenv("OPENAI_CHAT_COMPLETIONS_URL", "https://api.openai.com/v1/chat/completions")
 ANTHROPIC_MESSAGES_URL = os.getenv("ANTHROPIC_MESSAGES_URL", "https://api.anthropic.com/v1/messages")
-OPENAI_EMBEDDINGS_URL = os.getenv("OPENAI_EMBEDDINGS_URL", "https://api.openai.com/v1/embeddings")
+# No OPENAI_EMBEDDINGS_URL: the embeddings/RAG knowledge pipeline was removed
+# 2026-08-08 and nothing in this codebase calls an embeddings endpoint. The
+# constant had zero readers even before that. preflight refuses to boot if the
+# env var is still set, rather than let it look configured.
 MODEL_ALIASES = {
     "gpt-4o": "gpt-4o",
     "gpt-4o-mini": "gpt-4o-mini",

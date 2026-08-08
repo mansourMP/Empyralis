@@ -88,12 +88,6 @@ class ShopAssistantEvaluateRequest(BaseModel):
     connector_id: Optional[str] = None
 
 
-class DeployedAgentKnowledgeVerifyRequest(BaseModel):
-    workspace_id: str
-    query: str
-    limit: int = Field(default=5, ge=1, le=10)
-
-
 class DeployedAgentKnowledgeFileUploadRequest(BaseModel):
     workspace_id: str
     file_name: str
@@ -181,7 +175,6 @@ def _enforce_deployed_agent_route_decision(
             "conversation_list": "list_deployed_agent_conversations",
             "conversation_detail": "read_deployed_agent_conversation_detail",
             "external_user_delete": "delete_deployed_agent_external_user_data",
-            "knowledge_verify": "verify_deployed_agent_knowledge",
             "knowledge_upload": "upload_deployed_agent_knowledge_reference",
             "business_insight_review": "review_deployed_agent_business_insight",
             "business_insight_apply": "apply_deployed_agent_business_insight",
@@ -533,35 +526,6 @@ async def get_deployed_agent(
     )
     if not isinstance(payload, dict):
         raise HTTPException(status_code=404, detail="Deployed agent not found.")
-    return payload
-
-
-@router.post("/deployed-agents/{deployed_agent_id}/knowledge/verify")
-async def verify_deployed_agent_knowledge(
-    deployed_agent_id: str,
-    body: DeployedAgentKnowledgeVerifyRequest,
-    request: Request,
-    current_user=Depends(get_current_user),
-):
-    auth_module.validate_csrf(request)
-    _enforce_deployed_agent_route_decision(
-        operation="knowledge_verify",
-        workspace_id=body.workspace_id,
-        current_user=current_user,
-        deployed_agent_id=deployed_agent_id,
-    )
-    try:
-        payload = await deployed_agent_service.verify_deployed_agent_knowledge_retrieval(
-            deployed_agent_id=deployed_agent_id,
-            current_user=current_user,
-            owner_workspace_id=body.workspace_id,
-            query=body.query,
-            limit=body.limit,
-        )
-    except HTTPException:
-        raise
-    except ValueError as error:
-        _raise_for_value_error(error)
     return payload
 
 

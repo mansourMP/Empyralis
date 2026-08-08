@@ -93,43 +93,6 @@ class DeployedAgentServiceRustGateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["payload"]["operation"], "telegram_readiness")
         self.assertEqual(captured["payload"]["workspace_id"], "workspace-1")
 
-    async def test_verify_knowledge_wrong_rust_action_blocks_before_retrieval(self):
-        with (
-            patch(
-                "server_modules.deployed_agent_service.auth_module.enforce_workspace_access",
-                return_value="workspace-1",
-            ),
-            patch(
-                "server_modules.deployed_agent_service.control_plane_repository.get_workspace_by_id",
-                new=AsyncMock(return_value={"id": "workspace-1", "tenant_id": "tenant-1"}),
-            ),
-            patch(
-                "server_modules.deployed_agent_service.control_plane_repository.get_deployed_agent_by_id",
-                new=AsyncMock(return_value={"id": "dagent_1", "deployment_state": "live", "metadata": {}}),
-            ),
-            patch.object(
-                deployed_agent_service.rust_runtime_kernel_client,
-                "run_runtime_kernel_enforced",
-                return_value={"next_action": "upload_deployed_agent_knowledge_reference"},
-            ),
-            patch.object(
-                deployed_agent_service.knowledge_rag_service,
-                "retrieve_knowledge",
-                new=AsyncMock(),
-            ) as retrieve_mock,
-        ):
-            with self.assertRaises(HTTPException) as raised:
-                await deployed_agent_service.verify_deployed_agent_knowledge_retrieval(
-                    deployed_agent_id="dagent_1",
-                    current_user={"user_id": "user-1"},
-                    owner_workspace_id="workspace-1",
-                    query="brake pads",
-                )
-
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertIn("unexpected next_action", str(raised.exception.detail))
-        retrieve_mock.assert_not_awaited()
-
     async def test_conversation_detail_wrong_rust_action_blocks_before_event_load(self):
         with (
             patch(

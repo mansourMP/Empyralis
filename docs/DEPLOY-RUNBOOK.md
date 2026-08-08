@@ -89,6 +89,19 @@ Third-party OAuth connector client_id/secret pairs (`GOOGLE_WORKSPACE_OAUTH_CLIE
    cargo build --release --manifest-path empyralis-runtime-kernel/Cargo.toml
    ```
    This step is easy to forget because nothing else in this checklist touches it — that's exactly how MAN-306 happened (a `runtime_state_store.rs` fix shipped 2026-07-28 and reached the box via steps 1-2, but the binary was never rebuilt, so it kept enforcing the pre-fix policy and blocked every ordinary completed task run's archive write for weeks with no error anywhere). `server_modules/preflight.py`'s boot check now compares the binary's mtime against every file under `empyralis-runtime-kernel/src/`, `Cargo.toml`, and `Cargo.lock`, and refuses to boot if the binary is older — so skipping this step now fails the restart in step 7 loudly instead of degrading silently.
+3b. **Database migrations — apply any new file under `migrations/` BEFORE the restart in step 7** (check with `git diff --stat <previous-deployed-sha> HEAD -- migrations/`). Until 2026-08-08 this checklist had no migration step at all, which is why it is spelled out here rather than assumed.
+   ```bash
+   # As the APP's own role, never the postgres superuser — a superuser-applied
+   # migration leaves the object owned by `postgres`, the app cannot alter its
+   # own table on boot, and it crash-loops (~4 min of production downtime,
+   # 2026-08-07). If you slip: ALTER TABLE <t> OWNER TO empyralis_app;
+   psql "$DATABASE_URL" -f migrations/<new_file>.sql
+
+   # After ADDING a table, re-run the RLS policy migration — a table created
+   # without its policy exists with no isolation and reads return nothing:
+   psql "$DATABASE_URL" -f migrations/enable_rls.sql
+   ```
+   **Order is load-bearing in both directions.** A migration that ADDS a table must run before the code that reads it. A migration that DROPS one must ALSO run before the code that stops excusing it: `preflight._check_rls()` asks the live database which tables carry `tenant_id`/`workspace_id` and requires each to be listed in `enable_rls.sql` or in `preflight._RLS_COVERAGE_EXCEPTIONS`. So a table that was dropped in code — its exception entry removed — but still present on the box reads as NEW un-excused drift and **fails the boot**. `migrations/drop_knowledge_rag_tables.sql` (2026-08-08, the embeddings/RAG removal) is the first instance of this shape: apply it before deploying that code.
 4. **Frontend build:**
    ```bash
    cd frontend && npm ci && npm run build && cd ..

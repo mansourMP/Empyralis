@@ -539,6 +539,40 @@ better"*). OpenClaw's three-gate channel model (DM pairing → group allowlist
 for channel authorization, and `mention_gating_service.py` is already a port
 of it.
 
+**The RAG pipeline that contradicted that decision is deleted (2026-08-08).**
+`knowledge_rag_service.py` (chunking, hash/sentence-transformer embeddings, a
+LanceDB vector store, RRF fusion), the four derived tables
+(`knowledge_sources`/`_chunks`/`_embeddings`/`_retrieval_events`), their
+repository functions, the Rust control-plane gate ops, `lancedb`+`pandas`, the
+`knowledge_retrieval` credit type and the `rag` action domain all went with it.
+It was not merely off-doctrine — it fed nothing:
+
+```
+upload ─▶ chunk ─▶ embed ─▶ knowledge_chunks/_embeddings
+                                    │
+                                    ▼
+                         retrieve_knowledge()   ← 1 non-test caller:
+                                    │             verify_deployed_agent_
+                                    ▼             knowledge_retrieval(),
+                              (no agent turn)     the endpoint whose only
+                                                  job was to say the index
+                                                  worked. No frontend
+                                                  called even that.
+```
+
+What actually feeds a turn — and still does — is
+`unified_memory_service._search_knowledge_documents`: a plain keyword search
+over the raw uploaded files on disk, reaching the prompt through
+`workspace_context_memory_adapter` under the same "Retrieved Knowledge Sources"
+heading. Two implementations of one idea existed side by side; the agentic one
+was the live one. **Uploaded files are the user's data and were not touched** —
+`POST /deployed-agents/{id}/knowledge/files` still stores them; only the
+derived index is gone. Do not confuse the dropped `knowledge_sources` TABLE
+(derived) with `deployed_agents.knowledge_sources` JSONB (owner config, kept).
+`preflight._check_removed_knowledge_rag_config()` refuses to boot if
+`EMPYRALIS_RAG_*` / `OPENAI_EMBEDDINGS_URL` are still set, so the removed knobs
+fail loudly instead of looking configured.
+
 But **do not import a single-operator project's security assumptions into a
 multi-tenant one.** OpenClaw's own docs: *"not a hostile multi-tenant
 security boundary… one trusted operator boundary per gateway."* Their CVE

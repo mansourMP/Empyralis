@@ -134,6 +134,51 @@ class LocalStackDatabaseUrlCheckTests(unittest.TestCase):
             self.assertIsNone(preflight._check_local_stack_database_url())
 
 
+class RemovedKnowledgeRagConfigCheckTests(unittest.TestCase):
+    """The embeddings/RAG knowledge pipeline was removed 2026-08-08. Its env
+    knobs have no reader left, so a boot that still sets one must FAIL rather
+    than ignore it (CLAUDE.md: removing a provider/route makes stale config
+    fail loudly instead of falling through to a default)."""
+
+    def test_clean_environment_passes(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(preflight._check_removed_knowledge_rag_config())
+
+    def test_each_removed_var_is_rejected_on_its_own(self):
+        # Driven off the module's own tuple rather than a hand-copied sample:
+        # a hand-written list goes stale the moment someone adds a var, and
+        # this failure is silent by construction.
+        self.assertTrue(preflight._REMOVED_KNOWLEDGE_RAG_ENV_VARS)
+        for name in preflight._REMOVED_KNOWLEDGE_RAG_ENV_VARS:
+            with self.subTest(env_var=name):
+                with patch.dict(os.environ, {name: "something"}, clear=True):
+                    error = preflight._check_removed_knowledge_rag_config()
+                self.assertIsNotNone(error, f"{name} must fail the boot, not be ignored")
+                self.assertIn(name, error)
+
+    def test_blank_value_is_not_treated_as_configured(self):
+        with patch.dict(os.environ, {"EMPYRALIS_RAG_EMBEDDING_BACKEND": "   "}, clear=True):
+            self.assertIsNone(preflight._check_removed_knowledge_rag_config())
+
+    def test_error_names_every_offending_var_not_just_the_first(self):
+        with patch.dict(
+            os.environ,
+            {"EMPYRALIS_RAG_EMBEDDING_BACKEND": "hash", "OPENAI_EMBEDDINGS_URL": "https://x/y"},
+            clear=True,
+        ):
+            error = preflight._check_removed_knowledge_rag_config()
+        self.assertIsNotNone(error)
+        self.assertIn("EMPYRALIS_RAG_EMBEDDING_BACKEND", error)
+        self.assertIn("OPENAI_EMBEDDINGS_URL", error)
+
+    def test_error_states_uploaded_files_are_unaffected(self):
+        # The operator's first question on seeing this failure is "did I just
+        # lose the files people uploaded?" — the answer belongs in the message.
+        with patch.dict(os.environ, {"EMPYRALIS_RAG_LANCEDB_URI": "/tmp/x"}, clear=True):
+            error = preflight._check_removed_knowledge_rag_config()
+        self.assertIn("Uploaded knowledge files are unaffected", error)
+
+
 class PlatformCreditKeyCheckTests(unittest.TestCase):
     """preflight.py's advisory DeepSeek ``/user/balance`` health check — the
     one preflight step that makes a real outbound HTTPS request.
@@ -232,6 +277,7 @@ class PreflightRunnerTests(unittest.TestCase):
         """When all checks pass, errors list is empty."""
         async def _run():
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
+                 patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
                  patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
@@ -245,6 +291,7 @@ class PreflightRunnerTests(unittest.TestCase):
         """All failed checks appear in the error list."""
         async def _run():
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
+                 patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value="no kernel"), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value="no pg")), \
                  patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
@@ -260,6 +307,7 @@ class PreflightRunnerTests(unittest.TestCase):
         """When EMPYRALIS_SKIP_REDIS_CHECK is true, Redis is not checked."""
         async def _run():
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
+                 patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
                  self._no_platform_credit_call():

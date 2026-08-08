@@ -167,6 +167,56 @@ def _check_local_stack_database_url() -> Optional[str]:
     )
 
 
+# ── removed knowledge RAG pipeline ───────────────────────────────────
+
+# The embeddings/RAG knowledge pipeline (knowledge_rag_service.py, the
+# knowledge_sources/chunks/embeddings/retrieval_events tables, and the
+# /knowledge/verify route) was removed 2026-08-08. CLAUDE.md already
+# recorded the standing decision to prefer agentic search; the pipeline
+# contradicted it and, verified before removal, fed nothing -- the only
+# non-test reader of retrieve_knowledge() was the endpoint whose sole
+# purpose was to report that the index worked.
+#
+# These env vars configured ONLY that pipeline. Per CLAUDE.md's rule that
+# removed config must fail loudly rather than fall through to a default
+# (see model_router's deliberately-retained `vertex` branch), a boot that
+# still carries one refuses to start: a silently-ignored
+# EMPYRALIS_RAG_EMBEDDING_BACKEND would leave an operator believing an
+# embedding backend is selected and running when no such code path exists.
+_REMOVED_KNOWLEDGE_RAG_ENV_VARS = (
+    "EMPYRALIS_RAG_EMBEDDING_BACKEND",
+    "EMPYRALIS_RAG_SENTENCE_TRANSFORMERS_MODEL",
+    "EMPYRALIS_RAG_MAX_SOURCE_FILE_BYTES",
+    "EMPYRALIS_RAG_LANCEDB_URI",
+    "OPENAI_EMBEDDINGS_URL",
+)
+
+
+def _check_removed_knowledge_rag_config() -> Optional[str]:
+    """Return ``None`` unless the environment still configures the removed
+    embeddings/RAG knowledge pipeline.
+
+    Refuses to boot rather than ignore the setting. The variables below have
+    no reader left anywhere in the tree; honouring them silently is exactly
+    the "stale config falls through to a default" failure CLAUDE.md calls
+    out. Unset them -- there is nothing to point them at.
+    """
+    present = sorted(name for name in _REMOVED_KNOWLEDGE_RAG_ENV_VARS if os.getenv(name, "").strip())
+    if not present:
+        return None
+    return (
+        "The embeddings/RAG knowledge pipeline was removed (2026-08-08), but this "
+        f"environment still sets: {', '.join(present)}.\n"
+        "  These variables have no reader left in the codebase. Refusing to start rather "
+        "than ignore them silently, so nobody is left believing an embedding backend, a "
+        "vector store or a source-size cap is in force when none exists.\n"
+        "  Uploaded knowledge files are unaffected: they stay on disk under the workspace "
+        "knowledge dir and are still read at turn time by "
+        "unified_memory_service.search_unified_memory_documents (keyword search, no index).\n"
+        f"  Fix: unset {', '.join(present)} in this process's environment / .env / unit file."
+    )
+
+
 # ── kernel ───────────────────────────────────────────────────────────
 
 def _check_kernel() -> Optional[str]:
@@ -414,9 +464,6 @@ _RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {
     "workspace_hosted_ai_monthly_cost_ledger": _SCOPED_IN_APP_SQL,
     "workspace_billing_accounts": _SCOPED_IN_APP_SQL,
     "workspace_billing_subscriptions": _SCOPED_IN_APP_SQL,
-    "knowledge_sources": _SCOPED_IN_APP_SQL,
-    "knowledge_chunks": _SCOPED_IN_APP_SQL,
-    "knowledge_embeddings": _SCOPED_IN_APP_SQL,
     "workspace_member_invites": _SCOPED_IN_APP_SQL,
     "credit_ledger_events": _SCOPED_IN_APP_SQL,
     "agent_traces": _SCOPED_IN_APP_SQL,
@@ -436,7 +483,6 @@ _RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {
     "user_devices": _SCOPED_BY_UNGUESSABLE_KEY,
     "user_provider_connections": _SCOPED_BY_UNGUESSABLE_KEY,
     # ── audited: no live read path ────────────────────────────────────
-    "knowledge_retrieval_events": _NO_LIVE_READ,
     "governance_holds": _NO_LIVE_READ,
     "external_user_privacy_requests": _NO_LIVE_READ,
     "external_user_privacy_delete_audits": _NO_LIVE_READ,
@@ -934,6 +980,12 @@ async def run_preflight_checks() -> List[str]:
     local_stack_db_err = _check_local_stack_database_url()
     if local_stack_db_err:
         errors.append(local_stack_db_err)
+
+    # 1b. Config for the removed embeddings/RAG knowledge pipeline must be
+    #     gone, not silently ignored (CLAUDE.md: stale config fails loudly).
+    removed_rag_err = _check_removed_knowledge_rag_config()
+    if removed_rag_err:
+        errors.append(removed_rag_err)
 
     # 2. Kernel
     kernel_err = _check_kernel()

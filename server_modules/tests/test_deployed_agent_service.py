@@ -1743,10 +1743,6 @@ class DeployedAgentServiceTests(unittest.IsolatedAsyncioTestCase):
                     "server_modules.deployed_agent_service.update_deployed_agent",
                     new=AsyncMock(side_effect=fake_update_deployed_agent),
                 ),
-                patch(
-                    "server_modules.deployed_agent_service.knowledge_rag_service.ingest_workspace_knowledge_files",
-                    new=AsyncMock(return_value={"source_count": 1, "chunk_count": 1}),
-                ) as ingest_mock,
             ):
                 result = await deployed_agent_service.upload_deployed_agent_knowledge_file(
                     deployed_agent_id="dagent_1",
@@ -1761,72 +1757,12 @@ class DeployedAgentServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(source["kind"], "file")
             self.assertEqual(captured_update["updates"]["knowledge_sources"][0]["uri"], source["uri"])
             self.assertEqual((knowledge_root / "business-agents" / "dagent_1" / "FAQ-Sheet.md").read_text(), "# FAQ\nReturn policy")
-            self.assertEqual(ingest_mock.await_args.kwargs["source_refs"], ["business-agents/dagent_1/FAQ-Sheet.md"])
-
-    async def test_upload_deployed_agent_knowledge_file_ingests_only_uploaded_agent_file(self) -> None:
-        row = _deployed_agent_row()
-        row["id"] = "dagent_b"
-        row["knowledge_sources"] = []
-        indexed_sources: list[str] = []
-
-        async def fake_update_deployed_agent(**kwargs):
-            return {
-                **row,
-                "knowledge_sources": kwargs["updates"]["knowledge_sources"],
-            }
-
-        async def fake_upsert_source(**kwargs):
-            indexed_sources.append(kwargs["source_uri"])
-            return {"id": kwargs["source_id"], "source_uri": kwargs["source_uri"]}
-
-        async def fake_replace_chunks(**kwargs):
-            return kwargs["chunks"]
-
-        with TemporaryDirectory() as tmp_dir:
-            knowledge_root = Path(tmp_dir) / "knowledge"
-            agent_a_root = knowledge_root / "business-agents" / "dagent_a"
-            agent_a_root.mkdir(parents=True)
-            (agent_a_root / "agent-a.md").write_text("Agent A confidential note", encoding="utf-8")
-            with (
-                patch(
-                    "server_modules.deployed_agent_service.control_plane_repository.get_workspace_by_id",
-                    new=AsyncMock(return_value=_workspace_record()),
-                ),
-                patch(
-                    "server_modules.deployed_agent_service.control_plane_repository.get_deployed_agent_by_id",
-                    new=AsyncMock(return_value=row),
-                ),
-                patch(
-                    "server_modules.deployed_agent_service.workspace_context.workspace_knowledge_dir",
-                    return_value=knowledge_root,
-                ),
-                patch(
-                    "server_modules.deployed_agent_service.update_deployed_agent",
-                    new=AsyncMock(side_effect=fake_update_deployed_agent),
-                ),
-                patch(
-                    "server_modules.knowledge_rag_service.control_plane_repository.upsert_knowledge_source",
-                    new=AsyncMock(side_effect=fake_upsert_source),
-                ),
-                patch(
-                    "server_modules.knowledge_rag_service.control_plane_repository.replace_knowledge_source_chunks",
-                    new=AsyncMock(side_effect=fake_replace_chunks),
-                ),
-                patch(
-                    "server_modules.knowledge_rag_service._upsert_lancedb_source_chunks",
-                    return_value={"enabled": False, "stored": 1},
-                ),
-            ):
-                result = await deployed_agent_service.upload_deployed_agent_knowledge_file(
-                    deployed_agent_id="dagent_b",
-                    current_user=_owner_user(),
-                    owner_workspace_id="ws-1",
-                    file_name="Agent B.md",
-                    content_text="Agent B only note",
-                )
-
-            self.assertEqual(result["ingestion"]["source_count"], 1)
-            self.assertEqual(indexed_sources, ["knowledge://business-agents/dagent_b/Agent-B.md"])
+            # The embeddings/RAG index was removed 2026-08-08. An upload now
+            # only writes the file and records the reference — there is no
+            # ingestion step and no `ingestion` key in the response. The file
+            # itself is what a turn reads, through
+            # unified_memory_service._search_knowledge_documents.
+            self.assertNotIn("ingestion", result)
 
     def test_require_deployed_agent_admin_access_allows_owner(self) -> None:
         resolved = deployed_agent_service.require_deployed_agent_admin_access(

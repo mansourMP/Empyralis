@@ -1,0 +1,101 @@
+-- Drop the embeddings/RAG knowledge index. Decided 2026-08-08.
+--
+-- ┌──────────────────────────────────────────────────────────────────────┐
+-- │ DEPLOY ORDER MATTERS: APPLY THIS **BEFORE** DEPLOYING THE CODE.      │
+-- │                                                                      │
+-- │   migration first, then code   ──▶  boots clean                      │
+-- │   code first, then migration   ──▶  PREFLIGHT REFUSES TO BOOT        │
+-- │                                                                      │
+-- │ Why: the same change removes these four tables from                  │
+-- │ preflight._RLS_COVERAGE_EXCEPTIONS. preflight._check_rls() asks the  │
+-- │ LIVE database which tables carry tenant_id/workspace_id and requires │
+-- │ each to be in enable_rls.sql or in that exceptions registry. If the  │
+-- │ new code boots while these tables still exist, all four read as NEW  │
+-- │ un-excused tenant-scoped tables and _check_rls() fails the boot.     │
+-- │                                                                      │
+-- │ Applying this migration BEFORE the code deploy is safe: the only     │
+-- │ writer to these tables was the ingest path behind                    │
+-- │ POST /deployed-agents/{id}/knowledge/files, which has no frontend    │
+-- │ caller, and nothing reads them at all.                               │
+-- └──────────────────────────────────────────────────────────────────────┘
+--
+-- WHY: CLAUDE.md already recorded the standing decision to reject
+-- RAG/embeddings in favour of agentic search, following Claude Code's own
+-- documented reversal. These four tables were the pipeline that
+-- contradicted it, and -- verified before removal -- they fed nothing:
+--
+--     upload a file ──▶ chunk ──▶ embed ──▶ knowledge_chunks
+--                                            + knowledge_embeddings
+--                                                   │
+--                                                   ▼
+--                            retrieve_knowledge()  ← ONE non-test caller,
+--                                                    verify_deployed_agent_
+--                                                    knowledge_retrieval(),
+--                                                    i.e. the endpoint whose
+--                                                    only job was to report
+--                                                    that the index worked.
+--                                                   │
+--                                                   ▼
+--                                              (no agent turn)
+--
+-- No agent turn ever consumed a retrieved chunk. The route that did read
+-- the index (POST /deployed-agents/{id}/knowledge/verify) had no frontend
+-- caller either -- commit 85dcb7542 (2026-07-09) deleted the entire
+-- deployed-agents frontend and its own audit table already recorded these
+-- two endpoints as "no frontend caller / dead".
+--
+-- WHAT THIS DOES NOT TOUCH -- read this before running it:
+--
+--   * The user's ORIGINAL uploaded files. Those are plain text on disk
+--     under workspace_context.workspace_knowledge_dir(), written by
+--     deployed_agent_service.upload_deployed_agent_knowledge_file(). This
+--     migration does not touch the filesystem, and that upload path still
+--     works. They remain readable at turn time by
+--     unified_memory_service._search_knowledge_documents -- a keyword
+--     search over the raw files, no index, no chunking, no embedding --
+--     which reaches the prompt through
+--     workspace_context_memory_adapter under the same
+--     "Retrieved Knowledge Sources" heading the deleted RAG renderer used.
+--     Nothing a customer uploaded becomes unreachable.
+--
+--   * deployed_agents.knowledge_sources (JSONB). Despite sharing a name
+--     with the table dropped below, that COLUMN is user configuration --
+--     the owner's list of trusted source references -- not derived data.
+--     It is still written by the upload path and still read by
+--     _derive_studio_specialist_profile. It stays.
+--
+-- Everything dropped here is DERIVED and regenerable from those files;
+-- there is no unique customer content in any of these four tables.
+--
+-- DEPLOY: apply as the app's own role, NOT as the Postgres superuser
+-- (CLAUDE.md -- a superuser-applied migration leaves objects owned by
+-- `postgres` and the app crash-loops):
+--
+--     psql "$DATABASE_URL" -U empyralis_app -f migrations/drop_knowledge_rag_tables.sql
+--
+-- No enable_rls.sql re-run is needed: that file never carried a policy for
+-- any of these tables (they were carried as _RLS_COVERAGE_EXCEPTIONS in
+-- server_modules/preflight.py instead, and those four entries are removed
+-- in the same change). Dropping a table that has no policy cannot orphan
+-- one.
+--
+-- ORDER: children first. knowledge_embeddings references both
+-- knowledge_chunks and knowledge_sources; knowledge_chunks references
+-- knowledge_sources. CASCADE is deliberately NOT used -- if some object
+-- outside this set still depends on one of these tables, this migration
+-- should fail loudly rather than silently drop it.
+--
+-- VERIFIED 2026-08-08 against a throwaway local database (created, used and
+-- dropped; never production): the four tables were recreated from the exact
+-- DDL this change removes, seeded with an FK-linked row in each, and this
+-- file applied cleanly in one transaction leaving zero tables. Re-running it
+-- is a no-op (IF EXISTS), so a repeated deploy is safe.
+
+BEGIN;
+
+DROP TABLE IF EXISTS knowledge_embeddings;
+DROP TABLE IF EXISTS knowledge_chunks;
+DROP TABLE IF EXISTS knowledge_sources;
+DROP TABLE IF EXISTS knowledge_retrieval_events;
+
+COMMIT;

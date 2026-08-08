@@ -50,9 +50,6 @@ const SERVICE_OPERATIONS: &[&str] = &[
     "agent_session_upsert",
     "agent_session_terminate",
     "agent_turn_upsert",
-    "knowledge_source_upsert",
-    "knowledge_source_chunks_replace",
-    "knowledge_retrieval_event_write",
     "compiled_workflow_artifact_create",
     "workspace_agent_install_compiled_artifact_update",
     "self_hosted_enrollment_intent_create",
@@ -142,9 +139,6 @@ const OWNER_REQUIRED_OPERATIONS: &[&str] = &[
     "agent_session_upsert",
     "agent_session_terminate",
     "agent_turn_upsert",
-    "knowledge_source_upsert",
-    "knowledge_source_chunks_replace",
-    "knowledge_retrieval_event_write",
     "compiled_workflow_artifact_create",
     "workspace_agent_install_compiled_artifact_update",
     "self_hosted_enrollment_intent_create",
@@ -214,9 +208,6 @@ const ADMIN_REQUIRED_OPERATIONS: &[&str] = &[
     "agent_session_upsert",
     "agent_session_terminate",
     "agent_turn_upsert",
-    "knowledge_source_upsert",
-    "knowledge_source_chunks_replace",
-    "knowledge_retrieval_event_write",
     "workspace_tenant_binding_ensure",
 ];
 
@@ -257,9 +248,6 @@ const EXTERNAL_WRITE_OPERATIONS: &[&str] = &[
     "agent_session_upsert",
     "agent_session_terminate",
     "agent_turn_upsert",
-    "knowledge_source_upsert",
-    "knowledge_source_chunks_replace",
-    "knowledge_retrieval_event_write",
     "workspace_tenant_binding_ensure",
     "user_profile_update",
     "compiled_workflow_artifact_create",
@@ -1954,94 +1942,6 @@ mod agent_thread_session_turn_control_plane_tests {
         assert_eq!(
             decision["operation"].as_str(),
             Some("agent_turn_transcript_event_append")
-        );
-    }
-}
-
-#[cfg(test)]
-mod knowledge_control_plane_tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn knowledge_source_upsert_allows_idempotent_source_write() {
-        let decision = control_plane_service_decision_command(&json!({
-            "operation": "knowledge_source_upsert",
-            "record_type": "knowledge_source",
-            "tenant_id": "tenant-1",
-            "workspace_id": "workspace-1",
-            "actor_id": "agent-1",
-            "actor_role": "system",
-            "agent_id": "agent-1",
-            "idempotency_key": "source-1",
-            "target_status": "indexed",
-            "owner_access": true,
-            "admin_access": true,
-            "workspace_access": true,
-            "billing_entitled": true,
-            "quota_ok": true
-        }))
-        .unwrap();
-
-        assert_eq!(decision["decision"].as_str(), Some("allow"));
-        assert_eq!(
-            decision["operation"].as_str(),
-            Some("knowledge_source_upsert")
-        );
-        assert_eq!(decision["record_type"].as_str(), Some("knowledge_source"));
-    }
-
-    #[test]
-    fn knowledge_source_chunks_replace_requires_idempotency_key() {
-        let decision = control_plane_service_decision_command(&json!({
-            "operation": "knowledge_source_chunks_replace",
-            "record_type": "knowledge_chunks",
-            "tenant_id": "tenant-1",
-            "workspace_id": "workspace-1",
-            "actor_id": "agent-1",
-            "actor_role": "system",
-            "agent_id": "agent-1",
-            "owner_access": true,
-            "admin_access": true,
-            "workspace_access": true,
-            "billing_entitled": true,
-            "quota_ok": true
-        }))
-        .unwrap();
-
-        assert_eq!(decision["decision"].as_str(), Some("block"));
-        assert_eq!(decision["reason"].as_str(), Some("missing_idempotency_key"));
-    }
-
-    #[test]
-    fn knowledge_retrieval_event_write_allows_idempotent_event() {
-        let decision = control_plane_service_decision_command(&json!({
-            "operation": "knowledge_retrieval_event_write",
-            "record_type": "knowledge_retrieval_event",
-            "tenant_id": "tenant-1",
-            "workspace_id": "workspace-1",
-            "actor_id": "user-1",
-            "actor_role": "system",
-            "agent_id": "agent-1",
-            "thread_id": "thread-1",
-            "run_id": "run-1",
-            "idempotency_key": "retrieval-1",
-            "owner_access": true,
-            "admin_access": true,
-            "workspace_access": true,
-            "billing_entitled": true,
-            "quota_ok": true
-        }))
-        .unwrap();
-
-        assert_eq!(decision["decision"].as_str(), Some("allow"));
-        assert_eq!(
-            decision["operation"].as_str(),
-            Some("knowledge_retrieval_event_write")
-        );
-        assert_eq!(
-            decision["record_type"].as_str(),
-            Some("knowledge_retrieval_event")
         );
     }
 }

@@ -155,7 +155,6 @@ BARE_EXCEPT_PASS_BASELINE_FILES: frozenset[str] = frozenset({
     "server_modules/installed_solutions.py",
     "server_modules/jwt_secret.py",
     "server_modules/kill_switch_gate.py",
-    "server_modules/knowledge_rag_service.py",
     "server_modules/local_tool_executor.py",
     "server_modules/mcp_registry_service.py",
     "server_modules/memory_service.py",

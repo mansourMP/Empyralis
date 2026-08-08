@@ -24,9 +24,10 @@ table specifically:
   - agent_memory.py stores memory as files under .orion-stack/memory/ on
     local disk -- an audit flagged this as not durable across machines and
     not in the database of record.
-  - knowledge_sources keeps metadata in Postgres but the raw markdown on
-    disk under .orion-stack/workspace/... -- the same durability gap for
-    the part that actually matters (the content itself).
+  - uploaded knowledge files live only on disk under
+    .orion-stack/workspace/... (workspace_context.workspace_knowledge_dir)
+    -- the same durability gap for the part that actually matters (the
+    content itself).
 A project document is a small markdown text blob, not a binary asset --
 Postgres already gives every other control-plane row here one database of
 record, RLS-scoped isolation, and survival of a machine change with no
