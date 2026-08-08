@@ -278,6 +278,55 @@ class AllowlistDoesNotExcuseLongRandomRunsTests(unittest.TestCase):
         )
         self.assertLessEqual(longest, 24, "a registered tool name segment now exceeds the allowlist cap")
 
+    def test_every_live_tool_name_survives_inside_a_sentence(self) -> None:
+        """A model writes prose, not bare tokens.
+
+        The first version of this file enumerated the live registry but only
+        ever redacted each name ALONE, so `_HIGH_ENTROPY_CANDIDATE_PATTERN`
+        swallowing a trailing "." went unnoticed: "Use project_task__update."
+        redacted, "project_task__update" did not. An agent explaining what it
+        just did hits the punctuated form every time, and the two turn paths
+        that reach WhatsApp/Telegram/Signal/iMessage guard their replies — so
+        the punctuated form is the one a customer actually reads.
+
+        Every trailing punctuation mark below is one a model genuinely emits.
+        """
+        for name in _live_registered_tool_names():
+            for template in (
+                "Use {name}.",
+                "I called {name}, then stopped.",
+                "Run {name}!",
+                "Try `{name}`.",
+                "({name})",
+                "Done: {name}.",
+            ):
+                sentence = template.format(name=name)
+                self.assertEqual(
+                    secret_redaction_service.redact_text(sentence),
+                    sentence,
+                    f"{name} is redacted when written as prose: {sentence!r}",
+                )
+
+    def test_trailing_punctuation_does_not_rescue_a_real_credential(self) -> None:
+        """The other direction of the same change — the guard must not have
+        been widened into a hole. A credential at the end of a sentence is
+        still a credential."""
+        credentials = (
+            "sk-abcdefghijklmnop123456",
+            "ghp_abcdefghijklmnopqrstuvwxyz12",
+            "AKIAIOSFODNN7EXAMPLE",
+            "AIzaSyC1234567890abcdefghijklmnop",
+            "xoxb-123456789012-abcdefghijklmnop",
+        )
+        for credential in credentials:
+            for template in ("The key is {c}.", "{c}", "use {c}, please", "{c}."):
+                text = template.format(c=credential)
+                self.assertNotIn(
+                    credential,
+                    secret_redaction_service.redact_text(text),
+                    f"credential survived redaction in {text!r}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

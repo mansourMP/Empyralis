@@ -89,7 +89,23 @@ _HEX_IDENTIFIER_PATTERN = re.compile(r"^[0-9a-f]{32,64}$", re.IGNORECASE)
 # prefixed credential shape in _SENSITIVE_VALUE_PATTERNS is matched and
 # replaced BEFORE this allowlist is ever consulted, so it can never rescue one.
 _SAFE_IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]{0,23}(?:[._-]{1,2}[a-z0-9]{1,24})+$")
-_HIGH_ENTROPY_CANDIDATE_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9._~+/=-]{20,})(?![A-Za-z0-9])")
+# The candidate must not END on a `.`, `-` or `_`. Those are sentence
+# punctuation far more often than token material, and swallowing one defeats
+# the allowlist below, which (correctly) requires an identifier to end
+# alphanumeric. Before this, "Use project_task__update." captured the trailing
+# period, failed _SAFE_IDENTIFIER_PATTERN, and redacted a legitimate tool name
+# out of an agent's own prompt — the 2026-08-08 bug, whose first fix widened
+# the allowlist but left this half open, so only the unpunctuated form was
+# rescued and the enumerating test never wrote a sentence.
+#
+# This CANNOT rescue a credential: every real secret shape is substituted by
+# _SENSITIVE_VALUE_PATTERNS before this runs, and a token that merely loses a
+# trailing separator is still handed to _looks_like_high_entropy_secret on its
+# remaining 20+ characters. A JWT keeps its interior dots; base64 padding uses
+# `=`, which is still allowed to terminate a candidate.
+_HIGH_ENTROPY_CANDIDATE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z0-9._~+/=-]{19,}[A-Za-z0-9~+/=])(?![A-Za-z0-9])"
+)
 _URLISH_TOKEN_PATTERN = re.compile(r"(?i)(?:^|[./])[a-z0-9-]+\.[a-z]{2,}(?:[/:]|$)")
 
 
