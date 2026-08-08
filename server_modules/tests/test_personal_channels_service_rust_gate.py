@@ -428,6 +428,16 @@ class PersonalChannelsServiceRustGateTests(unittest.TestCase):
                     "server_modules.personal_channels_service.personal_channels_repository.create_or_get_outbound_message",
                     return_value=(outbound, True),
                 ),
+                # Without this the call reaches the real reply builder, which
+                # returns nothing under the test-suite provider guard; the
+                # function then takes its "agent said nothing" early return
+                # and never gets as far as the Rust gate this test is about.
+                patch(
+                    "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                    ".build_personal_channel_reply_async",
+                    new=AsyncMock(return_value={"text": "auto-reply", "source": "test"}),
+                    create=True,
+                ),
             ):
                 with self.assertRaises(ValueError) as raised:
                     await personal_channels_service._deliver_local_bridge_personal_reply(
@@ -437,11 +447,12 @@ class PersonalChannelsServiceRustGateTests(unittest.TestCase):
                         channel_key="signal_personal",
                         provider="signal_local_bridge",
                         label="Signal",
+                        agent_id="agent-rust-gate",
                         remote_jid="signal-user-1",
                         external_message_id="msg-1",
+                        text="hello",
                         push_name=None,
                         duplicate=False,
-                        no_reply_prefix="signal_personal:noreply:",
                     )
 
             self.assertIn("unexpected next_action", str(raised.exception))

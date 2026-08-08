@@ -251,6 +251,39 @@ happened" from "something else happened". And when a mocked path still
 reaches a provider, the path has moved out from under the patch — find where
 it goes now before re-pointing the mock, because the move is usually the bug.
 
+**A row written under one scope and updated under another is a silent
+no-op, and a test that reads the UNION of both scopes will never see it.**
+Second instance of "silence is a decision" being defeated, this time from
+the persistence layer. `_handle_local_bridge_gateway_channel_inbound`
+recorded its inbound row with the real `agent_id`;
+`_deliver_local_bridge_personal_reply` had no `agent_id` parameter at all,
+so all four of its `mark_inbound_processed` calls defaulted to
+`LEGACY_UNSCOPED_AGENT_ID` — an UPDATE keyed on
+`(gateway_id, channel_key, agent_id, external_message_id)` that matched zero
+rows, no error. The lost write is the no-reply marker, i.e. the only record
+that the agent was asked and DELIBERATELY said nothing, and the only reader
+is the guard at the top of that same function. `channel.inbound` is
+at-least-once on every leg (`ws-client.publishEvent` re-enqueues into a
+replayable outbox; `local-bridge-runtime`'s seen-event set is in-memory;
+the OpenClaw plugin retries through its own durable `BoundedRetryQueue`), so
+a redelivered message re-ran the turn and answered where the first pass had
+chosen silence — reproduced, it emits the same "Hello! How can I help you
+today?" as the group-ban incident. Affected the whole local-bridge family
+(Signal/iMessage/WeChat + all five OpenClaw channels); the shared
+`_control_command_block_result` had the same defect and reached
+WhatsApp/Telegram too. Hosted/cloud channels do not share it —
+`handle_cloud_channel_inbound` never touches `personal_channel_inbound_messages`.
+Fixed 2026-08-08; `agent_id` is now a REQUIRED keyword with no default on
+both, so a forgetful caller fails loudly. Three rules follow. **A scope
+column with a default is a loaded gun** — make it required on any function
+that both reads and writes the scoped row. **Never write a test that reads
+the union of two scopes to stay green either way**; `test_openclaw_channel_
+outbound.py`'s `_all_rows` did exactly that, deliberately, and is why this
+survived a build that was looking right at it. And outbound rows on this
+family stay unscoped ON PURPOSE (the explicit `POST .../messages` route has
+no `agent_id` and must share one idempotency namespace with auto-replies) —
+that one is uniform, not a mismatch, so do not "finish the job".
+
 **Branches whose work gets redone on main.** Nine branches were found with
 real commits, all superseded by the same fixes re-implemented directly on
 main days later. If a branch exists, merge it or delete it — leaving it means

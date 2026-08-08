@@ -188,6 +188,7 @@ class PersonalChannelsServiceNaturalReplyTests(unittest.IsolatedAsyncioTestCase)
                 channel_key="signal_personal",
                 provider="signal_local_bridge",
                 label="Signal",
+                agent_id="agent-natural-reply",
             )
 
         dispatch_mock.assert_awaited_once()
