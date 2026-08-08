@@ -424,6 +424,205 @@ async def set_project_archived(
     return _row_to_project(row)
 
 
+class _ProjectDeleteRaced(Exception):
+    """Internal: the DELETE matched no row, so the whole unit of work is
+    rolled back and delete_project returns None. Never escapes this module."""
+
+
+async def delete_project(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    project_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Permanently delete a project and everything that IS the project.
+    Irreversible; `set_project_archived` above is the reversible everyday
+    action and stays what the UI reaches for first.
+
+    Returns a summary of what was removed (counts, plus how many agents were
+    rehomed), or None when the project doesn't resolve in this workspace.
+    Raises ValueError for the default project — a workspace must always keep
+    a home for ungrouped agents, exactly as `set_project_archived` refuses.
+
+    What DIES with the project (all via the projects(id) FK's ON DELETE
+    CASCADE — see control_plane_repository.CONTROL_PLANE_SCHEMA_SQL):
+        project_tasks   ─▶ project_task_labels, task_notifications
+        project_documents
+        project_memberships
+        agent_goals
+
+    What MOVES HOME rather than being cut loose. Both columns are
+    ON DELETE SET NULL, and letting the FK do that is the sharp edge here,
+    which is why this reassigns them BEFORE the delete instead:
+
+      * workspace_agent_installs.project_id — a NULL here is not merely
+        untidy, it SILENTLY REVOKES the whole project-scoped toolset.
+        sage_agent_runtime_service._specialist_tool_allowed grants the
+        `project_task__*` / `document__*` / `goal__*` families on
+        `bool(toolset["project_id"])` alone (CLAUDE.md: "project membership
+        is the grant, not a connector binding"), so an agent whose project
+        row vanished would just stop being offered those tools, with no
+        error anywhere. Rehomed to the default project — the same thing
+        set_project_archived already does, for the same reason.
+      * vault_credentials.project_id — NULL is unreachable, not just
+        unlisted: connectors_actions.list_project_connectors and
+        subscribe_agent_to_project_credential both filter on it, and no
+        surface anywhere lists project-less credentials, so a stored secret
+        would linger forever with no way to see or revoke it. Rehomed
+        alongside the agents that use it, keeping the two on the same
+        project so subscribe_agent_to_project_credential's equality check
+        still holds.
+
+    What is deliberately LEFT ALONE:
+      * usage_events.project_id (no FK) — historical billing/usage rows.
+        Deleting a project must not rewrite what was already spent, and the
+        rollup only reads it under an explicit scope="project" query.
+      * workspace_member_invites.metadata->>'project_id' — a pending invite
+        naming this project. grant_invite_project_access resolves the
+        project by id and no-ops when it is gone, so acceptance degrades to
+        "joined the workspace, no project grant" rather than failing.
+      * Agent memory records carrying a project_id in their metadata blob:
+        outside Postgres entirely (memory_service), and an agent's own
+        recollection is not the project's to delete.
+    """
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return None
+    tenant_id = str(tenant_id or "").strip()
+    workspace_id = str(workspace_id or "").strip()
+    project_id = str(project_id or "").strip()
+
+    target = await get_project(tenant_id=tenant_id, workspace_id=workspace_id, project_id=project_id)
+    if target is None:
+        return None
+    if target.get("is_default"):
+        raise ValueError("The default project cannot be deleted.")
+
+    # Resolved BEFORE the transaction below: ensure_default_project takes
+    # its own connection out of the same pool, and calling it from inside a
+    # held transaction is how you deadlock a small pool.
+    default_project = await ensure_default_project(tenant_id=tenant_id, workspace_id=workspace_id)
+    default_project_id = str((default_project or {}).get("id") or "").strip()
+    if not default_project_id:
+        raise ValueError("Could not resolve this workspace's default project; nothing was deleted.")
+
+    # ONE transaction for the count + both reassignments + the delete, on one
+    # connection. Not decoration: the first browser run of this failed on the
+    # vault_credentials statement (that table has no tenant_id column), and
+    # with a statement-per-transaction helper the agents had ALREADY been
+    # moved out of a project that then didn't get deleted — a user's agents
+    # silently rehomed by an operation that reported failure. Either all of
+    # it happens or none of it does.
+    async def _run(connection: Any) -> Dict[str, Any]:
+            await control_plane_repository.apply_connection_scope(
+                connection, tenant_id=tenant_id, workspace_id=workspace_id,
+            )
+
+            # Count what the cascade is about to take, BEFORE it takes it —
+            # the caller (route → activity ledger → UI) can only report
+            # honestly on numbers read while the rows still exist.
+            counts_row = await connection.fetchrow(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM project_tasks
+                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS tasks,
+                  (SELECT COUNT(*) FROM project_documents
+                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS documents,
+                  (SELECT COUNT(*) FROM project_memberships
+                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS members,
+                  (SELECT COUNT(*) FROM agent_goals
+                     WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3) AS goals
+                """,
+                tenant_id,
+                workspace_id,
+                project_id,
+            )
+            counts = dict(counts_row) if counts_row else {}
+
+            agents_moved = await connection.execute(
+                """
+                UPDATE workspace_agent_installs
+                SET project_id = $4, updated_at = NOW()
+                WHERE tenant_id = $1 AND workspace_id = $2 AND project_id = $3
+                """,
+                tenant_id,
+                workspace_id,
+                project_id,
+                default_project_id,
+            )
+            # NOTE the different WHERE shape: vault_credentials has NO
+            # tenant_id column at all — one of the four tables CLAUDE.md
+            # calls out as carrying only ONE of the two scope columns (also
+            # why empyralis_rls_scope_match can't be applied to it).
+            # workspace_id + project_id is the full scope available, and it
+            # is sufficient: a project id is unique across tenants, and the
+            # rows whose workspace_id is deliberately NULL are the
+            # platform-scoped credentials, which never carry a project_id
+            # and so can never match here.
+            credentials_moved = await connection.execute(
+                """
+                UPDATE vault_credentials
+                SET project_id = $3
+                WHERE workspace_id = $1 AND project_id = $2
+                """,
+                workspace_id,
+                project_id,
+                default_project_id,
+            )
+
+            deleted = await connection.execute(
+                "DELETE FROM projects WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3",
+                tenant_id,
+                workspace_id,
+                project_id,
+            )
+            if _affected_row_count(deleted) < 1:
+                # Raced with a concurrent delete. Roll the reassignments
+                # back too — claiming a deletion that did not happen is the
+                # dishonesty this whole path is written to avoid.
+                raise _ProjectDeleteRaced()
+
+            return {
+                "counts": counts,
+                "agents_moved": _affected_row_count(agents_moved),
+                "credentials_moved": _affected_row_count(credentials_moved),
+            }
+
+    try:
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                outcome = await _run(connection)
+    except _ProjectDeleteRaced:
+        return None
+
+    counts = outcome["counts"]
+    return {
+        "id": project_id,
+        "name": target.get("name") or "",
+        "tasks_deleted": int(counts.get("tasks") or 0),
+        "documents_deleted": int(counts.get("documents") or 0),
+        "members_removed": int(counts.get("members") or 0),
+        "goals_deleted": int(counts.get("goals") or 0),
+        "agents_moved": outcome["agents_moved"],
+        "credentials_moved": outcome["credentials_moved"],
+        "moved_to_project_id": default_project_id,
+        "moved_to_project_name": str((default_project or {}).get("name") or ""),
+    }
+
+
+def _affected_row_count(command_tag: Any) -> int:
+    """asyncpg's execute() returns a command tag like 'UPDATE 3' / 'DELETE 1'.
+    Parse the count, defaulting to 0 rather than guessing when the shape is
+    unexpected."""
+    parts = str(command_tag or "").strip().split()
+    if not parts:
+        return 0
+    try:
+        return int(parts[-1])
+    except ValueError:
+        return 0
+
+
 async def set_project_default_gateway(
     *,
     tenant_id: str,

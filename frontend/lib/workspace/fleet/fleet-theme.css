@@ -10627,6 +10627,22 @@ h2.fleet-sage-console-title {
   background: var(--border);
 }
 
+/* Project settings > Remove: one button per row with its distinguishing
+   word beside it. Archive and Delete are near-identical gestures with
+   opposite consequences, so each carries the single word that tells them
+   apart — a label, not a paragraph of policy prose. */
+.fleet-project-remove-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fleet-project-remove-hint {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
 .fleet-member-invite-form {
   display: flex;
   flex-direction: column;

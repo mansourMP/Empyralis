@@ -100,7 +100,12 @@ export default function ProjectDetailPage() {
   // load for no reason.
   const { members: projectMembers, loading: projectMembersLoading, refresh: refreshProjectMembers } =
     useProjectMembers(workspaceId, projectId);
-  const { projects, refresh: refreshProjects } = useFleetProjects(workspaceId);
+  // include_archived: this list exists here only to resolve THIS project by
+  // id, and an archived one still has a reachable detail route (get_project
+  // never filtered on `archived`). Without it an archived project's page
+  // renders with no name, no icon and — worse — no settings popover at all,
+  // which is the only place Restore lives.
+  const { projects, refresh: refreshProjects } = useFleetProjects(workspaceId, true);
   const project = projects.find((p) => p.id === projectId);
   useBreadcrumbLabel(projectId, project?.name);
   useBreadcrumbIcon(
@@ -510,7 +515,26 @@ export default function ProjectDetailPage() {
             default hardware. See ProjectSettings.tsx's own header for why
             this row (not the Agents-only Properties drawer) is this
             control's home. */}
-        <ProjectSettings workspaceId={workspaceId} project={project} onChanged={refreshProjects} />
+        <ProjectSettings
+          workspaceId={workspaceId}
+          project={project}
+          // Real counts, so the delete confirmation names what it is about
+          // to take instead of describing it vaguely. `null` while each
+          // hook is still loading — the dialog omits an unconfirmed number
+          // rather than printing a confident 0.
+          contents={{
+            tasks: tasksLoading ? null : tasks.length,
+            documents: documentsLoading ? null : documents.length,
+            agents: inProject.length,
+          }}
+          onChanged={refreshProjects}
+          // Archived or deleted, this route no longer resolves to anything
+          // a reader can act on — an archived project is filtered out of
+          // every list, a deleted one is gone outright. .replace, not
+          // .push: the dead detail URL must not stay in history for the
+          // back button to land on.
+          onRemoved={() => router.replace(`${base}/projects`)}
+        />
         {/* Far RIGHT (margin-left:auto in the stylesheet, on BOTH
             .fleet-toolbar-actions and .fleet-view-options — see
             fleet-theme.css). Every control in here acts on the right-hand

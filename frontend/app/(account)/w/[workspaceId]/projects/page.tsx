@@ -65,15 +65,16 @@ const SORT_OPTIONS = [
   { value: "name", label: "Name" },
 ];
 
-type FilterState = { agents: string; sort: SortMode };
+type FilterState = { agents: string; state: string; sort: SortMode };
 
 // Same URL-backed view state as the Agents/Project-detail lists — so
 // browser-back restores the filtered/sorted view instead of resetting it.
 function readFiltersFromLocation(): FilterState {
-  if (typeof window === "undefined") return { agents: "all", sort: "name" };
+  if (typeof window === "undefined") return { agents: "all", state: "active", sort: "name" };
   const sp = new URLSearchParams(window.location.search);
   return {
     agents: sp.get("agents") || "all",
+    state: sp.get("state") || "active",
     sort: (sp.get("sort") as SortMode) || "name",
   };
 }
@@ -82,9 +83,23 @@ export default function ProjectsPage() {
   const params = useParams();
   const router = useRouter();
   const workspaceId = String(params?.workspaceId || "");
-  const { projects, loading, error, refresh } = useFleetProjects(workspaceId);
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   const [dialogOpen, setDialogOpen] = useState(false);
+
+  const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
+  const { agents: agentsFilter, state: stateFilter, sort } = filterState;
+
+  // Archive is only a real option if what you archived stays findable —
+  // otherwise it is deletion with extra steps and no undo. The default view
+  // is unchanged (active only, filtered server-side); switching to Archived
+  // refetches with include_archived and shows just those, from where the
+  // project's own settings popover offers Restore.
+  const showArchived = stateFilter === "archived";
+  const { projects: allProjects, loading, error, refresh } = useFleetProjects(workspaceId, showArchived);
+  const projects = useMemo(
+    () => (showArchived ? allProjects.filter((p) => p.archived) : allProjects),
+    [allProjects, showArchived],
+  );
 
   // U3-E: the count lives on the breadcrumb line itself ("Projects · 1
   // project"), not a second toolbar row.
@@ -96,20 +111,32 @@ export default function ProjectsPage() {
     ),
   );
 
-  const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
-  const { agents: agentsFilter, sort } = filterState;
-
+  // The updater is now PURE, and the URL write is an effect on the result.
+  // It used to call router.replace() from inside the setState updater, and
+  // React may run an updater during render — so the first time this filter
+  // row was actually exercised in a browser the console logged "Cannot
+  // update a component (Router) while rendering a different component
+  // (ProjectsPage)". Same URL-backed view state as before, same
+  // .replace-not-.push; only where the navigation happens changed.
   const updateFilters = useCallback((patch: Partial<FilterState>) => {
-    setFilterState((prev) => {
-      const next = { ...prev, ...patch };
-      const sp = new URLSearchParams();
-      if (next.agents !== "all") sp.set("agents", next.agents);
-      if (next.sort !== "name") sp.set("sort", next.sort);
-      const qs = sp.toString();
-      router.replace(`${base}/projects${qs ? `?${qs}` : ""}`);
-      return next;
-    });
-  }, [router, base]);
+    setFilterState((prev) => ({ ...prev, ...patch }));
+  }, []);
+
+  const filtersHydrated = useRef(false);
+  useEffect(() => {
+    // Skip the first pass: filterState was seeded FROM the URL, so writing
+    // it back on mount is a redundant navigation.
+    if (!filtersHydrated.current) {
+      filtersHydrated.current = true;
+      return;
+    }
+    const sp = new URLSearchParams();
+    if (filterState.agents !== "all") sp.set("agents", filterState.agents);
+    if (filterState.state !== "active") sp.set("state", filterState.state);
+    if (filterState.sort !== "name") sp.set("sort", filterState.sort);
+    const qs = sp.toString();
+    router.replace(`${base}/projects${qs ? `?${qs}` : ""}`);
+  }, [filterState, router, base]);
 
   // Command-palette hand-off: /projects?new=1 lands straight in the "New
   // project" dialog — same convention as agents/page.tsx's ?new=1.
@@ -194,6 +221,13 @@ export default function ProjectsPage() {
         { value: "empty", label: "Empty" },
       ],
     },
+    {
+      key: "state", label: "Show", value: stateFilter, onChange: (v) => updateFilters({ state: v }),
+      options: [
+        { value: "active", label: "Active" },
+        { value: "archived", label: "Archived" },
+      ],
+    },
   ];
 
   const filtered = useMemo(() => projects.filter((p) => {
@@ -228,8 +262,11 @@ export default function ProjectsPage() {
       </HeaderAction>
 
       <div className="fleet-content-toolbar">
+        {/* `|| showArchived` below is load-bearing: an EMPTY archived view
+            must still render the filter that got you here, or the only way
+            back to Active is the browser's back button. */}
         <FleetToolbar
-          filters={projects.length > 0 ? filters : undefined}
+          filters={projects.length > 0 || showArchived ? filters : undefined}
           sortOptions={projects.length > 0 ? SORT_OPTIONS : undefined}
           sortValue={sort}
           sortDefault="name"
@@ -249,6 +286,10 @@ export default function ProjectsPage() {
             <FleetListSkeleton rows={4} rowHeight={52} />
           ) : error && projects.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load projects" message={error} onRetry={refresh} />
+          ) : projects.length === 0 && showArchived ? (
+            // "Create your first agent" is the wrong offer here — nothing
+            // is missing, the archive is simply empty.
+            <div className="fleet-page-state-body">No archived projects.</div>
           ) : projects.length === 0 ? (
             <CreateFirstAgentEmpty
               workspaceId={workspaceId}

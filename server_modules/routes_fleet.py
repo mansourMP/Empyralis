@@ -15,12 +15,15 @@ Serves the Fleet Home UI and the per-agent modal tabs with:
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from server_modules import auth as auth_module
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter(tags=["fleet"])
 
@@ -467,6 +470,89 @@ async def fleet_patch_project(
         return {"ok": True, "project": project}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@router.delete("/api/w/{workspace_id}/fleet/projects/{project_id}")
+async def fleet_delete_project(
+    request: Request,
+    workspace_id: str,
+    project_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """Owner-only, irreversible: permanently delete a project. Its tasks,
+    documents, goals and member grants go with it; its agents and its
+    project-scoped connector credentials are rehomed to the workspace's
+    default project rather than left with a NULL project_id — see
+    projects_repository.delete_project's own docstring for why that
+    distinction is load-bearing (a NULL there silently revokes an agent's
+    project_task__*/document__*/goal__* tools) and for exactly what is
+    deliberately left untouched.
+
+    ARCHIVING (PATCH .../projects/{id} with archived=true) is the reversible
+    everyday action and stays what the UI offers first; this exists because
+    "hidden forever, removable never" is its own kind of trap.
+
+    Permission is owner-on-the-workspace, matching fleet_create_project and
+    fleet_patch_project exactly — a destructive operation is never gated
+    more loosely than the edit it supersedes. The tenant is resolved PER
+    WORKSPACE via _resolve_tenant (control_plane_repository.
+    resolve_tenant_id_for_workspace), never off the stale users.tenant_id
+    column; see CLAUDE.md.
+    """
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules import projects_repository as projects
+
+    try:
+        tenant_id = await _resolve_tenant(resolved_workspace_id)
+        removed = await projects.delete_project(
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            project_id=project_id,
+        )
+    except ValueError as exc:
+        # Business-logic refusal (the default project) — a real, explainable
+        # answer, not a crash. Same {ok:false, error} shape every other
+        # failure in this file returns.
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    if removed is None:
+        return {"ok": False, "error": "Project not found."}
+
+    # Audit trail, mirroring fleet_tools.fleet_delete_agent's own ledger
+    # write. The project id is NOT written to a foreign-keyed column — the
+    # row it would point at is already gone — it lives in metadata.
+    try:
+        from server_modules import activity_ledger_service
+        from server_modules.control_plane_repository import get_workspace_by_id
+
+        ws = await get_workspace_by_id(resolved_workspace_id)
+        await activity_ledger_service.append_activity_event(
+            tenant_id=str((ws or {}).get("tenant_id") or "").strip() or "system",
+            workspace_id=resolved_workspace_id,
+            actor_type="user",
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or "owner",
+            event_class="fleet_control",
+            detail_level="audit_reference",
+            action="project_deleted",
+            title=f"{removed.get('name') or 'Project'} deleted",
+            summary=(
+                f"{_actor_label(current_user)} deleted this project — "
+                f"{removed.get('tasks_deleted', 0)} task(s), "
+                f"{removed.get('documents_deleted', 0)} document(s) removed; "
+                f"{removed.get('agents_moved', 0)} agent(s) moved to "
+                f"{removed.get('moved_to_project_name') or 'the default project'}."
+            ),
+            status="executed",
+            metadata=removed,
+        )
+    except Exception:
+        # The project IS gone; failing to journal that must not turn a
+        # successful delete into a reported failure the caller retries.
+        LOGGER.warning("project_deleted ledger write failed for %s", project_id, exc_info=True)
+
+    return {"ok": True, "deleted": removed}
 
 
 # ── MAN-115: project member management ───────────────────────────────────
