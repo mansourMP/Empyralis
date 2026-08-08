@@ -351,6 +351,48 @@ a redactor must be **driven off the live registry in a test**
 stale the moment someone adds a tool, and this failure is silent by
 construction.
 
+**A guard called once inside a 2,300-line function is a guard the next branch
+will skip.** `handle_sage_chat` applied `_guard_sage_visible_reply` near its
+end; the BYO-brain `local` and `cli_subscription` branches `return`ed ~1,100
+lines earlier and never reached it, so raw model output went out through
+`sage_turn_adapter.execute_sage_turn` (which relays `result["message"]`
+verbatim) to WhatsApp/Telegram/Signal/iMessage/OpenClaw, and through
+`record_assistant_turn` into durable history that later turns re-inject. The
+worst two branches to miss: those are the turns running on the owner's own box
+against their own local model or CLI subscription, i.e. the output most likely
+to carry file contents or credentials. Fixed 2026-08-08 by moving the guard to
+the seams every branch must cross rather than adding two more call sites —
+`handle_sage_chat` is now a thin wrapper over `_handle_sage_chat_unguarded`
+(the old body) and guards the returned message once, and
+`thread_service.record_assistant_turn` guards `reply` before the write.
+
+```
+BEFORE                                   AFTER
+handle_sage_chat                         handle_sage_chat  (wrapper)
+ ├ local            ─── return  ✗guard    └ _handle_sage_chat_unguarded
+ ├ cli_subscription ─── return  ✗guard        ├ local / cli / loop / fallback
+ ├ action loop  ─guard─ return                └ any branch added later
+ └ fallback     ─guard─ return             ──▶ _guard_sage_visible_reply ──▶ out
+```
+
+Three rules follow. **Put a safety filter on the narrow waist, never on each
+branch** — a per-branch call is a rule the next author has to know, a wrapper
+is one they cannot reach around; this only works because the guard is
+idempotent, so verify that before wrapping. **Guard display AND persistence
+separately** — a reply cleaned for the screen but stored raw is still a leak
+the moment thread history becomes prompt context, and the two paths are
+genuinely different seams. And **a structural test is the only thing that
+catches the NEXT branch**: `test_unguarded_reply_paths.py` AST-asserts that
+`_handle_sage_chat_unguarded` has exactly one call site and it is the wrapper,
+because behavioural tests can only cover the branches that exist today.
+
+Still open, found while fixing this: the tool-name allowlist above still loses
+to trailing punctuation — `redact_text("Use project_task__update.")` returns
+`Use [redacted-secret]`, because `_HIGH_ENTROPY_CANDIDATE_PATTERN` swallows the
+final `.` and `_SAFE_IDENTIFIER_PATTERN` requires the token to end alphanumeric.
+Bare names are fine, so `test_tool_name_secret_redaction.py` (which enumerates
+the live registry unpunctuated) does not see it.
+
 **`users.tenant_id` / `users.workspace_id` are not the authoritative tenant.**
 These Postgres columns are written once, at signup, to the user's first/home
 workspace — never updated afterward. The moment a user is invited into a

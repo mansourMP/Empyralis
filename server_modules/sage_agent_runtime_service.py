@@ -4709,7 +4709,43 @@ def _schedule_post_turn_auto_compaction(
         )
 
 
-async def handle_sage_chat(
+async def handle_sage_chat(**kwargs: Any) -> dict:
+    """The ONE exit seam for every Sage turn's visible reply.
+
+    Every branch inside :func:`_handle_sage_chat_unguarded` — the real body —
+    returns through here, so the response leak guard cannot be bypassed by
+    adding a new branch. It was, twice: the BYO-brain ``local`` and
+    ``cli_subscription`` branches each returned their gateway reply directly,
+    hundreds of lines above the guard the cloud path runs, and
+    ``sage_turn_adapter.execute_sage_turn`` relays ``result["message"]``
+    verbatim to WhatsApp/Telegram/Signal/iMessage and the OpenClaw channels.
+    Those are the worst two to miss: they are the turns that run on the
+    owner's own machine, against their own local model or CLI subscription,
+    so their output is the most likely to carry file contents or credentials.
+
+    Guarding here instead of at each branch is deliberate — a per-branch call
+    is a rule a future author has to know about, a wrapper is one they cannot
+    reach around. The guard is idempotent, so the branches that already guard
+    internally (the action loop and the cloud fallthrough) are unaffected.
+
+    This covers what is SHOWN. What is STORED is covered at the other seam,
+    ``thread_service.record_assistant_turn`` — a reply cleaned for display but
+    written raw is still a leak the moment that history is re-injected into a
+    later prompt.
+    """
+    result = await _handle_sage_chat_unguarded(**kwargs)
+    if not isinstance(result, dict):
+        return result
+    guarded_message, guard_metadata = _guard_sage_visible_reply(result.get("message"))
+    result["message"] = guarded_message
+    if guard_metadata.get("redacted") or guard_metadata.get("blocked"):
+        # Only stamped when the guard actually did something, so the common
+        # case stays byte-for-byte identical to the pre-wrapper response.
+        result["reply_guard"] = guard_metadata
+    return result
+
+
+async def _handle_sage_chat_unguarded(
     *,
     workspace_id: str,
     tenant_id: str = "",
