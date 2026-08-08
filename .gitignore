@@ -112,3 +112,8 @@ deploy/packer/packer-manifest.json
 .packer.d/
 packer_cache/
 crash.log
+
+# Local first-run stack artifacts (secrets, sqlite, logs) — never committed.
+.e2e-state/
+.gateway-state/
+/venv
