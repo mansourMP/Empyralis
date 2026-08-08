@@ -24,7 +24,7 @@ customer's machine
 │  Empyralis gateway   (ours, unchanged) │
 │         ↕ local                        │
 │  OpenClaw gateway    (theirs, NEW)     │
-│    └─ 23 channels: WhatsApp, Telegram, │
+│    └─ 27 channels: WhatsApp, Telegram, │
 │       Discord, Signal, iMessage, Slack,│
 │       SMS, Feishu, QQ, LINE, Zalo…     │
 │    └─ brain OFF, memory OFF, UI OFF    │
@@ -69,7 +69,7 @@ YOURS    board, tasks, documents, agents-as-teammates,
    trusted operator boundary per gateway."* Empyralis is multi-tenant.
    Channels fit (one isolated instance per customer). Their whole agent does
    not.
-2. **Strategic:** OpenClaw has 23 channels, memory, skills, a plugin
+2. **Strategic:** OpenClaw has 27 channels, memory, skills, a plugin
    ecosystem — and **no board/workspace**. That gap is Empyralis's entire
    business. Adopting the thing that could close it hands them the position.
    The day they ship a team board, a full adopter is a wrapper around its own
