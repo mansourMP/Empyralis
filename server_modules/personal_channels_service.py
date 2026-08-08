@@ -318,28 +318,15 @@ class _WhatsAppPersonalChannelHandler(PersonalChannelHandler):
             payload=payload,
         )
 
-    async def deliver_reply(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        inbound: Dict[str, Any],
-        remote_jid: str,
-        external_message_id: str,
-        text: str,
-        push_name: Optional[str],
-        duplicate: bool,
-    ) -> Dict[str, Any]:
-        return await _deliver_whatsapp_personal_reply(
-            gateway_id=gateway_id,
-            registration=registration,
-            inbound=inbound,
-            remote_jid=remote_jid,
-            external_message_id=external_message_id,
-            text=text,
-            push_name=push_name,
-            duplicate=duplicate,
-        )
+    # NOTE: a `deliver_reply` passthrough used to sit here (and on the
+    # Telegram/local-bridge handlers below). Deleted 2026-08-08: zero
+    # callers, not declared on the PersonalChannelHandler ABC, and every one
+    # of them dropped agent_id on the floor — the local-bridge copy could not
+    # supply it at all. Wiring any of them would have silently reintroduced
+    # the unscoped-mark_inbound_processed bug fixed in
+    # _deliver_local_bridge_personal_reply. The live path is
+    # handle_inbound -> _handle_*_gateway_channel_inbound, which resolves
+    # agent_id first and threads it through.
 
     async def send_message(
         self,
@@ -414,30 +401,8 @@ class _TelegramPersonalChannelHandler(PersonalChannelHandler):
             payload=payload,
         )
 
-    async def deliver_reply(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        inbound: Dict[str, Any],
-        remote_jid: str,
-        external_message_id: str,
-        text: str,
-        push_name: Optional[str],
-        duplicate: bool,
-    ) -> Dict[str, Any]:
-        # Telegram handler currently inlines the deliver-reply logic inside
-        # _handle_telegram_gateway_channel_inbound.  For registry dispatch we
-        # route through the full handler which handles delivery internally.
-        return await _handle_telegram_gateway_channel_inbound(
-            gateway_id=gateway_id,
-            registration=registration,
-            payload={
-                **inbound,
-                "reply_text": text,
-                "duplicate": duplicate,
-            },
-        )
+    # deliver_reply passthrough deleted 2026-08-08 — see the note on
+    # _WhatsAppPersonalChannelHandler above.
 
     async def send_message(
         self,
@@ -517,31 +482,10 @@ class _LocalBridgePersonalChannelHandler(PersonalChannelHandler):
             label=self._label,
         )
 
-    async def deliver_reply(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        inbound: Dict[str, Any],
-        remote_jid: str,
-        external_message_id: str,
-        text: str,
-        push_name: Optional[str],
-        duplicate: bool,
-    ) -> Dict[str, Any]:
-        return await _deliver_local_bridge_personal_reply(
-            gateway_id=gateway_id,
-            registration=registration,
-            inbound=inbound,
-            remote_jid=remote_jid,
-            external_message_id=external_message_id,
-            text=text,
-            push_name=push_name,
-            duplicate=duplicate,
-            channel_key=self._channel_key,
-            provider=self._provider,
-            label=self._label,
-        )
+    # deliver_reply passthrough deleted 2026-08-08 — see the note on
+    # _WhatsAppPersonalChannelHandler above. This copy was the worst of the
+    # three: it had no agent_id to give, so wiring it would have marked every
+    # local-bridge inbound row under the legacy blank scope again.
 
     async def send_message(
         self,
@@ -772,6 +716,15 @@ def _control_command_block_result(
     inbound: Dict[str, Any],
     channel_key: str,
     provider: str,
+    # REQUIRED, deliberately without a default: this must be the SAME
+    # agent_id the caller passed to record_inbound_message for this message.
+    # mark_inbound_processed below is an UPDATE scoped by
+    # (gateway_id, channel_key, agent_id, external_message_id) — a default
+    # here would silently address the legacy-unscoped row instead, match zero
+    # rows, and lose the "seen, deliberately not replied to" marker. That is
+    # exactly the bug this parameter was added to close, so a caller that
+    # forgets must fail loudly rather than fall through to "".
+    agent_id: str,
     external_message_id: str,
     remote_jid: str,
     text: str,
@@ -790,6 +743,7 @@ def _control_command_block_result(
     refreshed_inbound = personal_channels_repository.mark_inbound_processed(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=channel_key,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         reply_idempotency_key=no_reply_idempotency_key,
     )
@@ -3038,6 +2992,7 @@ async def _handle_whatsapp_gateway_channel_inbound(
         inbound=inbound,
         channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
         provider=WHATSAPP_PERSONAL_PROVIDER,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         remote_jid=remote_jid,
         text=text,
@@ -3234,6 +3189,7 @@ async def _handle_telegram_gateway_channel_inbound(
         inbound=inbound,
         channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
         provider=TELEGRAM_PERSONAL_PROVIDER,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         remote_jid=remote_jid,
         text=text,
@@ -3444,6 +3400,29 @@ async def _deliver_local_bridge_personal_reply(
     channel_key: str,
     provider: str,
     label: str,
+    # REQUIRED, deliberately without a default (unlike the WhatsApp/Telegram
+    # twins' `agent_id: str = ""`). This function omitted the parameter
+    # entirely until 2026-08-08, so every mark_inbound_processed below
+    # defaulted to LEGACY_UNSCOPED_AGENT_ID while
+    # _handle_local_bridge_gateway_channel_inbound recorded the row under the
+    # REAL agent_id resolved by _resolve_local_bridge_agent_id. The UPDATE is
+    # scoped by (gateway_id, channel_key, agent_id, external_message_id), so
+    # it matched zero rows and reply_idempotency_key stayed NULL forever.
+    #
+    # Consequence, and why this is a safety fix and not bookkeeping: the
+    # no-reply marker written below IS the "the agent saw this and
+    # deliberately said nothing" record, and the guard at the top of this
+    # function is its only reader. `channel.inbound` is at-least-once by
+    # design end to end (ws-client.publishEvent re-enqueues into a replayable
+    # outbox when the socket is down; local-bridge-runtime's seen-event set
+    # is in-memory and dies with the process; the OpenClaw bridge plugin
+    # retries through its own durable BoundedRetryQueue). A redelivered
+    # message therefore found a blank marker, re-ran the turn, and could
+    # answer where the first pass had chosen SILENCE — the same
+    # "silence is a decision, not a failure" invariant
+    # personal_channel_sage_bridge_service enforces one layer down, defeated
+    # from the persistence layer instead.
+    agent_id: str,
     trace_id: str = "",
     attachments: Optional[List[Dict[str, Any]]] = None,
     is_owner: bool = False,
@@ -3459,6 +3438,15 @@ async def _deliver_local_bridge_personal_reply(
 
     outbound: Optional[Dict[str, Any]] = None
     idempotency_key = reply_idempotency_key or f"{channel_key}:{external_message_id}"
+    # OUTBOUND rows for this channel family stay under the legacy unscoped
+    # agent id ON PURPOSE, and that is not the same defect as the inbound one
+    # fixed here. Inbound was a genuine read/write MISMATCH — written scoped,
+    # updated unscoped. Outbound is uniformly unscoped on every local-bridge
+    # write path: send_local_bridge_personal_message (the explicit
+    # POST .../messages route) has no agent_id to pass at all, and it must
+    # share one idempotency namespace with these auto-replies or a manual
+    # retry of the same key would stop deduping against a reply already sent.
+    # Do not "finish the job" by scoping only these three calls.
     if reply_idempotency_key:
         outbound = personal_channels_repository.get_outbound_message(
             gateway_id=str(gateway_id or "").strip(),
@@ -3469,6 +3457,7 @@ async def _deliver_local_bridge_personal_reply(
         personal_channels_repository.mark_inbound_processed(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=channel_key,
+            agent_id=agent_id,
             external_message_id=external_message_id,
             reply_idempotency_key=idempotency_key,
         )
@@ -3502,9 +3491,13 @@ async def _deliver_local_bridge_personal_reply(
         # genuinely neither safe text nor media.
         if not reply or (not _safe_reply_text and not reply_media):
             no_reply_idempotency_key = f"{no_reply_prefix}{external_message_id}"
+            # THE load-bearing write: this is the durable record that the
+            # agent was asked and chose not to answer. See agent_id's own
+            # comment on this function's signature.
             refreshed_inbound = personal_channels_repository.mark_inbound_processed(
                 gateway_id=str(gateway_id or "").strip(),
                 channel_key=channel_key,
+                agent_id=agent_id,
                 external_message_id=external_message_id,
                 reply_idempotency_key=no_reply_idempotency_key,
             )
@@ -3543,6 +3536,7 @@ async def _deliver_local_bridge_personal_reply(
         personal_channels_repository.mark_inbound_processed(
             gateway_id=str(gateway_id or "").strip(),
             channel_key=channel_key,
+            agent_id=agent_id,
             external_message_id=external_message_id,
             reply_idempotency_key=idempotency_key,
         )
@@ -3582,6 +3576,7 @@ async def _deliver_local_bridge_personal_reply(
     personal_channels_repository.mark_inbound_processed(
         gateway_id=str(gateway_id or "").strip(),
         channel_key=channel_key,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         reply_idempotency_key=idempotency_key,
     )
@@ -3733,6 +3728,7 @@ async def _handle_local_bridge_gateway_channel_inbound(
         inbound=inbound,
         channel_key=channel_key,
         provider=provider,
+        agent_id=agent_id,
         external_message_id=external_message_id,
         remote_jid=remote_jid,
         text=text,
@@ -3765,6 +3761,9 @@ async def _handle_local_bridge_gateway_channel_inbound(
         channel_key=channel_key,
         provider=provider,
         label=label,
+        # The SAME agent_id record_inbound_message wrote this row under, a
+        # few lines above — see this parameter's comment on the callee.
+        agent_id=agent_id,
         trace_id=trace_id,
         attachments=attachments,
         is_owner=bool(dm_decision.get("is_owner")),

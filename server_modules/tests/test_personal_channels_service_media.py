@@ -267,6 +267,7 @@ class PersonalChannelsServiceMediaTests(unittest.IsolatedAsyncioTestCase):
                 channel_key="signal_personal",
                 provider="signal_local_bridge",
                 label="Signal",
+                agent_id="agent-media",
             )
 
         dispatch_mock.assert_awaited_once()
