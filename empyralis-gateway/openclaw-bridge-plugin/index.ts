@@ -87,9 +87,39 @@ export default definePluginEntry({
       log("gateway_stop: queue flush loop stopped");
     });
 
-    // The tap. Fires unconditionally on every inbound message across every
-    // channel, before any agent routing — confirmed live 2026-08-08 and by
-    // reading dispatch-*.js directly (see CHANNEL-ADOPTION-PLAN.md).
+    // The tap.
+    //
+    // CORRECTED 2026-08-08 (step 2), replacing an earlier claim here that
+    // this "fires unconditionally on every inbound message". It does not.
+    // The hook call site in `dispatch-B2e1grFo.js:1240` is unconditional,
+    // but reaching that call site is not: OpenClaw's channel ingress runs
+    // its OWN gates first and drops or skips before dispatch is ever
+    // invoked. Evidence, from openclaw@2026.6.10's shipped bundle:
+    //
+    //   message-access-CeqV-XzC.js  `decideChannelIngress` returns
+    //     admission "drop" | "skip" | "pairing-required" with gate effects
+    //     literally named `block-dispatch`.
+    //   message-handler.preflight-DjLxkMPn.js:1009  Discord's preflight
+    //     `return null` on a mention miss; message-handler-BlOnGv8G.js:367
+    //     then never enqueues the job that would dispatch.
+    //   bot-Dxj27QDQ.js:4132  Telegram's mention miss `return null`s too,
+    //     and on that path fires ONLY the internal hook, never the plugin
+    //     `message_received` one.
+    //   docs/plugins/sdk-channel-ingress.md  "A mention miss returns
+    //     admission: 'skip' so the turn kernel does not process an
+    //     observe-only turn."
+    //
+    // So this tap sees post-gate traffic, and it sees it WITHOUT the gate
+    // facts (`toPluginMessageReceivedEvent` forwards neither `isGroup` nor
+    // `wasMentioned`, unlike its sibling `toPluginInboundClaimEvent`).
+    // Empyralis therefore re-decides everything cloud-side and treats
+    // unknown group-ness as a group — see
+    // personal_channels_service.normalize_openclaw_gate_facts.
+    //
+    // Also NOT universal: WhatsApp suppresses this hook entirely unless
+    // `channels.whatsapp.pluginHooks.messageReceived: true` is set
+    // (docs/channels/whatsapp.md, "Plugin hooks and privacy"). Provisioning
+    // must set it; nothing here can compensate for its absence.
     api.on(
       "message_received",
       async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {

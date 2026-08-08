@@ -28,6 +28,8 @@ import { GatewayBrowserWorker } from "./browser/worker";
 import { GatewayBrowserRuntime } from "./browser/runtime";
 import { GatewayShellRuntime } from "./shell/runtime";
 import { GatewayLLMRuntime } from "./llm/runtime";
+import { OpenClawInboundListener } from "./openclaw/inbound-listener";
+import { setOpenClawTransportEnabled } from "./openclaw/capabilities";
 import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
@@ -285,6 +287,13 @@ async function main(): Promise<void> {
   // just above) — set once, here, before the one-time
   // supportedCapabilities() computation below.
   setCliSetupLocallyEnabled(config.cliSetupLocallyEnabled);
+  // Same shape again (CHANNEL-ADOPTION-PLAN.md step 2): whether this box
+  // transports channels through a co-located OpenClaw gateway is a static
+  // local configuration fact — the presence of the shared bridge secret —
+  // and must be known before the one-time supportedCapabilities()
+  // computation below, because the cloud rejects a channel.inbound for any
+  // channel this gateway never advertised.
+  setOpenClawTransportEnabled(Boolean(config.openclawBridgeToken));
   // Same "static local policy choice, set once before the first
   // supportedCapabilities() computation" shape as cliSetupLocallyEnabled
   // just above — see desktop-permissions.ts's shellFullAccessLocallyEnabled
@@ -371,7 +380,26 @@ async function main(): Promise<void> {
   // client exists.
   llmRuntime.setEventPublisher((payload) => client.publishEvent("tool.invoke.chunk", payload));
 
+  // OpenClaw bridge intake (CHANNEL-ADOPTION-PLAN.md step 2). Constructed
+  // only when the shared secret is configured — there is no unauthenticated
+  // mode, so an unset EMPYRALIS_BRIDGE_TOKEN means the listener simply does
+  // not exist, and the OpenClaw plugin's POSTs pile up in its own durable
+  // queue instead of being accepted by an open port.
+  const openclawInboundListener = config.openclawBridgeToken
+    ? new OpenClawInboundListener({
+        port: config.openclawBridgePort,
+        token: config.openclawBridgeToken,
+        publisher: client,
+        record: (messageType, payload) => journal.append("inbound", messageType, payload),
+        logger: {
+          info: (message: string) => console.log(`[gateway] ${message}`),
+          error: (message: string) => console.error(`[gateway] ${message}`),
+        },
+      })
+    : null;
+
   const cleanup = async (reason: string) => {
+    await openclawInboundListener?.stop().catch(() => undefined);
     await journal.append("system", "gateway.process.stop", {
       gatewayId: identity.gatewayId,
       deviceId: identity.deviceId,
@@ -500,6 +528,19 @@ async function main(): Promise<void> {
             error: message,
           });
         });
+        // Started only after the cloud scope is active: publishEvent throws
+        // without one, and an intake that can only 503 is worse than an
+        // intake that isn't listening yet (the plugin's queue holds the
+        // events either way, but a refused connection is unambiguous).
+        if (openclawInboundListener) {
+          void openclawInboundListener.start().catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            void journal.append("system", "gateway.openclaw_inbound.start_failed", {
+              error: message,
+              port: config.openclawBridgePort,
+            });
+          });
+        }
         void ensureSupervisorInstalledOnce().catch((error: unknown) => {
           const message = error instanceof Error ? error.message : String(error);
           void journal.append("system", "gateway.supervisor_install.check_failed", {
