@@ -343,6 +343,23 @@ class _RepositoryFailsClosedTests(unittest.TestCase):
                 [],
             )
 
+    def test_empty_state_list_does_not_discard_the_workspace_scope(self):
+        # `list_live_runs_by_state([])` delegates to `list_live_runs()`, which
+        # has no workspace predicate -- the scope must still be applied.
+        rows = [
+            {"run_id": "run-a", "workspace_id": "ws-a"},
+            {"run_id": "run-b-secret", "workspace_id": "ws-b"},
+        ]
+        with patch(
+            "server_modules.run_state_repository.list_live_runs",
+            new=AsyncMock(return_value=rows),
+        ):
+            scoped = asyncio.run(
+                run_state_repository.list_live_runs_by_state([], workspace_ids=["ws-a"])
+            )
+
+        self.assertEqual([row["run_id"] for row in scoped], ["run-a"])
+
     def test_empty_workspace_scope_returns_nothing_rather_than_everything(self):
         # An empty allow-list means "this caller may see no workspace" and must
         # never be widened back into "no filter".

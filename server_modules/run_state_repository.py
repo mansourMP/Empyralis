@@ -1181,7 +1181,14 @@ async def list_live_runs_by_state(
         return []
     normalized_states = [str(state or "").strip().lower() for state in (states or []) if str(state or "").strip()]
     if not normalized_states:
-        return await list_live_runs()
+        rows = await list_live_runs()
+        if workspace_scope is None:
+            return rows
+        # `list_live_runs()` carries no workspace predicate, so returning it
+        # unchanged would silently discard the caller's scope and hand back
+        # every tenant's rows -- the exact fail-open this change closes.
+        allowed = set(workspace_scope)
+        return [row for row in rows if str(row.get("workspace_id") or "").strip() in allowed]
     pool = await _read_pool(operation="list_live_runs_by_state")
     if pool is None:
         return []
