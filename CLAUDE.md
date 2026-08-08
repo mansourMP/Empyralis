@@ -31,6 +31,28 @@ working — the things that don't change when a ticket closes.
 moment; they went stale within a week and agents cited them as present truth.
 Deleted 2026-07-31. Findings become Linear issues; decisions become lines here.
 
+**When a system is being replaced, STOP BUILDING ON IT.** Once the founder
+settles on adopting a replacement, every hour spent improving the outgoing
+system is waste that gets deleted — and worse, it reads as progress. This was
+violated badly on 2026-08-08: after the decision to run OpenClaw's gateway as
+the channel transport, work continued on the old per-channel code — its
+pairing UI, its channel cards, a group-policy panel built against a gate
+model OpenClaw replaces. Four commits of UI work were abandoned unmerged.
+
+The ONE exception is a live defect actively harming customers right now (the
+silent-turn bug was shipping unwanted messages into real group chats and had
+already got the founder's personal account banned). Even then: **ask first,
+in one line, before touching the outgoing system.** Do not weigh "live bug"
+against "being deleted" silently and act on your own answer — that judgement
+belongs to the founder, and making it quietly is how a replacement program
+gets diluted into maintaining two systems at once.
+
+Corollary, from the same day: never present a system being adopted as a
+menu of parts to pick from. The founder's words, after saying it many times:
+*"there is only one thing which is channels."* Adopt the whole thing, or
+argue against adopting it — never quietly curate a subset and call it
+adoption.
+
 ## Positioning
 
 **Empyralis is the owned-context layer for a team, with execution attached.**
