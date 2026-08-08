@@ -13,6 +13,7 @@ from server_modules.safety_error_contract import kill_switch_error, to_http_body
 from server_modules import (
     channel_lane_contract_service,
     gateway_state_repository,
+    openclaw_provisioning_service,
     personal_channels_service,
     security_audit_service,
 )
@@ -950,10 +951,33 @@ async def update_personal_channel_group_policy(
                 "allowlist_size": len(updated.get("allowlist") or []),
             },
         )
+        # CHANNEL-ADOPTION-PLAN.md step 4. For an OpenClaw-transported channel
+        # the policy just saved here is NOT what decides whether a message ever
+        # arrives — OpenClaw's own config runs first and can block-dispatch
+        # before any Empyralis gate sees it. Push the new policy to the box now,
+        # so the setting is in force rather than merely stored.
+        #
+        # Best effort by design (an offline box re-asserts this from its own
+        # provisioning record at next boot, so a push failure must never fail a
+        # setting that saved cleanly) — but the RESULT is returned, because this
+        # is the only moment an owner can be told that the setting they just
+        # chose is one OpenClaw physically cannot carry. `openclaw_provisioning
+        # .disabled_channels` is that message; the traffic it concerns is
+        # dropped before Empyralis exists, so there is no later opportunity to
+        # notice.
+        provisioning = await openclaw_provisioning_service.reconcile_openclaw_policy_best_effort(
+            channel_key=normalized_channel_key,
+            gateway_id=gateway_id,
+            tenant_id=str(registration.get("tenant_id") or "default"),
+            workspace_id=str(registration.get("workspace_id") or "default"),
+            agent_id=normalized_agent_id,
+            actor_id=str(current_user.get("id") or "") or None,
+        )
         return {
             "channel_key": normalized_channel_key,
             "agent_id": normalized_agent_id,
             "group_policy": updated,
+            "openclaw_provisioning": provisioning,
         }
     except ValueError as exc:
         detail = str(exc)

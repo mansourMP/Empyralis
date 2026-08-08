@@ -65,6 +65,37 @@ export interface GatewayConfig {
    */
   openclawGatewayUrl: string;
   openclawGatewayToken?: string;
+  /**
+   * PROVISIONING (CHANNEL-ADOPTION-PLAN.md step 4).
+   *
+   * `openclawProfile` is the `--profile <name>` this box's OpenClaw instance
+   * runs under, i.e. `~/.openclaw-<name>`. ONE ISOLATED INSTANCE PER
+   * CUSTOMER, never shared — OpenClaw's own trust model is explicitly
+   * single-operator ("not a hostile multi-tenant security boundary"), and
+   * that isolation is the entire reason adopting their gateway is safe for a
+   * multi-tenant product. The default is deliberately NOT "openclaw" or
+   * "default": it must never be able to collide with `~/.openclaw`, the
+   * operator's own real instance.
+   */
+  openclawProfile: string;
+  /** Where the `openclaw` binary lives. Resolved on PATH when unset. */
+  openclawBinaryPath?: string;
+  /** Absolute path to the Empyralis bridge plugin directory that OpenClaw
+   *  loads. Derived from this process's own entry path when unset. */
+  openclawBridgePluginPath?: string;
+}
+
+/** The port half of `openclawGatewayUrl`, so provisioning tells OpenClaw to
+ *  listen exactly where the outbound WS client already dials. Falls back to
+ *  OpenClaw's own default (18789) for a URL with no explicit port. */
+export function openClawGatewayPortFromUrl(rawUrl: string): number {
+  try {
+    const parsed = new URL(String(rawUrl || "").trim());
+    const port = Number.parseInt(parsed.port, 10);
+    return Number.isFinite(port) && port > 0 ? port : 18789;
+  } catch {
+    return 18789;
+  }
 }
 
 function normalizeBaseUrl(value: string | undefined, fallback: string): string {
@@ -195,5 +226,8 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     openclawGatewayUrl:
       String(env.EMPYRALIS_OPENCLAW_GATEWAY_URL || "").trim() || "ws://127.0.0.1:18789",
     openclawGatewayToken: String(env.EMPYRALIS_OPENCLAW_GATEWAY_TOKEN || "").trim() || undefined,
+    openclawProfile: String(env.EMPYRALIS_OPENCLAW_PROFILE || "").trim() || "empyralis",
+    openclawBinaryPath: String(env.EMPYRALIS_OPENCLAW_BINARY || "").trim() || undefined,
+    openclawBridgePluginPath: String(env.EMPYRALIS_OPENCLAW_BRIDGE_PLUGIN_PATH || "").trim() || undefined,
   };
 }

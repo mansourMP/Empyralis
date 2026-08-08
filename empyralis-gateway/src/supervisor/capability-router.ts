@@ -21,6 +21,7 @@ import {
   filterCapabilitiesByDesktopPermission,
 } from "../runtime/desktop-permissions";
 import { openClawTransportCapabilities } from "../openclaw/capabilities";
+import { OpenClawProvisioningRuntime } from "../openclaw/provisioning/openclaw-provisioning-runtime";
 
 const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -31,7 +32,7 @@ const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // execution — see src/shell/runtime.ts. Unlike the old supervisor, this has
 // no unsandboxed path: it only exists where Docker (or an explicitly
 // authorized full_access mode) is actually verified present.
-type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm" | "cli_setup" | "self_update" | "doctor" | "restart";
+type ExecutorName = "browser" | "external_agent_proxy" | "personal_channel" | "shell_sandbox" | "llm" | "cli_setup" | "self_update" | "doctor" | "restart" | "openclaw_provision";
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -78,6 +79,13 @@ export class GatewayCapabilityRouter {
     // no local-capability precondition, so it's always advertised. See
     // update/gateway-restart-runtime.ts.
     private readonly restartRuntime?: GatewayRestartRuntime,
+    // openclaw.provision: advertised only when this box is actually an
+    // OpenClaw transport box (index.ts constructs this runtime only when the
+    // bridge secret is configured — the SAME condition that gates
+    // setOpenClawTransportEnabled and the inbound listener, so what we say we
+    // can provision and what we can actually provision are never two
+    // different sets). See openclaw/provisioning/openclaw-provisioning-runtime.ts.
+    private readonly openClawProvisioningRuntime?: OpenClawProvisioningRuntime,
   ) {}
 
   supportedCapabilities(): string[] {
@@ -107,6 +115,7 @@ export class GatewayCapabilityRouter {
       ...(this.selfUpdateRuntime?.requestedCapabilities() ?? []),
       ...(this.doctorRuntime?.requestedCapabilities() ?? []),
       ...(this.restartRuntime?.requestedCapabilities() ?? []),
+      ...(this.openClawProvisioningRuntime?.requestedCapabilities() ?? []),
     ];
   }
 
@@ -233,6 +242,18 @@ export class GatewayCapabilityRouter {
     if (this.restartRuntime?.supportsCapability(capabilityId)) {
       this.trackExecutor(runId, "restart");
       const result = await this.restartRuntime.handleCapabilityInvoke(
+        frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
+      );
+      return {
+        request_id: frame.id,
+        capability_id: capabilityId,
+        run_id: runId,
+        result,
+      };
+    }
+    if (this.openClawProvisioningRuntime?.supportsCapability(capabilityId)) {
+      this.trackExecutor(runId, "openclaw_provision");
+      const result = await this.openClawProvisioningRuntime.handleCapabilityInvoke(
         frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
       );
       return {

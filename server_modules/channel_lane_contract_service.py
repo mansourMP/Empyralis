@@ -91,10 +91,27 @@ OPENCLAW_PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
         "stage": "preview",
         "live_capable": "true",
     }
+    # INVARIANT: the suffix after `openclaw_` is OpenClaw's OWN channel id,
+    # verbatim. Both legs of the transport do a bare prefix strip/prepend
+    # (empyralis-gateway/src/openclaw/inbound-payload.ts's
+    # normalizeOpenClawChannelKey, outbound-payload.ts's
+    # openClawChannelIdFromChannelKey), so a suffix that is not a real
+    # OpenClaw channel id is broken in BOTH directions and silently: inbound
+    # arrives under a channel_key nothing here knows, outbound is rejected
+    # with "unsupported channel".
+    #
+    # That is exactly what `openclaw_qq` was until 2026-08-08 — OpenClaw's id
+    # is `qqbot` (dist/message-channel-constants-*.js's
+    # NATIVE_APPROVAL_CHANNELS, and `channels.qqbot` in its config schema),
+    # never `qq`. Renamed while renaming was still free: no QQ credentials
+    # exist yet (step 5), so nothing is persisted under the old key. Found by
+    # step 4's provisioning work — the first code that has to write
+    # `channels.<id>` into OpenClaw's real config, and therefore the first
+    # code the divergence could not hide from.
     for channel_key in (
         "openclaw_feishu",
         "openclaw_line",
-        "openclaw_qq",
+        "openclaw_qqbot",
         "openclaw_zalo",
         "openclaw_msteams",
     )
