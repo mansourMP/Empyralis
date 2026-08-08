@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from server_modules import external_content_guard
+from server_modules import external_content_guard, openclaw_channel_registry
 
 
 PERSONAL_GATEWAY_RUNTIME_LANE = "personal_gateway"
@@ -71,53 +71,19 @@ PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
 # platform is the channel_key suffix. A per-platform provider string would
 # imply Empyralis speaks each protocol itself, which it does not.
 #
-# Deliberately NOT listed: telegram/whatsapp/signal/imessage/wechat.
-# Empyralis already has first-party runtimes for those, and
-# CHANNEL-ADOPTION-PLAN.md step 6 is explicit that a channel is cut over
-# only after its replacement is proven live — adding a second lane for a
-# platform that already works is how you end up with two half-working
-# paths. Add an entry here when that platform's cut-over actually happens.
+# THE SET IS DERIVED, NOT LISTED. It used to be a five-entry tuple written
+# out here by hand, against an upstream that ships twenty-seven channels and
+# an Empyralis side with no per-channel code at all. Every channel now comes
+# from `openclaw_channel_registry`, which reads a manifest generated from the
+# pinned OpenClaw. Adding a channel upstream needs no edit here — only a
+# regeneration. See that module for why a checked-in manifest rather than a
+# CLI shell-out, and for how the verbatim-id invariant became automatic.
 OPENCLAW_TRANSPORT_PROVIDER = "openclaw"
 
-OPENCLAW_PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
-    channel_key: {
-        "provider": OPENCLAW_TRANSPORT_PROVIDER,
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
-        # "preview", not "live": the transport is wired and gated, but no
-        # platform on this list has been driven with real credentials yet
-        # (CHANNEL-ADOPTION-PLAN.md step 5). Do not promote this to "live"
-        # from a code reading — promote it from a real message.
-        "stage": "preview",
-        "live_capable": "true",
-    }
-    # INVARIANT: the suffix after `openclaw_` is OpenClaw's OWN channel id,
-    # verbatim. Both legs of the transport do a bare prefix strip/prepend
-    # (empyralis-gateway/src/openclaw/inbound-payload.ts's
-    # normalizeOpenClawChannelKey, outbound-payload.ts's
-    # openClawChannelIdFromChannelKey), so a suffix that is not a real
-    # OpenClaw channel id is broken in BOTH directions and silently: inbound
-    # arrives under a channel_key nothing here knows, outbound is rejected
-    # with "unsupported channel".
-    #
-    # That is exactly what `openclaw_qq` was until 2026-08-08 — OpenClaw's id
-    # is `qqbot` (dist/message-channel-constants-*.js's
-    # NATIVE_APPROVAL_CHANNELS, and `channels.qqbot` in its config schema),
-    # never `qq`. Renamed while renaming was still free: no QQ credentials
-    # exist yet (step 5), so nothing is persisted under the old key. Found by
-    # step 4's provisioning work — the first code that has to write
-    # `channels.<id>` into OpenClaw's real config, and therefore the first
-    # code the divergence could not hide from.
-    for channel_key in (
-        "openclaw_feishu",
-        "openclaw_line",
-        "openclaw_qqbot",
-        "openclaw_zalo",
-        "openclaw_msteams",
-    )
-}
-
-PERSONAL_CHANNEL_SPECS.update(OPENCLAW_PERSONAL_CHANNEL_SPECS)
+# The derivation itself lives below STUDIO_CHANNEL_ROADMAP, because resolving
+# which platforms Empyralis already owns has to read BOTH first-party catalogs
+# — the personal lane and the Studio lane — and the Studio one is defined after
+# this point. Search for OPENCLAW_TRANSPORT_OWNERSHIP.
 
 PERSONAL_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
     {
@@ -305,6 +271,100 @@ STUDIO_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
         "session_owner": "cloud_connector",
     },
 )
+
+# ── OpenClaw transport: the derived channel set ──────────────────────────
+#
+# Placed here, not beside OPENCLAW_TRANSPORT_PROVIDER above, because it has
+# to read BOTH first-party catalogs to know which platforms Empyralis
+# already owns.
+# The platforms Empyralis already implements itself, as bare tokens. Derived
+# from the first-party catalogs above rather than typed out, so a first-party
+# channel added later is automatically considered when resolving overlap with
+# OpenClaw instead of quietly producing a second live implementation of one
+# platform. `_personal`/`_bot`/`_twilio` are the suffixes those catalogs use
+# to say HOW a platform is reached; the platform itself is what remains.
+_FIRST_PARTY_LANE_SUFFIXES = ("_personal", "_bot", "_twilio")
+
+
+def _first_party_platform_token(channel_key: str) -> str:
+    token = str(channel_key or "").strip().lower()
+    for suffix in _FIRST_PARTY_LANE_SUFFIXES:
+        if token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+FIRST_PARTY_PLATFORM_TOKENS: frozenset[str] = frozenset(
+    _first_party_platform_token(channel_key) for channel_key in PERSONAL_CHANNEL_SPECS
+) | frozenset(
+    _first_party_platform_token(str(entry.get("channel_key") or ""))
+    for entry in STUDIO_CHANNEL_ROADMAP
+)
+
+# channel id -> "first_party" | "openclaw". Computed; see
+# openclaw_channel_registry.resolve_transport_ownership.
+OPENCLAW_TRANSPORT_OWNERSHIP: Dict[str, str] = openclaw_channel_registry.resolve_transport_ownership(
+    FIRST_PARTY_PLATFORM_TOKENS
+)
+
+# The OpenClaw channels that ARE the live implementation of their platform.
+# Only these enter PERSONAL_CHANNEL_SPECS, get advertised by the gateway, get
+# provisioned into OpenClaw's config, and can accept inbound — so declaring
+# all 27 cannot produce two runtimes on one account.
+OPENCLAW_ACTIVE_CHANNELS: tuple[Any, ...] = tuple(
+    channel
+    for channel in openclaw_channel_registry.CHANNELS
+    if OPENCLAW_TRANSPORT_OWNERSHIP.get(channel.id) == openclaw_channel_registry.OWNER_OPENCLAW
+)
+
+# The OpenClaw channels a first-party Empyralis runtime still owns. Declared
+# and visible (so the UI can say "carried by the transport, superseded here"),
+# never live.
+OPENCLAW_SUPERSEDED_CHANNELS: tuple[Any, ...] = tuple(
+    channel
+    for channel in openclaw_channel_registry.CHANNELS
+    if OPENCLAW_TRANSPORT_OWNERSHIP.get(channel.id) != openclaw_channel_registry.OWNER_OPENCLAW
+)
+
+if not OPENCLAW_ACTIVE_CHANNELS:
+    raise RuntimeError(
+        "Every OpenClaw channel resolved to a first-party owner, leaving the transport with "
+        "nothing to carry. That is a derivation failure, not a product decision — a silently "
+        "empty transport looks exactly like a working one until a customer's channel goes quiet."
+    )
+
+OPENCLAW_PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
+    channel.channel_key: {
+        "provider": OPENCLAW_TRANSPORT_PROVIDER,
+        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
+        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
+        # "preview", not "live", for EVERY channel on this transport — a
+        # property of the transport itself, not a per-channel judgement, so
+        # there is no list to keep honest. No platform here has been driven
+        # with real credentials yet (CHANNEL-ADOPTION-PLAN.md step 5).
+        #
+        # Promotion does not happen in this file. "Proven live" is an
+        # OBSERVED fact — a real message through a real connection — and it
+        # is reported per-gateway by
+        # personal_channels_service.get_gateway_personal_channel_surfaces
+        # (`connected` / `running` / `proven_live`), read off gateway state
+        # rather than declared here. That is the only shape of "promote it
+        # from a real message" that cannot rot into a stale hand-written
+        # claim.
+        "stage": "preview",
+        "live_capable": "true",
+        # Whether the pinned OpenClaw has a `channels.<id>` config node at
+        # all. Four catalogued channels only contribute one once their plugin
+        # is installed; provisioning must say so rather than write a node
+        # OpenClaw will reject. Carried here so every reader of the lane
+        # contract sees the same honest answer.
+        "policy_expressible": "true" if channel.config_schema_present else "false",
+    }
+    for channel in OPENCLAW_ACTIVE_CHANNELS
+}
+
+PERSONAL_CHANNEL_SPECS.update(OPENCLAW_PERSONAL_CHANNEL_SPECS)
+
 
 CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
     {
@@ -796,6 +856,115 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "capabilities": ["manifest", "health", "inbound", "outbound", "text"],
     },
 )
+
+
+# ── OpenClaw channels in the catalogs the UI reads ───────────────────────
+#
+# Until now the OpenClaw channels were in PERSONAL_CHANNEL_SPECS but in
+# NEITHER catalog, so `get_gateway_personal_channel_surfaces` — which
+# iterates `personal_channel_catalog()` — never listed one. They were wired
+# end to end and invisible: the "built, tested, and never wired" shape
+# CLAUDE.md names, one level up from the code.
+#
+# Both catalogs are extended from the SAME derived channel set, so a channel
+# OpenClaw adds shows up in the product without an edit here.
+#
+# WHAT THE UI CAN TELL APART, WITHOUT A HAND-MAINTAINED LIST:
+#
+#   stage "preview"                every OpenClaw channel, uniformly — the
+#                                  transport is wired and gated, nothing has
+#                                  been driven with real credentials yet.
+#   status "openclaw_transport"    live implementation of its platform.
+#   status "superseded_by_first_party"
+#                                  Empyralis already implements this platform
+#                                  itself; carried by the transport, not used.
+#                                  `superseded_by` names the owner.
+#   live_capable                   False for superseded channels — they are
+#                                  never advertised, provisioned, or handled.
+#   proven_live                    NOT here. It is an observed per-gateway
+#                                  fact (a real connection, a real message)
+#                                  reported by
+#                                  get_gateway_personal_channel_surfaces, and
+#                                  a catalog is the wrong place to claim it.
+
+# `openclaw channel id -> the Empyralis channel_key that owns that platform`.
+# Both lanes, because `slack` and `sms` are owned by Studio connectors while
+# telegram/whatsapp/signal/imessage/wechat/discord are owned by personal ones.
+# Computed from the same catalogs the ownership resolution reads, so it cannot
+# name an owner the resolution disagrees with.
+_OPENCLAW_FIRST_PARTY_OWNER_BY_ID: Dict[str, str] = {}
+for _owner_channel_key in (
+    *PERSONAL_CHANNEL_SPECS,
+    *(str(_entry.get("channel_key") or "") for _entry in STUDIO_CHANNEL_ROADMAP),
+):
+    _owner_channel_id = openclaw_channel_registry.openclaw_id_for_platform_token(
+        _first_party_platform_token(_owner_channel_key)
+    )
+    if (
+        _owner_channel_id
+        and OPENCLAW_TRANSPORT_OWNERSHIP.get(_owner_channel_id)
+        == openclaw_channel_registry.OWNER_FIRST_PARTY
+    ):
+        _OPENCLAW_FIRST_PARTY_OWNER_BY_ID.setdefault(_owner_channel_id, _owner_channel_key)
+
+
+def _openclaw_catalog_entry(channel: Any) -> Dict[str, Any]:
+    active = OPENCLAW_TRANSPORT_OWNERSHIP.get(channel.id) == openclaw_channel_registry.OWNER_OPENCLAW
+    superseded_by = _OPENCLAW_FIRST_PARTY_OWNER_BY_ID.get(channel.id)
+    return {
+        "channel_key": channel.channel_key,
+        "binding_channel_key": channel.channel_key,
+        # OpenClaw's own display name, from its own catalog — never a
+        # parallel hand-written label map.
+        "label": channel.label,
+        "provider": OPENCLAW_TRANSPORT_PROVIDER,
+        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
+        "category": "personal_runtime",
+        "stage": "preview",
+        "status": "openclaw_transport" if active else "superseded_by_first_party",
+        "superseded_by": superseded_by,
+        "live_capable": active,
+        # Never launchable from the product surface: an OpenClaw channel is
+        # credentialed inside OpenClaw on the owner's own machine, so a
+        # "Connect" button here would be a dead control (product law).
+        "launch_allowed": False,
+        "requires_agent_computer": True,
+        "account_provider": None,
+        "connector_id": None,
+        "openclaw_channel_id": channel.id,
+        "policy_expressible": bool(channel.config_schema_present),
+        "surface_support": ["sage"],
+        "capabilities": ["manifest", "health", "inbound", "outbound", "text"] if active else [],
+    }
+
+
+OPENCLAW_CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = tuple(
+    _openclaw_catalog_entry(channel) for channel in openclaw_channel_registry.CHANNELS
+)
+
+CHANNEL_PLATFORM_CATALOG = CHANNEL_PLATFORM_CATALOG + OPENCLAW_CHANNEL_PLATFORM_CATALOG
+
+# The personal roadmap only ever describes channels on the live personal
+# lane, so it carries the ACTIVE OpenClaw channels — a superseded one has no
+# runtime to describe, and listing it here would put a second "Telegram" in
+# front of a customer with no way to tell which one answers.
+PERSONAL_CHANNEL_ROADMAP = PERSONAL_CHANNEL_ROADMAP + tuple(
+    {
+        "channel_key": channel.channel_key,
+        "label": channel.label,
+        "provider": OPENCLAW_TRANSPORT_PROVIDER,
+        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
+        "stage": "preview",
+        "live_capable": "true",
+        "family": "personal",
+        "session_owner": "paired_gateway",
+    }
+    for channel in OPENCLAW_ACTIVE_CHANNELS
+)
+
+if len(CHANNEL_PLATFORM_CATALOG) <= len(OPENCLAW_CHANNEL_PLATFORM_CATALOG):
+    raise RuntimeError("First-party channels vanished from CHANNEL_PLATFORM_CATALOG.")
+
 
 RESERVED_PRIVATE_RUNTIME_CHANNELS: tuple[Dict[str, str], ...] = (
     {"channel_key": "voice_wake", "label": "Voice/Wake", "status": "reserved_private_runtime"},

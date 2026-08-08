@@ -15,6 +15,7 @@ from server_modules import (
     gateway_state_repository,
     kill_switch_gate,
     mention_gating_service,
+    openclaw_channel_registry,
     personal_channel_sage_bridge_service,
     personal_channels_repository,
     rust_runtime_kernel_client,
@@ -107,23 +108,55 @@ LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
 # those facts fail-closed before delegating to the very same
 # _handle_local_bridge_gateway_channel_inbound. See that class.
 OPENCLAW_TRANSPORT_PROVIDER = channel_lane_contract_service.OPENCLAW_TRANSPORT_PROVIDER
-OPENCLAW_CHANNEL_KEY_PREFIX = "openclaw_"
+OPENCLAW_CHANNEL_KEY_PREFIX = openclaw_channel_registry.CHANNEL_KEY_PREFIX
 
+# DERIVED, not listed. This used to be a five-entry map written out by hand
+# beside a five-entry tuple in channel_lane_contract_service, with a set-
+# equality check between them — two hand-maintained copies plus a check that
+# they agreed with EACH OTHER, which is the weakest guarantee available: both
+# could be wrong together, and both were. Five channels out of OpenClaw's
+# twenty-seven, and one of the five carried an id (`qq`) OpenClaw does not
+# have.
+#
+# There is now one source upstream of both: openclaw_channel_registry, whose
+# manifest is generated from the pinned OpenClaw install.
+#
+# LABELS ARE OPENCLAW'S OWN display names (their channel catalog's `label`),
+# never a parallel hand-written map. The old map called `openclaw_qqbot` "QQ";
+# OpenClaw calls it "QQ Bot", which is the more accurate name — it is their
+# Bot API channel, not a personal QQ account.
 OPENCLAW_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
-    "openclaw_feishu": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Feishu"},
-    "openclaw_line": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "LINE"},
-    # `qqbot`, not `qq` — the suffix is OpenClaw's own channel id verbatim.
-    # See channel_lane_contract_service.OPENCLAW_PERSONAL_CHANNEL_SPECS for
-    # why that invariant is load-bearing and why this was renamed.
-    "openclaw_qqbot": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "QQ"},
-    "openclaw_zalo": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Zalo"},
-    "openclaw_msteams": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Microsoft Teams"},
+    channel.channel_key: {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": channel.label}
+    for channel in channel_lane_contract_service.OPENCLAW_ACTIVE_CHANNELS
 }
 
-# Fail loudly if this module and the lane contract ever drift apart, rather
-# than letting a channel exist in one list and not the other and finding out
-# from a customer's silent channel (CLAUDE.md: stale config must fail
-# loudly, never fall through to a default).
+# The failure a set-equality check between two hand-written maps could never
+# catch, because two empty sets are equal: the derivation producing nothing.
+# An empty map is indistinguishable from a working one until a customer's
+# channel goes quiet — every OpenClaw inbound would be refused as an unknown
+# channel_key with no error anywhere saying why.
+if not OPENCLAW_PERSONAL_CHANNELS:
+    raise RuntimeError(
+        "The OpenClaw transport resolved to zero channels. Refusing to boot rather than "
+        "silently disabling every OpenClaw-transported channel."
+    )
+
+# No OpenClaw channel_key may collide with a first-party one. It cannot today
+# (the `openclaw_` prefix guarantees it), but these keys are now generated
+# from an upstream registry instead of typed here, so the day OpenClaw ships
+# an id that would collide this must be a boot failure — never a silent
+# `.update()` that replaces a live channel's handler with the transport's.
+_openclaw_key_collisions = sorted(set(OPENCLAW_PERSONAL_CHANNELS) & set(LOCAL_BRIDGE_PERSONAL_CHANNELS))
+if _openclaw_key_collisions:
+    raise RuntimeError(
+        f"OpenClaw channel keys collide with first-party local-bridge channels: "
+        f"{_openclaw_key_collisions}. Refusing to overwrite a live channel's handler."
+    )
+
+# Still asserted, now for a different reason: the two are derived from one
+# source, so this can no longer drift by authorship — but an `.update()` or a
+# test monkeypatch elsewhere could still diverge them at runtime, and this
+# pair is what decides whether a real message gets a turn.
 if set(OPENCLAW_PERSONAL_CHANNELS) != set(channel_lane_contract_service.OPENCLAW_PERSONAL_CHANNEL_SPECS):
     raise RuntimeError(
         "OpenClaw channel list drift: personal_channels_service.OPENCLAW_PERSONAL_CHANNELS "
@@ -2166,6 +2199,34 @@ def _connected_identity_label(channel_key: str, state: Optional[Dict[str, Any]])
     return None
 
 
+def _personal_channel_transport_descriptor(
+    channel_key: str,
+    platform: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Which transport carries this channel, and — for OpenClaw — which of
+    their channels it is.
+
+    Derived per channel from the registry, never a lookup table: a channel
+    OpenClaw adds gets a correct descriptor with no edit here.
+    """
+    channel = openclaw_channel_registry.channel_for_key(channel_key)
+    if channel is None:
+        return {"kind": "first_party"}
+    return {
+        "kind": openclaw_channel_registry.OWNER_OPENCLAW,
+        "openclaw_channel_id": channel.id,
+        "openclaw_version": openclaw_channel_registry.OPENCLAW_VERSION,
+        # False for the handful of catalogued channels whose `channels.<id>`
+        # config node only exists once their plugin is installed. Provisioning
+        # leaves those OFF with a stated reason rather than writing a node
+        # OpenClaw would reject — worth surfacing, because a channel that is
+        # declared but cannot carry a policy is not the same as one that is
+        # simply not connected.
+        "policy_expressible": bool(channel.config_schema_present),
+        "superseded_by": platform.get("superseded_by"),
+    }
+
+
 def get_gateway_personal_channel_surfaces(gateway_id: str) -> Dict[str, Any]:
     """Return safe per-channel capability/status projection for a paired Agent Computer.
 
@@ -2282,6 +2343,25 @@ def get_gateway_personal_channel_surfaces(gateway_id: str) -> Dict[str, Any]:
                 "state": _safe_state_summary(state),
                 "detail": _LOCAL_BRIDGE_PERSONAL_CHANNEL_COPY.get(channel_key, {}).get("detail"),
                 "next_step": _LOCAL_BRIDGE_PERSONAL_CHANNEL_COPY.get(channel_key, {}).get("next_step"),
+                # HOW "available through the transport, not yet proven live"
+                # is expressed — and why it is NOT a hand-maintained list.
+                #
+                #   stage        "preview" for every OpenClaw channel. A
+                #                property of the transport, uniform, so there
+                #                is no per-channel judgement to keep honest.
+                #   proven_live  OBSERVED, never declared: this gateway has a
+                #                real connection on this channel right now.
+                #                Read off gateway state, so it becomes true the
+                #                moment a channel is genuinely driven and false
+                #                again if it stops — which is the only version
+                #                of "promote it from a real message, not from a
+                #                code reading" that cannot rot.
+                #
+                # A UI shows "Preview — not connected" until proven_live, then
+                # the same live treatment every first-party channel gets. No
+                # list anywhere says which channels have made it.
+                "proven_live": bool(connected and running),
+                "transport": _personal_channel_transport_descriptor(channel_key, platform),
             }
         )
 

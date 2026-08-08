@@ -1,9 +1,5 @@
 /**
- * What each OpenClaw channel's config can and cannot express about policy —
- * transcribed from openclaw@2026.6.10's own `openclaw config schema` output
- * (2.5MB JSON Schema, read 2026-08-08), and re-verified against that schema
- * at provisioning time by auditOpenClawChannelShapes() below rather than
- * trusted as a comment.
+ * What each OpenClaw channel's config can and cannot express about policy.
  *
  * WHY THIS TABLE EXISTS AT ALL — the channels are NOT uniform, and the
  * differences are exactly where a policy silently stops being enforced:
@@ -23,7 +19,31 @@
  * mention-gating anyway. See ./openclaw-config-plan.ts for what provisioning
  * does about that (fails the channel closed, loudly — never ships a config
  * that quietly disagrees with the owner's setting).
+ *
+ * THE TABLE IS NO LONGER A TRANSCRIPTION. It was five rows hand-copied out of
+ * openclaw@2026.6.10's `openclaw config schema` on 2026-08-08, which covered
+ * five of their twenty-seven channels and would have had to be re-copied by
+ * hand for every channel added. It is now read out of that same schema by
+ * `scripts/generate_openclaw_channel_manifest.py` at generation time and
+ * emitted into ../generated-openclaw-channels.ts.
+ *
+ * The derivation reproduces all five hand-written rows byte-for-byte, which
+ * is why it is trusted for the other twenty-two.
+ *
+ * THE AUDIT BELOW IS STILL A REAL CHECK, not a tautology. Its expected values
+ * come from a manifest generated against the PINNED build and checked into
+ * the repo; its actual values come from the schema of the OpenClaw actually
+ * installed on the customer's box, read at provisioning time. Two different
+ * sources — which is the whole point (CLAUDE.md: "a check that derives its
+ * own expectations from the thing it checks is blind, and reports 'passed'").
+ * A same-version repack or a local patch still cannot quietly change what a
+ * policy means.
  */
+
+import {
+  GENERATED_OPENCLAW_MANIFEST,
+  type GeneratedOpenClawPolicyShape,
+} from "../generated-openclaw-channels";
 
 /** Where a channel keeps its per-conversation overrides, if anywhere.
  *  `groups` for most; `teams` for Microsoft Teams; null when the channel has
@@ -59,60 +79,54 @@ export interface OpenClawChannelPolicyShape {
   readonly configWrites: boolean;
 }
 
-/** The five channels Empyralis transports through OpenClaw today, keyed by
- *  OpenClaw's OWN channel id — which, by the invariant recorded in
- *  channel_lane_contract_service.OPENCLAW_PERSONAL_CHANNEL_SPECS, is also
- *  exactly the Empyralis `channel_key` minus its `openclaw_` prefix. Must
- *  stay in step with ../capabilities.ts's OPENCLAW_TRANSPORT_CHANNEL_IDS —
- *  asserted by a test, not by hope.
+function toPolicyShape(shape: GeneratedOpenClawPolicyShape): OpenClawChannelPolicyShape {
+  return {
+    dmPolicyModes: shape.dm_policy_modes,
+    groupPolicyModes: shape.group_policy_modes,
+    channelRequireMention: shape.channel_require_mention,
+    perChatMapKey: shape.per_chat_map_key,
+    perChatMapKeyedOnChatId: shape.per_chat_map_keyed_on_chat_id,
+    configWrites: shape.config_writes,
+  };
+}
+
+/**
+ * Every channel the pinned OpenClaw declares a `channels.<id>` config node
+ * for, keyed by OpenClaw's OWN channel id — which IS the Empyralis
+ * `channel_key` minus its `openclaw_` prefix, an invariant that is now
+ * automatic because both sides of it are generated from the same registry.
  *
- *  Provisioning is where that invariant stopped being theoretical: writing
- *  `channels.<id>` into a real OpenClaw config is the first operation that
- *  cannot succeed against an id OpenClaw does not have. It caught
- *  `openclaw_qq` (their id is `qqbot`), which was broken in both directions
- *  and silent in both. */
-export const OPENCLAW_CHANNEL_POLICY_SHAPES: Readonly<Record<string, OpenClawChannelPolicyShape>> = {
-  feishu: {
-    dmPolicyModes: ["open", "pairing", "allowlist"],
-    groupPolicyModes: ["open", "allowlist", "disabled"],
-    channelRequireMention: true,
-    perChatMapKey: "groups",
-    perChatMapKeyedOnChatId: true,
-    configWrites: true,
-  },
-  line: {
-    dmPolicyModes: ["open", "allowlist", "pairing", "disabled"],
-    groupPolicyModes: ["open", "allowlist", "disabled"],
-    channelRequireMention: false,
-    perChatMapKey: "groups",
-    perChatMapKeyedOnChatId: true,
-    configWrites: false,
-  },
-  qqbot: {
-    dmPolicyModes: ["open", "allowlist", "disabled"],
-    groupPolicyModes: ["open", "allowlist", "disabled"],
-    channelRequireMention: false,
-    perChatMapKey: "groups",
-    perChatMapKeyedOnChatId: true,
-    configWrites: false,
-  },
-  zalo: {
-    dmPolicyModes: ["pairing", "allowlist", "open", "disabled"],
-    groupPolicyModes: ["open", "disabled", "allowlist"],
-    channelRequireMention: false,
-    perChatMapKey: null,
-    perChatMapKeyedOnChatId: false,
-    configWrites: false,
-  },
-  msteams: {
-    dmPolicyModes: ["pairing", "allowlist", "open", "disabled"],
-    groupPolicyModes: ["open", "disabled", "allowlist"],
-    channelRequireMention: true,
-    perChatMapKey: "teams",
-    perChatMapKeyedOnChatId: true,
-    configWrites: true,
-  },
-};
+ * A channel with NO entry here is not an oversight: four catalogued channels
+ * (`wecom`, `openclaw-weixin`, `openclaw-zaloclawbot`, `yuanbao`) contribute
+ * their config node only once their plugin is installed. `renderOpenClawConfig`
+ * already handles a missing shape correctly — it writes `{enabled: false}` and
+ * reports a `disabledChannels` finding, rather than guessing at an
+ * authorization mapping — so those degrade honestly instead of silently.
+ *
+ * Provisioning is where the verbatim-id invariant stopped being theoretical:
+ * writing `channels.<id>` into a real OpenClaw config is the first operation
+ * that cannot succeed against an id OpenClaw does not have. It is what caught
+ * `openclaw_qq` (their id is `qqbot`), broken in both directions and silent in
+ * both.
+ */
+export const OPENCLAW_CHANNEL_POLICY_SHAPES: Readonly<Record<string, OpenClawChannelPolicyShape>> =
+  Object.freeze(
+    Object.fromEntries(
+      GENERATED_OPENCLAW_MANIFEST.channels
+        .filter((channel) => channel.policy_shape !== null)
+        .map((channel) => [channel.id, toPolicyShape(channel.policy_shape!)]),
+    ),
+  );
+
+if (Object.keys(OPENCLAW_CHANNEL_POLICY_SHAPES).length === 0) {
+  // Without shapes, renderOpenClawConfig disables EVERY channel and reports it
+  // as a policy finding — a total, plausible-looking outage of the transport.
+  // Fail at load instead.
+  throw new Error(
+    "No OpenClaw channel policy shapes were generated. Regenerate with " +
+      "`python3 scripts/generate_openclaw_channel_manifest.py`.",
+  );
+}
 
 // ── Schema audit: this table vs the CLI actually installed ────────────────
 //

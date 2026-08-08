@@ -18,6 +18,7 @@ from starlette.websockets import WebSocketDisconnect
 from server_modules import (
     agent_computer_profile_service,
     auth,
+    channel_lane_contract_service,
     gateway_protocol_service,
     gateway_registry_service,
     kill_switch_gate,
@@ -1952,8 +1953,16 @@ class GatewayRoutesTests(unittest.TestCase):
         # connectors_actions.py, personal_channel_sage_bridge_service.py),
         # not a regression. The surfaces endpoint iterates the live catalog,
         # so the expected set has to track it.
+        #
+        # The OpenClaw-transported channels joined this endpoint when the
+        # channel set stopped being hand-listed and started being derived from
+        # a pinned OpenClaw manifest. Before that they were in
+        # PERSONAL_CHANNEL_SPECS but in NEITHER catalog, so this endpoint --
+        # which iterates personal_channel_catalog() -- never listed one: wired
+        # end to end and invisible.
+        openclaw_keys = {key for key in by_key if by_key[key]["provider"] == "openclaw"}
         self.assertEqual(
-            set(by_key),
+            set(by_key) - openclaw_keys,
             {
                 "telegram_personal",
                 "whatsapp_personal",
@@ -1963,6 +1972,35 @@ class GatewayRoutesTests(unittest.TestCase):
                 "discord_personal",
             },
         )
+        # Derived, so asserted against the derivation rather than re-typed --
+        # but never allowed to be empty, which would let this endpoint quietly
+        # stop reporting an entire transport.
+        self.assertTrue(openclaw_keys)
+        self.assertEqual(
+            openclaw_keys,
+            {
+                channel.channel_key
+                for channel in channel_lane_contract_service.OPENCLAW_ACTIVE_CHANNELS
+            },
+        )
+        # "available through the transport, not yet proven live": every one is
+        # stage=preview, and proven_live is an OBSERVED fact -- this gateway
+        # reports no OpenClaw connection -- never a declared one.
+        for key in openclaw_keys:
+            self.assertEqual(by_key[key]["stage"], "preview")
+            self.assertFalse(by_key[key]["proven_live"])
+            self.assertEqual(by_key[key]["transport"]["kind"], "openclaw")
+            self.assertEqual(
+                by_key[key]["transport"]["openclaw_channel_id"],
+                key.removeprefix("openclaw_"),
+            )
+        # A platform Empyralis still implements first-party is never offered
+        # twice: no `openclaw_telegram` beside `telegram_personal`.
+        self.assertNotIn("openclaw_telegram", by_key)
+        self.assertNotIn("openclaw_whatsapp", by_key)
+        self.assertNotIn("openclaw_signal", by_key)
+        self.assertEqual(by_key["telegram_personal"]["transport"]["kind"], "first_party")
+
         self.assertTrue(by_key["telegram_personal"]["connected"])
         self.assertTrue(by_key["telegram_personal"]["running"])
         self.assertEqual(by_key["telegram_personal"]["connected_identity"], "mansur")

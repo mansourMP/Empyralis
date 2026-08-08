@@ -761,6 +761,90 @@ arrives over loopback HTTP from the plugin and does not depend on that
 socket, and `_assert_gateway_advertised_personal_channel` would drop already-
 arrived messages. Report `connecting` with `connected: false`.
 
+**"Channels" is ONE system. The OpenClaw channel set is DERIVED from
+OpenClaw, never hand-listed.** Landed 2026-08-08. Empyralis has no
+per-channel code on this lane at all — both legs do a bare prefix
+strip/prepend (`normalizeOpenClawChannelKey`,
+`openClawChannelIdFromChannelKey`), so every channel they carry already works
+through the identical path. Only the REGISTRY was curating, and it curated
+badly: five channels out of their twenty-seven, typed by hand in FOUR places
+(a tuple in `channel_lane_contract_service`, a parallel label map in
+`personal_channels_service` with a set-equality check between them, an array
+in the gateway's `capabilities.ts`, and a fifth list inside the schema
+fixture generator). A set-equality check between two hand-written maps can
+only ever answer "do my copies agree", never "are they right" — both were
+wrong together, one carried `qq` (an id OpenClaw does not have), and two
+empty sets would have been equal.
+
+```
+BEFORE                                  AFTER
+  tuple(5) ─set-equality─ map(5)          openclaw_channel_manifest.json
+     │                      │               (generated, 27, pinned)
+     └─── TS array(5) ──────┘                     │
+     └─── fixture list(6) ──┘        ┌────────────┼─────────────┐
+  add a channel = 4 edits +         lane       personal    generated-
+  remember their id verbatim        contract   channels    openclaw-
+                                                           channels.ts
+                                    add a channel = regenerate
+```
+
+Source of truth is `scripts/generate_openclaw_channel_manifest.py`, run
+against the PINNED install: `openclaw channels list --all --json` for the
+authoritative id set, `dist/channel-catalog.json` + `dist/extensions/*/
+package.json` for labels (their own display names — `qqbot` is "QQ Bot",
+which the deleted map called "QQ"), and `openclaw config schema` for the
+per-channel policy shape `OPENCLAW_CHANNEL_POLICY_SHAPES` used to transcribe
+by hand. The derivation reproduces all five hand-written shape rows exactly,
+which is why it is trusted for the other twenty-two. The two id sources are
+INDEPENDENT (a live CLI query vs files on disk) and generation FAILS if they
+disagree — the expected set and the actual set must never come from one
+place.
+
+A checked-in manifest, not a runtime shell-out: the cloud has no OpenClaw
+and never will, yet the cloud is the party that decides whether a
+`channel_key` is real (`assert_personal_gateway_channel`). The set is a
+property of the pinned version, exactly like the `message.action` param
+names that pin already covers.
+
+**The verbatim-id invariant is now automatic.** Nobody types a suffix; every
+`channel_key` is `f"openclaw_{id}"` where the id came out of their registry,
+and `openclaw_channel_id()` is a manifest LOOKUP rather than a prefix strip
+— so an id they do not have fails on our side instead of arriving as
+"unsupported channel" outbound, or not failing at all inbound.
+
+**Overlap is COMPUTED and defaults to the proven implementation.** Eight of
+their channels are platforms Empyralis already implements: telegram,
+whatsapp, signal, imessage, `openclaw-weixin` (consumer WeChat — `wecom` is
+WeChat Work, a different product and not an overlap), discord, slack, sms.
+The overlap set is the intersection of the derived OpenClaw ids with the
+platform tokens derived from BOTH first-party catalogs, so a platform they
+add later that collides with ours is caught the day it ships and resolved in
+favour of the existing runtime by DEFAULT. Superseded channels are DECLARED
+and visible in the platform catalog (`status: superseded_by_first_party`,
+`superseded_by` naming the owner) but never enter the lane specs, the
+handler registry, or the gateway's advertisement — so declaring all 27
+cannot put two runtimes on one account.
+`openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS` is the ONE
+authored datum in the whole system, and it is a decision rather than a list:
+moving an id into it is step 6's swap, and the first-party implementation
+must be deleted in the same change.
+
+**"Not yet proven live" is expressed without a list.** `stage: "preview"` is
+uniform across every OpenClaw channel — a property of the transport, so
+there is nothing per-channel to keep honest. Promotion is not a catalog
+edit: `proven_live` in `get_gateway_personal_channel_surfaces` is OBSERVED
+(a real connection on a real gateway), the only version of "promote it from
+a real message, not from a code reading" that cannot rot into a stale claim.
+
+Two things this fixed in passing. The OpenClaw channels were in
+`PERSONAL_CHANNEL_SPECS` but in NEITHER catalog, so
+`get_gateway_personal_channel_surfaces` — which iterates
+`personal_channel_catalog()` — never listed one: wired end to end and
+invisible, the "built, tested, and never wired" shape one level up from the
+code. And the schema fixture generator's own hand-written channel list was
+the most dangerous of the five copies, because a fixture that stops covering
+a channel does not fail — it silently stops checking it.
+
 **OpenClaw's config is a DERIVED ARTIFACT of Empyralis policy, and the
 mapping is per-axis, not one-to-one.** Landed 2026-08-08 (step 4,
 `empyralis-gateway/src/openclaw/provisioning/`). Their config decides what we

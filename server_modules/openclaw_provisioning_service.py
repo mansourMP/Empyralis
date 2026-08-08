@@ -39,7 +39,11 @@ import logging
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from server_modules import gateway_execution_service, personal_channels_service
+from server_modules import (
+    gateway_execution_service,
+    openclaw_channel_registry,
+    personal_channels_service,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -68,17 +72,16 @@ class OpenClawProvisioningError(RuntimeError):
 def openclaw_channel_id(channel_key: str) -> str:
     """`openclaw_feishu` -> `feishu`.
 
-    Safe as a bare prefix strip ONLY because of the invariant recorded in
-    channel_lane_contract_service.OPENCLAW_PERSONAL_CHANNEL_SPECS: the suffix
-    IS OpenClaw's own channel id. That invariant was violated exactly once
-    (`openclaw_qq` vs their `qqbot`) and broke the lane in both directions
-    silently.
+    No longer a bare prefix strip. The suffix IS OpenClaw's own channel id —
+    an invariant that used to rest on five hand-typed strings and was violated
+    exactly once (`openclaw_qq` vs their `qqbot`), breaking the lane in both
+    directions and silently. Those keys are now generated from OpenClaw's own
+    registry, so the invariant holds by construction; this lookup is what
+    makes it hold at RUNTIME too, so a key that reaches here with no real
+    channel behind it fails at this call rather than arriving at OpenClaw as
+    "unsupported channel" — or, on the way in, not failing at all.
     """
-    prefix = personal_channels_service.OPENCLAW_CHANNEL_KEY_PREFIX
-    normalized = str(channel_key or "").strip().lower()
-    if not normalized.startswith(prefix):
-        raise ValueError(f"{channel_key!r} is not an OpenClaw-transported channel key.")
-    return normalized[len(prefix):]
+    return openclaw_channel_registry.openclaw_channel_id(channel_key)
 
 
 async def build_openclaw_channel_policies(
