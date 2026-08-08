@@ -11,7 +11,7 @@ from server_modules import credit_ledger_contract
 from server_modules import secret_redaction_service
 
 
-ACTION_DOMAINS = {"tool", "mcp", "skill", "connector", "rag", "runtime"}
+ACTION_DOMAINS = {"tool", "mcp", "skill", "connector", "runtime"}
 ACTION_TYPES = {"read", "write", "execute", "invoke", "retrieve", "meter", "policy"}
 ACTION_STATUSES = {"started", "completed", "failed", "blocked", "approval_required", "approved", "denied", "policy_decision"}
 BILLING_MODES = {"none", "transparency", "metered", "ai_token_usage_ref"}

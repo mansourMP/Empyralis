@@ -221,24 +221,29 @@ def test_credits_for_byo_usage_cost_usd_honors_configurable_rate(monkeypatch) ->
     assert credits != billing_credit_config.credits_for_byo_usage_cost_usd(0.002 / 1.5)
 
 
-def test_unified_ledger_event_accepts_knowledge_retrieval_transparency_rows() -> None:
-    event = credit_ledger_contract.build_unified_credit_ledger_event(
-        surface="studio",
-        source_surface="studio_knowledge_verify",
-        payer="local",
-        credit_type="knowledge_retrieval",
-        workspace_id="ws-1",
-        agent_id="agent-1",
-        provider_usage={"retrieved_chunk_count": 2, "indexed_chunk_count": 12},
-        platform_cost_usd=0,
-        credits_debited=0,
-        estimation_mode="local_retrieval",
-    )
-
-    assert event["credit_type"] == "knowledge_retrieval"
-    assert event["payer"] == "local"
-    assert event["credits_debited"] == 0.0
-    assert event["provider_usage"]["retrieved_chunk_count"] == 2
+def test_unified_ledger_event_rejects_removed_knowledge_retrieval_credit_type() -> None:
+    # The embeddings/RAG knowledge pipeline was removed 2026-08-08 and
+    # `knowledge_retrieval` came out of CREDIT_LEDGER_TYPES with it — its only
+    # writer was the deleted knowledge_rag_service.retrieve_knowledge(). This
+    # asserts the vocabulary FAILS LOUDLY rather than quietly accepting a
+    # credit type nothing can produce (CLAUDE.md: removing a route/provider
+    # must make stale callers raise, not fall through).
+    try:
+        credit_ledger_contract.build_unified_credit_ledger_event(
+            surface="studio",
+            source_surface="studio_knowledge_verify",
+            payer="local",
+            credit_type="knowledge_retrieval",
+            workspace_id="ws-1",
+            agent_id="agent-1",
+            platform_cost_usd=0,
+            credits_debited=0,
+            estimation_mode="local_retrieval",
+        )
+    except ValueError as error:
+        assert "credit_type is not supported" in str(error)
+    else:
+        raise AssertionError("knowledge_retrieval must no longer be an accepted credit_type")
 
 
 def test_unified_ledger_event_rejects_unknown_surface() -> None:

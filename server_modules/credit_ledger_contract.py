@@ -27,7 +27,6 @@ CREDIT_LEDGER_ITEM_TYPES: tuple[str, ...] = (
 
 CREDIT_LEDGER_TYPES: tuple[str, ...] = (
     "ai_tokens",
-    "knowledge_retrieval",
     "computer_runtime",
     "storage",
     "gateway_relay",

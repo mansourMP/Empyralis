@@ -45,7 +45,6 @@ from server_modules import deployed_agent_virtual_runtime_service
 from server_modules import empyralis_model_tier_routing_service
 from server_modules import entitlements_service
 from server_modules import external_user_privacy_service
-from server_modules import knowledge_rag_service
 from server_modules import provider_catalog_service
 from server_modules import pricing_registry_service
 from server_modules import product_catalog_live_data_service
@@ -314,7 +313,6 @@ _DEPLOYED_AGENT_SERVICE_NEXT_ACTIONS = {
     "memory_list": {"list_deployed_agent_memory"},
     "activity_list": {"list_deployed_agent_activity"},
     "external_user_delete": {"delete_deployed_agent_external_user_data"},
-    "knowledge_verify": {"verify_deployed_agent_knowledge"},
     "knowledge_upload": {"upload_deployed_agent_knowledge_reference"},
     "test_turn": {"execute_deployed_agent_test_turn"},
     "shop_evaluate": {"evaluate_shop_assistant"},
@@ -1765,181 +1763,13 @@ def _knowledge_reference_summary(item: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def _knowledge_query_tokens(query: Any) -> List[str]:
-    normalized = _normalize_text(query).lower()
-    tokens: List[str] = []
-    current: List[str] = []
-    for char in normalized:
-        if char.isalnum():
-            current.append(char)
-            continue
-        if current:
-            token = "".join(current)
-            if len(token) >= 2 and token not in tokens:
-                tokens.append(token)
-            current = []
-    if current:
-        token = "".join(current)
-        if len(token) >= 2 and token not in tokens:
-            tokens.append(token)
-    return tokens
-
-
-def _knowledge_reference_search_text(source: Dict[str, Any]) -> str:
-    parts = [
-        source.get("id"),
-        source.get("label"),
-        source.get("source_kind"),
-        source.get("uri"),
-        source.get("path"),
-    ]
-    return " ".join(_normalize_text(part).lower() for part in parts if _normalize_text(part))
-
-
-def _score_knowledge_reference(source: Dict[str, Any], query_tokens: List[str]) -> int:
-    search_text = _knowledge_reference_search_text(source)
-    if not search_text:
-        return 0
-    return sum(1 for token in query_tokens if token in search_text)
-
-
-async def verify_deployed_agent_knowledge_retrieval(
-    *,
-    deployed_agent_id: str,
-    current_user: Optional[Dict[str, Any]],
-    owner_workspace_id: str,
-    query: str,
-    limit: int = 5,
-) -> Dict[str, Any]:
-    resolved_workspace_id = require_deployed_agent_admin_access(
-        current_user=current_user,
-        workspace_id=owner_workspace_id,
-    )
-    normalized_query = _normalize_text(query)
-    if not normalized_query:
-        raise ValueError("query is required.")
-    workspace = await control_plane_repository.get_workspace_by_id(resolved_workspace_id)
-    if not isinstance(workspace, dict):
-        raise _http_bad_request("Workspace is unavailable.")
-    tenant_id = _normalize_text(workspace.get("tenant_id"))
-    deployed_agent = await control_plane_repository.get_deployed_agent_by_id(
-        deployed_agent_id,
-        tenant_id=tenant_id,
-        owner_workspace_id=resolved_workspace_id,
-    )
-    if not isinstance(deployed_agent, dict):
-        raise ValueError("Deployed agent not found.")
-    _enforce_deployed_agent_service_decision(
-        "knowledge_verify",
-        deployed_agent=deployed_agent,
-        tenant_id=tenant_id,
-        workspace_id=resolved_workspace_id,
-        current_user=current_user,
-    )
-    config = _config_from_record(deployed_agent)
-    sources = [
-        summary
-        for summary in (
-            _knowledge_reference_summary(item)
-            for item in list(config.knowledge_sources or [])
-        )
-        if isinstance(summary, dict)
-    ]
-    query_tokens = _knowledge_query_tokens(normalized_query)
-    scored_sources = [
-        {**source, "score": score}
-        for source in sources
-        for score in [_score_knowledge_reference(source, query_tokens)]
-        if score > 0
-    ]
-    scored_sources.sort(
-        key=lambda source: (
-            -int(source.get("score") or 0),
-            _normalize_text(source.get("label")).lower(),
-        )
-    )
-    bounded_limit = max(1, min(int(limit or 5), 10))
-    matched_sources = scored_sources[:bounded_limit]
-    if not sources:
-        return {
-            "workspace_id": resolved_workspace_id,
-            "tenant_id": tenant_id,
-            "deployed_agent_id": deployed_agent_id,
-            "query": normalized_query,
-            "status": "no_sources",
-            "message": "No trusted knowledge source references are configured for this agent.",
-            "verification_kind": "content_retrieval",
-            "content_retrieval_available": False,
-            "source_count": 0,
-            "matched_sources": [],
-            "matched_chunks": [],
-            "confidence_score": 0.0,
-            "checked_at": _utc_now_iso(),
-        }
-    ingestion_status: Dict[str, Any] = {}
-    ingestion_error: Optional[str] = None
-    try:
-        ingestion_status = await knowledge_rag_service.ingest_workspace_knowledge_files(
-            tenant_id=tenant_id,
-            workspace_id=resolved_workspace_id,
-            agent_id=deployed_agent_id,
-            user_id=_normalize_text((current_user or {}).get("user_id")),
-        )
-    except Exception as exc:
-        ingestion_error = str(exc)
-    try:
-        retrieval = await knowledge_rag_service.retrieve_knowledge(
-            tenant_id=tenant_id,
-            workspace_id=resolved_workspace_id,
-            query=normalized_query,
-            surface="studio",
-            source_surface="studio_knowledge_verify",
-            agent_id=deployed_agent_id,
-            user_id=_normalize_text((current_user or {}).get("user_id")),
-            allowed_source_refs=knowledge_rag_service.source_reference_filter_values(sources),
-            top_k=bounded_limit,
-            payer="local",
-        )
-    except Exception as exc:
-        _logger.warning("Knowledge retrieval index unavailable for agent %s in workspace %s: %s", deployed_agent_id, resolved_workspace_id, exc)
-        retrieval = {
-            "status": "index_missing",
-            "message": "Knowledge retrieval is temporarily unavailable. Please try again.",
-            "content_retrieval_available": False,
-            "matched_chunks": [],
-            "confidence_score": 0.0,
-        }
-    status = str(retrieval.get("status") or "index_missing").strip().lower() or "index_missing"
-    if status == "retrieval_available":
-        message = "Retrieved source-grounded knowledge chunks for this agent."
-    elif status == "no_hits":
-        message = "Indexed knowledge exists for this agent, but no chunk matched this query."
-    elif matched_sources:
-        message = "Saved knowledge references matched, but no indexed content chunks are available for citation retrieval."
-    else:
-        message = "No indexed content chunks are available for the saved knowledge references."
-    metadata = {
-        "ingestion": ingestion_status,
-        "ingestion_error": ingestion_error,
-        "retrieval_event": retrieval.get("retrieval_event"),
-    }
-    return {
-        "workspace_id": resolved_workspace_id,
-        "tenant_id": tenant_id,
-        "deployed_agent_id": deployed_agent_id,
-        "query": normalized_query,
-        "status": status,
-        "message": message,
-        "verification_kind": "content_retrieval",
-        "content_retrieval_available": bool(retrieval.get("content_retrieval_available")),
-        "source_count": len(sources),
-        "matched_sources": matched_sources,
-        "matched_chunks": list(retrieval.get("matched_chunks") or retrieval.get("chunks") or []),
-        "confidence_score": float(retrieval.get("confidence_score") or 0.0),
-        "retrieved_chunk_ids": list(retrieval.get("retrieved_chunk_ids") or []),
-        "metadata": metadata,
-        "checked_at": _utc_now_iso(),
-    }
+# Upload validation only. An uploaded knowledge file is plain text on disk that
+# `unified_memory_service._search_knowledge_documents` keyword-searches at turn
+# time -- there is no index, no chunking and no embedding behind it. Kept in
+# sync with `unified_memory_service.TEXT_DOCUMENT_EXTENSIONS`, which is what
+# decides whether that search can actually read the file back.
+SUPPORTED_KNOWLEDGE_UPLOAD_EXTENSIONS = frozenset({".md", ".markdown", ".txt", ".csv", ".json"})
+MAX_KNOWLEDGE_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 def _safe_knowledge_filename(filename: Any) -> str:
@@ -1951,8 +1781,8 @@ def _safe_knowledge_filename(filename: Any) -> str:
     if not stem:
         raise _http_bad_request("file_name is invalid.")
     suffix = Path(stem).suffix.lower()
-    if suffix not in knowledge_rag_service.SUPPORTED_KNOWLEDGE_EXTENSIONS:
-        supported = ", ".join(sorted(knowledge_rag_service.SUPPORTED_KNOWLEDGE_EXTENSIONS))
+    if suffix not in SUPPORTED_KNOWLEDGE_UPLOAD_EXTENSIONS:
+        supported = ", ".join(sorted(SUPPORTED_KNOWLEDGE_UPLOAD_EXTENSIONS))
         raise _http_bad_request(f"Unsupported knowledge file type. Supported files: {supported}.")
     base = stem[: -len(suffix)] if suffix else stem
     return f"{base[:150]}{suffix}"
@@ -2048,7 +1878,7 @@ async def upload_deployed_agent_knowledge_file(
     if not raw_text.strip():
         raise _http_bad_request("Knowledge file is empty.")
     raw_bytes = raw_text.encode("utf-8")
-    max_bytes = knowledge_rag_service.DEFAULT_MAX_SOURCE_FILE_BYTES
+    max_bytes = MAX_KNOWLEDGE_UPLOAD_BYTES
     if len(raw_bytes) > max_bytes:
         raise _http_bad_request(f"Knowledge file exceeds max size ({len(raw_bytes)} bytes > {max_bytes} bytes).")
 
@@ -2097,20 +1927,12 @@ async def upload_deployed_agent_knowledge_file(
             owner_workspace_id=resolved_workspace_id,
             updates={"knowledge_sources": next_sources},
         )
-    ingestion_status = await knowledge_rag_service.ingest_workspace_knowledge_files(
-        tenant_id=tenant_id,
-        workspace_id=resolved_workspace_id,
-        agent_id=deployed_agent_id,
-        user_id=_normalize_text((current_user or {}).get("user_id")),
-        source_refs=[relative_path],
-    )
     return {
         "workspace_id": resolved_workspace_id,
         "tenant_id": tenant_id,
         "deployed_agent_id": deployed_agent_id,
         "knowledge_source": source_ref,
         "deployed_agent": updated,
-        "ingestion": ingestion_status,
     }
 
 
