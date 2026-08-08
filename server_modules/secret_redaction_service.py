@@ -57,7 +57,38 @@ _MAX_RECURSION_DEPTH = 10
 _MAX_LIST_ITEMS = 100
 _UUID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 _HEX_IDENTIFIER_PATTERN = re.compile(r"^[0-9a-f]{32,64}$", re.IGNORECASE)
-_SAFE_IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$")
+# A namespaced lowercase identifier, not a credential.
+#
+# This allowlist exists so the high-entropy detector below does not eat
+# ordinary snake_case/dotted identifiers. It previously permitted exactly ONE
+# separator character between alphanumeric runs, which cannot express this
+# codebase's own tool-naming convention: a DOUBLE underscore namespaces a
+# connector from its action (`project_task__update`,
+# `fleet__schedule_recurring_task`, `sage_service__update_profile`, and every
+# connector tool built by `skills_service.tool_name_for_action`). The result
+# was that 17 of the 72 registered tools — every `__` name at or over the
+# 20-char candidate floor — were rewritten to `[redacted-secret]` inside the
+# system prompt agents are handed, so the model could not see, let alone call,
+# the tools for assigning/updating/labelling a task, scheduling recurring work,
+# configuring another agent, or driving the browser/computer. Silent: no error,
+# it simply presented as the model "choosing not to".
+#
+# Two deliberate constraints keep this from becoming a credential hole:
+#
+#   * separator runs are capped at 2 (`[._-]{1,2}`) — the exact convention,
+#     not "any number of separators";
+#   * every segment is capped at 24 characters. The longest segment across the
+#     live registry is 13 (`consolidation`), so this is generous headroom for
+#     real identifiers while REFUSING the long random runs that the old
+#     single-separator pattern happily excused — e.g. a delimited
+#     `<id>.<64-hex-secret>` credential pair was allowlisted before this change
+#     and is redacted after it.
+#
+# Net effect on the detector: strictly tighter for long-run tokens, wider only
+# for short-segment lowercase identifiers with a doubled separator. Every
+# prefixed credential shape in _SENSITIVE_VALUE_PATTERNS is matched and
+# replaced BEFORE this allowlist is ever consulted, so it can never rescue one.
+_SAFE_IDENTIFIER_PATTERN = re.compile(r"^[a-z][a-z0-9]{0,23}(?:[._-]{1,2}[a-z0-9]{1,24})+$")
 _HIGH_ENTROPY_CANDIDATE_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9._~+/=-]{20,})(?![A-Za-z0-9])")
 _URLISH_TOKEN_PATTERN = re.compile(r"(?i)(?:^|[./])[a-z0-9-]+\.[a-z]{2,}(?:[/:]|$)")
 

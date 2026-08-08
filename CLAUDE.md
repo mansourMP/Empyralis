@@ -289,6 +289,33 @@ a `vertex` branch after Vertex was removed.
 was reworded to `"AI usage limit reached"` and users got a generic "Something
 went wrong" for five weeks. Match on stable codes, never on prose.
 
+**A redactor placed on an agent-visible path is a capability gate, and its
+allowlist is the gate's key.** `secret_redaction_service`'s
+`_SAFE_IDENTIFIER_PATTERN` allowed exactly ONE separator between alphanumeric
+runs, which cannot express our own `connector__action` convention — so its
+high-entropy sweep rewrote every `__` tool name of 20+ characters to
+`[redacted-secret]`. 17 of 72 registered tools, inside
+`sage_agent_runtime_service._build_prompt_envelope`, whose output IS the system
+prompt the model is handed. An agent cannot call a tool whose name it never
+sees: assign, update, label, schedule-recurring, configure-another-agent and
+the whole browser/computer family were gone, with no error anywhere — it
+presented as the model "choosing not to". Fixed 2026-08-08 in the allowlist
+(separator runs `{1,2}`, segments capped at 24), never by loosening the
+detector — weakening an entropy rule to fix a naming problem trades a silent
+capability bug for a silent secret leak. Three rules follow. **Redaction
+belongs on what is WRITTEN OUT (logs, ledger, traces, channel replies), never
+on what is READ IN by the model** — the same call redacted `user_message` too,
+so a person quoting a tool name at their own agent had it eaten. **A memory
+write redacted before disk is a permanent edit**, not a display filter — all
+four `memory_service` seams plus `agent_memory_tools.memory_write` were
+corrupting stored notes that merely mentioned a tool. And any allowlist inside
+a redactor must be **driven off the live registry in a test**
+(`test_tool_name_secret_redaction.py` enumerates
+`skills_service.registered_direct_chat_tool_names_for_logging()`, the same list
+`server.py` logs as `Registered tools: [...]`) — a hand-copied sample goes
+stale the moment someone adds a tool, and this failure is silent by
+construction.
+
 **`users.tenant_id` / `users.workspace_id` are not the authoritative tenant.**
 These Postgres columns are written once, at signup, to the user's first/home
 workspace — never updated afterward. The moment a user is invited into a
