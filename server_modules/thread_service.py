@@ -3,7 +3,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from server_modules import control_plane_repository, rust_runtime_kernel_client, transcript_events_service
+from server_modules import (
+    control_plane_repository,
+    response_leak_guard_service,
+    rust_runtime_kernel_client,
+    transcript_events_service,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -23,6 +28,32 @@ def _request_id_from_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[st
         if token:
             return token
     return None
+
+
+def guard_assistant_reply_for_storage(reply: Any) -> str:
+    """Strip secrets / RED / private-memory markers before an assistant reply
+    becomes durable.
+
+    This is the WRITE-OUT half of the leak guard, and the only seam every
+    assistant persistence passes through. A reply cleaned for display but
+    stored raw is still a leak: thread history is re-injected into later
+    prompts, so the raw text survives the turn that produced it and comes
+    back as context.
+
+    Deliberately assistant-only. ``record_user_turn`` is a READ-IN path and
+    is left untouched — redacting what a person typed is the bug fixed on
+    2026-08-08 (a user quoting ``project_task__update`` at their own agent
+    had it eaten). Direction rule: redact what is written OUT, never what is
+    read IN.
+
+    Idempotent, so callers that already guarded (the Sage action loop and
+    the cloud fallthrough) are unaffected. Empty stays empty — a
+    metadata-only turn must not acquire text here.
+    """
+    text = str(reply or "")
+    if not text:
+        return text
+    return response_leak_guard_service.guard_model_response(text).text
 
 
 def _actor_role(actor: Optional[Dict[str, Any]] = None) -> str:
@@ -149,6 +180,11 @@ async def record_assistant_turn(
     interventions: Optional[List[Dict[str, Any]]] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
+    # The persistence half of the response leak guard. Applied here rather
+    # than at each caller so a new turn path cannot store raw model output —
+    # exactly how the BYO-brain local / cli_subscription branches came to
+    # persist unguarded gateway replies.
+    reply = guard_assistant_reply_for_storage(reply)
     decision = _enforce_thread_record_decision(
         operation="create_turn",
         tenant_id=tenant_id,
