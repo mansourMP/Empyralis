@@ -14,6 +14,7 @@ from server_modules.auth import (
     allowed_workspace_ids,
     enforce_workspace_access,
     grant_workspace_owner_machine_trust,
+    has_platform_fleet_operator_access,
     revoke_workspace_owner_machine_trust,
     workspace_machine_enrollment_scope,
     workspace_role,
@@ -603,6 +604,11 @@ def _task_summary_from_local_claim(run: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def runtime_status_payload() -> Dict[str, Any]:
+    """The GLOBAL, cross-tenant fleet view.
+
+    Internal machinery only.  Never return this straight to an HTTP caller --
+    go through `scoped_runtime_status_payload`, which is the tenant boundary.
+    """
     local_queue.recover_orphaned_local_runs_on_startup()
     payload = local_queue.handle_get_local_workers_status()
     items = payload.get("items") if isinstance(payload.get("items"), list) else []
@@ -615,15 +621,125 @@ def runtime_status_payload() -> Dict[str, Any]:
     }
 
 
-def _recent_failed_run_snapshots(limit: int = 100) -> List[Dict[str, Any]]:
+def _worker_item_scope_tokens(item: Dict[str, Any]) -> tuple[str, str]:
+    tenant_token = str(item.get("tenant_id") or "default").strip() or "default"
+    workspace_token = str(item.get("workspace_id") or "default").strip() or "default"
+    return tenant_token, workspace_token
+
+
+def _worker_item_identity_tokens(item: Dict[str, Any]) -> set[str]:
+    return {
+        str(item.get(field) or "").strip()
+        for field in ("worker_id", "runtime_id", "machine_id")
+        if str(item.get(field) or "").strip()
+    }
+
+
+def scoped_runtime_status_payload(current_user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """`runtime_status_payload` narrowed to what this caller may actually see.
+
+    `require_api_key` proves only that somebody is logged in, so the fleet view
+    behind it used to hand every tenant's machine ids, hostnames, workspace ids
+    and current task ids to any authenticated user.  Global visibility now
+    needs `has_platform_fleet_operator_access`; everyone else sees only
+    machines in workspaces they belong to, with the summary and the capability
+    queue re-derived from that narrowed set.
+    """
+    payload = runtime_status_payload()
+    if has_platform_fleet_operator_access(current_user):
+        payload["view"] = "global_operator"
+        return payload
+
+    # `allowed_workspace_ids` returns None to mean "unrestricted". Operators are
+    # already handled above, so a None here is an unexpected grant shape and
+    # must fail CLOSED rather than fall through to the whole fleet.
+    allowed = allowed_workspace_ids(current_user)
+    allowed_workspaces = set(allowed) if allowed is not None else set()
+    allowed_tenants: set[str] = set()
+    for workspace_id in allowed_workspaces:
+        try:
+            allowed_tenants.add(workspace_tenant_id(current_user, workspace_id))
+        except HTTPException:
+            # Orphaned membership -- drop it rather than widening the view.
+            continue
+
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    scoped_items: List[Dict[str, Any]] = []
+    visible_identities: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        tenant_token, workspace_token = _worker_item_scope_tokens(item)
+        if workspace_token not in allowed_workspaces:
+            continue
+        if allowed_tenants and tenant_token not in allowed_tenants:
+            continue
+        scoped_items.append(item)
+        visible_identities |= _worker_item_identity_tokens(item)
+
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    capability_queue = payload.get("capability_queue") if isinstance(payload.get("capability_queue"), dict) else {}
+    scoped_capability_queue: Dict[str, Any] = {}
+    for capability, holders in capability_queue.items():
+        if not isinstance(holders, list):
+            continue
+        visible = [holder for holder in holders if str(holder or "").strip() in visible_identities]
+        if visible:
+            scoped_capability_queue[str(capability)] = visible
+
+    payload["view"] = "workspace_scoped"
+    payload["items"] = scoped_items
+    payload["capability_queue"] = scoped_capability_queue
+    payload["summary"] = local_queue.summarize_worker_items(
+        scoped_items,
+        pending_runs=int(summary.get("pending_runs") or 0),
+        claimed_runs=int(summary.get("claimed_runs") or 0),
+    )
+    return payload
+
+
+def _run_snapshot_workspace_id(item: Dict[str, Any]) -> str:
+    """Best-effort workspace of a run snapshot, across its three shapes.
+
+    Live rows carry `workspace_id` at the top level, archive payloads and
+    in-memory history items sometimes carry it only under `context`.
+    """
+    direct = str(item.get("workspace_id") or "").strip()
+    if direct:
+        return direct
+    context = item.get("context") if isinstance(item.get("context"), dict) else {}
+    return str(context.get("workspace_id") or "").strip()
+
+
+def _recent_failed_run_snapshots(
+    limit: int = 100,
+    *,
+    workspace_ids: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
+    """`workspace_ids=None` means every workspace; a set means only those.
+
+    An EMPTY set means "this caller may see nothing" and returns nothing --
+    it is never widened back to the whole fleet.
+    """
     snapshots: List[Dict[str, Any]] = []
     seen: set[str] = set()
+
+    def _in_scope(item: Dict[str, Any]) -> bool:
+        if workspace_ids is None:
+            return True
+        return _run_snapshot_workspace_id(item) in workspace_ids
+
+    if workspace_ids is not None and not workspace_ids:
+        return snapshots
     try:
-        live_failed = run_state_repository.sync_list_live_runs_by_state(["failed", "timeout"])
+        live_failed = run_state_repository.sync_list_live_runs_by_state(
+            ["failed", "timeout"],
+            workspace_ids=None if workspace_ids is None else sorted(workspace_ids),
+        )
     except Exception:
         live_failed = []
     for item in live_failed:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or not _in_scope(item):
             continue
         run_id = str(item.get("run_id") or "").strip()
         if not run_id or run_id in seen:
@@ -636,11 +752,14 @@ def _recent_failed_run_snapshots(limit: int = 100) -> List[Dict[str, Any]]:
         if len(snapshots) >= limit:
             return snapshots
     try:
-        archived = run_state_repository.sync_list_run_archive(limit=limit)
+        archived = run_state_repository.sync_list_run_archive(
+            limit=limit,
+            workspace_ids=None if workspace_ids is None else sorted(workspace_ids),
+        )
     except Exception:
         archived = []
     for item in archived:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or not _in_scope(item):
             continue
         run_id = str(item.get("run_id") or "").strip()
         if not run_id or run_id in seen:
@@ -652,7 +771,7 @@ def _recent_failed_run_snapshots(limit: int = 100) -> List[Dict[str, Any]]:
     with shared.RUN_HISTORY_LOCK:
         history_items = list(shared.RUN_HISTORY)
     for item in history_items:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or not _in_scope(item):
             continue
         run_id = str(item.get("run_id") or "").strip()
         if not run_id or run_id in seen:
@@ -665,13 +784,43 @@ def _recent_failed_run_snapshots(limit: int = 100) -> List[Dict[str, Any]]:
 
 
 def runtime_reliability_payload() -> Dict[str, Any]:
+    """The GLOBAL reliability snapshot -- internal callers only.
+
+    HTTP callers must go through `scoped_runtime_reliability_payload`.
+    """
     payload = telemetry.get_reliability_snapshot(failed_run_snapshots=_recent_failed_run_snapshots())
     payload["outbox"] = outbox_service.get_outbox_delivery_status()
     return payload
 
 
-def legacy_local_workers_status_payload() -> Dict[str, Any]:
-    payload = runtime_status_payload()
+def _caller_workspace_scope(current_user: Optional[Dict[str, Any]]) -> set[str]:
+    """The workspaces this non-operator caller may see. Fails closed."""
+    allowed = allowed_workspace_ids(current_user)
+    return set(allowed) if allowed is not None else set()
+
+
+def scoped_runtime_reliability_payload(current_user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """`runtime_reliability_payload` narrowed to the caller's own workspaces.
+
+    The failed-run scan behind this route reads `live_runs` and `run_archive`
+    with no workspace predicate, so `incomplete_run_ids` used to hand out other
+    tenants' run ids to any authenticated user.
+    """
+    if has_platform_fleet_operator_access(current_user):
+        payload = runtime_reliability_payload()
+        payload["view"] = "global_operator"
+        return payload
+    payload = telemetry.get_reliability_snapshot(
+        failed_run_snapshots=_recent_failed_run_snapshots(
+            workspace_ids=_caller_workspace_scope(current_user),
+        )
+    )
+    payload["outbox"] = outbox_service.get_outbox_delivery_status()
+    payload["view"] = "workspace_scoped"
+    return payload
+
+
+def _legacy_local_workers_status_from(payload: Dict[str, Any]) -> Dict[str, Any]:
     items = payload.get("items") if isinstance(payload.get("items"), list) else []
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     return {
@@ -686,6 +835,15 @@ def legacy_local_workers_status_payload() -> Dict[str, Any]:
         "offline": int(summary.get("offline") or 0),
         "online_workers": int(summary.get("online") or 0),
     }
+
+
+def legacy_local_workers_status_payload() -> Dict[str, Any]:
+    """GLOBAL. Internal callers only -- see `scoped_legacy_local_workers_status_payload`."""
+    return _legacy_local_workers_status_from(runtime_status_payload())
+
+
+def scoped_legacy_local_workers_status_payload(current_user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    return _legacy_local_workers_status_from(scoped_runtime_status_payload(current_user))
 
 
 def register_runtime_routes(app) -> None:
@@ -736,12 +894,12 @@ def register_runtime_routes(app) -> None:
         return StreamingResponse(_iter_audio_chunks(chunks), media_type="audio/mpeg")
 
     @app.get("/runtime/runtimes/status", dependencies=[Depends(require_api_key)])
-    async def get_runtime_status():
-        return runtime_status_payload()
+    async def get_runtime_status(current_user=Depends(require_api_key)):
+        return scoped_runtime_status_payload(current_user)
 
     @app.get("/runtime/runtimes/reliability", dependencies=[Depends(require_api_key)])
-    async def get_runtime_reliability():
-        return runtime_reliability_payload()
+    async def get_runtime_reliability(current_user=Depends(require_api_key)):
+        return scoped_runtime_reliability_payload(current_user)
 
     @app.get("/desktop/setup/status", dependencies=[Depends(require_api_key)])
     async def get_desktop_setup_status(
@@ -1217,8 +1375,8 @@ def register_runtime_routes(app) -> None:
         return result
 
     @app.get("/local/workers/status", dependencies=[Depends(require_api_key)])
-    async def get_legacy_local_workers_status():
-        return await run_in_threadpool(legacy_local_workers_status_payload)
+    async def get_legacy_local_workers_status(current_user=Depends(require_api_key)):
+        return await run_in_threadpool(scoped_legacy_local_workers_status_payload, current_user)
 
     @app.post("/runtime/runtimes/{runtime_id}/register", dependencies=[Depends(require_api_key)])
     async def register_runtime(runtime_id: str, payload: Optional[RuntimeRegisterPayload] = None):

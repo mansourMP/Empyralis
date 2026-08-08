@@ -1,8 +1,13 @@
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from server_modules.auth import enforce_workspace_access, get_current_user
+from server_modules.auth import (
+    allowed_workspace_ids,
+    enforce_workspace_access,
+    get_current_user,
+    has_platform_fleet_operator_access,
+)
 from server_modules.runtime_common import require_api_key
 from server_modules.runtime_models import (
     MemorySearchRequest,
@@ -110,8 +115,65 @@ async def public_health():
     return {"ok": bool((payload or {}).get("ok"))}
 
 
-async def internal_health():
-    return await core.health()
+def _scope_workspace_hotspots(hotspots: Any, allowed_workspaces: set) -> list:
+    if not isinstance(hotspots, list):
+        return []
+    return [
+        entry
+        for entry in hotspots
+        if isinstance(entry, dict)
+        and (str(entry.get("workspace_id") or "").strip() or "default") in allowed_workspaces
+    ]
+
+
+def scope_internal_health_payload(payload: Any, current_user: Optional[dict]) -> Any:
+    """Strip other tenants' workspace ids out of the internal health payload.
+
+    `scale_safety_baseline.local_queue` carries a global top-5
+    `{workspace_id, count}` hotspot list -- from `local_queue_dead_letters` and
+    from the in-process queue -- while `require_api_key` on this route proves
+    only that somebody is logged in.  Operators keep the global view; every
+    other caller sees only workspaces they belong to.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if has_platform_fleet_operator_access(current_user):
+        return payload
+    allowed = allowed_workspace_ids(current_user)
+    # None means "unrestricted". Operators already returned above, so an
+    # unexpected None here is treated as no grant rather than as everything.
+    allowed_workspaces = set(allowed) if allowed is not None else set()
+
+    baseline = payload.get("scale_safety_baseline")
+    if not isinstance(baseline, dict):
+        return payload
+    local_queue_baseline = baseline.get("local_queue")
+    if not isinstance(local_queue_baseline, dict):
+        return payload
+
+    scoped_local_queue = dict(local_queue_baseline)
+    scoped_local_queue["workspace_hotspots"] = _scope_workspace_hotspots(
+        local_queue_baseline.get("workspace_hotspots"),
+        allowed_workspaces,
+    )
+    dead_letters = local_queue_baseline.get("dead_letters")
+    if isinstance(dead_letters, dict):
+        scoped_dead_letters = dict(dead_letters)
+        scoped_dead_letters["workspace_hotspots"] = _scope_workspace_hotspots(
+            dead_letters.get("workspace_hotspots"),
+            allowed_workspaces,
+        )
+        scoped_local_queue["dead_letters"] = scoped_dead_letters
+
+    scoped_baseline = dict(baseline)
+    scoped_baseline["local_queue"] = scoped_local_queue
+    scoped_payload = dict(payload)
+    scoped_payload["scale_safety_baseline"] = scoped_baseline
+    return scoped_payload
+
+
+async def internal_health(current_user=Depends(require_api_key)):
+    return scope_internal_health_payload(await core.health(), current_user)
 
 
 router.add_api_route("/contract", core.runtime_contract, methods=['GET'], dependencies=[Depends(get_current_user)])

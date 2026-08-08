@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import json
 import logging
 import threading
-from typing import Any, Awaitable, Callable, Dict, Mapping, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional, TypeVar
 
 from server_modules import db as runtime_db
 from server_modules import rust_runtime_kernel_client
@@ -1160,7 +1160,25 @@ async def count_hosted_live_runs(
     return int(row.get("count") if isinstance(row, dict) else row["count"] or 0)
 
 
-async def list_live_runs_by_state(states: list[str]) -> list[Dict[str, Any]]:
+def _normalized_workspace_scope(workspace_ids: Optional[Iterable[Any]]) -> Optional[list[str]]:
+    """`None` means "every workspace"; a list (possibly empty) means "only these".
+
+    An EMPTY list is deliberately preserved rather than collapsed to `None` --
+    "this caller may see no workspace" must return no rows, not all of them.
+    """
+    if workspace_ids is None:
+        return None
+    return sorted({str(item or "").strip() for item in workspace_ids if str(item or "").strip()})
+
+
+async def list_live_runs_by_state(
+    states: list[str],
+    *,
+    workspace_ids: Optional[Iterable[Any]] = None,
+) -> list[Dict[str, Any]]:
+    workspace_scope = _normalized_workspace_scope(workspace_ids)
+    if workspace_scope is not None and not workspace_scope:
+        return []
     normalized_states = [str(state or "").strip().lower() for state in (states or []) if str(state or "").strip()]
     if not normalized_states:
         return await list_live_runs()
@@ -1174,9 +1192,11 @@ async def list_live_runs_by_state(states: list[str]) -> list[Dict[str, Any]]:
             SELECT run_id, workspace_id, tenant_id, state, payload, trace_id, version, registered_at
             FROM live_runs
             WHERE LOWER(COALESCE(state, '')) = ANY($1::text[])
+              AND ($2::text[] IS NULL OR workspace_id = ANY($2::text[]))
             ORDER BY updated_at DESC, created_at DESC
             """,
             normalized_states,
+            workspace_scope,
         )
     except Exception as exc:
         LOGGER.warning("Postgres list_live_runs_by_state failed: %s", exc)
@@ -1187,7 +1207,14 @@ async def list_live_runs_by_state(states: list[str]) -> list[Dict[str, Any]]:
     return items
 
 
-async def list_run_archive(limit: int = 200) -> list[Dict[str, Any]]:
+async def list_run_archive(
+    limit: int = 200,
+    *,
+    workspace_ids: Optional[Iterable[Any]] = None,
+) -> list[Dict[str, Any]]:
+    workspace_scope = _normalized_workspace_scope(workspace_ids)
+    if workspace_scope is not None and not workspace_scope:
+        return []
     pool = await _read_pool(operation="list_run_archive")
     if pool is None:
         return []
@@ -1196,10 +1223,12 @@ async def list_run_archive(limit: int = 200) -> list[Dict[str, Any]]:
             """
             SELECT payload
             FROM run_archive
+            WHERE ($2::text[] IS NULL OR workspace_id = ANY($2::text[]))
             ORDER BY completed_at DESC
             LIMIT $1
             """,
             max(1, int(limit or 0)),
+            workspace_scope,
         )
     except Exception as exc:
         LOGGER.warning("Postgres list_run_archive failed: %s", exc)
@@ -1793,16 +1822,48 @@ async def get_fleet_worker(worker_id: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
+def _require_explicit_scope(
+    operation: str,
+    *,
+    tenant_filter: str,
+    workspace_filter: str,
+    include_all_tenants: bool,
+) -> None:
+    """Refuse an unscoped read unless the caller asked for one by name.
+
+    The `($1 = '' OR tenant_id = $1)` idiom below fails OPEN: a caller who
+    forgets an argument silently reads every tenant's rows.  That is how
+    `GET /runtime/runtimes/status` came to return the whole fleet.  A missing
+    scope is now a loud `ValueError`; a deliberate global read has to say
+    `include_all_tenants=True` at the call site, where it is greppable.
+    """
+    if include_all_tenants:
+        return
+    if tenant_filter or workspace_filter:
+        return
+    raise ValueError(
+        f"{operation} requires tenant_id or workspace_id. "
+        "Pass include_all_tenants=True to read across every tenant on purpose."
+    )
+
+
 async def list_fleet_workers(
     *,
     tenant_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    include_all_tenants: bool = False,
 ) -> list[Dict[str, Any]]:
+    tenant_filter = str(tenant_id or "").strip()
+    workspace_filter = str(workspace_id or "").strip()
+    _require_explicit_scope(
+        "list_fleet_workers",
+        tenant_filter=tenant_filter,
+        workspace_filter=workspace_filter,
+        include_all_tenants=include_all_tenants,
+    )
     pool = await _read_pool(operation="list_fleet_workers")
     if pool is None:
         return []
-    tenant_filter = str(tenant_id or "").strip()
-    workspace_filter = str(workspace_id or "").strip()
     try:
         await _ensure_fleet_runtime_tables(pool)
         rows = await pool.fetch(
@@ -1937,12 +1998,19 @@ async def list_fleet_queue_partitions(
     *,
     tenant_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    include_all_tenants: bool = False,
 ) -> list[Dict[str, Any]]:
+    tenant_filter = str(tenant_id or "").strip()
+    workspace_filter = str(workspace_id or "").strip()
+    _require_explicit_scope(
+        "list_fleet_queue_partitions",
+        tenant_filter=tenant_filter,
+        workspace_filter=workspace_filter,
+        include_all_tenants=include_all_tenants,
+    )
     pool = await _read_pool(operation="list_fleet_queue_partitions")
     if pool is None:
         return []
-    tenant_filter = str(tenant_id or "").strip()
-    workspace_filter = str(workspace_id or "").strip()
     try:
         await _ensure_fleet_runtime_tables(pool)
         rows = await pool.fetch(
@@ -3487,18 +3555,26 @@ def sync_get_archived_run(run_id: str) -> Optional[Dict[str, Any]]:
     )
 
 
-def sync_list_live_runs_by_state(states: list[str]) -> list[Dict[str, Any]]:
+def sync_list_live_runs_by_state(
+    states: list[str],
+    *,
+    workspace_ids: Optional[Iterable[Any]] = None,
+) -> list[Dict[str, Any]]:
     return _run_sync(
-        lambda: list_live_runs_by_state(states),
+        lambda: list_live_runs_by_state(states, workspace_ids=workspace_ids),
         operation="sync_list_live_runs_by_state",
         fallback=[],
         raise_on_error=_sync_raise_on_read_failure(),
     )
 
 
-def sync_list_run_archive(limit: int = 200) -> list[Dict[str, Any]]:
+def sync_list_run_archive(
+    limit: int = 200,
+    *,
+    workspace_ids: Optional[Iterable[Any]] = None,
+) -> list[Dict[str, Any]]:
     return _run_sync(
-        lambda: list_run_archive(limit),
+        lambda: list_run_archive(limit, workspace_ids=workspace_ids),
         operation="sync_list_run_archive",
         fallback=[],
         raise_on_error=_sync_raise_on_read_failure(),
@@ -3888,9 +3964,23 @@ def sync_list_fleet_workers(
     *,
     tenant_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    include_all_tenants: bool = False,
 ) -> list[Dict[str, Any]]:
+    # Validate here as well as inside the coroutine: `_run_sync` swallows the
+    # exception into `fallback`, so a forgotten scope would otherwise become a
+    # silent empty list instead of a loud programming error.
+    _require_explicit_scope(
+        "sync_list_fleet_workers",
+        tenant_filter=str(tenant_id or "").strip(),
+        workspace_filter=str(workspace_id or "").strip(),
+        include_all_tenants=include_all_tenants,
+    )
     return _run_sync(
-        lambda: list_fleet_workers(tenant_id=tenant_id, workspace_id=workspace_id),
+        lambda: list_fleet_workers(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            include_all_tenants=include_all_tenants,
+        ),
         operation="sync_list_fleet_workers",
         fallback=[],
         raise_on_error=_sync_raise_on_read_failure(),
@@ -3939,9 +4029,20 @@ def sync_list_fleet_queue_partitions(
     *,
     tenant_id: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    include_all_tenants: bool = False,
 ) -> list[Dict[str, Any]]:
+    _require_explicit_scope(
+        "sync_list_fleet_queue_partitions",
+        tenant_filter=str(tenant_id or "").strip(),
+        workspace_filter=str(workspace_id or "").strip(),
+        include_all_tenants=include_all_tenants,
+    )
     return _run_sync(
-        lambda: list_fleet_queue_partitions(tenant_id=tenant_id, workspace_id=workspace_id),
+        lambda: list_fleet_queue_partitions(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            include_all_tenants=include_all_tenants,
+        ),
         operation="sync_list_fleet_queue_partitions",
         fallback=[],
         raise_on_error=_sync_raise_on_read_failure(),

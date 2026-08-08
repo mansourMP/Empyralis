@@ -213,9 +213,12 @@ class RuntimeRuntimeApiTests(unittest.TestCase):
         mock_reliability_payload.return_value = {"generated_at": "2026-04-08T00:00:00Z", "control_plane_api": {"request_count": 2}}
         handler = app.routes[("GET", "/runtime/runtimes/reliability")]
 
-        result = self._run_async(handler())
+        # The GLOBAL snapshot is now reachable only by an operator principal
+        # (platform service key / auth-admin), never by "someone is logged in".
+        result = self._run_async(handler(current_user={"auth_type": "api_key"}))
 
         self.assertEqual(result["control_plane_api"]["request_count"], 2)
+        self.assertEqual(result["view"], "global_operator")
         mock_reliability_payload.assert_called_once()
 
     @patch("server_modules.local_queue.create_machine_enrollment_intent")

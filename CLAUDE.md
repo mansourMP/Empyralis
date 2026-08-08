@@ -263,16 +263,51 @@ return rows.
 
 **`require_api_key` is not an authorization check.** `runtime_common.py:345`
 resolves ANY authenticated user of ANY tenant — it answers "is someone logged
-in", never "may this person see this workspace". `GET /runtime/runtimes/status`
-and `/runtime/runtimes/reliability` carry it as their only gate and return
-every tenant's machine names, workspace ids and run ids, because
-`list_fleet_workers` called with empty args (`run_state_repository.py:1796`)
-has a `WHERE ($1 = '' OR tenant_id = $1)` that is then vacuously true. Use
-`enforce_workspace_access` for anything workspace-shaped and
-`current_user_has_auth_admin_access` for operator tools. Note the near-miss
-that is NOT a bug: public `GET /health` computes the same cross-tenant payload
-but `public_health()` returns only `{"ok": ...}` — trace the response shaping,
-not just the payload construction, before calling something a leak.
+in", never "may this person see this workspace". Four routes carried it as
+their only gate and handed every tenant's machine ids, hostnames, workspace
+ids, run ids and dead-letter hotspots to any signed-in customer:
+
+```
+BEFORE                                    AFTER
+  any bearer session                        operator? (auth-admin OR ORION_API_KEY)
+        │                                        ├── yes ─▶ global view   [ops daemon]
+        ▼                                        └── no  ─▶ caller's workspaces only
+  /runtime/runtimes/status   ─▶ whole fleet             summary + capability_queue
+  /local/workers/status      ─▶ whole fleet             RE-DERIVED from the scoped set
+  /runtime/runtimes/reliability ─▶ 10 tenants' run ids
+  /health/internal           ─▶ global workspace top-5
+```
+
+Fixed 2026-08-08. The global path is gated on
+`auth.has_platform_fleet_operator_access` — an auth-admin identity, or
+possession of `ORION_API_KEY`, which is an operator secret; customer machines
+bootstrap with a per-machine enrollment token instead. Keeping that path is not
+a convenience: `scripts/orion_ops_daemon.py` and the `orion_*.sh` scripts poll
+`/runtime/runtimes/status` and restart the runtime when `summary.online` is 0,
+so scoping them to nothing would have caused a restart loop. Use
+`enforce_workspace_access` for anything workspace-shaped,
+`current_user_has_auth_admin_access` for operator tools, and
+`has_platform_fleet_operator_access` for a cross-tenant fleet view.
+
+Two rules follow. **A filtered item list beside an unfiltered summary is still
+a disclosure, just an arithmetic one** — hence
+`local_queue.summarize_worker_items`, so the scoped and global views cannot
+drift. And **`WHERE ($1 = '' OR tenant_id = $1)` fails OPEN**: a forgotten
+argument returns every tenant. `list_fleet_workers` /
+`list_fleet_queue_partitions` now raise unless the caller passes
+`include_all_tenants=True`, so a deliberate global read is greppable and an
+accidental one is loud. The same `('' OR …)` idiom still lives in
+`run_state_repository.py` at `list_live_runs_page`, `count_live_runs` and
+`list_pending_approvals_page`; every caller passes a workspace today, but
+`agent_workspace_api`'s `workspace_filter = … if workspace_id else None` means
+omitting the query param produces a cross-tenant read whose Python re-filter is
+also skipped — contained only because those routes sit behind
+`require_admin_api_key`.
+
+Note the near-miss that is NOT a bug: public `GET /health` computes the same
+cross-tenant payload but `public_health()` returns only `{"ok": ...}` — trace
+the response shaping, not just the payload construction, before calling
+something a leak.
 
 **Silent misrouting beats loud failure, and that is a bug.** A model calling
 the CLI's built-in `TaskCreate` instead of `project_task__create` reported

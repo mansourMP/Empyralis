@@ -846,7 +846,12 @@ def _merged_worker_registry_snapshot() -> Dict[str, Dict[str, Any]]:
     _init()
     merged: Dict[str, Dict[str, Any]] = {}
     try:
-        durable_items = run_state_repository.sync_list_fleet_workers()
+        # Deliberately global: this is the PROCESS-WIDE fleet registry that run
+        # placement and lease recovery work against, and a worker belongs to
+        # whichever tenant enrolled it.  Every HTTP surface that renders these
+        # rows must scope them to the caller first -- see
+        # runtime_runtime_api.scoped_runtime_status_payload.
+        durable_items = run_state_repository.sync_list_fleet_workers(include_all_tenants=True)
     except Exception:
         durable_items = []
     for item in durable_items or []:
@@ -3056,28 +3061,31 @@ def handle_cleanup_local_run_queue(
     }
 
 
-def handle_get_local_workers_status() -> Dict[str, Any]:
-    _init()
-    _cleanup_stale_local_claims()
-    _mark_ghost_enrollments_failed()
-    items: List[Dict[str, Any]] = []
-    now = _server._utc_now()
-    runtime_snapshot = _local_worker_registry_snapshot()
-    if not runtime_snapshot:
-        runtime_snapshot = _merged_worker_registry_snapshot()
-    queued_ids: List[str] = []
-    with _server.LOCAL_QUEUE_LOCK:
-        for worker_id, record in list(runtime_snapshot.items()):
-            if not isinstance(record, dict):
-                continue
-            items.append(_runtime_status_item_from_record(worker_id, record, now=now))
-        pending_runs = len(_server.LOCAL_PENDING_RUN_IDS)
-        claimed_runs = len(_server.LOCAL_CLAIMED_RUNS)
-        queued_ids = list(_server.LOCAL_PENDING_RUN_IDS)
+def summarize_worker_items(
+    items: List[Dict[str, Any]],
+    *,
+    pending_runs: int = 0,
+    claimed_runs: int = 0,
+) -> Dict[str, Any]:
+    """Fleet counts derived from a worker-item list.
+
+    Extracted so that a SCOPED view (one caller's own machines) and the global
+    view cannot drift apart.  A surface that filters `items` down to the
+    caller's workspaces must re-derive its counts here -- reporting the whole
+    fleet's `known`/`online` beside a filtered item list is itself a
+    cross-tenant disclosure, just an arithmetic one.
+    """
+    items = [item for item in (items or []) if isinstance(item, dict)]
+
+    def _current_run(item: Dict[str, Any]) -> Any:
+        # Raw registry records call it `current_run_id`; the HTTP projection in
+        # runtime_runtime_api renames it `current_task_id`.  Accept both so a
+        # scoped caller cannot accidentally summarise every machine as idle.
+        return item.get("current_run_id") or item.get("current_task_id")
 
     known = len(items)
     online = len([item for item in items if item.get("online")])
-    busy = len([item for item in items if item.get("online") and item.get("current_run_id")])
+    busy = len([item for item in items if item.get("online") and _current_run(item)])
     idle = max(0, online - busy)
     offline = max(0, known - online)
     interrupting = len([item for item in items if str(item.get("control_state") or "").strip().lower() == "interrupting"])
@@ -3088,7 +3096,7 @@ def handle_get_local_workers_status() -> Dict[str, Any]:
             item
             for item in items
             if bool(item.get("online"))
-            and not item.get("current_run_id")
+            and not _current_run(item)
             and str(item.get("prewarm_state") or "").strip().lower() in {"warm", "ready", "prewarmed"}
         ]
     )
@@ -3097,7 +3105,7 @@ def handle_get_local_workers_status() -> Dict[str, Any]:
             item
             for item in items
             if bool(item.get("online"))
-            and not item.get("current_run_id")
+            and not _current_run(item)
             and "hosted_secure" in {str(target).strip().lower() for target in (item.get("execution_targets") or [])}
         ]
     )
@@ -3120,6 +3128,47 @@ def handle_get_local_workers_status() -> Dict[str, Any]:
     recovering = len([item for item in items if str(item.get("lifecycle_state") or "").strip().lower() == "recovering"])
     stopped = len([item for item in items if str(item.get("lifecycle_state") or "").strip().lower() == "stopped"])
 
+    return {
+        "known": known,
+        "online": online,
+        "busy": busy,
+        "idle": idle,
+        "offline": offline,
+        "interrupting": interrupting,
+        "suspended": suspended,
+        "revoked": revoked,
+        "recovering": recovering,
+        "stopped": stopped,
+        "prewarmed_ready": prewarmed_ready,
+        "hosted_ready": hosted_ready,
+        "captain_known": captain_known,
+        "captain_online": captain_online,
+        "specialist_known": specialist_known,
+        "specialist_online": specialist_online,
+        "pending_runs": int(pending_runs or 0),
+        "claimed_runs": int(claimed_runs or 0),
+    }
+
+
+def handle_get_local_workers_status() -> Dict[str, Any]:
+    _init()
+    _cleanup_stale_local_claims()
+    _mark_ghost_enrollments_failed()
+    items: List[Dict[str, Any]] = []
+    now = _server._utc_now()
+    runtime_snapshot = _local_worker_registry_snapshot()
+    if not runtime_snapshot:
+        runtime_snapshot = _merged_worker_registry_snapshot()
+    queued_ids: List[str] = []
+    with _server.LOCAL_QUEUE_LOCK:
+        for worker_id, record in list(runtime_snapshot.items()):
+            if not isinstance(record, dict):
+                continue
+            items.append(_runtime_status_item_from_record(worker_id, record, now=now))
+        pending_runs = len(_server.LOCAL_PENDING_RUN_IDS)
+        claimed_runs = len(_server.LOCAL_CLAIMED_RUNS)
+        queued_ids = list(_server.LOCAL_PENDING_RUN_IDS)
+
     items.sort(key=_worker_display_sort_key)
     capability_queue = _capability_queue_summary(
         queued_ids,
@@ -3134,26 +3183,11 @@ def handle_get_local_workers_status() -> Dict[str, Any]:
     return {
         "enabled": _server.ORION_LOCAL_COMPANION_ENABLED,
         "lease_seconds": _server.ORION_LOCAL_LEASE_SECONDS,
-        "summary": {
-            "known": known,
-            "online": online,
-            "busy": busy,
-            "idle": idle,
-            "offline": offline,
-            "interrupting": interrupting,
-            "suspended": suspended,
-            "revoked": revoked,
-            "recovering": recovering,
-            "stopped": stopped,
-            "prewarmed_ready": prewarmed_ready,
-            "hosted_ready": hosted_ready,
-            "captain_known": captain_known,
-            "captain_online": captain_online,
-            "specialist_known": specialist_known,
-            "specialist_online": specialist_online,
-            "pending_runs": pending_runs,
-            "claimed_runs": claimed_runs,
-        },
+        "summary": summarize_worker_items(
+            items,
+            pending_runs=pending_runs,
+            claimed_runs=claimed_runs,
+        ),
         "watchdog": local_runtime_watchdog_status_snapshot(),
         "pressure": pressure,
         "capability_queue": capability_queue,
