@@ -46,6 +46,25 @@ export interface GatewayConfig {
   /** Loopback port for that listener. Matches the plugin's own default
    *  endpoint (`http://127.0.0.1:8790/openclaw/inbound`). */
   openclawBridgePort: number;
+  /**
+   * The OUTBOUND leg (CHANNEL-ADOPTION-PLAN.md step 3): where the local
+   * OpenClaw gateway's own WebSocket listens, and its own auth token.
+   *
+   * This is a DIFFERENT secret from `openclawBridgeToken` above and must
+   * stay that way. `EMPYRALIS_BRIDGE_TOKEN` is a low-privilege loopback
+   * secret we mint for the plugin to reach US; this is OpenClaw's own
+   * gateway credential (`openclaw gateway run --auth token --token <t>`),
+   * which grants `operator.write` on THEIR control plane. Never log it, and
+   * never reuse one as the other.
+   *
+   * An undefined token means no outbound session is opened at all — the
+   * OpenClaw channel runtimes are still registered so a send fails with a
+   * named reason instead of a generic "unsupported personal channel key".
+   * The URL is refused unless it is loopback (openclaw-gateway-client.ts's
+   * assertLoopbackWebSocketUrl); there is no escape hatch.
+   */
+  openclawGatewayUrl: string;
+  openclawGatewayToken?: string;
 }
 
 function normalizeBaseUrl(value: string | undefined, fallback: string): string {
@@ -173,5 +192,8 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     cliSetupLocallyEnabled: normalizeBoolean(env.EMPYRALIS_GATEWAY_CLI_SETUP_ENABLED, false),
     openclawBridgeToken: String(env.EMPYRALIS_BRIDGE_TOKEN || "").trim() || undefined,
     openclawBridgePort: normalizePositiveInt(env.EMPYRALIS_BRIDGE_PORT, 8790),
+    openclawGatewayUrl:
+      String(env.EMPYRALIS_OPENCLAW_GATEWAY_URL || "").trim() || "ws://127.0.0.1:18789",
+    openclawGatewayToken: String(env.EMPYRALIS_OPENCLAW_GATEWAY_TOKEN || "").trim() || undefined,
   };
 }

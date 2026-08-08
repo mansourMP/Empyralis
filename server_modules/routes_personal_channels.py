@@ -53,11 +53,20 @@ class GroupPolicyUpdateRequest(BaseModel):
     require_mention: Optional[bool] = None
 
 
-LOCAL_BRIDGE_CHANNELS: Dict[str, Dict[str, str]] = {
-    "signal_personal": {"provider": "signal_local_bridge", "label": "Signal"},
-    "imessage_personal": {"provider": "bluebubbles_local_bridge", "label": "iMessage"},
-    "wechat_personal": {"provider": "wechat_local_bridge", "label": "WeChat"},
-}
+# DERIVED from the service's own map, never re-declared here.
+#
+# This used to be a third hardcoded copy of the local-bridge channel list
+# (personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS is the first,
+# empyralis-gateway/src/channels/local-bridge-runtime.ts the second). When
+# step 2 merged the OpenClaw-transported channels into the service's map,
+# this copy was not updated — so an owner could receive an OpenClaw message
+# and get an automatic reply, but POST
+# /personal-channels/openclaw_line/gateways/{id}/messages answered 404,
+# because this dict had never heard of the channel. Reading the service's
+# map means a channel added there can never again be silently missing here.
+LOCAL_BRIDGE_CHANNELS: Dict[str, Dict[str, str]] = dict(
+    personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS
+)
 
 
 def _personal_channel_governance_metadata(action: str, channel_key: str) -> dict:

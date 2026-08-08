@@ -30,6 +30,8 @@ import { GatewayShellRuntime } from "./shell/runtime";
 import { GatewayLLMRuntime } from "./llm/runtime";
 import { OpenClawInboundListener } from "./openclaw/inbound-listener";
 import { setOpenClawTransportEnabled } from "./openclaw/capabilities";
+import { OpenClawGatewayClient } from "./openclaw/openclaw-gateway-client";
+import { buildOpenClawPersonalChannelRuntimes } from "./openclaw/outbound-runtime";
 import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
@@ -252,15 +254,40 @@ async function main(): Promise<void> {
     fullAccessLocallyEnabled: config.shellFullAccessLocallyEnabled,
     dockerImage: config.shellSandboxDockerImage,
   });
-  const personalChannelRuntimes = new PersonalChannelRuntimeRegistry(
-    config.personalChannelsEnabled
+  // Outbound leg for OpenClaw-transported channels (CHANNEL-ADOPTION-PLAN.md
+  // step 3). The session is opened only when OpenClaw's own gateway token is
+  // configured; the runtimes are registered whenever this box is an OpenClaw
+  // transport box at all (same condition as the capability advertisement
+  // below, so what we say we can carry and what we can actually route are
+  // never two different sets). Without a token the runtimes still answer
+  // channel.outbound — with a named "not configured" failure, which is far
+  // more diagnosable than GatewayWsClient's generic "Unsupported personal
+  // channel key".
+  const openclawGatewayClient = config.openclawGatewayToken
+    ? new OpenClawGatewayClient({
+        url: config.openclawGatewayUrl,
+        token: config.openclawGatewayToken,
+        record: (messageType, payload) => journal.append("outbound", messageType, payload),
+        logger: {
+          info: (message: string) => console.log(`[gateway] ${message}`),
+          error: (message: string) => console.error(`[gateway] ${message}`),
+        },
+      })
+    : null;
+  const personalChannelRuntimes = new PersonalChannelRuntimeRegistry([
+    ...(config.personalChannelsEnabled
       ? [
           new WhatsAppPersonalRuntime(db),
           new TelegramPersonalRuntime(db),
           ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((bridgeConfig) => buildLocalBridgeChannelRuntime(bridgeConfig, db)),
         ]
-      : [],
-  );
+      : []),
+    ...(config.openclawBridgeToken
+      ? buildOpenClawPersonalChannelRuntimes(openclawGatewayClient, (messageType, payload) =>
+          journal.append("outbound", messageType, payload),
+        )
+      : []),
+  ]);
   // Docker readiness feeds the shell_sandbox permission (runtime/desktop-
   // permissions.ts), which gates what capabilityRouter.supportedCapabilities()
   // below advertises. This probe MUST still be awaited here, before that
@@ -400,6 +427,9 @@ async function main(): Promise<void> {
 
   const cleanup = async (reason: string) => {
     await openclawInboundListener?.stop().catch(() => undefined);
+    // One shared OpenClaw session for all five channel runtimes, so it is
+    // stopped here once rather than from any single runtime's stop().
+    await openclawGatewayClient?.stop().catch(() => undefined);
     await journal.append("system", "gateway.process.stop", {
       gatewayId: identity.gatewayId,
       deviceId: identity.deviceId,

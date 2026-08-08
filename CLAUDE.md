@@ -223,6 +223,17 @@ requires updating every legitimate "home tenant" reader
 `create_workspace` bootstrap). Before reading `tenant_id` off a user record
 anywhere, resolve it from the workspace instead.
 
+**A channel list copied into a third place.** The local-bridge channel map
+exists in `personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS`, in
+`empyralis-gateway/src/channels/local-bridge-runtime.ts`, and — until
+2026-08-08 — a third time as a literal in `routes_personal_channels.py`.
+Adding the OpenClaw channels updated the first two, so those channels
+accepted inbound and dispatched automatic replies while
+`POST /personal-channels/{key}/gateways/{id}/messages` answered 404 for the
+same key. Now derived from the service map. The gateway's copy is a genuine
+cross-language duplicate and stays, guarded by drift assertions in both
+directions; a same-language third copy never earns its place.
+
 **Branches whose work gets redone on main.** Nine branches were found with
 real commits, all superseded by the same fixes re-implemented directly on
 main days later. If a branch exists, merge it or delete it — leaving it means
@@ -278,6 +289,40 @@ their OpenClaw channel is silent: it is silent BY DESIGN until the owner
 allowlists the chat and turns `require_mention` off for it, or until
 OpenClaw starts forwarding `wasMentioned` (the bridge schema and mapper
 already carry the field).
+
+**OpenClaw outbound is a WS RPC from the box, never an HTTP call from the
+cloud.** Landed 2026-08-08 (step 3). Their `admin-http-rpc` allowlist has no
+send/message method, so a stateless cloud caller cannot deliver at all;
+delivery is only reachable through `message.action` on the Gateway
+**WebSocket**, from a process on the same machine. Hence
+`empyralis-gateway/src/openclaw/openclaw-gateway-client.ts` holding one live
+loopback session shared by all five channel runtimes. Do not "simplify" this
+into an HTTP call — it does not exist.
+
+Three rules that path must keep. **Scope is `operator.write`, never
+`operator.admin`** — admin is the only scope under which OpenClaw honours a
+client-asserted `senderIsOwner`, which is literally one of their CVEs; a
+client that cannot claim it can never reintroduce it. **Classify by
+`error.code`** (their closed `ErrorCodes` set plus `retryable`/`retryAfterMs`),
+never by the sentence — an unknown code is treated as PERMANENT so it
+surfaces instead of looping. **Retry only under the caller's own
+`idempotencyKey`**, which OpenClaw dedupes on (`resolveGatewayInflightRequest`);
+that key is what makes a retry not a duplicate message, so it is required,
+never defaulted.
+
+The cloud side needed no new outbound stack: `_OpenClawPersonalChannelHandler`
+already inherits `_deliver_local_bridge_personal_reply` ->
+`dispatch_channel_outbound`, and the only missing piece was a
+`PersonalChannelRuntime` registered under the `openclaw_*` keys. **The bridge
+plugin's `message_sending` cancel predicate also fires on the replies we
+originate**, so the gateway refuses to send text that predicate would match
+(`wouldBridgePluginCancel`) — an invisible cancellation inside OpenClaw is
+exactly the silent drop this step exists to eliminate. **A configured but
+disconnected outbound socket must never be reported with an
+inbound-blocking health status** (`disconnected`/`unavailable`/…) — inbound
+arrives over loopback HTTP from the plugin and does not depend on that
+socket, and `_assert_gateway_advertised_personal_channel` would drop already-
+arrived messages. Report `connecting` with `connected: false`.
 
 ## Testing the UI
 

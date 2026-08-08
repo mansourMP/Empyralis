@@ -39,6 +39,35 @@ test("does not match a plain mention of a missing API key without the FailoverEr
   );
 });
 
+// ── Collision with the OUTBOUND path (CHANNEL-ADOPTION-PLAN.md step 3) ────
+//
+// `message_sending` fires on EVERY outbound delivery OpenClaw performs —
+// including the ones Empyralis originates through `message.action`. So this
+// predicate is, by construction, also evaluated against our real replies. It
+// must never cancel one.
+//
+// The gateway side additionally REFUSES to hand OpenClaw any text this
+// predicate would cancel (openclaw/outbound-payload.ts's
+// wouldBridgePluginCancel, enforced in outbound-runtime.ts), so the one
+// contrived double-marker case below can never actually reach this hook via
+// the Empyralis outbound path — it is refused, loudly and journaled, before
+// the send. These two tests are the two halves of that proof.
+test("does not cancel replies Empyralis delivers through message.action", () => {
+  const empyralisReplies = [
+    "On it — I filed that as MAN-401.",
+    "The deploy failed: connection refused on port 5432. Want me to retry?",
+    "Здесь всё готово.",
+    "已完成，任务已归档。",
+    // Adversarial, one marker each — a single marker must never be enough,
+    // or ordinary talk about outages would start disappearing.
+    "The on-call log mentions FailoverError; I've opened an incident.",
+    "No API key found for provider — that's the billing issue you flagged.",
+  ];
+  for (const content of empyralisReplies) {
+    assert.equal(isSuppressedCredentiallessTurnReply({ content }), false, `would have cancelled: ${content}`);
+  }
+});
+
 test("known accepted false-positive edge: a real reply that happens to contain both exact marker strings", () => {
   // Documents the known, accepted risk of a content match (see
   // src/cancel-predicate.ts's header comment) rather than hiding it. This

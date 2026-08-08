@@ -1,0 +1,45 @@
+// Isolated OpenClaw profile for CHANNEL-ADOPTION-PLAN.md step 3's live
+// outbound verification. NEVER apply to a real profile.
+//
+// Deliberately configures NO channel account and NO model provider: the
+// point of the run is to prove `message.action` is reachable at
+// operator.write and rejects an unconfigured channel CLEANLY and
+// STRUCTURALLY (INVALID_REQUEST), which is the strongest proof available
+// without real channel credentials. Actual delivery is step 5.
+//
+// The bridge plugin is deliberately NOT loaded here: outbound does not go
+// through it (the plugin never originates sends), and loading it would only
+// add an inbound queue nothing feeds.
+//
+// Usage — replace <REPO> with the absolute path to this checkout:
+//   openclaw --profile empyralis-outbound-verify config patch --file <this>
+//   openclaw --profile empyralis-outbound-verify gateway run \
+//     --port 19299 --bind loopback --auth token --token verify-loopback-secret
+//
+// Tear down: stop the gateway, then
+// `rm -rf ~/.openclaw-empyralis-outbound-verify`
+// (never touch ~/.openclaw or ~/.openclaw-dev — those are real profiles).
+{
+  gateway: {
+    // Required, or the gateway refuses to start ("suspicious or clobbered
+    // config") — see CHANNEL-ADOPTION-PLAN.md's feasibility table.
+    mode: "local",
+    port: 19299,
+    bind: "loopback",
+    auth: { mode: "token", token: "verify-loopback-secret" },
+    controlUi: { enabled: false },
+  },
+  // mDNS is ON by default and advertised itself on the LAN unprompted during
+  // the original feasibility run. Off, always.
+  discovery: {
+    mdns: { mode: "off" },
+  },
+  plugins: {
+    entries: {
+      bonjour: { enabled: false },
+    },
+  },
+  agents: {
+    defaults: { skipBootstrap: true },
+  },
+}
