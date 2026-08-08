@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from server_modules import direct_chat_operator_binding_service
 from server_modules import sage_agent_runtime_service
+from server_modules.tests.support_live_llm_stubs import ChatStreamStub, patched_provider_calls
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT_DIR / "server_modules" / "direct_chat_runtime_exports.py"
@@ -185,6 +186,27 @@ def _rebuild_operator_chat_exports() -> None:
 
 operator_chat.generate_chat_reply_stream_with_provider_fallback = _legacy_fallback_stream
 _rebuild_operator_chat_exports()
+
+def _no_openai_credential_healthcheck():
+    """Turn off the OpenAI credential health probe for one call.
+
+    A "this is obviously a tool task" reply offers a durable run, and building
+    that offer crosses the doctor gate:
+
+        direct_chat_handoff_service -> turn_runtime -> run_service
+          -> doctor_gate -> health_diagnostics -> health_core.health()
+            -> runtime_status.probe_openai_credential()   <- live GET
+
+    That probe is a real, unauthenticated-by-us GET to api.openai.com whenever
+    OPENAI_HEALTHCHECK is on (its default) and an OPENAI_API_KEY happens to be
+    in the environment -- so these tests reached OpenAI on a developer machine
+    and quietly did not on a bare CI box, which is exactly the "results depend
+    on whose machine ran the suite" problem. OPENAI_HEALTHCHECK=False is the
+    product's own switch for this, so the probe still runs its real
+    no-network branch rather than a fabricated response.
+    """
+    return patch("server_modules.health_core.OPENAI_HEALTHCHECK", False)
+
 
 def build_direct_operator_reply(**kwargs):
     _rebuild_operator_chat_exports()
@@ -378,31 +400,33 @@ class OperatorChatTests(unittest.TestCase):
     @patch("operator_chat_under_test.provider_has_key", return_value=True)
     @patch("operator_chat_under_test.resolve_workspace_tool_capabilities", return_value=[])
     def test_streaming_reply_does_not_duplicate_final_chunk(self, _capabilities, _provider_has_key, _preferred_provider, _handoff):
-        def fake_stream(**kwargs):
-            def _iterator():
-                yield {"type": "chunk", "delta": "Hel"}
-                yield {"type": "chunk", "delta": "lo"}
-                yield {
-                    "type": "result",
-                    "reply": "Hello",
-                    "usage_masked": {
-                        "provider": "openai",
-                        "model": "gpt-5.4",
-                        "prompt_tokens": 1,
-                        "completion_tokens": 1,
-                        "total_tokens": 2,
-                        "estimation_mode": "provider_usage_exact",
-                    },
-                    "provider": "openai",
-                    "model": "gpt-5.4",
-                    "attempted_providers": "openai",
-                    "error": "",
-                    "tool_calls": [],
-                }
-            return _iterator()
+        # A real two-delta stream, so the assertions below exercise the
+        # incremental-prefix assembly rather than a single canned string.
+        stream_stub = ChatStreamStub(
+            reply="Hello",
+            chunks=["Hel", "lo"],
+            provider="openai",
+            model="gpt-5.4",
+            attempted_providers="openai",
+            usage={
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+                "estimation_mode": "provider_usage_exact",
+            },
+        )
 
         with (
-            patch("operator_chat_under_test.generate_chat_reply_stream_with_provider_fallback", side_effect=fake_stream),
+            # The stream above is only the FIRST provider call this turn
+            # makes. After the reply is yielded the turn also runs memory-fact
+            # extraction, and tool_honesty_guard can run a regeneration pass --
+            # both real, billed calls, neither of which this test ever mocked.
+            patched_provider_calls(
+                stream_stub,
+                stream_target="operator_chat_under_test.generate_chat_reply_stream_with_provider_fallback",
+            ),
             patch("operator_chat_under_test._persist_direct_chat_hosted_usage_best_effort", lambda **_kwargs: None),
             patch("server_modules.direct_chat_hosted_usage_service.persist_direct_chat_hosted_usage_best_effort", lambda **_kwargs: None),
         ):
@@ -421,6 +445,10 @@ class OperatorChatTests(unittest.TestCase):
 
         chunk_deltas = [str(event.get("delta") or "") for event in events if str(event.get("type") or "") == "chunk"]
         final_payloads = [event.get("payload") for event in events if str(event.get("type") or "") == "final"]
+        # Without this, "the deltas were not duplicated" cannot be told apart
+        # from "the stub was never reached and these events came from
+        # somewhere else entirely".
+        self.assertEqual(stream_stub.call_count, 1)
         self.assertEqual(chunk_deltas, ["Hel", "lo"])
         self.assertEqual(len(final_payloads), 1)
         self.assertEqual(final_payloads[0]["reply"], "Hello")
@@ -495,7 +523,8 @@ class OperatorChatTests(unittest.TestCase):
         }],
     )
     def test_obvious_telegram_write_preview_bypasses_ai_ready_gate(self, _capabilities, _provider_has_key, generate_reply):
-        with patch("operator_chat_under_test.message_can_use_direct_connector_tools", return_value=False):
+        with patch("operator_chat_under_test.message_can_use_direct_connector_tools", return_value=False), \
+             _no_openai_credential_healthcheck():
             payload = build_direct_operator_reply(
                 message="Send a Telegram message to my test chat saying certification probe one.",
                 workspace_id="default",
@@ -525,7 +554,8 @@ class OperatorChatTests(unittest.TestCase):
         }],
     )
     def test_obvious_google_draft_preview_bypasses_ai_ready_gate(self, _capabilities, _provider_has_key, generate_reply):
-        with patch("operator_chat_under_test.message_can_use_direct_connector_tools", return_value=False):
+        with patch("operator_chat_under_test.message_can_use_direct_connector_tools", return_value=False), \
+             _no_openai_credential_healthcheck():
             payload = build_direct_operator_reply(
                 message="Draft an email to myself summarizing today's certification results.",
                 workspace_id="default",

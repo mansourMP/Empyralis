@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from pydantic import ValidationError
 
 from server_modules.schemas import SageChatRequest, SageVoiceTaskRequest
+from server_modules.tests.support_live_llm_stubs import patched_provider_calls
 
 
 class SageChatApiContractTests(unittest.TestCase):
@@ -60,6 +61,7 @@ class SageChatApiContractTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", usage={"model": "gpt-4o"}, provider="openai") as sage_stream,
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -90,6 +92,10 @@ class SageChatApiContractTests(unittest.TestCase):
             "trace_id",
         }
         self.assertTrue(required_keys.issubset(set(result.keys())))
+        # The contract above must be built from a turn that really ran the
+        # provider path, not from a turn that fell through some earlier
+        # short-circuit -- assert the stubbed provider stream was the source.
+        self.assertEqual(sage_stream.call_count, 1)
 
     def test_prompt_includes_identity_guardrails(self):
         with (
@@ -100,6 +106,7 @@ class SageChatApiContractTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Ok", provider="deepseek") as sage_stream,
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -116,8 +123,13 @@ class SageChatApiContractTests(unittest.TestCase):
                 )
             )
 
-            system_prompt = mock_generate.call_args[0][3]
-            routed_context = mock_generate.call_args[0][0]
+            # Read the prompt off the call the turn REALLY makes. This used
+            # to read mock_generate.call_args, i.e. the arguments of a
+            # function the live path stopped calling -- so the assertions
+            # below were checking a call that never happened while the turn
+            # itself went to a real provider.
+            system_prompt = sage_stream.system_prompt
+            routed_context = sage_stream.context
             self.assertIn("ai assistant", system_prompt.lower())
             self.assertIn("user's personal ai assistant", system_prompt.lower())
             self.assertIn("don't wait to be micromanaged", system_prompt.lower())
