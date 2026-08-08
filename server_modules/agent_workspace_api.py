@@ -1250,10 +1250,16 @@ def _agent_workspace_status(
 
 def _list_workspace_live_runs_bounded(
     *,
-    workspace_id: Optional[str] = None,
+    workspace_id: str,
     states: Optional[Set[str]] = None,
     page_size: int = 200,
 ) -> List[Dict[str, Any]]:
+    # Required, with no default. A `None` here used to mean "every workspace"
+    # in the SQL AND to skip every `if workspace_filter and ...` re-filter
+    # downstream, so one forgotten argument produced a cross-tenant read that
+    # nothing narrowed afterwards.
+    if not str(workspace_id or "").strip():
+        raise ValueError("_list_workspace_live_runs_bounded requires a workspace_id.")
     normalized_states = sorted(
         {
             str(state or "").strip().lower()
@@ -1282,9 +1288,11 @@ def _list_workspace_live_runs_bounded(
 
 def _list_workspace_pending_approvals_bounded(
     *,
-    workspace_id: Optional[str] = None,
+    workspace_id: str,
     page_size: int = 200,
 ) -> List[Dict[str, Any]]:
+    if not str(workspace_id or "").strip():
+        raise ValueError("_list_workspace_pending_approvals_bounded requires a workspace_id.")
     items: List[Dict[str, Any]] = []
     offset = 0
     safe_page_size = max(1, min(int(page_size), 500))
@@ -1319,7 +1327,13 @@ def register_agent_workspace_routes(app) -> None:
         _refresh_server_exports()
         safe_history_limit = max(1, min(int(history_limit), 200))
         safe_audit_limit = max(1, min(int(audit_limit), 300))
-        workspace_filter = _normalize_workspace_id(enforce_workspace_access(current_user, workspace_id)) if workspace_id else None
+        # A missing `workspace_id` resolves to the CALLER'S OWN workspace, never to
+        # "every workspace". `enforce_workspace_access(current_user, None)` already
+        # has that answer (`auth._resolve_workspace_token_for_current_user`), and it
+        # still validates membership. The old `if workspace_id else None` handed the
+        # repository an unscoped read AND skipped every `if workspace_filter and ...`
+        # re-filter below, so one omitted query parameter defeated both layers.
+        workspace_filter = _normalize_workspace_id(enforce_workspace_access(current_user, workspace_id))
 
         workers_payload = handle_get_local_workers_status()
         queue_payload = handle_get_local_run_queue(workspace_id=workspace_filter, limit=120)
@@ -1503,7 +1517,13 @@ def register_agent_workspace_routes(app) -> None:
         if ORION_SINGLE_AGENT_MODE and target_role != ORION_SINGLE_AGENT_ROLE:
             raise HTTPException(status_code=400, detail="Single-agent mode is enabled. Only the orchestrator workspace is available.")
 
-        workspace_filter = _normalize_workspace_id(enforce_workspace_access(current_user, workspace_id)) if workspace_id else None
+        # A missing `workspace_id` resolves to the CALLER'S OWN workspace, never to
+        # "every workspace". `enforce_workspace_access(current_user, None)` already
+        # has that answer (`auth._resolve_workspace_token_for_current_user`), and it
+        # still validates membership. The old `if workspace_id else None` handed the
+        # repository an unscoped read AND skipped every `if workspace_filter and ...`
+        # re-filter below, so one omitted query parameter defeated both layers.
+        workspace_filter = _normalize_workspace_id(enforce_workspace_access(current_user, workspace_id))
         safe_history_limit = max(1, min(int(history_limit), 100))
         safe_file_limit = max(1, min(int(file_limit), 120))
         safe_artifact_limit = max(1, min(int(artifact_limit), 120))
@@ -1772,10 +1792,18 @@ def register_agent_workspace_routes(app) -> None:
         limit: int = 120,
         current_user: Any = None,
     ):
-        workspace_filter = _normalize_workspace_id(enforce_workspace_access(current_user, workspace_id)) if workspace_id else None
+        # A missing `workspace_id` resolves to the CALLER'S OWN workspace, never to
+        # "every workspace". `enforce_workspace_access(current_user, None)` already
+        # has that answer (`auth._resolve_workspace_token_for_current_user`), and it
+        # still validates membership. The old `if workspace_id else None` handed the
+        # repository an unscoped read AND skipped every `if workspace_filter and ...`
+        # re-filter below, so one omitted query parameter defeated both layers.
+        workspace_filter = _normalize_workspace_id(enforce_workspace_access(current_user, workspace_id))
         entitlement_cache: Dict[str, Dict[str, Any]] = {}
-        if workspace_filter:
-            _ensure_artifacts_access_for_workspace(workspace_filter)
+        # Unconditional now: `workspace_filter` can no longer be None, so the
+        # artifacts entitlement is checked on every call rather than only on the
+        # ones that bothered to name a workspace.
+        _ensure_artifacts_access_for_workspace(workspace_filter)
         safe_history_limit = max(1, min(int(history_limit), 160))
         safe_limit = max(1, min(int(limit), 240))
 

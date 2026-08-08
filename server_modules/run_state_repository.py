@@ -1054,17 +1054,74 @@ async def list_live_runs() -> list[Dict[str, Any]]:
     return items
 
 
+def _require_explicit_workspace_scope(
+    operation: str,
+    *,
+    workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
+    include_all_workspaces: bool = False,
+) -> Optional[list[str]]:
+    """Resolve a run-state read's workspace scope, failing CLOSED when it is missing.
+
+    `WHERE ($1 = '' OR workspace_id = $1)` fails OPEN: a caller who forgets the
+    argument silently reads every tenant's rows.  Worse, the Python re-filters
+    meant to catch that are themselves written `if workspace_filter and ...`, so
+    the SAME omission skips them too -- which is how `GET /artifacts` came to
+    return other tenants' run ids and artifact paths behind nothing but
+    `require_api_key`.
+
+    Returning `None` means "every workspace", and that answer is reachable only
+    by passing `include_all_workspaces=True` at the call site, where it is
+    greppable.  Sibling of `_require_explicit_scope` on the fleet queries; the
+    two exist so the codebase has one answer to this, not two.
+
+    An EMPTY `workspace_ids` is deliberately preserved rather than collapsed to
+    "unscoped" -- "this caller may see no workspace" must return no rows, not
+    all of them.
+    """
+    scope: set[str] = set()
+    token = str(workspace_id or "").strip()
+    if token:
+        scope.add(token)
+    scope_list_supplied = workspace_ids is not None
+    if scope_list_supplied:
+        scope.update(
+            str(item or "").strip()
+            for item in (workspace_ids or [])
+            if str(item or "").strip()
+        )
+    if include_all_workspaces:
+        if scope:
+            raise ValueError(
+                f"{operation} cannot combine include_all_workspaces=True with a workspace scope."
+            )
+        return None
+    if not token and not scope_list_supplied:
+        raise ValueError(
+            f"{operation} requires workspace_id or workspace_ids. "
+            "Pass include_all_workspaces=True to read across every workspace on purpose."
+        )
+    return sorted(scope)
+
+
 async def list_live_runs_page(
     *,
     limit: int = 100,
     offset: int = 0,
     workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
     states: Optional[list[str]] = None,
+    include_all_workspaces: bool = False,
 ) -> list[Dict[str, Any]]:
+    workspace_scope = _require_explicit_workspace_scope(
+        "list_live_runs_page",
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        include_all_workspaces=include_all_workspaces,
+    )
     pool = await _read_pool(operation="list_live_runs_page")
     if pool is None:
         return []
-    workspace_filter = str(workspace_id or "").strip()
     normalized_states = [str(state or "").strip().lower() for state in (states or []) if str(state or "").strip()]
     try:
         await _ensure_live_run_tables(pool)
@@ -1072,13 +1129,14 @@ async def list_live_runs_page(
             """
             SELECT run_id, workspace_id, tenant_id, state, payload, trace_id, version, registered_at
             FROM live_runs
-            WHERE ($1 = '' OR workspace_id = $1)
-              AND (CARDINALITY($2::text[]) = 0 OR LOWER(COALESCE(state, '')) = ANY($2::text[]))
+            WHERE ($1::boolean OR workspace_id = ANY($2::text[]))
+              AND (CARDINALITY($3::text[]) = 0 OR LOWER(COALESCE(state, '')) = ANY($3::text[]))
             ORDER BY updated_at DESC, created_at DESC
-            LIMIT $3
-            OFFSET $4
+            LIMIT $4
+            OFFSET $5
             """,
-            workspace_filter,
+            workspace_scope is None,
+            workspace_scope or [],
             normalized_states,
             max(1, min(int(limit or 0), 500)),
             max(0, int(offset or 0)),
@@ -1092,12 +1150,19 @@ async def list_live_runs_page(
 async def count_live_runs(
     *,
     workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
     states: Optional[list[str]] = None,
+    include_all_workspaces: bool = False,
 ) -> int:
+    workspace_scope = _require_explicit_workspace_scope(
+        "count_live_runs",
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        include_all_workspaces=include_all_workspaces,
+    )
     pool = await _read_pool(operation="count_live_runs")
     if pool is None:
         return 0
-    workspace_filter = str(workspace_id or "").strip()
     normalized_states = [str(state or "").strip().lower() for state in (states or []) if str(state or "").strip()]
     try:
         await _ensure_live_run_tables(pool)
@@ -1105,10 +1170,11 @@ async def count_live_runs(
             """
             SELECT COUNT(*)::int AS count
             FROM live_runs
-            WHERE ($1 = '' OR workspace_id = $1)
-              AND (CARDINALITY($2::text[]) = 0 OR LOWER(COALESCE(state, '')) = ANY($2::text[]))
+            WHERE ($1::boolean OR workspace_id = ANY($2::text[]))
+              AND (CARDINALITY($3::text[]) = 0 OR LOWER(COALESCE(state, '')) = ANY($3::text[]))
             """,
-            workspace_filter,
+            workspace_scope is None,
+            workspace_scope or [],
             normalized_states,
         )
     except Exception as exc:
@@ -2387,7 +2453,19 @@ async def create_or_update_approval_request(
     return _approval_record_from_row(row)
 
 
-async def list_pending_approvals(limit: int = 100) -> list[Dict[str, Any]]:
+async def list_pending_approvals(
+    limit: int = 100,
+    *,
+    workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
+    include_all_workspaces: bool = False,
+) -> list[Dict[str, Any]]:
+    workspace_scope = _require_explicit_workspace_scope(
+        "list_pending_approvals",
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        include_all_workspaces=include_all_workspaces,
+    )
     pool = await _read_pool(operation="list_pending_approvals")
     if pool is None:
         return []
@@ -2399,10 +2477,16 @@ async def list_pending_approvals(limit: int = 100) -> list[Dict[str, Any]]:
                    request_payload, decision_payload, metadata, expires_at, updated_at, version
             FROM run_approvals
             WHERE status = 'requested'
+              AND (
+                    $2::boolean
+                 OR COALESCE(request_payload->>'workspace_id', metadata->>'workspace_id', 'default') = ANY($3::text[])
+              )
             ORDER BY requested_at DESC, id DESC
             LIMIT $1
             """,
             max(1, min(int(limit or 0), 300)),
+            workspace_scope is None,
+            workspace_scope or [],
         )
     except Exception as exc:
         LOGGER.warning("Postgres list_pending_approvals failed: %s", exc)
@@ -2415,11 +2499,18 @@ async def list_pending_approvals_page(
     limit: int = 100,
     offset: int = 0,
     workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
+    include_all_workspaces: bool = False,
 ) -> list[Dict[str, Any]]:
+    workspace_scope = _require_explicit_workspace_scope(
+        "list_pending_approvals_page",
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        include_all_workspaces=include_all_workspaces,
+    )
     pool = await _read_pool(operation="list_pending_approvals_page")
     if pool is None:
         return []
-    workspace_filter = str(workspace_id or "").strip()
     try:
         await _ensure_run_approval_table(pool)
         rows = await pool.fetch(
@@ -2428,12 +2519,16 @@ async def list_pending_approvals_page(
                    request_payload, decision_payload, metadata, expires_at, updated_at, version
             FROM run_approvals
             WHERE status = 'requested'
-              AND ($1 = '' OR COALESCE(request_payload->>'workspace_id', metadata->>'workspace_id', 'default') = $1)
+              AND (
+                    $1::boolean
+                 OR COALESCE(request_payload->>'workspace_id', metadata->>'workspace_id', 'default') = ANY($2::text[])
+              )
             ORDER BY requested_at DESC, id DESC
-            LIMIT $2
-            OFFSET $3
+            LIMIT $3
+            OFFSET $4
             """,
-            workspace_filter,
+            workspace_scope is None,
+            workspace_scope or [],
             max(1, min(int(limit or 0), 500)),
             max(0, int(offset or 0)),
         )
@@ -3508,10 +3603,28 @@ def sync_list_live_runs_page(
     limit: int = 100,
     offset: int = 0,
     workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
     states: Optional[list[str]] = None,
+    include_all_workspaces: bool = False,
 ) -> list[Dict[str, Any]]:
+    # Validate here, not only inside the coroutine: `_run_sync` swallows
+    # exceptions into `fallback`, which would turn a missing-scope programming
+    # error into a silent empty list instead of a loud one.
+    _require_explicit_workspace_scope(
+        "sync_list_live_runs_page",
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        include_all_workspaces=include_all_workspaces,
+    )
     return _run_sync(
-        lambda: list_live_runs_page(limit=limit, offset=offset, workspace_id=workspace_id, states=states),
+        lambda: list_live_runs_page(
+            limit=limit,
+            offset=offset,
+            workspace_id=workspace_id,
+            workspace_ids=workspace_ids,
+            states=states,
+            include_all_workspaces=include_all_workspaces,
+        ),
         operation="sync_list_live_runs_page",
         fallback=[],
         raise_on_error=_sync_raise_on_read_failure(),
@@ -3521,10 +3634,23 @@ def sync_list_live_runs_page(
 def sync_count_live_runs(
     *,
     workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
     states: Optional[list[str]] = None,
+    include_all_workspaces: bool = False,
 ) -> int:
+    _require_explicit_workspace_scope(
+        "sync_count_live_runs",
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        include_all_workspaces=include_all_workspaces,
+    )
     return _run_sync(
-        lambda: count_live_runs(workspace_id=workspace_id, states=states),
+        lambda: count_live_runs(
+            workspace_id=workspace_id,
+            workspace_ids=workspace_ids,
+            states=states,
+            include_all_workspaces=include_all_workspaces,
+        ),
         operation="sync_count_live_runs",
         fallback=0,
         raise_on_error=_sync_raise_on_read_failure(),
@@ -3623,9 +3749,26 @@ def sync_create_or_update_approval_request(
     )
 
 
-def sync_list_pending_approvals(limit: int = 100) -> list[Dict[str, Any]]:
+def sync_list_pending_approvals(
+    limit: int = 100,
+    *,
+    workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
+    include_all_workspaces: bool = False,
+) -> list[Dict[str, Any]]:
+    _require_explicit_workspace_scope(
+        "sync_list_pending_approvals",
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        include_all_workspaces=include_all_workspaces,
+    )
     return _run_sync(
-        lambda: list_pending_approvals(limit),
+        lambda: list_pending_approvals(
+            limit,
+            workspace_id=workspace_id,
+            workspace_ids=workspace_ids,
+            include_all_workspaces=include_all_workspaces,
+        ),
         operation="sync_list_pending_approvals",
         fallback=[],
         raise_on_error=_sync_raise_on_read_failure(),
@@ -3637,9 +3780,23 @@ def sync_list_pending_approvals_page(
     limit: int = 100,
     offset: int = 0,
     workspace_id: Optional[str] = None,
+    workspace_ids: Optional[Iterable[Any]] = None,
+    include_all_workspaces: bool = False,
 ) -> list[Dict[str, Any]]:
+    _require_explicit_workspace_scope(
+        "sync_list_pending_approvals_page",
+        workspace_id=workspace_id,
+        workspace_ids=workspace_ids,
+        include_all_workspaces=include_all_workspaces,
+    )
     return _run_sync(
-        lambda: list_pending_approvals_page(limit=limit, offset=offset, workspace_id=workspace_id),
+        lambda: list_pending_approvals_page(
+            limit=limit,
+            offset=offset,
+            workspace_id=workspace_id,
+            workspace_ids=workspace_ids,
+            include_all_workspaces=include_all_workspaces,
+        ),
         operation="sync_list_pending_approvals_page",
         fallback=[],
         raise_on_error=_sync_raise_on_read_failure(),

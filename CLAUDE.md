@@ -296,13 +296,44 @@ drift. And **`WHERE ($1 = '' OR tenant_id = $1)` fails OPEN**: a forgotten
 argument returns every tenant. `list_fleet_workers` /
 `list_fleet_queue_partitions` now raise unless the caller passes
 `include_all_tenants=True`, so a deliberate global read is greppable and an
-accidental one is loud. The same `('' OR …)` idiom still lives in
-`run_state_repository.py` at `list_live_runs_page`, `count_live_runs` and
-`list_pending_approvals_page`; every caller passes a workspace today, but
-`agent_workspace_api`'s `workspace_filter = … if workspace_id else None` means
-omitting the query param produces a cross-tenant read whose Python re-filter is
-also skipped — contained only because those routes sit behind
-`require_admin_api_key`.
+accidental one is loud.
+
+The rest of that idiom is closed too (2026-08-08, `fix/vacuous-tenant-filters`).
+`run_state_repository`'s `list_live_runs_page` / `count_live_runs` /
+`list_pending_approvals_page` — plus the zero-caller `list_pending_approvals`,
+which had no workspace predicate at all — now bind the scope unconditionally
+(`WHERE ($1::boolean OR workspace_id = ANY($2::text[]))`, where `$1` can only
+come from an explicit `include_all_workspaces=True`), and
+`_require_explicit_workspace_scope` raises on a missing one **in the sync
+wrapper as well as the coroutine** — `_run_sync` swallows exceptions into
+`fallback`, so a guard only inside the coroutine turns a forgotten scope into a
+silent `[]` instead of a loud failure. An EMPTY `workspace_ids` still means
+"this caller may see no workspace" and returns nothing.
+
+The caller-side half was the sharper bug. `agent_workspace_api`'s
+`workspace_filter = … if workspace_id else None` produced an unscoped read AND
+skipped every `if workspace_filter and …` re-filter below it — one omitted query
+parameter defeated both layers. Two of the three routes sat behind
+`require_admin_api_key`, which is `enforce_minimum_role(…, "owner")`: **any
+workspace owner of any tenant, a role check and not a tenancy check**. The
+third, `_workspace_artifacts_payload` (`GET /artifacts`,
+`GET /artifacts/workspace`), sat behind plain `require_api_key` and was
+therefore a live leak, not a latent one — omit `workspace_id` and it walked
+other tenants' live runs into `_get_replay_payload` and returned their run ids
+and artifact paths. A missing `workspace_id` now resolves to the CALLER'S OWN
+workspace via `enforce_workspace_access(current_user, None)`, never to "all";
+`/runs` legitimately spans several, so it passes the caller's
+`allowed_workspace_ids` as a list. `_list_workspace_live_runs_bounded` and its
+approvals sibling take `workspace_id` as a REQUIRED argument with no default —
+the same "a scope column with a default is a loaded gun" rule.
+
+Reintroduction is guarded by `test_run_state_scope_fails_closed.py`'s
+`FailOpenScopeFilterDriftTests`: a source scan for the three fail-open shapes
+(`$n = '' OR`, `$n IS NULL OR`, `CARDINALITY(…) = 0 OR`) landing on a
+tenant/workspace column, diffed against a hand-written allowlist carrying a
+written verdict per surviving instance. A behavioural test cannot catch a NEW
+one — it type-checks and behaves perfectly for every caller that remembers the
+argument.
 
 Note the near-miss that is NOT a bug: public `GET /health` computes the same
 cross-tenant payload but `public_health()` returns only `{"ok": ...}` — trace

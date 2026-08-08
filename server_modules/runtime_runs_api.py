@@ -1066,6 +1066,21 @@ def register_run_routes(app) -> None:
                     "pack_id": str(pack_id or "").strip() or None,
                 },
             )
+        # `/runs` legitimately spans every workspace the caller belongs to, so a
+        # missing `workspace_id` here is NOT an error -- but it must not become an
+        # unscoped read either. Mirror exactly the decision
+        # `_authorized_history_item_matches` already applies below, so the SQL
+        # never returns rows the Python filter would then have to throw away.
+        # `allowed_workspace_ids` returns None only for an operator principal
+        # (api_key + auth-admin, or a non-bearer is_admin), which is the same set
+        # the Python filter treats as unrestricted.
+        if requested_workspace_id:
+            live_run_scope_kwargs: dict[str, Any] = {"workspace_id": requested_workspace_id}
+        elif allowed_workspaces is None:
+            live_run_scope_kwargs = {"include_all_workspaces": True}
+        else:
+            live_run_scope_kwargs = {"workspace_ids": sorted(allowed_workspaces)}
+
         base_history_item_matches = _late_server_export("_history_item_matches")
         entitlement_cache: dict[str, dict[str, Any]] = {}
 
@@ -1096,8 +1111,8 @@ def register_run_routes(app) -> None:
             list_live_runs_page_fn=lambda page_limit, page_offset, page_workspace_id, page_states: run_state_repository.sync_list_live_runs_page(
                 limit=page_limit,
                 offset=page_offset,
-                workspace_id=page_workspace_id,
                 states=page_states,
+                **live_run_scope_kwargs,
             ),
             run_history_lock=_late_server_export("RUN_HISTORY_LOCK"),
             run_history=_late_server_export("RUN_HISTORY"),

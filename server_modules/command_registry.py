@@ -889,10 +889,16 @@ async def _handle_tasks(
     *, workspace_id: str, remainder: str, surface: str, **kwargs: Any
 ) -> Dict[str, Any]:
     """List active runs for this workspace from the durable run store."""
+    workspace_token = str(workspace_id or "").strip()
+    if not workspace_token:
+        # Fail closed rather than reading every workspace's runs. The repository
+        # would raise anyway; the broad `except Exception` below would turn that
+        # into a misleading "temporarily unavailable".
+        return {"reply": "No workspace is selected, so there is nothing to list."}
     try:
         from server_modules.run_state_repository import list_live_runs_page
 
-        runs = await list_live_runs_page(workspace_id=workspace_id, limit=20)
+        runs = await list_live_runs_page(workspace_id=workspace_token, limit=20)
 
         # Also check in-memory local queue
         try:

@@ -372,14 +372,31 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
                     "updated_at": "2026-04-06T10:10:00Z",
                 }
             ]
-            runtime_runs_api.run_state_repository.sync_list_live_runs_page = (
-                lambda limit=100, offset=0, workspace_id=None, states=None: [
+            def _fake_list_live_runs_page(
+                *,
+                limit=100,
+                offset=0,
+                workspace_id=None,
+                workspace_ids=None,
+                states=None,
+                include_all_workspaces=False,
+            ):
+                # Mirror the real repository contract: the scope is a concrete
+                # list unless the caller explicitly asked for every workspace.
+                scope = None if include_all_workspaces else set()
+                if scope is not None:
+                    if workspace_id:
+                        scope.add(str(workspace_id))
+                    for token in workspace_ids or []:
+                        scope.add(str(token))
+                return [
                     item
                     for item in runtime_runs_api.run_state_repository.sync_list_live_runs()
-                    if (not workspace_id or str(item.get("workspace_id") or "") == str(workspace_id))
+                    if (scope is None or str(item.get("workspace_id") or "") in scope)
                     and (not states or str(item.get("status") or "").lower() in {str(state).lower() for state in states})
                 ][offset : offset + limit]
-            )
+
+            runtime_runs_api.run_state_repository.sync_list_live_runs_page = _fake_list_live_runs_page
             runtime_runs_api._late_server_export = lambda name: {
                 "runs": {
                     "run-live": {
@@ -835,7 +852,7 @@ class RuntimeRunsApiCanonicalRouteTests(unittest.TestCase):
             runtime_runs_api.runtime_route_registration_service.register_runtime_run_routes_from_api = lambda *args, **kwargs: None
             runtime_runs_api._refresh_server_exports = lambda: fake_server
             runtime_runs_api.run_state_repository.sync_list_live_runs = lambda: []
-            runtime_runs_api.run_state_repository.sync_list_live_runs_page = lambda limit=100, offset=0, workspace_id=None, states=None: []
+            runtime_runs_api.run_state_repository.sync_list_live_runs_page = lambda **kwargs: []
 
             app = _FakeApp()
             runtime_runs_api.register_run_routes(app)
