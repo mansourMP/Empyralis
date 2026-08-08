@@ -246,6 +246,39 @@ record (sandbox escape; a client-asserted `senderIsOwner` flag trusted
 because it arrived over loopback) is what happens when that boundary is
 ignored. Read their source, port the design, never vendor their core.
 
+**OpenClaw's `message_received` tap is post-gate and fact-less.** Verified
+against the shipped v2026.6.10 bundle 2026-08-08, correcting the earlier
+belief (recorded in the bridge plugin and in CHANNEL-ADOPTION-PLAN.md) that
+it "fires unconditionally on every inbound message". The hook call site
+(`dispatch-*.js:1240`) is unconditional; reaching it is not.
+`message-access-*.js`'s `decideChannelIngress` returns admission
+`drop`/`skip`/`pairing-required` with gate effects literally named
+`block-dispatch`, and each adapter returns before enqueueing
+(`message-handler.preflight-*.js:1009` for Discord, `bot-*.js:4132` for
+Telegram — which on a mention miss fires only the INTERNAL hook, never the
+plugin one). Their own doc: *"A mention miss returns `admission: "skip"` so
+the turn kernel does not process an observe-only turn."*
+
+Worse, the event carries neither `isGroup` nor `wasMentioned` —
+`toPluginMessageReceivedEvent` forwards both only on the sibling
+`inbound_claim` event, and the internal fact is
+`Boolean(ctx.GroupSubject || ctx.GroupChannel)` where only `GroupChannel`
+survives into metadata, so a Telegram/WhatsApp group looks exactly like a DM
+at the tap. WhatsApp additionally suppresses the hook entirely unless
+`channels.whatsapp.pluginHooks.messageReceived: true` is set.
+
+Hence `personal_channels_service.normalize_openclaw_gate_facts`: unknown
+group-ness is treated as a GROUP (strict side of the union), so it lands on
+Gates 2/3 (allowlist + require-mention) instead of Gate 1 (default open).
+Never derive a mention from message text on this path — the payload lacks
+the bot's own handle/id, it misses Telegram `text_mention` and WhatsApp
+`mentionedJid` entirely, and `mention_gating_service`'s contract forbids
+reading content at all. Consequence to state plainly to anyone who asks why
+their OpenClaw channel is silent: it is silent BY DESIGN until the owner
+allowlists the chat and turns `require_mention` off for it, or until
+OpenClaw starts forwarding `wasMentioned` (the bridge schema and mapper
+already carry the field).
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**

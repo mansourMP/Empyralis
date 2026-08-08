@@ -83,6 +83,53 @@ LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
     "wechat_personal": {"provider": "wechat_local_bridge", "label": "WeChat"},
 }
 
+# ── OpenClaw-transported channels (CHANNEL-ADOPTION-PLAN.md step 2) ───────
+#
+# These are local-bridge channels in every sense that matters to this
+# module: a separate process on the owner's own machine speaks the platform
+# protocol, and the Empyralis gateway republishes what it sees on the same
+# `channel.inbound` event. They are therefore MERGED INTO
+# LOCAL_BRIDGE_PERSONAL_CHANNELS below rather than given a parallel
+# membership test, so every existing local-bridge-family behaviour applies
+# to them by construction instead of by remembering to add a second branch:
+#
+#   _unresolved_identity_group_policy_config  -> fails CLOSED (disabled /
+#                                                require_mention) when no
+#                                                agent identity resolves
+#   _resolve_agent_id_for_inbound             -> local-bridge state lookup
+#   _resolve_local_bridge_agent_id            -> preferred_gateway_id claim
+#   _claim_agent_channel_state                -> explicit owner action
+#   GROUP_POLICY_CHANNEL_KEYS                 -> the Gate 2/3 WRITE route
+#
+# The one thing they do NOT share is the inbound handler: OpenClaw's
+# `message_received` hook carries weaker addressing facts than a first-party
+# bridge does, so they get _OpenClawPersonalChannelHandler, which normalizes
+# those facts fail-closed before delegating to the very same
+# _handle_local_bridge_gateway_channel_inbound. See that class.
+OPENCLAW_TRANSPORT_PROVIDER = channel_lane_contract_service.OPENCLAW_TRANSPORT_PROVIDER
+OPENCLAW_CHANNEL_KEY_PREFIX = "openclaw_"
+
+OPENCLAW_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
+    "openclaw_feishu": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Feishu"},
+    "openclaw_line": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "LINE"},
+    "openclaw_qq": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "QQ"},
+    "openclaw_zalo": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Zalo"},
+    "openclaw_msteams": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Microsoft Teams"},
+}
+
+# Fail loudly if this module and the lane contract ever drift apart, rather
+# than letting a channel exist in one list and not the other and finding out
+# from a customer's silent channel (CLAUDE.md: stale config must fail
+# loudly, never fall through to a default).
+if set(OPENCLAW_PERSONAL_CHANNELS) != set(channel_lane_contract_service.OPENCLAW_PERSONAL_CHANNEL_SPECS):
+    raise RuntimeError(
+        "OpenClaw channel list drift: personal_channels_service.OPENCLAW_PERSONAL_CHANNELS "
+        f"{sorted(OPENCLAW_PERSONAL_CHANNELS)} != channel_lane_contract_service."
+        f"OPENCLAW_PERSONAL_CHANNEL_SPECS {sorted(channel_lane_contract_service.OPENCLAW_PERSONAL_CHANNEL_SPECS)}"
+    )
+
+LOCAL_BRIDGE_PERSONAL_CHANNELS.update(OPENCLAW_PERSONAL_CHANNELS)
+
 
 def _enforce_personal_gateway_config_decision(
     *,
@@ -529,12 +576,130 @@ class _LocalBridgePersonalChannelHandler(PersonalChannelHandler):
         raise ValueError(f"{self._label} is configured on Agent Computer through its local bridge.")
 
 
+# Reason code recorded on the message when this handler had to assume
+# "group" because OpenClaw did not say. Stable token, matched nowhere by
+# prose (CLAUDE.md: match on codes, never on wording).
+OPENCLAW_GROUPNESS_ASSUMED = "openclaw_groupness_unknown_assumed_group"
+
+
+def normalize_openclaw_gate_facts(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn OpenClaw's weaker addressing facts into the ones the three gates
+    consume, FAIL-CLOSED, returning a new dict (never mutating the caller's).
+
+    Why this exists at all — verified against openclaw@2026.6.10's shipped
+    bundle on 2026-08-08, not from their docs:
+
+    1. `message_received`'s event has NO `wasMentioned` and NO `isGroup`.
+       `dist/message-hook-mappers-*.js`'s `toPluginMessageReceivedEvent`
+       forwards neither, while the sibling `toPluginInboundClaimEvent` in
+       the same file forwards both. Their canonical internal fact is
+       `isGroup = Boolean(ctx.GroupSubject || ctx.GroupChannel)`, and only
+       `GroupChannel` (as `metadata.channelName`) survives into the hook —
+       so a Telegram/WhatsApp group, whose group-ness comes from
+       `GroupSubject`, reaches our tap looking exactly like a DM.
+
+    2. Therefore the bridge plugin can only ever report `isGroup: true` or
+       `isGroup: undefined` (see its `deriveIsGroupBestEffort`). It cannot
+       say `false` today.
+
+    UNKNOWN GROUP-NESS IS TREATED AS A GROUP. Treating it as a DM would
+    route the message to Gate 1, whose default for a resolved binding is
+    DM_POLICY_OPEN — i.e. a stranger in a public group would get a turn.
+    That is precisely the incident in CHANNEL-GATEWAY-PLAN.md §1. Treating
+    it as a group routes it to Gates 2 and 3, whose defaults are allowlist
+    and require-mention. Strict side of the union, always.
+
+    MENTION IS NEVER SYNTHESIZED. `is_mentioned` is passed through only when
+    OpenClaw actually asserted it (it does not, today — the field is
+    reserved for a future release; the plugin's schema already carries it).
+    `is_reply_to_sage` is never asserted from `isReply`, because "a reply to
+    some message" is not "a reply to the agent" — OpenClaw computes its own
+    `reply_to_bot` implicit mention from the bot's user id and does not
+    forward it. Deriving a mention from raw message text was considered and
+    rejected: it needs the bot's own handle/user id (absent from the
+    payload), it misses Telegram `text_mention` entities and WhatsApp
+    `mentionedJid` entirely, and `mention_gating_service`'s module contract
+    forbids reading message content at all.
+
+    NET EFFECT TODAY: an OpenClaw group message is denied at Gate 2 unless
+    the owner has explicitly allowlisted that chat, and denied at Gate 3
+    even then unless the owner has explicitly turned require_mention off for
+    that binding. Both are existing, owner-writable settings
+    (update_agent_group_policy_config / the PATCH route), not new surfaces.
+    """
+    normalized = dict(message)
+    if normalized.get("is_group") is None:
+        normalized["is_group"] = True
+        normalized["openclaw_groupness"] = OPENCLAW_GROUPNESS_ASSUMED
+    else:
+        normalized["is_group"] = bool(normalized["is_group"])
+    # Absent stays absent: mention_gating_service.mention_facts_from_message
+    # collapses a missing is_mentioned to False, which is the fail-closed
+    # answer we want. Writing an explicit False here would be identical in
+    # effect but would read as an assertion we are not entitled to make.
+    if normalized.get("is_mentioned") is None:
+        normalized.pop("is_mentioned", None)
+    # Never inferred — see the docstring.
+    normalized.pop("is_reply_to_sage", None)
+    # An inbound hook event is by definition not the owner's own self-chat;
+    # OpenClaw has no equivalent fact, and a forged one would bypass BOTH
+    # the group and DM gates (_enforce_group_policy's and _is_owner_message's
+    # self-chat shortcuts).
+    normalized["is_self_chat"] = False
+    return normalized
+
+
+class _OpenClawPersonalChannelHandler(_LocalBridgePersonalChannelHandler):
+    """A local-bridge channel whose bridge happens to be OpenClaw.
+
+    Identical to its parent in every respect except that it normalizes the
+    inbound addressing facts fail-closed first — see
+    normalize_openclaw_gate_facts. It deliberately does NOT add a fourth
+    gate, weaken an existing one, or introduce a second copy of the gate
+    chain: after that one substitution it calls straight into
+    _handle_local_bridge_gateway_channel_inbound, the same function
+    Signal/iMessage/WeChat use.
+    """
+
+    async def handle_inbound(
+        self,
+        *,
+        gateway_id: str,
+        registration: Dict[str, Any],
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized_payload = dict(payload)
+        message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+        normalized_payload["message"] = normalize_openclaw_gate_facts(message)
+        return await super().handle_inbound(
+            gateway_id=gateway_id,
+            registration=registration,
+            payload=normalized_payload,
+        )
+
+    async def configure(
+        self,
+        *,
+        gateway_id: str,
+        registration: Dict[str, Any],
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        raise ValueError(
+            f"{self._label} is configured on the OpenClaw gateway running alongside Agent Computer."
+        )
+
+
 _handler_registry = PersonalChannelHandlerRegistry()
 _handler_registry.register(_WhatsAppPersonalChannelHandler())
 _handler_registry.register(_TelegramPersonalChannelHandler())
 for _channel_key, _channel_spec in LOCAL_BRIDGE_PERSONAL_CHANNELS.items():
+    _handler_cls = (
+        _OpenClawPersonalChannelHandler
+        if _channel_key in OPENCLAW_PERSONAL_CHANNELS
+        else _LocalBridgePersonalChannelHandler
+    )
     _handler_registry.register(
-        _LocalBridgePersonalChannelHandler(
+        _handler_cls(
             _channel_key,
             _channel_spec["provider"],
             _channel_spec["label"],

@@ -20,6 +20,7 @@ import {
   assertCapabilityPermissionReady,
   filterCapabilitiesByDesktopPermission,
 } from "../runtime/desktop-permissions";
+import { openClawTransportCapabilities } from "../openclaw/capabilities";
 
 const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -86,6 +87,11 @@ export class GatewayCapabilityRouter {
         ? filterCapabilitiesByDesktopPermission(this.browserRuntime?.requestedCapabilities() ?? [])
         : []),
       ...this.personalChannelRuntimes.requestedCapabilities(),
+      // OpenClaw-transported channels have no PersonalChannelRuntime on this
+      // side — their runtime is the OpenClaw process, and the gateway owns
+      // only the loopback intake. Advertised only when that intake is
+      // actually configured; see openclaw/capabilities.ts.
+      ...openClawTransportCapabilities(),
       ...this.externalAgentProxyRuntime.requestedCapabilities(),
       // shell_sandbox capabilities are filtered the same way as browser's —
       // gated on the "shell_sandbox" desktop permission, which is only

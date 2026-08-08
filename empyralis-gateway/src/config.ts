@@ -35,6 +35,17 @@ export interface GatewayConfig {
    * shellFullAccessLocallyEnabled above.
    */
   cliSetupLocallyEnabled: boolean;
+  /**
+   * Shared secret with the OpenClaw bridge plugin running in the OpenClaw
+   * gateway process on this same box (`EMPYRALIS_BRIDGE_TOKEN` — the SAME
+   * name the plugin reads, deliberately, so a box is configured once).
+   * Undefined means the OpenClaw inbound listener does not start at all:
+   * there is no unauthenticated mode. Never log this value.
+   */
+  openclawBridgeToken?: string;
+  /** Loopback port for that listener. Matches the plugin's own default
+   *  endpoint (`http://127.0.0.1:8790/openclaw/inbound`). */
+  openclawBridgePort: number;
 }
 
 function normalizeBaseUrl(value: string | undefined, fallback: string): string {
@@ -160,5 +171,7 @@ export function loadGatewayConfig(env: NodeJS.ProcessEnv = process.env): Gateway
     shellFullAccessLocallyEnabled: normalizeBoolean(env.EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED, false),
     shellSandboxDockerImage: String(env.EMPYRALIS_GATEWAY_SHELL_SANDBOX_IMAGE || "").trim() || undefined,
     cliSetupLocallyEnabled: normalizeBoolean(env.EMPYRALIS_GATEWAY_CLI_SETUP_ENABLED, false),
+    openclawBridgeToken: String(env.EMPYRALIS_BRIDGE_TOKEN || "").trim() || undefined,
+    openclawBridgePort: normalizePositiveInt(env.EMPYRALIS_BRIDGE_PORT, 8790),
   };
 }

@@ -11,8 +11,14 @@
 //     openclaw --profile empyralis-bridge-verify gateway run \
 //       --port 19199 --bind loopback --auth token --token verify-loopback-secret
 //
-// Then in another terminal, before starting the gateway:
-//   node verify/mock-empyralis-listener.mjs &
+// Then in another terminal, before starting the gateway, run the REAL
+// gateway intake (not the old mock listener — that only proved the plugin
+// could reach *something*):
+//   cd empyralis-gateway && npm run build
+//   EMPYRALIS_BRIDGE_TOKEN=verify-bridge-secret EMPYRALIS_BRIDGE_PORT=8791 \
+//     node openclaw-bridge-plugin/verify/gateway-intake-harness.mjs
+// and point the plugin at it:
+//   EMPYRALIS_BRIDGE_ENDPOINT_URL=http://127.0.0.1:8791/openclaw/inbound
 //
 // synthetic-inbound-driver (loaded alongside empyralis-bridge here) drives
 // OpenClaw's real global hook runner with realistically-shaped events 1.5s

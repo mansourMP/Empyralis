@@ -56,6 +56,52 @@ PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
     },
 }
 
+# ── OpenClaw-transported channels ────────────────────────────────────────
+#
+# CHANNEL-ADOPTION-PLAN.md step 2. An OpenClaw gateway runs as a channel
+# TRANSPORT ONLY on the customer's own machine, next to the Empyralis
+# gateway; its brain/memory/skills/UI are off. Inbound arrives at our
+# bridge plugin's `message_received` tap, is POSTed to the Empyralis
+# gateway's loopback intake, and is republished on the SAME
+# `channel.inbound` event through the SAME three gates every other
+# personal-gateway channel uses. That makes these members of the existing
+# personal-gateway lane by construction, not a new lane.
+#
+# ONE PROVIDER FOR ALL OF THEM, ON PURPOSE. The transport is OpenClaw; the
+# platform is the channel_key suffix. A per-platform provider string would
+# imply Empyralis speaks each protocol itself, which it does not.
+#
+# Deliberately NOT listed: telegram/whatsapp/signal/imessage/wechat.
+# Empyralis already has first-party runtimes for those, and
+# CHANNEL-ADOPTION-PLAN.md step 6 is explicit that a channel is cut over
+# only after its replacement is proven live — adding a second lane for a
+# platform that already works is how you end up with two half-working
+# paths. Add an entry here when that platform's cut-over actually happens.
+OPENCLAW_TRANSPORT_PROVIDER = "openclaw"
+
+OPENCLAW_PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
+    channel_key: {
+        "provider": OPENCLAW_TRANSPORT_PROVIDER,
+        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
+        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
+        # "preview", not "live": the transport is wired and gated, but no
+        # platform on this list has been driven with real credentials yet
+        # (CHANNEL-ADOPTION-PLAN.md step 5). Do not promote this to "live"
+        # from a code reading — promote it from a real message.
+        "stage": "preview",
+        "live_capable": "true",
+    }
+    for channel_key in (
+        "openclaw_feishu",
+        "openclaw_line",
+        "openclaw_qq",
+        "openclaw_zalo",
+        "openclaw_msteams",
+    )
+}
+
+PERSONAL_CHANNEL_SPECS.update(OPENCLAW_PERSONAL_CHANNEL_SPECS)
+
 PERSONAL_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
     {
         "channel_key": "telegram_personal",
