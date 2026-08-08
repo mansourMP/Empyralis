@@ -45,7 +45,8 @@ async def _main() -> int:
         print(f"KNOWN UNCOVERED ({len(excused)}) — tenant-scoped tables deliberately outside")
         print("the migration today, each with a recorded reason. Remediation backlog:")
         for entry in excused:
-            print(f"  - {entry['table']} ({', '.join(entry['scope_columns'])})")
+            note = " [already has a policy — the exception can be deleted]" if entry.get("protected") else ""
+            print(f"  - {entry['table']} ({', '.join(entry['scope_columns'])}){note}")
             print(f"      {entry['reason']}")
 
     print()

@@ -415,7 +415,19 @@ _RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {
     "knowledge_chunks": _SCOPED_IN_APP_SQL,
     "knowledge_embeddings": _SCOPED_IN_APP_SQL,
     "workspace_member_invites": _SCOPED_IN_APP_SQL,
+    "credit_ledger_events": _SCOPED_IN_APP_SQL,
+    "agent_traces": _SCOPED_IN_APP_SQL,
+    "deployed_agent_conversation_memory": _SCOPED_IN_APP_SQL,
+    "activity_ledger_events": _SCOPED_IN_APP_SQL,
     # ── audited: keyed on an unguessable id, ownership re-checked ─────
+    # The mcp_oauth_* trio is the cleanest case in the registry: the ONLY
+    # reads are `WHERE token_hash = $1` / `code_hash = $1` — keyed on
+    # possession of the raw secret, with no list-by-client_id or
+    # list-by-user_id path anywhere. An unscoped WHERE on a secret hash is
+    # the correct shape, not a gap.
+    "mcp_oauth_access_tokens": _SCOPED_BY_UNGUESSABLE_KEY,
+    "mcp_oauth_refresh_tokens": _SCOPED_BY_UNGUESSABLE_KEY,
+    "mcp_oauth_authorization_codes": _SCOPED_BY_UNGUESSABLE_KEY,
     "deployed_agents": _SCOPED_BY_UNGUESSABLE_KEY,
     "runtime_sessions": _SCOPED_BY_UNGUESSABLE_KEY,
     "user_devices": _SCOPED_BY_UNGUESSABLE_KEY,
@@ -476,11 +488,17 @@ _RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {
         "own tenant_id/workspace_id. A policy would blank the drain loop's "
         "reads and stop all delivery. Correctly global, not an oversight."
     ),
+    # agent_computers is NOT in this registry on purpose. It already carries
+    # ENABLE + FORCE ROW LEVEL SECURITY from its own migration
+    # (migrations/add_agent_computers.sql), so it is genuinely protected and
+    # the coverage check recognises it by reading the live policy state rather
+    # than by name. Worth knowing anyway: agent_computers_repository.py runs
+    # every query with bypass_rls=True (list_records_for_pairing_scan has to
+    # scan cross-tenant to match an inbound beacon), so the policy is not the
+    # enforcement layer there today — the app-level re-check in
+    # routes_gateway.py:2393/2441 is.
     # ── NOT audited — status genuinely unknown ────────────────────────
-    "activity_ledger_events": _NOT_YET_AUDITED,
     "agent_action_events": _NOT_YET_AUDITED,
-    "agent_computers": _NOT_YET_AUDITED,
-    "agent_traces": _NOT_YET_AUDITED,
     "channel_events": _NOT_YET_AUDITED,
     "channel_links": _NOT_YET_AUDITED,
     "channel_pairing_intents": _NOT_YET_AUDITED,
@@ -538,10 +556,17 @@ async def _discover_tenant_scoped_tables(conn: Any) -> Dict[str, List[str]]:
     rows = await conn.fetch(
         """
         SELECT c.relname AS table_name,
-               array_agg(a.attname ORDER BY a.attname) AS scope_columns
+               array_agg(a.attname ORDER BY a.attname) AS scope_columns,
+               bool_or(c.relrowsecurity) AS rls_enabled,
+               bool_or(c.relforcerowsecurity) AS rls_forced,
+               COALESCE(MAX(p.policy_count), 0) AS policy_count
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_attribute a ON a.attrelid = c.oid
+        LEFT JOIN (
+            SELECT schemaname, tablename, COUNT(*) AS policy_count
+            FROM pg_policies GROUP BY schemaname, tablename
+        ) p ON p.schemaname = n.nspname AND p.tablename = c.relname
         WHERE n.nspname = 'public'
           AND c.relkind IN ('r', 'p')
           AND a.attnum > 0
@@ -550,20 +575,35 @@ async def _discover_tenant_scoped_tables(conn: Any) -> Dict[str, List[str]]:
         GROUP BY c.relname
         """
     )
-    return {row["table_name"]: list(row["scope_columns"]) for row in rows}
+    return {
+        row["table_name"]: {
+            "scope_columns": list(row["scope_columns"]),
+            "protected": bool(
+                row["rls_enabled"] and row["rls_forced"] and int(row["policy_count"] or 0) > 0
+            ),
+        }
+        for row in rows
+    }
 
 
 def _rls_coverage_problems(
-    discovered: Dict[str, List[str]],
+    discovered: Dict[str, Dict[str, Any]],
     expected: List[str],
     exceptions: Optional[Dict[str, str]] = None,
 ) -> List[str]:
-    """Tenant-scoped tables the migration never heard of and nobody excused.
+    """Tenant-scoped tables with no policy at all and no recorded exception.
 
     ``discovered`` comes from the live database, ``expected`` from
-    ``enable_rls.sql``. Anything in the first and neither of the other two is
-    a table holding tenant data with no database-level boundary — and, until
-    this check existed, no way for anyone to find out at boot.
+    ``enable_rls.sql``. The question asked is "is this table protected?", NOT
+    "is it named in that one file" — `agent_computers` carries its own
+    ``FORCE ROW LEVEL SECURITY`` in migrations/add_agent_computers.sql and is
+    genuinely protected, so flagging it would be a false alarm, and false
+    alarms are how a boot check gets switched off.
+
+    (``enable_rls.sql`` is still the right home for a new policy: CLAUDE.md's
+    deploy note says it must be re-run after adding any table, which is what
+    keeps _check_rls's enforcement half re-asserting it. A policy that lives
+    only in a one-shot migration is protected but not re-verified.)
     """
     if exceptions is None:
         exceptions = _RLS_COVERAGE_EXCEPTIONS
@@ -571,9 +611,10 @@ def _rls_coverage_problems(
     excused = set(exceptions)
     problems: List[str] = []
     for table in sorted(discovered):
-        if table in covered or table in excused:
+        info = discovered[table]
+        if table in covered or table in excused or info.get("protected"):
             continue
-        columns = ", ".join(discovered[table])
+        columns = ", ".join(info.get("scope_columns") or [])
         problems.append(f"{table} (carries {columns}): no RLS policy and no recorded exception")
     return problems
 
@@ -759,7 +800,8 @@ async def report_rls_state() -> Dict[str, Any]:
         "uncovered_but_excused": [
             {
                 "table": table,
-                "scope_columns": discovered[table],
+                "scope_columns": discovered[table].get("scope_columns") or [],
+                "protected": bool(discovered[table].get("protected")),
                 "reason": _RLS_COVERAGE_EXCEPTIONS[table],
             }
             for table in excused

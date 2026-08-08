@@ -31,7 +31,13 @@ class FakeConn:
             discovery_rows
             if discovery_rows is not None
             else [
-                {"table_name": r["table_name"], "scope_columns": ["tenant_id", "workspace_id"]}
+                {
+                    "table_name": r["table_name"],
+                    "scope_columns": ["tenant_id", "workspace_id"],
+                    "rls_enabled": True,
+                    "rls_forced": True,
+                    "policy_count": 1,
+                }
                 for r in rows
             ]
         )

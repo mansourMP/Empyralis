@@ -56,7 +56,7 @@ class CoverageProblemTests(unittest.TestCase):
 
     def test_flags_a_scoped_table_the_migration_never_heard_of(self):
         problems = preflight._rls_coverage_problems(
-            discovered={"drifted": ["tenant_id", "workspace_id"]},
+            discovered={"drifted": {"scope_columns": ["tenant_id", "workspace_id"]}},
             expected=["some_other_table"],
             exceptions={},
         )
@@ -70,7 +70,7 @@ class CoverageProblemTests(unittest.TestCase):
 
     def test_a_table_with_only_workspace_id_is_still_flagged_and_says_so(self):
         problems = preflight._rls_coverage_problems(
-            discovered={"half_scoped": ["workspace_id"]},
+            discovered={"half_scoped": {"scope_columns": ["workspace_id"]}},
             expected=[],
             exceptions={},
         )
@@ -81,15 +81,55 @@ class CoverageProblemTests(unittest.TestCase):
 
     def test_covered_by_migration_is_not_flagged(self):
         problems = preflight._rls_coverage_problems(
-            discovered={"covered": ["tenant_id", "workspace_id"]},
+            discovered={"covered": {"scope_columns": ["tenant_id", "workspace_id"]}},
             expected=["covered"],
             exceptions={},
         )
         self.assertEqual(problems, [])
 
+    def test_a_table_already_protected_elsewhere_is_not_flagged(self):
+        """The question is "is it protected", not "is it in that one file".
+
+        `agent_computers` carries its own ENABLE + FORCE ROW LEVEL SECURITY in
+        migrations/add_agent_computers.sql. It is genuinely protected, it is
+        not in enable_rls.sql, and it is not excused — so a name-only
+        comparison would report it as an unguarded tenant table. That is a
+        false alarm, and false alarms are how a boot check gets switched off.
+        """
+        problems = preflight._rls_coverage_problems(
+            discovered={
+                "protected_elsewhere": {
+                    "scope_columns": ["tenant_id", "workspace_id"],
+                    "protected": True,
+                },
+            },
+            expected=[],
+            exceptions={},
+        )
+        self.assertEqual(problems, [])
+
+    def test_partial_protection_does_not_count_as_protected(self):
+        """RLS enabled but not FORCEd, or with zero policies, is not
+        protection — the table owner bypasses an unFORCEd policy, and an
+        enabled-but-policyless table is just a table. Discovery reports
+        `protected` only when all three hold; assert the flag is honoured
+        as a boolean and a false one still fails."""
+        problems = preflight._rls_coverage_problems(
+            discovered={
+                "half_protected": {
+                    "scope_columns": ["tenant_id", "workspace_id"],
+                    "protected": False,
+                },
+            },
+            expected=[],
+            exceptions={},
+        )
+        self.assertEqual(len(problems), 1)
+        self.assertIn("half_protected", problems[0])
+
     def test_recorded_exception_is_not_flagged(self):
         problems = preflight._rls_coverage_problems(
-            discovered={"excused": ["workspace_id"]},
+            discovered={"excused": {"scope_columns": ["workspace_id"]}},
             expected=[],
             exceptions={"excused": "deliberately global — reason here"},
         )
@@ -109,9 +149,9 @@ class CoverageProblemTests(unittest.TestCase):
     def test_reports_every_gap_not_just_the_first(self):
         problems = preflight._rls_coverage_problems(
             discovered={
-                "gap_a": ["tenant_id"],
-                "gap_b": ["workspace_id"],
-                "fine": ["tenant_id", "workspace_id"],
+                "gap_a": {"scope_columns": ["tenant_id"]},
+                "gap_b": {"scope_columns": ["workspace_id"]},
+                "fine": {"scope_columns": ["tenant_id", "workspace_id"]},
             },
             expected=["fine"],
             exceptions={},
@@ -130,7 +170,7 @@ class CoverageProblemTests(unittest.TestCase):
             self.skipTest("exception registry is empty — nothing to suppress")
         table = sorted(registry)[0]
         problems = preflight._rls_coverage_problems(
-            discovered={table: ["tenant_id", "workspace_id"]},
+            discovered={table: {"scope_columns": ["tenant_id", "workspace_id"]}},
             expected=[],
         )
         self.assertEqual(problems, [])
@@ -184,6 +224,10 @@ _ADD_SCOPE_COLUMN = re.compile(
     re.IGNORECASE,
 )
 _SCOPE_COLUMN_DECL = re.compile(r"(^|,)\s*(tenant_id|workspace_id)\b", re.IGNORECASE | re.MULTILINE)
+_ENABLE_RLS = re.compile(
+    r"ALTER\s+TABLE\s+(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s+ENABLE\s+ROW\s+LEVEL\s+SECURITY",
+    re.IGNORECASE,
+)
 _SKIP_DIRS = {".git", "node_modules", ".next", "target", "venv", ".venv", "__pycache__"}
 
 
@@ -237,6 +281,33 @@ def _scoped_tables_declared_in_source() -> dict:
     return found
 
 
+def _tables_with_rls_declared_anywhere() -> set:
+    """Tables any file in the repo turns RLS on for, not just enable_rls.sql.
+
+    `agent_computers` carries its own ENABLE + FORCE ROW LEVEL SECURITY in
+    migrations/add_agent_computers.sql (and re-asserts it in
+    agent_computers_repository.py's self-provisioning path). It is protected;
+    it is simply protected somewhere else. The runtime check learns this by
+    reading the live policy state — the source-side twin has to learn it by
+    reading the source, or it would demand an exception entry for a table
+    that does not need one.
+    """
+    root = _repo_root()
+    declared: set = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for filename in filenames:
+            if not filename.endswith((".py", ".sql")):
+                continue
+            try:
+                with open(os.path.join(dirpath, filename), "r", encoding="utf-8", errors="ignore") as handle:
+                    source = handle.read()
+            except OSError:
+                continue
+            declared.update(m.group(1).lower() for m in _ENABLE_RLS.finditer(source))
+    return declared
+
+
 class SourceDeclaredCoverageTests(unittest.TestCase):
     """Every scoped table in this repo's DDL is either covered or excused.
 
@@ -254,16 +325,22 @@ class SourceDeclaredCoverageTests(unittest.TestCase):
             "the source scraper found almost nothing — it has stopped working, "
             "which would make this test vacuously green",
         )
-        covered = set(preflight._tenant_scoped_tables_from_migration())
+        protected = _tables_with_rls_declared_anywhere()
+        self.assertIn(
+            "agent_computers", protected,
+            "the RLS-declaration scraper stopped finding policies outside "
+            "enable_rls.sql, which would make this test demand exceptions for "
+            "tables that are already protected",
+        )
         excused = set(preflight._RLS_COVERAGE_EXCEPTIONS)
-        orphans = sorted(set(declared) - covered - excused)
+        orphans = sorted(set(declared) - protected - excused)
         self.assertEqual(
             orphans, [],
-            "These tables carry tenant_id/workspace_id but are in neither "
-            "migrations/enable_rls.sql nor preflight._RLS_COVERAGE_EXCEPTIONS. "
-            "Add RLS (once every query against the table is confirmed scoped, "
-            "or its reads will silently return zero rows), or record why it is "
-            f"exempt: {orphans}",
+            "These tables carry tenant_id/workspace_id, no migration turns RLS "
+            "on for them, and preflight._RLS_COVERAGE_EXCEPTIONS does not "
+            "record why. Add RLS in migrations/enable_rls.sql (only once every "
+            "query against the table is confirmed scoped, or its reads will "
+            f"silently return zero rows), or record the exemption: {orphans}",
         )
 
 
@@ -299,7 +376,26 @@ def _all_enforced(tables):
 
 def _discovery(*tables):
     return [
-        {"table_name": t, "scope_columns": ["tenant_id", "workspace_id"]}
+        {
+            "table_name": t,
+            "scope_columns": ["tenant_id", "workspace_id"],
+            "rls_enabled": True,
+            "rls_forced": True,
+            "policy_count": 1,
+        }
+        for t in tables
+    ]
+
+
+def _discovery_unprotected(*tables):
+    return [
+        {
+            "table_name": t,
+            "scope_columns": ["tenant_id", "workspace_id"],
+            "rls_enabled": False,
+            "rls_forced": False,
+            "policy_count": 0,
+        }
         for t in tables
     ]
 
@@ -318,7 +414,7 @@ class CheckRlsCoverageTests(unittest.TestCase):
     def test_boot_fails_on_an_uncovered_tenant_scoped_table(self):
         expected = preflight._tenant_scoped_tables_from_migration()
         drifted = f"brand_new_scoped_table_{uuid.uuid4().hex[:8]}"
-        conn = _FakeConn(_all_enforced(expected), _discovery(*expected, drifted))
+        conn = _FakeConn(_all_enforced(expected), _discovery(*expected) + _discovery_unprotected(drifted))
         err = self._run_check(conn)
         self.assertIsNotNone(err, "an unprotected tenant-scoped table must fail boot")
         self.assertIn(drifted, err)
@@ -338,7 +434,7 @@ class CheckRlsCoverageTests(unittest.TestCase):
         excused = sorted(preflight._RLS_COVERAGE_EXCEPTIONS)
         if not excused:
             self.skipTest("exception registry is empty")
-        conn = _FakeConn(_all_enforced(expected), _discovery(*expected, excused[0]))
+        conn = _FakeConn(_all_enforced(expected), _discovery(*expected) + _discovery_unprotected(excused[0]))
         self.assertIsNone(self._run_check(conn))
 
     def test_narrow_skip_suppresses_coverage_only(self):
@@ -349,14 +445,14 @@ class CheckRlsCoverageTests(unittest.TestCase):
         rows[0]["rls_enabled"] = False  # a REAL enforcement gap
         broken = rows[0]["table_name"]
         drifted = "some_uncovered_table"
-        conn = _FakeConn(rows, _discovery(*expected, drifted))
+        conn = _FakeConn(rows, _discovery(*expected) + _discovery_unprotected(drifted))
         err = self._run_check(conn, {"EMPYRALIS_SKIP_RLS_COVERAGE_CHECK": "true"})
         self.assertIsNotNone(err)
         self.assertIn(broken, err)
 
     def test_narrow_skip_does_not_query_discovery_at_all(self):
         expected = preflight._tenant_scoped_tables_from_migration()
-        conn = _FakeConn(_all_enforced(expected), _discovery(*expected, "drifted"))
+        conn = _FakeConn(_all_enforced(expected), _discovery(*expected) + _discovery_unprotected("drifted"))
         err = self._run_check(conn, {"EMPYRALIS_SKIP_RLS_COVERAGE_CHECK": "1"})
         self.assertIsNone(err)
         # Asserting the absence of a complaint is not enough on its own — it
@@ -370,7 +466,7 @@ class CheckRlsCoverageTests(unittest.TestCase):
         expected = preflight._tenant_scoped_tables_from_migration()
         rows = _all_enforced(expected)
         rows[0]["rls_forced"] = False
-        conn = _FakeConn(rows, _discovery(*expected, "drifted"))
+        conn = _FakeConn(rows, _discovery(*expected) + _discovery_unprotected("drifted"))
         err = self._run_check(conn)
         self.assertIsNotNone(err)
         self.assertIn("RLS not FORCEd", err)
@@ -409,6 +505,18 @@ class DiscoveryQueryTests(unittest.TestCase):
                 CREATE VIEW {p}_view AS SELECT id, tenant_id, workspace_id FROM {p}_both;
                 ALTER TABLE {p}_both ADD COLUMN dropped_scope text;
                 ALTER TABLE {p}_both DROP COLUMN dropped_scope;
+
+                -- Protected the way agent_computers is: its own ENABLE +
+                -- FORCE + policy, nowhere near enable_rls.sql.
+                CREATE TABLE {p}_protected (id text PRIMARY KEY, tenant_id text, workspace_id text);
+                ALTER TABLE {p}_protected ENABLE ROW LEVEL SECURITY;
+                ALTER TABLE {p}_protected FORCE ROW LEVEL SECURITY;
+                CREATE POLICY {p}_protected_scope ON {p}_protected FOR ALL USING (true);
+
+                -- Enabled but NOT forced and with no policy: the two
+                -- half-measures that must not read as protection.
+                CREATE TABLE {p}_enabled_only (id text PRIMARY KEY, tenant_id text, workspace_id text);
+                ALTER TABLE {p}_enabled_only ENABLE ROW LEVEL SECURITY;
                 """
             )
             discovered = await preflight._discover_tenant_scoped_tables(conn)
@@ -416,7 +524,8 @@ class DiscoveryQueryTests(unittest.TestCase):
             await conn.execute(
                 f"""
                 DROP VIEW IF EXISTS {p}_view;
-                DROP TABLE IF EXISTS {p}_both, {p}_ws_only, {p}_tenant_only, {p}_neither;
+                DROP TABLE IF EXISTS {p}_both, {p}_ws_only, {p}_tenant_only,
+                                     {p}_neither, {p}_protected, {p}_enabled_only;
                 """
             )
             await conn.close()
@@ -426,15 +535,31 @@ class DiscoveryQueryTests(unittest.TestCase):
         discovered = self._run(self._exercise())
         p = self.prefix
 
-        self.assertEqual(discovered.get(f"{p}_both"), ["tenant_id", "workspace_id"])
-        self.assertEqual(discovered.get(f"{p}_ws_only"), ["workspace_id"])
-        self.assertEqual(discovered.get(f"{p}_tenant_only"), ["tenant_id"])
+        self.assertEqual(discovered.get(f"{p}_both", {}).get("scope_columns"),
+                         ["tenant_id", "workspace_id"])
+        self.assertEqual(discovered.get(f"{p}_ws_only", {}).get("scope_columns"),
+                         ["workspace_id"])
+        self.assertEqual(discovered.get(f"{p}_tenant_only", {}).get("scope_columns"),
+                         ["tenant_id"])
 
         # A table with no scope column has no tenant boundary to enforce.
         self.assertNotIn(f"{p}_neither", discovered)
         # A view cannot carry a policy of its own; flagging it would be noise
         # that trains people to ignore this check.
         self.assertNotIn(f"{p}_view", discovered)
+
+    def test_reads_real_policy_state_not_just_column_names(self):
+        """`protected` must come from the live catalog, or the check would
+        flag every table protected outside enable_rls.sql — agent_computers
+        being the one that actually exists today."""
+        discovered = self._run(self._exercise())
+        p = self.prefix
+
+        self.assertTrue(discovered.get(f"{p}_protected", {}).get("protected"))
+        # ENABLE without FORCE and without a policy is not protection: the
+        # owner bypasses an unFORCEd policy, and there is no policy anyway.
+        self.assertFalse(discovered.get(f"{p}_enabled_only", {}).get("protected"))
+        self.assertFalse(discovered.get(f"{p}_both", {}).get("protected"))
 
     def test_finds_the_tables_the_migration_already_covers(self):
         """Sanity that discovery and the migration speak about the same
@@ -457,7 +582,7 @@ class DiscoveryQueryTests(unittest.TestCase):
         for table in sorted(present):
             with self.subTest(table=table):
                 self.assertTrue(
-                    set(discovered[table]) & {"tenant_id", "workspace_id"},
+                    set(discovered[table].get("scope_columns") or []) & {"tenant_id", "workspace_id"},
                     f"{table} is in enable_rls.sql but discovery found no scope column",
                 )
 

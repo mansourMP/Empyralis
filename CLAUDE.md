@@ -187,6 +187,55 @@ out-of-process compiled dependency this codebase grows needs the same
 staleness gate; `grep`-for-callers doesn't catch drift in an artifact that
 isn't source.
 
+**A check that derives its own expectations from the thing it checks is
+blind, and reports "passed".** `preflight._check_rls()` verified that every
+table listed in `migrations/enable_rls.sql` had RLS + FORCE + a policy — all
+40 did — but it got its list of "tenant-scoped tables" by parsing that same
+file. So a table carrying `tenant_id`/`workspace_id` that nobody added to the
+migration was simultaneously unprotected AND unverified. **60** were, on
+2026-08-08. Fixed by asking the live database which tables carry a scope
+column and requiring each to be either in the migration or in
+`preflight._RLS_COVERAGE_EXCEPTIONS` with a written verdict (seeded with all
+60, so boot is unaffected and only NEW drift fails; `EMPYRALIS_SKIP_RLS_
+COVERAGE_CHECK` disables just that half, so an incomplete list is never a
+reason to reach for `EMPYRALIS_SKIP_RLS_CHECK`). Two rules follow. When you
+write a conformance check, the expected set and the actual set must come from
+**different** sources — otherwise it can only ever confirm itself. And
+scrapers must handle inline DDL: half those tables are created by per-module
+`_ensure_*_tables()` helpers whose `CREATE TABLE` has no trailing semicolon,
+so a scraper anchored on `;` finds 30 and silently reports the other 30 do
+not exist.
+
+**No RLS ≠ a leak, and RLS is not always the fix.** Of those 60: most are
+scoped by explicit `WHERE tenant_id/workspace_id` in application SQL; 10 are
+local SQLite files where Postgres RLS is inapplicable; 6 have no live reader
+at all. Four *cannot* take the standard policy — `vault_credentials`,
+`workspace_policies`, `tenant_policies`, `tenant_enterprise_settings` carry
+only ONE of the two columns, and `empyralis_rls_scope_match(tenant_id,
+workspace_id)` requires both. `vault_credentials` is the sharpest: nullable
+`workspace_id` is load-bearing (platform-scoped credentials are the NULLs), so
+a naive policy would blank them — and `vault_repository.list_all()` is a
+full-table `SELECT` with no `WHERE` that every vault operation goes through,
+the boundary applied in Python afterwards. Separately, the four
+`run_state_repository` tables (`live_runs`, `run_archive`, `runtime_sessions`,
+`runtime_outbox`) are read through a plain asyncpg pool that never sets the
+session GUCs, so a policy there would blank the runtime's own reads. Before
+recommending RLS on a table, answer whether its existing queries would still
+return rows.
+
+**`require_api_key` is not an authorization check.** `runtime_common.py:345`
+resolves ANY authenticated user of ANY tenant — it answers "is someone logged
+in", never "may this person see this workspace". `GET /runtime/runtimes/status`
+and `/runtime/runtimes/reliability` carry it as their only gate and return
+every tenant's machine names, workspace ids and run ids, because
+`list_fleet_workers` called with empty args (`run_state_repository.py:1796`)
+has a `WHERE ($1 = '' OR tenant_id = $1)` that is then vacuously true. Use
+`enforce_workspace_access` for anything workspace-shaped and
+`current_user_has_auth_admin_access` for operator tools. Note the near-miss
+that is NOT a bug: public `GET /health` computes the same cross-tenant payload
+but `public_health()` returns only `{"ok": ...}` — trace the response shaping,
+not just the payload construction, before calling something a leak.
+
 **Silent misrouting beats loud failure, and that is a bug.** A model calling
 the CLI's built-in `TaskCreate` instead of `project_task__create` reported
 "Task #1 created successfully" while `project_tasks` stayed empty — real
