@@ -39,13 +39,17 @@ the channel transport, work continued on the old per-channel code — its
 pairing UI, its channel cards, a group-policy panel built against a gate
 model OpenClaw replaces. Four commits of UI work were abandoned unmerged.
 
-The ONE exception is a live defect actively harming customers right now (the
-silent-turn bug was shipping unwanted messages into real group chats and had
-already got the founder's personal account banned). Even then: **ask first,
-in one line, before touching the outgoing system.** Do not weigh "live bug"
-against "being deleted" silently and act on your own answer — that judgement
-belongs to the founder, and making it quietly is how a replacement program
-gets diluted into maintaining two systems at once.
+**There is no "but real customers are being harmed" exception, because there
+are no production users on the gateway.** The people using it are people the
+founder knows personally. He has stated this more than once; an agent
+reasoning about urgency must not invent a customer base to justify work on
+the outgoing system. That false premise is exactly what was used on
+2026-08-08 to rationalise fixing old channel bugs mid-replacement.
+
+If the outgoing system has a defect, the answer is one line to the founder,
+not a fix. Weighing "live bug" against "being deleted" silently, and acting
+on your own answer, is how a replacement program quietly becomes maintenance
+of two systems at once.
 
 Corollary, from the same day: never present a system being adopted as a
 menu of parts to pick from. The founder's words, after saying it many times:
