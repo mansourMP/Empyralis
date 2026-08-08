@@ -239,6 +239,23 @@ real commits, all superseded by the same fixes re-implemented directly on
 main days later. If a branch exists, merge it or delete it — leaving it means
 someone rebuilds it.
 
+**An untracked work order is invisible to the agent doing the work.** Since
+one agent = one worktree, an uncommitted file exists ONLY in the primary
+tree. `CHANNEL-ADOPTION-PLAN.md` sat untracked for three whole build steps
+while every dispatched agent was instructed to read it first — none of them
+could, and the failure is silent (a missing file, not an error). Two rules
+follow. **Commit any document you intend an agent to read**, before
+dispatching. And when handing off, put the load-bearing constraints in the
+prompt itself, not only behind a path — a prompt always arrives, a file
+reference may not.
+
+**Delete a superseded work order; do not archive it.** A stale design doc
+gets cited as present truth, which is bad. A stale *work order* gets
+**executed**, which is worse. `CHANNEL-PORT-PLAN.md` instructed an agent to
+hand-port ~190,000 lines of OpenClaw TypeScript — the precise program its
+own successor was written to cancel. Deleted 2026-08-08. If a plan is dead,
+the file dies with it; git history is the archive.
+
 ## Learn from the masters, then verify
 
 Adopting Anthropic's Agent SDK beat the hand-rolled harness. Rejecting
