@@ -394,6 +394,14 @@ Never silence a finding via their `security.audit.suppressions` — the
 lockdown forbids it outright, so "the audit is clean" keeps meaning
 something.
 
+Provisioning WRITES the config; it does not restart their process, and it
+says so (`restart_required`). Their `gateway.restart.request` is scoped
+`operator.admin`, and `operator.admin` stays permanently out of reach — it is
+the only scope under which OpenClaw honours a client-asserted `senderIsOwner`,
+one of their CVEs. The supervised unit's KeepAlive brings a new config into
+force; never widen the scope to hurry that along, and never report a policy
+as in force when it has only been written.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**

@@ -21,17 +21,44 @@
  *     `configWrites` switch precisely because they write back);
  *   - a previous Empyralis provisioning run against an older policy.
  *
- * THE DECISION — regenerate-and-restart for content drift; refuse-to-run for
- * anything we cannot verify. Concretely:
+ * THE DECISION — regenerate for content drift; refuse-to-run for anything we
+ * cannot verify. Concretely:
  *
  *   drift in a path Empyralis generates
- *       -> REGENERATE + APPLY + RESTART, and journal
+ *       -> REGENERATE + APPLY, and journal
  *          `openclaw.provision.drift_corrected` with the paths that differed.
  *          Empyralis is the sole author of those paths; a local edit is not a
  *          second opinion, it is a stale build. Reconciling the other way
  *          (importing their config into our database) would make the owner's
  *          Empyralis settings a lagging mirror of a file they cannot see, and
  *          is never done.
+ *
+ *          ON RESTART, PRECISELY — because overclaiming here would be the
+ *          same lie this module exists to prevent. `openclaw config patch`
+ *          answers "Restart the gateway to apply." Some paths hot-reload
+ *          (their `config.schema.lookup` reports a `reloadKind` per path, not
+ *          yet surveyed — CHANNEL-ADOPTION-PLAN.md still lists it UNVERIFIED);
+ *          the rest need the process to come back. This module does NOT
+ *          restart it, for two reasons that are both hard rules rather than
+ *          conveniences:
+ *
+ *            1. Their `gateway.restart.request` RPC is scoped
+ *               `operator.admin` (dist/core-descriptors-*.js). `operator.admin`
+ *               is the ONLY scope under which OpenClaw honours a
+ *               client-asserted `senderIsOwner` — literally one of their CVEs,
+ *               and the reason ../outbound-payload.ts's OPENCLAW_REQUIRED_SCOPES
+ *               is `operator.write` and nothing more. Provisioning does not get
+ *               to widen that for its own convenience.
+ *            2. The shared supervisor module never kills a running job
+ *               (../../update/gateway-supervisor-install.ts's safety posture):
+ *               unattended, from inside a live process, with nobody watching.
+ *
+ *          So a run that changed the config reports `restartRequired: true`,
+ *          which reaches the cloud in the capability result and the boot
+ *          reconcile's state update. The supervised unit's KeepAlive/
+ *          Restart=always brings the new config into force on the next
+ *          restart. What this module will never do is claim a policy is in
+ *          force when it has only been written.
  *
  *   post-apply read-back does not satisfy the lockdown or the policy
  *       -> REFUSE. The instance is not started, or is stopped if running,
@@ -226,6 +253,10 @@ export interface OpenClawProvisionResult {
   supervisor?: OpenClawSupervisorInstallOutcome;
   /** True when the supervised instance answered a health probe afterwards. */
   healthy?: boolean;
+  /** True when this run changed the config and the OpenClaw process has NOT
+   *  been restarted, so some or all of the new policy is written but not yet
+   *  in force. See the module doc's "ON RESTART, PRECISELY". */
+  restartRequired: boolean;
 }
 
 export interface OpenClawProvisionerOptions {
@@ -463,6 +494,7 @@ export class OpenClawProvisioner {
       profile,
       version,
       configChanged: false,
+      restartRequired: false,
       driftedPaths: [],
       disabledChannels: [],
       widenings: [],
@@ -612,6 +644,7 @@ export class OpenClawProvisioner {
       status: "provisioned",
       supervisor,
       healthy,
+      restartRequired: base.configChanged,
     };
     await this.record("openclaw.provision.applied", {
       profile,
@@ -628,6 +661,7 @@ export class OpenClawProvisioner {
       stripped_credential_env: strippedCredentialEnvNames,
       supervisor_action: supervisor.repair?.action ?? null,
       healthy: healthy ?? null,
+      restart_required: result.restartRequired,
     });
     return result;
   }

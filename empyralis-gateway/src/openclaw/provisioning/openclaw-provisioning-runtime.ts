@@ -272,6 +272,7 @@ function serialize(result: OpenClawProvisionResult): Record<string, unknown> {
         }
       : null,
     healthy: result.healthy ?? null,
+    restart_required: result.restartRequired,
   };
 }
 

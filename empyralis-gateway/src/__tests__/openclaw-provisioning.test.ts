@@ -803,3 +803,37 @@ test("the agent workspace is pinned inside the instance's own profile, not the s
   const agents = rendered.config.agents as { defaults: Record<string, unknown> };
   assert.equal(agents.defaults.workspace, "/tmp/fake-home/.openclaw-acme/workspace");
 });
+
+test("a run that changed the config reports restartRequired, and a no-op run does not", async () => {
+  // Overclaiming "the policy is live" when it has only been WRITTEN is the
+  // same lie this module exists to prevent. OpenClaw's own restart RPC is
+  // scoped operator.admin — the scope this codebase has a standing rule never
+  // to request (it is the only one under which a client-asserted
+  // senderIsOwner is honoured) — so the restart is reported, never taken.
+  const clean = effectiveFor([policy({ channelId: "feishu" })]);
+  const drifted = JSON.parse(JSON.stringify(clean)) as Record<string, any>;
+  drifted.channels.feishu.requireMention = false;
+
+  const changed = await fakeProvisioner({
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: drifted,
+    effectiveAfterPatch: clean,
+    audit: { findings: [] },
+    patchCode: 0,
+  }).provision();
+  assert.equal(changed.status, "provisioned", changed.refusal?.detail);
+  assert.equal(changed.configChanged, true);
+  assert.equal(changed.restartRequired, true);
+
+  // A refusal never claims a restart is pending — nothing was applied.
+  const refused = await fakeProvisioner({
+    version: "2026.7.0",
+    schema: schemaFixture(),
+    effective: clean,
+    audit: { findings: [] },
+    patchCode: 0,
+  }).provision();
+  assert.equal(refused.status, "refused");
+  assert.equal(refused.restartRequired, false);
+});
