@@ -23,7 +23,14 @@ import subprocess
 
 import pytest
 
-import conftest as tests_conftest
+# NOT `import conftest`: server_modules/tests/e2e/conftest.py has no
+# __init__.py either, so both conftests are imported under the same bare
+# top-level name "conftest" and whichever lands in sys.modules last wins --
+# which pointed this file at the wrong module during a full-suite run. The
+# guard's conftest re-registers itself under this unambiguous alias (see the
+# bottom of server_modules/tests/conftest.py) so the arm/disarm state asserted
+# here is the same state pytest is actually driving.
+import empyralis_tests_egress_guard as tests_conftest
 
 # The whole file describes an ARMED guard. A deliberate session-wide opt-in
 # run disarms it on purpose, so there is nothing here to assert -- skip rather
@@ -113,6 +120,29 @@ class TestSubprocessEgressIsBlocked:
         with pytest.raises(tests_conftest.LiveProviderCallBlocked):
             subprocess.Popen(["claude", "-p", "hello"])
         del tests_conftest._LIVE_EGRESS_VIOLATIONS[:]
+
+    def test_curl_at_a_loopback_url_is_allowed(self):
+        """test_web_tools_ssrf_redirect_guard starts a real ThreadingHTTPServer
+        on 127.0.0.1 and drives web_tools' curl fallback at it. A URL argument
+        that is demonstrably loopback is not egress."""
+        completed = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "http://127.0.0.1:1/nothing-here"],
+            capture_output=True,
+        )
+        assert completed.returncode != 0  # nothing is listening -- the point is it RAN
+        assert not tests_conftest._LIVE_EGRESS_VIOLATIONS
+
+    def test_a_local_cli_capability_probe_is_allowed(self):
+        """provider_profiles.claude_code_cli_status runs `claude auth status
+        --json` on the availability path every direct-chat test crosses. It is
+        a local capability probe, not a billed model call -- blocking it broke
+        availability resolution across ~30 tests while catching nothing."""
+        assert tests_conftest._argv_is_local_cli_probe(["claude", "auth", "status", "--json"])
+        assert not tests_conftest._argv_is_local_cli_probe(["claude", "-p", "hello"])
+        assert not tests_conftest._argv_is_local_cli_probe(["codex", "exec", "do the thing"])
+        # a probe-looking flag late in an inference command line must not buy
+        # the whole invocation a pass
+        assert not tests_conftest._argv_is_local_cli_probe(["claude", "-p", "hello", "--help"])
 
     def test_ordinary_subprocesses_still_run(self):
         """Denylist, not allowlist: this suite legitimately shells out to

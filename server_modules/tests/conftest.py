@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import sys
 import uuid
 import warnings
 from pathlib import Path
@@ -200,7 +201,22 @@ _LIVE_PROVIDER_MARKER = "live_provider"
 # spawns them as a subprocess and all of that turn's model traffic happens
 # inside Node, where no Python-level patch can see it.
 _NETWORK_EGRESS_EXECUTABLES = frozenset({
-    "curl", "wget", "http", "https", "httpie", "claude", "codex", "ollama",
+    "curl", "wget", "http", "https", "httpie", "claude", "codex",
+})
+
+# The agent CLIs are also used as LOCAL capability probes, not only as
+# inference entry points -- provider_profiles.claude_code_cli_status runs
+# `claude auth status --json` on the availability path that every direct-chat
+# test crosses. Those probes are not billed model calls and blocking them
+# would break availability resolution everywhere without catching anything
+# this guard is for. Matched on the first non-flag subcommand, and kept to
+# the invocations this repo actually makes; anything else (notably
+# `claude -p <prompt>`, `claude ... text --model ...`, `codex exec ...`, and
+# whatever argv the Agent SDK builds for its own spawn) stays blocked.
+# `ollama` is deliberately absent from the denylist entirely: the CLI talks
+# to 127.0.0.1:11434, and the socket guard is what catches ollama.com.
+_LOCAL_PROBE_CLI_TOKENS = frozenset({
+    "auth", "doctor", "mcp", "--version", "-v", "--help", "-h", "config",
 })
 
 _LIVE_EGRESS_ALLOWED = False          # flipped per-test by the fixture below
@@ -268,6 +284,42 @@ def _egress_host_is_allowed(host: str) -> bool:
     return _EGRESS_HOSTNAMES_BY_IP.get(normalized, "") in _EXTRA_ALLOWED_EGRESS_HOSTS
 
 
+def _argv_targets_only_loopback(argv: list[str]) -> bool:
+    """True when a denylisted binary is demonstrably pointed at loopback only.
+
+    Carve-out for the tests that legitimately shell out to `curl` against a
+    local HTTP server they started themselves -- test_web_tools_ssrf_redirect_guard
+    runs a real ThreadingHTTPServer on 127.0.0.1 and drives web_tools' curl
+    fallback at it. Requires at least one URL argument AND every URL to be
+    loopback: an invocation with no URL to inspect (`claude -p "..."`, which
+    reads its destination from the environment) cannot be vouched for and
+    stays blocked.
+    """
+    from urllib.parse import urlsplit
+
+    urls = [a for a in argv if a.startswith("http://") or a.startswith("https://")]
+    if not urls:
+        return False
+    for url in urls:
+        try:
+            host = str(urlsplit(url).hostname or "").strip().lower()
+        except Exception:
+            return False
+        if not _egress_host_is_allowed(host):
+            return False
+    return True
+
+
+def _argv_is_local_cli_probe(argv: list[str]) -> bool:
+    """True for `claude auth status --json` and friends -- see
+    _LOCAL_PROBE_CLI_TOKENS. Only the FIRST argument after the executable is
+    consulted, so an inference invocation cannot smuggle itself past by
+    carrying a probe-looking flag somewhere later in the command line."""
+    if len(argv) < 2:
+        return False
+    return argv[1].strip().lower() in _LOCAL_PROBE_CLI_TOKENS
+
+
 def _install_network_egress_guard() -> None:
     """Patch the process's real egress points. Installed at pytest_configure --
     before collection, so it also covers a module that fires a provider call at
@@ -329,13 +381,21 @@ def _install_network_egress_guard() -> None:
 
     def _guarded_popen_init(self, args, *rest, **kwargs):
         if not _LIVE_EGRESS_ALLOWED:
-            argv0 = args if isinstance(args, (str, bytes)) else (args[0] if args else "")
-            if isinstance(argv0, bytes):
-                argv0 = argv0.decode("utf-8", "replace")
-            basename = os.path.basename(str(argv0 or "").strip().split(" ")[0]).lower()
-            if basename in _NETWORK_EGRESS_EXECUTABLES:
+            argv = [args] if isinstance(args, (str, bytes)) else list(args or [])
+            argv = [
+                a.decode("utf-8", "replace") if isinstance(a, bytes) else str(a)
+                for a in argv
+            ]
+            argv0 = argv[0] if argv else ""
+            basename = os.path.basename(argv0.strip().split(" ")[0]).lower()
+            if (
+                basename in _NETWORK_EGRESS_EXECUTABLES
+                and not _argv_targets_only_loopback(argv)
+                and not _argv_is_local_cli_probe(argv)
+            ):
                 _record_and_raise_egress_violation(
-                    f"the {basename!r} subprocess", "subprocess.Popen"
+                    f"the {basename!r} subprocess ({' '.join(argv[:3])!r})",
+                    "subprocess.Popen",
                 )
         return real_popen_init(self, args, *rest, **kwargs)
 
@@ -1877,3 +1937,16 @@ def second_real_user_in_workspace():
         return {"user_id": user_id, "email": clean_email, "current_user": current_user}
 
     return _make
+
+
+# ---------------------------------------------------------------------------
+# Stable alias so a test can reach THIS module's state (notably the egress
+# guard's arm/disarm flag and its recorded violations, which live in these
+# globals). A plain `import conftest` is not safe here: server_modules/tests/
+# e2e/conftest.py has no __init__.py either, so both files are imported under
+# the same bare top-level name and whichever lands in sys.modules last wins --
+# which silently pointed test_live_provider_egress_guard.py at the wrong
+# module during a full-suite run. Re-registering the already-loaded module
+# object under an unambiguous name keeps the test looking at the same globals
+# pytest is actually driving, never a second copy.
+sys.modules.setdefault("empyralis_tests_egress_guard", sys.modules[__name__])
