@@ -18,8 +18,56 @@ export class GatewayCheckpoints {
   // window (see debouncedWrite() below). Defaults to "offline": nothing
   // has confirmed a live connection yet.
   private lastKnownHealthState: GatewayHealthState = "offline";
+  // In-memory mirror of lastClientSeq, for EXACTLY the reason
+  // lastKnownHealthState above exists — save() is debounced by 100ms, so a
+  // load() inside that window returns the value from before the write. Callers
+  // that allocated an outbound frame sequence with
+  // `(await load()).lastClientSeq + 1` therefore handed the SAME seq to two
+  // messages arriving less than 100ms apart, and the cloud answers a repeated
+  // seq by closing the socket (gateway_protocol_service.py, "gateway frame
+  // replay detected", code 4408) and losing the second message. `null` until
+  // the first allocation seeds it from disk; after that disk is a durability
+  // record this class writes and never reads back.
+  private lastKnownClientSeq: number | null = null;
+  // Serializes allocateClientSeq's own seed-then-increment, so the very first
+  // two concurrent allocations cannot both find the mirror unseeded.
+  private clientSeqGate: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly db: GatewayStateDb) {}
+
+  /**
+   * The next outbound frame sequence number, allocated exactly once.
+   *
+   * THE INVARIANT: every value this returns is strictly greater than every
+   * value returned before it, for the life of the process and across a
+   * restart. The cloud enforces it as a connection-fatal rule, so a duplicate
+   * is not a retry — it is a dropped customer message plus a dropped socket.
+   *
+   * Never reintroduce `(await load()).lastClientSeq + 1` at a call site: it
+   * has two independent failure modes, and this method closes both. The read
+   * and the write are separated by an await (so two callers interleave), and
+   * the write is debounced (so even a serialized second caller reads a stale
+   * number back). Reproduced live 2026-08-08 on the first provisioned OpenClaw
+   * instance — two inbound channel messages 23ms apart, both `seq: 1`.
+   */
+  async allocateClientSeq(): Promise<number> {
+    const allocation = this.clientSeqGate.then(async () => {
+      if (this.lastKnownClientSeq === null) {
+        const snapshot = await this.load();
+        this.lastKnownClientSeq = Math.max(Number(snapshot.lastClientSeq ?? 0), 0);
+      }
+      const next = this.lastKnownClientSeq + 1;
+      this.lastKnownClientSeq = next;
+      // Durability only. A failure here must not hand the caller a seq it
+      // cannot use, and must not stall the lane: the worst case of a lost
+      // write is that a later process restart re-uses a number, which is the
+      // same position we are in without any persistence at all.
+      await this.save({ lastClientSeq: next }).catch(() => undefined);
+      return next;
+    });
+    this.clientSeqGate = allocation.catch(() => undefined);
+    return allocation;
+  }
 
   /** The most recently recorded health state, synchronously available.
    *  This is what GatewayWsClient.sendHeartbeat() threads into the
