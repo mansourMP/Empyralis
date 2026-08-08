@@ -392,10 +392,13 @@ _NEEDS_SCHEMA_CHANGE_FIRST = (
     "possible at all. Blocked on a schema decision, not on effort."
 )
 _UNSCOPED_READ_CONFIRMED = (
-    "2026-08-08 audit: HAS a confirmed unscoped read reachable by any "
-    "authenticated user. Tracked as its own fix — the route gate is the bug, "
-    "RLS is only the backstop. Excused here so this check can still catch NEW "
-    "drift; removing this entry requires the read path to be fixed first."
+    "2026-08-08 audit: HAD a confirmed unscoped read reachable by any "
+    "authenticated user; the HTTP boundary was closed the same day (see the "
+    "block below). The rows are still read globally in-process by fleet "
+    "placement, so RLS remains inapplicable here — run_state_repository uses a "
+    "plain asyncpg pool that never sets the session GUCs, and a policy would "
+    "blank the runtime's own reads. Excused so this check still catches NEW "
+    "drift; the enforcement is application-level and lives at the route."
 )
 _NOT_YET_AUDITED = (
     "2026-08-08: carries a scope column and is outside enable_rls.sql, but was "
@@ -463,16 +466,17 @@ _RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {
     "workspace_policies": _NEEDS_SCHEMA_CHANGE_FIRST,
     "tenant_policies": _NEEDS_SCHEMA_CHANGE_FIRST,
     "tenant_enterprise_settings": _NEEDS_SCHEMA_CHANGE_FIRST,
-    # ── audited: a real unscoped read exists, tracked separately ──────
-    # These three feed GET /runtime/runtimes/status, /runtime/runtimes/
-    # reliability and /health/internal, all gated only by require_api_key
-    # (runtime_common.py:345) — which resolves ANY authenticated user of ANY
-    # tenant, not a system key. list_fleet_workers called with empty args
-    # (run_state_repository.py:1796) makes its own WHERE vacuously true.
-    # The route gate is the bug; note that RLS on these four tables would NOT
-    # currently help anyway — run_state_repository uses a plain asyncpg pool
-    # that never sets the session GUCs, so a policy would blank the runtime's
-    # own reads.
+    # ── audited: read globally in-process, scoped at the HTTP boundary ─
+    # These four fed GET /runtime/runtimes/status, /local/workers/status,
+    # /runtime/runtimes/reliability and /health/internal, all gated only by
+    # require_api_key — which resolves ANY authenticated user of ANY tenant,
+    # not a system key. FIXED 2026-08-08: those routes now scope to the
+    # caller's own workspaces and require has_platform_fleet_operator_access
+    # for the global view. The tables are still read globally in-process by
+    # fleet placement and lease recovery, which is correct — the boundary is
+    # the route, not the query. list_fleet_workers no longer accepts a silent
+    # unscoped read either: a missing tenant/workspace raises unless the caller
+    # passes include_all_tenants=True.
     "fleet_worker_registrations": _UNSCOPED_READ_CONFIRMED,
     "live_runs": _UNSCOPED_READ_CONFIRMED,
     "run_archive": _UNSCOPED_READ_CONFIRMED,

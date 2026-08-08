@@ -1174,6 +1174,34 @@ def current_user_has_auth_admin_access(current_user: Optional[Dict[str, Any]]) -
     return False
 
 
+def has_platform_fleet_operator_access(current_user: Optional[Dict[str, Any]]) -> bool:
+    """True only for a principal entitled to a GLOBAL, cross-tenant fleet view.
+
+    `require_api_key` is not an authorization check -- it resolves any
+    authenticated user of any tenant and answers only "is someone logged in".
+    Anything that returns other tenants' machines, run ids or workspace ids
+    must gate on this instead.
+
+    Two principals qualify:
+
+      * an auth-admin identity (`current_user_has_auth_admin_access`), the
+        documented gate for operator tools; and
+      * the platform's own service key -- `auth_type == "api_key"` is reachable
+        only by presenting `ORION_API_KEY` (see `get_current_user`), an
+        operator secret that is never issued to a customer.  Customer machines
+        bootstrap with a per-machine enrollment token or a saved runtime
+        session instead (`scripts/orion_local_worker.py`).
+
+    An ordinary bearer session -- i.e. any signed-in customer -- never
+    qualifies, which is exactly the boundary that was missing.
+    """
+    if not isinstance(current_user, dict):
+        return False
+    if current_user_has_auth_admin_access(current_user):
+        return True
+    return str(current_user.get("auth_type") or "").strip().lower() == "api_key"
+
+
 def enforce_minimum_role(current_user: Optional[Dict[str, Any]], minimum_role: str) -> Dict[str, Any]:
     if not isinstance(current_user, dict):
         raise HTTPException(status_code=401, detail="Authentication required.")
