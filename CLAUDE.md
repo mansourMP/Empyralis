@@ -506,6 +506,79 @@ family stay unscoped ON PURPOSE (the explicit `POST .../messages` route has
 no `agent_id` and must share one idempotency namespace with auto-replies) —
 that one is uniform, not a mismatch, so do not "finish the job".
 
+**A stand-in left in `sys.modules` becomes production's `server` forever.**
+Eight modules late-bind `server` with `if _server is not None: return` and
+cache it; `external_write_safety` additionally copies its whole namespace
+into its own globals. Fourteen test modules install a stand-in
+`types.ModuleType("server")` carrying a handful of attributes — 67 install
+sites — for the length of one test, each restoring it in its own cleanup
+block (`test_sage_context_files_api.py` never restores at all), and a test
+that FAILS before reaching that block leaves the stand-in registered. One
+does today
+(`test_runtime_runs_api_canonical_routes.py::test_create_runtime_session_
+canonicalizes_web_direct_chat_thread`). Everything that late-bound after
+that point kept a six-name module for the rest of the process, silently:
+`IDEMPOTENCY_RECORDS` and the rest of `server`'s namespace simply were not
+there, and the AttributeError surfaced in unrelated tests much later.
+That, not `importlib.reload`, is what made the Python suite report a
+different number on different orderings — 450 failures in alphabetical
+order, 465 and 462 under two shuffles, the same 8801 tests and the same
+commit. Fixed 2026-08-08 two ways: `external_write_safety._init()` rebinds
+when `sys.modules["server"]` is not the object it cached and refreshes the
+names it copied, plus a module-level `__getattr__` so reading a copied name
+from OUTSIDE forces the bind instead of depending on some earlier test
+having called in; and conftest restores `sys.modules["server"]` after every
+test and drops any `_server` cache holding something else — on the narrow
+waist, because the per-file cleanup block is precisely the rule that already
+failed. `test_reload_isolation.py` guards the reload half structurally.
+
+Do NOT extend that rebind to the other seven late-binders. Tests for
+`local_queue`, `provider_profiles` and `vault_store` inject a
+`SimpleNamespace` straight into `module._server` on purpose, and a guard
+that re-imports the real `server` whenever `_server` is not
+`sys.modules["server"]` throws their stub away — measured: +26 failures
+across `test_local_queue_machine_controls.py`,
+`test_local_queue_watchdog.py` and `test_local_worker_crash_rehearsal.py`.
+Those seven dereference `_server.attr` at call time, so a stale bind fails
+loudly anyway; only `external_write_safety` copies the namespace, and only a
+namespace copy can go missing in silence.
+
+**The suite is deterministic; the ENVIRONMENT is what moves the number.**
+Two identical-order full runs produce byte-identical failing sets (450 vs
+450, zero flapping) even with three other suites competing for the box. So
+when two people quote different numbers they ran different experiments.
+Three things change it without changing a line of source, and every run now
+prints all three in its header: **the interpreter** (`python -m pytest`
+takes whatever is first on PATH — the repo venv is 3.12, `ci.yml` pins
+3.14, and their pytest/fastapi versions differ), **whether the Rust kernel
+binary is built** (`target/` is untracked, so a fresh worktree skips 77
+`@pytest.mark.kernel` tests that a `cargo build` tree runs for real), and
+**how many suites are in flight** (a concurrent run gets killed under memory
+pressure, and a killed run's truncated output reads as a *smaller* failure
+count, not as an error — that is how "±16" gets quoted). Run it as
+`DATABASE_URL= venv/bin/python -m pytest server_modules/tests`, alone.
+
+**Nothing gates on the Python suite.** Every workflow in `.github/workflows`
+is `on: workflow_dispatch` — no push trigger, no PR trigger, no git hooks.
+`ci.yml`'s one pytest job runs 21 hand-picked files, not the suite, and
+`--ignore`s nothing. A suite carrying ~450 known failures is not a gate and
+should not be described as one.
+
+**Tests write to the developer's real `~/.empyralis/state`.** Nineteen
+modules bake `EMPYRALIS_STATE_HOME` at IMPORT time; conftest sets the env var
+in a fixture, which is far too late, and hand-patches only seven constants
+across five modules. The rest still point at the real home —
+`control_plane_repository.LOCAL_CONTROL_PLANE_DB_FILE` and its 8.8MB
+`agent-threads.json` sibling have their mtime moved by an ordinary `pytest`
+run. Every parallel agent's suite shares those files. Redirecting them
+generically (walk `sys.modules` for `server_modules.*` `Path` attributes
+under `~/.empyralis`) works and is drafted, but it UNMASKS at least three
+tests in `test_connectors_actions_store_credential_cross_workspace_ownership.py`
+that pass only because the developer's real vault key file exists — on a
+clean box they hit `runtime_kernel_unavailable`. Left out of the determinism
+fix deliberately so a pollution fix does not arrive disguised as a stability
+one; it needs its own change and its own full-suite measurement.
+
 **Branches whose work gets redone on main.** Nine branches were found with
 real commits, all superseded by the same fixes re-implemented directly on
 main days later. If a branch exists, merge it or delete it — leaving it means

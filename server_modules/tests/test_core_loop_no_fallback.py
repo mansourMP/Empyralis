@@ -469,60 +469,72 @@ class SignupCreditGrantTests(unittest.TestCase):
 
     def test_signup_credit_grant_env_var_override(self):
         """EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD overrides the grant."""
-        with patch.dict(
-            os.environ,
-            {"EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD": "1.00"},
-            clear=False,
-        ):
-            # Re-import to pick up env var. The constant now lives in
-            # billing_credit_config.py (single source of truth) and
-            # control_plane_repository re-exports it at import time, so
-            # both modules must be reloaded — billing_credit_config first
-            # (to recompute from the patched env), then
-            # control_plane_repository (to re-bind the fresh value).
-            import importlib
-            import server_modules.billing_credit_config as bcc
-            import server_modules.control_plane_repository as cpr
+        # Re-import to pick up env var. The constant now lives in
+        # billing_credit_config.py (single source of truth) and
+        # control_plane_repository re-exports it at import time, so both
+        # modules must be reloaded — billing_credit_config first (to
+        # recompute from the patched env), then control_plane_repository
+        # (to re-bind the fresh value).
+        #
+        # The RESTORING reloads have to sit outside the patch.dict block.
+        # Run inside it (as they were) they re-read the still-overridden
+        # variable, "restore" the module to the overridden value, and leak
+        # it into every later test in the session — silently, because
+        # control_plane_repository is on conftest's restore list and
+        # billing_credit_config was not, so the two ended up disagreeing
+        # about the same constant.
+        import importlib
+        import server_modules.billing_credit_config as bcc
+        import server_modules.control_plane_repository as cpr
 
-            importlib.reload(bcc)
-            importlib.reload(cpr)
+        try:
+            with patch.dict(
+                os.environ,
+                {"EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD": "1.00"},
+                clear=False,
+            ):
+                importlib.reload(bcc)
+                importlib.reload(cpr)
 
-            try:
                 meta = cpr._new_workspace_billing_metadata()
                 billing = meta.get("billing", {})
                 self.assertEqual(billing["credit_balance_usd"], 1.0)
                 transactions = billing.get("credit_transactions", [])
                 self.assertEqual(transactions[0]["amount_usd"], 1.0)
                 self.assertEqual(transactions[0]["credits"], 2000)
-            finally:
-                # Restore original
-                importlib.reload(bcc)
-                importlib.reload(cpr)
-
-    def test_zero_env_var_disables_grant(self):
-        """Setting EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD=0 disables the grant."""
-        with patch.dict(
-            os.environ,
-            {"EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD": "0"},
-            clear=False,
-        ):
-            import importlib
-            import server_modules.billing_credit_config as bcc
-            import server_modules.control_plane_repository as cpr
-
+        finally:
+            # env is no longer patched here, so these reload the real defaults
             importlib.reload(bcc)
             importlib.reload(cpr)
 
-            try:
+    def test_zero_env_var_disables_grant(self):
+        """Setting EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD=0 disables the grant."""
+        # Restoring reloads outside the patch.dict block — see the comment in
+        # test_signup_credit_grant_env_var_override above. This is the case
+        # that actually bit: "0" is not the default, so the leaked value was a
+        # disabled signup grant for every test that ran after this one.
+        import importlib
+        import server_modules.billing_credit_config as bcc
+        import server_modules.control_plane_repository as cpr
+
+        try:
+            with patch.dict(
+                os.environ,
+                {"EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD": "0"},
+                clear=False,
+            ):
+                importlib.reload(bcc)
+                importlib.reload(cpr)
+
                 meta = cpr._new_workspace_billing_metadata()
                 billing = meta.get("billing", {})
                 self.assertEqual(billing["credit_balance_usd"], 0.0)
                 transactions = billing.get("credit_transactions", [])
                 # When grant is 0, no transaction should be created
                 self.assertEqual(len(transactions), 0)
-            finally:
-                importlib.reload(bcc)
-                importlib.reload(cpr)
+        finally:
+            importlib.reload(bcc)
+            importlib.reload(cpr)
 
     def test_workspace_shell_metadata_includes_billing_grant(self):
         """_workspace_shell_metadata with _new_workspace_billing_metadata()
