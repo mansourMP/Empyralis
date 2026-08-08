@@ -141,6 +141,94 @@ def pytest_configure(config: "pytest.Config") -> None:
         )
 
 
+def pytest_report_header(config: "pytest.Config") -> list[str]:
+    """State the conditions this run's number is valid under.
+
+    A failure count is only comparable to another count taken the same way,
+    and three things silently change it here without changing a single line
+    of source:
+
+      * WHICH INTERPRETER. `python -m pytest` resolves to whatever is first
+        on PATH. This repo's venv is 3.12 and CI's workflow pins 3.14, and
+        the two have different pytest/fastapi/httpx versions installed --
+        so "python -m pytest" and "venv/bin/python -m pytest" are simply
+        not the same experiment.
+      * WHETHER THE RUST KERNEL BINARY IS BUILT. `target/` is not tracked,
+        so a fresh git worktree has no binary and the ~77 @pytest.mark.kernel
+        tests SKIP, while the same commit in a tree that has run `cargo
+        build` runs them for real.
+      * HOW MANY SUITES ARE IN FLIGHT. Agents work in parallel worktrees off
+        one `.git`, on one machine; several concurrent full-suite runs
+        contend for CPU and get killed under memory pressure, and a killed
+        run's truncated output reads as a much smaller failure count rather
+        than as an error.
+
+    None of these raise. They are printed, every run, so that a number
+    someone quotes carries the conditions that produced it.
+    """
+    import sys as _sys
+
+    lines = [f"empyralis: interpreter {_sys.executable} (python {_sys.version.split()[0]})"]
+
+    versions = []
+    for dist in ("fastapi", "httpx", "pydantic", "anyio", "pytest-asyncio"):
+        try:
+            from importlib.metadata import version as _version
+
+            versions.append(f"{dist} {_version(dist)}")
+        except Exception:
+            versions.append(f"{dist} ?")
+    lines.append("empyralis: " + ", ".join(versions))
+
+    try:
+        from server_modules.rust_runtime_kernel_client import runtime_kernel_binary
+
+        binary = runtime_kernel_binary()
+    except Exception:
+        binary = None
+    lines.append(
+        "empyralis: rust kernel binary "
+        + (f"{binary}" if binary else "ABSENT -- every @pytest.mark.kernel test will SKIP")
+    )
+
+    concurrent = _count_other_pytest_sessions()
+    if concurrent:
+        lines.append(
+            f"empyralis: WARNING -- {concurrent} other pytest session(s) are already running on "
+            "this machine; a count taken now is not comparable with one taken alone"
+        )
+    return lines
+
+
+def _count_other_pytest_sessions() -> int:
+    """Best-effort count of other `-m pytest` processes. Never raises: a
+    missing/odd `ps` must not be able to stop a test run."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ps", "-Ao", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except Exception:
+        return 0
+    mine = str(os.getpid())
+    count = 0
+    for line in out.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid == mine or "-m pytest" not in command:
+            continue
+        # `ps` also lists the shell that launched each run, whose own command
+        # line contains that string too. Count interpreters, not wrappers.
+        argv0 = command.split(" ", 1)[0].rsplit("/", 1)[-1].lower()
+        if not argv0.startswith("python"):
+            continue
+        count += 1
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Sibling guard to the DATABASE_URL one above, same posture, same reason for
 # existing: a test session must not reach a real, billed, third-party service
@@ -1675,6 +1763,26 @@ def _skip_kernel_tests_when_binary_missing(request: pytest.FixtureRequest, monke
 # without touching those three files' own reload-based test strategy --
 # they still get a genuinely fresh module for the duration of their own
 # test, they just stop leaking that fresh module to everyone downstream.
+#
+# The tuple below is NOT the coverage, though -- it is only a seed. It is a
+# hand-maintained list of the modules somebody had already been bitten by,
+# and a hand-maintained list of what to protect goes stale silently, which
+# is the same shape of blindness as a conformance check that derives its
+# expectations from the thing it checks. A reload of anything NOT on it
+# still leaked for the rest of the session. Confirmed instance:
+# test_core_loop_no_fallback.py's restoring `importlib.reload(bcc)` sits
+# INSIDE its own `with patch.dict(os.environ, ...)`, so it re-reads the
+# still-overridden variable and leaves
+# billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD == 0.0 for every later
+# test -- while control_plane_repository, which re-exports the same constant
+# and IS on the list, got restored. The two then disagree, which is worse
+# than either value alone.
+#
+# So the fixture also wraps importlib.reload itself for the duration of each
+# test and snapshots whatever actually gets reloaded, listed or not. The
+# seed list is still worth keeping: it snapshots from BEFORE the test body
+# ran, which is a strictly safer restore point than one taken at reload time
+# for a module several files reload.
 _RELOAD_SENSITIVE_MODULE_NAMES = (
     "server_modules.auth",
     "server_modules.db",
@@ -1683,17 +1791,47 @@ _RELOAD_SENSITIVE_MODULE_NAMES = (
     "server_modules.channel_pairing_service",
 )
 
+# The snapshots taken for the test currently running. Exposed (rather than
+# kept in the fixture's closure) so test_reload_isolation.py can assert the
+# tracker actually caught an unlisted module, instead of asserting only that
+# the wrapper object exists.
+_ACTIVE_RELOAD_SNAPSHOTS: dict[str, dict] = {}
+
 
 @pytest.fixture(autouse=True)
-def _restore_reload_sensitive_modules():
+def _restore_reload_sensitive_modules(monkeypatch: pytest.MonkeyPatch):
+    import importlib
     import sys
 
     snapshots: dict[str, dict] = {}
-    for module_name in _RELOAD_SENSITIVE_MODULE_NAMES:
+    _ACTIVE_RELOAD_SNAPSHOTS.clear()
+
+    def _snapshot(module_name: str) -> None:
+        if not module_name or module_name in snapshots:
+            return
         module = sys.modules.get(module_name)
         if module is not None:
             snapshots[module_name] = dict(vars(module))
+            _ACTIVE_RELOAD_SNAPSHOTS[module_name] = snapshots[module_name]
+
+    for module_name in _RELOAD_SENSITIVE_MODULE_NAMES:
+        _snapshot(module_name)
+
+    real_reload = importlib.reload
+
+    def _tracked_reload(module):
+        # Snapshot BEFORE the reload runs, so the restore below returns the
+        # module to the state the rest of the session was compiled against.
+        _snapshot(getattr(module, "__name__", "") or "")
+        return real_reload(module)
+
+    # Read by test_reload_isolation.py -- the mechanism disappearing is
+    # otherwise completely silent.
+    _tracked_reload._empyralis_reload_tracked = True
+    monkeypatch.setattr(importlib, "reload", _tracked_reload)
+
     yield
+
     for module_name, snapshot in snapshots.items():
         module = sys.modules.get(module_name)
         if module is None:
@@ -1711,6 +1849,81 @@ def _restore_reload_sensitive_modules():
                     delattr(module, key)
                 except Exception:
                     pass
+
+
+@pytest.fixture(autouse=True)
+def _restore_server_module_binding():
+    """No test may leave a stand-in module registered as ``server``.
+
+    Fourteen test modules install a small ``types.ModuleType("server")``
+    carrying a handful of attributes -- 67 install sites -- because the real
+    ``server`` is enormous and they only need a couple of names from it. Each
+    restores it in its own cleanup block (``test_sage_context_files_api.py``
+    never restores at all) -- but a test that FAILS before reaching that block
+    leaves the stand-in in ``sys.modules`` for the rest of the session, and
+    ``test_runtime_runs_api_canonical_routes.py::test_create_runtime_session_
+    canonicalizes_web_direct_chat_thread`` is failing today, so it does.
+
+    Eight ``server_modules`` modules then late-bind that stand-in and cache it
+    (``external_write_safety``, ``vault_store``, ``runtime_policy``,
+    ``provider_profiles``, ``local_queue``, ``connector_metadata``,
+    ``google_drive_api``, ``customer_ops_pack``).  ``external_write_safety``
+    additionally copies the bound module's whole namespace into its own
+    globals, so binding a six-attribute stand-in silently loses the rest --
+    ``IDEMPOTENCY_RECORDS`` among them.  That is the entire mechanism behind
+    the 16 tests (across four files) that pass in alphabetical order and fail
+    in any other: alphabetically they run BEFORE the leaking file, and in a
+    shuffled order they run after it.
+
+    Restoring here rather than in those six files is deliberate: a per-file
+    cleanup block is a rule the next author has to know, and it is exactly the
+    rule that already failed. This is the narrow waist.
+    """
+    import sys
+
+    had_server = "server" in sys.modules
+    before = sys.modules.get("server")
+    yield
+    after = sys.modules.get("server")
+    if after is before and had_server == ("server" in sys.modules):
+        return
+    if had_server:
+        sys.modules["server"] = before
+    else:
+        sys.modules.pop("server", None)
+    _reset_late_bound_server_caches(before)
+
+
+def _reset_late_bound_server_caches(expected_server) -> None:
+    """Drop any ``_server`` cache that is holding something else.
+
+    Discovered by scanning the imported ``server_modules.*`` for the late-bind
+    idiom rather than from a list, so a module that adopts it tomorrow is
+    covered without anyone remembering to come back here.
+    """
+    import sys
+
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith("server_modules"):
+            continue
+        try:
+            namespace = vars(module)
+        except Exception:
+            continue
+        if "_server" not in namespace or namespace["_server"] is expected_server:
+            continue
+        try:
+            module._server = None
+        except Exception:
+            continue
+        # external_write_safety copies the bound module's namespace into its
+        # own globals and records what it copied; drop those too, or the
+        # stand-in's values outlive the binding they came from.
+        exported = namespace.get("_SERVER_EXPORTED_NAMES")
+        if isinstance(exported, set):
+            for copied in list(exported):
+                namespace.pop(copied, None)
+            exported.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -1778,6 +1991,7 @@ def _isolate_empyralis_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         )
     except Exception:
         pass
+
 
 
 class _InMemoryDcrVault:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sys
 import time
 from datetime import timedelta
 from typing import Any, Callable, Dict, Optional
@@ -10,18 +11,70 @@ from typing import Any, Callable, Dict, Optional
 from server_modules import rust_runtime_kernel_client
 
 _server = None
+# Names this module copied out of `server`, so a later rebind can refresh them
+# instead of leaving whichever value arrived first in place forever.
+_SERVER_EXPORTED_NAMES: set[str] = set()
 
 
 def _init():
+    """Late-bind `server`'s public namespace into this module.
+
+    Re-binds whenever the object registered as `sys.modules["server"]` is not
+    the one we last copied from. The original `if _server is not None: return`
+    froze the namespace on the FIRST call, whatever `server` happened to be at
+    that moment -- and several test modules deliberately install a small
+    stand-in module under that name for the duration of a test. If a copy
+    happened during one of those windows, this module kept six attributes
+    forever and silently lost the rest (IDEMPOTENCY_RECORDS among them), for
+    the whole process, with no error anywhere: callers just started seeing
+    AttributeError from unrelated code much later.
+
+    Production has exactly one `server` module, so the rebind never fires
+    there; it only stops a stand-in from becoming permanent.
+    """
     global _server
-    if _server is not None:
+    current = sys.modules.get("server")
+    if _server is not None and current is _server:
         return
     import server as _s
 
     _server = _s
-    for key, value in vars(_s).items():
-        if not key.startswith("__") and key not in globals():
-            globals()[key] = value
+    exported = vars(_s)
+    # Drop names the previous binding contributed that this one does not have,
+    # so a stale value can never outlive the module it came from.
+    for stale in _SERVER_EXPORTED_NAMES - set(exported):
+        globals().pop(stale, None)
+        _SERVER_EXPORTED_NAMES.discard(stale)
+    for key, value in exported.items():
+        if key.startswith("__"):
+            continue
+        # This module's own definitions always win; only previously-copied
+        # names are refreshed.
+        if key in globals() and key not in _SERVER_EXPORTED_NAMES:
+            continue
+        globals()[key] = value
+        _SERVER_EXPORTED_NAMES.add(key)
+
+def __getattr__(name: str):
+    """Force the late bind on attribute access, not just on a function call.
+
+    Every public function here calls `_init()` first, so the copied names are
+    always present by the time this module's own code reads them. Reading one
+    from OUTSIDE -- `external_write_safety.IDEMPOTENCY_RECORDS`, which is what
+    the API-wall tests patch -- had no such trigger, so whether the attribute
+    existed depended entirely on whether some earlier test had happened to
+    call into this module first. That is a genuine order dependency in the
+    module's public surface, not just a test problem: it is why 16 tests
+    across four files passed in alphabetical order and failed in any other.
+    """
+    if name.startswith("__"):
+        raise AttributeError(name)
+    _init()
+    try:
+        return globals()[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+
 
 _EXTERNAL_WRITE_PENDING_WAIT_SECONDS = 60.0
 _EXTERNAL_WRITE_PENDING_STALE_SECONDS = 300.0
