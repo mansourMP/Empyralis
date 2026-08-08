@@ -1,0 +1,52 @@
+// Reproduces the 2026-08-08 live verification of empyralis-bridge under an
+// isolated OpenClaw profile. NEVER apply this to a real profile — it turns
+// off model provider credentials by omission (no provider configured) and
+// disables mDNS/bonjour, which is exactly what a real deployment also
+// wants, but this file is a throwaway verification harness, not a
+// provisioning template.
+//
+// Usage (replace <REPO> with the absolute path to this checkout):
+//   openclaw --profile empyralis-bridge-verify config patch --file config.patch.json5
+//   EMPYRALIS_BRIDGE_TOKEN=verify-bridge-secret \
+//     openclaw --profile empyralis-bridge-verify gateway run \
+//       --port 19199 --bind loopback --auth token --token verify-loopback-secret
+//
+// Then in another terminal, before starting the gateway:
+//   node verify/mock-empyralis-listener.mjs &
+//
+// synthetic-inbound-driver (loaded alongside empyralis-bridge here) drives
+// OpenClaw's real global hook runner with realistically-shaped events 1.5s
+// after gateway_start, so empyralis-bridge's real registered handlers run
+// end to end inside a real gateway process without needing a real channel
+// account. See verify/synthetic-inbound-driver/index.ts and
+// CHANNEL-ADOPTION-PLAN.md for what this does and does not prove.
+//
+// Tear down: pkill the gateway and listener processes, then
+// `rm -rf ~/.openclaw-empyralis-bridge-verify` (never touch ~/.openclaw or
+// ~/.openclaw-dev — those are real profiles).
+{
+  gateway: {
+    mode: "local",
+    port: 19199,
+    bind: "loopback",
+    auth: { mode: "token", token: "verify-loopback-secret" },
+    controlUi: { enabled: false },
+  },
+  discovery: {
+    mdns: { mode: "off" },
+  },
+  plugins: {
+    load: { paths: [
+      "<REPO>/empyralis-gateway/openclaw-bridge-plugin",
+      "<REPO>/empyralis-gateway/openclaw-bridge-plugin/verify/synthetic-inbound-driver",
+    ] },
+    entries: {
+      "empyralis-bridge": { enabled: true },
+      "synthetic-inbound-driver": { enabled: true },
+      bonjour: { enabled: false },
+    },
+  },
+  agents: {
+    defaults: { skipBootstrap: true },
+  },
+}

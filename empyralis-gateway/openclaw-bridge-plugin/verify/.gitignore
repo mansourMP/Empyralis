@@ -1,0 +1,4 @@
+# Runtime output from reproducing the live verification — never commit logs
+# or captured event bodies (they may contain conversation content).
+*.log
+*.jsonl

@@ -1,0 +1,22 @@
+{
+  "name": "@empyralis/openclaw-bridge-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenClaw plugin: turns an OpenClaw gateway into a channel transport for Empyralis. Runs inside OpenClaw's own process — see ../../CHANNEL-ADOPTION-PLAN.md for why. No runtime dependency on any @openclaw/* package; only the public `openclaw` package's documented plugin contract (used for local dev types/tests, never bundled).",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build --silent && node --test dist/src/__tests__/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.1.0",
+    "typescript": "^5.0.4"
+  },
+  "dependencies": {}
+}
