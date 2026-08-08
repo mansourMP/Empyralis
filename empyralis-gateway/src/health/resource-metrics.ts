@@ -1,8 +1,8 @@
-import { execFile } from "child_process";
 import fs from "fs/promises";
 import os from "os";
 
 import { sleep } from "../cloud/reconnect";
+import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
 
 /**
  * Live hardware resource telemetry attached to every gateway.heartbeat frame
@@ -218,22 +218,21 @@ async function sampleMemory(): Promise<{ used: number | null; total: number | nu
   }
 }
 
-function runCommand(command: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; stdout: string }> {
-  return new Promise((resolve) => {
-    try {
-      execFile(command, args, { timeout: timeoutMs, windowsHide: true }, (error, stdout) => {
-        if (error) {
-          // Covers "binary not found" (ENOENT), non-zero exit, and the
-          // timeout kill above — all collapse to the same best-effort null.
-          resolve({ ok: false, stdout: "" });
-          return;
-        }
-        resolve({ ok: true, stdout: String(stdout || "") });
-      });
-    } catch {
-      resolve({ ok: false, stdout: "" });
-    }
-  });
+async function runCommand(command: string, args: string[], timeoutMs: number): Promise<{ ok: boolean; stdout: string }> {
+  // execFileWithTimeout, never execFile's own `timeout` option: that option
+  // sends one SIGTERM and never escalates, so a child that ignores it kept its
+  // ProcessWrap and stdio pipes on the event loop forever. The withTimeout()
+  // races below hid that here — the PROMISE settled, so this read looked
+  // healthy while the abandoned child leaked. These samplers run on every
+  // heartbeat, so one wedged `vm_stat`/`nvidia-smi` per tick accumulates for
+  // as long as the gateway is up. See shell/exec-file-with-timeout.ts.
+  const result = await execFileWithTimeout(command, args, timeoutMs);
+  if (result.timedOut || result.error || result.exitCode !== 0) {
+    // Covers "binary not found" (ENOENT), non-zero exit, and the timeout kill
+    // — all collapse to the same best-effort null.
+    return { ok: false, stdout: "" };
+  }
+  return { ok: true, stdout: result.stdout };
 }
 
 /**

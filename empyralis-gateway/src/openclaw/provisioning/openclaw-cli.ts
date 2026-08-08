@@ -20,20 +20,29 @@
  *   BOUNDED. Every call has a timeout and a stdout cap, so a wedged CLI
  *     cannot hang a capability invocation forever — the same failure the
  *     gateway supervisor installer had to guard against (update/gateway-
- *     supervisor-install.ts's withTimeout).
+ *     supervisor-install.ts's withTimeout). That bound is enforced by
+ *     shell/exec-file-with-timeout.ts, NOT by execFile's own `timeout`
+ *     option, which this file used to pass and which does not bound
+ *     anything: it fires one SIGTERM, never escalates, and its callback
+ *     still only runs when the child exits, so a CLI that ignores SIGTERM
+ *     left the promise pending and the child on the event loop forever.
  *
  * Secrets are never passed as argv (argv is world-readable in `ps`): the
  * gateway token reaches OpenClaw through the config file it writes, and the
  * audit's `--token` is only ever used for a deep probe we do not run.
  */
 
-import { execFile } from "child_process";
 import os from "os";
 import path from "path";
 
+import { execFileWithTimeout } from "../../shell/exec-file-with-timeout";
 import { sanitizeOpenClawChildEnv } from "./openclaw-config-plan";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+/** Conventional shell exit code for "killed by a timeout" (`timeout(1)`), so a
+ *  wedged CLI is distinguishable from both success and the 127 this file
+ *  already reserves for "binary not installed". */
+const TIMED_OUT_EXIT_CODE = 124;
 /** `config schema` alone is ~2.5MB, so this cannot be small. */
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
@@ -98,29 +107,26 @@ export class OpenClawCli {
     return { ...this.env };
   }
 
-  private defaultExec(args: string[], options?: { timeoutMs?: number }): Promise<OpenClawCliResult> {
-    return new Promise((resolve) => {
-      execFile(
-        this.binaryPath,
-        args,
-        {
-          env: this.env,
-          timeout: options?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-          maxBuffer: MAX_BUFFER_BYTES,
-          encoding: "utf8" as const,
-        },
-        (error, stdout, stderr) => {
-          if (error && error.code === "ENOENT") {
-            // Not installed at all — distinguished from "wrong version" so
-            // openclaw-version.ts can say the right thing.
-            resolve({ code: 127, stdout: "", stderr: `openclaw binary not found at "${this.binaryPath}"` });
-            return;
-          }
-          const code = typeof error?.code === "number" ? error.code : error ? 1 : 0;
-          resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
-        },
-      );
+  private async defaultExec(args: string[], options?: { timeoutMs?: number }): Promise<OpenClawCliResult> {
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const result = await execFileWithTimeout(this.binaryPath, args, timeoutMs, {
+      env: this.env,
+      maxBuffer: MAX_BUFFER_BYTES,
+      encoding: "utf8" as const,
     });
+    if (result.timedOut) {
+      return {
+        code: TIMED_OUT_EXIT_CODE,
+        stdout: "",
+        stderr: `openclaw ${args.join(" ")} timed out after ${timeoutMs}ms and was killed.`,
+      };
+    }
+    if (result.error?.code === "ENOENT") {
+      // Not installed at all — distinguished from "wrong version" so
+      // openclaw-version.ts can say the right thing.
+      return { code: 127, stdout: "", stderr: `openclaw binary not found at "${this.binaryPath}"` };
+    }
+    return { code: result.exitCode ?? 1, stdout: result.stdout, stderr: result.stderr };
   }
 
   /** Every subcommand goes through here, so `--profile` cannot be forgotten. */
