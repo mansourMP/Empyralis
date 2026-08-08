@@ -234,6 +234,23 @@ same key. Now derived from the service map. The gateway's copy is a genuine
 cross-language duplicate and stays, guarded by drift assertions in both
 directions; a same-language third copy never earns its place.
 
+**A mock protects a seam, not a path.** `test_genuinely_silent_turn_still_returns_none`
+patched `execute_sage_turn`, got its `None`, and passed for months — while
+the code AFTER that seam ran a second, unmocked LLM turn. The sync
+`build_whatsapp_personal_reply` / `build_telegram_personal_reply` (both live:
+`personal_channels_service.py:2775` and `:3277`) treated the unified path's
+`None` as "nothing to send, try harder" and fell through to the legacy
+no-tools `_build_personal_reply`, which re-asked the model with no mention
+gate, no envelope and no group context — asked "hello" it answered "Hello!
+How can I help you today?" and shipped it. **Silence is a decision, never a
+failure.** The async builders never had that fallback; now the sync ones
+don't either, and the whole legacy no-tools path is deleted rather than left
+for someone to rewire. Fixed 2026-08-08. Two rules follow. A test asserting
+an ABSENCE must also assert the call count, or it cannot tell "nothing
+happened" from "something else happened". And when a mocked path still
+reaches a provider, the path has moved out from under the patch — find where
+it goes now before re-pointing the mock, because the move is usually the bug.
+
 **Branches whose work gets redone on main.** Nine branches were found with
 real commits, all superseded by the same fixes re-implemented directly on
 main days later. If a branch exists, merge it or delete it — leaving it means
@@ -421,6 +438,29 @@ runtime now refuses to boot a dev/test/local process without it
 (`server_modules/preflight.py`'s `_check_local_stack_database_url`). Never
 set it by copying a value you found somewhere; if you don't know what it
 should be, ask rather than guess.
+
+**A test may never reach a live LLM provider.** Enforced in
+`server_modules/tests/conftest.py`, sibling to the `DATABASE_URL` guard and
+added for the same reason: a credentialed developer's `pytest` run was making
+real, billed DeepSeek/OpenAI calls, and on a box WITHOUT credentials the same
+calls failed quietly and let assertions pass for unrelated reasons. There is
+no single provider chokepoint to patch — traffic leaves through
+`scripts/orion_local_worker_llm.py` (urllib + a `curl` fallback),
+`runtime_common.http_json_request`, `openai_compat_adapter`'s httpx client,
+the Node `claude` CLI the Agent SDK spawns, and several one-off SDK clients —
+so the guard sits at `socket.socket.connect` (every in-process transport ends
+there) plus a subprocess denylist for the ones that leave the process. The
+violation is a **`BaseException`**, because the channel and runtime paths are
+full of broad `except Exception:` handlers that would otherwise swallow it,
+and it is re-raised at teardown so not even a bare `except:` buys a green
+test. Allowed: loopback, the `DATABASE_URL` host, `curl` at a loopback URL,
+and local CLI capability probes (`claude auth status`). Opt in with
+`@pytest.mark.live_provider` or `EMPYRALIS_TEST_ALLOW_LIVE_PROVIDER_CALLS=1`;
+no test needs either today. Turning it on exposed 12 tests
+(`test_sage_agent_runtime_service.py` ×6, `test_preflight.py` ×3,
+`test_operator_chat.py`, `test_sage_chat_api.py`) that had been calling
+providers for real — still open, and each needs a mock, not a weaker
+assertion.
 
 Python tests passing is not evidence the UI works. A test asserting a function
 returns a dict does not notice that the button calling it fires no request.

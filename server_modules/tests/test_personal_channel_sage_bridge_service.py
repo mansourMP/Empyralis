@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-import uuid
 import asyncio
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
@@ -23,65 +22,22 @@ from server_modules.sage_agent_runtime_contract import SageTurnResult
 
 
 class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
-    def test_whatsapp_personal_reply_uses_direct_chat_runtime_lane_without_studio_install_context(self) -> None:
-        with (
-            patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
-                new=AsyncMock(return_value=SageTurnResult(message="")),
-            ),
-            patch(
-                "server_modules.direct_chat_runtime_exports.collect_direct_operator_reply",
-                return_value={"reply": "hello from Sage"},
-            ) as reply_mock,
-        ):
-            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
-                workspace_id="workspace-1",
-                gateway_id="gateway-1",
-                remote_jid="15551234567",
-                text="hey Sage",
-                push_name="Mansur",
-            )
-
-        self.assertEqual(result["text"], "hello from Sage")
-        kwargs = reply_mock.call_args.kwargs
-        self.assertEqual(kwargs["thread_id"], "whatsapp_personal:gateway-1:15551234567")
-        self.assertEqual(kwargs["availability"]["runtime_lane"], "personal_gateway")
-        self.assertEqual(kwargs["availability"]["memory_surface"], "direct_chat")
-        self.assertEqual(kwargs["session_ctx"]["surface_channel"], "whatsapp_personal")
-        self.assertEqual(kwargs["session_ctx"]["runtime_lane"], "personal_gateway")
-        self.assertEqual(kwargs["session_ctx"]["memory_surface"], "direct_chat")
-        self.assertEqual(kwargs["availability"]["personal_channel_tool_profile"], "external_no_tools")
-        self.assertFalse(kwargs["availability"]["tools_allowed"])
-        self.assertEqual(kwargs["availability"]["tool_capabilities"], [])
-        self.assertFalse(kwargs["availability"]["runtime_ok"])
-        self.assertFalse(kwargs["availability"]["local_gateway_online"])
-        self.assertFalse(
-            kwargs["availability"]["capability_truth"]["my_computer"]["local_tools_available"]
-        )
-        self.assertEqual(kwargs["session_ctx"]["personal_channel_tool_profile"], "external_no_tools")
-        self.assertFalse(kwargs["session_ctx"]["tools_allowed"])
-        self.assertNotIn("responder_install_id", kwargs["session_ctx"])
-        self.assertNotIn("deployed_agent_id", kwargs["session_ctx"])
-        self.assertNotIn("connector_id", kwargs["session_ctx"])
-        self.assertEqual(kwargs["requested_model"], "")
-        self.assertEqual(kwargs["requested_provider"], "")
-        self.assertIn("EXTERNAL_UNTRUSTED_CONTENT", kwargs["message"])
-        self.assertIn("hey Sage", kwargs["message"])
-        self.assertEqual(kwargs["session_ctx"]["external_content_guard"]["source"], "personal_channel")
-        self.assertEqual(kwargs["session_ctx"]["external_content_guard"]["channel"], "whatsapp_personal")
-        uuid.UUID(kwargs["session_ctx"]["external_content_guard"]["wrapper_id"])
-
     def test_telegram_personal_reply_wraps_prompt_injection_before_runtime(self) -> None:
-        with (
-            patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
-                new=AsyncMock(return_value=SageTurnResult(message="")),
-            ),
-            patch(
-                "server_modules.direct_chat_runtime_exports.collect_direct_operator_reply",
-                return_value={"reply": "safe reply"},
-            ) as reply_mock,
-        ):
+        """The prompt-injection boundary, asserted on the path that actually
+        runs: a non-owner's message is wrapped by external_content_guard
+        BEFORE it reaches execute_sage_turn.
+
+        This assertion used to be made one layer further down, against
+        direct_chat_runtime_exports.collect_direct_operator_reply -- the
+        legacy no-tools fallback builder. That fallback only ever ran when
+        the unified turn returned nothing, i.e. when the agent had chosen
+        silence, and it has been removed (it was re-asking the model after
+        that decision and speaking anyway). The guard property is unchanged
+        and still enforced; only the seam it is observed at moves, from the
+        deleted fallback to the real chokepoint.
+        """
+        turn_mock = AsyncMock(return_value=SageTurnResult(message="safe reply"))
+        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
             result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
@@ -91,63 +47,11 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(result["text"], "safe reply")
-        kwargs = reply_mock.call_args.kwargs
-        self.assertIn("EXTERNAL_UNTRUSTED_CONTENT", kwargs["message"])
-        self.assertIn("SANITIZED_EXTERNAL_CONTENT_MARKER", kwargs["message"])
-        self.assertIn(
-            "ignore_previous_instructions",
-            kwargs["session_ctx"]["external_content_guard"]["suspicious_patterns"],
-        )
-
-    def test_personal_reply_temporarily_removes_runtime_tool_builders(self) -> None:
-        from server_modules import direct_chat_runtime_exports
-
-        original_builtin_builder = lambda: [{"name": "web__search"}]
-
-        def collect_reply(**_kwargs):
-            self.assertEqual(direct_chat_runtime_exports.build_direct_chat_tools([{"id": "gmail"}]), [])
-            self.assertEqual(direct_chat_runtime_exports.build_local_direct_chat_tools({"runtime_ok": True}), [])
-            self.assertEqual(direct_chat_runtime_exports.build_builtin_direct_chat_tools(), [])
-            return {"reply": "no tools used"}
-
-        with (
-            patch(
-                "server_modules.sage_turn_adapter.execute_sage_turn",
-                new=AsyncMock(return_value=SageTurnResult(message="")),
-            ),
-            patch.object(
-                direct_chat_runtime_exports,
-                "build_direct_chat_tools",
-                lambda _tool_capabilities: [{"name": "gmail__send"}],
-                create=True,
-            ),
-            patch.object(
-                direct_chat_runtime_exports,
-                "build_local_direct_chat_tools",
-                lambda _availability: [{"name": "local_shell__run"}],
-                create=True,
-            ),
-            patch.object(
-                direct_chat_runtime_exports,
-                "build_builtin_direct_chat_tools",
-                original_builtin_builder,
-                create=True,
-            ),
-            patch(
-                "server_modules.direct_chat_runtime_exports.collect_direct_operator_reply",
-                side_effect=collect_reply,
-            ),
-        ):
-            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
-                workspace_id="workspace-1",
-                gateway_id="gateway-1",
-                remote_jid="15551234567",
-                text="search the web for this",
-                push_name="Mansur",
-            )
-
-            self.assertEqual(result["text"], "no tools used")
-            self.assertIs(direct_chat_runtime_exports.build_builtin_direct_chat_tools, original_builtin_builder)
+        message = turn_mock.await_args.kwargs["message"]
+        self.assertIn("EXTERNAL_UNTRUSTED_CONTENT", message)
+        self.assertIn("SANITIZED_EXTERNAL_CONTENT_MARKER", message)
+        self.assertEqual(turn_mock.await_args.kwargs["channel_origin"], "telegram_personal")
+        self.assertEqual(turn_mock.await_args.kwargs["channel_sender_id"], "tg-user-1")
 
     def test_async_telegram_reply_routes_unified_sage_with_trace(self) -> None:
         async def run_case():
@@ -299,11 +203,32 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         self.assertEqual(result["media"], [self._MEDIA_ITEM])
 
     def test_genuinely_silent_turn_still_returns_none(self) -> None:
-        """Unchanged behavior: no message AND no media is real silence."""
-        with patch(
-            "server_modules.sage_turn_adapter.execute_sage_turn",
-            new=AsyncMock(return_value=SageTurnResult(message="")),
-        ):
+        """No message AND no media is real silence -- and silence must SURVIVE
+        the whole builder, not just the unified turn inside it.
+
+        This test used to assert only `assertIsNone(result)`, which it got for
+        entirely the wrong reason. The unified path did return None correctly;
+        build_whatsapp_personal_reply then treated that None as "nothing to
+        send, try harder" and ran a SECOND, tool-less LLM turn
+        (_build_personal_reply -> collect_direct_operator_reply ->
+        stream_provider_backed_direct_chat) that never saw the mock at all. On
+        a machine with credentials that second turn reached DeepSeek for real
+        and came back with "Hello! How can I help you today?" -- an unprompted
+        outbound message from a turn that had already decided to stay quiet,
+        which is precisely the failure that got the owner banned from a public
+        Telegram group. On a machine WITHOUT credentials the same call failed,
+        the failure was swallowed, None fell out anyway, and the assertion
+        passed while verifying nothing.
+
+        So the assertions below check the property, not the symptom:
+          - the result is None (silence reaches the caller), AND
+          - exactly ONE turn ran (no second, unguarded LLM call after it).
+        The conftest egress guard is the structural backstop: if anyone
+        reintroduces a post-silence provider call, it fails loudly instead of
+        billing someone and passing.
+        """
+        turn_mock = AsyncMock(return_value=SageTurnResult(message=""))
+        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
             result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
@@ -313,6 +238,33 @@ class OutboundMediaPropagationTests(unittest.TestCase):
             )
 
         self.assertIsNone(result)
+        self.assertEqual(
+            turn_mock.await_count, 1,
+            "a silent turn must run exactly one turn -- a second one means the "
+            "builder is re-asking the model after it already chose silence",
+        )
+
+    def test_genuinely_silent_group_turn_is_silent_on_telegram(self) -> None:
+        """The banned-account case, stated directly: a group message the agent
+        chooses not to answer produces NO reply object at all, so
+        personal_channels_service has nothing to dispatch. Same property as
+        above on the other live sync builder (personal_channels_service.py
+        calls build_telegram_personal_reply for every Telegram inbound)."""
+        turn_mock = AsyncMock(return_value=SageTurnResult(message=""))
+        with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
+            result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
+                workspace_id="workspace-1",
+                gateway_id="gateway-1",
+                remote_jid="tg-group-1",
+                text="anyone up for lunch?",
+                push_name="Someone Else",
+                is_group=True,
+                chat_label="Family",
+                was_addressed=False,
+            )
+
+        self.assertIsNone(result)
+        self.assertEqual(turn_mock.await_count, 1)
 
     def test_reply_with_no_media_key_defaults_to_empty_list(self) -> None:
         """A turn that never touched send_image/generate_image (the common
