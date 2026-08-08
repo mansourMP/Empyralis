@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
 
 import logging as _logging
@@ -12,7 +11,6 @@ from server_modules.sage_command_dispatcher import (  # noqa: E402
 )
 from server_modules.error_notification import classify_error_notification  # noqa: E402
 
-from server_modules import authority_mandate_service
 from server_modules import channel_lane_contract_service
 from server_modules.channel_adapter import filter_outbound_reply
 from server_modules.inbound_envelope import (
@@ -76,133 +74,6 @@ def _build_error_reply_dict(
     return result
 
 
-_NO_TOOL_RUNTIME_CALLBACKS = (
-    "build_direct_chat_tools",
-    "build_local_direct_chat_tools",
-    "build_builtin_direct_chat_tools",
-    "_build_direct_chat_tools",
-    "_build_local_direct_chat_tools",
-    "_build_builtin_direct_chat_tools",
-)
-
-
-def _personal_channel_no_tools_availability(runtime_context: Dict[str, Any]) -> Dict[str, Any]:
-    availability = dict(runtime_context["availability"])
-    availability.update(
-        {
-            "personal_channel_tool_profile": "external_no_tools",
-            "tools_allowed": False,
-            "tool_capabilities": [],
-            "local_gateway_online": False,
-            "runtime_ok": False,
-            "capability_truth": {
-                "my_computer": {
-                    "local_tools_available": False,
-                    "local_gateway_online": False,
-                    "runtime_ok": False,
-                },
-                "connectors": [],
-                "builtin_tools": [],
-            },
-        }
-    )
-    return availability
-
-
-def _personal_channel_no_tools_session_ctx(
-    *,
-    runtime_context: Dict[str, Any],
-    guarded: Any,
-    is_owner: bool = False,
-) -> Dict[str, Any]:
-    session_ctx = dict(runtime_context["session_ctx"])
-    session_ctx.update(
-        {
-            "personal_channel_tool_profile": "external_no_tools",
-            "tools_allowed": False,
-            # This fallback (mandate hardening report) used to hard-code
-            # TIER_AUDIENCE unconditionally because it never resolved a live
-            # sender identity. It now receives is_owner from the SAME
-            # robust, non-spoofable check the primary unified path uses
-            # (personal_channels_service._is_owner_message via
-            # _enforce_dm_policy — self-chat or sender matching the
-            # channel's linked owner id, NEVER a claimed name/message text)
-            # — so a provably-owner turn gets TIER_OWNER here too. Still
-            # fails safe: is_owner defaults False -> audience, and tools
-            # stay hard-zeroed below regardless of tier (this is a no-tools
-            # call either way), so this only ever affects tone/behavior
-            # instructions inside handle_sage_chat, never tool access.
-            "authority_tier": (
-                authority_mandate_service.TIER_OWNER
-                if is_owner
-                else authority_mandate_service.TIER_AUDIENCE
-            ),
-        }
-    )
-    # Only genuinely external/unknown senders get the external_content_guard
-    # audit block — an owner turn was never wrapped in the first place (see
-    # the is_owner branch in _build_personal_reply below), so there is no
-    # wrapper_id/suspicious_patterns to report here.
-    if not is_owner and guarded is not None:
-        session_ctx["external_content_guard"] = {
-            "wrapper_id": guarded.wrapper_id,
-            "suspicious_patterns": list(guarded.suspicious_patterns),
-            "source": guarded.metadata.source,
-            "channel": guarded.metadata.channel,
-        }
-    return session_ctx
-
-
-def _owner_provenance_message(
-    *,
-    raw_text: str,
-    display_name: Optional[str],
-    channel_label: str,
-    is_group: bool = False,
-    chat_label: Optional[str] = None,
-) -> str:
-    """Clean, unwrapped provenance header for a message ROBUSTLY identified
-    as coming from the workspace OWNER's own identity — self-chat, or a
-    sender matching the channel's linked owner id (see
-    personal_channels_service._is_owner_message). Deliberately NOT the
-    same shape as external_content_guard.wrap_external_content: no
-    "SECURITY NOTICE", no <<<EXTERNAL_UNTRUSTED_CONTENT>>> markers. The
-    owner is not an external/untrusted party — wrapping their own message
-    as untrusted data (the bug this fixes) taught the model to distrust its
-    own owner's instructions. This is presentation only, never a trust
-    boundary: display_name comes from the channel's own push_name field on
-    a message already robustly confirmed to be from the owner's linked
-    identity, so it cannot be spoofed by a stranger to claim ownership.
-
-    is_group / chat_label: part of the "family group" bug fix. This
-    function used to hardcode "direct message" unconditionally, even when
-    the caller had ALREADY correctly resolved is_group=True (an owner
-    posting inside a group they're a member of — see
-    _build_unified_sage_personal_reply_async's is_group docstring). The
-    model was then told "From: <name> (owner) · <channel> · direct
-    message" for what was actually a message in a shared group with other,
-    non-owner participants watching — indistinguishable, from the model's
-    point of view, from the owner privately DMing it. That framing is what
-    made the agent treat a group turn exactly like a private 1:1 command.
-    chat_label (the actual group/channel name, e.g. a Telegram supergroup's
-    title) is untrusted, attacker-influenceable text — sanitized/truncated
-    by the caller (see _sanitize_channel_label) before it ever reaches
-    here; only ever used for a human-readable label, never a trust
-    boundary.
-    """
-    name = str(display_name or "").strip() or "the workspace owner"
-    label = str(channel_label or "").strip() or "this channel"
-    if is_group:
-        group_name = str(chat_label or "").strip()
-        where = f'the "{group_name}" group chat' if group_name else "a group chat"
-        return (
-            f"From: {name} (owner) · {label} · message posted in {where}, "
-            "visible to other participants who are NOT the workspace owner\n\n"
-            f"{raw_text}"
-        )
-    return f"From: {name} (owner) · {label} · direct message\n\n{raw_text}"
-
-
 def _owner_unified_conversation_key(agent_id: str) -> str:
     """Fixed agent_conversation_memory conversation_key for the owner's own
     1:1 thread with this agent — shared across EVERY channel the owner DMs
@@ -241,47 +112,28 @@ def _sanitize_channel_label(value: Optional[str]) -> str:
 
 
 def _personal_channel_guard_metadata(
-    *, remote_jid: str, is_group: bool, chat_label: Optional[str], include_group_context: bool = True,
+    *, remote_jid: str, is_group: bool, chat_label: Optional[str],
 ) -> Dict[str, Any]:
     """Metadata threaded into external_content_guard.wrap_external_content
-    for a non-owner personal-channel sender ("family group" bug fix, other
-    half). _owner_provenance_message's is_group/chat_label doc covers the
-    OWNER branch; this covers the EXTERNAL/non-owner branch, which needs
-    the same explicit "you are one of possibly many people in a shared
-    chat" signal — without it, a message that DOES pass the group gate
-    (mentioned or a reply to Sage) still reached the model with zero
-    indication it was a group message at all: Source/Sender/Channel lines
-    only, the same as an ordinary 1:1 stranger DM. Chat-Type/Group-Name are
-    deliberately Title-Cased (unlike "remote_jid") to render legibly
-    alongside wrap_external_content's own Source:/Sender:/Channel: lines —
-    external_content_guard._metadata_lines passes extra dict keys through
-    unchanged, no automatic case conversion. chat_label is untrusted,
+    for a non-owner personal-channel sender. chat_label is untrusted,
     attacker-influenceable text (any group member/admin can set a group's
     name) — sanitized/truncated via _sanitize_channel_label before it
     reaches the model, same as everywhere else chat_label is used.
 
-    include_group_context: True (default) keeps the ORIGINAL behavior this
-    docstring describes — the legacy no-tools _build_personal_reply()
-    fallback still needs it, since that path never reaches
-    execute_sage_turn and so has no envelope header to state the group
-    context instead. _build_unified_sage_personal_reply_async (the primary
-    path — every real personal-channel turn) passes False: the canonical
-    InboundEnvelope's rendered header (execute_sage_turn's chokepoint)
-    already states the group/channel name and "NOT your owner" once,
-    structurally: adding it again here would be exactly the
-    "is_group/chat_label text framing" duplication the inbound-envelope
-    wiring removes. The SECURITY NOTICE/<<<EXTERNAL_UNTRUSTED_CONTENT>>>
-    trust boundary itself, and the plain remote_jid/Sender:/Channel: lines,
-    are UNCHANGED either way — this flag only ever affects the two extra
-    Chat-Type/Group-Name lines.
+    The group signal itself (Chat-Type / Group-Name) is deliberately NOT
+    added here any more: the canonical InboundEnvelope's rendered header
+    (execute_sage_turn's chokepoint) already states the group/channel name
+    and "NOT your owner" once, structurally, and duplicating it inside the
+    guard wrapper is exactly the ad-hoc text framing the inbound-envelope
+    wiring removed. An `include_group_context=True` branch used to keep the
+    old behavior for the legacy no-tools _build_personal_reply() fallback;
+    that fallback is gone (it was overriding the agent's decision to stay
+    silent with a second, unguarded LLM turn), so the flag had exactly one
+    caller passing exactly one value and has been collapsed away. The
+    SECURITY NOTICE / <<<EXTERNAL_UNTRUSTED_CONTENT>>> trust boundary and
+    the plain remote_jid/Sender:/Channel: lines are UNCHANGED.
     """
-    metadata: Dict[str, Any] = {"remote_jid": str(remote_jid or "").strip()}
-    if is_group and include_group_context:
-        metadata["Chat-Type"] = "group"
-        group_name = _sanitize_channel_label(chat_label)
-        if group_name:
-            metadata["Group-Name"] = group_name
-    return metadata
+    return {"remote_jid": str(remote_jid or "").strip()}
 
 
 def _build_personal_channel_envelope(
@@ -461,117 +313,6 @@ async def _execute_channel_turn_with_envelope(
     return sage_result.as_dict()
 
 
-@contextmanager
-def _without_direct_chat_runtime_tools(runtime_exports: Any):
-    saved = {
-        name: getattr(runtime_exports, name)
-        for name in _NO_TOOL_RUNTIME_CALLBACKS
-        if hasattr(runtime_exports, name)
-    }
-    for name in saved:
-        if "builtin" in name:
-            setattr(runtime_exports, name, lambda: [])
-        elif "local" in name:
-            setattr(runtime_exports, name, lambda _availability: [])
-        else:
-            setattr(runtime_exports, name, lambda _tool_capabilities: [])
-    try:
-        yield
-    finally:
-        for name, value in saved.items():
-            setattr(runtime_exports, name, value)
-
-
-def _build_personal_reply(
-    *,
-    surface_channel: str,
-    workspace_id: str,
-    gateway_id: str,
-    remote_jid: str,
-    text: str,
-    push_name: Optional[str] = None,
-    fallback_label: str,
-    source_event_id: Optional[str] = None,
-    is_owner: bool = False,
-    is_group: bool = False,
-    chat_label: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    normalized_text = str(text or "").strip()
-    if not normalized_text:
-        return None
-    guarded = None
-    if is_owner:
-        # OWNER, robustly identified by the caller — clean provenance, no
-        # SECURITY NOTICE, no <<<EXTERNAL_UNTRUSTED_CONTENT>>> wrapper. See
-        # _build_unified_sage_personal_reply_async's matching branch (the
-        # primary path) for the full rationale; this legacy no-tools
-        # fallback needs the same fix so a silent-turn retry doesn't
-        # re-wrap the owner's own message as untrusted external content.
-        # is_group/chat_label: same "family group" bug fix as the primary
-        # path — see _owner_provenance_message's docstring.
-        turn_message = _owner_provenance_message(
-            raw_text=normalized_text, display_name=push_name, channel_label=fallback_label,
-            is_group=is_group, chat_label=chat_label,
-        )
-    else:
-        # EXTERNAL / non-owner / unknown sender — UNCHANGED prompt-injection
-        # boundary; metadata gained an explicit chat-type/group-name signal
-        # (see _personal_channel_guard_metadata's docstring).
-        guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
-            surface_channel=surface_channel,
-            text=normalized_text,
-            sender=push_name or remote_jid,
-            source_event_id=source_event_id,
-            metadata=_personal_channel_guard_metadata(
-                remote_jid=remote_jid, is_group=is_group, chat_label=chat_label,
-            ),
-        )
-        turn_message = guarded.text
-    runtime_context = channel_lane_contract_service.build_personal_gateway_runtime_context(
-        surface_channel=surface_channel,
-        workspace_id=str(workspace_id or "default").strip() or "default",
-        gateway_id=str(gateway_id or "").strip(),
-        remote_jid=str(remote_jid or "").strip(),
-    )
-    try:
-        from server_modules import direct_chat_runtime_exports
-
-        with _without_direct_chat_runtime_tools(direct_chat_runtime_exports):
-            result = direct_chat_runtime_exports.collect_direct_operator_reply(
-                message=turn_message,
-                workspace_id=str(workspace_id or "default").strip() or "default",
-                requested_model="",
-                requested_provider="",
-                thread_id=str(runtime_context["thread_id"]),
-                prior_messages=[],
-                reasoning_effort="",
-                availability=_personal_channel_no_tools_availability(runtime_context),
-                approved_action=None,
-                max_iterations=1,
-                session_ctx=_personal_channel_no_tools_session_ctx(
-                    runtime_context=runtime_context,
-                    guarded=guarded,
-                    is_owner=is_owner,
-                ),
-            )
-        # Same [SILENT]/NO_REPLY suppression as the unified path above — this
-        # legacy fallback builder must not leak the sentinel either.
-        reply = filter_outbound_reply(str((result or {}).get("reply") or "").strip())
-        if reply:
-            return {
-                "text": reply,
-                "source": "direct_chat_runtime_exports",
-                "raw": dict(result or {}),
-            }
-    except Exception as _exc:
-        _logger.warning(
-            "_build_personal_reply failed for channel=%s workspace=%s: %s",
-            surface_channel, workspace_id, _exc,
-        )
-        return _build_error_reply_dict(_exc, workspace_id)
-    return None
-
-
 async def _build_unified_sage_personal_reply_async(
     *,
     surface_channel: str,
@@ -671,29 +412,24 @@ async def _build_unified_sage_personal_reply_async(
     raw_text = str(text or "").strip()
 
     if is_owner:
-        # OWNER — clean, UNPREFIXED message. This used to call
-        # _owner_provenance_message() to hand-build a "From: {name} (owner)
-        # · {channel} · direct message"/group-chat prose header — that
-        # duplicated exactly the facts the canonical InboundEnvelope (built
-        # below) now states once, structurally, in the one-line header
-        # execute_sage_turn prepends at its own chokepoint. Removing the
-        # duplicate ad-hoc prefix here is the actual envelope wiring; the
-        # legacy no-tools _build_personal_reply() fallback above still
-        # calls _owner_provenance_message() unchanged, because that path
-        # never reaches execute_sage_turn and so has no envelope header to
-        # rely on instead.
+        # OWNER — clean, UNPREFIXED message. This used to hand-build a
+        # "From: {name} (owner) · {channel} · direct message"/group-chat
+        # prose header — that duplicated exactly the facts the canonical
+        # InboundEnvelope (built below) now states once, structurally, in
+        # the one-line header execute_sage_turn prepends at its own
+        # chokepoint. Removing the duplicate ad-hoc prefix here is the
+        # actual envelope wiring.
         turn_message = raw_text
     else:
         # EXTERNAL / non-owner / unknown sender — this is the
         # prompt-injection boundary. The SECURITY NOTICE/wrapper itself is
         # UNCHANGED from prior behavior. The Chat-Type/Group-Name lines
         # _personal_channel_guard_metadata used to add for a group turn are
-        # dropped here (include_group_context=False) — the canonical
-        # InboundEnvelope built below already states the group/chat name
-        # and "NOT your owner" once, in the header execute_sage_turn
-        # prepends; duplicating it inside the guard wrapper too is exactly
-        # the ad-hoc "is_group/chat_label text framing" this wiring
-        # removes. See _personal_channel_guard_metadata's own docstring.
+        # dropped — the canonical InboundEnvelope built below already states
+        # the group/chat name and "NOT your owner" once, in the header
+        # execute_sage_turn prepends; duplicating it inside the guard
+        # wrapper too is exactly the ad-hoc "is_group/chat_label text
+        # framing" this wiring removes. See _personal_channel_guard_metadata.
         guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
             surface_channel=surface_channel,
             text=raw_text,
@@ -701,7 +437,6 @@ async def _build_unified_sage_personal_reply_async(
             source_event_id=source_event_id,
             metadata=_personal_channel_guard_metadata(
                 remote_jid=remote_jid, is_group=is_group, chat_label=chat_label,
-                include_group_context=False,
             ),
         )
         turn_message = guarded.text
@@ -1211,7 +946,14 @@ def build_whatsapp_personal_reply(
     why this must never be a blanket True. None for a non-group turn
     (not applicable).
     """
-    unified = _build_unified_sage_personal_reply(
+    # SILENCE IS A DECISION, NOT A FAILURE — see the module docstring note.
+    # None from the unified path means the agent ran and chose to say
+    # nothing; it is returned as-is. This used to fall through to a second,
+    # tool-less LLM turn (_build_personal_reply) that re-asked the model with
+    # no gating context at all, so "stay quiet" came back as "Hello! How can
+    # I help you today?" — an unprompted outbound message, in a group chat,
+    # from a turn that had already decided not to speak.
+    return _build_unified_sage_personal_reply(
         surface_channel="whatsapp_personal",
         workspace_id=workspace_id,
         gateway_id=gateway_id,
@@ -1227,21 +969,6 @@ def build_whatsapp_personal_reply(
         is_group=is_group,
         chat_label=chat_label,
         was_addressed=was_addressed,
-    )
-    if unified is not None:
-        return unified
-    return _build_personal_reply(
-        surface_channel="whatsapp_personal",
-        workspace_id=workspace_id,
-        gateway_id=gateway_id,
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        fallback_label="WhatsApp",
-        source_event_id=source_event_id,
-        is_owner=is_owner,
-        is_group=is_group,
-        chat_label=chat_label,
     )
 
 
@@ -1264,7 +991,8 @@ def build_telegram_personal_reply(
     """Build a reply for a Telegram personal DM — see build_whatsapp_personal_reply's
     docstring for the agent_id, sender_id, is_owner, is_group, chat_label
     and was_addressed contracts."""
-    unified = _build_unified_sage_personal_reply(
+    # Silence is a decision — see build_whatsapp_personal_reply above.
+    return _build_unified_sage_personal_reply(
         surface_channel="telegram_personal",
         workspace_id=workspace_id,
         gateway_id=gateway_id,
@@ -1280,19 +1008,4 @@ def build_telegram_personal_reply(
         is_group=is_group,
         chat_label=chat_label,
         was_addressed=was_addressed,
-    )
-    if unified is not None:
-        return unified
-    return _build_personal_reply(
-        surface_channel="telegram_personal",
-        workspace_id=workspace_id,
-        gateway_id=gateway_id,
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        fallback_label="Telegram",
-        source_event_id=source_event_id,
-        is_owner=is_owner,
-        is_group=is_group,
-        chat_label=chat_label,
     )

@@ -123,6 +123,7 @@ def _database_url_unsafe_reason(raw_url: str) -> str:
 
 
 def pytest_configure(config: "pytest.Config") -> None:
+    _install_network_egress_guard()
     raw_url = _resolve_candidate_database_url()
     if not raw_url:
         return  # no Postgres configured at all -- SQLite fallback, nothing to guard
@@ -137,6 +138,260 @@ def pytest_configure(config: "pytest.Config") -> None:
             "whose name contains 'test'.",
             returncode=1,
         )
+
+
+# ---------------------------------------------------------------------------
+# Sibling guard to the DATABASE_URL one above, same posture, same reason for
+# existing: a test session must not reach a real, billed, third-party service
+# just because the developer running it happens to have credentials in their
+# environment. The DB guard was added after a test run silently polluted
+# production Postgres (MAN-139); this one exists because a test run was
+# silently making REAL, BILLED LLM provider calls -- confirmed by a captured
+# DeepSeek response (prompt_tokens 176, completion_tokens 9, a real model
+# reply) inside an ordinary unit test whose whole point was to assert the
+# agent said NOTHING.
+#
+# Two things made that possible and both are fixed here:
+#
+#   1. Nothing stopped a unit test from opening a socket to api.deepseek.com.
+#   2. A test that patches one function is not protected when the code path
+#      moves out from under the patch -- and the resulting live call FAILS
+#      (no credentials on the CI/clean box), the caller swallows the failure,
+#      and the assertion passes for a completely unrelated reason. Green,
+#      meaningless, and silent about it. That is the exact "silent
+#      misrouting beats loud failure" failure mode CLAUDE.md names.
+#
+# WHY THE SOCKET LAYER AND NOT A PROVIDER MODULE. This backend has no single
+# LLM chokepoint to patch. Provider traffic leaves through at least four
+# structurally independent transports:
+#
+#     scripts/orion_local_worker_llm.py     urllib + a curl subprocess fallback
+#     server_modules/runtime_common.py      http_json_request (the one that IS
+#                                           egress_policy-enforced)
+#     server_modules/openai_compat_adapter  httpx.AsyncClient (loopback proxy
+#                                           for the Claude Agent SDK engine)
+#     claude_agent_sdk_bridge.py            spawns the Node `claude` CLI, whose
+#                                           HTTP is invisible to Python entirely
+#
+# ...plus one-off SDK clients (openai.AsyncOpenAI in
+# sage_telegram_hosted_service.py, boto3 in provider_profiles.py, httpx in
+# multimodal_provider_service.py / tools_image_gen.py). Guarding any one of
+# them is guarding a call site, and a future code path slips around it -- which
+# is precisely how the broken test got here. `socket.socket.connect` is the
+# one place every in-process transport must pass through, whatever library
+# it is built on; the subprocess denylist below covers the transports that
+# leave the process instead (curl, the claude/codex CLIs).
+#
+# FAIL-LOUD MECHANICS. The violation raises a BaseException subclass, not an
+# Exception, because the personal-channel and runtime paths are full of broad
+# `except Exception:` handlers that would otherwise convert this guard into
+# exactly the silent degradation it exists to eliminate. As a second layer
+# (a bare `except:` would still swallow a BaseException), every violation is
+# also recorded, and the autouse fixture below fails the test at teardown
+# even if the exception never made it out. Both layers together are what make
+# the guard unavoidable rather than merely present.
+_LIVE_PROVIDER_ALLOW_ENV = "EMPYRALIS_TEST_ALLOW_LIVE_PROVIDER_CALLS"
+_LIVE_PROVIDER_MARKER = "live_provider"
+
+# argv[0] basenames that exist to move bytes over the network. Deliberately a
+# DENYLIST, not an allowlist: this suite legitimately shells out to openssl
+# (vault encryption), git, cargo, and the compiled runtime kernel, and those
+# must keep working. `claude`/`codex` are here because the Agent SDK bridge
+# spawns them as a subprocess and all of that turn's model traffic happens
+# inside Node, where no Python-level patch can see it.
+_NETWORK_EGRESS_EXECUTABLES = frozenset({
+    "curl", "wget", "http", "https", "httpie", "claude", "codex", "ollama",
+})
+
+_LIVE_EGRESS_ALLOWED = False          # flipped per-test by the fixture below
+_LIVE_EGRESS_VIOLATIONS: list[str] = []
+_EGRESS_HOSTNAMES_BY_IP: dict[str, str] = {}
+_EXTRA_ALLOWED_EGRESS_HOSTS: set[str] = set()
+
+# Hosts we can positively vouch for. Loopback is a local Ollama, the
+# openai_compat_adapter's own 127.0.0.1 proxy, or a local Postgres -- none of
+# them a billed third party, and the adapter's *upstream* hop is a separate,
+# non-loopback connect that this guard still catches.
+_ALWAYS_ALLOWED_EGRESS_HOSTS = frozenset({
+    "127.0.0.1", "::1", "0.0.0.0", "localhost", "", "::",
+})
+
+
+class LiveProviderCallBlocked(BaseException):
+    """Raised when a test tries to reach a real network service.
+
+    Intentionally a BaseException -- see the block comment above.
+    """
+
+
+def _describe_egress_target(host: str, port: object) -> str:
+    hostname = _EGRESS_HOSTNAMES_BY_IP.get(host, "")
+    if hostname and hostname != host:
+        return f"{hostname} ({host}:{port})"
+    return f"{host}:{port}"
+
+
+def _record_and_raise_egress_violation(target: str, transport: str) -> None:
+    message = (
+        f"BLOCKED: a test attempted a live network call to {target} via {transport}.\n"
+        "\n"
+        "Unit tests must never reach a real LLM provider -- those calls are billed, "
+        "they make results depend on whose machine the suite runs on, and when "
+        "credentials are absent they fail quietly and let an assertion pass for the "
+        "wrong reason (which is how test_genuinely_silent_turn_still_returns_none "
+        "spent months proving nothing).\n"
+        "\n"
+        "Fix it by mocking the provider call. If execution is reaching a provider "
+        "despite a patch, the code path has MOVED OUT FROM UNDER your patch -- find "
+        "the function that actually runs now rather than re-pointing the mock "
+        "blindly; the move itself may be the bug.\n"
+        "\n"
+        "If a test genuinely needs a live call, opt in explicitly and narrowly with "
+        f"@pytest.mark.{_LIVE_PROVIDER_MARKER} on that one test, or set "
+        f"{_LIVE_PROVIDER_ALLOW_ENV}=1 for a deliberate local run. Never set that "
+        "variable in CI.\n"
+        "\n"
+        "Guard lives in server_modules/tests/conftest.py."
+    )
+    _LIVE_EGRESS_VIOLATIONS.append(message)
+    raise LiveProviderCallBlocked(message)
+
+
+def _egress_host_is_allowed(host: str) -> bool:
+    normalized = str(host or "").strip().lower()
+    if normalized in _ALWAYS_ALLOWED_EGRESS_HOSTS:
+        return True
+    if normalized.startswith("127.") or normalized.startswith("::ffff:127."):
+        return True
+    if normalized in _EXTRA_ALLOWED_EGRESS_HOSTS:
+        return True
+    return _EGRESS_HOSTNAMES_BY_IP.get(normalized, "") in _EXTRA_ALLOWED_EGRESS_HOSTS
+
+
+def _install_network_egress_guard() -> None:
+    """Patch the process's real egress points. Installed at pytest_configure --
+    before collection, so it also covers a module that fires a provider call at
+    IMPORT time, which no fixture could ever catch."""
+    import socket
+    import subprocess
+
+    # A remote Postgres named by DATABASE_URL is a legitimate destination: the
+    # DATABASE_URL guard above has already established it is a dedicated test
+    # database, and the blackbox_db tests exist to talk to it.
+    raw_db_url = _resolve_candidate_database_url()
+    if raw_db_url:
+        try:
+            from urllib.parse import urlsplit
+
+            db_host = str(urlsplit(raw_db_url).hostname or "").strip().lower()
+            if db_host:
+                _EXTRA_ALLOWED_EGRESS_HOSTS.add(db_host)
+        except Exception:
+            pass
+
+    real_getaddrinfo = socket.getaddrinfo
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_popen_init = subprocess.Popen.__init__
+
+    def _guarded_getaddrinfo(host, port, *args, **kwargs):
+        # Resolution itself is harmless; recording it is what lets the error
+        # message name "api.deepseek.com" instead of an opaque IP.
+        results = real_getaddrinfo(host, port, *args, **kwargs)
+        hostname = str(host or "").strip().lower()
+        if hostname:
+            for entry in results:
+                try:
+                    address = entry[4][0]
+                except Exception:
+                    continue
+                _EGRESS_HOSTNAMES_BY_IP.setdefault(str(address).strip().lower(), hostname)
+        return results
+
+    def _check_socket_address(address, transport: str) -> None:
+        if _LIVE_EGRESS_ALLOWED:
+            return
+        if not isinstance(address, (tuple, list)) or not address:
+            return  # AF_UNIX / AF_NETLINK and friends never leave the machine
+        host = str(address[0] or "").strip().lower()
+        port = address[1] if len(address) > 1 else "?"
+        if _egress_host_is_allowed(host):
+            return
+        _record_and_raise_egress_violation(_describe_egress_target(host, port), transport)
+
+    def _guarded_connect(self, address):
+        _check_socket_address(address, "socket.connect")
+        return real_connect(self, address)
+
+    def _guarded_connect_ex(self, address):
+        _check_socket_address(address, "socket.connect_ex")
+        return real_connect_ex(self, address)
+
+    def _guarded_popen_init(self, args, *rest, **kwargs):
+        if not _LIVE_EGRESS_ALLOWED:
+            argv0 = args if isinstance(args, (str, bytes)) else (args[0] if args else "")
+            if isinstance(argv0, bytes):
+                argv0 = argv0.decode("utf-8", "replace")
+            basename = os.path.basename(str(argv0 or "").strip().split(" ")[0]).lower()
+            if basename in _NETWORK_EGRESS_EXECUTABLES:
+                _record_and_raise_egress_violation(
+                    f"the {basename!r} subprocess", "subprocess.Popen"
+                )
+        return real_popen_init(self, args, *rest, **kwargs)
+
+    socket.getaddrinfo = _guarded_getaddrinfo
+    socket.socket.connect = _guarded_connect
+    socket.socket.connect_ex = _guarded_connect_ex
+    subprocess.Popen.__init__ = _guarded_popen_init
+
+
+_CALL_PHASE_ALREADY_FAILED = [False]
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Lets the fixture below tell "the guard's exception reached pytest" apart
+    from "the code under test swallowed it", so a blocked call is reported once
+    rather than twice."""
+    outcome = yield
+    report = outcome.get_result()
+    if report.when == "call" and report.failed:
+        _CALL_PHASE_ALREADY_FAILED[0] = True
+
+
+@pytest.fixture(autouse=True)
+def _block_live_provider_calls(request: pytest.FixtureRequest):
+    """Per-test arm/disarm of the egress guard, plus the second failure layer.
+
+    The recorded-violation check is what survives a `except BaseException:` or
+    bare `except:` somewhere in the code under test: even if the raise never
+    reaches pytest, the test still fails here, loudly, naming what it called.
+    Without it a swallowed block would leave the test green -- the same
+    pass-for-the-wrong-reason this guard exists to end.
+    """
+    global _LIVE_EGRESS_ALLOWED
+
+    opted_in = (
+        request.node.get_closest_marker(_LIVE_PROVIDER_MARKER) is not None
+        or str(os.environ.get(_LIVE_PROVIDER_ALLOW_ENV) or "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    _LIVE_EGRESS_ALLOWED = opted_in
+    _CALL_PHASE_ALREADY_FAILED[0] = False
+    del _LIVE_EGRESS_VIOLATIONS[:]
+    try:
+        yield
+    finally:
+        _LIVE_EGRESS_ALLOWED = False
+        violations = list(_LIVE_EGRESS_VIOLATIONS)
+        del _LIVE_EGRESS_VIOLATIONS[:]
+        if violations and not opted_in and not _CALL_PHASE_ALREADY_FAILED[0]:
+            raise AssertionError(
+                f"{len(violations)} blocked live network call(s) during this test, and "
+                "the code under test SWALLOWED the guard's exception -- the test would "
+                "otherwise have passed while silently reaching a provider.\n\n"
+                + "\n\n".join(violations)
+            )
 
 
 # ---------------------------------------------------------------------------
