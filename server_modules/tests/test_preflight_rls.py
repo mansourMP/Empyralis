@@ -13,12 +13,40 @@ from server_modules import preflight
 
 
 class FakeConn:
-    def __init__(self, rows):
-        self._rows = rows
-        self.closed = False
+    """_check_rls now issues TWO fetches, not one.
 
-    async def fetch(self, _query, _tables):
-        return self._rows
+    The second is the coverage half added alongside this file's sibling,
+    test_preflight_rls_coverage.py: it asks the live database which tables
+    carry a tenant_id/workspace_id column, so a scoped table missing from
+    enable_rls.sql fails boot instead of being invisible. This fake answers
+    the state query first and the discovery query second (the order
+    _check_rls calls them in), and reports a fully-covered schema so these
+    tests keep proving exactly what they always proved — the *enforcement*
+    half — with the coverage half quiet.
+    """
+
+    def __init__(self, rows, discovery_rows=None):
+        self._rows = rows
+        self._discovery_rows = (
+            discovery_rows
+            if discovery_rows is not None
+            else [
+                {
+                    "table_name": r["table_name"],
+                    "scope_columns": ["tenant_id", "workspace_id"],
+                    "rls_enabled": True,
+                    "rls_forced": True,
+                    "policy_count": 1,
+                }
+                for r in rows
+            ]
+        )
+        self.closed = False
+        self._fetches = 0
+
+    async def fetch(self, _query, *_args):
+        self._fetches += 1
+        return self._rows if self._fetches == 1 else self._discovery_rows
 
     async def close(self):
         self.closed = True

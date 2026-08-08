@@ -12,9 +12,23 @@ Checks
 2. **Rust runtime kernel** — binary must exist (built or env-var path).
 3. **PostgreSQL** — DATABASE_URL must be set, pool must be reachable,
    and ``workspace_agent_installs`` must have the stage_4b columns.
-4. **Row-Level Security** — every tenant-scoped table (parsed from
-   ``migrations/enable_rls.sql``) must have RLS enabled + FORCEd + a policy,
-   or boot fails. Prevents serving traffic with tenant isolation silently off.
+4. **Row-Level Security** — two halves, because either one alone is blind:
+   (a) *enforcement* — every table listed in ``migrations/enable_rls.sql``
+   must have RLS enabled + FORCEd + a policy on the live database;
+   (b) *coverage* — every table in the live database that carries a
+   ``tenant_id``/``workspace_id`` column must either be listed in that
+   migration or be recorded in :data:`_RLS_COVERAGE_EXCEPTIONS` with a
+   written reason. Without (b) the check is circular: it verified exactly
+   the tables the migration already knew about, so a tenant-scoped table
+   nobody added to the migration was both unprotected *and* unverified
+   while preflight reported "all checks passed". 60 tables were in that
+   state on 2026-08-08.
+   The exception registry is seeded with those 60 so this check catches
+   NEW drift immediately rather than waiting on a remediation that can
+   only be done a few tables at a time. Each entry carries its audit
+   verdict; working the list down is the direction of travel, and
+   ``server_modules/tests/test_preflight_rls_coverage.py`` fails if an
+   entry outlives the gap it describes.
 5. **Redis** — REDIS_URL (default ``redis://localhost:6379``) must PONG.
 """
 
@@ -311,6 +325,300 @@ def _tenant_scoped_tables_from_migration() -> List[str]:
     return sorted({name.lower() for name in matches})
 
 
+# ── RLS coverage: which tables SHOULD be in the migration ─────────────
+#
+# _tenant_scoped_tables_from_migration() above answers "did the tables the
+# migration names get their policies?" — it cannot answer "does the migration
+# name every table that needs one", because it derives its own expectations
+# from that same file. That circularity is why 30+ tenant-scoped tables sat
+# unprotected AND unreported while preflight said "all checks passed".
+#
+# The coverage check closes it from the other end: ask the LIVE database which
+# tables carry a tenant_id/workspace_id column, and require each one to be
+# either covered by the migration or listed below with a written reason.
+#
+# One honest limit, stated rather than papered over: server.py's lifespan runs
+# preflight_or_raise() BEFORE control_plane_repository.ensure_control_plane_
+# schema(), so a table that boot itself creates is invisible on the boot that
+# creates it and is caught on the NEXT one. Deploys restart, so the lag is one
+# restart, not forever — but this is a drift alarm, not a gate a new table
+# cannot slip past for a single boot. Moving the check after schema bootstrap
+# would close that, at the cost of letting the server touch the database
+# before isolation has been verified; refusing to serve unverified is the more
+# important of the two, so the ordering stays.
+#
+# Adding a table here is a deliberate, reviewed act — it is the ONLY way to
+# have a tenant-scoped table without a policy, and every entry states why.
+# Entries are the 2026-08-08 audit backlog: they exist so the check starts
+# catching NEW drift immediately instead of waiting for a 30-table
+# remediation that can only be done a few tables at a time (turning RLS on
+# for a table whose queries are not tenant-scoped makes its reads silently
+# return zero rows — see the MAN-109 comment in migrations/enable_rls.sql).
+# Working an entry off this list — not growing it — is the direction of
+# travel. A new table belongs in migrations/enable_rls.sql, not here.
+# Verdict vocabulary for the seeded backlog. Each string says what was found
+# on 2026-08-08 and what has to be true before the table can move into
+# migrations/enable_rls.sql — because "add RLS" is NOT free: a policy on a
+# table whose queries do not set app.current_tenant_id/app.current_workspace_id
+# makes every read silently return zero rows.
+_SCOPED_IN_APP_SQL = (
+    "2026-08-08 audit: every read carries an explicit tenant_id/workspace_id "
+    "filter in application SQL. No cross-tenant read path found. RLS here "
+    "would be defence in depth; safe to add once its queries are confirmed to "
+    "run through the scoped rls_* helpers. Remediation, not an incident."
+)
+_SCOPED_BY_UNGUESSABLE_KEY = (
+    "2026-08-08 audit: reads are keyed on an id the caller could only have "
+    "obtained legitimately (uuid / signed token / secret hash) rather than on "
+    "tenant_id, and every traced caller re-checks ownership after the fetch. "
+    "Defence-in-depth gap, not a live leak — no attacker-controllable key."
+)
+_NO_LIVE_READ = (
+    "2026-08-08 audit: nothing reads this table on a live path (write-only, or "
+    "the only reader has zero callers — the repo's 'built, tested, never "
+    "wired' pattern). Near-zero exposure regardless of RLS; re-audit before "
+    "wiring any reader up."
+)
+_NOT_POSTGRES = (
+    "2026-08-08 audit: not a Postgres table on the live path — backed by a "
+    "local SQLite file, or only reachable in the SQLite fallback branch. "
+    "Postgres RLS is structurally inapplicable. Listed so the check does not "
+    "flag it if a Postgres copy is ever bootstrapped by accident."
+)
+_NEEDS_SCHEMA_CHANGE_FIRST = (
+    "2026-08-08 audit: carries only ONE of tenant_id/workspace_id, so it "
+    "cannot use empyralis_rls_scope_match(tenant_id, workspace_id) unchanged. "
+    "Needs a column added or a bespoke single-column policy BEFORE RLS is "
+    "possible at all. Blocked on a schema decision, not on effort."
+)
+_UNSCOPED_READ_CONFIRMED = (
+    "2026-08-08 audit: HAS a confirmed unscoped read reachable by any "
+    "authenticated user. Tracked as its own fix — the route gate is the bug, "
+    "RLS is only the backstop. Excused here so this check can still catch NEW "
+    "drift; removing this entry requires the read path to be fixed first."
+)
+_NOT_YET_AUDITED = (
+    "2026-08-08: carries a scope column and is outside enable_rls.sql, but was "
+    "NOT reached in the audit that seeded this list. Excused solely so the "
+    "check can start catching NEW drift today; this entry is an admission of "
+    "unknown status, not a judgement that the table is safe. Audit before "
+    "trusting it either way."
+)
+
+_RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {
+    # ── audited: scoped in application SQL ────────────────────────────
+    "usage_events": _SCOPED_IN_APP_SQL,
+    "workspace_hosted_ai_monthly_cost_ledger": _SCOPED_IN_APP_SQL,
+    "workspace_billing_accounts": _SCOPED_IN_APP_SQL,
+    "workspace_billing_subscriptions": _SCOPED_IN_APP_SQL,
+    "knowledge_sources": _SCOPED_IN_APP_SQL,
+    "knowledge_chunks": _SCOPED_IN_APP_SQL,
+    "knowledge_embeddings": _SCOPED_IN_APP_SQL,
+    "workspace_member_invites": _SCOPED_IN_APP_SQL,
+    "credit_ledger_events": _SCOPED_IN_APP_SQL,
+    "agent_traces": _SCOPED_IN_APP_SQL,
+    "deployed_agent_conversation_memory": _SCOPED_IN_APP_SQL,
+    "activity_ledger_events": _SCOPED_IN_APP_SQL,
+    # ── audited: keyed on an unguessable id, ownership re-checked ─────
+    # The mcp_oauth_* trio is the cleanest case in the registry: the ONLY
+    # reads are `WHERE token_hash = $1` / `code_hash = $1` — keyed on
+    # possession of the raw secret, with no list-by-client_id or
+    # list-by-user_id path anywhere. An unscoped WHERE on a secret hash is
+    # the correct shape, not a gap.
+    "mcp_oauth_access_tokens": _SCOPED_BY_UNGUESSABLE_KEY,
+    "mcp_oauth_refresh_tokens": _SCOPED_BY_UNGUESSABLE_KEY,
+    "mcp_oauth_authorization_codes": _SCOPED_BY_UNGUESSABLE_KEY,
+    "deployed_agents": _SCOPED_BY_UNGUESSABLE_KEY,
+    "runtime_sessions": _SCOPED_BY_UNGUESSABLE_KEY,
+    "user_devices": _SCOPED_BY_UNGUESSABLE_KEY,
+    "user_provider_connections": _SCOPED_BY_UNGUESSABLE_KEY,
+    # ── audited: no live read path ────────────────────────────────────
+    "knowledge_retrieval_events": _NO_LIVE_READ,
+    "governance_holds": _NO_LIVE_READ,
+    "external_user_privacy_requests": _NO_LIVE_READ,
+    "external_user_privacy_delete_audits": _NO_LIVE_READ,
+    "fleet_queue_partitions": _NO_LIVE_READ,
+    "deployed_agent_upgrade_click_events": _NO_LIVE_READ,
+    # ── audited: not a Postgres table on the live path ────────────────
+    "gateway_registrations": _NOT_POSTGRES,
+    "gateway_sessions": _NOT_POSTGRES,
+    "gateway_pairing_intents": _NOT_POSTGRES,
+    "gateway_action_approvals": _NOT_POSTGRES,
+    "gateway_browser_sessions": _NOT_POSTGRES,
+    "sage_agent_computer_selections": _NOT_POSTGRES,
+    "personal_channel_whatsapp_states": _NOT_POSTGRES,
+    "personal_channel_telegram_states": _NOT_POSTGRES,
+    "personal_channel_local_bridge_states": _NOT_POSTGRES,
+    "workspace_registry": _NOT_POSTGRES,
+    # ── audited: schema blocks the standard policy ────────────────────
+    # vault_credentials is the highest-blast-radius entry in this whole
+    # registry: no tenant_id column at all, NULLABLE workspace_id (platform-
+    # scoped credentials legitimately have NULL), and vault_repository.py:101
+    # list_all() is a full-table SELECT with no WHERE that every vault
+    # operation goes through. The tenant boundary is vault_helpers.
+    # workspace_visible() in Python, applied after the whole table is already
+    # in memory. Held at every call site traced — but a naive policy here
+    # would blank the platform-scoped rows, so this needs a schema decision.
+    "vault_credentials": _NEEDS_SCHEMA_CHANGE_FIRST,
+    "workspace_policies": _NEEDS_SCHEMA_CHANGE_FIRST,
+    "tenant_policies": _NEEDS_SCHEMA_CHANGE_FIRST,
+    "tenant_enterprise_settings": _NEEDS_SCHEMA_CHANGE_FIRST,
+    # ── audited: a real unscoped read exists, tracked separately ──────
+    # These three feed GET /runtime/runtimes/status, /runtime/runtimes/
+    # reliability and /health/internal, all gated only by require_api_key
+    # (runtime_common.py:345) — which resolves ANY authenticated user of ANY
+    # tenant, not a system key. list_fleet_workers called with empty args
+    # (run_state_repository.py:1796) makes its own WHERE vacuously true.
+    # The route gate is the bug; note that RLS on these four tables would NOT
+    # currently help anyway — run_state_repository uses a plain asyncpg pool
+    # that never sets the session GUCs, so a policy would blank the runtime's
+    # own reads.
+    "fleet_worker_registrations": _UNSCOPED_READ_CONFIRMED,
+    "live_runs": _UNSCOPED_READ_CONFIRMED,
+    "run_archive": _UNSCOPED_READ_CONFIRMED,
+    "local_queue_dead_letters": _UNSCOPED_READ_CONFIRMED,
+    # ── legitimately global background worker ─────────────────────────
+    # Drained by runs_core.run_outbox_delivery_forever with no tenant filter
+    # (FOR UPDATE SKIP LOCKED), which is correct: outbox_service.
+    # deliver_outbox_event re-scopes every delivery from the claimed row's own
+    # tenant_id/workspace_id. RLS would break the drain loop for no gain.
+    "runtime_outbox": (
+        "2026-08-08 audit: cross-tenant by design — a single global drain loop "
+        "claims due events and re-scopes each delivery from the claimed row's "
+        "own tenant_id/workspace_id. A policy would blank the drain loop's "
+        "reads and stop all delivery. Correctly global, not an oversight."
+    ),
+    # agent_computers is NOT in this registry on purpose. It already carries
+    # ENABLE + FORCE ROW LEVEL SECURITY from its own migration
+    # (migrations/add_agent_computers.sql), so it is genuinely protected and
+    # the coverage check recognises it by reading the live policy state rather
+    # than by name. Worth knowing anyway: agent_computers_repository.py runs
+    # every query with bypass_rls=True (list_records_for_pairing_scan has to
+    # scan cross-tenant to match an inbound beacon), so the policy is not the
+    # enforcement layer there today — the app-level re-check in
+    # routes_gateway.py:2393/2441 is.
+    # ── NOT audited — status genuinely unknown ────────────────────────
+    "agent_action_events": _NOT_YET_AUDITED,
+    "channel_events": _NOT_YET_AUDITED,
+    "channel_links": _NOT_YET_AUDITED,
+    "channel_pairing_intents": _NOT_YET_AUDITED,
+    "channel_user_acquisition_touches": _NOT_YET_AUDITED,
+    "chat_stream_state": _NOT_YET_AUDITED,
+    "credit_ledger_events": _NOT_YET_AUDITED,
+    "deployed_agent_business_insights": _NOT_YET_AUDITED,
+    "deployed_agent_conversation_memory": _NOT_YET_AUDITED,
+    "deployed_agent_daily_message_usage": _NOT_YET_AUDITED,
+    "deployed_agent_monthly_cost_ledger": _NOT_YET_AUDITED,
+    "discord_workspace_pairings": _NOT_YET_AUDITED,
+    "hosted_ai_reservations": _NOT_YET_AUDITED,
+    "mcp_oauth_access_tokens": _NOT_YET_AUDITED,
+    "mcp_oauth_authorization_codes": _NOT_YET_AUDITED,
+    "mcp_oauth_refresh_tokens": _NOT_YET_AUDITED,
+    "notification_devices": _NOT_YET_AUDITED,
+    "notification_reads": _NOT_YET_AUDITED,
+    "notifications": _NOT_YET_AUDITED,
+    "run_history": _NOT_YET_AUDITED,
+}
+
+
+def _rls_coverage_check_skipped() -> bool:
+    """Narrow escape hatch for the coverage half only.
+
+    Deliberately separate from EMPYRALIS_SKIP_RLS_CHECK. The seeded exception
+    list above was written from an audit of the live schema; if it turns out
+    to be one table short on some box, the operator's only lever would
+    otherwise be EMPYRALIS_SKIP_RLS_CHECK — which also switches off the
+    *enforcement* verification that has been protecting 40 tables since
+    MAN-109. Trading real isolation checking for a bookkeeping miss is a bad
+    trade, so it gets its own switch. Logged at error level on every boot,
+    like its sibling: never a silent choice.
+
+    Before rolling this change onto a box, run
+    ``DATABASE_URL=... python3 scripts/rls_state_report.py`` there first — it
+    prints exactly what this check would say, without booting anything.
+    """
+    return os.getenv("EMPYRALIS_SKIP_RLS_COVERAGE_CHECK", "").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+async def _discover_tenant_scoped_tables(conn: Any) -> Dict[str, List[str]]:
+    """Live-database inventory: ``{table_name: [scope columns it carries]}``.
+
+    Ordinary and partitioned tables in ``public`` only — views cannot carry a
+    policy of their own, so they are not the boundary and would only produce
+    noise. Individual partitions are deliberately NOT excluded: Postgres
+    applies the *partition's* policies when one is queried directly, so a
+    partition of a covered parent is still its own hole. There are none in
+    this schema today; if someone adds partitioning, a loud prompt to think
+    about it is the correct outcome rather than a silent exemption.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT c.relname AS table_name,
+               array_agg(a.attname ORDER BY a.attname) AS scope_columns,
+               bool_or(c.relrowsecurity) AS rls_enabled,
+               bool_or(c.relforcerowsecurity) AS rls_forced,
+               COALESCE(MAX(p.policy_count), 0) AS policy_count
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid
+        LEFT JOIN (
+            SELECT schemaname, tablename, COUNT(*) AS policy_count
+            FROM pg_policies GROUP BY schemaname, tablename
+        ) p ON p.schemaname = n.nspname AND p.tablename = c.relname
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND a.attname IN ('tenant_id', 'workspace_id')
+        GROUP BY c.relname
+        """
+    )
+    return {
+        row["table_name"]: {
+            "scope_columns": list(row["scope_columns"]),
+            "protected": bool(
+                row["rls_enabled"] and row["rls_forced"] and int(row["policy_count"] or 0) > 0
+            ),
+        }
+        for row in rows
+    }
+
+
+def _rls_coverage_problems(
+    discovered: Dict[str, Dict[str, Any]],
+    expected: List[str],
+    exceptions: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    """Tenant-scoped tables with no policy at all and no recorded exception.
+
+    ``discovered`` comes from the live database, ``expected`` from
+    ``enable_rls.sql``. The question asked is "is this table protected?", NOT
+    "is it named in that one file" — `agent_computers` carries its own
+    ``FORCE ROW LEVEL SECURITY`` in migrations/add_agent_computers.sql and is
+    genuinely protected, so flagging it would be a false alarm, and false
+    alarms are how a boot check gets switched off.
+
+    (``enable_rls.sql`` is still the right home for a new policy: CLAUDE.md's
+    deploy note says it must be re-run after adding any table, which is what
+    keeps _check_rls's enforcement half re-asserting it. A policy that lives
+    only in a one-shot migration is protected but not re-verified.)
+    """
+    if exceptions is None:
+        exceptions = _RLS_COVERAGE_EXCEPTIONS
+    covered = set(expected)
+    excused = set(exceptions)
+    problems: List[str] = []
+    for table in sorted(discovered):
+        info = discovered[table]
+        if table in covered or table in excused or info.get("protected"):
+            continue
+        columns = ", ".join(info.get("scope_columns") or [])
+        problems.append(f"{table} (carries {columns}): no RLS policy and no recorded exception")
+    return problems
+
+
 async def _fetch_rls_state(conn: Any, tables: List[str]) -> Dict[str, Dict[str, Any]]:
     """Return per-table {rls_enabled, rls_forced, policy_count} from the live DB."""
     rows = await conn.fetch(
@@ -398,6 +706,16 @@ async def _check_rls() -> Optional[str]:
     try:
         state = await _fetch_rls_state(conn, expected)
         problems = _rls_problems(expected, state)
+        if _rls_coverage_check_skipped():
+            LOGGER.error(
+                "preflight: RLS COVERAGE verification BYPASSED "
+                "(EMPYRALIS_SKIP_RLS_COVERAGE_CHECK set) — a tenant-scoped "
+                "table outside migrations/enable_rls.sql would not be reported."
+            )
+            coverage_problems = []
+        else:
+            discovered = await _discover_tenant_scoped_tables(conn)
+            coverage_problems = _rls_coverage_problems(discovered, expected)
     finally:
         await conn.close()
 
@@ -408,6 +726,22 @@ async def _check_rls() -> Optional[str]:
             f"traffic without isolation.\n  {len(problems)}/{len(expected)} table(s) affected:\n"
             + "\n".join(f"    - {p}" for p in problems)
             + "\n  Apply: psql <DATABASE_URL> -f migrations/enable_rls.sql"
+        )
+    if coverage_problems:
+        return (
+            "Tenant-scoped table(s) exist with NO RLS policy and no recorded "
+            "exception. The tables listed in migrations/enable_rls.sql are all "
+            "enforced, but these carry tenant_id/workspace_id and are outside "
+            "it entirely — so nothing at the database level keeps one tenant's "
+            "rows away from another's.\n"
+            f"  {len(coverage_problems)} table(s):\n"
+            + "\n".join(f"    - {p}" for p in coverage_problems)
+            + "\n  Fix one of two ways:\n"
+            "    1. Add the table to migrations/enable_rls.sql and re-run it "
+            "(preferred) — but FIRST confirm every query against it is scoped, "
+            "or its reads will silently return zero rows.\n"
+            "    2. If the table is legitimately global/operational, record it "
+            "in preflight._RLS_COVERAGE_EXCEPTIONS with the reason."
         )
     return None
 
@@ -436,6 +770,7 @@ async def report_rls_state() -> Dict[str, Any]:
     conn = await asyncpg.connect(database_url, timeout=10)
     try:
         state = await _fetch_rls_state(conn, expected)
+        discovered = await _discover_tenant_scoped_tables(conn)
     finally:
         await conn.close()
 
@@ -450,12 +785,27 @@ async def report_rls_state() -> Dict[str, Any]:
             "policy_count": int(row.get("policy_count") or 0),
         })
     problems = _rls_problems(expected, state)
+    coverage_problems = _rls_coverage_problems(discovered, expected)
+    # The known-and-excused backlog is reported separately from the unknown
+    # ones: an operator needs to see the outstanding remediation list, not
+    # just "no new drift".
+    excused = sorted(set(discovered) & set(_RLS_COVERAGE_EXCEPTIONS))
     return {
         "configured": True,
         "reason": None,
         "tables": tables,
-        "ok": not problems,
+        "ok": not problems and not coverage_problems,
         "problems": problems,
+        "coverage_problems": coverage_problems,
+        "uncovered_but_excused": [
+            {
+                "table": table,
+                "scope_columns": discovered[table].get("scope_columns") or [],
+                "protected": bool(discovered[table].get("protected")),
+                "reason": _RLS_COVERAGE_EXCEPTIONS[table],
+            }
+            for table in excused
+        ],
     }
 
 
