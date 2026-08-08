@@ -1,0 +1,13 @@
+{
+  "id": "synthetic-inbound-driver",
+  "name": "Synthetic Inbound Driver (verification only, not shipped)",
+  "description": "Throwaway plugin used only to verify empyralis-bridge live under an isolated profile. Drives OpenClaw's real global hook runner with fabricated but realistically-shaped message_received / message_sending events so empyralis-bridge's real registered handlers run inside a real gateway process. Never install this alongside the real bridge plugin in production.",
+  "contracts": {},
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
