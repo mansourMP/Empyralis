@@ -580,6 +580,21 @@ record (sandbox escape; a client-asserted `senderIsOwner` flag trusted
 because it arrived over loopback) is what happens when that boundary is
 ignored. Read their source, port the design, never vendor their core.
 
+**"Channels" is ONE system, never a per-channel integration list.** The
+founder's instruction, given repeatedly and violated anyway: *"there is only
+one thing which is channels… we don't have telegram or WhatsApp, we have
+channels."* We run OpenClaw's gateway as the transport and wire ONE adapter;
+whatever channels their gateway carries, we carry. Both legs already do a
+bare `openclaw_` prefix strip/prepend, so there is no per-channel code on our
+side — which means a hand-maintained channel list is pure curation and pure
+defect. The first build shipped a hardcoded 5-name tuple in
+`channel_lane_contract_service` plus a parallel label map in
+`personal_channels_service`, with a drift check between them; the drift check
+was treating a symptom of a list that should not exist. **If adding a channel
+requires an Empyralis code change, it is wired wrong.** Same test for any
+future transport we adopt: derive the capability set from the thing that owns
+it, never transcribe it.
+
 **OpenClaw's `message_received` tap is post-gate and fact-less.** Verified
 against the shipped v2026.6.10 bundle 2026-08-08, correcting the earlier
 belief (recorded in the bridge plugin and in CHANNEL-ADOPTION-PLAN.md) that

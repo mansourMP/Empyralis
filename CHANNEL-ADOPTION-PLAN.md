@@ -258,10 +258,22 @@ with `require_mention` off — or once OpenClaw starts forwarding
                          replacement is proven live. Big-bang swap is
                          how you create the gap we're closing.
 
-7. NEW CHANNELS          Feishu/Lark, QQ, LINE, Zalo, MS Teams —
-                         the founder's actual market (Chinese + SE
-                         Asian users). Should be config, not code.
-                         NOT Matrix/Nostr/IRC/Twitch.
+7. ALL CHANNELS          NOT a curated list. The channel set is
+                         DERIVED from OpenClaw's own registry, so
+                         whatever their gateway carries, we carry.
+
+                         Founder, repeatedly and explicitly:
+                         "there is only one thing which is
+                         channels... we don't have telegram or
+                         WhatsApp, we have channels."
+
+                         A hardcoded per-channel tuple is the
+                         defect, not the design. If adding a
+                         channel needs an Empyralis code change,
+                         it is wired wrong. Earlier revisions of
+                         this file named 5 channels and a
+                         "not wanted" list — both were mistakes
+                         and are deleted.
 
 8. UI                    official channel logos, connect flows,
                          and group-policy control (see below —
