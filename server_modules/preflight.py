@@ -12,9 +12,16 @@ Checks
 2. **Rust runtime kernel** — binary must exist (built or env-var path).
 3. **PostgreSQL** — DATABASE_URL must be set, pool must be reachable,
    and ``workspace_agent_installs`` must have the stage_4b columns.
-4. **Row-Level Security** — every tenant-scoped table (parsed from
-   ``migrations/enable_rls.sql``) must have RLS enabled + FORCEd + a policy,
-   or boot fails. Prevents serving traffic with tenant isolation silently off.
+4. **Row-Level Security** — two halves, because either one alone is blind:
+   (a) *enforcement* — every table listed in ``migrations/enable_rls.sql``
+   must have RLS enabled + FORCEd + a policy on the live database;
+   (b) *coverage* — every table in the live database that carries a
+   ``tenant_id``/``workspace_id`` column must either be listed in that
+   migration or be recorded in :data:`_RLS_COVERAGE_EXCEPTIONS` with a
+   written reason. Without (b) the check is circular: it verified exactly
+   the tables the migration already knew about, so a tenant-scoped table
+   nobody added to the migration was both unprotected *and* unverified
+   while preflight reported "all checks passed".
 5. **Redis** — REDIS_URL (default ``redis://localhost:6379``) must PONG.
 """
 
@@ -311,6 +318,115 @@ def _tenant_scoped_tables_from_migration() -> List[str]:
     return sorted({name.lower() for name in matches})
 
 
+# ── RLS coverage: which tables SHOULD be in the migration ─────────────
+#
+# _tenant_scoped_tables_from_migration() above answers "did the tables the
+# migration names get their policies?" — it cannot answer "does the migration
+# name every table that needs one", because it derives its own expectations
+# from that same file. That circularity is why 30+ tenant-scoped tables sat
+# unprotected AND unreported while preflight said "all checks passed".
+#
+# The coverage check closes it from the other end: ask the LIVE database which
+# tables carry a tenant_id/workspace_id column, and require each one to be
+# either covered by the migration or listed below with a written reason.
+#
+# One honest limit, stated rather than papered over: server.py's lifespan runs
+# preflight_or_raise() BEFORE control_plane_repository.ensure_control_plane_
+# schema(), so a table that boot itself creates is invisible on the boot that
+# creates it and is caught on the NEXT one. Deploys restart, so the lag is one
+# restart, not forever — but this is a drift alarm, not a gate a new table
+# cannot slip past for a single boot. Moving the check after schema bootstrap
+# would close that, at the cost of letting the server touch the database
+# before isolation has been verified; refusing to serve unverified is the more
+# important of the two, so the ordering stays.
+#
+# Adding a table here is a deliberate, reviewed act — it is the ONLY way to
+# have a tenant-scoped table without a policy, and every entry states why.
+# Entries are the 2026-08-08 audit backlog: they exist so the check starts
+# catching NEW drift immediately instead of waiting for a 30-table
+# remediation that can only be done a few tables at a time (turning RLS on
+# for a table whose queries are not tenant-scoped makes its reads silently
+# return zero rows — see the MAN-109 comment in migrations/enable_rls.sql).
+# Working an entry off this list — not growing it — is the direction of
+# travel. A new table belongs in migrations/enable_rls.sql, not here.
+_RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {}
+
+
+def _rls_coverage_check_skipped() -> bool:
+    """Narrow escape hatch for the coverage half only.
+
+    Deliberately separate from EMPYRALIS_SKIP_RLS_CHECK. The seeded exception
+    list above was written from an audit of the live schema; if it turns out
+    to be one table short on some box, the operator's only lever would
+    otherwise be EMPYRALIS_SKIP_RLS_CHECK — which also switches off the
+    *enforcement* verification that has been protecting 40 tables since
+    MAN-109. Trading real isolation checking for a bookkeeping miss is a bad
+    trade, so it gets its own switch. Logged at error level on every boot,
+    like its sibling: never a silent choice.
+
+    Before rolling this change onto a box, run
+    ``DATABASE_URL=... python3 scripts/rls_state_report.py`` there first — it
+    prints exactly what this check would say, without booting anything.
+    """
+    return os.getenv("EMPYRALIS_SKIP_RLS_COVERAGE_CHECK", "").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+async def _discover_tenant_scoped_tables(conn: Any) -> Dict[str, List[str]]:
+    """Live-database inventory: ``{table_name: [scope columns it carries]}``.
+
+    Ordinary and partitioned tables in ``public`` only — views cannot carry a
+    policy of their own, so they are not the boundary and would only produce
+    noise. Individual partitions are deliberately NOT excluded: Postgres
+    applies the *partition's* policies when one is queried directly, so a
+    partition of a covered parent is still its own hole. There are none in
+    this schema today; if someone adds partitioning, a loud prompt to think
+    about it is the correct outcome rather than a silent exemption.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT c.relname AS table_name,
+               array_agg(a.attname ORDER BY a.attname) AS scope_columns
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND a.attname IN ('tenant_id', 'workspace_id')
+        GROUP BY c.relname
+        """
+    )
+    return {row["table_name"]: list(row["scope_columns"]) for row in rows}
+
+
+def _rls_coverage_problems(
+    discovered: Dict[str, List[str]],
+    expected: List[str],
+    exceptions: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    """Tenant-scoped tables the migration never heard of and nobody excused.
+
+    ``discovered`` comes from the live database, ``expected`` from
+    ``enable_rls.sql``. Anything in the first and neither of the other two is
+    a table holding tenant data with no database-level boundary — and, until
+    this check existed, no way for anyone to find out at boot.
+    """
+    if exceptions is None:
+        exceptions = _RLS_COVERAGE_EXCEPTIONS
+    covered = set(expected)
+    excused = set(exceptions)
+    problems: List[str] = []
+    for table in sorted(discovered):
+        if table in covered or table in excused:
+            continue
+        columns = ", ".join(discovered[table])
+        problems.append(f"{table} (carries {columns}): no RLS policy and no recorded exception")
+    return problems
+
+
 async def _fetch_rls_state(conn: Any, tables: List[str]) -> Dict[str, Dict[str, Any]]:
     """Return per-table {rls_enabled, rls_forced, policy_count} from the live DB."""
     rows = await conn.fetch(
@@ -398,6 +514,16 @@ async def _check_rls() -> Optional[str]:
     try:
         state = await _fetch_rls_state(conn, expected)
         problems = _rls_problems(expected, state)
+        if _rls_coverage_check_skipped():
+            LOGGER.error(
+                "preflight: RLS COVERAGE verification BYPASSED "
+                "(EMPYRALIS_SKIP_RLS_COVERAGE_CHECK set) — a tenant-scoped "
+                "table outside migrations/enable_rls.sql would not be reported."
+            )
+            coverage_problems = []
+        else:
+            discovered = await _discover_tenant_scoped_tables(conn)
+            coverage_problems = _rls_coverage_problems(discovered, expected)
     finally:
         await conn.close()
 
@@ -408,6 +534,22 @@ async def _check_rls() -> Optional[str]:
             f"traffic without isolation.\n  {len(problems)}/{len(expected)} table(s) affected:\n"
             + "\n".join(f"    - {p}" for p in problems)
             + "\n  Apply: psql <DATABASE_URL> -f migrations/enable_rls.sql"
+        )
+    if coverage_problems:
+        return (
+            "Tenant-scoped table(s) exist with NO RLS policy and no recorded "
+            "exception. The tables listed in migrations/enable_rls.sql are all "
+            "enforced, but these carry tenant_id/workspace_id and are outside "
+            "it entirely — so nothing at the database level keeps one tenant's "
+            "rows away from another's.\n"
+            f"  {len(coverage_problems)} table(s):\n"
+            + "\n".join(f"    - {p}" for p in coverage_problems)
+            + "\n  Fix one of two ways:\n"
+            "    1. Add the table to migrations/enable_rls.sql and re-run it "
+            "(preferred) — but FIRST confirm every query against it is scoped, "
+            "or its reads will silently return zero rows.\n"
+            "    2. If the table is legitimately global/operational, record it "
+            "in preflight._RLS_COVERAGE_EXCEPTIONS with the reason."
         )
     return None
 
@@ -436,6 +578,7 @@ async def report_rls_state() -> Dict[str, Any]:
     conn = await asyncpg.connect(database_url, timeout=10)
     try:
         state = await _fetch_rls_state(conn, expected)
+        discovered = await _discover_tenant_scoped_tables(conn)
     finally:
         await conn.close()
 
@@ -450,12 +593,26 @@ async def report_rls_state() -> Dict[str, Any]:
             "policy_count": int(row.get("policy_count") or 0),
         })
     problems = _rls_problems(expected, state)
+    coverage_problems = _rls_coverage_problems(discovered, expected)
+    # The known-and-excused backlog is reported separately from the unknown
+    # ones: an operator needs to see the outstanding remediation list, not
+    # just "no new drift".
+    excused = sorted(set(discovered) & set(_RLS_COVERAGE_EXCEPTIONS))
     return {
         "configured": True,
         "reason": None,
         "tables": tables,
-        "ok": not problems,
+        "ok": not problems and not coverage_problems,
         "problems": problems,
+        "coverage_problems": coverage_problems,
+        "uncovered_but_excused": [
+            {
+                "table": table,
+                "scope_columns": discovered[table],
+                "reason": _RLS_COVERAGE_EXCEPTIONS[table],
+            }
+            for table in excused
+        ],
     }
 
 
