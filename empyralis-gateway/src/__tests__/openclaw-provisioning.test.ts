@@ -3,7 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
-import { OPENCLAW_TRANSPORT_CHANNEL_IDS } from "../openclaw/capabilities";
+import {
+  OPENCLAW_TRANSPORT_CHANNEL_IDS,
+  openClawTransportChannelKeys,
+} from "../openclaw/capabilities";
+import {
+  GENERATED_OPENCLAW_MANIFEST,
+  GENERATED_OPENCLAW_SUPERSEDED_CHANNEL_IDS,
+} from "../openclaw/generated-openclaw-channels";
+import { openClawChannelIdFromChannelKey } from "../openclaw/outbound-payload";
 import {
   OPENCLAW_CHANNEL_POLICY_SHAPES,
   auditOpenClawChannelShapes,
@@ -232,8 +240,18 @@ test("a group chat allowlist is never written into groupAllowFrom (a SENDER list
 });
 
 test("an unknown channel id is never configured from a guess", () => {
-  const rendered = renderOpenClawConfig(plan([policy({ channelId: "matrix" })]), { gatewayToken: "t" });
-  assert.equal(channelBlock(rendered, "matrix").enabled, false);
+  // `matrix` used to stand in for "unknown" because the shape table covered
+  // only five channels by hand. It is a real, known channel now that the table
+  // is derived from OpenClaw's own schema, so this needs an id that genuinely
+  // has no policy semantics anywhere — the case where guessing an
+  // authorization mapping would be a silently broken gate.
+  const unknown = "not-a-real-openclaw-channel";
+  assert.equal(
+    GENERATED_OPENCLAW_MANIFEST.channels.some((channel) => channel.id === unknown),
+    false,
+  );
+  const rendered = renderOpenClawConfig(plan([policy({ channelId: unknown })]), { gatewayToken: "t" });
+  assert.equal(channelBlock(rendered, unknown).enabled, false);
   assert.equal(rendered.disabledChannels.length, 1);
 });
 
@@ -487,11 +505,75 @@ test("discovered plugin hooks are switched on in the rendered config", () => {
   assert.deepEqual(channelBlock(rendered, "line").pluginHooks, { messageReceived: true });
 });
 
-test("the shape table covers exactly the transported channels", () => {
-  assert.deepEqual(
-    Object.keys(OPENCLAW_CHANNEL_POLICY_SHAPES).sort(),
-    [...OPENCLAW_TRANSPORT_CHANNEL_IDS].sort(),
+test("every transported channel with a config node has a shape, and one without degrades honestly", () => {
+  // Both sides are now derived from the same generated manifest, so this is
+  // no longer "did two hand-written lists stay in step" but "does every
+  // channel we transport have the policy semantics provisioning needs".
+  assert.ok(OPENCLAW_TRANSPORT_CHANNEL_IDS.length > 0);
+  assert.ok(Object.keys(OPENCLAW_CHANNEL_POLICY_SHAPES).length > 0);
+
+  const byId = new Map(GENERATED_OPENCLAW_MANIFEST.channels.map((c) => [c.id, c]));
+  for (const channelId of OPENCLAW_TRANSPORT_CHANNEL_IDS) {
+    const channel = byId.get(channelId);
+    assert.ok(channel, `${channelId} is transported but absent from the manifest`);
+    assert.equal(
+      Object.hasOwn(OPENCLAW_CHANNEL_POLICY_SHAPES, channelId),
+      channel.config_schema_present,
+      `${channelId}: a shape must exist exactly when OpenClaw declares channels.${channelId}`,
+    );
+  }
+
+  // The channels with no config node are NOT an oversight: their plugin
+  // contributes it only once installed. renderOpenClawConfig must leave such
+  // a channel OFF with a stated reason rather than guess at an authorization
+  // mapping — a guessed policy is how a gate silently stops being a gate.
+  const withoutSchema = OPENCLAW_TRANSPORT_CHANNEL_IDS.filter(
+    (id) => !byId.get(id)?.config_schema_present,
   );
+  assert.ok(withoutSchema.length > 0, "expected at least one install-gated channel to cover");
+  for (const channelId of withoutSchema) {
+    const rendered = renderOpenClawConfig(plan([policy({ channelId })]), { gatewayToken: "t" });
+    assert.deepEqual(channelBlock(rendered, channelId), { enabled: false });
+    assert.equal(rendered.disabledChannels.some((f) => f.channelId === channelId), true);
+  }
+});
+
+test("a channel a first-party Empyralis runtime owns is never transported", () => {
+  // Declaring all of OpenClaw's channels must not produce two runtimes on one
+  // account. The split is computed on the Python side and generated into this
+  // bundle, so the gateway cannot hold a second opinion about it.
+  assert.ok(GENERATED_OPENCLAW_SUPERSEDED_CHANNEL_IDS.length > 0);
+  for (const channelId of GENERATED_OPENCLAW_SUPERSEDED_CHANNEL_IDS) {
+    assert.equal(
+      OPENCLAW_TRANSPORT_CHANNEL_IDS.includes(channelId),
+      false,
+      `${channelId} is advertised by the gateway while an Empyralis runtime still owns it`,
+    );
+  }
+  const advertised = new Set(openClawTransportChannelKeys());
+  for (const channelId of GENERATED_OPENCLAW_SUPERSEDED_CHANNEL_IDS) {
+    assert.equal(advertised.has(`openclaw_${channelId}`), false);
+  }
+  // Active + superseded must partition the manifest — a channel in neither
+  // would be silently unreachable, and one in both is the bug above.
+  assert.deepEqual(
+    [...OPENCLAW_TRANSPORT_CHANNEL_IDS, ...GENERATED_OPENCLAW_SUPERSEDED_CHANNEL_IDS].sort(),
+    GENERATED_OPENCLAW_MANIFEST.channels.map((c) => c.id).sort(),
+  );
+});
+
+test("every transported channel_key is `openclaw_` plus OpenClaw's own id, verbatim", () => {
+  // The `openclaw_qq` bug (their id is `qqbot`), made structurally
+  // impossible: nothing here types a suffix any more.
+  const ids = new Set(GENERATED_OPENCLAW_MANIFEST.channels.map((c) => c.id));
+  assert.ok(ids.has("qqbot"));
+  assert.equal(ids.has("qq"), false);
+  for (const channelKey of openClawTransportChannelKeys()) {
+    const channelId = openClawChannelIdFromChannelKey(channelKey);
+    assert.ok(channelId, `${channelKey} does not round-trip to an OpenClaw channel id`);
+    assert.equal(channelKey, `openclaw_${channelId}`);
+    assert.equal(ids.has(channelId), true);
+  }
 });
 
 // ── the cloud's payload ───────────────────────────────────────────────────

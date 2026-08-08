@@ -52,13 +52,61 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
             service.assert_public_studio_webhook_path("/personal-channels/whatsapp/gateways/gateway-1")
 
     def test_channel_catalog_keeps_personal_priority_and_studio_boundary(self) -> None:
-        personal_catalog = service.personal_channel_catalog()
+        full_personal_catalog = service.personal_channel_catalog()
         studio_catalog = service.studio_channel_catalog()
+
+        # The catalog is now the first-party channels followed by the DERIVED
+        # OpenClaw-transported ones. The first-party half is still asserted
+        # exactly, order included — that order is the product's priority
+        # order. The derived half is asserted by its contract instead of by a
+        # list that would have to be re-typed every time OpenClaw ships a
+        # channel, which is the defect this split exists to remove.
+        personal_catalog = [
+            entry
+            for entry in full_personal_catalog
+            if entry["provider"] != service.OPENCLAW_TRANSPORT_PROVIDER
+        ]
+        openclaw_catalog = [
+            entry
+            for entry in full_personal_catalog
+            if entry["provider"] == service.OPENCLAW_TRANSPORT_PROVIDER
+        ]
 
         self.assertEqual(
             [entry["channel_key"] for entry in personal_catalog],
             ["telegram_personal", "whatsapp_personal", "signal_personal", "imessage_personal", "wechat_personal", "discord_personal"],
         )
+        self.assertEqual(
+            [entry["channel_key"] for entry in full_personal_catalog[: len(personal_catalog)]],
+            [entry["channel_key"] for entry in personal_catalog],
+            "First-party channels must keep priority over the transported ones.",
+        )
+
+        # A derived set that silently emptied would make every assertion about
+        # it pass vacuously, and would read to a customer as a product with no
+        # channels rather than as a bug.
+        self.assertTrue(openclaw_catalog)
+        self.assertEqual(
+            [entry["channel_key"] for entry in openclaw_catalog],
+            [channel.channel_key for channel in service.OPENCLAW_ACTIVE_CHANNELS],
+        )
+        # Every transported channel is "preview" — a property of the
+        # transport, not a per-channel judgement, so there is no list to keep
+        # honest. Nothing here has been driven with real credentials yet
+        # (CHANNEL-ADOPTION-PLAN.md step 5).
+        self.assertEqual({entry["stage"] for entry in openclaw_catalog}, {"preview"})
+        # No transported channel may collide with a first-party one, and the
+        # active/superseded split must be a partition — an id on both sides
+        # would be two live implementations of one platform.
+        self.assertFalse(
+            {entry["channel_key"] for entry in personal_catalog}
+            & {entry["channel_key"] for entry in openclaw_catalog}
+        )
+        self.assertFalse(
+            {channel.id for channel in service.OPENCLAW_ACTIVE_CHANNELS}
+            & {channel.id for channel in service.OPENCLAW_SUPERSEDED_CHANNELS}
+        )
+
         self.assertEqual(
             [entry["stage"] for entry in personal_catalog],
             # Signal, iMessage, and WeChat are all first-class,
@@ -125,7 +173,21 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         catalog = service.platform_channel_catalog()
         by_key = {entry["channel_key"]: entry for entry in catalog}
 
-        self.assertEqual(len(catalog), 26)
+        # 26 first-party entries, plus one per channel the pinned OpenClaw
+        # carries — ALL of them, including the ones a first-party runtime
+        # still owns, so the UI can show "carried by the transport, superseded
+        # here" rather than leaving them invisible. Counted from the derived
+        # set rather than re-typed, but the first-party 26 stays exact.
+        openclaw_entries = [
+            entry
+            for entry in catalog
+            if entry["provider"] == service.OPENCLAW_TRANSPORT_PROVIDER
+        ]
+        self.assertTrue(openclaw_entries)
+        self.assertEqual(len(catalog) - len(openclaw_entries), 26)
+        self.assertEqual(
+            len(openclaw_entries), len(service.openclaw_channel_registry.CHANNELS)
+        )
         # SMS via Twilio — a live business channel on the Studio connector lane
         # (the "each agent gets its own phone number" feature).
         self.assertEqual(by_key["sms_twilio"]["provider"], "twilio_sms")

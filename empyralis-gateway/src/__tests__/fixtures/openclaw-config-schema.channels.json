@@ -1,9 +1,52 @@
 {
-  "$comment": "Pruned fixture of `openclaw config schema` from openclaw@2026.6.10 (the pinned build). Only the policy-bearing properties are kept \u2014 the full document is ~2.5MB. Regenerate with scripts/refresh-openclaw-schema-fixture.mjs when the pin moves.",
+  "$comment": "Pruned fixture of `openclaw config schema` from openclaw@2026.6.10 (the pinned build). Only the policy-bearing properties are kept — the full document is ~2.5MB. Regenerate with scripts/refresh-openclaw-schema-fixture.mjs when the pin moves.",
   "openclawVersion": "2026.6.10",
   "properties": {
     "channels": {
       "properties": {
+        "clickclack": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "discord": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "configWrites": {
+              "type": "boolean"
+            },
+            "dmPolicy": {
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         "feishu": {
           "properties": {
             "allowFrom": {
@@ -145,6 +188,366 @@
           },
           "type": "object"
         },
+        "googlechat": {
+          "properties": {
+            "configWrites": {
+              "type": "boolean"
+            },
+            "groupAllowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "groups": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "botLoopProtection": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "cooldownSeconds": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      },
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "maxEventsPerWindow": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      },
+                      "windowSeconds": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "requireMention": {
+                    "type": "boolean"
+                  },
+                  "systemPrompt": {
+                    "type": "string"
+                  },
+                  "users": {
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ]
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "propertyNames": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "requireMention": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "imessage": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "configWrites": {
+              "type": "boolean"
+            },
+            "dmPolicy": {
+              "default": "pairing",
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupAllowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "groups": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "requireMention": {
+                    "type": "boolean"
+                  },
+                  "systemPrompt": {
+                    "type": "string"
+                  },
+                  "tools": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "allow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "alsoAllow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "deny": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "toolsBySender": {
+                    "additionalProperties": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "allow": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "alsoAllow": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "deny": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "propertyNames": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "irc": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "dmPolicy": {
+              "default": "pairing",
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupAllowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "groups": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "allowFrom": {
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ]
+                    },
+                    "type": "array"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "requireMention": {
+                    "type": "boolean"
+                  },
+                  "skills": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "systemPrompt": {
+                    "type": "string"
+                  },
+                  "tools": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "allow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "alsoAllow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "deny": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "toolsBySender": {
+                    "additionalProperties": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "allow": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "alsoAllow": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "deny": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "propertyNames": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
         "line": {
           "properties": {
             "allowFrom": {
@@ -231,6 +634,206 @@
                 "type": "string"
               },
               "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "matrix": {
+          "properties": {
+            "groupAllowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "groups": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "account": {
+                    "type": "string"
+                  },
+                  "allowBots": {
+                    "anyOf": [
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "const": "mentions",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "autoReply": {
+                    "type": "boolean"
+                  },
+                  "botLoopProtection": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "cooldownSeconds": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      },
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "maxEventsPerWindow": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      },
+                      "windowSeconds": {
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "requireMention": {
+                    "type": "boolean"
+                  },
+                  "skills": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "systemPrompt": {
+                    "type": "string"
+                  },
+                  "tools": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "allow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "alsoAllow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "deny": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "users": {
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ]
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "properties": {},
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "mattermost": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "configWrites": {
+              "type": "boolean"
+            },
+            "dmPolicy": {
+              "default": "pairing",
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupAllowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "groups": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "requireMention": {
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              },
+              "propertyNames": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "requireMention": {
+              "type": "boolean"
             }
           },
           "type": "object"
@@ -429,6 +1032,69 @@
           },
           "type": "object"
         },
+        "nextcloud-talk": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "dmPolicy": {
+              "default": "pairing",
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupAllowFrom": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "nostr": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "dmPolicy": {
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
         "qqbot": {
           "properties": {
             "allowFrom": {
@@ -555,6 +1221,457 @@
               "type": "object"
             }
           },
+          "type": "object"
+        },
+        "signal": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "configWrites": {
+              "type": "boolean"
+            },
+            "dmPolicy": {
+              "default": "pairing",
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupAllowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "groups": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "ingest": {
+                    "type": "boolean"
+                  },
+                  "requireMention": {
+                    "type": "boolean"
+                  },
+                  "tools": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "allow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "alsoAllow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "deny": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "toolsBySender": {
+                    "additionalProperties": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "allow": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "alsoAllow": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "deny": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "propertyNames": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "slack": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "configWrites": {
+              "type": "boolean"
+            },
+            "dmPolicy": {
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "requireMention": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "sms": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "dmPolicy": {
+              "default": "pairing",
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "synology-chat": {
+          "properties": {},
+          "type": "object"
+        },
+        "telegram": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "configWrites": {
+              "type": "boolean"
+            },
+            "dmPolicy": {
+              "default": "pairing",
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupAllowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "groups": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "allowFrom": {
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ]
+                    },
+                    "type": "array"
+                  },
+                  "disableAudioPreflight": {
+                    "type": "boolean"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "errorCooldownMs": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "errorPolicy": {
+                    "enum": [
+                      "always",
+                      "once",
+                      "silent"
+                    ],
+                    "type": "string"
+                  },
+                  "groupPolicy": {
+                    "enum": [
+                      "open",
+                      "disabled",
+                      "allowlist"
+                    ],
+                    "type": "string"
+                  },
+                  "ingest": {
+                    "type": "boolean"
+                  },
+                  "requireMention": {
+                    "type": "boolean"
+                  },
+                  "skills": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "systemPrompt": {
+                    "type": "string"
+                  },
+                  "tools": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "allow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "alsoAllow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "deny": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "toolsBySender": {
+                    "additionalProperties": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "allow": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "alsoAllow": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "deny": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  },
+                  "topics": {
+                    "additionalProperties": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "agentId": {
+                          "type": "string"
+                        },
+                        "allowFrom": {
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              }
+                            ]
+                          },
+                          "type": "array"
+                        },
+                        "disableAudioPreflight": {
+                          "type": "boolean"
+                        },
+                        "enabled": {
+                          "type": "boolean"
+                        },
+                        "errorCooldownMs": {
+                          "maximum": 9007199254740991,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "errorPolicy": {
+                          "enum": [
+                            "always",
+                            "once",
+                            "silent"
+                          ],
+                          "type": "string"
+                        },
+                        "groupPolicy": {
+                          "enum": [
+                            "open",
+                            "disabled",
+                            "allowlist"
+                          ],
+                          "type": "string"
+                        },
+                        "ingest": {
+                          "type": "boolean"
+                        },
+                        "requireMention": {
+                          "type": "boolean"
+                        },
+                        "skills": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "systemPrompt": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "propertyNames": {
+                "type": "string"
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "tlon": {
+          "properties": {},
+          "type": "object"
+        },
+        "twitch": {
+          "properties": {},
           "type": "object"
         },
         "whatsapp": {
@@ -721,6 +1838,95 @@
                 "allowlist"
               ],
               "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "zalouser": {
+          "properties": {
+            "allowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "dmPolicy": {
+              "enum": [
+                "pairing",
+                "allowlist",
+                "open",
+                "disabled"
+              ],
+              "type": "string"
+            },
+            "groupAllowFrom": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "type": "array"
+            },
+            "groupPolicy": {
+              "default": "allowlist",
+              "enum": [
+                "open",
+                "disabled",
+                "allowlist"
+              ],
+              "type": "string"
+            },
+            "groups": {
+              "additionalProperties": {
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "requireMention": {
+                    "type": "boolean"
+                  },
+                  "tools": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "allow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "alsoAllow": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "deny": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "properties": {},
+              "type": "object"
             }
           },
           "type": "object"

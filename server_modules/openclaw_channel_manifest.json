@@ -1,0 +1,584 @@
+{
+  "schema": "empyralis.openclaw_channel_manifest.v1",
+  "openclaw_version": "2026.6.10",
+  "generated_by": "scripts/generate_openclaw_channel_manifest.py",
+  "channel_key_prefix": "openclaw_",
+  "channels": [
+    {
+      "id": "clickclack",
+      "channel_key": "openclaw_clickclack",
+      "label": "ClickClack",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [],
+        "group_policy_modes": [],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "discord",
+      "channel_key": "openclaw_discord",
+      "label": "Discord",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "feishu",
+      "channel_key": "openclaw_feishu",
+      "label": "Feishu",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": true,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "googlechat",
+      "channel_key": "openclaw_googlechat",
+      "label": "Google Chat",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": true,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "imessage",
+      "channel_key": "openclaw_imessage",
+      "label": "iMessage",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "irc",
+      "channel_key": "openclaw_irc",
+      "label": "IRC",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "line",
+      "channel_key": "openclaw_line",
+      "label": "LINE",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "matrix",
+      "channel_key": "openclaw_matrix",
+      "label": "Matrix",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "mattermost",
+      "channel_key": "openclaw_mattermost",
+      "label": "Mattermost",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": true,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "msteams",
+      "channel_key": "openclaw_msteams",
+      "label": "Microsoft Teams",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": true,
+        "per_chat_map_key": "teams",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "nextcloud-talk",
+      "channel_key": "openclaw_nextcloud-talk",
+      "label": "Nextcloud Talk",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "nostr",
+      "channel_key": "openclaw_nostr",
+      "label": "Nostr",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "openclaw-weixin",
+      "channel_key": "openclaw_openclaw-weixin",
+      "label": "Weixin",
+      "origin": "installable",
+      "config_schema_present": false,
+      "policy_shape": null
+    },
+    {
+      "id": "openclaw-zaloclawbot",
+      "channel_key": "openclaw_openclaw-zaloclawbot",
+      "label": "Zalo ClawBot",
+      "origin": "installable",
+      "config_schema_present": false,
+      "policy_shape": null
+    },
+    {
+      "id": "qqbot",
+      "channel_key": "openclaw_qqbot",
+      "label": "QQ Bot",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "signal",
+      "channel_key": "openclaw_signal",
+      "label": "Signal",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "slack",
+      "channel_key": "openclaw_slack",
+      "label": "Slack",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": true,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "sms",
+      "channel_key": "openclaw_sms",
+      "label": "SMS",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "synology-chat",
+      "channel_key": "openclaw_synology-chat",
+      "label": "Synology Chat",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [],
+        "group_policy_modes": [],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "telegram",
+      "channel_key": "openclaw_telegram",
+      "label": "Telegram",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": true,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "tlon",
+      "channel_key": "openclaw_tlon",
+      "label": "Tlon",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [],
+        "group_policy_modes": [],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "twitch",
+      "channel_key": "openclaw_twitch",
+      "label": "Twitch",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [],
+        "group_policy_modes": [],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "wecom",
+      "channel_key": "openclaw_wecom",
+      "label": "WeCom",
+      "origin": "installable",
+      "config_schema_present": false,
+      "policy_shape": null
+    },
+    {
+      "id": "whatsapp",
+      "channel_key": "openclaw_whatsapp",
+      "label": "WhatsApp",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": true,
+        "plugin_hook_flags": [
+          "messageReceived"
+        ],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "yuanbao",
+      "channel_key": "openclaw_yuanbao",
+      "label": "Yuanbao",
+      "origin": "installable",
+      "config_schema_present": false,
+      "policy_shape": null
+    },
+    {
+      "id": "zalo",
+      "channel_key": "openclaw_zalo",
+      "label": "Zalo",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": null,
+        "per_chat_map_keyed_on_chat_id": false,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    },
+    {
+      "id": "zalouser",
+      "channel_key": "openclaw_zalouser",
+      "label": "Zalo Personal",
+      "origin": "installable",
+      "config_schema_present": true,
+      "policy_shape": {
+        "dm_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open",
+          "pairing"
+        ],
+        "group_policy_modes": [
+          "allowlist",
+          "disabled",
+          "open"
+        ],
+        "channel_require_mention": false,
+        "per_chat_map_key": "groups",
+        "per_chat_map_keyed_on_chat_id": true,
+        "config_writes": false,
+        "plugin_hook_flags": [],
+        "unhandled_plugin_hook_flags": []
+      }
+    }
+  ]
+}

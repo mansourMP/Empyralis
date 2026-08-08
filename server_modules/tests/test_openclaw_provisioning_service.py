@@ -16,6 +16,7 @@ import pytest
 
 from server_modules import (
     channel_lane_contract_service,
+    openclaw_channel_registry,
     openclaw_provisioning_service,
     personal_channels_service,
 )
@@ -24,18 +25,44 @@ from server_modules import (
 def test_openclaw_channel_key_suffix_is_openclaws_own_channel_id():
     """The invariant that `openclaw_qq` violated (their id is `qqbot`), broken
     silently in both directions until step 4's provisioning had to write
-    `channels.<id>` into a real config."""
-    # Transcribed from openclaw@2026.6.10's own config schema (`channels.*`)
-    # and dist/message-channel-constants-*.js.
-    openclaw_channel_ids = {"feishu", "line", "qqbot", "zalo", "msteams"}
-    suffixes = {
-        openclaw_provisioning_service.openclaw_channel_id(key)
-        for key in personal_channels_service.OPENCLAW_PERSONAL_CHANNELS
-    }
-    assert suffixes == openclaw_channel_ids
+    `channels.<id>` into a real config.
+
+    This used to assert a hand-typed set of five suffixes, which could only
+    ever confirm that two hand-written lists agreed with a third. The suffixes
+    are now GENERATED from OpenClaw's own registry, so the assertion that
+    matters is structural: every key round-trips to an id OpenClaw actually
+    has, and nothing anywhere invents one.
+    """
+    assert personal_channels_service.OPENCLAW_PERSONAL_CHANNELS, (
+        "The OpenClaw channel set is empty — every assertion in the loop below "
+        "would pass vacuously while the transport carries nothing."
+    )
+
+    for channel_key in personal_channels_service.OPENCLAW_PERSONAL_CHANNELS:
+        channel_id = openclaw_provisioning_service.openclaw_channel_id(channel_key)
+        # The suffix IS their id, verbatim — never a normalization of it.
+        assert channel_key == f"openclaw_{channel_id}"
+        # And that id is one OpenClaw declares, not one we invented. This is
+        # the half a bare prefix strip could never check.
+        assert channel_id in openclaw_channel_registry.CHANNELS_BY_ID
+
     assert set(channel_lane_contract_service.OPENCLAW_PERSONAL_CHANNEL_SPECS) == set(
         personal_channels_service.OPENCLAW_PERSONAL_CHANNELS
     )
+
+
+def test_openclaw_uses_their_qqbot_id_and_never_the_qq_that_broke_the_lane():
+    """A regression pin on the one id this codebase actually got wrong.
+
+    Independently sourced: `qqbot` is what openclaw@2026.6.10's own config
+    schema (`channels.qqbot`) and dist/message-channel-constants-*.js's
+    NATIVE_APPROVAL_CHANNELS call it. Kept as a named fact rather than a full
+    list, so it cannot go stale the day OpenClaw adds a channel.
+    """
+    assert "qqbot" in openclaw_channel_registry.CHANNELS_BY_ID
+    assert "qq" not in openclaw_channel_registry.CHANNELS_BY_ID
+    assert "openclaw_qqbot" in personal_channels_service.OPENCLAW_PERSONAL_CHANNELS
+    assert "openclaw_qq" not in personal_channels_service.OPENCLAW_PERSONAL_CHANNELS
 
 
 def test_openclaw_channel_id_refuses_a_non_openclaw_key():

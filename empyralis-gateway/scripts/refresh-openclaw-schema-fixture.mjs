@@ -17,17 +17,41 @@
  * The profile is only used to scope the CLI call; nothing is written to it.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT = path.join(HERE, "..", "src", "__tests__", "fixtures", "openclaw-config-schema.channels.json");
+const MANIFEST = path.join(HERE, "..", "..", "server_modules", "openclaw_channel_manifest.json");
 
-/** Must match OPENCLAW_TRANSPORT_CHANNEL_IDS, plus whatsapp — kept because it
- *  is the one channel that suppresses the inbound plugin hook, and the hook
- *  audit's regression test needs a real example of that shape. */
-const CHANNELS = ["feishu", "line", "qqbot", "zalo", "msteams", "whatsapp"];
+/**
+ * Every channel the pinned OpenClaw declares a config node for — read out of
+ * the generated channel manifest, never typed here.
+ *
+ * This used to be `["feishu","line","qqbot","zalo","msteams","whatsapp"]` with
+ * a comment saying it must match OPENCLAW_TRANSPORT_CHANNEL_IDS. That was a
+ * fourth hand-maintained copy of the channel set, and the one furthest from
+ * anybody's attention: a fixture that silently stops covering a channel does
+ * not fail, it just stops checking it — which is worse than failing.
+ *
+ * WhatsApp is now included by construction rather than as a named exception:
+ * it is in the manifest like everything else, and it remains the one channel
+ * that suppresses the inbound plugin hook, so the hook audit's regression test
+ * still has a real example of that shape.
+ */
+const manifest = JSON.parse(readFileSync(MANIFEST, "utf8"));
+const CHANNELS = manifest.channels
+  .filter((channel) => channel.config_schema_present)
+  .map((channel) => channel.id);
+if (CHANNELS.length === 0) {
+  throw new Error(
+    "The generated channel manifest declares no channel with a config schema node. Run " +
+      "`python3 scripts/generate_openclaw_channel_manifest.py` first — an empty fixture " +
+      "asserts nothing and passes.",
+  );
+}
 const POLICY_PROPERTIES = [
   "dmPolicy",
   "groupPolicy",
@@ -40,16 +64,29 @@ const POLICY_PROPERTIES = [
   "groupAllowFrom",
 ];
 
-const profileIndex = process.argv.indexOf("--profile");
-const profile = profileIndex >= 0 ? process.argv[profileIndex + 1] : "empyralis-schema-fixture";
+// A throwaway HOME rather than `--profile`: a profile still lands under the
+// operator's own home (`~/.openclaw-<profile>`), and reading a schema is no
+// reason to write anything into a real OpenClaw tree. Same isolation the
+// Python manifest generator uses.
+const scratchHome = mkdtempSync(path.join(tmpdir(), "empyralis-openclaw-fixture-"));
+const env = { ...process.env, HOME: scratchHome };
+delete env.OPENCLAW_CONFIG_DIR;
 
-const version = execFileSync("openclaw", ["--profile", profile, "--version"], { encoding: "utf8" }).trim();
+// Their CLI prints either a bare semver-ish line or the "OpenClaw 2026.6.10
+// (aa69b12)" banner depending on how it is invoked; the fixture records the
+// version only, same shape parseOpenClawVersion() accepts.
+const versionOutput = execFileSync("openclaw", ["--version"], { encoding: "utf8", env }).trim();
+const versionMatch = versionOutput.match(/\b(\d{4}\.\d{1,2}\.\d{1,3})\b/);
+if (!versionMatch) throw new Error(`Could not parse an OpenClaw version out of: ${versionOutput}`);
+const version = versionMatch[1];
 const schema = JSON.parse(
-  execFileSync("openclaw", ["--profile", profile, "config", "schema"], {
+  execFileSync("openclaw", ["config", "schema"], {
     encoding: "utf8",
+    env,
     maxBuffer: 64 * 1024 * 1024,
   }),
 );
+rmSync(scratchHome, { recursive: true, force: true });
 
 const source = schema.properties.channels.properties;
 const properties = {};
