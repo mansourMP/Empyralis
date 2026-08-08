@@ -134,7 +134,99 @@ class LocalStackDatabaseUrlCheckTests(unittest.TestCase):
             self.assertIsNone(preflight._check_local_stack_database_url())
 
 
+class PlatformCreditKeyCheckTests(unittest.TestCase):
+    """preflight.py's advisory DeepSeek ``/user/balance`` health check — the
+    one preflight step that makes a real outbound HTTPS request.
+
+    It had no direct coverage at all: the only thing reaching it was
+    PreflightRunnerTests below, which calls run_preflight_checks() for
+    unrelated reasons and therefore fired a REAL, billed request at
+    api.deepseek.com on any machine with a key in its environment. These
+    tests exercise the check itself with the HTTP response mocked, including
+    the failure shapes, so the branch that exists to shout "PLATFORM-CREDIT
+    KEY DEAD" is actually verified rather than merely executed.
+    """
+
+    def _run_check(self, *, api_key="sk-platform-test", http_return=None, http_side_effect=None, env=None):
+        import asyncio
+
+        resolution = MagicMock()
+        resolution.value = api_key
+        http = MagicMock(return_value=http_return, side_effect=http_side_effect)
+        with patch.dict(os.environ, env or {}, clear=True), \
+             patch(
+                 "server_modules.secrets_broker.resolve_hosted_provider_secret",
+                 return_value=resolution,
+             ) as broker, \
+             patch("server_modules.runtime_common.http_json_request", new=http):
+            with self.assertLogs(preflight.LOGGER, level="INFO") as captured:
+                asyncio.run(preflight._check_platform_credit_keys())
+        return http, broker, captured.output
+
+    def test_healthy_key_makes_one_balance_request_and_does_not_shout(self):
+        http, _broker, logs = self._run_check(
+            http_return={"status": 200, "json": {"is_available": True}},
+        )
+        self.assertEqual(http.call_count, 1)
+        self.assertEqual(http.call_args.args[0], "https://api.deepseek.com/user/balance")
+        self.assertEqual(http.call_args.kwargs["method"], "GET")
+        self.assertIn("Bearer sk-platform-test", http.call_args.kwargs["headers"]["Authorization"])
+        self.assertFalse([line for line in logs if line.startswith("CRITICAL")])
+        self.assertTrue([line for line in logs if "healthy" in line])
+
+    def test_empty_balance_is_reported_as_a_dead_platform_credit_key(self):
+        _http, _broker, logs = self._run_check(
+            http_return={"status": 200, "json": {"is_available": False}},
+        )
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM-CREDIT KEY DEAD", critical[0])
+
+    def test_rejected_key_is_reported_as_a_dead_platform_credit_key(self):
+        _http, _broker, logs = self._run_check(
+            http_return={"status": 401, "json": {"error": "invalid api key"}},
+        )
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM-CREDIT KEY DEAD", critical[0])
+
+    def test_transport_failure_warns_but_never_claims_the_key_is_dead(self):
+        """A network problem on OUR side is not evidence the upstream account
+        is empty — mislabelling it would send an operator chasing a billing
+        problem that doesn't exist."""
+        _http, _broker, logs = self._run_check(
+            http_side_effect=OSError("connection reset"),
+        )
+        self.assertFalse([line for line in logs if line.startswith("CRITICAL")])
+        self.assertTrue([line for line in logs if "network/transport" in line])
+
+    def test_no_configured_key_makes_no_request_at_all(self):
+        http, _broker, logs = self._run_check(api_key="")
+        self.assertEqual(http.call_count, 0)
+        self.assertTrue([line for line in logs if "no DeepSeek platform-credit key" in line])
+
+    def test_skip_flag_makes_no_request_and_does_not_resolve_a_secret(self):
+        http, broker, logs = self._run_check(
+            env={"EMPYRALIS_SKIP_PLATFORM_CREDIT_CHECK": "true"},
+        )
+        self.assertEqual(http.call_count, 0)
+        self.assertEqual(broker.call_count, 0)
+        self.assertTrue([line for line in logs if "skipped" in line])
+
+
 class PreflightRunnerTests(unittest.TestCase):
+    """run_preflight_checks() composition. Step 6 (the advisory DeepSeek
+    balance check) is mocked out in every test here because it is not the
+    subject: these assert which checks run and how their errors are
+    collected. Left unmocked it reached api.deepseek.com for real —
+    see PlatformCreditKeyCheckTests above for its own coverage."""
+
+    @staticmethod
+    def _no_platform_credit_call():
+        return patch(
+            "server_modules.preflight._check_platform_credit_keys",
+            new=AsyncMock(return_value=None),
+        )
 
     def test_all_passed_returns_empty_list(self):
         """When all checks pass, errors list is empty."""
@@ -142,7 +234,8 @@ class PreflightRunnerTests(unittest.TestCase):
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
-                 patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)):
+                 patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
+                 self._no_platform_credit_call():
                 return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
@@ -154,7 +247,8 @@ class PreflightRunnerTests(unittest.TestCase):
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value="no kernel"), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value="no pg")), \
-                 patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)):
+                 patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
+                 self._no_platform_credit_call():
                 return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
@@ -167,7 +261,8 @@ class PreflightRunnerTests(unittest.TestCase):
         async def _run():
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value=None), \
-                 patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)):
+                 patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
+                 self._no_platform_credit_call():
                 with patch.dict(os.environ, {"EMPYRALIS_SKIP_REDIS_CHECK": "true"}):
                     return await preflight.run_preflight_checks()
         import asyncio

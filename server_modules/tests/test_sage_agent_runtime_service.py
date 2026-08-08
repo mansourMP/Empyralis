@@ -11,6 +11,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from server_modules import compaction_service
 from server_modules import sage_agent_runtime_service
 from server_modules.specialist_runtime_context import SpecialistRuntimeContext
+from server_modules.tests.support_live_llm_stubs import patched_provider_calls
 
 
 def _run(coro):
@@ -81,6 +82,7 @@ class SageAgentRuntimeContextLoadingTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", usage={"model": "d"}, provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -114,6 +116,7 @@ class SageAgentRuntimeContextLoadingTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -139,6 +142,7 @@ class SageAgentRuntimeContextLoadingTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -169,6 +173,7 @@ class SageAgentRuntimeContextLoadingTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -201,6 +206,7 @@ class SageAgentRuntimeContextLoadingTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[safe_skill]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -310,7 +316,7 @@ class SageAgentRuntimeAttachmentContextTests(unittest.TestCase):
 
 
 class SageAgentRuntimeSafetyTests(unittest.TestCase):
-    def _setup_mocks(self, *, profile_overrides=None, skills=None, memory_return="", files_return=None):
+    def _setup_mocks(self, *, profile_overrides=None, skills=None, memory_return="", files_return=None, reply="Reply"):
         mocks = {}
         defaults = {"user_name": "", "identity_summary": "", "communication_style": "", "recurring_responsibility": "", "standing_rules": []}
         if profile_overrides:
@@ -321,7 +327,13 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         mocks["heartbeat"] = patch("server_modules.sage_agent_runtime_service.sage_heartbeat_service.build_sage_heartbeat_snapshot", new=AsyncMock(return_value={}))
         mocks["skills"] = patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=skills or [])
         mocks["provider"] = patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("deepseek", {"api_key": "test"}))
-        mocks["generate"] = patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=("Reply", {"model": "d"}, "deepseek", ""))
+        mocks["generate"] = patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", return_value=(reply, {"model": "d"}, "deepseek", ""))
+        # mocks["generate"] above only covers the LEGACY fallback entry
+        # points (sage_agent_runtime_service lines 4104 / 5885 / 6573). The
+        # ordinary turn goes through the streaming seam instead -- see
+        # support_live_llm_stubs -- so this is the one that actually keeps a
+        # test off the network.
+        mocks["provider_stream"] = patched_provider_calls(reply=reply, usage={"model": "d"}, provider="deepseek")
         mocks["persist"] = patch("server_modules.sage_agent_runtime_service.persist_interaction")
         mocks["activity"] = patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock())
         mocks["audit"] = patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event")
@@ -347,7 +359,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         with (
             mocks["profile"], mocks["files"], mocks["memory"] as mock_mem,
             mocks["heartbeat"], mocks["skills"], mocks["provider"],
-            mocks["generate"], mocks["persist"], mocks["activity"], mocks["audit"],
+            mocks["generate"], mocks["provider_stream"], mocks["persist"], mocks["activity"], mocks["audit"],
         ):
             _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", message="hello",
@@ -364,14 +376,20 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         with (
             mocks["profile"], mocks["files"], mocks["memory"], mocks["heartbeat"],
             mocks["skills"], mocks["provider"],
-            mocks["generate"] as mock_gen,
+            mocks["generate"] as mock_gen, mocks["provider_stream"] as sage_stream,
             mocks["persist"], mocks["activity"], mocks["audit"],
         ):
             _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", message="hello",
             ))
 
-            system_prompt = mock_gen.call_args[0][3]
+            # Read the prompt off the call the turn REALLY makes. mock_gen
+            # (the non-streaming fallback seam) is not called on an ordinary
+            # turn at all, so mock_gen.call_args was None-shaped and every
+            # assertion below was unreachable while the turn itself went to
+            # a live provider -- see support_live_llm_stubs.
+            self.assertEqual(sage_stream.call_count, 1)
+            system_prompt = sage_stream.system_prompt
             self.assertNotIn("sk-", system_prompt)
             self.assertIn("what can you do", system_prompt)
             self.assertIn("user's personal AI assistant", system_prompt)
@@ -386,7 +404,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
             "<｜｜DSML｜｜parameter name=\"command\" string=\"true\">system_profiler</｜｜DSML｜｜parameter>"
             "</｜｜DSML｜｜invoke>"
         )
-        mocks = self._setup_mocks()
+        mocks = self._setup_mocks(reply=dsml_reply)
         mocks["generate"] = patch(
             "server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback",
             return_value=(dsml_reply, {"model": "deepseek-chat"}, "deepseek", ""),
@@ -394,7 +412,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         with (
             mocks["profile"], mocks["files"], mocks["memory"], mocks["heartbeat"],
             mocks["skills"], mocks["provider"],
-            mocks["generate"], mocks["persist"] as mock_persist, mocks["activity"], mocks["audit"],
+            mocks["generate"], mocks["provider_stream"], mocks["persist"] as mock_persist, mocks["activity"], mocks["audit"],
         ):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", message="hello",
@@ -420,7 +438,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         with (
             mocks["profile"], mocks["files"], mocks["memory"], mocks["heartbeat"],
             mocks["skills"], mocks["provider"],
-            mocks["generate"], mocks["persist"], mocks["activity"],
+            mocks["generate"], mocks["provider_stream"], mocks["persist"], mocks["activity"],
             mocks["audit"] as mock_audit, mocks["approval"],
         ):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
@@ -445,7 +463,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         with (
             mocks["profile"], mocks["files"], mocks["memory"], mocks["heartbeat"],
             mocks["skills"], mocks["provider"],
-            mocks["generate"], mocks["persist"], mocks["activity"], mocks["audit"], mocks["approval"],
+            mocks["generate"], mocks["provider_stream"], mocks["persist"], mocks["activity"], mocks["audit"], mocks["approval"],
         ):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
@@ -490,7 +508,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
                 with (
                     mocks["profile"], mocks["files"], mocks["memory"], mocks["heartbeat"],
                     mocks["skills"], mocks["provider"],
-                    mocks["generate"], mocks["persist"], mocks["activity"], mocks["audit"],
+                    mocks["generate"], mocks["provider_stream"], mocks["persist"], mocks["activity"], mocks["audit"],
                     mocks["approval"] as mock_approval,
                 ):
                     result = _run(sage_agent_runtime_service.handle_sage_chat(
@@ -519,7 +537,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         with (
             mocks["profile"], mocks["files"], mocks["memory"], mocks["heartbeat"],
             mocks["skills"], mocks["provider"],
-            mocks["generate"], mocks["persist"], mocks["activity"], mocks["audit"], mocks["approval"],
+            mocks["generate"], mocks["provider_stream"], mocks["persist"], mocks["activity"], mocks["audit"], mocks["approval"],
         ):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1", message="run the deployment script",
@@ -542,7 +560,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         with (
             mocks["profile"], mocks["files"], mocks["memory"], mocks["heartbeat"],
             mocks["skills"], mocks["provider"],
-            mocks["generate"], mocks["persist"], mocks["activity"], mocks["audit"], mocks["approval"],
+            mocks["generate"], mocks["provider_stream"], mocks["persist"], mocks["activity"], mocks["audit"], mocks["approval"],
         ):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
@@ -565,7 +583,7 @@ class SageAgentRuntimeSafetyTests(unittest.TestCase):
         mocks = self._setup_mocks(skills=[dangerous])
         with (
             mocks["profile"], mocks["files"], mocks["memory"], mocks["heartbeat"],
-            mocks["skills"], mocks["provider"], mocks["generate"], mocks["persist"],
+            mocks["skills"], mocks["provider"], mocks["generate"], mocks["provider_stream"], mocks["persist"],
             mocks["activity"], mocks["audit"], mocks["approval"],
         ):
             chat_result = _run(
@@ -597,6 +615,7 @@ class SageAgentRuntimePersistenceTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction") as mock_persist,
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -724,6 +743,7 @@ class SageAgentRuntimeAuditTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event") as mock_audit,
@@ -762,6 +782,7 @@ class SageAgentRuntimeAuditTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[dangerous]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event") as mock_audit,
@@ -802,6 +823,7 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Hello there", usage={"model": "gpt-4o"}, provider="openai"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -1224,6 +1246,7 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider", return_value=("openai", {"api_key": "test-key"})),
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Reply", provider="openai"),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports.resolve_workspace_tool_capabilities", return_value=[]),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._resolve_direct_chat_availability", return_value={"runtime_ok": False, "local_gateway_online": False}),
             patch("server_modules.sage_agent_runtime_service.direct_chat_runtime_exports._execute_single_direct_tool_call") as mock_execute,
@@ -1495,6 +1518,7 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="", error="All providers failed"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
@@ -1519,6 +1543,7 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.list_skill_definitions", return_value=[]),
             patch("server_modules.sage_agent_runtime_service._resolve_cloud_provider") as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback", side_effect=RuntimeError("provider crashed")),
+            patched_provider_calls(raises=RuntimeError("provider crashed")),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event") as mock_audit,
@@ -2858,6 +2883,7 @@ class SageAgentRuntimeMasterModelConfigCheckTests(unittest.TestCase):
                 new=AsyncMock(return_value=("openai", {"api_key": "test-key"})),
             ) as mock_provider,
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback") as mock_generate,
+            patched_provider_calls(reply="Hello there", usage={"model": "gpt-4o"}, provider="openai"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),

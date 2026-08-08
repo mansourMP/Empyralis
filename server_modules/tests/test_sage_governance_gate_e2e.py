@@ -17,6 +17,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from server_modules import kill_switch_gate, safe_mode_service
+from server_modules.tests.support_live_llm_stubs import patched_provider_calls
 from server_modules.unified_governance_gate import evaluate_action_policy
 from server_modules.agent_computer_policy_service import (
     build_default_agent_computer_policy,
@@ -289,6 +290,10 @@ class TelegramHostedE2ETests(unittest.TestCase):
                   return_value=("deepseek", {"api_key": "test-key"})),
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback",
                   return_value=("Hey Mansur! How can I help?", {"model": "deepseek-chat"}, "deepseek", "")),
+            # The line above patches the LEGACY fallback seam only; an
+            # ordinary turn reaches the provider through the streaming one.
+            # See server_modules/tests/support_live_llm_stubs.py.
+            patched_provider_calls(reply="Hey Mansur! How can I help?", usage={"model": "deepseek-chat"}, provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
@@ -332,6 +337,10 @@ class TelegramHostedE2ETests(unittest.TestCase):
                   return_value=("deepseek", {"api_key": "test-key"})),
             patch("server_modules.sage_agent_runtime_service.generate_chat_reply_with_provider_fallback",
                   return_value=("Hi Alice!", {"model": "deepseek-chat"}, "deepseek", "")),
+            # The line above patches the LEGACY fallback seam only; an
+            # ordinary turn reaches the provider through the streaming one.
+            # See server_modules/tests/support_live_llm_stubs.py.
+            patched_provider_calls(reply="Hi Alice!", usage={"model": "deepseek-chat"}, provider="deepseek"),
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event",
                   new=AsyncMock()),
