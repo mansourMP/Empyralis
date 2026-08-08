@@ -133,7 +133,15 @@ class SageChatApiContractTests(unittest.TestCase):
             self.assertIn("ai assistant", system_prompt.lower())
             self.assertIn("user's personal ai assistant", system_prompt.lower())
             self.assertIn("don't wait to be micromanaged", system_prompt.lower())
-            self.assertIn("explicit confirmation", system_prompt.lower())
+            # Re-aimed 2026-08-08, NOT weakened. This asserted "explicit
+            # confirmation", a phrase the prompt no longer contains because
+            # the product forbids the behaviour: CLAUDE.md's "No approval
+            # system" law says an agent acts on its own reasoning and there
+            # is never a gate that blocks it mid-action. The prompt was
+            # rewritten to disclose-then-act, and this now asserts THAT.
+            # It went unnoticed because the mock guarded a seam the turn
+            # path had abandoned, so this line was never actually reached.
+            self.assertIn("disclose what you are about to do", system_prompt.lower())
             self.assertIn("never write xml", system_prompt.lower())
             self.assertTrue(routed_context["disable_provider_fallback"])
             self.assertNotIn("cannot send messages", system_prompt.lower())
