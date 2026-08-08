@@ -347,7 +347,10 @@ class RunStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         with patch("server_modules.run_state_repository.runtime_db.get_pool", return_value=pool):
-            items = await run_state_repository.list_pending_approvals(limit=10)
+            items = await run_state_repository.list_pending_approvals(
+                limit=10,
+                workspace_id="workspace-1",
+            )
 
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["approval_id"], "approval-1")
@@ -379,11 +382,14 @@ class RunStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["run_id"], "run-1")
         query, args = pool.fetch_calls[-1]
-        self.assertIn("LIMIT $3", query)
-        self.assertEqual(args[0], "workspace-1")
-        self.assertEqual(args[1], ["running"])
-        self.assertEqual(args[2], 25)
-        self.assertEqual(args[3], 50)
+        self.assertIn("LIMIT $4", query)
+        # $1 is the "read every workspace" flag and must be False whenever a
+        # scope was given -- it is the only thing that can widen this query.
+        self.assertIs(args[0], False)
+        self.assertEqual(args[1], ["workspace-1"])
+        self.assertEqual(args[2], ["running"])
+        self.assertEqual(args[3], 25)
+        self.assertEqual(args[4], 50)
 
     async def test_count_hosted_live_runs_uses_bounded_workspace_count_query(self):
         pool = _FakePool(fetchrow_result={"count": 2})
@@ -429,9 +435,10 @@ class RunStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(items[0]["workspace_id"], "workspace-1")
         query, args = pool.fetch_calls[-1]
         self.assertIn("workspace_id", query)
-        self.assertEqual(args[0], "workspace-1")
-        self.assertEqual(args[1], 20)
-        self.assertEqual(args[2], 10)
+        self.assertIs(args[0], False)
+        self.assertEqual(args[1], ["workspace-1"])
+        self.assertEqual(args[2], 20)
+        self.assertEqual(args[3], 10)
 
     async def test_record_transition_raises_when_postgres_fails(self):
         pool = _FakePool(execute_error=RuntimeError("db down"))
