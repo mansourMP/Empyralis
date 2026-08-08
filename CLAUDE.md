@@ -187,6 +187,44 @@ out-of-process compiled dependency this codebase grows needs the same
 staleness gate; `grep`-for-callers doesn't catch drift in an artifact that
 isn't source.
 
+**`execFile`'s `timeout` option is not a timeout, and neither is
+`execFileSync`'s.** Both send `killSignal` (SIGTERM) exactly once and never
+escalate. `execFile`'s CALLBACK still only fires on the child's exit, so a
+child that ignores SIGTERM leaves the wrapping promise pending FOREVER and its
+ProcessWrap + stdio PipeWraps refcounted on the event loop; `execFileSync`
+is worse — it goes back to blocking, freezing the whole process with the
+event loop stopped, so no timer, no handle dump and no
+`process.getActiveResourcesInfo()` can even observe it.
+
+```
+execFile(cmd, args, {timeout: T})
+  t=T   SIGTERM ──▶ child ignores it ──▶ ... nothing, ever
+        callback: never    promise: pending    handles: held for process life
+
+execFileWithTimeout(cmd, args, T)          <- shell/exec-file-with-timeout.ts
+  t=T   resolve({timedOut:true})   ── the DEADLINE belongs to the caller
+        SIGTERM ─(grace)─▶ SIGKILL ─▶ unref child + stdio
+```
+
+`docker info` on macOS does exactly this while waiting on a wedged Docker
+Desktop socket. `health/service-inventory.ts` probes Docker at boot
+(`index.ts`), on every `shell.execute` (`shell/runtime.ts`'s `isDockerReady`)
+and from the heartbeat (`cloud/ws-client.ts`) — and its 60s cache is only
+WRITTEN after the probe resolves, so a wedged probe also means the cache never
+fills and the next caller spawns another immortal child. Found 2026-08-08 on
+the founder's own box: the live gateway, up 3 days, holding 4 of them, with
+~50 more reparented to init from earlier gateway processes, oldest over a day
+old — plus `ws-client`'s `passiveInventoryRefresh` single-flight stuck non-null
+forever, so capability re-advertisement had silently frozen. It is also why
+four gateway test files passed every assertion and then hung, which is why
+nobody had a clean `npm test` signal for weeks. Every spawn-with-a-deadline now
+goes through `shell/exec-file-with-timeout.ts`, and a drift assertion in
+`__tests__/exec-file-timeout-child-leak.test.ts` bans the raw option in `src/`
+— a behavioural test cannot catch its reintroduction, because it type-checks
+and behaves perfectly against every child that does die on SIGTERM. When you
+add a subprocess with a timeout, the timeout is yours to enforce: resolve on
+your own deadline, escalate to SIGKILL, and unref what refuses to die.
+
 **Silent misrouting beats loud failure, and that is a bug.** A model calling
 the CLI's built-in `TaskCreate` instead of `project_task__create` reported
 "Task #1 created successfully" while `project_tasks` stayed empty — real

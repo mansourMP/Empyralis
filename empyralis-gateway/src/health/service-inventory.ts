@@ -1,4 +1,3 @@
-import { execFile } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -20,6 +19,7 @@ import {
   setShellSandboxDockerReady,
   type CapabilityPermissionStatus,
 } from "../runtime/desktop-permissions";
+import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
 import { resolveCommandPath } from "../shell/user-install-dirs";
 
 export type PassiveServiceStatus = "ready" | "degraded" | "offline" | "missing" | "unknown" | "blocked";
@@ -197,20 +197,28 @@ function defaultCommandExists(command: string, env: NodeJS.ProcessEnv, platform:
   return resolveCommandPath(command, env, platform);
 }
 
-function defaultRunCommand(command: string, args: string[], timeoutMs: number): Promise<CommandResult> {
-  return new Promise((resolve) => {
-    execFile(command, args, { timeout: timeoutMs, windowsHide: true }, (error, stdout, stderr) => {
-      const err = error as NodeJS.ErrnoException & { code?: number | string; signal?: NodeJS.Signals; killed?: boolean };
-      const code = typeof err?.code === "number" ? err.code : (error ? 1 : 0);
-      resolve({
-        exitCode: code,
-        stdout: String(stdout || ""),
-        stderr: String(stderr || ""),
-        signal: err?.signal ?? null,
-        timedOut: Boolean(err?.killed),
-      });
-    });
-  });
+// Every probe below goes through execFileWithTimeout, NOT execFile's own
+// `timeout` option. See shell/exec-file-with-timeout.ts: that option sends one
+// SIGTERM and never escalates, and its callback still only fires on the child's
+// exit — so a `docker info` waiting on a wedged Docker Desktop socket (which
+// demonstrably ignores SIGTERM on macOS) left this promise pending forever,
+// hung the whole Promise.all in collectPassiveInventorySnapshot, and stranded
+// an immortal child process on every probe.
+async function defaultRunCommand(command: string, args: string[], timeoutMs: number): Promise<CommandResult> {
+  const result = await execFileWithTimeout(command, args, timeoutMs);
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    // Every probe below renders `stderr || stdout || "exited with <code>"` into
+    // its owner-facing summary, and a timed-out child has neither — without
+    // this the Settings > Hardware row would read "docker info exited with
+    // null." instead of naming the actual condition.
+    stderr: result.timedOut
+      ? `Timed out after ${timeoutMs}ms; the process did not exit on its own and was killed.`
+      : result.stderr,
+    signal: result.signal,
+    timedOut: result.timedOut,
+  };
 }
 
 async function defaultHttpGetJson(url: string, timeoutMs: number): Promise<HttpProbeResult> {

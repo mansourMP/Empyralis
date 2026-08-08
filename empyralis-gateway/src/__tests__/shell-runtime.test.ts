@@ -1,20 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
 
+import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
 import { GatewayShellRuntime, resolveExecutionMode, type GatewayShellRuntimeConfig } from "../shell/runtime";
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 
-function realDockerAvailable(): boolean {
-  try {
-    execFileSync("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 3_000, stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
+let dockerAvailability: Promise<boolean> | null = null;
+
+/**
+ * This gate used to be `execFileSync("docker", ["info", ...], { timeout: 3_000 })`,
+ * and it is why this file hung forever after printing every passing assertion.
+ *
+ * spawnSync's `timeout` sends killSignal (SIGTERM) once and then goes back to
+ * WAITING for the child to exit — it never escalates. `docker info` against a
+ * wedged Docker Desktop socket ignores SIGTERM, so execFileSync blocked the
+ * whole process synchronously: no timer fired, no handle dump was reachable,
+ * and even `process.getActiveResourcesInfo()` was unobservable because the
+ * event loop never turned again. The async sibling of the same mistake is the
+ * production leak fixed in shell/exec-file-with-timeout.ts.
+ *
+ * Memoized: the probe is a per-machine fact, so paying it once beats paying it
+ * per test, and the result is identical.
+ */
+function realDockerAvailable(): Promise<boolean> {
+  dockerAvailability ??= execFileWithTimeout("docker", ["info", "--format", "{{.ServerVersion}}"], 3_000)
+    .then((result) => !result.timedOut && !result.error && result.exitCode === 0);
+  return dockerAvailability;
 }
 
 const SAGE_AUTHORIZED_POLICY = {
@@ -215,7 +229,7 @@ test("requestedCapabilities and supportsCapability report exactly shell.execute 
 // skip (not fail) when Docker isn't available, since CI/dev boxes vary. ──
 
 test("real Docker: sandbox mode runs a command in an actual hardened container and round-trips output", async (t) => {
-  if (!realDockerAvailable()) {
+  if (!(await realDockerAvailable())) {
     t.skip("Docker daemon is not available on this machine");
     return;
   }
@@ -229,7 +243,7 @@ test("real Docker: sandbox mode runs a command in an actual hardened container a
 });
 
 test("real Docker: two back-to-back calls each get a fresh container — no state bleed outside the workspace mount", async (t) => {
-  if (!realDockerAvailable()) {
+  if (!(await realDockerAvailable())) {
     t.skip("Docker daemon is not available on this machine");
     return;
   }
@@ -259,7 +273,7 @@ test("real Docker: two back-to-back calls each get a fresh container — no stat
 });
 
 test("real Docker: the pre-execution filter rejects a hard-blocked command before Docker is ever invoked", async (t) => {
-  if (!realDockerAvailable()) {
+  if (!(await realDockerAvailable())) {
     t.skip("Docker daemon is not available on this machine");
     return;
   }
