@@ -21,7 +21,14 @@ Checks
    written reason. Without (b) the check is circular: it verified exactly
    the tables the migration already knew about, so a tenant-scoped table
    nobody added to the migration was both unprotected *and* unverified
-   while preflight reported "all checks passed".
+   while preflight reported "all checks passed". 60 tables were in that
+   state on 2026-08-08.
+   The exception registry is seeded with those 60 so this check catches
+   NEW drift immediately rather than waiting on a remediation that can
+   only be done a few tables at a time. Each entry carries its audit
+   verdict; working the list down is the direction of travel, and
+   ``server_modules/tests/test_preflight_rls_coverage.py`` fails if an
+   entry outlives the gap it describes.
 5. **Redis** — REDIS_URL (default ``redis://localhost:6379``) must PONG.
 """
 
@@ -349,7 +356,151 @@ def _tenant_scoped_tables_from_migration() -> List[str]:
 # return zero rows — see the MAN-109 comment in migrations/enable_rls.sql).
 # Working an entry off this list — not growing it — is the direction of
 # travel. A new table belongs in migrations/enable_rls.sql, not here.
-_RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {}
+# Verdict vocabulary for the seeded backlog. Each string says what was found
+# on 2026-08-08 and what has to be true before the table can move into
+# migrations/enable_rls.sql — because "add RLS" is NOT free: a policy on a
+# table whose queries do not set app.current_tenant_id/app.current_workspace_id
+# makes every read silently return zero rows.
+_SCOPED_IN_APP_SQL = (
+    "2026-08-08 audit: every read carries an explicit tenant_id/workspace_id "
+    "filter in application SQL. No cross-tenant read path found. RLS here "
+    "would be defence in depth; safe to add once its queries are confirmed to "
+    "run through the scoped rls_* helpers. Remediation, not an incident."
+)
+_SCOPED_BY_UNGUESSABLE_KEY = (
+    "2026-08-08 audit: reads are keyed on an id the caller could only have "
+    "obtained legitimately (uuid / signed token / secret hash) rather than on "
+    "tenant_id, and every traced caller re-checks ownership after the fetch. "
+    "Defence-in-depth gap, not a live leak — no attacker-controllable key."
+)
+_NO_LIVE_READ = (
+    "2026-08-08 audit: nothing reads this table on a live path (write-only, or "
+    "the only reader has zero callers — the repo's 'built, tested, never "
+    "wired' pattern). Near-zero exposure regardless of RLS; re-audit before "
+    "wiring any reader up."
+)
+_NOT_POSTGRES = (
+    "2026-08-08 audit: not a Postgres table on the live path — backed by a "
+    "local SQLite file, or only reachable in the SQLite fallback branch. "
+    "Postgres RLS is structurally inapplicable. Listed so the check does not "
+    "flag it if a Postgres copy is ever bootstrapped by accident."
+)
+_NEEDS_SCHEMA_CHANGE_FIRST = (
+    "2026-08-08 audit: carries only ONE of tenant_id/workspace_id, so it "
+    "cannot use empyralis_rls_scope_match(tenant_id, workspace_id) unchanged. "
+    "Needs a column added or a bespoke single-column policy BEFORE RLS is "
+    "possible at all. Blocked on a schema decision, not on effort."
+)
+_UNSCOPED_READ_CONFIRMED = (
+    "2026-08-08 audit: HAS a confirmed unscoped read reachable by any "
+    "authenticated user. Tracked as its own fix — the route gate is the bug, "
+    "RLS is only the backstop. Excused here so this check can still catch NEW "
+    "drift; removing this entry requires the read path to be fixed first."
+)
+_NOT_YET_AUDITED = (
+    "2026-08-08: carries a scope column and is outside enable_rls.sql, but was "
+    "NOT reached in the audit that seeded this list. Excused solely so the "
+    "check can start catching NEW drift today; this entry is an admission of "
+    "unknown status, not a judgement that the table is safe. Audit before "
+    "trusting it either way."
+)
+
+_RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {
+    # ── audited: scoped in application SQL ────────────────────────────
+    "usage_events": _SCOPED_IN_APP_SQL,
+    "workspace_hosted_ai_monthly_cost_ledger": _SCOPED_IN_APP_SQL,
+    "workspace_billing_accounts": _SCOPED_IN_APP_SQL,
+    "workspace_billing_subscriptions": _SCOPED_IN_APP_SQL,
+    "knowledge_sources": _SCOPED_IN_APP_SQL,
+    "knowledge_chunks": _SCOPED_IN_APP_SQL,
+    "knowledge_embeddings": _SCOPED_IN_APP_SQL,
+    "workspace_member_invites": _SCOPED_IN_APP_SQL,
+    # ── audited: keyed on an unguessable id, ownership re-checked ─────
+    "deployed_agents": _SCOPED_BY_UNGUESSABLE_KEY,
+    "runtime_sessions": _SCOPED_BY_UNGUESSABLE_KEY,
+    "user_devices": _SCOPED_BY_UNGUESSABLE_KEY,
+    "user_provider_connections": _SCOPED_BY_UNGUESSABLE_KEY,
+    # ── audited: no live read path ────────────────────────────────────
+    "knowledge_retrieval_events": _NO_LIVE_READ,
+    "governance_holds": _NO_LIVE_READ,
+    "external_user_privacy_requests": _NO_LIVE_READ,
+    "external_user_privacy_delete_audits": _NO_LIVE_READ,
+    "fleet_queue_partitions": _NO_LIVE_READ,
+    "deployed_agent_upgrade_click_events": _NO_LIVE_READ,
+    # ── audited: not a Postgres table on the live path ────────────────
+    "gateway_registrations": _NOT_POSTGRES,
+    "gateway_sessions": _NOT_POSTGRES,
+    "gateway_pairing_intents": _NOT_POSTGRES,
+    "gateway_action_approvals": _NOT_POSTGRES,
+    "gateway_browser_sessions": _NOT_POSTGRES,
+    "sage_agent_computer_selections": _NOT_POSTGRES,
+    "personal_channel_whatsapp_states": _NOT_POSTGRES,
+    "personal_channel_telegram_states": _NOT_POSTGRES,
+    "personal_channel_local_bridge_states": _NOT_POSTGRES,
+    "workspace_registry": _NOT_POSTGRES,
+    # ── audited: schema blocks the standard policy ────────────────────
+    # vault_credentials is the highest-blast-radius entry in this whole
+    # registry: no tenant_id column at all, NULLABLE workspace_id (platform-
+    # scoped credentials legitimately have NULL), and vault_repository.py:101
+    # list_all() is a full-table SELECT with no WHERE that every vault
+    # operation goes through. The tenant boundary is vault_helpers.
+    # workspace_visible() in Python, applied after the whole table is already
+    # in memory. Held at every call site traced — but a naive policy here
+    # would blank the platform-scoped rows, so this needs a schema decision.
+    "vault_credentials": _NEEDS_SCHEMA_CHANGE_FIRST,
+    "workspace_policies": _NEEDS_SCHEMA_CHANGE_FIRST,
+    "tenant_policies": _NEEDS_SCHEMA_CHANGE_FIRST,
+    "tenant_enterprise_settings": _NEEDS_SCHEMA_CHANGE_FIRST,
+    # ── audited: a real unscoped read exists, tracked separately ──────
+    # These three feed GET /runtime/runtimes/status, /runtime/runtimes/
+    # reliability and /health/internal, all gated only by require_api_key
+    # (runtime_common.py:345) — which resolves ANY authenticated user of ANY
+    # tenant, not a system key. list_fleet_workers called with empty args
+    # (run_state_repository.py:1796) makes its own WHERE vacuously true.
+    # The route gate is the bug; note that RLS on these four tables would NOT
+    # currently help anyway — run_state_repository uses a plain asyncpg pool
+    # that never sets the session GUCs, so a policy would blank the runtime's
+    # own reads.
+    "fleet_worker_registrations": _UNSCOPED_READ_CONFIRMED,
+    "live_runs": _UNSCOPED_READ_CONFIRMED,
+    "run_archive": _UNSCOPED_READ_CONFIRMED,
+    "local_queue_dead_letters": _UNSCOPED_READ_CONFIRMED,
+    # ── legitimately global background worker ─────────────────────────
+    # Drained by runs_core.run_outbox_delivery_forever with no tenant filter
+    # (FOR UPDATE SKIP LOCKED), which is correct: outbox_service.
+    # deliver_outbox_event re-scopes every delivery from the claimed row's own
+    # tenant_id/workspace_id. RLS would break the drain loop for no gain.
+    "runtime_outbox": (
+        "2026-08-08 audit: cross-tenant by design — a single global drain loop "
+        "claims due events and re-scopes each delivery from the claimed row's "
+        "own tenant_id/workspace_id. A policy would blank the drain loop's "
+        "reads and stop all delivery. Correctly global, not an oversight."
+    ),
+    # ── NOT audited — status genuinely unknown ────────────────────────
+    "activity_ledger_events": _NOT_YET_AUDITED,
+    "agent_action_events": _NOT_YET_AUDITED,
+    "agent_computers": _NOT_YET_AUDITED,
+    "agent_traces": _NOT_YET_AUDITED,
+    "channel_events": _NOT_YET_AUDITED,
+    "channel_links": _NOT_YET_AUDITED,
+    "channel_pairing_intents": _NOT_YET_AUDITED,
+    "channel_user_acquisition_touches": _NOT_YET_AUDITED,
+    "chat_stream_state": _NOT_YET_AUDITED,
+    "credit_ledger_events": _NOT_YET_AUDITED,
+    "deployed_agent_business_insights": _NOT_YET_AUDITED,
+    "deployed_agent_conversation_memory": _NOT_YET_AUDITED,
+    "deployed_agent_daily_message_usage": _NOT_YET_AUDITED,
+    "deployed_agent_monthly_cost_ledger": _NOT_YET_AUDITED,
+    "discord_workspace_pairings": _NOT_YET_AUDITED,
+    "hosted_ai_reservations": _NOT_YET_AUDITED,
+    "mcp_oauth_access_tokens": _NOT_YET_AUDITED,
+    "mcp_oauth_authorization_codes": _NOT_YET_AUDITED,
+    "mcp_oauth_refresh_tokens": _NOT_YET_AUDITED,
+    "notification_devices": _NOT_YET_AUDITED,
+    "notification_reads": _NOT_YET_AUDITED,
+    "notifications": _NOT_YET_AUDITED,
+    "run_history": _NOT_YET_AUDITED,
+}
 
 
 def _rls_coverage_check_skipped() -> bool:

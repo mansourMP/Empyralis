@@ -36,6 +36,7 @@ the regression guard for that, in three parts:
 
 import asyncio
 import os
+import re
 import unittest
 import uuid
 from unittest.mock import AsyncMock, patch
@@ -170,6 +171,99 @@ class ExceptionRegistryTests(unittest.TestCase):
             "These tables now have RLS in migrations/enable_rls.sql, so their "
             "entries in preflight._RLS_COVERAGE_EXCEPTIONS are obsolete and "
             f"must be deleted: {stale}",
+        )
+
+
+_CREATE_TABLE = re.compile(
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s*\(",
+    re.IGNORECASE,
+)
+_ADD_SCOPE_COLUMN = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:public\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s+"
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(tenant_id|workspace_id)\b",
+    re.IGNORECASE,
+)
+_SCOPE_COLUMN_DECL = re.compile(r"(^|,)\s*(tenant_id|workspace_id)\b", re.IGNORECASE | re.MULTILINE)
+_SKIP_DIRS = {".git", "node_modules", ".next", "target", "venv", ".venv", "__pycache__"}
+
+
+def _repo_root() -> str:
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _scoped_tables_declared_in_source() -> dict:
+    """Every table this repo's own DDL gives a tenant_id/workspace_id column.
+
+    Deliberately a TEST-side scraper and not production code. The runtime check
+    asks the live database, which is the authority on what actually exists; this
+    asks the source, which is the authority on what someone just WROTE. The
+    runtime check cannot see a table until the boot after the one that creates
+    it (server.py runs preflight before ensure_control_plane_schema), so without
+    this the alarm would always be one restart late.
+
+    Tables are declared in three different shapes here — .sql migration files,
+    a big CONTROL_PLANE_SCHEMA_SQL string, and inline `CREATE TABLE IF NOT
+    EXISTS` inside per-module `_ensure_*_tables()` helpers (the last kind has
+    no trailing semicolon, which is exactly how a naive scraper misses them) —
+    so this walks the paren depth rather than looking for a terminator.
+    """
+    root = _repo_root()
+    found: dict = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for filename in filenames:
+            if not filename.endswith((".py", ".sql", ".ts")):
+                continue
+            path = os.path.join(dirpath, filename)
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                    source = handle.read()
+            except OSError:
+                continue
+            for match in _CREATE_TABLE.finditer(source):
+                index, depth = match.end(), 1
+                while index < len(source) and depth:
+                    if source[index] == "(":
+                        depth += 1
+                    elif source[index] == ")":
+                        depth -= 1
+                    index += 1
+                body = source[match.end():index - 1]
+                columns = {m.group(2).lower() for m in _SCOPE_COLUMN_DECL.finditer(body)}
+                if columns:
+                    found.setdefault(match.group(1).lower(), set()).update(columns)
+            for match in _ADD_SCOPE_COLUMN.finditer(source):
+                found.setdefault(match.group(1).lower(), set()).add(match.group(2).lower())
+    return found
+
+
+class SourceDeclaredCoverageTests(unittest.TestCase):
+    """Every scoped table in this repo's DDL is either covered or excused.
+
+    This is the CI-time twin of the boot-time check, and it is the one that
+    actually fires on the pull request that introduces the problem. If it goes
+    red, a new table was given a tenant_id/workspace_id column without anyone
+    deciding what protects it — which is precisely the state 60 tables were
+    already in when this check was written.
+    """
+
+    def test_no_scoped_table_is_both_unprotected_and_unrecorded(self):
+        declared = _scoped_tables_declared_in_source()
+        self.assertGreater(
+            len(declared), 50,
+            "the source scraper found almost nothing — it has stopped working, "
+            "which would make this test vacuously green",
+        )
+        covered = set(preflight._tenant_scoped_tables_from_migration())
+        excused = set(preflight._RLS_COVERAGE_EXCEPTIONS)
+        orphans = sorted(set(declared) - covered - excused)
+        self.assertEqual(
+            orphans, [],
+            "These tables carry tenant_id/workspace_id but are in neither "
+            "migrations/enable_rls.sql nor preflight._RLS_COVERAGE_EXCEPTIONS. "
+            "Add RLS (once every query against the table is confirmed scoped, "
+            "or its reads will silently return zero rows), or record why it is "
+            f"exempt: {orphans}",
         )
 
 
