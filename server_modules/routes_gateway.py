@@ -1379,6 +1379,45 @@ async def _shutdown_revoked_live_gateway_connection(gateway_id: str, *, reason: 
     return True
 
 
+def _find_gateway_bound_to_vps(
+    *,
+    vps_id: str,
+    workspace_id: str,
+    tenant_id: Optional[str],
+    user_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Reverse-lookup of vps_provisioning_service._resolved_record_status's
+    own scan: given a destroyed VPS record, find the (still-active) Gateway
+    registration paired to it — record_vps_provision never writes the
+    gateway_id back onto the VPS record (only the pairing token, which the
+    Gateway consumes once at register time; see gateway_pairing_service),
+    so the only durable link between "this droplet" and "this Gateway box"
+    is metadata.vps_id on the registration itself, same as the status
+    resolver reads. Used by delete_hardware_vps so destroying the droplet
+    also makes the box disappear from the Hardware list, not just the
+    provisioning record. Best-effort: an empty/failed lookup just means no
+    linked registration was ever created (e.g. the box died before ever
+    pairing) and there is nothing to revoke.
+    """
+    clean_vps_id = str(vps_id or "").strip()
+    if not clean_vps_id:
+        return None
+    try:
+        registrations = gateway_state_repository.list_workspace_gateway_registrations(
+            workspace_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            include_revoked=False,
+        )
+    except Exception:
+        return None
+    for registration in registrations:
+        metadata = registration.get("metadata") if isinstance(registration.get("metadata"), dict) else {}
+        if str(metadata.get("vps_id") or "").strip() == clean_vps_id:
+            return registration
+    return None
+
+
 @router.get("/agent-computers/{computer_id}/policy")
 async def get_agent_computer_policy(
     computer_id: str,
@@ -2386,6 +2425,16 @@ async def delete_hardware_vps(
     vps_id: str,
     current_user=Depends(require_api_key),
 ):
+    """Destroys the underlying cloud droplet/instance (so the provider stops
+    billing for it) and — unlike a plain "disconnect" — also revokes the
+    paired Gateway registration so the box disappears from the Hardware
+    list instead of lingering as a stale "disconnected" entry. This is the
+    Hardware detail page's "Destroy server" action; delete_recorded_vps
+    itself is idempotent (a 404 from the provider on an already-gone
+    droplet is treated as success — see _http_empty), so a retried request
+    (e.g. the user double-clicks, or a prior call succeeded on the
+    provider side but the response never reached the client) never 502s.
+    """
     try:
         record = await vps_provisioning_service.load_vps_record(vps_id)
     except (KeyError, ValueError) as exc:
@@ -2403,11 +2452,62 @@ async def delete_hardware_vps(
         raise HTTPException(status_code=404, detail="VPS provisioning record was not found.") from exc
     except vps_provisioning_service.VPSProvisioningError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # The droplet is destroyed and billing has stopped — everything past
+    # this point is UI-cleanup, best-effort. A failure here must never
+    # surface as a 5xx (that would read as "the destroy failed" when the
+    # money-losing part already succeeded); it's logged and the response
+    # just carries gateway_revoked: false so the frontend/operator knows to
+    # check the Hardware list.
+    tenant_id = workspace_tenant_id(current_user, workspace_id)
+    actor_user_id = str((current_user or {}).get("user_id") or "").strip() or None
+    gateway_revoked = False
+    linked_gateway_id: Optional[str] = None
+    try:
+        linked_registration = _find_gateway_bound_to_vps(
+            vps_id=vps_id,
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            user_id=actor_user_id,
+        )
+        if linked_registration:
+            linked_gateway_id = str(linked_registration.get("gateway_id") or "").strip() or None
+        if linked_gateway_id:
+            revoked_payload = gateway_registry_service.revoke_gateway_registration(
+                gateway_id=linked_gateway_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                user_id=actor_user_id,
+                reason="Server destroyed — droplet deleted from the Hardware page.",
+            )
+            mutation_plan = dict(revoked_payload.pop("mutation_plan", {}) or {})
+            if mutation_plan.get("shutdown_live_connection", True):
+                await _shutdown_revoked_live_gateway_connection(
+                    linked_gateway_id,
+                    reason="server destroyed",
+                )
+            if mutation_plan.get("mark_dedicated_workstation_revoked", True):
+                dedicated_workstation_setup_service.mark_dedicated_workstation_revoked(
+                    gateway_id=linked_gateway_id,
+                    reason=str(mutation_plan.get("revocation_reason") or "").strip()
+                    or "Server destroyed.",
+                    actor_user_id=actor_user_id or "",
+                )
+            gateway_revoked = True
+    except Exception:
+        LOGGER.exception(
+            "delete_hardware_vps: destroyed droplet vps_id=%s but could not revoke linked gateway_id=%s",
+            vps_id,
+            linked_gateway_id,
+        )
+
     return {
         "vps_id": deleted_record["vps_id"],
         "provider": deleted_record["provider"],
         "provider_resource_id": deleted_record["provider_resource_id"],
         "status": deleted_record["status"],
+        "gateway_id": linked_gateway_id,
+        "gateway_revoked": gateway_revoked,
     }
 
 

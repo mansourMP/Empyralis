@@ -165,8 +165,10 @@ Normalization: buildTelegramMessageContext() (called from processMessage) normal
 - To — recipient
 - RawBody — message text
 - SessionKey — derived session identifier
-- ChatType — "direct" or "group"
-- InboundEventKind — "message" or "room_event"
+- ChatType — "direct" | "group" | "channel" (src/channels/chat-type.ts:11)
+- InboundEventKind — "user_request" | "room_event" (CORRECTED 2026-07-19 — was misrecorded as
+  "message"|"room_event" here; actual type at src/channels/inbound-event/kind.ts:4. Full envelope
+  + memory-attribution deep dive below.)
 - MediaType — optional media content type
 
 Ingress Authorization
@@ -1037,3 +1039,262 @@ piece (private-API/SIP) Empyralis should NOT blindly copy.
   PATH during an interactive terminal wizard" becomes "detect
   bridge/BlueBubbles reachability from the web UI's health poll" instead
   of a literal port of the CLI flow.
+
+
+UPDATE 2026-07-16 — full .ts source now available; prefer it for all future OpenClaw research
+
+Better source than the minified dist above: `/Users/mansur/openclaw` — the actual TypeScript
+(`extensions/*/src`, `src/`, `docs/`). This doc is our knowledge cache — every OpenClaw sub-agent
+finding gets folded back here so we stop re-researching. (This worktree's copy of the doc predates
+several rounds of research already folded into the main checkout's `docs/OpenClaw.md` — TOPOLOGY,
+MULTI-AGENT ROUTING, MCP client/server, and MEDIA-GENERATION sections exist there but not here yet.
+Reconcile on next merge; not duplicated below to avoid drift.)
+
+========================================================================
+INBOUND CONTEXT ENVELOPE — what OpenClaw hands the model for one message
+========================================================================
+Source: /Users/mansur/openclaw (full .ts). Investigated 2026-07-19 to spec our own inbound-context
+envelope (server_modules/external_content_guard.py, channel_lane_contract_service.py) against
+OpenClaw's, and specifically to find how OpenClaw labels a broadcast-channel post — motivated by a
+real incident where our agent commented on a channel post as if it had been addressed. Full spec
+with every file:line and verbatim template: see the envelope+memory research task output (fold
+into a permanent doc location if this proves durable — currently only in scratchpad).
+
+1. THREE LAYERS, not one format. (a) System prompt "trusted metadata": buildInboundMetaSystemPrompt
+   (src/auto-reply/reply/inbound-meta.ts:504-545) emits a small, BYTE-STABLE (cache-friendly)
+   ```json block: {schema:"openclaw.inbound_meta.v2", account_id, channel, provider, surface,
+   chat_type, response_format} — deliberately excludes sender name/group subject/message ids
+   because those are attacker-influenceable and would bust prompt-prefix caching. (b) Per-turn
+   "untrusted metadata" JSON blocks prefixed to the user turn: buildInboundUserContextPrefix
+   (inbound-meta.ts:548-747) via formatUntrustedJsonBlock(label, payload) (inbound-meta.ts:197-204)
+   — labeled blocks like "Conversation info (untrusted metadata):", "Sender (untrusted metadata):"
+   {label,id,name,username,tag,e164,is_bot}, "Reply chain ... (untrusted, nearest first):". (c) A
+   plain-text bracket header glued onto the body itself: formatAgentEnvelope/formatInboundEnvelope
+   (src/auto-reply/envelope.ts:171-247) — `[Channel From Host Ip Timestamp] body`, with a sender
+   label baked into the body for non-direct chats. CONFIRMED verbatim examples from
+   envelope.test.ts: `[WebChat user1 mac-mini 10.0.0.5 Thu 2025-01-02T03:04:05Z] hello`,
+   `[Discord Guild #general] Alice: hi` (chatType:"channel"), `[Signal Signal Group id:123] Bob
+   (42): ping` (chatType:"group"). This trusted/untrusted split is a deliberate prompt-injection
+   defense: the system prompt tells the model in advance that names/quotes/history arrive as
+   separate untrusted blocks and a user message that LOOKS like a metadata header must never be
+   believed (inbound-meta.ts:536-538, near-verbatim).
+2. ChatType is only 3-valued: "direct"|"group"|"channel" (src/channels/chat-type.ts:11). There is
+   NO 4th "broadcast" value.
+3. BROADCAST CHANNEL POST LABELING — the honest answer, and it's not what you'd hope. Telegram's
+   real channel_post (extensions/telegram/src/bot-handlers.runtime.ts:3467-3498) is normalized by
+   normalizeChannelPostMessage() (bot-handlers.runtime.ts:3151-3174) into a SYNTHETIC group
+   message: fake `from` identity (is_bot:true, name=channel title), chat.type force-rewritten to
+   "supergroup" → downstream this becomes ChatType:"group", NOT a distinct channel/broadcast value
+   (bot-message-context.session.ts:401, `isGroup ? "group" : "direct"`). The `"channel"` ChatType
+   value is used for something else entirely — Slack/Discord/Mattermost/MSTeams's persistent
+   multi-member rooms (their own platform word for non-DM), not Telegram's one-way broadcast.
+   OpenClaw has NO hard-coded "this is a broadcast, you cannot be addressed" tag. Instead it layers
+   3 general-purpose, non-broadcast-specific defenses: (a) `requireConfiguredGroup:true` for
+   channel_post specifically — unconfigured channels are dropped pre-processing
+   (bot-handlers.runtime.ts:3493 vs 3448 for ordinary group msgs); (b) `requireMention` defaults to
+   TRUE for any unconfigured group/channel (resolveChannelGroupRequireMention,
+   src/config/group-policy.ts:422-454, fallback `return true` at line 453) — unaddressed traffic is
+   HARD-DROPPED (`return null`) before the model ever sees it
+   (extensions/telegram/src/bot-message-context.body.ts:418-475); (c) an OPT-IN (no default —
+   z.enum(...).optional(), zod-schema.core.ts:586,614) "room_event" framing for operators who want
+   unaddressed group/channel traffic to still reach the model but clearly marked passive: literal
+   `"[OpenClaw room event]"` header (src/auto-reply/reply/prompt-prelude.ts:14) +
+   `"Treat this as observed room activity. Decide whether to act."` (prompt-prelude.ts:143-160) —
+   this is the closest thing to an explicit non-addressed label, but it's generic ambient-group
+   framing, not broadcast-specific, and it's off by default. On top, every group/channel turn's
+   system prompt carries buildGroupChatContext's generic "mostly lurk ... reply only when directly
+   addressed ... if addressed to someone else, stay silent" instruction (src/auto-reply/reply/groups.ts:235-301,
+   249,264-271) — same text for a 2-person Slack channel and a 50k-subscriber Telegram broadcast.
+   BOTTOM LINE: if an operator misconfigures requireMention:false or groupActivation:always for a
+   channel-post-fed group, OpenClaw has the SAME "replies to every channel post" failure mode our
+   owner hit. This is a config footgun OpenClaw also has, not a problem it solved.
+4. Operator-facing "shows JSON with username+message" — NOT CONFIRMED as a distinct feature after a
+   real search (src/tui/**, src/interactive/payload.ts, raw-update-log.ts, /debug /context /system
+   commands all checked, none match; dist/control-ui is compiled, source unavailable). Strong
+   candidate (INFERRED): this is just layers (a)/(b) above AS SEEN in a verbose/debug prompt log —
+   they ARE literally ```json fenced blocks containing sender/sender_id/sender_username next to the
+   body, because that's the real prompt payload, not a bespoke display feature.
+5. >> vs EMPYRALIS: our current envelope (server_modules/external_content_guard.py:149-192,
+   wired via channel_lane_contract_service.guard_personal_gateway_inbound_message,
+   channel_lane_contract_service.py:864-878) wraps EVERY personal-channel inbound message —
+   including the owner's own DMs — in the identical "SECURITY NOTICE: external, untrusted source"
+   framing, with no chat_type/chat_kind field threaded through at all (confirmed zero grep hits for
+   chat_type|broadcast|channel_post|is_owner in channel_lane_contract_service.py). There IS one
+   good existing gate — WhatsApp group inbound is skipped unless mentioned or replying to Sage
+   (personal_channels_service.py:1410-1419), same idea as OpenClaw's requireMention hard-drop — but
+   it's WhatsApp-specific in what was found; Telegram's build_telegram_personal_reply_async
+   (personal_channel_sage_bridge_service.py:354) needs a separate audit for an equivalent gate,
+   since Telegram is the platform with the actual broadcast-channel concept. We're full-account
+   (not bot identity) on these channels, so OpenClaw's "disguise the channel post as a group
+   message from a synthetic bot sender" hack doesn't transfer cleanly (no bot-vs-human fiction to
+   lean on) and shouldn't be copied — the fix should be an explicit chat_kind field
+   (direct|group|broadcast_channel|status) sourced from the gateway's native client, checked BEFORE
+   any reply/comment tool call is allowed, not just mentioned in prompt text.
+
+========================================================================
+MEMORY ATTRIBUTION — does OpenClaw stop a stranger's words becoming "the owner's" fact?
+========================================================================
+Source: /Users/mansur/openclaw (full .ts). Investigated 2026-07-19 alongside the envelope research
+above, direct motivation: a stranger's statement in a group got treated as the owner's own
+preference by our agent. Two structurally different OpenClaw memory-write paths, both checked.
+
+1. PATH A — file-based, default, always on. MEMORY.md + memory/YYYY-MM-DD.md, plain Markdown
+   (docs/concepts/memory.md:9-11, "there is no hidden state"). WHAT gets written is decided by THE
+   MODEL ITSELF via write/edit tool calls, nudged by a pre-compaction "memory flush" turn
+   (src/auto-reply/reply/memory-flush.ts — gates WHEN, not WHAT; shouldRunMemoryFlush,
+   memory-flush.ts:136-161) and by an optional "dreaming" consolidation pass gated on score/recall-
+   frequency/query-diversity thresholds (src/memory-host-sdk/dreaming.ts) — none of dreaming's
+   gates are source-trust related, confirmed by reading its MemoryLightDreamingSource /
+   MemoryDeepDreamingSource enums (dreaming.ts:66-67): "daily"|"sessions"|"recall"|"memory"|"logs" —
+   data-source TYPES, not sender identity. Whatever lands in MEMORY.md is trusted unconditionally
+   next turn: `"MEMORY.md: durable user preferences and behavior guidance. Keep following it
+   throughout the session unless higher-priority instructions override."` (src/agents/system-prompt.ts:229,
+   verbatim). The ONLY attribution-awareness anywhere in OpenClaw is PROSE GUIDANCE in
+   docs/concepts/memory.md's "Action-sensitive memories" section (read in full, lines 58-96),
+   telling the model to optionally note "who is the source or owner, if that affects trust or
+   authority" as part of a memory note's text — advisory, not a schema field, not code-enforced,
+   entirely dependent on model compliance.
+2. PATH B — extensions/memory-lancedb, bundled but OPT-IN (autoCapture defaults false,
+   config.ts:249, `cfg.autoCapture === true`). CONFIRMED the default backend (memory-core) does NOT
+   auto-capture from raw text at all (zero agent_end/autoCapture hits in src/plugin-sdk/memory-core*.ts)
+   — this vulnerability only exists if an operator opts in. When it IS on: shouldCapture()
+   (extensions/memory-lancedb/index.ts:1350-1393) is a PURELY CONTENT-BASED filter — envelope-
+   sludge/length/emoji/prompt-injection checks plus a MEMORY_TRIGGERS regex match — takes NO
+   sender/chatType/owner parameter, full function signature confirmed by direct read. Worse:
+   sanitizeForMemoryCapture() (index.ts:1183-1322), which runs first, EXPLICITLY STRIPS the
+   sender-attribution prefix the envelope layer built (`"Bob: ..."` / `"(self): ..."`) before
+   storage — own code comment at index.ts:1299-1307 confirms this is deliberate cleanup, not an
+   accident. The storage schema has nowhere to put attribution even if it survived:
+   `MemoryEntry = {id, text, vector, importance, category, createdAt}` (index.ts:50-57) — no
+   sender/owner/source-channel field at all. Wired to `api.on("agent_end", ...)`
+   (index.ts:1943-2015), fires after EVERY successful turn in EVERY chatType (direct/group/channel)
+   — no chatType scoping on the write side (config.ts:7-21 confirms: autoCapture, captureMaxChars,
+   customTriggers only). SHARPEST finding: the attribution data is NOT architecturally unavailable
+   — the agent_end hook's own `ctx` param (PluginHookAgentContext, src/plugins/hook-types.ts:243-275)
+   carries `senderId`, `channel`, `chatId`, `channelContext:{sender,chat}` right there, and the
+   plugin's capture code simply never reads any of them. `senderIsOwner` is a real, pervasively-used
+   concept elsewhere in OpenClaw core (agent-tools.ts, agent-command.ts, message-tool.ts, dozens of
+   files) for AUTHORIZATION — just never threaded into this memory-write path. Contrast: the
+   SIBLING recall-side plugin (active-memory) DOES scope by chat type, and its default is
+   restrictive — `allowedChatTypes: [...] ?? ["direct"]` (extensions/active-memory/index.ts:867) —
+   recall defaults to direct-chats-only, capture has no equivalent default-safe scoping at all. That
+   asymmetry (safe-by-default reads, unscoped writes) is backwards from what attribution-safety
+   would want.
+3. CONCLUSION: OpenClaw does not solve this. Path B has a confirmed, reproducible bug: any group/
+   channel message matching a preference/fact/decision-shaped regex gets embedded and later
+   recalled into ANY session (including 1:1 DMs) with zero record of who said it, and the plugin
+   actively discards attribution data sitting in its own hook context. Path A is "attribution-
+   aware" only to the extent a compliant model follows advisory docs. DO NOT COPY PATH B'S PATTERN.
+4. Memory schema, both paths (CONFIRMED): LanceDB `MemoryEntry` has 6 fields, none provenance
+   (index.ts:50-57); category enum `preference|fact|decision|entity|other`
+   (extensions/memory-lancedb/config.ts:26). MEMORY.md/daily notes: unstructured prose, no schema
+   at all. Neither has a first-class who-said-it / source-channel / owner-vs-third-party field.
+5. UI/config surface for memory rules (CONFIRMED, mostly absent): no dedicated memory-attribution
+   settings screen found anywhere in the TS source (dist/control-ui is compiled, out of scope).
+   Capture config: autoCapture/captureMaxChars/customTriggers, no chat scoping. Recall config:
+   allowedChatTypes/allowedChatIds/deniedChatIds, chat-scoped but never sender-scoped. The ONE place
+   owner-identity is actually checked in the whole memory stack is `/active-memory ... --global`'s
+   admin-permission gate on CHANGING CONFIG (lacksAdminToMutateActiveMemoryGlobal, index.ts:830-838)
+   — not a gate on what gets written to memory.
+6. >> vs EMPYRALIS: server_modules/agent_memory.py's `memory_entries` SQLite schema
+   (agent_memory.py:267-274, `{key, content, created_at, updated_at}`) has the EXACT SAME gap as
+   OpenClaw's MemoryEntry — no sender/chat_kind/owner field anywhere. `_save_memory()`
+   (agent_memory.py:333-363) and `_save_daily_log()` (agent_memory.py:500-518) take no sender/
+   chat_kind/owner parameter. MEMORY.md is confirmed by this file's own docstring
+   (agent_memory.py:556-578) to be the real "source of truth," injected "verbatim every turn" —
+   same unconditional-trust posture as OpenClaw's system-prompt.ts:229 line. We independently
+   converged on the identical MEMORY.md + memory/YYYY-MM-DD.md file-naming convention, worth noting.
+   UNLIKE OpenClaw's Path B, no automatic regex-trigger capture from raw conversation text was
+   found in this file — `_save_memory`/`_save_daily_log` take caller-supplied key/content directly,
+   suggesting an explicit-tool-call path closer to OpenClaw's Path A. NOT YET TRACED: which caller
+   (memory_write tool? sage_agent_runtime_service.py?) actually supplies key/content, and whether
+   THAT call site has any sender/chat_kind awareness — flagged as a fast follow-up, not confirmed
+   clean. RECOMMENDATION: this is the highest-leverage place to do strictly better than upstream,
+   not just match it — add a required provenance field to memory_entries (source_sender_id,
+   source_is_owner or attributed_to enum, source_chat_kind), thread the sender/chat_kind that
+   channel_lane_contract_service's guard call already resolves through to whatever calls
+   _save_memory for channel-originated turns, and gate the "durable, verbatim-injected" trust class
+   on it. Since OpenClaw's own plugin-hook contract proves this data is normally already available
+   at the write decision point, our fix is plumbing existing data through, not inventing new
+   detection — precisely the step OpenClaw's bundled plugin skips.
+6. No Regex/KW Matching: Tool selection is 100% LLM-driven via function calling. There's no fallback regex or keyword-based tool dispatch.
+
+
+6. No Regex/KW Matching: Tool selection is 100% LLM-driven via function calling. There's no fallback regex or keyword-based tool dispatch.
+
+---
+ADDENDUM (2026-07-20) — WECHAT CHANNEL / TENCENT iLINK PROTOCOL
+
+CORRECTION to prior internal claims: `frontend/lib/workspace/fleet/SageLauncher.tsx:53`
+says "Personal WeChat has no official API to build a bridge against, so this isn't
+supported yet" and `docs/PLATFORM-MAP.md:1187` says WeChat is unbuilt because "Personal
+WeChat has no official API to build a bridge against." Both were true when written but
+are now STALE. Tencent released an official personal-WeChat bot API on 2026-03-21/22
+(confirmed via npm registry `time.created` for `@tencent-weixin/openclaw-weixin`, not
+just a blog claim). The old grey-market/reverse-engineered path (WeChatPadPro, itchat,
+iPad-protocol hooking — genuinely high ban risk, ToS-violating) is still banned/unsafe;
+that's a separate thing from iLink, which is Tencent's own sanctioned product. Full
+scoping doc with every claim source-tagged CONFIRMED/INFERRED:
+`/private/tmp/claude-501/-Users-mansur-empyralis/4c1272c1-6a8e-4f4c-9592-15f4633ec1b7/scratchpad/wechat-ilink-scoping.md`
+(session scratchpad — copy anything load-bearing into a permanent doc before it expires).
+
+What iLink is: a plain HTTP/JSON REST API at `https://ilinkai.weixin.qq.com` — not a
+websocket protocol, not SDK-only. Confirmed live myself with a bare unauthenticated curl
+(`GET /ilink/bot/get_bot_qrcode?bot_type=3` → real QR token, HTTP 200, zero credentials
+needed for that step). Auth is QR-scan-to-token: `get_bot_qrcode` → user scans in WeChat →
+poll `get_qrcode_status` (long-poll) → `bot_token` + `baseurl`, used thereafter as
+`Authorization: Bearer <bot_token>` + fixed `AuthorizationType: ilink_bot_token` +
+per-request `X-WECHAT-UIN` (random, anti-replay). Inbound messages are long-polled via
+`POST getupdates` (~35s hold, cursor-based — same shape as Telegram's getUpdates).
+Outbound replies via `POST sendmessage` MUST echo the inbound message's `context_token`
+or the reply doesn't attach to the right conversation. Media (image/voice/file/video)
+goes through a separate CDN with client-side AES-128-ECB encryption. No group chat today
+(schema has a placeholder `group_id` field but OpenClaw's own docs say the plugin
+"declares direct chats only"). No proactive/cold outbound — bot can only reply inside an
+existing context_token thread the human started. No published rate limits anywhere.
+
+Is this OpenClaw-locked or can we call it directly? DIRECTLY CALLABLE, confirmed multiple
+ways:
+1. Tencent's own `Tencent/openclaw-weixin` README has a "Backend API Protocol" section
+   explicitly for "developers integrating with their own backend" — the full endpoint
+   table, request/response JSON. Tencent documents this for third parties on purpose.
+2. Three independent non-OpenClaw reimplementations already exist in the wild:
+   `github.com/x1ah/wechat-ilink-demo` (raw JS, README literally says "iLink 协议本身是
+   独立的 HTTP/JSON API，完全可以脱离 OpenClaw 直接调用" — standalone, no OpenClaw needed),
+   `github.com/the-yex/wechat-ilink-sdk` (community Go SDK, Apache-2.0, no OpenClaw dep),
+   and a standalone Python client (per a third writeup) built by stripping 3 OpenClaw
+   coupling points out of Tencent's own npm package source.
+3. There's a `bot_agent` field (UA-style, "used for log attribution... not used for
+   authentication or routing") that Tencent's README explicitly invites third-party apps
+   to set to their own name instead of the "OpenClaw" default — built for non-OpenClaw
+   clients on purpose.
+
+What IS OpenClaw-locked: the published npm package `@tencent-weixin/openclaw-weixin`
+itself (41 TS source files: auth/, api/, cdn/, messaging/, monitor/, config/, storage/)
+declares `peerDependencies: { "openclaw": ">=2026.5.12" }` (confirmed via direct
+`registry.npmjs.org` query) and "checks the host version at startup and will refuse to
+load if the running OpenClaw version is outside the supported range" per its own README.
+So: the PACKAGE is OpenClaw-only; the PROTOCOL it implements is not. No separate official
+Tencent SDK exists outside this OpenClaw plugin — but the protocol is small enough (7
+endpoints, one auth flow, one AES-128-ECB media codec) that writing an Empyralis-native
+client from Tencent's own documented endpoint table is less work than extracting OpenClaw
+glue from their package.
+
+Empyralis integration shape: almost all our own plumbing for `wechat_personal` already
+exists and is dev-harness-tested (`LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS` in
+`empyralis-gateway/src/channels/local-bridge-runtime.ts:128-136`, the generic
+`LocalBridgePersonalChannelRuntime` polling/dedup/publish class in the same file, the
+`wechat_personal` catalog entry in `server_modules/connection_catalog_service.py:265-286`
+already marked `LAUNCH_LIVE_WHEN_CONFIGURED`, and the generic
+`_handle_local_bridge_gateway_channel_inbound` dispatch in
+`server_modules/agent_channel_router.py:1625`). The only missing piece is a new
+`empyralis-gateway/src/bridges/wechat-bridge.ts`, same shape as the existing
+`signal-cli-bridge.ts` (expose `/health`, `POST /messages`, `GET /events`; translate to/
+from iLink underneath). The one genuinely new design problem, not present in any existing
+bridge: our generic inbound/outbound event shape has no slot for `context_token`, which
+iLink requires on every reply — needs to ride in the existing free-form `metadata` field
+plus a small `remote_jid → last context_token` map the bridge keeps itself.
+
+Biggest open question, unresolved by any source including Tencent's own docs: whether
+non-Mainland-China-registered WeChat accounts are eligible at all. Worth one real test
+login before relying on this for the stated China-market strategic angle.
