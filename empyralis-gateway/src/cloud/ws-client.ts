@@ -161,6 +161,30 @@ export class GatewayWsClient {
   // carried the original request is already gone — see sendResponse().
   private readonly responseDeliveryQueue: PendingResponseQueue;
   private activeScope: GatewayScope | null = null;
+  /**
+   * Serializes the read-modify-write of `checkpoints.lastClientSeq` AND the
+   * socket write that consumes it.
+   *
+   * `publishEvent` is called once per inbound HTTP POST the OpenClaw bridge
+   * plugin makes into src/openclaw/inbound-listener.ts, so two channel
+   * messages arriving in the same tick genuinely run concurrently. Both
+   * awaited `checkpoints.load()` before either `save()`d, so both frames went
+   * out carrying the SAME `seq` — and the cloud's strictly-increasing-seq
+   * guard (gateway_protocol_service.py's `gateway frame replay detected`)
+   * answers that by closing the socket with 4408. The second message is then
+   * LOST with no error anywhere: it had already been written to the socket, so
+   * it was never enqueued in the outbox and there is nothing to replay, while
+   * the plugin's own durable queue had already been 202'd and dropped it.
+   *
+   * Reproduced live 2026-08-08 on the first provisioned OpenClaw instance —
+   * two synthetic inbound events 23ms apart, journal cursors 209/211 both
+   * `seq: 1`, socket closed 4408 25ms later, only the first ever reaching
+   * `handle_gateway_channel_inbound`.
+   *
+   * The lock must cover the SEND, not just the counter: allocating in order
+   * and writing out of order trips the same guard.
+   */
+  private clientSeqLock: Promise<unknown> = Promise.resolve();
   private socketFailureReason: string | null = null;
   private _connectionStartedAt: number | null = null;
   private _lastHeartbeatResponseAt: number | null = null;
@@ -624,6 +648,15 @@ export class GatewayWsClient {
     await this.sendStateUpdate(this.activeScope, payload);
   }
 
+  /** Runs `fn` after every previously-queued seq-allocating write has finished,
+   *  including one that threw — a failed send must not wedge the lane, and it
+   *  must not let the next writer reuse a seq that already went out. */
+  private withClientSeqLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.clientSeqLock.then(fn, fn);
+    this.clientSeqLock = next.catch(() => undefined);
+    return next;
+  }
+
   async publishEvent(
     type: "channel.inbound" | "cli.login.output" | "tool.invoke.chunk",
     payload: GatewayChannelInboundPayload | GatewayCliLoginOutputPayload | GatewayToolInvokeChunkPayload | Record<string, unknown>,
@@ -637,41 +670,45 @@ export class GatewayWsClient {
       });
       throw new Error("Gateway scope is not active.");
     }
-    const checkpoints = await this.checkpoints.load();
-    const nextSeq = Math.max(Number(checkpoints.lastClientSeq ?? 0), 0) + 1;
-    const frame: GatewayEventEnvelope = {
-      kind: "event",
-      protocolVersion: PROTOCOL_VERSION,
-      type,
-      seq: nextSeq,
-      ack: checkpoints.lastServerSeq ?? checkpoints.lastAck ?? 0,
-      ts: new Date().toISOString(),
-      scope: this.activeScope,
-      payload: payload as Record<string, unknown>,
-    };
-    await this.journal.append("outbound", type, frame as unknown as Record<string, unknown>);
-    await this.checkpoints.save({ lastClientSeq: nextSeq });
-    const requestId = `event:${type}:${nextSeq}`;
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-      await this.outbox.enqueue(requestId, type, payload as Record<string, unknown>, {
-        replayable: true,
-      });
-      await this.outbox.markForReplay(requestId, "Gateway socket is not connected.");
-      return;
-    }
-    const encoded = encodeFrame(frame);
-    if (typeof encoded === "string") {
-      try {
-        this.socket.send(encoded);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+    // Serialized: see withClientSeqLock. The scope check above is deliberately
+    // OUTSIDE the lock (it neither reads nor advances the counter).
+    const scope = this.activeScope;
+    return this.withClientSeqLock(async () => {
+      const checkpoints = await this.checkpoints.load();
+      const nextSeq = await this.checkpoints.allocateClientSeq();
+      const frame: GatewayEventEnvelope = {
+        kind: "event",
+        protocolVersion: PROTOCOL_VERSION,
+        type,
+        seq: nextSeq,
+        ack: checkpoints.lastServerSeq ?? checkpoints.lastAck ?? 0,
+        ts: new Date().toISOString(),
+        scope,
+        payload: payload as Record<string, unknown>,
+      };
+      await this.journal.append("outbound", type, frame as unknown as Record<string, unknown>);
+      const requestId = `event:${type}:${nextSeq}`;
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
         await this.outbox.enqueue(requestId, type, payload as Record<string, unknown>, {
           replayable: true,
         });
-        await this.outbox.markForReplay(requestId, message);
-        throw error;
+        await this.outbox.markForReplay(requestId, "Gateway socket is not connected.");
+        return;
       }
-    }
+      const encoded = encodeFrame(frame);
+      if (typeof encoded === "string") {
+        try {
+          this.socket.send(encoded);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await this.outbox.enqueue(requestId, type, payload as Record<string, unknown>, {
+            replayable: true,
+          });
+          await this.outbox.markForReplay(requestId, message);
+          throw error;
+        }
+      }
+    });
   }
 
   async disconnect(scope: GatewayScope, reason = "shutdown"): Promise<void> {
@@ -982,27 +1019,30 @@ export class GatewayWsClient {
   private async replayOutboxItem(item: GatewayOutboxItem, scope: GatewayScope): Promise<void> {
     await this.outbox.markAttemptStarted(item.requestId);
     if (item.messageType === "channel.inbound") {
-      const checkpoints = await this.checkpoints.load();
-      const nextSeq = Math.max(Number(checkpoints.lastClientSeq ?? 0), 0) + 1;
-      const frame: GatewayEventEnvelope = {
-        kind: "event",
-        protocolVersion: PROTOCOL_VERSION,
-        type: "channel.inbound",
-        seq: nextSeq,
-        ack: checkpoints.lastServerSeq ?? checkpoints.lastAck ?? 0,
-        ts: new Date().toISOString(),
-        scope,
-        payload: dict(item.payload),
-      };
-      await this.journal.append("outbound", "channel.inbound", frame as unknown as Record<string, unknown>);
-      await this.checkpoints.save({ lastClientSeq: nextSeq });
-      const encoded = encodeFrame(frame);
-      if (typeof encoded !== "string") {
-        const message = encoded.ok === false ? encoded.error : "Frame encoding failed";
-        await this.outbox.markForReplay(item.requestId, message);
-        throw new Error(message);
-      }
-      this.socket?.send(encoded);
+      // Same lock as publishEvent: a replay racing a freshly-arrived message
+      // is exactly the collision below, and the two must draw from one counter.
+      await this.withClientSeqLock(async () => {
+        const checkpoints = await this.checkpoints.load();
+        const nextSeq = await this.checkpoints.allocateClientSeq();
+        const frame: GatewayEventEnvelope = {
+          kind: "event",
+          protocolVersion: PROTOCOL_VERSION,
+          type: "channel.inbound",
+          seq: nextSeq,
+          ack: checkpoints.lastServerSeq ?? checkpoints.lastAck ?? 0,
+          ts: new Date().toISOString(),
+          scope,
+          payload: dict(item.payload),
+        };
+        await this.journal.append("outbound", "channel.inbound", frame as unknown as Record<string, unknown>);
+        const encoded = encodeFrame(frame);
+        if (typeof encoded !== "string") {
+          const message = encoded.ok === false ? encoded.error : "Frame encoding failed";
+          await this.outbox.markForReplay(item.requestId, message);
+          throw new Error(message);
+        }
+        this.socket?.send(encoded);
+      });
       await this.outbox.acknowledge(item.requestId);
       return;
     }

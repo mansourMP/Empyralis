@@ -796,6 +796,85 @@ one of their CVEs. The supervised unit's KeepAlive brings a new config into
 force; never widen the scope to hurry that along, and never report a policy
 as in force when it has only been written.
 
+**A real Empyralis-provisioned OpenClaw instance has now existed** (2026-08-08,
+profile `empyralis-first-run`, launchd `ai.empyralis.openclaw.empyralis-first-run`).
+Running it for the first time settled four things a code reading could not:
+
+```
+WHAT A FIRST RUN ACTUALLY NEEDS, IN ORDER
+  1. openclaw@2026.6.10 on PATH                 provisioning REFUSES otherwise
+  2. an Empyralis gateway with BOTH secrets     EMPYRALIS_BRIDGE_TOKEN +
+     (else openclaw.provision is never              EMPYRALIS_OPENCLAW_GATEWAY_TOKEN
+      advertised, so the cloud cannot dispatch)
+  3. a cloud trigger  ─────────────────────────▶ THIS WAS MISSING. see below.
+  4. `openclaw plugins install @openclaw/<id>`   NOT DONE BY PROVISIONING. see below.
+  5. the channel credential                      ← the only owner-supplied step
+```
+
+**There was no way to set the transport up.** `provision_openclaw_gateway`'s
+only caller was `reconcile_openclaw_policy_best_effort` (PATCH
+.../group-policy), and the boot reconcile is a documented no-op on a box that
+has never been provisioned — it re-asserts a stored policy and cannot create
+the first one. So the first run on any machine had no entry point, and
+everything downstream of it was dead in practice. Closed by
+`POST /personal-channels/openclaw/gateways/{id}/provision`, which is
+deliberately NOT best-effort: a settings save that cannot reach the box must
+still return 200, but a setup action that returns "nothing happened" is
+indistinguishable from success. A `refused` result stays a 200 carrying the
+whole report — a refusal is a successful round trip that says why.
+
+**None of the five transported channels ships bundled in openclaw@2026.6.10.**
+Its `dist/extensions/` carries imessage/irc/mattermost/signal/sms/telegram —
+NOT feishu, line, qqbot, zalo or msteams, all five of which are separate
+`@openclaw/<id>` npm packages. Their own docs claim zalo and msteams are
+bundled "in current releases"; in the pinned build they are not. Provisioning
+writes `channels.<id>.*` policy for a channel whose plugin is absent, which is
+exactly why `message.action` answers `unsupported channel: <id>` — that clean
+rejection means "no plugin AND no credential", not "no credential". Step 5
+needs `openclaw plugins install` in the provisioning run (and a decision about
+pinning those packages, which version independently of the CLI — 2026.7.1
+against a 2026.6.10 CLI today).
+
+Two smaller ones, both live-path: `OpenClawProvisioningRuntime` never passes
+`probeHealth` to the provisioner, so `healthy` is ALWAYS null in every result
+the cloud sees. And the OpenClaw channels are absent from
+`channel_lane_contract_service.PERSONAL_CHANNEL_ROADMAP` (they are added to
+`PERSONAL_CHANNEL_SPECS` only), so `GET /personal-channels/gateways/{id}/channels`
+— the sole channel-listing endpoint, and what any UI would render — does not
+show them at all. A second hand-maintained channel list, doing exactly what the
+"channels is ONE system" rule above says it must not.
+
+**A gateway frame `seq` is allocated ONCE, through
+`GatewayCheckpoints.allocateClientSeq()`.** Never
+`(await checkpoints.load()).lastClientSeq + 1` at a call site: that shape lost
+a real customer message on the first live inbound test, and it fails two
+independent ways.
+
+```
+publishEvent  (one call per bridge-plugin POST — genuinely concurrent)
+  A: load() ──await──▶ seq=1 ──▶ save() ──▶ send      seq 1  ✓ delivered
+  B: load() ──await──▶ seq=1 ──▶ save() ──▶ send      seq 1  ✗ 4408, message GONE
+     └ both read before either wrote        └ and save() is DEBOUNCED 100ms,
+                                              so even serialized, B re-reads 0
+```
+
+The cloud treats a non-increasing `seq` as fatal (`gateway_protocol_service`'s
+`gateway frame replay detected`, close code 4408). The second message is lost
+outright — already written to the socket, so never enqueued in the outbox and
+nothing to replay, while the bridge plugin's own durable queue had been 202'd
+and dropped it. Nothing anywhere reports the loss. Observed with two events
+23ms apart; two real messages in the same second would do it.
+
+Both halves are fixed in `allocateClientSeq` (in-memory mirror + its own gate),
+which is the same in-memory-mirror pattern `lastKnownHealthState` already used
+in that class for the same debounce reason, plus `withClientSeqLock` in
+`ws-client` so frames are WRITTEN in allocation order — allocating in order and
+sending out of order trips the identical guard.
+`__tests__/ws-client-event-seq-race.test.ts` drives the REAL
+`GatewayCheckpoints`, not a stand-in: a stub whose `save()` writes through
+turns green as soon as the race is closed while production still emits
+duplicates — "a mock protects a seam, not a path", measured.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**

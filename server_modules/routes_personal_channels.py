@@ -1029,6 +1029,117 @@ async def get_personal_channel_group_policy(
     }
 
 
+# ── OpenClaw transport: first-run provisioning ─────────────────────────
+#
+# Until this route existed there was NO way to set up the OpenClaw transport
+# on a box. Every trigger for openclaw_provisioning_service was downstream of
+# something else having already happened:
+#
+#   PATCH .../group-policy   -> reconcile_openclaw_policy_best_effort, which
+#                               (a) needs an agent binding and a policy the
+#                               owner wants to CHANGE, and (b) is best effort
+#                               by design, so a box that is offline, unpaired,
+#                               or refusing returns 200 with
+#                               openclaw_provisioning: null. Correct for a
+#                               settings save; useless as a setup action,
+#                               because "nothing happened" and "it worked"
+#                               look identical.
+#   boot reconcile           -> OpenClawProvisioningRuntime
+#                               .reconcileFromLastAppliedPolicy(), which is a
+#                               documented NO-OP on a box that has never been
+#                               provisioned. It re-asserts a stored policy; it
+#                               cannot create the first one.
+#
+# So the first provisioning run on any machine had no entry point at all, and
+# every trigger downstream of it was dead code in practice. This is that entry
+# point, and nothing more: it is deliberately NOT best-effort (an explicit
+# setup action that cannot reach the box must fail loudly) and it takes no
+# body, because it has nothing to configure — the policy it pushes is whatever
+# is already stored for this agent, read through the same loaders the live
+# inbound gates use.
+
+
+@router.post("/personal-channels/openclaw/gateways/{gateway_id}/provision")
+async def provision_openclaw_transport(
+    request: Request,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """Set up (or re-assert) this computer's OpenClaw channel transport.
+
+    "member", matching PATCH .../group-policy above rather than the "viewer"
+    of the read routes: this writes a config on the customer's machine and
+    installs a supervised process, which is at least as consequential as
+    changing which chats an agent answers in.
+
+    `agent_id` is required for the same reason it is on the group-policy
+    routes — the policy being pushed is stored per (agent, channel), and
+    provisioning from an unresolved identity would write the fail-closed
+    fallback into OpenClaw's config as though the owner had chosen it.
+    """
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="member",
+    )
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        raise HTTPException(
+            status_code=400,
+            detail="agent_id is required: OpenClaw's channel policy is generated from a specific agent's settings.",
+        )
+    try:
+        result = await openclaw_provisioning_service.provision_openclaw_gateway(
+            gateway_id=gateway_id,
+            tenant_id=str(registration.get("tenant_id") or "default"),
+            workspace_id=str(registration.get("workspace_id") or "default"),
+            agent_id=normalized_agent_id,
+            actor_id=str(current_user.get("id") or "") or None,
+        )
+    except openclaw_provisioning_service.OpenClawProvisioningError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.openclaw.provision",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key="openclaw",
+            detail=str(exc),
+            metadata={"agent_id": normalized_agent_id},
+        )
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    # A "refused" result is a SUCCESSFUL round trip that carries a refusal
+    # reason from the box — a wrong OpenClaw version, a failed lockdown
+    # read-back, an unclean security audit. It is returned as 200 with the
+    # refusal intact rather than raised, because the caller needs the whole
+    # report (which channels were disabled and why, which settings could not
+    # be expressed), and an HTTPException carries one sentence.
+    _emit_personal_channel_audit(
+        action="personal_channel.openclaw.provision",
+        status="success" if str(result.get("status") or "") == "provisioned" else "denied",
+        registration=registration,
+        current_user=current_user,
+        gateway_id=gateway_id,
+        channel_key="openclaw",
+        detail=(
+            "The OpenClaw channel transport was provisioned on this computer."
+            if str(result.get("status") or "") == "provisioned"
+            else "OpenClaw provisioning was refused by the computer; the channel transport is not in service."
+        ),
+        metadata={
+            "agent_id": normalized_agent_id,
+            "status": result.get("status"),
+            "refusal_code": (result.get("refusal") or {}).get("code") if isinstance(result.get("refusal"), dict) else None,
+            "profile": result.get("profile"),
+            "config_changed": result.get("config_changed"),
+            "restart_required": result.get("restart_required"),
+        },
+    )
+    return {"gateway_id": gateway_id, "agent_id": normalized_agent_id, "openclaw_provisioning": result}
+
+
 # ── Stage 2: Cloud Session Manager inbound ──────────────────────
 
 import hashlib
