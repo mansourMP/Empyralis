@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 
-import { loadGatewayConfig } from "./config";
+import { loadGatewayConfig, openClawGatewayPortFromUrl } from "./config";
 import { GatewayWsClient } from "./cloud/ws-client";
 import { resolveDeviceIdentity } from "./pairing/device-identity";
 import { GatewayTokenStore } from "./pairing/token-store";
@@ -28,10 +28,14 @@ import { GatewayBrowserWorker } from "./browser/worker";
 import { GatewayBrowserRuntime } from "./browser/runtime";
 import { GatewayShellRuntime } from "./shell/runtime";
 import { GatewayLLMRuntime } from "./llm/runtime";
-import { OpenClawInboundListener } from "./openclaw/inbound-listener";
+import { OpenClawInboundListener, OPENCLAW_INBOUND_PATH } from "./openclaw/inbound-listener";
 import { setOpenClawTransportEnabled } from "./openclaw/capabilities";
 import { OpenClawGatewayClient } from "./openclaw/openclaw-gateway-client";
 import { buildOpenClawPersonalChannelRuntimes } from "./openclaw/outbound-runtime";
+import {
+  OpenClawProvisioningRuntime,
+  defaultBridgePluginPath,
+} from "./openclaw/provisioning/openclaw-provisioning-runtime";
 import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
@@ -368,6 +372,30 @@ async function main(): Promise<void> {
     personalChannelRuntimes,
     stateDir: config.stateDir,
   });
+  // OpenClaw provisioning (CHANNEL-ADOPTION-PLAN.md step 4). Constructed
+  // under EXACTLY the same condition as the inbound listener and the
+  // transport capability advertisement above — the bridge secret plus
+  // OpenClaw's own gateway token. Without both there is no OpenClaw instance
+  // for this box to own, and advertising `openclaw.provision` would let the
+  // cloud dispatch a capability that could only fail.
+  const openclawProvisioningRuntime =
+    config.openclawBridgeToken && config.openclawGatewayToken
+      ? new OpenClawProvisioningRuntime({
+          profile: config.openclawProfile,
+          // Derived from the SAME url the outbound WS client dials, so the
+          // port we provision OpenClaw to listen on and the port we connect
+          // to can never be two different numbers.
+          gatewayPort: openClawGatewayPortFromUrl(config.openclawGatewayUrl),
+          gatewayToken: config.openclawGatewayToken,
+          bridgeToken: config.openclawBridgeToken,
+          bridgeEndpointUrl: `http://127.0.0.1:${config.openclawBridgePort}${OPENCLAW_INBOUND_PATH}`,
+          bridgePluginPath:
+            config.openclawBridgePluginPath || defaultBridgePluginPath(require.main?.filename || process.argv[1] || process.execPath),
+          stateDir: config.stateDir,
+          binaryPath: config.openclawBinaryPath,
+          record: (messageType, payload) => journal.append("system", messageType, payload),
+        })
+      : null;
   const capabilityRouter = new GatewayCapabilityRouter(
     browserRuntime,
     personalChannelRuntimes,
@@ -378,6 +406,7 @@ async function main(): Promise<void> {
     selfUpdateRuntime,
     doctorRuntime,
     restartRuntime,
+    openclawProvisioningRuntime ?? undefined,
   );
   getDoctorRequestedCapabilities = () => capabilityRouter.supportedCapabilities();
   const identity = await resolveDeviceIdentity(db, {
@@ -570,6 +599,47 @@ async function main(): Promise<void> {
               port: config.openclawBridgePort,
             });
           });
+        }
+        // Boot-time OpenClaw reconcile (CHANNEL-ADOPTION-PLAN.md step 4).
+        // Re-asserts the last policy the cloud pushed against whatever the
+        // local OpenClaw config actually says now — their in-chat
+        // `/activation` command and the box operator's editor can both have
+        // changed it since, with no cloud round trip and nothing logged
+        // anywhere. Runs on every boot, like the supervisor-install check
+        // just below, rather than waiting for someone to notice a channel
+        // has gone quiet. A box that has never been provisioned is a no-op.
+        if (openclawProvisioningRuntime) {
+          void openclawProvisioningRuntime
+            .reconcileFromLastAppliedPolicy()
+            .then(async (result) => {
+              if (!result) return;
+              await journal.append("system", "gateway.openclaw_provision.boot_reconcile", {
+                status: result.status,
+                refusal_code: result.refusal?.code ?? null,
+                config_changed: result.configChanged,
+                drifted_paths: result.driftedPaths,
+              });
+              // Same gateway.state.update -> registration.metadata path the
+              // restart health check and supervisor install already use, so a
+              // refused instance is a VISIBLE state rather than a line in a
+              // log file on someone else's machine.
+              await client.publishStateUpdate({
+                openclaw_provisioning: {
+                  status: result.status,
+                  profile: result.profile,
+                  refusal: result.refusal ?? null,
+                  config_fingerprint: result.configFingerprint ?? null,
+                  drifted_paths: result.driftedPaths,
+                  disabled_channels: result.disabledChannels,
+                },
+              });
+            })
+            .catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error);
+              void journal.append("system", "gateway.openclaw_provision.boot_reconcile_failed", {
+                error: message,
+              });
+            });
         }
         void ensureSupervisorInstalledOnce().catch((error: unknown) => {
           const message = error instanceof Error ? error.message : String(error);

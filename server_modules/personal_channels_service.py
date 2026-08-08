@@ -112,7 +112,10 @@ OPENCLAW_CHANNEL_KEY_PREFIX = "openclaw_"
 OPENCLAW_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
     "openclaw_feishu": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Feishu"},
     "openclaw_line": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "LINE"},
-    "openclaw_qq": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "QQ"},
+    # `qqbot`, not `qq` — the suffix is OpenClaw's own channel id verbatim.
+    # See channel_lane_contract_service.OPENCLAW_PERSONAL_CHANNEL_SPECS for
+    # why that invariant is load-bearing and why this was renamed.
+    "openclaw_qqbot": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "QQ"},
     "openclaw_zalo": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Zalo"},
     "openclaw_msteams": {"provider": OPENCLAW_TRANSPORT_PROVIDER, "label": "Microsoft Teams"},
 }

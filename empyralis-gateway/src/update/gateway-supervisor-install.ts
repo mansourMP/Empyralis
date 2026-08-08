@@ -143,18 +143,57 @@ function xmlEscape(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function renderLaunchAgentPlist(opts: {
+/**
+ * What a supervised program looks like, independent of WHICH program it is.
+ *
+ * Generalized 2026-08-08 for CHANNEL-ADOPTION-PLAN.md step 4: the co-located
+ * OpenClaw gateway needs exactly this supervision (start on login, restart on
+ * crash, audited-and-repaired unit file) and there must not be a second
+ * implementation of it. The renderers, the drift audit
+ * (auditGatewaySupervisorUnit), the repair (repairGatewaySupervisorUnit) and
+ * both OS registrars below are shared verbatim; the only thing OpenClaw
+ * supplies is a different definition — see openclaw/provisioning/
+ * openclaw-supervisor-unit.ts.
+ *
+ * `environment` is new and exists for OpenClaw specifically: launchd/systemd
+ * do NOT inherit a login shell's environment, so the child's env is whatever
+ * the unit says it is. That is the strongest possible place to guarantee no
+ * model-provider credential reaches OpenClaw — there is no value present to
+ * drift. Omitting it renders byte-identically to the pre-generalization
+ * output, so the Empyralis gateway's own unit is unchanged.
+ */
+export interface SupervisedProgramDefinition {
+  /** launchd Label / systemd unit file name. */
   label: string;
-  execPath: string;
-  entryPath: string;
+  /** argv, already resolved to absolute paths. */
+  programArguments: string[];
   workingDirectory: string;
+  /** launchd only (systemd journals on its own). */
   logPath: string;
-}): string {
-  const execXml = xmlEscape(opts.execPath);
-  const entryXml = xmlEscape(opts.entryPath);
+  /** Exact environment for the child. Absent = inherit whatever the
+   *  supervisor provides. */
+  environment?: Record<string, string>;
+  /** systemd `Description=`. */
+  description?: string;
+}
+
+export function renderLaunchAgentPlist(opts: SupervisedProgramDefinition): string {
   const cwdXml = xmlEscape(opts.workingDirectory);
   const logXml = xmlEscape(opts.logPath);
   const labelXml = xmlEscape(opts.label);
+  const argsXml = opts.programArguments
+    .map((arg) => `    <string>${xmlEscape(arg)}</string>`)
+    .join("\n");
+  const envKeys = Object.keys(opts.environment ?? {}).sort();
+  const envXml =
+    envKeys.length > 0
+      ? `  <key>EnvironmentVariables</key>\n  <dict>\n${envKeys
+          .map(
+            (key) =>
+              `    <key>${xmlEscape(key)}</key>\n    <string>${xmlEscape(String(opts.environment?.[key] ?? ""))}</string>`,
+          )
+          .join("\n")}\n  </dict>\n`
+      : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -163,12 +202,11 @@ function renderLaunchAgentPlist(opts: {
   <string>${labelXml}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${execXml}</string>
-    <string>${entryXml}</string>
+${argsXml}
   </array>
   <key>WorkingDirectory</key>
   <string>${cwdXml}</string>
-  <key>RunAtLoad</key>
+${envXml}  <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
@@ -181,14 +219,13 @@ function renderLaunchAgentPlist(opts: {
 `;
 }
 
-function renderSystemdUnit(opts: {
-  execPath: string;
-  entryPath: string;
-  workingDirectory: string;
-}): string {
-  const execXml = `${opts.execPath} ${opts.entryPath}`;
+export function renderSystemdUnit(opts: SupervisedProgramDefinition): string {
+  const envLines = Object.keys(opts.environment ?? {})
+    .sort()
+    .map((key) => `Environment=${key}=${String(opts.environment?.[key] ?? "")}`)
+    .join("\n");
   return `[Unit]
-Description=Empyralis Agent Computer Gateway
+Description=${opts.description ?? "Empyralis Agent Computer Gateway"}
 Documentation=https://empyralis.ai
 After=network-online.target
 Wants=network-online.target
@@ -196,8 +233,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${opts.workingDirectory}
-ExecStart=${execXml}
-Restart=always
+ExecStart=${opts.programArguments.join(" ")}
+${envLines ? `${envLines}\n` : ""}Restart=always
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30
@@ -225,8 +262,7 @@ export function resolveExpectedSupervisorUnit(
       name: label,
       contents: renderLaunchAgentPlist({
         label,
-        execPath: opts.execPath,
-        entryPath: opts.entryPath,
+        programArguments: [opts.execPath, opts.entryPath],
         workingDirectory,
         logPath,
       }),
@@ -240,9 +276,10 @@ export function resolveExpectedSupervisorUnit(
       unitPath,
       name: unitName,
       contents: renderSystemdUnit({
-        execPath: opts.execPath,
-        entryPath: opts.entryPath,
+        label: unitName,
+        programArguments: [opts.execPath, opts.entryPath],
         workingDirectory,
+        logPath: path.join(opts.logDir, "gateway.log"),
       }),
     };
   }

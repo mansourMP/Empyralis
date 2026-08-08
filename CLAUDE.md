@@ -341,6 +341,67 @@ arrives over loopback HTTP from the plugin and does not depend on that
 socket, and `_assert_gateway_advertised_personal_channel` would drop already-
 arrived messages. Report `connecting` with `connected: false`.
 
+**OpenClaw's config is a DERIVED ARTIFACT of Empyralis policy, and the
+mapping is per-axis, not one-to-one.** Landed 2026-08-08 (step 4,
+`empyralis-gateway/src/openclaw/provisioning/`). Their config decides what we
+ever see, so ours can only narrow it. Which store is authoritative follows
+from which gate fact survives their tap:
+
+```
+AXIS               FACT AT OUR TAP     AUTHORITATIVE   OPENCLAW MUST BE
+dm sender policy   sender id: PRESENT  Empyralis       ⊇ (never stricter)
+group chat policy  chat id:   PRESENT  Empyralis       ⊇ (never stricter)
+require_mention    wasMentioned: GONE  OpenClaw ONLY   == (exact)
+```
+
+Stricter-than-Empyralis is the bug: the message vanishes before our process
+exists, our settings screen still says "open", and nothing can report it.
+Looser is safe (we re-decide) but must be RECORDED — every widening carries a
+code. `require_mention` has no ⊇ escape, so where it cannot be expressed the
+CHANNEL FAILS CLOSED with an owner-facing reason. Today that is exactly
+`channels.zalo` + `require_mention: false` (no `requireMention` field, no
+per-group map, and their default is TRUE).
+
+Drift: regenerate-and-restart, always journaled (`openclaw.provision
+.drift_corrected`); refuse-to-run when read-back cannot verify the lockdown
+or the policy, when the version is off the pin, or when `openclaw security
+audit` is not clean. Never reconcile the other way — importing their config
+into our database would make the owner's settings a lagging mirror of a file
+they cannot see. Verification always reads the EFFECTIVE config back out of
+OpenClaw, never the document we meant to write.
+
+Four things about their product that only running it reveals — none are in
+the schema, and each is silent:
+- **`dmPolicy: "open"` alone means DROP EVERY DM.** `allowFrom` must contain
+  `"*"`. Their config validator says so; the schema does not.
+- **`--profile` does not isolate the agent workspace.** It lands in
+  `~/.openclaw/workspace-<profile>` — inside the operator's shared tree,
+  beside every other customer's. Pin `agents.defaults.workspace` into the
+  profile's own state dir, or the one-instance-per-customer claim is hollow.
+- **A `groups: {"*": …}` entry sets `allowAll`**, silently turning a
+  `groupPolicy: "allowlist"` into "every group". Use per-chat keys.
+- **Their id is `qqbot`, not `qq`.** The Empyralis `channel_key` suffix must
+  BE their channel id verbatim; both legs do a bare prefix strip.
+
+A transport instance gets NO tool authority (`tools.profile: "minimal"`,
+elevated off, `fs.workspaceOnly`, an explicit denylist) — their own audit
+refuses the instance otherwise, and it is right to: anyone who can message a
+tool-enabled agent shares its authority. Their
+`security.trust_model.multi_user_heuristic` warn always fires and is
+acknowledged, but ONLY because per-profile isolation, no tools, and no brain
+are each enforced by a lockdown check that would refuse the instance first.
+Never silence a finding via their `security.audit.suppressions` — the
+lockdown forbids it outright, so "the audit is clean" keeps meaning
+something.
+
+Provisioning WRITES the config; it does not restart their process, and it
+says so (`restart_required`). Their `gateway.restart.request` is scoped
+`operator.admin`, and `operator.admin` stays permanently out of reach — it is
+the only scope under which OpenClaw honours a client-asserted `senderIsOwner`,
+one of their CVEs. The supervised unit's KeepAlive brings a new config into
+force; never widen the scope to hurry that along, and never report a policy
+as in force when it has only been written.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**

@@ -26,7 +26,14 @@ import { OPENCLAW_CHANNEL_KEY_PREFIX } from "./inbound-payload";
 export const OPENCLAW_TRANSPORT_CHANNEL_IDS: readonly string[] = [
   "feishu",
   "line",
-  "qq",
+  // `qqbot` is OpenClaw's own channel id (dist/message-channel-constants-*.js,
+  // and `channels.qqbot` in its config schema). It was `qq` here until
+  // 2026-08-08, which broke the lane in BOTH directions and silently: a real
+  // QQ message would have arrived as `openclaw_qqbot` (a key the cloud does
+  // not know), and every outbound send would have been rejected with
+  // "unsupported channel: qq". Renamed everywhere before any credentials
+  // exist — see channel_lane_contract_service's comment.
+  "qqbot",
   "zalo",
   "msteams",
 ];
