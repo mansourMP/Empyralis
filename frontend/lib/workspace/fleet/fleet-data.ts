@@ -74,6 +74,10 @@ export type FleetProject = {
   agent_count?: number;
   status?: string;
   is_default?: boolean;
+  /** Hidden from every default list — projects_repository.list_projects
+   *  filters `archived = FALSE` unless include_archived is passed. Only
+   *  ever true in a list fetched with useFleetProjects(ws, true). */
+  archived?: boolean;
   /** Icon name (lucide-react key, e.g. "rocket") and tint key (TintKey) —
    *  always populated by the backend (projects_repository.py), computed
    *  deterministically from the project id if never explicitly set. */
@@ -155,6 +159,10 @@ type SharedEntry<T> = {
   subscribers: Set<() => void>;
   intervalId: ReturnType<typeof setInterval> | null;
   inFlight: Promise<void> | null;
+  /** The live fetcher for this key, so a write elsewhere can invalidate a
+   *  cache entry it doesn't hold a hook instance of — see
+   *  refreshSharedResources below. Null until something has subscribed. */
+  fetcher: (() => Promise<T>) | null;
 };
 
 const sharedResourceCache = new Map<string, SharedEntry<unknown>>();
@@ -162,10 +170,39 @@ const sharedResourceCache = new Map<string, SharedEntry<unknown>>();
 function sharedEntry<T>(key: string, initialValue: T): SharedEntry<T> {
   let entry = sharedResourceCache.get(key) as SharedEntry<T> | undefined;
   if (!entry) {
-    entry = { data: initialValue, loading: true, error: null, subscribers: new Set(), intervalId: null, inFlight: null };
+    entry = {
+      data: initialValue, loading: true, error: null, subscribers: new Set(),
+      intervalId: null, inFlight: null, fetcher: null,
+    };
     sharedResourceCache.set(key, entry);
   }
   return entry;
+}
+
+/** Force-refetch every cached key starting with `keyPrefix`, whether or not
+ *  the caller holds a hook instance for it.
+ *
+ *  A component's own `refresh()` only invalidates the key IT subscribed to,
+ *  which is wrong the moment one write changes what several differently-keyed
+ *  views would return. Archiving a project is exactly that: the project
+ *  detail page subscribes to `…:all` (it must be able to render an archived
+ *  project so Restore is reachable), while the projects list and the sidebar
+ *  rail subscribe to `…:active`. Refreshing only `…:all` left the archived
+ *  project sitting in the list and the rail until the next 60s poll — an
+ *  archive that visibly does nothing, which is the whole complaint this
+ *  feature exists to fix. */
+function refreshSharedResources(keyPrefix: string): void {
+  for (const [key, entry] of sharedResourceCache) {
+    if (!key.startsWith(keyPrefix)) continue;
+    if (!entry.fetcher) continue;
+    void runSharedFetch(entry, entry.fetcher, true);
+  }
+}
+
+/** Every project-list view for this workspace, refetched now — see
+ *  refreshSharedResources for why one hook's own refresh() isn't enough. */
+export function refreshFleetProjects(workspaceId: string): void {
+  refreshSharedResources(`fleet-projects:${workspaceId}:`);
 }
 
 function runSharedFetch<T>(entry: SharedEntry<T>, fetcher: () => Promise<T>, force: boolean): Promise<void> {
@@ -208,6 +245,9 @@ function useSharedPolledResource<T>(
   useEffect(() => {
     const listener = () => forceRender((n) => n + 1);
     entry.subscribers.add(listener);
+    // Stable indirection through fetcherRef, so storing this never pins a
+    // stale closure — same reason the interval below reads through the ref.
+    entry.fetcher = () => fetcherRef.current();
     if (entry.subscribers.size === 1) {
       void runSharedFetch(entry, fetcherRef.current, false);
       entry.intervalId = setInterval(() => void runSharedFetch(entry, fetcherRef.current, false), intervalMs);
@@ -330,22 +370,57 @@ export function useFleetWorkspace(workspaceId: string) {
   return { workspace, loading, refresh };
 }
 
-export function useFleetProjects(workspaceId: string) {
+/** Archived projects are excluded server-side by default
+ *  (projects_repository.list_projects' `($3::bool OR archived = FALSE)`), so
+ *  every existing caller keeps the active-only list it already had.
+ *  `includeArchived` opts into the full set for the one surface that needs
+ *  to show — and un-archive — them; it gets its OWN shared-resource cache
+ *  key so the two views cannot overwrite each other's data. */
+export function useFleetProjects(workspaceId: string, includeArchived = false) {
   const fetcher = useCallback(async (): Promise<FleetProject[]> => {
-    const res = await fetch(`/api/w/${workspaceId}/fleet/projects`, { credentials: "include" });
+    const qs = includeArchived ? "?include_archived=true" : "";
+    const res = await fetch(`/api/w/${workspaceId}/fleet/projects${qs}`, { credentials: "include" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return Array.isArray(data.projects) ? data.projects : [];
-  }, [workspaceId]);
+  }, [workspaceId, includeArchived]);
 
   const { data: projects, loading, error, refresh } = useSharedPolledResource<FleetProject[]>(
-    `fleet-projects:${workspaceId}`,
+    `fleet-projects:${workspaceId}:${includeArchived ? "all" : "active"}`,
     fetcher,
     60_000,
     [],
   );
 
   return { projects, loading, error, refresh };
+}
+
+/** DELETE .../fleet/projects/{id} — owner-only, irreversible
+ *  (routes_fleet.fleet_delete_project). Archiving via patchFleetProject
+ *  below is the reversible everyday action; this is the real removal.
+ *  Resolves to the server's own summary of what went, so a caller can say
+ *  what actually happened instead of guessing. */
+export type DeletedProjectSummary = {
+  tasks_deleted?: number;
+  documents_deleted?: number;
+  goals_deleted?: number;
+  agents_moved?: number;
+  moved_to_project_name?: string;
+};
+
+export async function deleteFleetProject(
+  workspaceId: string,
+  projectId: string,
+): Promise<DeletedProjectSummary> {
+  const res = await fetch(
+    `/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}`,
+    { method: "DELETE", credentials: "include", headers: buildCookieAuthHeaders("DELETE", {}) },
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false) {
+    throw new Error(apiErrorMessage(data, `Could not delete project (HTTP ${res.status})`));
+  }
+  return (data.deleted || {}) as DeletedProjectSummary;
 }
 
 /** PATCH .../fleet/projects/{id} — rename, archive/unarchive, or set/clear
