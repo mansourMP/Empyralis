@@ -396,7 +396,19 @@ class PersonalChannelsServiceDeliveryBackstopTests(unittest.TestCase):
                     duplicate=False,
                 )
             create_outbound.assert_not_called()
-            mark_processed.assert_called()
+            # STRENGTHENED (fix/silent-message-drop). This used to assert
+            # mark_inbound_processed WAS called — i.e. that a status string
+            # smuggled in as a reply got recorded under the
+            # `whatsapp_personal:noreply:` marker, the durable "the agent was
+            # asked and DELIBERATELY said nothing" record and the only thing
+            # the redelivery guard reads. The turn plainly did not choose
+            # silence, so writing that marker recorded a message the platform
+            # failed to answer as answered AND cancelled the at-least-once
+            # retry that was its last chance. Suppression is unchanged (the
+            # text still never leaves); what changed is that the message is
+            # no longer thrown away with it. See
+            # test_channel_undelivered_not_silence.py.
+            mark_processed.assert_not_called()
             return result
 
         result = asyncio.run(run_case())

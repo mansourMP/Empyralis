@@ -499,6 +499,64 @@ happened" from "something else happened". And when a mocked path still
 reaches a provider, the path has moved out from under the patch — find where
 it goes now before re-pointing the mock, because the move is usually the bug.
 
+**"Nothing to send" is THREE facts, and collapsing them threw away
+customers' messages.** Third instance of "silence is a decision" being
+defeated, this time at the delivery seam. `_build_error_reply_dict` returns
+`{"text": ""}` on ANY turn failure (credits gone, provider unreachable,
+context overflow, a crash) — byte-identical to a turn that ran fine and
+deliberately said nothing. All four personal-channel delivery seams
+(WhatsApp, Telegram, local-bridge/OpenClaw, cloud) read that one empty string
+the same way and wrote the `<channel>:noreply:` marker, which is the durable
+"the agent was asked and CHOSE not to answer" record AND the only thing the
+redelivery guard reads. So a message the platform failed to answer was
+permanently recorded as answered: the person got nothing, was told nothing,
+and the at-least-once retry (`ws-client`'s replayable outbox,
+`local-bridge-runtime`'s seen-set, the OpenClaw plugin's `BoundedRetryQueue`)
+was cancelled by the lie. Fixed 2026-08-09 in
+`channel_adapter.resolve_channel_reply_outcome` —
+deliver / silent / **undelivered** — on the narrow waist beside
+`filter_channel_outbound_reply`, with an AST drift test banning a direct
+filter call in `personal_channels_service.py` so a fifth seam cannot
+reintroduce it. Undelivered writes no marker, audits `status="failed"`, and
+leaves the row retriable.
+
+Three rules follow. **An empty string is not a decision** — if two callers
+must tell "chose not to" from "could not", the producer has to say which, and
+a `text == ""` sentinel structurally cannot. **A suppression filter answers
+"may this be sent", never "did the agent answer"** — those are different
+questions and `filter_channel_outbound_reply` was being asked both.
+And `filter_outbound_reply` (the `[SILENT]`/`NO_REPLY` sentinels — the
+MODEL's own silence) and `is_channel_suppressed_text` (a PLATFORM status
+string) must stay distinguishable at any seam that classifies intent;
+collapsing them turns a legitimate quiet turn into an infinite retry.
+
+**Audience is now expressible on the channel boundary, via a SECOND
+allowlist, never a widening of the first.** `CHANNEL_SAFE_CODES` was
+audience-blind, so an owner texting their own agent got exactly what a
+stranger got. `platform_event.CHANNEL_OWNER_SAFE_CODES` +
+`owner_channel_text_for_code()` is code-in / frozen-literal-out: it has no
+string parameter, so no exception text, provider response, classified prose,
+`ErrorNotification.raw_detail` or secret can travel through it, and
+`CHANNEL_SUPPRESSED_TEXTS` is unchanged so the stranger path is byte-for-byte
+what it was. Holds one code today (`channel_execution_failed`) and is
+asserted to hold ONLY codes something actually produces — no dead entries.
+Extend it with a producer that carries a stable CODE, never with a keyword
+match on an exception's prose.
+
+**`channel_concurrency_service` has ZERO production callers** — the whole
+lease/quota gate (`thread_busy`, `agent_limit_exceeded`,
+`workspace_limit_exceeded`, `workspace_rate_limited`), its
+`agent_channel_execution_leases` table, its RLS policy, its Rust kernel ops
+and five test files, wired to nothing. Its only importer,
+`channel_execution_quota_adapter.py`, has zero callers of its own; the one
+test that patches it through `agent_channel_router` patches symbols that
+module no longer has. So `thread_busy` cannot fire today and no channel
+message is ever refused for concurrency: a second message arriving mid-turn
+starts a SECOND CONCURRENT TURN that read thread history before the first
+turn's reply was written. Nothing is dropped; context is torn and reply order
+is nondeterministic. Verified 2026-08-09. Do not describe the concurrency
+gate as live, and do not "fix" a thread_busy drop that does not exist.
+
 **A row written under one scope and updated under another is a silent
 no-op, and a test that reads the UNION of both scopes will never see it.**
 Second instance of "silence is a decision" being defeated, this time from

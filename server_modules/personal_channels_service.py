@@ -22,7 +22,13 @@ from server_modules import (
     secret_redaction_service,
     security_audit_service,
 )
-from server_modules.channel_adapter import filter_channel_outbound_reply
+# Imported as a MODULE, not as bare names: every delivery seam in this file
+# must go through channel_adapter.resolve_channel_reply_outcome(), and
+# test_channel_reply_outcome_drift.py AST-asserts that this file never calls
+# filter_channel_outbound_reply directly again. Re-adding a bare-name import
+# of the filter is how a fourth seam would quietly reintroduce the
+# silence/failure conflation this module was fixed for.
+from server_modules import channel_adapter
 
 _logger = logging.getLogger(__name__)
 
@@ -2825,43 +2831,63 @@ async def _deliver_whatsapp_personal_reply(
             chat_label=chat_label,
             was_addressed=was_addressed,
         )
-        reply_media = list((reply or {}).get("media") or [])
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
-        # be sent into a channel (DM or group). filter_channel_outbound_reply()
-        # is the backstop here regardless of what the bridge service returned
-        # — it catches [SILENT] markers AND any text matching a known
-        # platform status/error string, so a turn error/quota denial/timeout
-        # can never masquerade as a deliverable reply.
-        _raw_reply_text = str((reply or {}).get("text") or "").strip()
-        _safe_reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
+        # be sent into a channel (DM or group). resolve_channel_reply_outcome
+        # applies filter_channel_outbound_reply internally as the backstop
+        # regardless of what the bridge service returned — it catches
+        # [SILENT] markers AND any text matching a known platform
+        # status/error string, so a turn error/quota denial/timeout can never
+        # masquerade as a deliverable reply. It ALSO separates "the agent
+        # chose silence" from "the turn never completed", which this seam
+        # used to record identically.
+        outcome = channel_adapter.resolve_channel_reply_outcome(reply, is_owner=is_owner)
+        reply_media = list(outcome.media)
+        _safe_reply_text = outcome.text
         # A media-only reply (send_image/generate_image queued an attachment
         # but the model had nothing more to say, or its text was filtered
         # above) still has something to deliver — only skip when there is
         # genuinely neither safe text nor media.
-        if not reply or (not _safe_reply_text and not reply_media):
-            no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
-            refreshed_inbound = personal_channels_repository.mark_inbound_processed(
-                gateway_id=str(gateway_id or "").strip(),
-                channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-                agent_id=agent_id,
-                external_message_id=external_message_id,
-                reply_idempotency_key=no_reply_idempotency_key,
-            )
+        if not _safe_reply_text and not reply_media:
+            _undelivered = outcome.is_undelivered
+            # See the matching comment in _deliver_local_bridge_personal_reply:
+            # the no-reply marker means "the agent DELIBERATELY said nothing",
+            # so an undelivered turn must not write it — doing so records a
+            # message the platform failed to answer as answered and cancels
+            # its redelivery retry.
+            refreshed_inbound = None
+            if not _undelivered:
+                no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
+                refreshed_inbound = personal_channels_repository.mark_inbound_processed(
+                    gateway_id=str(gateway_id or "").strip(),
+                    channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+                    agent_id=agent_id,
+                    external_message_id=external_message_id,
+                    reply_idempotency_key=no_reply_idempotency_key,
+                )
             _emit_automatic_reply_audit(
                 action="personal_channel.whatsapp.automatic_reply",
-                status="skipped",
+                status="failed" if _undelivered else "skipped",
                 registration=registration,
                 gateway_id=gateway_id,
                 channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
                 provider=WHATSAPP_PERSONAL_PROVIDER,
                 detail=(
-                    "Automatic WhatsApp personal reply was skipped because the agent returned no reply."
-                    if not _raw_reply_text
-                    else "Automatic WhatsApp personal reply was suppressed: a hardcoded status/error message may never reach a channel."
+                    "Automatic WhatsApp personal reply was NOT delivered: the turn did not complete "
+                    f"({outcome.status_code}). The inbound message is left unprocessed so a redelivery retries it."
+                    if _undelivered
+                    else "Automatic WhatsApp personal reply was skipped because the agent returned no reply."
                 ),
-                metadata={"remote_jid": remote_jid, "inbound_external_message_id": external_message_id},
+                metadata={
+                    "remote_jid": remote_jid,
+                    "inbound_external_message_id": external_message_id,
+                    "undelivered": _undelivered,
+                    "status_code": outcome.status_code or None,
+                },
                 trace_id=trace_id,
-                idempotency_key=f"personal_channel.whatsapp.automatic_reply.skipped:{gateway_id}:{external_message_id}",
+                idempotency_key=(
+                    "personal_channel.whatsapp.automatic_reply."
+                    f"{'failed' if _undelivered else 'skipped'}:{gateway_id}:{external_message_id}"
+                ),
             )
             return {"duplicate": duplicate, "inbound": refreshed_inbound or inbound, "outbound": None}
 
@@ -2874,8 +2900,13 @@ async def _deliver_whatsapp_personal_reply(
             text=_safe_reply_text,
             reply_to_external_message_id=external_message_id,
             metadata={
-                "reply_source": str(reply.get("source") or "").strip() or None,
+                "reply_source": (
+                    "platform_status_owner_only"
+                    if outcome.is_undelivered
+                    else str((reply or {}).get("source") or "").strip() or None
+                ),
                 "media": reply_media or None,
+                "undelivered_status_code": outcome.status_code or None,
             },
         )
 
@@ -3342,44 +3373,64 @@ async def _handle_telegram_gateway_channel_inbound(
             # threaded through rather than left to default.
             was_addressed=group_decision.get("was_addressed"),
         )
-        reply_media = list((reply or {}).get("media") or [])
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
         # be sent into a channel (DM or group — a group turn only reaches
         # this point after already passing the mention/reply gate above, but
         # that gate is about WHETHER to run a turn at all, not about what a
         # turn is allowed to reply with, so this backstop still applies to
-        # every reply unconditionally). filter_channel_outbound_reply() is
-        # the backstop here regardless of what the bridge service returned.
-        _raw_reply_text = str((reply or {}).get("text") or "").strip()
-        _safe_reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
+        # every reply unconditionally). resolve_channel_reply_outcome applies
+        # filter_channel_outbound_reply internally as that backstop AND
+        # separates "the agent chose silence" from "the turn never completed".
+        outcome = channel_adapter.resolve_channel_reply_outcome(
+            reply, is_owner=bool(dm_decision.get("is_owner")),
+        )
+        reply_media = list(outcome.media)
+        _safe_reply_text = outcome.text
         # A media-only reply (send_image/generate_image queued an attachment
         # but the model had nothing more to say, or its text was filtered
         # above) still has something to deliver — only skip when there is
         # genuinely neither safe text nor media.
-        if not reply or (not _safe_reply_text and not reply_media):
-            no_reply_idempotency_key = f"{TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
-            refreshed_inbound = personal_channels_repository.mark_inbound_processed(
-                gateway_id=str(gateway_id or "").strip(),
-                channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-                agent_id=agent_id,
-                external_message_id=external_message_id,
-                reply_idempotency_key=no_reply_idempotency_key,
-            )
+        if not _safe_reply_text and not reply_media:
+            _undelivered = outcome.is_undelivered
+            # See the matching comment in _deliver_local_bridge_personal_reply:
+            # the no-reply marker means "the agent DELIBERATELY said nothing",
+            # so an undelivered turn must not write it — doing so records a
+            # message the platform failed to answer as answered and cancels
+            # its redelivery retry.
+            refreshed_inbound = None
+            if not _undelivered:
+                no_reply_idempotency_key = f"{TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
+                refreshed_inbound = personal_channels_repository.mark_inbound_processed(
+                    gateway_id=str(gateway_id or "").strip(),
+                    channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+                    agent_id=agent_id,
+                    external_message_id=external_message_id,
+                    reply_idempotency_key=no_reply_idempotency_key,
+                )
             _emit_automatic_reply_audit(
                 action="personal_channel.telegram.automatic_reply",
-                status="skipped",
+                status="failed" if _undelivered else "skipped",
                 registration=registration,
                 gateway_id=gateway_id,
                 channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
                 provider=TELEGRAM_PERSONAL_PROVIDER,
                 detail=(
-                    "Automatic Telegram personal reply was skipped because the agent returned no reply."
-                    if not _raw_reply_text
-                    else "Automatic Telegram personal reply was suppressed: a hardcoded status/error message may never reach a channel."
+                    "Automatic Telegram personal reply was NOT delivered: the turn did not complete "
+                    f"({outcome.status_code}). The inbound message is left unprocessed so a redelivery retries it."
+                    if _undelivered
+                    else "Automatic Telegram personal reply was skipped because the agent returned no reply."
                 ),
-                metadata={"remote_jid": remote_jid, "inbound_external_message_id": external_message_id},
+                metadata={
+                    "remote_jid": remote_jid,
+                    "inbound_external_message_id": external_message_id,
+                    "undelivered": _undelivered,
+                    "status_code": outcome.status_code or None,
+                },
                 trace_id=trace_id,
-                idempotency_key=f"personal_channel.telegram.automatic_reply.skipped:{gateway_id}:{external_message_id}",
+                idempotency_key=(
+                    "personal_channel.telegram.automatic_reply."
+                    f"{'failed' if _undelivered else 'skipped'}:{gateway_id}:{external_message_id}"
+                ),
             )
             return {"duplicate": not created, "inbound": refreshed_inbound or inbound, "outbound": None}
 
@@ -3392,8 +3443,13 @@ async def _handle_telegram_gateway_channel_inbound(
             text=_safe_reply_text,
             reply_to_external_message_id=external_message_id,
             metadata={
-                "reply_source": str(reply.get("source") or "").strip() or None,
+                "reply_source": (
+                    "platform_status_owner_only"
+                    if outcome.is_undelivered
+                    else str((reply or {}).get("source") or "").strip() or None
+                ),
                 "media": reply_media or None,
+                "undelivered_status_code": outcome.status_code or None,
             },
         )
 
@@ -3560,42 +3616,65 @@ async def _deliver_local_bridge_personal_reply(
             chat_label=chat_label,
             was_addressed=was_addressed,
         )
-        reply_media = list((reply or {}).get("media") or [])
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
-        # be sent into a channel (DM or group).
-        _raw_reply_text = str((reply or {}).get("text") or "").strip()
-        _safe_reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
+        # be sent into a channel (DM or group). resolve_channel_reply_outcome
+        # applies filter_channel_outbound_reply internally as the backstop AND
+        # separates "the agent chose silence" from "the turn never completed"
+        # — see its docstring for why collapsing those two lost people's
+        # messages outright.
+        outcome = channel_adapter.resolve_channel_reply_outcome(reply, is_owner=is_owner)
+        reply_media = list(outcome.media)
+        _safe_reply_text = outcome.text
         # A media-only reply (send_image/generate_image queued an attachment
         # but the model had nothing more to say, or its text was filtered
         # above) still has something to deliver — only skip when there is
         # genuinely neither safe text nor media.
-        if not reply or (not _safe_reply_text and not reply_media):
-            no_reply_idempotency_key = f"{no_reply_prefix}{external_message_id}"
-            # THE load-bearing write: this is the durable record that the
-            # agent was asked and chose not to answer. See agent_id's own
-            # comment on this function's signature.
-            refreshed_inbound = personal_channels_repository.mark_inbound_processed(
-                gateway_id=str(gateway_id or "").strip(),
-                channel_key=channel_key,
-                agent_id=agent_id,
-                external_message_id=external_message_id,
-                reply_idempotency_key=no_reply_idempotency_key,
-            )
+        if not _safe_reply_text and not reply_media:
+            _undelivered = outcome.is_undelivered
+            # The no-reply marker is written ONLY for a genuine silence
+            # decision. On an UNDELIVERED turn it is deliberately NOT
+            # written: it would record a message the platform failed to
+            # answer as answered, and it is the exact row the redelivery
+            # guard at the top of this function reads — so writing it also
+            # cancels the at-least-once retry that is this message's last
+            # remaining chance to be answered at all.
+            refreshed_inbound = None
+            if not _undelivered:
+                no_reply_idempotency_key = f"{no_reply_prefix}{external_message_id}"
+                # THE load-bearing write: this is the durable record that the
+                # agent was asked and chose not to answer. See agent_id's own
+                # comment on this function's signature.
+                refreshed_inbound = personal_channels_repository.mark_inbound_processed(
+                    gateway_id=str(gateway_id or "").strip(),
+                    channel_key=channel_key,
+                    agent_id=agent_id,
+                    external_message_id=external_message_id,
+                    reply_idempotency_key=no_reply_idempotency_key,
+                )
             _emit_automatic_reply_audit(
                 action=f"personal_channel.{channel_key.split('_', 1)[0]}.automatic_reply",
-                status="skipped",
+                status="failed" if _undelivered else "skipped",
                 registration=registration,
                 gateway_id=gateway_id,
                 channel_key=channel_key,
                 provider=provider,
                 detail=(
-                    f"Automatic {label} personal reply was skipped because the agent returned no reply."
-                    if not _raw_reply_text
-                    else f"Automatic {label} personal reply was suppressed: a hardcoded status/error message may never reach a channel."
+                    f"Automatic {label} personal reply was NOT delivered: the turn did not complete "
+                    f"({outcome.status_code}). The inbound message is left unprocessed so a redelivery retries it."
+                    if _undelivered
+                    else f"Automatic {label} personal reply was skipped because the agent returned no reply."
                 ),
-                metadata={"remote_jid": remote_jid, "inbound_external_message_id": external_message_id},
+                metadata={
+                    "remote_jid": remote_jid,
+                    "inbound_external_message_id": external_message_id,
+                    "undelivered": _undelivered,
+                    "status_code": outcome.status_code or None,
+                },
                 trace_id=trace_id,
-                idempotency_key=f"personal_channel.{channel_key}.automatic_reply.skipped:{gateway_id}:{external_message_id}",
+                idempotency_key=(
+                    f"personal_channel.{channel_key}.automatic_reply."
+                    f"{'failed' if _undelivered else 'skipped'}:{gateway_id}:{external_message_id}"
+                ),
             )
             return {"duplicate": duplicate, "inbound": refreshed_inbound or inbound, "outbound": None}
 
@@ -3607,8 +3686,13 @@ async def _deliver_local_bridge_personal_reply(
             text=_safe_reply_text,
             reply_to_external_message_id=external_message_id,
             metadata={
-                "reply_source": str(reply.get("source") or "").strip() or None,
+                "reply_source": (
+                    "platform_status_owner_only"
+                    if outcome.is_undelivered
+                    else str((reply or {}).get("source") or "").strip() or None
+                ),
                 "media": reply_media or None,
+                "undelivered_status_code": outcome.status_code or None,
             },
         )
 
@@ -4823,15 +4907,26 @@ async def handle_cloud_channel_inbound(
     )
 
     # ABSOLUTE RULE: no hardcoded platform status/error message may EVER be
-    # sent into a channel (DM or group) — filter_channel_outbound_reply()
-    # is the backstop regardless of what the bridge service returned.
-    _raw_reply_text = str((reply or {}).get("text") or "").strip()
-    reply_text = filter_channel_outbound_reply(_raw_reply_text) if _raw_reply_text else None
+    # sent into a channel (DM or group) — resolve_channel_reply_outcome
+    # applies filter_channel_outbound_reply internally as the backstop
+    # regardless of what the bridge service returned, and additionally tells
+    # "the agent chose silence" apart from "the turn never completed".
+    #
+    # This path (hosted/cloud) never touches personal_channel_inbound_messages
+    # at all, so there is no no-reply marker to mis-write and no retry to
+    # cancel here — the only thing that changes is that the OWNER now learns
+    # their own agent failed instead of reading as ignoring them, and that the
+    # returned status distinguishes the two for anything reading it.
+    outcome = channel_adapter.resolve_channel_reply_outcome(
+        reply, is_owner=bool(dm_decision.get("is_owner")),
+    )
+    reply_text = outcome.text
     if not reply_text:
         return {
-            "status": "no_reply",
+            "status": "undelivered" if outcome.is_undelivered else "no_reply",
             "session_id": session_id,
             "external_message_id": external_message_id,
+            "status_code": outcome.status_code or None,
         }
 
     # Dispatch the reply to the cloud session manager

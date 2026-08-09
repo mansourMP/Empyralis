@@ -186,3 +186,131 @@ def filter_channel_outbound_reply(reply: str | None) -> str | None:
     if is_channel_suppressed_text(text):
         return None
     return text
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Reply outcome — "nothing to send" is THREE different facts, not one
+# ──────────────────────────────────────────────────────────────────────────
+
+# Keys a reply-dict producer sets to say "this turn did not complete".
+# personal_channel_sage_bridge_service._build_error_reply_dict is the only
+# producer today.
+DELIVERY_FAILED_KEY = "delivery_failed"
+DELIVERY_FAILED_CODE_KEY = "delivery_failed_code"
+
+DELIVER = "deliver"
+SILENT = "silent"
+UNDELIVERED = "undelivered"
+
+
+@dataclass(frozen=True)
+class ChannelReplyOutcome:
+    """What a channel delivery seam should actually DO with a reply dict.
+
+    Every personal-channel delivery seam used to collapse three completely
+    different facts into one `if not reply or not safe_text:` branch, and
+    then record ALL of them with the `<channel>:noreply:` idempotency
+    marker — the durable "the agent was asked and DELIBERATELY said nothing"
+    record. Two of the three are not that:
+
+        kind=deliver      the agent produced something. Send it.
+        kind=silent       the agent ran to completion and chose to say
+                          nothing (a group message that wasn't for it, a
+                          [SILENT] sentinel). A real decision — record the
+                          no-reply marker, do not retry.
+        kind=undelivered  the turn did NOT complete: it raised, or a
+                          platform status string reached the send boundary
+                          pretending to be a reply. The agent never decided
+                          anything. Recording the no-reply marker here is a
+                          LIE that also disarms the only retry this message
+                          will ever get, because `channel.inbound` is
+                          at-least-once on every leg and that marker is what
+                          the redelivery guard reads.
+
+    text is populated for `deliver`, and for `undelivered` ONLY when the
+    recipient is the workspace OWNER and the failure code is in
+    platform_event.CHANNEL_OWNER_SAFE_CODES — a frozen literal selected by
+    code, never caller-supplied text. It is always None for `silent`.
+    """
+
+    kind: str
+    text: str | None = None
+    media: tuple[dict, ...] = ()
+    status_code: str = ""
+
+    @property
+    def is_undelivered(self) -> bool:
+        return self.kind == UNDELIVERED
+
+
+def resolve_channel_reply_outcome(
+    reply: Any,
+    *,
+    is_owner: bool = False,
+) -> ChannelReplyOutcome:
+    """Classify a channel reply dict into deliver / silent / undelivered.
+
+    The single place that decides which of the three a "nothing to send"
+    turn actually was. Put here, beside filter_channel_outbound_reply(),
+    because every seam that calls that filter must make this decision too —
+    a per-seam `if` is a rule the next author has to know, and there are
+    already three near-identical copies of that `if` in
+    personal_channels_service.py.
+
+    *is_owner* must come from a robust ownership signal
+    (personal_channels_service._is_owner_message), never a claimed name.
+    False (the default) means "treat as a stranger" — the conservative side.
+    """
+    from server_modules import platform_event
+
+    data = reply if isinstance(reply, dict) else {}
+    media = tuple(item for item in (data.get("media") or []) if isinstance(item, dict))
+    raw_text = str(data.get("text") or "").strip()
+
+    # Two DIFFERENT filters, and the difference is the whole point:
+    #   filter_outbound_reply        strips the [SILENT]/NO_REPLY sentinels —
+    #                                the model's own deliberate "say nothing".
+    #   is_channel_suppressed_text   catches a hardcoded PLATFORM status/error
+    #                                string — the model said nothing of the
+    #                                kind; the platform did.
+    # Collapsing them (as `filter_channel_outbound_reply` alone does, correctly,
+    # for its own job of deciding deliverability) is what made a failure
+    # indistinguishable from a silence decision at every delivery seam.
+    unmarked_text = filter_outbound_reply(raw_text) if raw_text else None
+    safe_text = (
+        None
+        if unmarked_text is None or platform_event.is_channel_suppressed_text(unmarked_text)
+        else unmarked_text
+    )
+
+    failed = bool(data.get(DELIVERY_FAILED_KEY))
+    status_code = str(data.get(DELIVERY_FAILED_CODE_KEY) or "").strip()
+
+    # A producer returned NON-EMPTY, NON-SENTINEL text that the suppression
+    # allowlist ate: a hardcoded platform status/error string wearing a
+    # reply's clothes (the 2026-07-18 shape). The turn failed; it did not
+    # choose silence. Suppression still holds — safe_text is already None and
+    # raw_text is never read again.
+    if not failed and unmarked_text is not None and safe_text is None:
+        failed = True
+
+    if failed:
+        if not status_code:
+            status_code = platform_event.CHANNEL_EXECUTION_FAILED.code
+        owner_text = (
+            platform_event.owner_channel_text_for_code(status_code) if is_owner else None
+        )
+        # Media queued before the failure is real agent output (send_image
+        # already ran), so it still ships — but the turn is still recorded
+        # as undelivered, never as deliberate silence.
+        return ChannelReplyOutcome(
+            kind=UNDELIVERED,
+            text=owner_text,
+            media=media,
+            status_code=status_code,
+        )
+
+    if safe_text or media:
+        return ChannelReplyOutcome(kind=DELIVER, text=safe_text or "", media=media)
+
+    return ChannelReplyOutcome(kind=SILENT)

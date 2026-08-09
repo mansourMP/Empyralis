@@ -12,7 +12,11 @@ from server_modules.sage_command_dispatcher import (  # noqa: E402
 from server_modules.error_notification import classify_error_notification  # noqa: E402
 
 from server_modules import channel_lane_contract_service
-from server_modules.channel_adapter import filter_outbound_reply
+from server_modules.channel_adapter import (
+    DELIVERY_FAILED_CODE_KEY,
+    DELIVERY_FAILED_KEY,
+    filter_outbound_reply,
+)
 from server_modules.inbound_envelope import (
     EnvelopeChat,
     EnvelopeSender,
@@ -27,20 +31,39 @@ def _build_error_reply_dict(
     *,
     extra: dict | None = None,
 ) -> dict:
-    """Build a SILENT error result for a personal channel turn.
+    """Build a FAILED (not silent) error result for a personal channel turn.
 
     ABSOLUTE RULE: no hardcoded status/error message may EVER be sent into
-    a channel (DM or group). "text" is intentionally left empty here — every
-    caller in personal_channels_service.py already treats an empty "text" as
-    "no reply" and skips the channel send (marking the inbound message
-    processed with an audit event, status="skipped"). The classified message
-    is kept under "error_text"/"notification" for logging and any future
-    dashboard rendering only — callers must never resurrect a channel-bound
-    string from those keys.
+    a channel (DM or group). "text" is intentionally left empty here — no
+    delivery seam may ever resurrect a channel-bound string from
+    "error_text"/"notification" (the latter carries
+    ErrorNotification.raw_detail, i.e. the RAW exception text).
 
-    The failure itself is still logged (server logs) and surfaced loudly via
-    durability_signal (dashboard/activity feed) so it isn't silently lost —
-    it just never reaches the human on the other end of the channel.
+    But an empty "text" alone used to be a LIE by omission. Every delivery
+    seam read it as "the agent had nothing to say" and wrote the
+    `<channel>:noreply:` marker — the durable record that the agent was
+    asked and DELIBERATELY chose silence. It had not: the turn never
+    completed. Two things followed from that one conflation:
+
+        - the person got nothing and was told nothing, and
+        - the marker disarmed the ONLY retry the message would ever get.
+          `channel.inbound` is at-least-once on every leg (ws-client's
+          replayable outbox, local-bridge-runtime's in-memory seen-set, the
+          OpenClaw plugin's durable BoundedRetryQueue) and that marker is
+          exactly what the redelivery guard at the top of
+          _deliver_local_bridge_personal_reply reads. A message the platform
+          failed to answer was therefore permanently recorded as answered.
+
+    So the result now also carries channel_adapter.DELIVERY_FAILED_KEY, and
+    channel_adapter.resolve_channel_reply_outcome() turns that into
+    kind="undelivered" — no no-reply marker, an honest audit row, a retry
+    that can still happen, and (for the OWNER only) a frozen
+    CHANNEL_EXECUTION_FAILED literal so their own agent does not read as
+    simply ignoring them. See that function and
+    platform_event.CHANNEL_OWNER_SAFE_CODES.
+
+    The failure is still logged (server logs) and surfaced loudly via
+    durability_signal (dashboard/activity feed), unchanged.
     """
     _exc_str = str(exc)
     _classified = classify_error(_exc_str, raw_error=_exc_str)
@@ -61,6 +84,8 @@ def _build_error_reply_dict(
         )
     except Exception:
         pass
+    from server_modules import platform_event as _platform_event
+
     result: dict = {
         "text": "",
         "source": "error_classifier",
@@ -68,6 +93,14 @@ def _build_error_reply_dict(
         "notification": classify_error_notification(
             _exc_str, raw_error=_exc_str,
         ).as_dict(),
+        # "the turn did not complete" — NOT "the agent chose silence".
+        # A stable CODE, never the classified prose: the owner-visible
+        # literal is looked up from the frozen PlatformEvent registry by
+        # this code (platform_event.owner_channel_text_for_code), so no part
+        # of _exc_str, _classified, or notification["raw_detail"] can reach
+        # a channel through it.
+        DELIVERY_FAILED_KEY: True,
+        DELIVERY_FAILED_CODE_KEY: _platform_event.CHANNEL_EXECUTION_FAILED.code,
     }
     if extra:
         result.update(extra)
