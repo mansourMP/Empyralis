@@ -15,6 +15,7 @@ import { openClawChannelIdFromChannelKey } from "../openclaw/outbound-payload";
 import {
   OPENCLAW_CHANNEL_POLICY_SHAPES,
   auditOpenClawChannelShapes,
+  resolveOpenClawChannelToolFlags,
   resolveOpenClawPluginHookFlags,
 } from "../openclaw/provisioning/openclaw-channel-shapes";
 import {
@@ -1315,4 +1316,84 @@ test("plugin install: the instance's plugin inventory is an explicit allowlist",
     findOpenClawLockdownViolations(rendered.config).some((v) => v.code === "plugin_allowlist_empty"),
     false,
   );
+});
+
+test("plugin install: a channel plugin's OWN tool surface is switched off, discovered not listed", () => {
+  // Only reachable once a channel plugin is installed: `@openclaw/feishu`
+  // contributes `channels.feishu.tools` (doc/chat/wiki/drive/perm/scopes/
+  // bitable/base), which the GLOBAL tools.* lockdown does not reach. Their own
+  // audit found it the moment a credential was configured:
+  //   channels.feishu.doc_owner_open_id [warn] "feishu_doc action \"create\"
+  //   can grant document access to the trusted requesting Feishu user."
+  // A radio must not be able to create documents in the owner's tenant.
+  const schema = {
+    properties: {
+      channels: {
+        properties: {
+          feishu: {
+            properties: {
+              tools: {
+                properties: {
+                  doc: { type: "boolean" },
+                  drive: { type: "boolean" },
+                  perm: { type: "boolean" },
+                },
+              },
+            },
+          },
+          // No tools node at all — the ordinary case, and it must contribute
+          // nothing rather than an empty object.
+          line: { properties: {} },
+        },
+      },
+    },
+  };
+
+  const resolved = resolveOpenClawChannelToolFlags(schema, ["feishu", "line"]);
+  assert.deepEqual(resolved.findings, []);
+  assert.deepEqual(
+    resolved.disable.map((entry) => `${entry.channelId}.${entry.flag}`).sort(),
+    ["feishu.doc", "feishu.drive", "feishu.perm"],
+  );
+
+  const rendered = renderOpenClawConfig(
+    { ...plan([policy({ channelId: "feishu" }), policy({ channelId: "line" })]), channelToolFlags: resolved.disable },
+    { gatewayToken: "t" },
+  );
+  assert.deepEqual(channelBlock(rendered, "feishu").tools, { doc: false, drive: false, perm: false });
+  assert.equal(channelBlock(rendered, "line").tools, undefined);
+
+  // A flag shape we cannot switch off is a FINDING, and a shape finding
+  // refuses the whole run — never a silent "leave it on".
+  const odd = resolveOpenClawChannelToolFlags(
+    {
+      properties: {
+        channels: { properties: { feishu: { properties: { tools: { properties: { doc: { type: "object" } } } } } } },
+      },
+    },
+    ["feishu"],
+  );
+  assert.deepEqual(odd.disable, []);
+  assert.equal(odd.findings.length, 1);
+  assert.equal(odd.findings[0].code, "unhandled_channel_tool");
+});
+
+test("plugin install: a channel tool surface we cannot switch off REFUSES the whole run", async () => {
+  const schema = schemaFixture() as Record<string, any>;
+  schema.properties.channels.properties.feishu.properties.tools = {
+    properties: { doc: { type: "object" } },
+  };
+  const result = await fakeProvisioner(
+    {
+      version: OPENCLAW_PINNED_VERSION,
+      schema,
+      effective: effectiveFor([policy({ channelId: "feishu" })], ["feishu"]),
+      audit: { findings: [] },
+      patchCode: 0,
+    },
+    { plan: plan([policy({ channelId: "feishu", installPlugin: true })]) },
+  ).provision();
+  assert.equal(result.status, "refused");
+  assert.equal(result.refusal?.code, "openclaw_channel_shape_drift");
+  assert.match(result.refusal?.detail ?? "", /unhandled_channel_tool/);
 });

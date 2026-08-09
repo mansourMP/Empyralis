@@ -106,6 +106,7 @@ import path from "path";
 
 import {
   auditOpenClawChannelShapes,
+  resolveOpenClawChannelToolFlags,
   resolveOpenClawPluginHookFlags,
   type OpenClawChannelShapeFinding,
 } from "./openclaw-channel-shapes";
@@ -584,6 +585,11 @@ export class OpenClawProvisioner {
     const shapeFindings = auditOpenClawChannelShapes(schema, channelIds);
     const hooks = resolveOpenClawPluginHookFlags(schema, channelIds);
     shapeFindings.push(...hooks.findings);
+    // Runs AFTER the plugin install above, so a tool surface a channel plugin
+    // only contributes once installed is seen — which is the whole reason it
+    // was invisible until step 5.
+    const channelTools = resolveOpenClawChannelToolFlags(schema, channelIds);
+    shapeFindings.push(...channelTools.findings);
     base.shapeFindings = shapeFindings;
     if (shapeFindings.length > 0) {
       return this.refuse(
@@ -604,6 +610,7 @@ export class OpenClawProvisioner {
         // control, and an isolation control does not take a hint.
         profileStateDir: openClawProfileStateDir(profile, this.homeDir),
         pluginHookFlags: hooks.enable,
+        channelToolFlags: channelTools.disable,
         // Straight from the install pass, so `plugins.allow` names exactly
         // what this box installed — never a hand-kept second list, and never
         // an intent that the install did not actually produce.

@@ -1022,6 +1022,40 @@ PRESENCE, never the policy's value: the loaders normalize a missing entry into
 a full default document, so a value comparison cannot tell "never configured"
 from "configured, and happens to match the default".
 
+**A channel PLUGIN contributes its own tool surface, and the global `tools.*`
+lockdown does not reach it.** The sharpest thing step 5 turned up, and it was
+invisible before it because there were no plugins installed to contribute one.
+`@openclaw/feishu` ships `channels.feishu.tools` — doc / chat / wiki / drive /
+perm / scopes / bitable / base — i.e. create documents, manage permissions and
+reach Drive in the owner's Feishu tenant, on an instance whose entire job is to
+be a radio. `tools.profile: "minimal"` + `tools.elevated.enabled: false` +
+`tools.deny` do not touch it. Their own audit catches it, but ONLY once a
+credential is configured, which is precisely the moment the owner is least able
+to act on it:
+
+```
+channels.feishu.doc_owner_open_id [warn]
+  "channels.feishu tools include \"doc\"; feishu_doc action \"create\" can grant
+   document access to the trusted requesting Feishu user."
+  remediation: "Disable channels.feishu.tools.doc when not needed…"
+```
+
+`resolveOpenClawChannelToolFlags` now discovers every `channels.<id>.tools.<flag>`
+boolean from the installed schema and writes them all FALSE, and a non-boolean
+there is a shape finding that refuses the run. DISCOVERED, never listed — a
+hard-coded set of Feishu's eight would stop covering the ninth and would cover
+nothing for the next plugin that grows the node. Anything else a plugin
+contributes to `channels.<id>.*` deserves the same question: the global
+lockdown was written against a bundle with no third-party channel code in it.
+
+**Provisioning never wipes a channel credential, and that is verified rather
+than assumed.** `config patch` merges recursively and `findConfigDrift` is
+one-directional, so `channels.<id>.appId`/`appSecret` — which the generator
+does not write — survive every reprovision. Checked live with a placeholder
+credential across a full provisioning run. It matters because the owner's setup
+step and the boot reconcile would otherwise race, and the failure would present
+as a channel that mysteriously logs out.
+
 **`plugins.allow` must be non-empty, and that only became true once we started
 installing.** OpenClaw said it itself on the first live run: *"plugins.allow is
 empty; discovered non-bundled plugins may auto-load: feishu (…). Set

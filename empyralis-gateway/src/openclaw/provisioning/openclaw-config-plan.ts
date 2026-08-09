@@ -168,6 +168,11 @@ export interface OpenClawProvisioningPlan {
   /** Every `channels.<id>.pluginHooks.<flag>` the installed schema declares,
    *  discovered by resolveOpenClawPluginHookFlags — all set to true. */
   pluginHookFlags?: Array<{ channelId: string; flag: string }>;
+  /** Every `channels.<id>.tools.<flag>` the installed schema declares,
+   *  discovered by resolveOpenClawChannelToolFlags — all set to FALSE. A
+   *  channel plugin's own tool surface is not covered by the global `tools.*`
+   *  lockdown, and a transport instance carries no tool authority. */
+  channelToolFlags?: Array<{ channelId: string; flag: string }>;
   /** Channel-plugin ids this box has actually installed, from OpenClaw's own
    *  install registry (./openclaw-plugin-install.ts). They join the bridge
    *  plugin in `plugins.allow`, so the instance's plugin inventory is an
@@ -788,6 +793,17 @@ export function renderOpenClawConfig(
     const existing = (channels[channelId] as Record<string, unknown> | undefined) ?? {};
     const hooks = (existing.pluginHooks as Record<string, unknown> | undefined) ?? {};
     channels[channelId] = { ...existing, pluginHooks: { ...hooks, [flag]: true } };
+  }
+
+  // Per-channel tool surfaces, all OFF. Discovered from the installed schema
+  // (never a hard-coded list), because a channel PLUGIN contributes these and
+  // the global `tools.*` lockdown does not reach them — `channels.feishu.tools`
+  // would otherwise let anyone who can message this transport create documents
+  // and grant permissions in the owner's Feishu tenant.
+  for (const { channelId, flag } of plan.channelToolFlags ?? []) {
+    const existing = (channels[channelId] as Record<string, unknown> | undefined) ?? {};
+    const tools = (existing.tools as Record<string, unknown> | undefined) ?? {};
+    channels[channelId] = { ...existing, tools: { ...tools, [flag]: false } };
   }
 
   const pluginPaths = [plan.bridgePluginPath, ...(plan.extraPluginPaths ?? [])];
