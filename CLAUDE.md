@@ -1217,16 +1217,18 @@ traffic. `message.action` and OpenClaw's own agent reply converge on the SAME
 function three frames down, so anything below that line is ours for free:
 
 ```
-message.action ─▶ handleSendAction ─▶ sendCoreMessage ─┐   send-BMn-S3XR.js
-                                                       ├─▶ sendMessage
-their agent ─▶ reply dispatcher ─▶ deliver ────────────┘   message-Bv-*.js
-                                                              │
-                                     ▼─────────────────────────┘
-                            sendDurableMessageBatch
-                            deliverOutboundPayloadsInternal   deliver-BPqL55uX.js
-                              ├ sendTextChunks  ← CHUNKING, per-plugin limit ✓
-                              └ plugin.sendText ← the plugin's own API client ✓
-        ─────────────── everything ABOVE the fork is theirs alone ───────────────
+OURS    message.action (WS RPC) ─▶ sendHandlers["message.action"]  send-BMn-S3XR.js
+                                   dispatchChannelMessageAction
+                                   plugin.actions.handleAction     e.g. telegram
+                                                                   action-runtime-*.js
+THEIRS  inbound ─▶ reply dispatcher ─▶ deliver ──┐
+                   (humanDelay, typing, sendChain)│
+                                                  ▼
+                          BOTH ─▶ sendDurableMessageBatch
+                                  deliverOutboundPayloadsInternal  deliver-BPqL55uX.js
+                                    ├ sendTextChunks   CHUNKING, per-plugin limit ✓
+                                    └ plugin.sendText  the plugin's own API client ✓
+        ─────────── everything ABOVE the join is theirs alone ───────────
                  humanDelay ✗   typing ✗   inbound debounce ✗
 ```
 
@@ -1248,7 +1250,11 @@ Four things this settles, each of which a code reading gets wrong by default:
   Matrix and Synology ship their own send queues. **Signal, iMessage, IRC, SMS
   and ClickClack have none, and no 429/retry-after handling either.** Adopting
   OpenClaw buys real pacing per channel, not uniform pacing — do not describe
-  it as a blanket protection.
+  it as a blanket protection. And for the channels this lane actually routes
+  today (feishu/line/qqbot/zalo/msteams) the plugin is third-party npm that
+  provisioning installs, so whether it paces **cannot be determined from
+  OpenClaw's own source** — it is a property of each plugin, not of the
+  transport. Say that, rather than generalising from Telegram.
 - **Presence is structurally unreachable through this transport.**
   `CHANNEL_MESSAGE_ACTION_NAMES` has no typing action at all (`read` and
   `set-presence` exist; typing does not). Typing lives on the plugin's
