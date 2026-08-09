@@ -1260,6 +1260,17 @@ while the plan it printed said `refused`; the installer now reads
 `runtimeInstall.action` and `provision.status`, and a plan with no usable Node
 carries no unit at all, so there is nothing to start.
 
+**A `warn` from their audit is BLOCKING, so a directory nobody looked at can
+make a box provision once and refuse forever.** The OpenClaw profile state dir
+came out `755` on a real box — a `mkdir` inheriting a systemd service's 022
+umask, or OpenClaw creating it before we get there — and their
+`fs.state_dir.perms_readable` check reports that at `warn`, which
+`blockingAuditFindings` treats as blocking. First run: provisioned. Every run
+after it: `openclaw_security_audit_not_clean`. Nothing about that reads as a
+permissions problem. Now chmod 0700 on EVERY run rather than at creation,
+because the directory that broke it already existed — and it holds the gateway
+token and the conversation state, so 755 was wrong on its own terms too.
+
 **A systemd unit with no `User=` runs as root, and `--profile` resolves against
 `$HOME`.** Both halves matter for the co-located transport: root is absurd
 authority for a process whose whole job is to be a radio, and a root-run
