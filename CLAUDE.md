@@ -1179,6 +1179,84 @@ the cloud sees. And the OpenClaw channels are absent from
 show them at all. A second hand-maintained channel list, doing exactly what the
 "channels is ONE system" rule above says it must not.
 
+**The channel SETUP FORM is generated from OpenClaw's schema, exactly like the
+channel list is generated from their registry.** Landed 2026-08-09 (step 8).
+Twenty-four hand-written forms would be the five-entry channel tuple all over
+again: stale the day upstream renames a field, and simply absent for the
+twenty-fifth channel. `scripts/generate_openclaw_channel_manifest.py` now emits
+a per-channel `credential_shape` from the same `openclaw config schema` parse
+that already produces the policy shape.
+
+```
+FIELD CLASS   SIGNAL (structural, no channel name anywhere)
+secret        their SecretRef union:
+                anyOf[{type:string}, oneOf[{source:const env|file|exec,
+                                            provider, id}]]
+              — OpenClaw's OWN declaration that a value is a credential.
+              Corroborated independently by their per-plugin
+              `dist/*secret-contract*.js`, which names the same paths.
+identifier    plain string, no default/enum, not a *File/*Path, not in the
+              policy surface, and NAME carried by <= 5 of their 24 channel
+              nodes. Cross-channel name frequency is the second axis:
+              boilerplate is shared (name, responsePrefix, historyLimit,
+              webhookPath), a credential companion is unique to its platform
+              (appId, accountSid, tenantId, homeserver, channelAccessToken).
+              Secrets are EXEMPT — botToken is on four channels and is still
+              a credential.
+pairing       a channel declaring NEITHER a SecretRef field NOR a `*File`
+              variant takes no pasted credential at all. They ship a
+              file-backed variant only for credentials, which is why LINE
+              (whose channelAccessToken/channelSecret are plain strings)
+              still lands in `credential` via tokenFile/secretFile, and IRC's
+              `password` via passwordFile. WhatsApp, iMessage, Signal,
+              Twitch, Synology Chat, Zalo Personal and Tlon land in
+              `pairing` and render NO form — a dead control is a product-law
+              violation, not a caption.
+plugin_absent the plugin contributes `channels.<id>` only once installed, so
+              its fields are unknowable. Say so; never guess.
+```
+
+**`openclaw config get --json` REDACTS every secret at the source**
+(`"appSecret": "__OPENCLAW_REDACTED__"`). That is what makes "the credential
+never comes back out" structural rather than a rule to remember: the cloud
+process cannot hold a stored channel credential even once it is stored, so
+`set: true|false` is the only credential-shaped thing any read can produce.
+The write path treats that placeholder arriving as a VALUE as a refusal — a
+form echoing a masked read back would otherwise overwrite a live credential
+with the literal string.
+
+**The credential is a PASS-THROUGH; nothing in the cloud stores it.** Browser
+-> `PUT /personal-channels/openclaw/gateways/{id}/channels/{key}/credential`
+-> gateway WS -> `openclaw config patch` on the owner's own box. No table, no
+log, no journal (field NAMES only, and the audit row carries names only too).
+Deliberately not `vault_credentials`: that table has no `tenant_id` and
+`list_all()` is a full-table read with the boundary applied in Python, so one
+row per channel per gateway would make a known-weak scoping story worse for a
+second copy of a secret with no reader. Execution locality already says the
+credential belongs where the transport runs. The cost — rebuild the box and
+the owner re-enters it — is the same trade the gateway token already makes.
+
+**`openclaw.channel_setup` is a SEPARATE capability from `openclaw.provision`,
+because they answer to different authorities.** Empyralis owns the policy and
+REGENERATES it every run; the owner owns the credential and nothing may
+regenerate it. Fusing them gives either a reprovision that wipes a credential
+or a credential save that drags a whole policy render behind it. Verified live
+2026-08-09: a full provisioning run left two browser-written credentials
+intact (`config patch` merges, and the generator never writes those keys).
+
+**Three states, never collapsed — the bar is OpenClaw's own `channels list`:**
+`- Feishu: not installed, configured, disabled, run openclaw plugins install…`
+i.e. plugin / credential / switch, plus the specific next action, on one line.
+A single "Connected / Not connected" light destroys exactly the fact that says
+which of the three to go fix. `installed` comes from
+`channels list --all --json` -> `chat.<id>.installed`, `configured` is
+PER-FIELD (one boolean would repeat the same collapse a level down), `enabled`
+from the effective config. Each non-working state carries a BUTTON, not a
+command, because the cloud can already drive the device; where the action
+genuinely cannot happen in a browser (a QR scan) the row says so instead of
+rendering a control that submits nothing. Never "Connected" — a connection is
+proven by a real message arriving, and the screen has seen none.
+
 **A gateway frame `seq` is allocated ONCE, through
 `GatewayCheckpoints.allocateClientSeq()`.** Never
 `(await checkpoints.load()).lastClientSeq + 1` at a call site: that shape lost
