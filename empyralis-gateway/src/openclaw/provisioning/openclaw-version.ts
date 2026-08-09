@@ -37,6 +37,61 @@ export const OPENCLAW_PINNED_VERSION = "2026.6.10";
 /** What `npm i -g` must install. Exact, never a range. */
 export const OPENCLAW_PINNED_PACKAGE_SPEC = `openclaw@${OPENCLAW_PINNED_VERSION}`;
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * THE TRANSPORT NEEDS ITS OWN NODE, AND THIS IS WHY
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * openclaw@2026.6.10 requires Node >= 22.19. Every Empyralis Agent Computer
+ * installs Node 20 (scripts/install-agent-computer.sh's install_node20), and
+ * the founder's Mac happens to run Node 26 — which is the only reason any of
+ * this ever worked when it was tested by hand.
+ *
+ * Discovered by running the real installer end to end on a real Ubuntu 24.04
+ * box, and it is invisible any other way: `npm install --global` does NOT
+ * enforce `engines` by default, so the install SUCCEEDS, the binary appears on
+ * PATH, and every single invocation then exits with
+ *
+ *     openclaw: Node.js v22.19+ is required (current: v20.20.2).
+ *
+ * A supervised unit pointing at it becomes a five-second restart loop, forever,
+ * on a box that reported a clean install.
+ *
+ * WHY NOT SIMPLY MOVE THE BOX TO NODE 22. Because the gateway ships as a
+ * PREBUILT artifact with its `node_modules` already compiled — bufferutil,
+ * utf-8-validate, sharp. Node 20 -> 22 is an ABI break
+ * (NODE_MODULE_VERSION 115 -> 127), so bumping the box's Node would break
+ * every published gateway artifact on every existing box. The transport gets
+ * its own runtime instead, in its own directory, first on ITS PATH and nobody
+ * else's.
+ *
+ * EXACT, like every other pin here: "whatever Node 22 npm serves today" is the
+ * same silent-drift shape the OpenClaw pin exists to prevent.
+ */
+export const OPENCLAW_NODE_MINIMUM_VERSION = "22.19.0";
+export const OPENCLAW_PINNED_NODE_VERSION = "22.20.0";
+
+/** Parses `v22.20.0` / `22.20.0` into comparable numbers; undefined when the
+ *  output is not a Node version at all (which is what an ENOENT or a wrapper
+ *  script's error text looks like). */
+export function parseNodeVersion(output: string): [number, number, number] | undefined {
+  const match = String(output ?? "").match(/v?(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+/** Whether a Node version satisfies OpenClaw's own documented floor. */
+export function nodeSatisfiesOpenClaw(observed: string | undefined): boolean {
+  const found = parseNodeVersion(observed ?? "");
+  const floor = parseNodeVersion(OPENCLAW_NODE_MINIMUM_VERSION);
+  if (!found || !floor) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (found[index] > floor[index]) return true;
+    if (found[index] < floor[index]) return false;
+  }
+  return true;
+}
+
 /** Pulls the version out of `openclaw --version` output. Their CLI prints a
  *  bare semver-ish line; `openclaw --help`'s banner prints
  *  "OpenClaw 2026.6.10 (aa69b12)". Both shapes are accepted, and anything

@@ -127,6 +127,10 @@ umask 0077
   printf 'HOME=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/home")"
   printf 'NPM_CONFIG_CACHE=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/npm-cache")"
   printf 'PATH=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
+  # The channel transport's own Node, baked by deploy/packer/scripts/
+  # 70-channel-transport.sh. Named, never prepended: the gateway must keep
+  # running on the Node its prebuilt native modules were compiled against.
+  printf 'EMPYRALIS_OPENCLAW_NODE_BIN_DIR=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/openclaw-node/bin")"
   if [[ -n "${existing_gateway_token}" ]]; then
     printf 'EMPYRALIS_GATEWAY_TOKEN=%s\n' "$(shell_quote_env "${existing_gateway_token}")"
   fi
@@ -190,6 +194,7 @@ setup_channel_transport() {
         NPM_CONFIG_PREFIX="${INSTALL_ROOT}/cli" \
         NPM_CONFIG_CACHE="${INSTALL_ROOT}/cli/npm-cache" \
         EMPYRALIS_GATEWAY_STATE_DIR="${STATE_ROOT}/gateway" \
+        EMPYRALIS_OPENCLAW_NODE_BIN_DIR="${INSTALL_ROOT}/openclaw-node/bin" \
         node "${plan_entry}" --ensure-runtime --provision --require-user "${SERVICE_USER}")"; then
     echo "empyralis-configure: could not set up messaging channels; the Agent Computer is unaffected" >&2
     return 1

@@ -60,15 +60,25 @@
 import { execFileWithTimeout } from "../../shell/exec-file-with-timeout";
 import type { OpenClawCli } from "./openclaw-cli";
 import {
+  OPENCLAW_NODE_MINIMUM_VERSION,
   OPENCLAW_PINNED_PACKAGE_SPEC,
   OPENCLAW_PINNED_VERSION,
-  checkOpenClawVersion,
+  nodeSatisfiesOpenClaw,
 } from "./openclaw-version";
+import { checkOpenClawVersion } from "./openclaw-version";
 
-/** `npm i -g openclaw` on a cold cache took ~40s on the boxes this was
- *  measured on; a small droplet on a slow mirror is slower still. Generous,
- *  but bounded — an unbounded install is a wedged boot. */
-const INSTALL_TIMEOUT_MS = 10 * 60_000;
+/**
+ * MEASURED, not guessed. `npm install --global openclaw@2026.6.10` unpacks
+ * >350MB of node_modules — they ship twenty-seven channels — and took over ten
+ * minutes on a 2-vCPU aarch64 Ubuntu 24.04 VM with a warm local network. The
+ * smallest droplet this product offers is `s-1vcpu-1gb` on whatever mirror
+ * DigitalOcean gives it, so ten minutes was a deadline that would have
+ * expired on real customer hardware and left the box channel-less with a
+ * timeout as the only explanation.
+ *
+ * Bounded regardless: an unbounded install is a boot that never finishes.
+ */
+const INSTALL_TIMEOUT_MS = 25 * 60_000;
 
 export type OpenClawRuntimeInstallAction =
   /** Already at the pin. Nothing was executed. */
@@ -83,6 +93,10 @@ export type OpenClawRuntimeInstallAction =
 export type OpenClawRuntimeInstallRefusalCode =
   /** npm itself is missing — this box cannot acquire OpenClaw at all. */
   | "openclaw_runtime_npm_unavailable"
+  /** The Node that would RUN OpenClaw is older than OpenClaw's own floor.
+   *  Refused BEFORE the install, because `npm i -g` does not enforce
+   *  `engines` and would happily leave a binary that exits on every call. */
+  | "openclaw_runtime_node_too_old"
   /** npm ran and failed (network, registry, EACCES on the global prefix). */
   | "openclaw_runtime_install_failed"
   /** npm reported success but the CLI is still absent or off the pin. */
@@ -118,6 +132,11 @@ export interface EnsureOpenClawRuntimeOptions {
   env?: NodeJS.ProcessEnv;
   /** Test seam. Replaces the child_process call entirely. */
   runNpm?: NpmRunner;
+  /** What `node --version` says for the Node that will run BOTH the npm
+   *  install and the supervised OpenClaw process. Injected by the caller,
+   *  which is the party that decides which Node that is (see
+   *  ./openclaw-node-runtime.ts). */
+  nodeVersion?: string;
   record?: (messageType: string, payload: Record<string, unknown>) => Promise<unknown>;
 }
 
@@ -167,6 +186,29 @@ export async function ensureOpenClawRuntimeInstalled(
 
   if (options.install === false) {
     return { ...base, action: "skipped", observedVersion: before.observed };
+  }
+
+  // ── Refuse a Node that cannot run what we are about to install ────────
+  //
+  // BEFORE the install, not after: `npm install --global` does not enforce
+  // `engines`, so installing first would leave 350MB of node_modules and a
+  // binary on PATH that exits with an nvm suggestion on every single call —
+  // and a supervised unit pointing at it is a permanent restart loop that
+  // reports a clean install. Measured on a real Ubuntu 24.04 box; see
+  // OPENCLAW_NODE_MINIMUM_VERSION.
+  if (options.nodeVersion !== undefined && !nodeSatisfiesOpenClaw(options.nodeVersion)) {
+    return {
+      ...base,
+      action: "failed",
+      observedVersion: before.observed,
+      refusal: {
+        code: "openclaw_runtime_node_too_old",
+        detail:
+          `The channel transport needs Node ${OPENCLAW_NODE_MINIMUM_VERSION} or newer and this computer would run it ` +
+          `on ${String(options.nodeVersion).trim() || "an unreadable version"}. Refusing to install it rather than ` +
+          "leave a transport that exits on every call — installing would succeed and then never work.",
+      },
+    };
   }
 
   const env = options.env ?? process.env;

@@ -54,7 +54,14 @@ import {
   buildOpenClawSupervisedEnv,
   resolveExpectedOpenClawSupervisorUnit,
 } from "./openclaw-supervisor-unit";
-import { OPENCLAW_PINNED_PACKAGE_SPEC, OPENCLAW_PINNED_VERSION } from "./openclaw-version";
+import { resolveOpenClawNodeVersion, withOpenClawNodeOnPath } from "./openclaw-node-runtime";
+import {
+  OPENCLAW_NODE_MINIMUM_VERSION,
+  OPENCLAW_PINNED_NODE_VERSION,
+  OPENCLAW_PINNED_PACKAGE_SPEC,
+  OPENCLAW_PINNED_VERSION,
+  nodeSatisfiesOpenClaw,
+} from "./openclaw-version";
 
 export interface OpenClawInstallPlan {
   profile: string;
@@ -70,6 +77,20 @@ export interface OpenClawInstallPlan {
    *  where the gateway installs its own LaunchAgent perfectly well without
    *  root, so the installer has nothing to do. */
   unit: { mode: string; name: string; path: string; contents: string } | null;
+  /**
+   * The Node the transport needs, and the Node it would actually get.
+   *
+   * The installer reads this BEFORE asking for anything else: openclaw
+   * requires Node >= 22.19, every Agent Computer box has Node 20, and
+   * `npm i -g` does not enforce `engines` — so without this the install
+   * succeeds and the binary exits on every call.
+   */
+  nodeRuntime: {
+    minimumVersion: string;
+    pinnedVersion: string;
+    observedVersion?: string;
+    satisfied: boolean;
+  };
   runtimeInstall?: OpenClawRuntimeInstallOutcome;
   /** Present when --provision ran. Same shape the cloud sees. */
   provision?: { mode: string; status: string; refusal: unknown; lockdownViolations: unknown };
@@ -156,21 +177,31 @@ export async function buildOpenClawInstallPlan(
         envGatewayToken: config.openclawGatewayToken,
       });
 
+  const transportEnv = withOpenClawNodeOnPath(env);
+  const observedNodeVersion = await resolveOpenClawNodeVersion(env);
+  const nodeRuntime = {
+    minimumVersion: OPENCLAW_NODE_MINIMUM_VERSION,
+    pinnedVersion: OPENCLAW_PINNED_NODE_VERSION,
+    observedVersion: observedNodeVersion,
+    satisfied: nodeSatisfiesOpenClaw(observedNodeVersion),
+  };
+
   let runtimeInstall: OpenClawRuntimeInstallOutcome | undefined;
   if (options.ensureRuntime) {
     runtimeInstall = await ensureOpenClawRuntimeInstalled({
-      cli: new OpenClawCli({ profile, binaryPath: config.openclawBinaryPath, env }),
-      env,
+      cli: new OpenClawCli({ profile, binaryPath: config.openclawBinaryPath, env: transportEnv }),
+      env: transportEnv,
+      nodeVersion: observedNodeVersion,
     });
   }
 
-  const binaryPath = await resolveOpenClawBinaryPath(config.openclawBinaryPath, env);
+  const binaryPath = await resolveOpenClawBinaryPath(config.openclawBinaryPath, transportEnv);
 
   // Provision BEFORE the unit is written, through the same builder and the
   // same ensureProvisionedAtBoot() the gateway runs — never a second idea of
   // what provisioning means.
   let provision: OpenClawInstallPlan["provision"];
-  if (options.provision && !options.runtimeOnly && binaryPath) {
+  if (options.provision && !options.runtimeOnly && nodeRuntime.satisfied && binaryPath) {
     const runtime = buildOpenClawProvisioningRuntime({
       config,
       secrets,
@@ -178,7 +209,7 @@ export async function buildOpenClawInstallPlan(
       // defaultBridgePluginPath resolves the package root exactly as it does
       // for the gateway process itself.
       entryPath: path.resolve(__dirname, "..", "..", "index.js"),
-      env,
+      env: transportEnv,
     });
     const outcome = await runtime.ensureProvisionedAtBoot();
     provision = {
@@ -193,8 +224,11 @@ export async function buildOpenClawInstallPlan(
   // privilege, so the gateway's own provisioning run installs and registers
   // the LaunchAgent itself. Handing the installer a plist to write would be a
   // second writer for a file with one owner.
+  // No unit for a transport that cannot run: a unit whose ExecStart exits on
+  // every call is a five-second restart loop, forever, on a box that reported
+  // a clean install.
   const unit =
-    !options.runtimeOnly && platform === "linux" && binaryPath
+    !options.runtimeOnly && nodeRuntime.satisfied && platform === "linux" && binaryPath
       ? resolveExpectedOpenClawSupervisorUnit({
           profile,
           binaryPath,
@@ -202,7 +236,7 @@ export async function buildOpenClawInstallPlan(
           environment: buildOpenClawSupervisedEnv({
             profile,
             homeDir,
-            pathEnv: String(env.PATH || "/usr/local/bin:/usr/bin:/bin"),
+            pathEnv: String(transportEnv.PATH || "/usr/local/bin:/usr/bin:/bin"),
             bridgeToken: secrets.bridgeToken,
             bridgeEndpointUrl: `http://127.0.0.1:${config.openclawBridgePort}${OPENCLAW_INBOUND_PATH}`,
           }),
@@ -218,6 +252,7 @@ export async function buildOpenClawInstallPlan(
     packageSpec: OPENCLAW_PINNED_PACKAGE_SPEC,
     binaryPath,
     gatewayPort,
+    nodeRuntime,
     profileStateDir: openClawProfileStateDir(profile, homeDir),
     unit: unit ? { mode: unit.mode, name: unit.name, path: unit.unitPath, contents: unit.contents } : null,
     runtimeInstall,

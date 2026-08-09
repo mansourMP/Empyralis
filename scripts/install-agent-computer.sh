@@ -325,6 +325,70 @@ install_docker() {
   return 1
 }
 
+openclaw_node_dir() {
+  printf '%s' "${INSTALL_ROOT}/openclaw-node"
+}
+
+install_openclaw_node() {
+  # The version is asked of the gateway artifact (openclaw-version.ts), never
+  # typed here — same rule as the OpenClaw pin itself. A version literal in a
+  # script that boxes fetch once and never fetch again is a copy that drifts
+  # silently.
+  local node_dir bin_dir want have arch tarball url tmp
+  node_dir="$(openclaw_node_dir)"
+  bin_dir="${node_dir}/bin"
+
+  want="$(sudo -u "${SERVICE_USER}" env -i \
+      PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      node -e 'process.stdout.write(require(process.argv[1]).OPENCLAW_PINNED_NODE_VERSION)' \
+      "${CURRENT_DIR}/gateway/dist/openclaw/provisioning/openclaw-version.js" 2>/dev/null)" || want=""
+  if [[ -z "${want}" ]]; then
+    log "WARNING: could not read the channel transport's Node version from the gateway build"
+    return 1
+  fi
+
+  if [[ -x "${bin_dir}/node" ]]; then
+    have="$("${bin_dir}/node" --version 2>/dev/null | tr -d 'v')"
+    if [[ "${have}" == "${want}" ]]; then
+      log "channel transport Node ${want} already installed"
+      return 0
+    fi
+  fi
+
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *)
+      log "WARNING: no channel transport Node build for $(uname -m)"
+      return 1
+      ;;
+  esac
+
+  tarball="node-v${want}-linux-${arch}.tar.xz"
+  url="${EMPYRALIS_NODE_DIST_BASE_URL:-https://nodejs.org/dist}/v${want}/${tarball}"
+  tmp="$(mktemp -d)"
+  log "installing Node ${want} for the channel transport"
+  if ! curl -fsSL -m 300 -o "${tmp}/${tarball}" "${url}"; then
+    rm -rf "${tmp}"
+    log "WARNING: could not download ${url}"
+    return 1
+  fi
+  rm -rf "${node_dir}"
+  mkdir -p "${node_dir}"
+  if ! tar -xJf "${tmp}/${tarball}" -C "${node_dir}" --strip-components=1; then
+    rm -rf "${tmp}" "${node_dir}"
+    log "WARNING: could not extract ${tarball}"
+    return 1
+  fi
+  rm -rf "${tmp}"
+  chown -R root:root "${node_dir}"
+  if [[ ! -x "${bin_dir}/node" ]]; then
+    log "WARNING: the extracted Node has no bin/node"
+    return 1
+  fi
+  return 0
+}
+
 install_channel_transport() {
   # Channels. The customer never sees this step, never types a command, and
   # never learns the name of the software it installs — they press one button,
@@ -365,6 +429,24 @@ install_channel_transport() {
     return 1
   fi
 
+  # ── The transport's own Node ──────────────────────────────────────────────
+  #
+  # It needs a NEWER Node than the gateway, and the gateway cannot simply move
+  # to it: the gateway ships prebuilt, with native modules compiled against
+  # Node 20's ABI, so bumping install_node20() would break every published
+  # artifact on every existing box. Two runtimes, side by side, and only the
+  # transport's unit ever sees the new one on its PATH.
+  #
+  # Found by running this installer end to end on a real box: `npm install
+  # --global` does NOT enforce `engines`, so installing the transport under
+  # Node 20 SUCCEEDS, puts a binary on PATH, and then exits on every single
+  # call with a suggestion to use nvm — and the supervised unit becomes a
+  # five-second restart loop on a box that reported a clean install.
+  if ! install_openclaw_node; then
+    report_beacon 0 "could not set up messaging channels on this server; everything else is installed and working, and channels can be set up later"
+    return 1
+  fi
+
   # As ${SERVICE_USER}, never as root: this mints the gateway's own loopback
   # secrets into its state directory, and a root-owned copy there is a file
   # the gateway then cannot read — a transport that is dead in a way that
@@ -377,6 +459,7 @@ install_channel_transport() {
         NPM_CONFIG_PREFIX="${INSTALL_ROOT}/cli" \
         NPM_CONFIG_CACHE="${INSTALL_ROOT}/cli/npm-cache" \
         EMPYRALIS_GATEWAY_STATE_DIR="${STATE_ROOT}/gateway" \
+        EMPYRALIS_OPENCLAW_NODE_BIN_DIR="$(openclaw_node_dir)/bin" \
         node "${plan_entry}" --ensure-runtime --provision --require-user "${SERVICE_USER}" 2>/tmp/empyralis-channel-transport.err)"; then
     local err
     err="$(tail -c 400 /tmp/empyralis-channel-transport.err 2>/dev/null | tr '\n' ' ')"
@@ -387,6 +470,29 @@ install_channel_transport() {
     # out — the same posture platform_event.CHANNEL_OWNER_SAFE_CODES takes for
     # channel replies.
     log "WARNING: channel transport install failed: ${err}"
+    report_beacon 0 "could not set up messaging channels on this server; everything else is installed and working, and channels can be set up later"
+    return 1
+  fi
+
+  # ── Believe the PLAN'S VERDICT, not the exit code ────────────────────────
+  #
+  # The plan CLI exits 0 whenever it ran; whether the transport is USABLE is a
+  # separate fact it reports. Writing and starting a unit on the strength of
+  # "the command worked" is how the first live run of this code ended up with
+  # a five-second restart loop and a console line that said "installed and
+  # running". An empty string is not a decision, and neither is exit 0.
+  local runtime_action provision_status
+  runtime_action="$(printf '%s' "${plan}" | python3 -c 'import json,sys; p=json.load(sys.stdin).get("runtimeInstall") or {}; print(p.get("action",""))')"
+  provision_status="$(printf '%s' "${plan}" | python3 -c 'import json,sys; p=json.load(sys.stdin).get("provision") or {}; print(p.get("status",""))')"
+  if [[ "${runtime_action}" != "installed" && "${runtime_action}" != "already_installed" ]]; then
+    log "WARNING: the channel transport was not installed (${runtime_action:-unknown})"
+    log "         $(printf '%s' "${plan}" | python3 -c 'import json,sys; p=(json.load(sys.stdin).get("runtimeInstall") or {}).get("refusal") or {}; print(p.get("detail",""))')"
+    report_beacon 0 "could not set up messaging channels on this server; everything else is installed and working, and channels can be set up later"
+    return 1
+  fi
+  if [[ "${provision_status}" != "provisioned" ]]; then
+    log "WARNING: the channel transport was installed but not configured (${provision_status:-unknown})"
+    log "         $(printf '%s' "${plan}" | python3 -c 'import json,sys; p=(json.load(sys.stdin).get("provision") or {}).get("refusal") or {}; print(p.get("detail",""))')"
     report_beacon 0 "could not set up messaging channels on this server; everything else is installed and working, and channels can be set up later"
     return 1
   fi
@@ -514,6 +620,13 @@ write_env_file() {
     printf 'HOME=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/home")"
     printf 'NPM_CONFIG_CACHE=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/npm-cache")"
     printf 'PATH=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
+    # The channel transport's own Node — NOT on the gateway's PATH above, and
+    # deliberately so. The gateway ships prebuilt with native modules compiled
+    # against Node 20's ABI; the transport needs Node 22+. Naming the directory
+    # here (rather than prepending it) lets the gateway's own provisioning pass
+    # put it first on the CHILD's PATH only. See empyralis-gateway/src/openclaw/
+    # provisioning/openclaw-node-runtime.ts.
+    printf 'EMPYRALIS_OPENCLAW_NODE_BIN_DIR=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/openclaw-node/bin")"
     if [[ -n "${existing_gateway_token}" ]]; then
       printf 'EMPYRALIS_GATEWAY_TOKEN=%s\n' "$(shell_quote_env "${existing_gateway_token}")"
     fi

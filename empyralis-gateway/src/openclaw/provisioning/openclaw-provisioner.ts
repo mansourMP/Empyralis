@@ -126,6 +126,7 @@ import {
   type OpenClawChannelPluginState,
   type OpenClawPluginRefusalCode,
 } from "./openclaw-plugin-install";
+import { resolveOpenClawNodeVersion, withOpenClawNodeOnPath } from "./openclaw-node-runtime";
 import {
   ensureOpenClawRuntimeInstalled,
   type NpmRunner,
@@ -563,12 +564,18 @@ export class OpenClawProvisioner {
     // On a correct box `ensureOpenClawRuntimeInstalled` executes nothing at
     // all (it is gated on the same `--version` read), so a boot-time
     // reconcile on a box with no network is unaffected.
+    // The transport's OWN Node, first on the child's PATH — never this
+    // process's (./openclaw-node-runtime.ts explains why they must differ).
+    // A test that injects `runNpm` never reaches a real `node`, so the
+    // version probe is skipped for it rather than shelling out.
+    const transportEnv = withOpenClawNodeOnPath(this.env);
     const runtimeInstall = await ensureOpenClawRuntimeInstalled({
       cli: this.options.cli,
       install: this.options.installRuntime !== false,
-      env: this.env,
+      env: transportEnv,
       npmPath: this.options.npmPath,
       runNpm: this.options.runNpm,
+      nodeVersion: this.options.runNpm ? undefined : await resolveOpenClawNodeVersion(this.env),
       record: this.options.record,
     });
     const version = checkOpenClawVersion(await this.options.cli.version());
@@ -813,7 +820,11 @@ export class OpenClawProvisioner {
     return buildOpenClawSupervisedEnv({
       profile: this.options.cli.profile,
       homeDir: this.homeDir,
-      pathEnv: String(this.env.PATH || "/usr/local/bin:/usr/bin:/bin"),
+      // The SAME PATH the install ran under. The installed `openclaw` bin is
+      // `#!/usr/bin/env node`, so the runtime that executes it is decided
+      // here, at run time — installing under one Node and supervising under
+      // another is a transport that installs cleanly and exits on every call.
+      pathEnv: String(withOpenClawNodeOnPath(this.env).PATH || "/usr/local/bin:/usr/bin:/bin"),
       bridgeToken: this.options.bridgeToken,
       bridgeEndpointUrl: this.options.bridgeEndpointUrl,
     });

@@ -25,7 +25,17 @@ import {
   resolveExpectedOpenClawSupervisorUnit,
 } from "../openclaw/provisioning/openclaw-supervisor-unit";
 import { renderSystemdUnit } from "../update/gateway-supervisor-install";
-import { OPENCLAW_PINNED_VERSION } from "../openclaw/provisioning/openclaw-version";
+import {
+  OPENCLAW_NODE_BIN_DIR_ENV,
+  withOpenClawNodeOnPath,
+} from "../openclaw/provisioning/openclaw-node-runtime";
+import { ensureOpenClawRuntimeInstalled } from "../openclaw/provisioning/openclaw-runtime-install";
+import { OpenClawCli } from "../openclaw/provisioning/openclaw-cli";
+import {
+  OPENCLAW_NODE_MINIMUM_VERSION,
+  OPENCLAW_PINNED_VERSION,
+  nodeSatisfiesOpenClaw,
+} from "../openclaw/provisioning/openclaw-version";
 
 /** In-memory fs, so no test writes a developer's real state directory. */
 function memoryFs() {
@@ -167,7 +177,10 @@ test("omitting `user` renders the gateway's own unit byte-identically", async ()
 // ── the plan handed to the root installer ─────────────────────────────────
 
 const PLAN_ENV = {
-  PATH: "/usr/bin:/bin",
+  // The directory of the Node running this test, so `node --version` resolves
+  // — the plan asks the box which Node the transport would get, and a PATH
+  // with no node at all is (correctly) "unusable".
+  PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
   EMPYRALIS_GATEWAY_STATE_DIR: path.join(os.tmpdir(), `openclaw-plan-test-${process.pid}`),
   EMPYRALIS_BRIDGE_TOKEN: "bridge-token-for-the-plan-test",
   EMPYRALIS_OPENCLAW_GATEWAY_TOKEN: "gateway-token-for-the-plan-test",
@@ -212,6 +225,22 @@ test("the Linux plan carries a complete, startable unit", async () => {
   assert.match(plan.unit!.contents, /^Restart=always$/m);
 });
 
+test("a box whose Node is too old gets NO unit and NO provision", async () => {
+  // The failure this prevents, measured on a real Ubuntu 24.04 box: the
+  // install succeeds under Node 20, the binary lands on PATH, and the unit
+  // becomes a five-second restart loop while the installer logs success.
+  // No usable Node -> no unit -> the installer has nothing to start.
+  const plan = await buildOpenClawInstallPlan({
+    env: { ...PLAN_ENV, PATH: "/nonexistent-bin" },
+    platform: "linux",
+    homeDir: "/home/empyralis",
+  });
+  assert.equal(plan.nodeRuntime.satisfied, false);
+  assert.equal(plan.unit, null, "never hand the installer a unit that cannot start");
+  assert.equal(plan.provision, undefined, "and never claim the transport was configured");
+  assert.equal(plan.nodeRuntime.minimumVersion, OPENCLAW_NODE_MINIMUM_VERSION);
+});
+
 test("the macOS plan carries no unit, because the gateway installs its own", async () => {
   // `~/Library/LaunchAgents` needs no privilege, so the gateway's own
   // provisioning run installs and registers the LaunchAgent. Handing an
@@ -224,4 +253,65 @@ test("the macOS plan carries no unit, because the gateway installs its own", asy
   });
   assert.equal(plan.unit, null);
   assert.equal(plan.profileStateDir, "/Users/someone/.openclaw-acme");
+});
+
+// ── the Node the transport runs on ────────────────────────────────────────
+//
+// Found by running the real installer end to end on Ubuntu 24.04: openclaw
+// requires Node >= 22.19, every Agent Computer installs Node 20, and
+// `npm install --global` does NOT enforce `engines`. So the install succeeds,
+// the binary lands on PATH, and every invocation exits with an nvm suggestion
+// — a supervised unit pointing at it is a five-second restart loop on a box
+// that reported a clean install. None of that is visible from a code reading.
+
+test("Node 20 does not satisfy the transport, Node 22.19+ does", async () => {
+  assert.equal(nodeSatisfiesOpenClaw("v20.20.2"), false);
+  assert.equal(nodeSatisfiesOpenClaw("v22.18.0"), false, "the floor is 22.19, not 22");
+  assert.equal(nodeSatisfiesOpenClaw(`v${OPENCLAW_NODE_MINIMUM_VERSION}`), true);
+  assert.equal(nodeSatisfiesOpenClaw("v22.20.0"), true);
+  assert.equal(nodeSatisfiesOpenClaw("v26.4.0"), true, "the founder's Mac, which is why this was never seen");
+  // An unreadable answer is NOT treated as fine. `openclaw --version` on an
+  // old Node prints its own error text, and a permissive parse there would
+  // read that error as a pass.
+  assert.equal(nodeSatisfiesOpenClaw(undefined), false);
+  assert.equal(nodeSatisfiesOpenClaw("openclaw: Node.js v22.19+ is required"), false);
+});
+
+test("an install onto too-old Node is REFUSED, before npm runs", async () => {
+  // Before, not after: a 350MB install that leaves a binary which cannot run
+  // is strictly worse than no install, because the box then looks equipped.
+  const npmCalls: string[][] = [];
+  const outcome = await ensureOpenClawRuntimeInstalled({
+    cli: new OpenClawCli({
+      profile: "acme",
+      env: { PATH: "/usr/bin" },
+      exec: async () => ({ code: 127, stdout: "", stderr: "not found" }),
+    }),
+    nodeVersion: "v20.20.2",
+    runNpm: async (args) => {
+      npmCalls.push(args);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  assert.equal(outcome.action, "failed");
+  assert.equal(outcome.refusal?.code, "openclaw_runtime_node_too_old");
+  assert.equal(npmCalls.length, 0, "nothing may be downloaded onto a Node that cannot run it");
+});
+
+test("the transport Node goes FIRST on the child PATH, and only the child's", async () => {
+  // The installed `openclaw` bin is `#!/usr/bin/env node`, so the runtime that
+  // executes it is whatever PATH resolves at RUN time — not the one that
+  // installed it. Install under one Node and supervise under another and the
+  // transport installs cleanly, then exits on every call.
+  const env = { PATH: "/usr/bin:/bin", [OPENCLAW_NODE_BIN_DIR_ENV]: "/opt/empyralis/openclaw-node/bin" };
+  const child = withOpenClawNodeOnPath(env);
+  assert.equal(child.PATH, "/opt/empyralis/openclaw-node/bin:/usr/bin:/bin");
+  assert.equal(env.PATH, "/usr/bin:/bin", "the caller's own PATH is never mutated");
+
+  // Idempotent — a reconcile must not grow the PATH on every boot.
+  assert.equal(withOpenClawNodeOnPath(child).PATH, child.PATH);
+
+  // Unconfigured leaves PATH alone rather than prepending an empty entry,
+  // which most resolvers read as "the current directory".
+  assert.equal(withOpenClawNodeOnPath({ PATH: "/usr/bin" }).PATH, "/usr/bin");
 });
