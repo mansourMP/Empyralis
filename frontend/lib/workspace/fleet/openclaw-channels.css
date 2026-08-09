@@ -5,6 +5,21 @@
  * is hard-coded, and there is no `@media (prefers-color-scheme)` — the app
  * stamps `data-theme` on <html> and the tokens flip underneath.
  *
+ * SAME SYSTEM AS THE CARDS ABOVE IT, NOT A BOLTED-ON SECTION
+ * ------------------------------------------------------------------------
+ * This used to be its own bordered card list (`.openclaw-channel-list`, a
+ * card-within-a-card floating inside the section) and its own dialog chrome,
+ * both different in shape, weight and texture from the rest of Settings.
+ * Fixed 2026-08-09: the list now IS `.fleet-list`/`.fleet-list-row` (the
+ * exact flat-hairline-row primitive Members, Hardware and Connections already
+ * use — see OpenClawChannelsPanel.tsx), the status chips ARE `.fleet-badge`,
+ * and the credential dialog IS `.fleet-channel-banner` (the same
+ * header+icon+title+close, scrolling-body shape the Telegram/WhatsApp/
+ * Discord/Signal/iMessage/Slack/WeChat cards already open into). What
+ * remains here is only what genuinely has no equivalent yet: the row's
+ * secondary caption/detail lines, the chip TONE colours, and the generated
+ * credential form — never a parallel card/list/dialog shell.
+ *
  * ACCENT DISCIPLINE: not one rule in this file paints `--accent`. The single
  * accent-filled control on the screen is `.fleet-btn--accent-fill`, applied to
  * exactly one button per view (the toolbar's primary action in the list, the
@@ -40,46 +55,23 @@
   color: var(--warning-text);
 }
 
-/* Dense inside the group, airy between groups: rows share a hairline and sit
-   tight; the list itself is separated from what surrounds it. */
-.openclaw-channel-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  overflow: hidden;
-  background: var(--bg-card);
+/* The "these channels are covered above" note — same subtitle typography as
+   the section's own description, just muted a shade further since it is
+   context, not the primary description of what this panel does. */
+.openclaw-elsewhere-note {
+  color: var(--text-muted);
 }
 
+/* .openclaw-channel-list/.openclaw-channel-row are applied ALONGSIDE
+   .fleet-list/.fleet-list-row (see OpenClawChannelsPanel.tsx) — they carry no
+   shape, border, background or padding of their own any more; that all comes
+   from the shared primitive now. What's left here is layout that is genuinely
+   specific to this row's content (wrapping many chips + an action cluster on
+   narrow viewports). */
 .openclaw-channel-row {
-  display: flex;
-  gap: var(--space-4);
-  align-items: flex-start;
   justify-content: space-between;
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border);
 }
 
-.openclaw-channel-row:last-child {
-  border-bottom: none;
-}
-
-.openclaw-channel-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.openclaw-channel-title {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  color: var(--text-primary);
-}
-
-/* OpenClaw's own selection label — "Telegram (Bot API)", "WhatsApp (QR link)".
-   Their words, not ours, so it cannot drift from their product. */
 .openclaw-channel-selection {
   font-size: var(--text-xs);
   color: var(--text-muted);
@@ -92,25 +84,12 @@
   margin-top: var(--space-1);
 }
 
-/* One chip per independent fact. They are deliberately the same size and
-   weight: none of the three is more important than the others, and rendering
-   one as a "status" and the rest as detail is the collapse this screen
-   exists to avoid. */
-.openclaw-chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 var(--space-2);
-  height: 18px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border);
-  background: var(--bg-inset);
-  color: var(--text-muted);
-  font-size: var(--text-2xs);
-  font-weight: var(--weight-medium);
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-}
-
+/* Chip TONE only. Shape, size, border and padding all come from the shared
+   .fleet-badge base class every chip here also carries — this file no longer
+   defines a parallel pill primitive. One chip per independent fact: none of
+   the three states (installed / configured / on) outranks the others, so
+   they stay the same size and weight rather than one reading as "the"
+   status and the rest as detail. */
 .openclaw-chip--ok {
   color: var(--online-text);
   border-color: var(--border-strong);
@@ -121,7 +100,6 @@
 }
 
 .openclaw-chip--secret {
-  margin-left: var(--space-2);
   color: var(--text-secondary);
 }
 
@@ -154,33 +132,13 @@
   color: var(--text-muted);
 }
 
-.openclaw-docs {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  text-decoration: none;
-  white-space: nowrap;
-}
-
-.openclaw-docs:hover {
-  color: var(--text-secondary);
-  text-decoration: underline;
-}
-
 /* ── The generated credential form ───────────────────────────────────── */
-
-.openclaw-dialog {
-  width: min(520px, calc(100vw - var(--space-8)));
-  max-height: calc(100vh - var(--space-8));
-  overflow-y: auto;
-  padding: var(--space-5);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-panel);
-  box-shadow: var(--panel-shadow);
-}
+/* The dialog SHELL (backdrop blur, sizing, background, radius, shadow,
+   header/close, scrolling body) is .fleet-detail-backdrop + the shared
+   .fleet-channel-banner/-header/-icon/-title/-body classes — the identical
+   primitives the first-party channel cards above already open into. Only the
+   form INSIDE the body is specific to this screen, because it is generated
+   from field data rather than hand-written per channel. */
 
 .openclaw-form {
   display: flex;
@@ -203,9 +161,10 @@
   color: var(--text-secondary);
 }
 
-/* The field name is OpenClaw's config key, verbatim. Monospaced because it is
-   an identifier the owner will also see in their platform's own docs — a
-   prettified "App Secret" would be a translation we would then have to keep. */
+/* The field name is this channel's own config key, verbatim. Monospaced
+   because it is an identifier the owner will also see in their platform's
+   own docs — a prettified "App Secret" would be a translation we would then
+   have to keep in sync. */
 .openclaw-form-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--text-xs);
@@ -247,6 +206,7 @@
 @media (max-width: 720px) {
   .openclaw-channel-row {
     flex-direction: column;
+    align-items: flex-start;
     gap: var(--space-2);
   }
 

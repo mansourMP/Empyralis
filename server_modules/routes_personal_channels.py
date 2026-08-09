@@ -1109,7 +1109,7 @@ async def provision_openclaw_transport(
     if not normalized_agent_id:
         raise HTTPException(
             status_code=400,
-            detail="agent_id is required: OpenClaw's channel policy is generated from a specific agent's settings.",
+            detail="agent_id is required: the channel policy is generated from a specific agent's settings.",
         )
     try:
         result = await openclaw_provisioning_service.provision_openclaw_gateway(
@@ -1218,12 +1218,24 @@ async def get_openclaw_channel_setup(
         # "the channel is not connected" is exactly the state confusion this
         # screen exists to remove.
         observed_error = str(exc)
+    # The channels a first-party Empyralis runtime already carries (Telegram,
+    # WhatsApp, Discord, Signal, iMessage, Slack, WeChat, SMS as of writing) —
+    # why they are absent from `catalog` above. COMPUTED from the same
+    # overlap logic that decides `catalog` itself
+    # (channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS), never a
+    # second hand-typed list beside it, so it cannot drift from what the
+    # catalog actually excludes.
+    already_available_channels = sorted(
+        (channel.label for channel in channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS),
+        key=str.lower,
+    )
     return {
         "gateway_id": gateway_id,
         "openclaw_version": openclaw_channel_registry.OPENCLAW_VERSION,
         "channels": catalog,
         "observed": observed,
         "observed_error": observed_error,
+        "already_available_channels": already_available_channels,
     }
 
 
@@ -1264,7 +1276,7 @@ async def put_openclaw_channel_credential(
     if not openclaw_channel_registry.is_openclaw_channel_key(normalized_key):
         raise HTTPException(
             status_code=404,
-            detail=f"{channel_key!r} is not an OpenClaw-transported channel.",
+            detail=f"{channel_key!r} is not a channel this transport carries.",
         )
     try:
         result = await openclaw_channel_setup_service.write_channel_credential(

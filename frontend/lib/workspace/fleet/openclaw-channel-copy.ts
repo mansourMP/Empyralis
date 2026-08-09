@@ -1,0 +1,116 @@
+/**
+ * Pure copy-producing logic for OpenClawChannelsPanel.tsx, split out into its
+ * own module (no React, no CSS import, no "use client") for the same reason
+ * fleet-data.ts exists: openclaw-channel-copy.test.ts runs under plain
+ * `npx tsx`, outside Next.js/webpack, and a module that imports a stylesheet
+ * cannot be loaded that way. OpenClawChannelsPanel.tsx imports everything in
+ * this file rather than redefining it.
+ */
+
+export type OpenClawCredentialField = {
+  name: string;
+  secret: boolean;
+  type: string;
+  file_alternative?: string | null;
+};
+
+export type OpenClawChannelCatalogEntry = {
+  channel_key: string;
+  channel_id: string;
+  label: string;
+  connect_method: "credential" | "pairing" | "plugin_absent";
+  selection_label: string;
+  docs_path: string | null;
+  fields: OpenClawCredentialField[];
+  requires_plugin: boolean;
+  plugin_id: string | null;
+};
+
+export type OpenClawObservedField = { name: string; secret: boolean; type: string; set: boolean };
+
+export type OpenClawObservedChannel = {
+  channel_id: string;
+  channel_key: string;
+  installed: boolean;
+  requires_plugin: boolean;
+  enabled: boolean;
+  configured: boolean;
+  fields: OpenClawObservedField[];
+  accounts: string[];
+};
+
+/** "A, B, and C" — the one place this pairing joins a channel-label list, so
+ *  the wording stays in sync no matter how many labels the backend sends. */
+export function formatChannelList(labels: string[]): string {
+  if (labels.length === 0) return "";
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return `${labels[0]} and ${labels[1]}`;
+  return `${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}`;
+}
+
+/** The one thing this row needs the reader to do next, and why.
+ *  Exactly one per row — a row with two calls to action has no call to action. */
+export type Remediation =
+  | { kind: "install"; label: string; detail: string }
+  | { kind: "credential"; label: string; detail: string }
+  | { kind: "enable"; label: string; detail: string }
+  | { kind: "elsewhere"; detail: string }
+  | { kind: "unknown"; detail: string }
+  | { kind: "ready"; detail: string };
+
+export function remediationFor(
+  entry: OpenClawChannelCatalogEntry,
+  observed: OpenClawObservedChannel | undefined,
+  reachable: boolean,
+): Remediation {
+  if (!reachable || !observed) {
+    return {
+      kind: "unknown",
+      detail: "This computer could not be reached, so its channel state is unknown.",
+    };
+  }
+  if (entry.requires_plugin && !observed.installed) {
+    return {
+      kind: "install",
+      // Deliberately not "not connected": the plugin is the thing that is
+      // missing, and installing it is a button, not a support ticket.
+      label: "Install plugin",
+      detail: "The channel's plugin is not on this computer yet.",
+    };
+  }
+  if (entry.connect_method === "plugin_absent") {
+    return {
+      kind: "unknown",
+      detail: "This channel's connection fields aren't known until its plugin is installed on this computer.",
+    };
+  }
+  if (entry.connect_method === "pairing") {
+    return {
+      kind: "elsewhere",
+      // The honest version of a dead control. Their own selection label says
+      // how it links; we do not invent a form that would submit nothing.
+      detail: `${entry.selection_label} — there is no token to paste. Link it directly from this computer.`,
+    };
+  }
+  const missing = observed.fields.filter((field) => !field.set);
+  if (missing.length > 0) {
+    return {
+      kind: "credential",
+      label: observed.fields.some((field) => field.set) ? "Finish credential" : "Add credential",
+      detail: `Waiting on ${missing.map((field) => field.name).join(", ")}.`,
+    };
+  }
+  if (!observed.enabled) {
+    return {
+      kind: "enable",
+      label: "Turn on",
+      detail: "Credential is in place, but the channel is switched off on this computer.",
+    };
+  }
+  return {
+    kind: "ready",
+    // "Ready", never "Connected". A connection is proven by a real message
+    // arriving, and nothing on this screen has seen one.
+    detail: "Plugin installed, credential in place, channel on.",
+  };
+}
