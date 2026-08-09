@@ -873,3 +873,66 @@ def is_channel_suppressed_text(text: str) -> bool:
     """True if *text* is a hardcoded platform status/error string that must
     never reach a channel send — see the module docstring above."""
     return str(text or "").strip() in CHANNEL_SUPPRESSED_TEXTS
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Audience — the OWNER's own channel is not a stranger's channel
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# CHANNEL_SAFE_CODES above is AUDIENCE-BLIND: one flat allowlist applied
+# identically to a stranger messaging a business agent and to the owner
+# texting their own agent from their own phone. That blindness is why an
+# owner whose credits ran out, whose provider was unreachable, or whose turn
+# crashed got EXACTLY the same thing a stranger got — nothing — which is
+# indistinguishable from "my agent is ignoring me". Silence is right for the
+# stranger (platform error prose in a customer's chat reads as broken) and
+# wrong for the owner (they are the only person who can fix it).
+#
+# This is a SECOND allowlist, not a widening of the first. Three properties
+# make it narrow, and each is asserted in test_channel_silence_on_error.py:
+#
+#   1. CHANNEL_SUPPRESSED_TEXTS is UNCHANGED — every code below is STILL in
+#      it, so filter_channel_outbound_reply() keeps suppressing this text on
+#      the default (stranger) path, byte for byte.
+#   2. owner_channel_text_for_code() takes a CODE, never text. There is no
+#      string parameter, so no exception message, model output, provider
+#      response, classified error prose, ErrorNotification.raw_detail, or
+#      secret can be routed through it — only a frozen module-level literal
+#      selected by an exact code match. An unknown code returns None.
+#   3. The set is enumerated by hand, holds only codes an owner can ACT on,
+#      and holds only codes that are actually produced today. It is not
+#      derived from severity, from a category, or from anything that grows
+#      on its own when a new PlatformEvent is added.
+#
+# Today exactly one code is produced on this path: channel_execution_failed,
+# emitted by personal_channel_sage_bridge_service._build_error_reply_dict
+# when a personal-channel turn raises. Adding a second is a one-line change
+# HERE plus a producer that carries the code — deliberately not a keyword
+# match on the exception's prose, which is the stale-string-matching failure
+# mode this codebase has already been bitten by.
+CHANNEL_OWNER_SAFE_CODES: frozenset[str] = frozenset({
+    CHANNEL_EXECUTION_FAILED.code,
+})
+
+
+_OWNER_SAFE_CHANNEL_TEXT_BY_CODE: dict[str, str] = {
+    event.code: event.channel_text.strip()
+    for event in _all_platform_events()
+    if event.code in CHANNEL_OWNER_SAFE_CODES and event.channel_text.strip()
+}
+
+
+def owner_channel_text_for_code(code: str) -> Optional[str]:
+    """Frozen channel text for *code*, but ONLY for the workspace OWNER.
+
+    Returns the PlatformEvent's own ``channel_text`` when *code* is in
+    CHANNEL_OWNER_SAFE_CODES, else None. Callers must have ROBUSTLY
+    established ownership first (personal_channels_service._is_owner_message
+    — self-chat or a sender matching the channel's linked owner id; never a
+    claimed name and never message text).
+
+    Deliberately code-in / literal-out: this function cannot be handed text
+    to pass through, so it can never become a route for an error string, a
+    provider response, or a secret. See the block comment above.
+    """
+    return _OWNER_SAFE_CHANNEL_TEXT_BY_CODE.get(str(code or "").strip()) or None

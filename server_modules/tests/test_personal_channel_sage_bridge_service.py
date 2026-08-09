@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
 from server_modules import personal_channel_sage_bridge_service
-from server_modules import personal_channels_service, personal_channels_repository
+from server_modules import personal_channels_service, personal_channels_repository, platform_event
 from server_modules.inbound_envelope import SurfaceKind
 from server_modules.sage_agent_runtime_contract import SageTurnResult
 
@@ -1015,15 +1015,40 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def _assert_never_reaches_the_channel(
-        self, *, channel_key: str, provider: str, label: str, external_message_id: str, exc: Exception,
+        self,
+        *,
+        channel_key: str,
+        provider: str,
+        label: str,
+        external_message_id: str,
+        exc: Exception,
+        is_self_chat: bool = True,
     ) -> None:
+        """A failed turn must never put RAW or CLASSIFIED error text into a
+        channel.
+
+        The assertion used to be "zero dispatch, unconditionally", which was
+        a proxy for that rule and is no longer the whole contract: an owner
+        messaging their OWN agent now receives the frozen
+        CHANNEL_EXECUTION_FAILED literal, because silence from your own agent
+        is indistinguishable from it ignoring you (see
+        platform_event.CHANNEL_OWNER_SAFE_CODES). So this asserts the actual
+        rule, more strictly than before: whatever reaches the channel must be
+        EXACTLY that frozen module literal — never the exception, never
+        classify_error()'s prose, never ErrorNotification.raw_detail — and
+        for a non-owner (is_self_chat=False) it must still be nothing at all.
+        """
+        dispatched: list[str] = []
+
+        async def _capture_dispatch(*, text: str = "", **_kwargs):
+            dispatched.append(text)
+            return {"external_message_id": "out-1"}
+
         async def run_case():
             with (
                 patch(
                     "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                    new=AsyncMock(side_effect=AssertionError(
-                        "must never dispatch a raw/classified error into the channel"
-                    )),
+                    new=AsyncMock(side_effect=_capture_dispatch),
                     create=True,
                 ),
                 patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
@@ -1046,7 +1071,7 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
                             # Robustly-identified owner turn (channel-agnostic
                             # — see _is_owner_message), so this reaches the
                             # Sage turn instead of being blocked by dmPolicy.
-                            "is_self_chat": True,
+                            "is_self_chat": is_self_chat,
                         },
                     },
                     channel_key=channel_key,
@@ -1055,10 +1080,24 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
                 )
 
         result = asyncio.run(run_case())
-        # Never crashed (asyncio.run would have propagated any exception),
-        # and — the modern, stricter equivalent of the old ok=True/
-        # sage_replied=False — nothing was ever dispatched to the channel.
-        self.assertIsNone(result.get("outbound"))
+        # Never crashed (asyncio.run would have propagated any exception).
+        _exc_text = str(exc)
+        for sent in dispatched:
+            self.assertEqual(
+                sent,
+                platform_event.CHANNEL_EXECUTION_FAILED.channel_text,
+                "only the frozen owner-safe literal may reach a channel on a failed turn",
+            )
+            self.assertNotIn(_exc_text, sent)
+        if is_self_chat:
+            self.assertEqual(
+                dispatched,
+                [platform_event.CHANNEL_EXECUTION_FAILED.channel_text],
+                "the OWNER must be able to tell 'it broke' from 'it ignored me'",
+            )
+        else:
+            self.assertEqual(dispatched, [], "a non-owner gets absolutely nothing")
+            self.assertIsNone(result.get("outbound"))
 
     def _assert_classified_error_text(
         self, *, channel_key: str, external_message_id: str, exc: Exception, expect_substring: str,
@@ -1101,6 +1140,18 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
         self._assert_never_reaches_the_channel(
             channel_key="wechat_personal", provider="wechat_local_bridge", label="WeChat",
             external_message_id="wc-err-1", exc=RuntimeError("provider HTTP 401 unauthorized"),
+        )
+
+    def test_non_owner_sender_gets_absolutely_nothing_on_a_failed_turn(self) -> None:
+        """The other half of the audience rule: a stranger's chat must still
+        receive NOTHING when the turn fails. is_self_chat=False is the only
+        owner signal a local-bridge channel has (see
+        _handle_local_bridge_gateway_channel_inbound), so dropping it makes
+        this a non-owner turn."""
+        self._assert_never_reaches_the_channel(
+            channel_key="signal_personal", provider="signal_local_bridge", label="Signal",
+            external_message_id="sig-err-nonowner", exc=RuntimeError("HTTP 429 rate limit"),
+            is_self_chat=False,
         )
 
     def test_wechat_execute_sage_turn_failure_is_classified(self) -> None:
