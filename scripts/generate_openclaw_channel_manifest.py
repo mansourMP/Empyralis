@@ -54,6 +54,24 @@ SOURCES OF TRUTH, AND WHY THESE THREE
        derivation reproduces all five byte-for-byte, which is why it is
        trusted for the other twenty-two.
 
+    5. (2)'s `openclaw.install` block             -> HOW TO INSTALL the plugin
+       Twenty of the twenty-seven channels do not ship in the pinned bundle at
+       all: they are separate npm packages, and `channels.<id>` policy written
+       for one whose package is absent produces a clean-looking rejection that
+       means "no plugin AND no credential" — indistinguishable, from outside,
+       from "no credential". Their catalog already carries the npm spec, the
+       plugin id (which is NOT the channel id for the four external ones), the
+       `minHostVersion` range and, for externals, an `expectedIntegrity`
+       hash. All of it is read, none of it is typed: an `@openclaw/<id>`
+       convention guessed from the channel id would be wrong for
+       `wecom` (`@wecom/wecom-openclaw-plugin`), `openclaw-weixin`,
+       `openclaw-zaloclawbot` and `yuanbao`.
+
+       (2) and (3) must PARTITION the id set — a channel is bundled or it is
+       installable, never both and never neither. Generation fails otherwise,
+       because "neither" means a channel we would advertise and never be able
+       to install, and "both" means we cannot tell which code would load.
+
 (1) and (2)+(3) are INDEPENDENT sources for the same set — a live CLI query
 versus files on disk. Generation fails if they disagree. That is deliberate:
 CLAUDE.md, "a check that derives its own expectations from the thing it checks
@@ -217,6 +235,109 @@ def _disk_labels(package_root: Path) -> Dict[str, str]:
     return labels
 
 
+def _split_npm_spec(spec: str) -> tuple[str, Optional[str]]:
+    """`@scope/name@1.2.3` -> (`@scope/name`, `1.2.3`); `@scope/name` -> (..., None).
+
+    The leading `@` of a scope is not a version separator, so the split is on
+    the LAST `@` and only when it is not at index 0.
+    """
+    text = str(spec or "").strip()
+    at = text.rfind("@")
+    if at <= 0:
+        return text, None
+    return text[:at], text[at + 1 :] or None
+
+
+def _plugin_installs(package_root: Path, ids: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Source 5 — id -> how to install its plugin, or None when it is bundled.
+
+    Read straight off their `openclaw.install` block. Nothing here is inferred
+    from the channel id: the package name, the plugin id, the host-version
+    range and the integrity hash are each theirs, verbatim, because four of
+    the twenty are third-party packages whose names follow no convention we
+    could guess.
+    """
+    catalog_path = package_root / "dist" / "channel-catalog.json"
+    catalog = json.loads(catalog_path.read_text())
+    entries = catalog.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise GenerationError(f"{catalog_path} carried no `entries` array.")
+
+    installable: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        openclaw = (entry or {}).get("openclaw") or {}
+        channel = openclaw.get("channel") or {}
+        channel_id = str(channel.get("id") or "").strip().lower()
+        if not channel_id:
+            continue
+        install = openclaw.get("install")
+        if not isinstance(install, dict):
+            raise GenerationError(
+                f"Catalog entry for channel {channel_id!r} has no `openclaw.install` block, so "
+                "there is no derivable way to install its plugin. Refusing to write a manifest "
+                "that would advertise a channel provisioning can never bring up."
+            )
+        npm_spec = str(install.get("npmSpec") or "").strip()
+        if not npm_spec:
+            raise GenerationError(
+                f"Catalog entry for channel {channel_id!r} declares no `npmSpec`. "
+                "Only npm installs are supported by Empyralis provisioning today "
+                "(their `clawhubSpec` path is a second, unpinnable registry)."
+            )
+        package_name, catalog_version = _split_npm_spec(npm_spec)
+        installable[channel_id] = {
+            "required": True,
+            # The PLUGIN id, which is what `openclaw plugins list` and the
+            # install registry key on — equal to the channel id for the 16
+            # official plugins and different for all four external ones.
+            "plugin_id": str((openclaw.get("plugin") or {}).get("id") or channel_id).strip().lower(),
+            "npm_package": package_name,
+            # Verbatim, including a version when THEY pinned one. Passed to
+            # `openclaw plugins install` unchanged, so an upstream decision to
+            # pin an external package is honoured rather than re-derived.
+            "npm_spec": npm_spec,
+            "catalog_pinned_version": catalog_version,
+            "source": str(entry.get("source") or "").strip().lower() or "unknown",
+            "min_host_version": (str(install.get("minHostVersion")).strip() if install.get("minHostVersion") else None),
+            "expected_integrity": (
+                str(install.get("expectedIntegrity")).strip() if install.get("expectedIntegrity") else None
+            ),
+        }
+
+    bundled: Dict[str, str] = {}
+    extensions_dir = package_root / "dist" / "extensions"
+    for manifest_path in sorted(extensions_dir.glob("*/package.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except json.JSONDecodeError:
+            continue
+        channel = (manifest.get("openclaw") or {}).get("channel") or {}
+        channel_id = str(channel.get("id") or "").strip().lower()
+        if channel_id:
+            bundled[channel_id] = manifest_path.parent.name
+
+    # ── The partition check ──────────────────────────────────────────────
+    # Two independent readers of the same package tree, and the question they
+    # answer is not "do you agree" but "between you, is every channel
+    # accounted for exactly once". A channel in neither is one provisioning
+    # would advertise and never be able to install; a channel in both means we
+    # cannot say which code would load.
+    both = sorted(set(installable) & set(bundled))
+    neither = sorted(set(ids) - set(installable) - set(bundled))
+    if both or neither:
+        raise GenerationError(
+            "OpenClaw's installable catalog and its bundled extensions do not partition the "
+            f"channel set. In both: {both}. In neither: {neither}. A channel in neither would be "
+            "advertised by Empyralis and impossible to install; a channel in both has two "
+            "candidate implementations. Fix the reader before regenerating."
+        )
+
+    return {
+        channel_id: (installable.get(channel_id) if channel_id in installable else None)
+        for channel_id in ids
+    }
+
+
 def _schema_enum(node: Any) -> Optional[List[str]]:
     """Their generator emits both `{enum:[...]}` and `{anyOf:[{const:...}]}`."""
     if not isinstance(node, dict):
@@ -297,6 +418,7 @@ def build_manifest() -> Dict[str, Any]:
         shapes = _policy_shapes(home)
 
     labels = _disk_labels(package_root)
+    plugin_installs = _plugin_installs(package_root, ids)
 
     # ── The two-source conformance check ─────────────────────────────────
     # `channels list --all --json` (their live registry) versus the on-disk
@@ -337,6 +459,12 @@ def build_manifest() -> Dict[str, Any]:
                 # than writing a node OpenClaw will reject.
                 "config_schema_present": channel_id in shapes,
                 "policy_shape": shapes.get(channel_id),
+                # None for a channel whose implementation ships inside the
+                # pinned bundle; an install descriptor for one that does not.
+                # `null` here is a positive statement ("bundled, nothing to
+                # install"), not "unknown" — the partition check above is what
+                # makes that reading safe.
+                "plugin_install": plugin_installs.get(channel_id),
             }
         )
 
@@ -415,6 +543,24 @@ export interface GeneratedOpenClawPolicyShape {{
   readonly unhandled_plugin_hook_flags: readonly string[];
 }}
 
+/** How to install a channel's plugin, read from OpenClaw's own
+ *  `channel-catalog.json` `openclaw.install` block. `null` on the seven
+ *  channels whose implementation ships inside the pinned bundle. */
+export interface GeneratedOpenClawPluginInstall {{
+  readonly required: boolean;
+  /** The PLUGIN id, which is what `openclaw plugins list` keys on. Equal to
+   *  the channel id for the official plugins, different for every external
+   *  one (`wecom` -> `wecom-openclaw-plugin`). */
+  readonly plugin_id: string;
+  readonly npm_package: string;
+  /** Their spec verbatim, version included when THEY pinned one. */
+  readonly npm_spec: string;
+  readonly catalog_pinned_version: string | null;
+  readonly source: string;
+  readonly min_host_version: string | null;
+  readonly expected_integrity: string | null;
+}}
+
 export interface GeneratedOpenClawChannel {{
   readonly id: string;
   readonly channel_key: string;
@@ -422,6 +568,7 @@ export interface GeneratedOpenClawChannel {{
   readonly origin: string;
   readonly config_schema_present: boolean;
   readonly policy_shape: GeneratedOpenClawPolicyShape | null;
+  readonly plugin_install: GeneratedOpenClawPluginInstall | null;
 }}
 
 export interface GeneratedOpenClawManifest {{

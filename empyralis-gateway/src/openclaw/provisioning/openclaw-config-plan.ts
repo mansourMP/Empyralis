@@ -127,6 +127,27 @@ export interface EmpyralisChannelPolicy {
   enabled: boolean;
   dmPolicy: EmpyralisDmPolicy;
   groupPolicy: EmpyralisGroupPolicy;
+  /**
+   * Whether this box should acquire the channel's PLUGIN, not just its policy.
+   *
+   * Separate from `enabled` on purpose. Policy is written for every channel on
+   * every run — a channel omitted from the config would keep whatever the last
+   * run left, which is the stale-derived-artifact failure provisioning exists
+   * to prevent — but twenty of the twenty-seven channels are separate npm
+   * packages, and installing all of them on every customer's machine to write
+   * a policy nobody asked for is minutes of network per boot and twenty
+   * third-party dependencies running inside an instance that carries their
+   * messages.
+   *
+   * So the two questions are asked separately: "what may this channel do"
+   * (always answered) and "does this box need this channel's code at all"
+   * (answered only for channels the owner has actually reached for). The cloud
+   * decides the second — see openclaw_provisioning_service.py.
+   *
+   * Absent/false is NOT "this channel is broken": it is "no plugin here", and
+   * it is reported as exactly that (`OpenClawChannelPluginState.installed`).
+   */
+  installPlugin?: boolean;
 }
 
 export interface OpenClawProvisioningPlan {
@@ -147,6 +168,11 @@ export interface OpenClawProvisioningPlan {
   /** Every `channels.<id>.pluginHooks.<flag>` the installed schema declares,
    *  discovered by resolveOpenClawPluginHookFlags — all set to true. */
   pluginHookFlags?: Array<{ channelId: string; flag: string }>;
+  /** Channel-plugin ids this box has actually installed, from OpenClaw's own
+   *  install registry (./openclaw-plugin-install.ts). They join the bridge
+   *  plugin in `plugins.allow`, so the instance's plugin inventory is an
+   *  explicit list rather than whatever happens to be on disk. */
+  installedChannelPluginIds?: readonly string[];
 }
 
 /** Secrets are passed separately from the plan so the plan itself can be
@@ -199,6 +225,11 @@ export interface RenderedOpenClawConfig {
 }
 
 const REDACTED = "<redacted>";
+
+/** The bridge plugin's own id, as declared in its `openclaw.plugin.json`. It
+ *  is both an `entries` key and an `allow` entry, and the two disagreeing
+ *  would silently unload the one plugin the whole transport depends on. */
+export const OPENCLAW_BRIDGE_PLUGIN_ID = "empyralis-bridge";
 
 // ── The security lockdown ─────────────────────────────────────────────────
 //
@@ -448,6 +479,43 @@ export function findOpenClawLockdownViolations(effectiveConfig: unknown): OpenCl
         `These tools are not denied on a transport-only instance: ${missingDenies.join(", ")}. ` +
         "Anyone who can message this gateway shares whatever tool authority its agent has, and this one is " +
         "supposed to have none.",
+    });
+  }
+
+  // ── Plugin inventory: an explicit allowlist, never "whatever is on disk" ──
+  //
+  // Added 2026-08-09, when provisioning started INSTALLING channel plugins and
+  // OpenClaw itself said so on the very first run:
+  //
+  //   [plugins] plugins.allow is empty; discovered non-bundled plugins may
+  //   auto-load: feishu (…/node_modules/@openclaw/feishu/dist/index.js).
+  //   Set plugins.allow to explicit trusted ids.
+  //
+  // With it empty, ANY package that reaches the profile's plugin directory
+  // loads into the instance that carries a customer's messages — and that
+  // directory now has a writer. Their own semantics make the allowlist the
+  // right control rather than a blunt one: "when set, only listed plugins are
+  // eligible to load. Configured bundled chat channels can still activate
+  // their bundled plugin when the channel is explicitly enabled in config" —
+  // and this generator always writes an explicit `channels.<id>` block, so
+  // bundled channels are unaffected. Verified live on a provisioned instance:
+  // the bridge plugin, the installed Feishu plugin and bundled `irc` all stay
+  // `loaded`, while `telegram` (not enabled) stays `disabled`.
+  //
+  // The VALUE is per-box (it names the plugins that box installed), so it
+  // cannot be an OPENCLAW_LOCKDOWN_EXPECTATIONS constant. Its exact contents
+  // are still enforced by the read-back drift check, which requires every
+  // generated path to match; what is asserted here is the part that is
+  // invariant — that it is set at all.
+  const allow = readPath(effectiveConfig, "plugins.allow");
+  if (!Array.isArray(allow) || allow.length === 0) {
+    violations.push({
+      path: "plugins.allow",
+      code: "plugin_allowlist_empty",
+      detail:
+        "No plugin allowlist is in force, so any plugin package present on disk is eligible to load into this " +
+        "instance. Provisioning installs channel plugins into this profile, which means that directory has a " +
+        "writer; an unbounded inventory there is unreviewed third-party code running beside a customer's messages.",
     });
   }
 
@@ -751,9 +819,19 @@ export function renderOpenClawConfig(
     plugins: {
       enabled: true,
       load: { paths: pluginPaths },
+      // The instance's entire plugin inventory, named. Sorted and deduped so
+      // the fingerprint does not move on argument order — a config that
+      // reports "changed" on every run trains everyone to ignore the signal.
+      allow: [
+        ...new Set([
+          OPENCLAW_BRIDGE_PLUGIN_ID,
+          ...Object.keys(extraEntries),
+          ...(plan.installedChannelPluginIds ?? []),
+        ]),
+      ].sort(),
       entries: {
         ...extraEntries,
-        "empyralis-bridge": { enabled: true },
+        [OPENCLAW_BRIDGE_PLUGIN_ID]: { enabled: true },
         // Bonjour is a separate plugin from discovery.mdns and defaults on.
         bonjour: { enabled: false },
       },

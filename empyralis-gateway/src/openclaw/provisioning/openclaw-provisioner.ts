@@ -120,6 +120,11 @@ import {
   type OpenClawProvisioningPlan,
   type OpenClawSecrets,
 } from "./openclaw-config-plan";
+import {
+  ensureChannelPluginsInstalled,
+  type OpenClawChannelPluginState,
+  type OpenClawPluginRefusalCode,
+} from "./openclaw-plugin-install";
 import { checkOpenClawVersion, type OpenClawVersionCheck } from "./openclaw-version";
 import {
   auditAndRepairOpenClawSupervisorUnit,
@@ -222,7 +227,12 @@ export type OpenClawProvisionRefusalCode =
   | "openclaw_config_patch_failed"
   | "openclaw_lockdown_violated"
   | "openclaw_policy_not_applied"
-  | "openclaw_security_audit_not_clean";
+  | "openclaw_security_audit_not_clean"
+  // Channel-plugin acquisition (./openclaw-plugin-install.ts). A channel whose
+  // plugin is absent answers an outbound send with a rejection that means "no
+  // plugin AND no credential" at once, so these refuse the whole run rather
+  // than provisioning an instance that looks configured and cannot deliver.
+  | OpenClawPluginRefusalCode;
 
 export interface OpenClawProvisionResult {
   status: OpenClawProvisionStatus;
@@ -247,6 +257,15 @@ export interface OpenClawProvisionResult {
   shapeFindings: OpenClawChannelShapeFinding[];
   lockdownViolations: OpenClawLockdownViolation[];
   auditFindings: OpenClawAuditFinding[];
+  /**
+   * Per-channel plugin state, as OpenClaw itself reports it.
+   *
+   * The field that makes "no plugin" and "no credential" separately
+   * answerable. `installed: false` is the former; on a run that returns
+   * `provisioned`, every channel the plan asked to install reads `true`, so a
+   * send that still fails can only be the latter.
+   */
+  channelPlugins: OpenClawChannelPluginState[];
   /** Model-provider credential env vars found in this process's environment
    *  and therefore withheld from OpenClaw. Names only, never values. */
   strippedCredentialEnvNames: string[];
@@ -309,6 +328,19 @@ interface StoredProvisioningRecord {
   appliedAt: string;
   pinnedVersion: string;
   channels: EmpyralisChannelPolicy[];
+  /**
+   * pluginId -> the exact `<name>@<version>` this box installed, as OpenClaw
+   * resolved it. THIS IS THE PLUGIN VERSION PIN.
+   *
+   * It is observed, not authored: their installer owns host-compatibility
+   * resolution ("…2026.7.1 is incompatible with this runtime; using newest
+   * compatible …2026.6.10"), so writing a version literal into our repo would
+   * transcribe a decision we cannot verify. But "newest compatible" moves, so
+   * the first resolution is captured here and every later run must match it —
+   * otherwise a plugin silently changing under a provisioned instance looks
+   * exactly like nothing happening, which is the MAN-306 shape.
+   */
+  pluginPins?: Record<string, string>;
 }
 
 function defaultFs(): NonNullable<OpenClawProvisionerOptions["fs"]> {
@@ -436,7 +468,11 @@ export class OpenClawProvisioner {
     }
   }
 
-  private async writeStoredRecord(fingerprint: string, pinnedVersion: string): Promise<void> {
+  private async writeStoredRecord(
+    fingerprint: string,
+    pinnedVersion: string,
+    pluginPins: Record<string, string>,
+  ): Promise<void> {
     const filePath = openClawProvisioningRecordPath(this.options.stateDir, this.options.cli.profile);
     await this.fs.mkdir(path.dirname(filePath));
     const record: StoredProvisioningRecord = {
@@ -444,6 +480,7 @@ export class OpenClawProvisioner {
       appliedAt: new Date().toISOString(),
       pinnedVersion,
       channels: this.options.plan.channels,
+      pluginPins,
     };
     await this.fs.writeFile(filePath, JSON.stringify(record, null, 2));
   }
@@ -501,10 +538,44 @@ export class OpenClawProvisioner {
       shapeFindings: [],
       lockdownViolations: [],
       auditFindings: [],
+      channelPlugins: [],
       strippedCredentialEnvNames,
     };
     if (!version.ok) {
       return this.refuse(base, version.code ?? "openclaw_version_mismatch", version.detail ?? "");
+    }
+
+    const stored = await this.readStoredRecord();
+    base.previousConfigFingerprint = stored?.fingerprint;
+
+    // ── 1a. Acquire the channel plugins ─────────────────────────────────
+    //
+    // BEFORE the schema audit, not after: a channel plugin contributes its own
+    // `channels.<id>` config schema (their catalog's `channelConfigs`), so a
+    // shape audit run first would be auditing a world that is about to change.
+    // Before the config write for the same reason, and before the security
+    // audit so that audit runs with the third-party plugin code LOADED — a
+    // plugin is new code inside the instance, and "the audit was clean before
+    // we added it" is not the claim worth making.
+    //
+    // After the version pin, because `min_host_version` is checked against it.
+    const pluginOutcome = await ensureChannelPluginsInstalled({
+      cli: this.options.cli,
+      // Report on every channel the plan enables; install only the ones it
+      // asked to install.
+      channelIds: this.options.plan.channels
+        .filter((channel) => channel.enabled)
+        .map((channel) => channel.channelId),
+      installChannelIds: this.options.plan.channels
+        .filter((channel) => channel.enabled && channel.installPlugin)
+        .map((channel) => channel.channelId),
+      recordedPins: stored?.pluginPins ?? {},
+      hostVersion: version.expected,
+      record: this.options.record,
+    });
+    base.channelPlugins = pluginOutcome.states;
+    if (pluginOutcome.refusal) {
+      return this.refuse(base, pluginOutcome.refusal.code, pluginOutcome.refusal.detail);
     }
 
     // ── 2. The installed schema still has the shape the mapping assumes ──
@@ -533,15 +604,18 @@ export class OpenClawProvisioner {
         // control, and an isolation control does not take a hint.
         profileStateDir: openClawProfileStateDir(profile, this.homeDir),
         pluginHookFlags: hooks.enable,
+        // Straight from the install pass, so `plugins.allow` names exactly
+        // what this box installed — never a hand-kept second list, and never
+        // an intent that the install did not actually produce.
+        installedChannelPluginIds: pluginOutcome.states
+          .filter((state) => state.requiresPlugin && state.installed && state.pluginId)
+          .map((state) => state.pluginId as string),
       },
       this.options.secrets,
     );
     base.configFingerprint = rendered.fingerprint;
     base.disabledChannels = rendered.disabledChannels;
     base.widenings = rendered.widenings;
-
-    const stored = await this.readStoredRecord();
-    base.previousConfigFingerprint = stored?.fingerprint;
 
     // ── 4. Detect drift against what the instance ACTUALLY enforces ─────
     const effectiveBefore = await this.readEffectiveConfig();
@@ -618,7 +692,7 @@ export class OpenClawProvisioner {
     }
 
     // ── 8. Record, supervise, probe ─────────────────────────────────────
-    await this.writeStoredRecord(rendered.fingerprint, version.expected);
+    await this.writeStoredRecord(rendered.fingerprint, version.expected, pluginOutcome.resolvedPins);
 
     const supervisor = await auditAndRepairOpenClawSupervisorUnit(
       {
@@ -658,6 +732,14 @@ export class OpenClawProvisioner {
       })),
       widenings: rendered.widenings.map((finding) => ({ channel_id: finding.channelId, code: finding.code })),
       audit_findings: auditFindings.map((finding) => ({ check_id: finding.checkId, severity: finding.severity })),
+      channel_plugins: pluginOutcome.states.map((state) => ({
+        channel_id: state.channelId,
+        plugin_id: state.pluginId ?? null,
+        requires_plugin: state.requiresPlugin,
+        installed: state.installed,
+        resolved_spec: state.resolvedSpec ?? null,
+        action: state.action,
+      })),
       stripped_credential_env: strippedCredentialEnvNames,
       supervisor_action: supervisor.repair?.action ?? null,
       healthy: healthy ?? null,

@@ -1053,16 +1053,35 @@ async def get_personal_channel_group_policy(
 # So the first provisioning run on any machine had no entry point at all, and
 # every trigger downstream of it was dead code in practice. This is that entry
 # point, and nothing more: it is deliberately NOT best-effort (an explicit
-# setup action that cannot reach the box must fail loudly) and it takes no
-# body, because it has nothing to configure — the policy it pushes is whatever
-# is already stored for this agent, read through the same loaders the live
-# inbound gates use.
+# setup action that cannot reach the box must fail loudly). The policy it
+# pushes is whatever is already stored for this agent, read through the same
+# loaders the live inbound gates use.
+#
+# Its one optional input is `install_channels`, and it configures nothing — it
+# names channels whose PLUGIN this box should acquire. That cannot be inferred
+# from what is connected, because twenty of OpenClaw's channels are separate
+# npm packages and a channel physically cannot connect before its package is
+# installed: "install once connected" is a deadlock. This is the lever that
+# breaks it, and it is the request a future "Connect Feishu" button makes.
+
+
+class OpenClawProvisionRequest(BaseModel):
+    """`install_channels`: Empyralis channel_keys (`openclaw_feishu`, …).
+
+    Additive only. It never disables or removes a channel — the plugin set on a
+    box is a union over time, because uninstalling a plugin out from under a
+    connected account would take a working channel down to satisfy a request
+    that was only ever about which code is present.
+    """
+
+    install_channels: Optional[List[str]] = None
 
 
 @router.post("/personal-channels/openclaw/gateways/{gateway_id}/provision")
 async def provision_openclaw_transport(
     request: Request,
     gateway_id: str,
+    payload: Optional[OpenClawProvisionRequest] = None,
     current_user=Depends(require_api_key),
     agent_id: Optional[str] = None,
 ):
@@ -1097,6 +1116,7 @@ async def provision_openclaw_transport(
             workspace_id=str(registration.get("workspace_id") or "default"),
             agent_id=normalized_agent_id,
             actor_id=str(current_user.get("id") or "") or None,
+            install_channel_keys=list(payload.install_channels or []) if payload else None,
         )
     except openclaw_provisioning_service.OpenClawProvisioningError as exc:
         _emit_personal_channel_audit(
@@ -1135,6 +1155,11 @@ async def provision_openclaw_transport(
             "profile": result.get("profile"),
             "config_changed": result.get("config_changed"),
             "restart_required": result.get("restart_required"),
+            "installed_channel_plugins": sorted(
+                str(entry.get("channel_id") or "")
+                for entry in (result.get("channel_plugins") or [])
+                if isinstance(entry, dict) and entry.get("requires_plugin") and entry.get("installed")
+            ),
         },
     )
     return {"gateway_id": gateway_id, "agent_id": normalized_agent_id, "openclaw_provisioning": result}

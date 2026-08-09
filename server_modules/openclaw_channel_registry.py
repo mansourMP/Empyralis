@@ -104,7 +104,15 @@ CHANNEL_KEY_PREFIX: str = str(_MANIFEST.get("channel_key_prefix") or "openclaw_"
 class OpenClawChannel:
     """One channel OpenClaw carries, exactly as OpenClaw describes it."""
 
-    __slots__ = ("id", "channel_key", "label", "origin", "config_schema_present", "policy_shape")
+    __slots__ = (
+        "id",
+        "channel_key",
+        "label",
+        "origin",
+        "config_schema_present",
+        "policy_shape",
+        "plugin_install",
+    )
 
     def __init__(self, record: Mapping[str, Any]) -> None:
         channel_id = str(record.get("id") or "").strip().lower()
@@ -129,6 +137,17 @@ class OpenClawChannel:
         self.config_schema_present = bool(record.get("config_schema_present"))
         shape = record.get("policy_shape")
         self.policy_shape: Optional[Dict[str, Any]] = dict(shape) if isinstance(shape, dict) else None
+        # How this channel's plugin is acquired, straight from OpenClaw's own
+        # `channel-catalog.json`. `None` means BUNDLED — it ships inside the
+        # pinned build and there is nothing to install. Twenty of the
+        # twenty-seven are separate npm packages, and until provisioning
+        # installed them a `channels.<id>` policy was written for code that was
+        # not on the box: the outbound rejection then meant "no plugin AND no
+        # credential" at once, which is indistinguishable from the ordinary
+        # not-connected-yet state. Read here so the cloud can say which of the
+        # two a channel is in without attempting a send.
+        install = record.get("plugin_install")
+        self.plugin_install: Optional[Dict[str, Any]] = dict(install) if isinstance(install, dict) else None
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<OpenClawChannel {self.channel_key} {self.label!r}>"

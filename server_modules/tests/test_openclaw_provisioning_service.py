@@ -165,7 +165,21 @@ def test_provision_dispatches_the_capability_with_the_policy_and_trusts_the_box(
     # both tokens already and is the only party that knows which OpenClaw is
     # installed.
     for channel in channels:
-        assert set(channel) == {"channel_id", "channel_key", "enabled", "dm_policy", "group_policy"}
+        assert set(channel) == {
+            "channel_id",
+            "channel_key",
+            "enabled",
+            "dm_policy",
+            "group_policy",
+            # Not policy: "does this box need this channel's third-party plugin
+            # package on disk". A separate axis, and the only per-channel field
+            # that is ever narrowed — policy is still pushed for every channel.
+            "install_plugin",
+        }
+        # Fail-closed: no enabled binding and no stored policy key for any
+        # channel here, so nothing is fetched. Acquiring third-party code onto
+        # a customer's machine is never what an absent signal means.
+        assert channel["install_plugin"] is False
     payload = str(captured["arguments"])
     assert "token" not in payload
 
@@ -213,3 +227,179 @@ def test_reconcile_is_a_no_op_for_a_non_openclaw_channel(monkeypatch):
             )
             is None
         )
+
+
+# ── which channels get their PLUGIN installed (step 5) ────────────────────
+#
+# Twenty of OpenClaw's twenty-seven channels are separate npm packages. Policy
+# is still pushed for all of them; only "does this box need this channel's
+# code" is narrowed. These tests protect the two properties that decision has
+# to have: it must break the connect/install deadlock, and it must never grow
+# the set by accident.
+
+
+def _stub_channel_in_use_sources(monkeypatch, *, bindings, install_metadata):
+    async def fake_bindings(*, tenant_id, workspace_id, agent_install_id, enabled_only):
+        assert enabled_only is True, "a disabled binding is not a channel in use"
+        return [{"key": key} for key in bindings]
+
+    async def fake_install(install_id, *, tenant_id=None, workspace_id=None):
+        return {"install_metadata": install_metadata}
+
+    monkeypatch.setattr(
+        openclaw_provisioning_service.agent_bindings_repository,
+        "list_agent_channel_bindings",
+        fake_bindings,
+    )
+    monkeypatch.setattr(
+        openclaw_provisioning_service.agent_registry_repository,
+        "get_workspace_agent_install_bundle",
+        fake_install,
+    )
+
+
+def test_a_stored_policy_key_counts_as_in_use_even_with_a_default_value(monkeypatch):
+    """The deadlock-breaker, and the reason PRESENCE is the test.
+
+    An enabled binding is written only once a session reaches `connected`, and
+    a session cannot connect before the plugin exists. Bindings alone therefore
+    deadlock: no plugin -> no connection -> no binding -> no plugin. A stored
+    policy key is written the moment the owner touches the channel at all.
+
+    It must be key presence and never the value: the loaders normalize a
+    MISSING entry into a full default document, so a value comparison cannot
+    tell "never configured" from "configured, and happens to match the
+    default".
+    """
+    _stub_channel_in_use_sources(
+        monkeypatch,
+        bindings=[],
+        install_metadata={
+            "group_policy": {
+                # Present, and holding exactly what an unconfigured channel
+                # would normalize to. Still counts.
+                "openclaw_feishu": {
+                    "mode": personal_channels_service.DEFAULT_GROUP_POLICY_MODE,
+                    "allowlist": [],
+                    "require_mention": personal_channels_service.DEFAULT_REQUIRE_MENTION,
+                },
+            },
+        },
+    )
+    in_use = _run(
+        openclaw_provisioning_service.channels_in_use(
+            tenant_id="t", workspace_id="w", agent_id="a"
+        )
+    )
+    assert in_use == {"openclaw_feishu"}
+
+
+def test_an_enabled_binding_counts_as_in_use(monkeypatch):
+    _stub_channel_in_use_sources(
+        monkeypatch,
+        bindings=["openclaw_line", "telegram_personal"],
+        install_metadata={},
+    )
+    in_use = _run(
+        openclaw_provisioning_service.channels_in_use(
+            tenant_id="t", workspace_id="w", agent_id="a"
+        )
+    )
+    # A first-party channel_key is never an OpenClaw plugin request.
+    assert in_use == {"openclaw_line"}
+
+
+def test_channels_in_use_fails_closed_when_a_source_is_unreadable(monkeypatch):
+    """Fewer channels, never more. A false negative is a reported
+    `installed: false` the owner can act on; a false positive is third-party
+    code fetched onto a machine we do not own."""
+
+    async def boom(**kwargs):
+        raise RuntimeError("control plane unavailable")
+
+    async def boom_install(install_id, *, tenant_id=None, workspace_id=None):
+        raise RuntimeError("install bundle unreadable")
+
+    monkeypatch.setattr(
+        openclaw_provisioning_service.agent_bindings_repository,
+        "list_agent_channel_bindings",
+        boom,
+    )
+    monkeypatch.setattr(
+        openclaw_provisioning_service.agent_registry_repository,
+        "get_workspace_agent_install_bundle",
+        boom_install,
+    )
+    in_use = _run(
+        openclaw_provisioning_service.channels_in_use(
+            tenant_id="t", workspace_id="w", agent_id="a"
+        )
+    )
+    assert in_use == set()
+
+
+def test_an_explicit_install_request_brings_a_channel_up_and_cannot_invent_one(monkeypatch):
+    """`install_channels` is the setup lever — the request a "Connect Feishu"
+    action makes before any binding or stored policy can exist. It is filtered
+    against the generated OpenClaw channel set, so it can never introduce a
+    channel_key the transport does not carry."""
+
+    async def fake_load_dm(*, tenant_id, workspace_id, agent_id, channel_key):
+        return {"mode": "open", "allowlist": [], "pending_pairing": {}}
+
+    async def fake_load_group(*, tenant_id, workspace_id, agent_id, channel_key):
+        return {"mode": "disabled", "allowlist": [], "require_mention": True}
+
+    monkeypatch.setattr(personal_channels_service, "_load_agent_dm_policy_config", fake_load_dm)
+    monkeypatch.setattr(personal_channels_service, "_load_agent_group_policy_config", fake_load_group)
+    _stub_channel_in_use_sources(monkeypatch, bindings=[], install_metadata={})
+
+    channels = _run(
+        openclaw_provisioning_service.build_openclaw_channel_policies(
+            tenant_id="t",
+            workspace_id="w",
+            agent_id="a",
+            install_channel_keys=[
+                "openclaw_feishu",
+                "openclaw_not_a_real_channel",
+                "telegram_personal",
+                "",
+            ],
+        )
+    )
+    requested = {entry["channel_key"] for entry in channels if entry["install_plugin"]}
+    assert requested == {"openclaw_feishu"}
+    # Every channel still receives a policy — narrowing installs must never
+    # narrow policy, or a channel omitted from the config keeps whatever the
+    # last run left.
+    assert len(channels) == len(personal_channels_service.OPENCLAW_PERSONAL_CHANNELS)
+
+
+def test_the_plugin_install_descriptor_exists_for_every_transported_channel():
+    """The manifest half of the same guarantee the gateway asserts: a channel
+    is bundled (`plugin_install: null`) or installable, never neither. A
+    channel in neither bucket would be advertised by Empyralis and impossible
+    to bring up — which is precisely the state Feishu was in."""
+    channels = openclaw_channel_registry.CHANNELS
+    assert channels, "an empty registry would pass every assertion below vacuously"
+    bundled = 0
+    installable = 0
+    for channel in channels:
+        descriptor = channel.plugin_install
+        if descriptor is None:
+            bundled += 1
+            continue
+        installable += 1
+        assert descriptor["required"] is True
+        assert descriptor["plugin_id"]
+        assert descriptor["npm_package"]
+        assert descriptor["npm_spec"].startswith(descriptor["npm_package"])
+    assert bundled > 0 and installable > 0
+    assert bundled + installable == len(channels)
+    # Read from their catalog, never guessed: `@openclaw/<id>` is wrong for
+    # all four external packages.
+    by_id = openclaw_channel_registry.CHANNELS_BY_ID
+    assert by_id["feishu"].plugin_install["npm_package"] == "@openclaw/feishu"
+    assert by_id["wecom"].plugin_install["npm_package"] == "@wecom/wecom-openclaw-plugin"
+    assert by_id["wecom"].plugin_install["plugin_id"] == "wecom-openclaw-plugin"
+    assert by_id["telegram"].plugin_install is None

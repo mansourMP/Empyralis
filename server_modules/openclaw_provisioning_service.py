@@ -40,6 +40,8 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from server_modules import (
+    agent_bindings_repository,
+    agent_registry_repository,
     gateway_execution_service,
     openclaw_channel_registry,
     personal_channels_service,
@@ -84,11 +86,101 @@ def openclaw_channel_id(channel_key: str) -> str:
     return openclaw_channel_registry.openclaw_channel_id(channel_key)
 
 
+async def channels_in_use(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+) -> set:
+    """The OpenClaw `channel_key`s this owner has actually reached for.
+
+    WHY THIS QUESTION IS SEPARATE FROM "WHAT IS THIS CHANNEL'S POLICY"
+    ------------------------------------------------------------------
+    Policy is pushed for EVERY channel on every run — build_openclaw_channel_
+    policies below explains why, and that stays true. But twenty of OpenClaw's
+    twenty-seven channels are separate npm packages that provisioning now
+    installs, and installing all twenty on every customer's machine to write a
+    policy nobody asked for would be minutes of network per boot plus twenty
+    third-party packages loaded inside the instance that carries their
+    messages. So "what may this channel do" and "does this box need this
+    channel's code" are asked separately, and only the second is narrowed.
+
+    TWO SIGNALS, UNIONED, AND WHY NEITHER ALONE WOULD DO
+    -----------------------------------------------------
+      1. an ENABLED `agent_channel_bindings` row — agent_bindings_repository's
+         own definition of connected ("credential scoped to agent exists AND
+         binding row enabled"). Authoritative, but it is written only once a
+         session reaches `connected`, and a session cannot connect without the
+         plugin. Alone, it deadlocks: no plugin -> no connection -> no binding
+         -> no plugin.
+      2. a stored policy KEY for that channel in the agent's install metadata.
+         Written the moment the owner touches the channel's settings at all,
+         which is the earliest honest signal of intent and breaks the deadlock.
+
+    Key PRESENCE is the test, never the policy's value: the loaders normalize a
+    missing entry into a full default document, so a value comparison cannot
+    tell "never configured" from "configured, and happens to match the
+    default" (personal_channels_service._normalize_dm_policy_config(None)
+    returns exactly what a stored default returns).
+
+    Fails CLOSED — an unreadable install bundle or an unavailable control plane
+    yields fewer channels, never more. The cost of a false negative is a
+    reported `installed: false` the owner can act on; the cost of a false
+    positive is third-party code fetched onto a machine we do not own.
+    """
+    in_use: set = set()
+    openclaw_keys = set(personal_channels_service.OPENCLAW_PERSONAL_CHANNELS)
+
+    try:
+        bindings = await agent_bindings_repository.list_agent_channel_bindings(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            agent_install_id=agent_id,
+            enabled_only=True,
+        )
+    except Exception:
+        _logger.warning(
+            "could not read agent channel bindings for agent_id=%s; treating no channel as bound",
+            agent_id,
+            exc_info=True,
+        )
+        bindings = []
+    for row in bindings or []:
+        key = str((row or {}).get("key") or "").strip()
+        if key in openclaw_keys:
+            in_use.add(key)
+
+    try:
+        install = await agent_registry_repository.get_workspace_agent_install_bundle(
+            agent_id, tenant_id=tenant_id, workspace_id=workspace_id
+        )
+    except Exception:
+        _logger.warning(
+            "could not read the agent install bundle for agent_id=%s; treating no channel as configured",
+            agent_id,
+            exc_info=True,
+        )
+        install = None
+    meta = (install or {}).get("install_metadata") or (install or {}).get("metadata") or {}
+    if isinstance(meta, dict):
+        for policy_field in ("dm_policy", "group_policy"):
+            stored = meta.get(policy_field)
+            if not isinstance(stored, dict):
+                continue
+            for key in stored:
+                normalized = str(key or "").strip()
+                if normalized in openclaw_keys:
+                    in_use.add(normalized)
+
+    return in_use
+
+
 async def build_openclaw_channel_policies(
     *,
     tenant_id: str,
     workspace_id: str,
     agent_id: str,
+    install_channel_keys: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """The full policy set for every OpenClaw-transported channel, read
     through the SAME loaders the live inbound gates use
@@ -106,7 +198,22 @@ async def build_openclaw_channel_policies(
     omitted from the payload would keep whatever policy the previous
     provisioning run left in OpenClaw's config — the stale derived artifact
     this whole step exists to eliminate.
+
+    `install_plugin` is the ONE per-channel axis that is narrowed, and it is a
+    different question entirely: not "what may this channel do" but "does this
+    box need this channel's third-party plugin package on disk". See
+    channels_in_use(). `install_channel_keys` force-adds to that set, which is
+    how an explicit setup action ("connect Feishu") brings a channel up before
+    any binding or stored policy exists for it.
     """
+    requested = {
+        str(key or "").strip()
+        for key in (install_channel_keys or [])
+        if str(key or "").strip() in personal_channels_service.OPENCLAW_PERSONAL_CHANNELS
+    }
+    install_keys = requested | await channels_in_use(
+        tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id
+    )
     policies: List[Dict[str, Any]] = []
     for channel_key in sorted(personal_channels_service.OPENCLAW_PERSONAL_CHANNELS):
         dm_policy = await personal_channels_service._load_agent_dm_policy_config(
@@ -126,6 +233,7 @@ async def build_openclaw_channel_policies(
                 "channel_id": openclaw_channel_id(channel_key),
                 "channel_key": channel_key,
                 "enabled": True,
+                "install_plugin": channel_key in install_keys,
                 "dm_policy": {
                     "mode": dm_policy.get("mode"),
                     "allowlist": list(dm_policy.get("allowlist") or []),
@@ -147,8 +255,14 @@ async def provision_openclaw_gateway(
     workspace_id: str,
     agent_id: str,
     actor_id: Optional[str] = None,
+    install_channel_keys: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Push the current policy to the box and return its verbatim result.
+
+    `install_channel_keys` names channels whose PLUGIN this box should acquire
+    even though nothing has been connected on them yet — the "bring this
+    channel up" half of a setup action, which cannot come from the connected
+    set because a channel cannot connect before its plugin exists.
 
     The gateway's answer is trusted as-is and never re-interpreted here: it is
     the only party that knows which OpenClaw is installed, what its schema
@@ -158,7 +272,10 @@ async def provision_openclaw_gateway(
     """
     run_id = f"openclaw-provision-{uuid4().hex[:12]}"
     channels = await build_openclaw_channel_policies(
-        tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        agent_id=agent_id,
+        install_channel_keys=install_channel_keys,
     )
     try:
         execution = await gateway_execution_service.execute_tool_via_gateway(
