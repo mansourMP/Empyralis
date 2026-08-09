@@ -1536,3 +1536,45 @@ test("plugin install: a channel tool surface we cannot switch off REFUSES the wh
   assert.equal(result.refusal?.code, "openclaw_channel_shape_drift");
   assert.match(result.refusal?.detail ?? "", /unhandled_channel_tool/);
 });
+
+test("the profile state dir is locked to 0700 on EVERY run, not just at creation", async () => {
+  // Measured on a real box: the directory came out 755 (a `mkdir` inheriting a
+  // systemd service's 022 umask, or OpenClaw creating it first), OpenClaw's own
+  // audit reports `fs.state_dir.perms_readable` at WARN, and warn is blocking.
+  // So the first run provisioned and every run after it would have refused
+  // with `openclaw_security_audit_not_clean` — provision once, refuse forever.
+  // The directory holds the gateway token and the conversation state.
+  const chmods: Array<[string, number]> = [];
+  const files = new Map<string, string>();
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })]),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state, {
+    fs: {
+      readFile: async (filePath: string) => {
+        const found = files.get(filePath);
+        if (found === undefined) throw new Error("ENOENT");
+        return found;
+      },
+      writeFile: async (filePath: string, contents: string) => {
+        files.set(filePath, contents);
+      },
+      mkdir: async () => undefined,
+      rm: async (filePath: string) => {
+        files.delete(filePath);
+      },
+      chmod: async (dirPath: string, mode: number) => {
+        chmods.push([dirPath, mode]);
+      },
+    },
+  }).provision();
+
+  assert.equal(result.status, "provisioned", result.refusal?.detail);
+  const locked = chmods.find(([dir]) => dir.endsWith(".openclaw-acme"));
+  assert.ok(locked, `expected the profile state dir to be chmod'ed, got ${JSON.stringify(chmods)}`);
+  assert.equal(locked![1], 0o700);
+});
