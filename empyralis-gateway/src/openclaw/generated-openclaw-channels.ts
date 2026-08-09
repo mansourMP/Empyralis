@@ -45,6 +45,36 @@ export interface GeneratedOpenClawPluginInstall {
   readonly expected_integrity: string | null;
 }
 
+/** One control on the generated setup form. Derived from OpenClaw's own
+ *  config schema — `secret: true` is THEIR SecretRef union, not our guess. */
+export interface GeneratedOpenClawCredentialField {
+  readonly name: string;
+  readonly secret: boolean;
+  readonly type: "string" | "number" | "boolean";
+  /** A `<name>File` sibling OpenClaw also accepts. Recorded so the pair is
+   *  visible; never rendered — a browser form may not write a path on the
+   *  owner's machine. */
+  readonly file_alternative: string | null;
+}
+
+/** How an owner connects this channel, and what they type to do it.
+ *
+ *  `connect_method`:
+ *    "credential"     fields below. render them.
+ *    "pairing"        the schema declares no credential field at all — this
+ *                     channel links by QR / local pairing / inbound webhook.
+ *                     Rendering a token form here would be a dead control.
+ *    "plugin_absent"  the plugin contributes `channels.<id>` only once
+ *                     installed, so its fields are not knowable yet. */
+export interface GeneratedOpenClawCredentialShape {
+  readonly connect_method: "credential" | "pairing" | "plugin_absent";
+  /** OpenClaw's own selection label — "WhatsApp (QR link)", "SMS (Twilio)". */
+  readonly selection_label: string;
+  readonly docs_path: string | null;
+  readonly fields: readonly GeneratedOpenClawCredentialField[];
+  readonly file_alternatives: readonly string[];
+}
+
 export interface GeneratedOpenClawChannel {
   readonly id: string;
   readonly channel_key: string;
@@ -53,6 +83,7 @@ export interface GeneratedOpenClawChannel {
   readonly config_schema_present: boolean;
   readonly policy_shape: GeneratedOpenClawPolicyShape | null;
   readonly plugin_install: GeneratedOpenClawPluginInstall | null;
+  readonly credential_shape: GeneratedOpenClawCredentialShape;
 }
 
 export interface GeneratedOpenClawManifest {
@@ -85,7 +116,57 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
       },
-      "plugin_install": null
+      "plugin_install": null,
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "ClickClack",
+        "docs_path": "/channels/clickclack",
+        "fields": [
+          {
+            "name": "token",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "agentId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "baseUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "botUserId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "model",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "systemPrompt",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "workspace",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
+      }
     },
     {
       "id": "discord",
@@ -121,6 +202,50 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Discord (Bot API)",
+        "docs_path": "/channels/discord",
+        "fields": [
+          {
+            "name": "token",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "ackReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "activity",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "activityUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "applicationId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "proxy",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
       }
     },
     {
@@ -156,6 +281,44 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.5.29",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Feishu/Lark (飞书)",
+        "docs_path": "/channels/feishu",
+        "fields": [
+          {
+            "name": "appSecret",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "encryptKey",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "verificationToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "appId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookHost",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
       }
     },
     {
@@ -187,6 +350,46 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Google Chat (Chat API)",
+        "docs_path": "/channels/googlechat",
+        "fields": [
+          {
+            "name": "serviceAccount",
+            "secret": true,
+            "type": "string",
+            "file_alternative": "serviceAccountFile"
+          },
+          {
+            "name": "appPrincipal",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "audience",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "botUser",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": [
+          "serviceAccountFile"
+        ]
       }
     },
     {
@@ -214,7 +417,14 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
       },
-      "plugin_install": null
+      "plugin_install": null,
+      "credential_shape": {
+        "connect_method": "pairing",
+        "selection_label": "iMessage (imsg)",
+        "docs_path": "/channels/imessage",
+        "fields": [],
+        "file_alternatives": []
+      }
     },
     {
       "id": "irc",
@@ -241,7 +451,47 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
       },
-      "plugin_install": null
+      "plugin_install": null,
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "IRC (Server + Nick)",
+        "docs_path": "/channels/irc",
+        "fields": [
+          {
+            "name": "host",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "nick",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "password",
+            "secret": false,
+            "type": "string",
+            "file_alternative": "passwordFile"
+          },
+          {
+            "name": "realname",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "username",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": [
+          "passwordFile"
+        ]
+      }
     },
     {
       "id": "line",
@@ -277,6 +527,26 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "LINE (Messaging API)",
+        "docs_path": "/channels/line",
+        "fields": [
+          {
+            "name": "channelAccessToken",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "channelSecret",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
       }
     },
     {
@@ -308,6 +578,68 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Matrix (plugin)",
+        "docs_path": "/channels/matrix",
+        "fields": [
+          {
+            "name": "accessToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "password",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "ackReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "avatarUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "deviceId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "deviceName",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "homeserver",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "proxy",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "userId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
       }
     },
     {
@@ -335,7 +667,27 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
       },
-      "plugin_install": null
+      "plugin_install": null,
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Mattermost (plugin)",
+        "docs_path": "/channels/mattermost",
+        "fields": [
+          {
+            "name": "botToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "baseUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
+      }
     },
     {
       "id": "msteams",
@@ -371,6 +723,56 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Microsoft Teams (Teams SDK)",
+        "docs_path": "/channels/msteams",
+        "fields": [
+          {
+            "name": "appPassword",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "appId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "certificateThumbprint",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "managedIdentityClientId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "serviceUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "sharePointSiteId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "tenantId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
       }
     },
     {
@@ -407,6 +809,53 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Nextcloud Talk (self-hosted)",
+        "docs_path": "/channels/nextcloud-talk",
+        "fields": [
+          {
+            "name": "apiPassword",
+            "secret": true,
+            "type": "string",
+            "file_alternative": "apiPasswordFile"
+          },
+          {
+            "name": "botSecret",
+            "secret": true,
+            "type": "string",
+            "file_alternative": "botSecretFile"
+          },
+          {
+            "name": "apiUser",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "baseUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookHost",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookPublicUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": [
+          "apiPasswordFile",
+          "botSecretFile"
+        ]
       }
     },
     {
@@ -439,6 +888,20 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Nostr (NIP-04 DMs)",
+        "docs_path": "/channels/nostr",
+        "fields": [
+          {
+            "name": "privateKey",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
       }
     },
     {
@@ -457,6 +920,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "external",
         "min_host_version": ">=2026.3.22",
         "expected_integrity": "sha512-dPQbidUNWigC6V10vGW4i+GLH09x+6zUhafZRjuxkJ9GDu8o62WBsnUTojp4KqUH756hz+t2v9khiCRSi0dBDw=="
+      },
+      "credential_shape": {
+        "connect_method": "plugin_absent",
+        "selection_label": "Weixin（微信）",
+        "docs_path": "/channels/wechat",
+        "fields": [],
+        "file_alternatives": []
       }
     },
     {
@@ -475,6 +945,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "external",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": "sha512-5IxZriHJYACLLGqkCPPsTP9tas62kXEOFqTFAFMdunAM3SPhIJwVFRp0WvoP/m7L2PX85weD0g8LOtxM93VDYg=="
+      },
+      "credential_shape": {
+        "connect_method": "plugin_absent",
+        "selection_label": "Zalo ClawBot (QR)",
+        "docs_path": "/channels/zaloclawbot",
+        "fields": [],
+        "file_alternatives": []
       }
     },
     {
@@ -510,6 +987,40 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "QQ Bot (Official API)",
+        "docs_path": "/channels/qqbot",
+        "fields": [
+          {
+            "name": "clientSecret",
+            "secret": true,
+            "type": "string",
+            "file_alternative": "clientSecretFile"
+          },
+          {
+            "name": "appId",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "systemPrompt",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "upgradeUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": [
+          "clientSecretFile"
+        ]
       }
     },
     {
@@ -537,7 +1048,14 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
       },
-      "plugin_install": null
+      "plugin_install": null,
+      "credential_shape": {
+        "connect_method": "pairing",
+        "selection_label": "Signal (signal-cli)",
+        "docs_path": "/channels/signal",
+        "fields": [],
+        "file_alternatives": []
+      }
     },
     {
       "id": "slack",
@@ -573,6 +1091,50 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.5.12-beta.1",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Slack (Socket Mode)",
+        "docs_path": "/channels/slack",
+        "fields": [
+          {
+            "name": "appToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "botToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "signingSecret",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "userToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "ackReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "typingReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
       }
     },
     {
@@ -596,7 +1158,45 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
       },
-      "plugin_install": null
+      "plugin_install": null,
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "SMS (Twilio)",
+        "docs_path": "/channels/sms",
+        "fields": [
+          {
+            "name": "authToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "accountSid",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "fromNumber",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "messagingServiceSid",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "publicWebhookUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
+      }
     },
     {
       "id": "synology-chat",
@@ -623,6 +1223,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "pairing",
+        "selection_label": "Synology Chat (Webhook)",
+        "docs_path": "/channels/synology-chat",
+        "fields": [],
+        "file_alternatives": []
       }
     },
     {
@@ -650,7 +1257,57 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
       },
-      "plugin_install": null
+      "plugin_install": null,
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Telegram (Bot API)",
+        "docs_path": "/channels/telegram",
+        "fields": [
+          {
+            "name": "botToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookSecret",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "ackReaction",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "apiRoot",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "proxy",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookHost",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
+      }
     },
     {
       "id": "tlon",
@@ -677,6 +1334,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "pairing",
+        "selection_label": "Tlon (Urbit)",
+        "docs_path": "/channels/tlon",
+        "fields": [],
+        "file_alternatives": []
       }
     },
     {
@@ -704,6 +1368,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "pairing",
+        "selection_label": "Twitch (Chat)",
+        "docs_path": "/channels/twitch",
+        "fields": [],
+        "file_alternatives": []
       }
     },
     {
@@ -722,6 +1393,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "external",
         "min_host_version": null,
         "expected_integrity": "sha512-TCkP9as00WfEhgFWG8YL/rcmaWGIshAki2HQh83nTRccGfVBCoGjrEboTTqq3yDmK9koWTV11zi8u8A4dNtvug=="
+      },
+      "credential_shape": {
+        "connect_method": "plugin_absent",
+        "selection_label": "WeCom（企业微信）",
+        "docs_path": "/plugins/community#wecom",
+        "fields": [],
+        "file_alternatives": []
       }
     },
     {
@@ -760,6 +1438,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.25",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "pairing",
+        "selection_label": "WhatsApp (QR link)",
+        "docs_path": "/channels/whatsapp",
+        "fields": [],
+        "file_alternatives": []
       }
     },
     {
@@ -778,6 +1463,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "external",
         "min_host_version": null,
         "expected_integrity": "sha512-lH2I9/nsmrg7l0YJJSQhOSpWMEFBAa6FwKbZcRLDFHDT2+mOZkHa44XE+8KYN4VmorlUdAxHzpZQmVr7C98IuA=="
+      },
+      "credential_shape": {
+        "connect_method": "plugin_absent",
+        "selection_label": "Yuanbao (元宝)",
+        "docs_path": "/plugins/community#yuanbao",
+        "fields": [],
+        "file_alternatives": []
       }
     },
     {
@@ -814,6 +1506,38 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "credential",
+        "selection_label": "Zalo (Bot API)",
+        "docs_path": "/channels/zalo",
+        "fields": [
+          {
+            "name": "botToken",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookSecret",
+            "secret": true,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "proxy",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          },
+          {
+            "name": "webhookUrl",
+            "secret": false,
+            "type": "string",
+            "file_alternative": null
+          }
+        ],
+        "file_alternatives": []
       }
     },
     {
@@ -850,6 +1574,13 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "source": "official",
         "min_host_version": ">=2026.4.10",
         "expected_integrity": null
+      },
+      "credential_shape": {
+        "connect_method": "pairing",
+        "selection_label": "Zalo (Personal Account)",
+        "docs_path": "/channels/zalouser",
+        "fields": [],
+        "file_alternatives": []
       }
     }
   ]

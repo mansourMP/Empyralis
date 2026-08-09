@@ -1791,6 +1791,7 @@ function ChatTab({
 // ── Channels ────────────────────────────────────────────────────────────────
 
 import { IMessageSetupPanel } from "./IMessageSetupPanel";
+import { OpenClawChannelsPanel } from "./OpenClawChannelsPanel";
 import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
 import {
   isPersonalChannelStatusActive,
@@ -2287,6 +2288,28 @@ export function ChannelsTab({
           );
         })}
       </div>
+
+      {/* The OpenClaw transport (CHANNEL-ADOPTION-PLAN.md step 8). Its own
+          component, deliberately NOT wired into the grid above: that grid is
+          the outgoing per-channel implementation step 6 retires one platform
+          at a time, and growing it would be building on a system that is being
+          replaced. This section is the replacement, and it has no per-channel
+          code at all — every channel in it, and every field of every form,
+          comes from the pinned OpenClaw manifest.
+
+          Gated on the agent having a box, because the transport runs on
+          hardware and hardware attaches to its owner. No box means nothing to
+          configure, so nothing renders — never a disabled panel explaining
+          itself, which is a dead control with a caption. */}
+      {agentGatewayId ? (
+        <div style={{ marginTop: "var(--space-8)" }}>
+          <OpenClawChannelsPanel
+            workspaceId={workspaceId}
+            gatewayId={agentGatewayId}
+            agentId={agentId}
+          />
+        </div>
+      ) : null}
 
       {activePlatform && (
         <div

@@ -36,6 +36,7 @@ import {
   OpenClawProvisioningRuntime,
   defaultBridgePluginPath,
 } from "./openclaw/provisioning/openclaw-provisioning-runtime";
+import { OpenClawChannelSetupRuntime } from "./openclaw/provisioning/openclaw-channel-setup";
 import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
@@ -396,6 +397,20 @@ async function main(): Promise<void> {
           record: (messageType, payload) => journal.append("system", messageType, payload),
         })
       : null;
+  // The credential half of channel setup, gated on the SAME condition as
+  // provisioning above: no OpenClaw instance on this box means no credential
+  // to write and nothing to read three states from. Kept a separate runtime
+  // from provisioning because the two answer to different authorities —
+  // Empyralis owns and regenerates the policy, the OWNER owns the credential
+  // and nothing may regenerate it.
+  const openclawChannelSetupRuntime =
+    config.openclawBridgeToken && config.openclawGatewayToken
+      ? new OpenClawChannelSetupRuntime({
+          profile: config.openclawProfile,
+          binaryPath: config.openclawBinaryPath,
+          record: (messageType, payload) => journal.append("system", messageType, payload),
+        })
+      : null;
   const capabilityRouter = new GatewayCapabilityRouter(
     browserRuntime,
     personalChannelRuntimes,
@@ -407,6 +422,7 @@ async function main(): Promise<void> {
     doctorRuntime,
     restartRuntime,
     openclawProvisioningRuntime ?? undefined,
+    openclawChannelSetupRuntime ?? undefined,
   );
   getDoctorRequestedCapabilities = () => capabilityRouter.supportedCapabilities();
   const identity = await resolveDeviceIdentity(db, {

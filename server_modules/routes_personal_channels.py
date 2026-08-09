@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -13,6 +13,8 @@ from server_modules.safety_error_contract import kill_switch_error, to_http_body
 from server_modules import (
     channel_lane_contract_service,
     gateway_state_repository,
+    openclaw_channel_registry,
+    openclaw_channel_setup_service,
     openclaw_provisioning_service,
     personal_channels_service,
     security_audit_service,
@@ -1163,6 +1165,150 @@ async def provision_openclaw_transport(
         },
     )
     return {"gateway_id": gateway_id, "agent_id": normalized_agent_id, "openclaw_provisioning": result}
+
+
+# ── Channel setup from the browser: three states, one credential ────────
+#
+# The read is deliberately a JOIN of two different things, kept separable:
+#
+#   catalog   the GENERATED setup form. A property of the pinned OpenClaw and
+#             therefore knowable from the repository alone, so an offline box
+#             still renders the right form for every channel.
+#   observed  installed / configured / enabled, read off the box itself.
+#             Absent when the box cannot be reached, and SAID SO — never
+#             defaulted to "not connected", which reads as a fact about the
+#             channel when it is a fact about the network.
+#
+# The write is a PASS-THROUGH. Nothing here persists the credential; see
+# openclaw_channel_setup_service's module docstring for why that beats the
+# vault, and note the consequence that no GET on this router can return one.
+
+
+@router.get("/personal-channels/openclaw/gateways/{gateway_id}/setup")
+async def get_openclaw_channel_setup(
+    request: Request,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+):
+    """The generated setup form per channel, joined with observed device state.
+
+    "viewer", matching the other read routes: this returns no secret and cannot
+    return one — the only credential-shaped data in the response is a per-field
+    `set` boolean, and OpenClaw redacts secret values before they ever leave the
+    customer's machine.
+    """
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="viewer",
+    )
+    catalog = openclaw_channel_setup_service.openclaw_channel_setup_catalog()
+    observed: Optional[Dict[str, Any]] = None
+    observed_error: Optional[str] = None
+    try:
+        observed = await openclaw_channel_setup_service.read_channel_setup_state(
+            gateway_id=gateway_id,
+            workspace_id=str(registration.get("workspace_id") or "default"),
+            actor_id=str(current_user.get("id") or "") or None,
+        )
+    except openclaw_channel_setup_service.OpenClawProvisioningError as exc:
+        # An unreachable box is not a 4xx on a READ: the catalog half is still
+        # true and still worth rendering, and collapsing "we could not ask" into
+        # "the channel is not connected" is exactly the state confusion this
+        # screen exists to remove.
+        observed_error = str(exc)
+    return {
+        "gateway_id": gateway_id,
+        "openclaw_version": openclaw_channel_registry.OPENCLAW_VERSION,
+        "channels": catalog,
+        "observed": observed,
+        "observed_error": observed_error,
+    }
+
+
+class OpenClawChannelCredentialRequest(BaseModel):
+    """`values`: field name -> value, for fields in the channel's derived shape.
+
+    A field left OUT is left unchanged on the box (`config patch` merges). There
+    is deliberately no "clear" here: an empty string is not a decision, and
+    reading one as "delete this credential" is how a save that meant nothing
+    takes a working channel down.
+    """
+
+    values: Dict[str, str]
+
+
+@router.put("/personal-channels/openclaw/gateways/{gateway_id}/channels/{channel_key}/credential")
+async def put_openclaw_channel_credential(
+    request: Request,
+    gateway_id: str,
+    channel_key: str,
+    payload: OpenClawChannelCredentialRequest,
+    current_user=Depends(require_api_key),
+):
+    """Send an owner-supplied channel credential to their own machine.
+
+    "member", matching the provision route: this writes into the config of a
+    process running on the customer's computer.
+
+    The response carries the RE-READ device state, never the submitted values.
+    """
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="member",
+    )
+    normalized_key = str(channel_key or "").strip().lower()
+    if not openclaw_channel_registry.is_openclaw_channel_key(normalized_key):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{channel_key!r} is not an OpenClaw-transported channel.",
+        )
+    try:
+        result = await openclaw_channel_setup_service.write_channel_credential(
+            gateway_id=gateway_id,
+            workspace_id=str(registration.get("workspace_id") or "default"),
+            channel_key=normalized_key,
+            values=payload.values,
+            actor_id=str(current_user.get("id") or "") or None,
+        )
+    except openclaw_channel_setup_service.OpenClawProvisioningError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.openclaw.credential",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_key,
+            detail=str(exc),
+            # FIELD NAMES only. An audit row is durable; a value in one is a
+            # permanent leak, and this is the one path a value passes through.
+            metadata={"fields": sorted(str(name) for name in (payload.values or {}))},
+        )
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    refused = str(result.get("status") or "") == "refused"
+    _emit_personal_channel_audit(
+        action="personal_channel.openclaw.credential",
+        status="denied" if refused else "success",
+        registration=registration,
+        current_user=current_user,
+        gateway_id=gateway_id,
+        channel_key=normalized_key,
+        detail=(
+            "The computer refused the channel credential."
+            if refused
+            else "A channel credential was written on this computer."
+        ),
+        metadata={
+            "fields": sorted(str(name) for name in (result.get("written_fields") or [])),
+            "refusal_code": (result.get("refusal") or {}).get("code")
+            if isinstance(result.get("refusal"), dict)
+            else None,
+        },
+    )
+    return {"gateway_id": gateway_id, "channel_key": normalized_key, "openclaw_channel_setup": result}
 
 
 # ── Stage 2: Cloud Session Manager inbound ──────────────────────

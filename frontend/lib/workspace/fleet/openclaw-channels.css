@@ -1,0 +1,257 @@
+/* Channel setup for the OpenClaw transport.
+ *
+ * Theme-agnostic by construction: every colour here is a token from
+ * lib/ui/theme-tokens.css, so light and dark are the same stylesheet. Nothing
+ * is hard-coded, and there is no `@media (prefers-color-scheme)` — the app
+ * stamps `data-theme` on <html> and the tokens flip underneath.
+ *
+ * ACCENT DISCIPLINE: not one rule in this file paints `--accent`. The single
+ * accent-filled control on the screen is `.fleet-btn--accent-fill`, applied to
+ * exactly one button per view (the toolbar's primary action in the list, the
+ * dialog's Save in the dialog). Row actions are neutral on purpose — a list
+ * where every row shouts has no primary action at all.
+ */
+
+.openclaw-toolbar {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin: var(--space-4) 0;
+}
+
+.openclaw-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  margin: var(--space-3) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-inset);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.openclaw-banner svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--warning-text);
+}
+
+/* Dense inside the group, airy between groups: rows share a hairline and sit
+   tight; the list itself is separated from what surrounds it. */
+.openclaw-channel-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  background: var(--bg-card);
+}
+
+.openclaw-channel-row {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.openclaw-channel-row:last-child {
+  border-bottom: none;
+}
+
+.openclaw-channel-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.openclaw-channel-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+/* OpenClaw's own selection label — "Telegram (Bot API)", "WhatsApp (QR link)".
+   Their words, not ours, so it cannot drift from their product. */
+.openclaw-channel-selection {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.openclaw-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+/* One chip per independent fact. They are deliberately the same size and
+   weight: none of the three is more important than the others, and rendering
+   one as a "status" and the rest as detail is the collapse this screen
+   exists to avoid. */
+.openclaw-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-2);
+  height: 18px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.openclaw-chip--ok {
+  color: var(--online-text);
+  border-color: var(--border-strong);
+}
+
+.openclaw-chip--off {
+  color: var(--text-muted);
+}
+
+.openclaw-chip--secret {
+  margin-left: var(--space-2);
+  color: var(--text-secondary);
+}
+
+.openclaw-channel-detail {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.5;
+  max-width: 62ch;
+}
+
+.openclaw-channel-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.openclaw-ready {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--online-text);
+  white-space: nowrap;
+}
+
+.openclaw-ready--muted {
+  color: var(--text-muted);
+}
+
+.openclaw-docs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.openclaw-docs:hover {
+  color: var(--text-secondary);
+  text-decoration: underline;
+}
+
+/* ── The generated credential form ───────────────────────────────────── */
+
+.openclaw-dialog {
+  width: min(520px, calc(100vw - var(--space-8)));
+  max-height: calc(100vh - var(--space-8));
+  overflow-y: auto;
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel);
+  box-shadow: var(--panel-shadow);
+}
+
+.openclaw-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.openclaw-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.openclaw-form-field label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+/* The field name is OpenClaw's config key, verbatim. Monospaced because it is
+   an identifier the owner will also see in their platform's own docs — a
+   prettified "App Secret" would be a translation we would then have to keep. */
+.openclaw-form-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+}
+
+.openclaw-form-note {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin: 0 0 var(--space-4);
+  line-height: 1.5;
+}
+
+.openclaw-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.openclaw-spin {
+  animation: openclaw-spin var(--dur-3, 200ms) linear infinite;
+  animation-duration: 900ms;
+}
+
+@keyframes openclaw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .openclaw-spin {
+    animation: none;
+  }
+}
+
+/* Narrow viewport: the row stops being two columns rather than squeezing the
+   action off the edge. */
+@media (max-width: 720px) {
+  .openclaw-channel-row {
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .openclaw-channel-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}

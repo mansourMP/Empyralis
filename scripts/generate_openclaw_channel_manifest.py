@@ -72,6 +72,12 @@ SOURCES OF TRUTH, AND WHY THESE THREE
        because "neither" means a channel we would advertise and never be able
        to install, and "both" means we cannot tell which code would load.
 
+    6. (4) again + (2)/(3)'s `openclaw.channel` block  -> CREDENTIAL SHAPE
+       What an owner actually types to connect the channel, and how. See
+       "THE CREDENTIAL SHAPE DERIVATION" below — this is the thing that makes
+       a browser setup form generated rather than hand-written, so a channel
+       OpenClaw adds later grows its own form with no Empyralis code change.
+
 (1) and (2)+(3) are INDEPENDENT sources for the same set — a live CLI query
 versus files on disk. Generation fails if they disagree. That is deliberate:
 CLAUDE.md, "a check that derives its own expectations from the thing it checks
@@ -85,20 +91,85 @@ iMessage backend; `qa-channel`, a test fixture). The manifest records
 `policy_shape: null` for the former and never invents a channel from the
 latter — the id set comes from (1), never from the schema.
 
+THE CREDENTIAL SHAPE DERIVATION (source 6)
+------------------------------------------
+A setup form per channel is the same defect as a channel list per channel:
+twenty-four hand-written forms would go stale the day upstream renames a
+field, and would simply not exist for the twenty-fifth channel. So the form
+is DERIVED from `openclaw config schema`, in this one pass, alongside the
+policy shape it already derives from the same document.
+
+A property of `channels.<id>` is a credential field iff it is a leaf scalar
+AND one of:
+
+  (S) SECRET — its node is OpenClaw's own SecretRef union:
+
+        anyOf[ {type: "string"},
+               oneOf[ {source: {const: "env"|"file"|"exec"}, provider, id} ] ]
+
+      That union is the type OpenClaw gives a value it will resolve out of an
+      env var, a file, or an exec provider — i.e. THEIR declaration that the
+      value is a credential, not ours. It is corroborated independently by
+      their per-plugin `dist/*secret-contract*.js`, whose
+      `secretTargetRegistryEntries` name exactly the same paths (Feishu:
+      appSecret / encryptKey / verificationToken). Two unrelated readers, one
+      answer, so the structural read is trusted for the channels whose plugin
+      is not installed here.
+
+  (I) IDENTIFIER — a plain `{"type": "string"}` with no default, no enum,
+      that is not a filesystem path (`*File` / `*Path` / `*Dir` / `*Roots` —
+      an alternative input mode for a value you can also paste, and never
+      something a browser form should be setting on someone's machine), is
+      not part of the policy surface source 4 already derives, AND whose NAME
+      is channel-specific rather than shared boilerplate.
+
+      "Channel-specific" is COMPUTED, never judged. A property name carried
+      by more than GENERIC_FIELD_NAME_CHANNEL_LIMIT of the schema's channel
+      nodes is boilerplate every channel has (`name`, `responsePrefix`,
+      `defaultAccount`, `historyLimit`, `webhookPath`, `enabled`, …), while a
+      credential companion is unique to its platform by nature (`appId`,
+      `accountSid`, `tenantId`, `homeserver`, `channelAccessToken`). The two
+      inputs to that test are different axes of the same document — one
+      channel's own property set versus the cross-channel frequency of a name
+      — so it is not a check deriving its expectations from the thing it
+      checks.
+
+      Secrets are EXEMPT from the frequency test. `botToken` is carried by
+      four channels and is still a credential; a value OpenClaw types as a
+      secret is a credential however many platforms share the word.
+
+CONNECT METHOD — three honest states, all derived, none listed:
+
+    credential   the derivation found fields. render them.
+    pairing      the schema declares NO credential field at all. There is
+                 nothing to paste: WhatsApp/iMessage/Twitch/Synology-Chat
+                 link by QR, by a local database, or by a webhook the other
+                 side posts to. A token form here would be a dead control.
+    plugin_absent  the channel has no `channels.<id>` schema node yet, because
+                 its plugin contributes one only once installed. We cannot
+                 know its fields and must not guess them.
+
+`selection_label` and `docs_path` come from (2)/(3)'s `openclaw.channel`
+block — their own words for how a channel connects ("WhatsApp (QR link)",
+"Telegram (Bot API)", "SMS (Twilio)", "IRC (Server + Nick)"), which is
+better copy than anything we would write and cannot go stale against them.
+
 ISOLATION: every OpenClaw invocation runs under a throwaway HOME, so this
 never reads or writes the operator's own ~/.openclaw.
 """
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYTHON_MANIFEST_PATH = REPO_ROOT / "server_modules" / "openclaw_channel_manifest.json"
@@ -114,6 +185,59 @@ CHANNEL_KEY_PREFIX = "openclaw_"
 # failure wearing a plausible answer, not an upstream removal. Raise this when
 # upstream genuinely grows; never lower it to make a run succeed.
 MINIMUM_EXPECTED_CHANNELS = 20
+
+# A leaf-scalar property name carried by MORE than this many of the schema's
+# channel nodes is shared boilerplate, not a credential companion. See "THE
+# CREDENTIAL SHAPE DERIVATION" in the module docstring. Measured against the
+# pinned build: the frequency distribution has a wide gap here (the generic
+# names run 22/20/19/17/16/14/…/6, the channel-specific ones 4 and below), so
+# the cut is not balanced on a knife edge. Secrets bypass this test entirely.
+GENERIC_FIELD_NAME_CHANNEL_LIMIT = 5
+
+# Filesystem-path fields. OpenClaw offers a `<name>File` variant for most
+# credentials so an operator can keep the value off the config file; that is a
+# second input mode for the SAME secret, not a second credential, and a path on
+# the customer's machine is not something a browser form may set. Recorded as
+# `file_alternative` on the field it belongs to so nothing is silently lost.
+_PATH_FIELD_SUFFIX = re.compile(r"(File|Path|Dir|Roots)$")
+
+# The properties source 4 already claims as the POLICY surface. Provisioning
+# generates every one of these from Empyralis's own database
+# (`openclaw-config-plan.ts`), so a setup form that offered them would be
+# offering to fight the next reconcile. Named by their schema key because that
+# is what source 4 reads them under — this is the policy/credential seam, not
+# a per-channel list: it does not grow when upstream adds a channel.
+_POLICY_SURFACE_FIELDS = frozenset(
+    {
+        "dmPolicy",
+        "groupPolicy",
+        "requireMention",
+        "groups",
+        "teams",
+        "rooms",
+        "guilds",
+        "channels",
+        "dms",
+        "dm",
+        "allowFrom",
+        "groupAllowFrom",
+        "groupSenderAllowFrom",
+        "autoJoinAllowlist",
+        "allowlistOnly",
+        "configWrites",
+        "pluginHooks",
+        "tools",
+        "enabled",
+        "threadBindings",
+        "mentionPatterns",
+        "mentionAliases",
+        "execApprovals",
+    }
+)
+
+CONNECT_METHOD_CREDENTIAL = "credential"
+CONNECT_METHOD_PAIRING = "pairing"
+CONNECT_METHOD_PLUGIN_ABSENT = "plugin_absent"
 
 
 class GenerationError(RuntimeError):
@@ -199,14 +323,17 @@ def _catalog_origins(home: Path) -> Dict[str, str]:
     return origins
 
 
-def _disk_labels(package_root: Path) -> Dict[str, str]:
-    """Sources 2 + 3 — id -> display label, read off disk.
+def _disk_channel_meta(package_root: Path) -> Dict[str, Dict[str, Any]]:
+    """Sources 2 + 3 — id -> their whole `openclaw.channel` block, off disk.
 
     Mirrors their own `listBundledChannelCatalogEntries()`: the generated
     official catalog plus every bundled plugin manifest that declares
-    `openclaw.channel`.
+    `openclaw.channel`. The block carries the display label AND their own
+    one-line description of how the channel connects (`selectionLabel`:
+    "WhatsApp (QR link)", "Telegram (Bot API)", "SMS (Twilio)") plus a docs
+    path, all of which the setup UI shows verbatim rather than re-writing.
     """
-    labels: Dict[str, str] = {}
+    meta: Dict[str, Dict[str, Any]] = {}
 
     catalog_path = package_root / "dist" / "channel-catalog.json"
     catalog = json.loads(catalog_path.read_text())
@@ -217,7 +344,7 @@ def _disk_labels(package_root: Path) -> Dict[str, str]:
         channel = ((entry or {}).get("openclaw") or {}).get("channel") or {}
         channel_id = str(channel.get("id") or "").strip().lower()
         if channel_id:
-            labels[channel_id] = str(channel.get("label") or channel_id)
+            meta[channel_id] = dict(channel)
 
     extensions_dir = package_root / "dist" / "extensions"
     if not extensions_dir.is_dir():
@@ -230,9 +357,17 @@ def _disk_labels(package_root: Path) -> Dict[str, str]:
         channel = (manifest.get("openclaw") or {}).get("channel") or {}
         channel_id = str(channel.get("id") or "").strip().lower()
         if channel_id:
-            labels.setdefault(channel_id, str(channel.get("label") or channel_id))
+            meta.setdefault(channel_id, dict(channel))
 
-    return labels
+    return meta
+
+
+def _disk_labels(package_root: Path) -> Dict[str, str]:
+    """Sources 2 + 3 — id -> display label."""
+    return {
+        channel_id: str(channel.get("label") or channel_id)
+        for channel_id, channel in _disk_channel_meta(package_root).items()
+    }
 
 
 def _split_npm_spec(spec: str) -> tuple[str, Optional[str]]:
@@ -365,21 +500,8 @@ def _properties(node: Any) -> Dict[str, Any]:
     return props if isinstance(props, dict) else {}
 
 
-def _policy_shapes(home: Path) -> Dict[str, Dict[str, Any]]:
+def _policy_shapes(channels: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """Source 4 — per-channel policy shape, from `openclaw config schema`."""
-    raw = _run_openclaw(["config", "schema"], home=home)
-    try:
-        schema = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise GenerationError(f"`openclaw config schema` was not JSON: {exc}") from exc
-
-    channels = _properties(_properties(schema).get("channels"))
-    if not channels:
-        raise GenerationError(
-            "`openclaw config schema` declared no `channels` properties. "
-            "Refusing to generate a manifest with no policy shapes."
-        )
-
     shapes: Dict[str, Dict[str, Any]] = {}
     for channel_id, node in channels.items():
         props = _properties(node)
@@ -408,6 +530,207 @@ def _policy_shapes(home: Path) -> Dict[str, Dict[str, Any]]:
     return shapes
 
 
+def _is_secret_ref_union(node: Any) -> bool:
+    """True when a schema node is OpenClaw's own SecretRef union.
+
+    Their shape, verbatim from `openclaw config schema`:
+
+        anyOf: [ {type: "string"},
+                 oneOf: [ {type: "object",
+                           properties: {source: {const: "env"},
+                                        provider: {...}, id: {...}},
+                           required: ["source","provider","id"]},
+                          ... "file", "exec" ] ]
+
+    Recognised STRUCTURALLY: a plain-string branch beside a branch of objects
+    that each pin `source` to a const and require `provider`+`id`. No field
+    name is ever consulted, so a credential upstream adds tomorrow is found by
+    the same rule that finds `botToken` today.
+    """
+    if not isinstance(node, dict):
+        return False
+    branches = node.get("anyOf") if isinstance(node.get("anyOf"), list) else node.get("oneOf")
+    if not isinstance(branches, list):
+        return False
+
+    def _plain_string(branch: Any) -> bool:
+        return isinstance(branch, dict) and branch.get("type") == "string" and "enum" not in branch
+
+    def _secret_ref(branch: Any) -> bool:
+        if not isinstance(branch, dict):
+            return False
+        candidates: List[Any] = [branch]
+        for key in ("oneOf", "anyOf"):
+            if isinstance(branch.get(key), list):
+                candidates.extend(branch[key])
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            props = candidate.get("properties")
+            if not isinstance(props, dict):
+                continue
+            source = props.get("source")
+            if not isinstance(source, dict) or not isinstance(source.get("const"), str):
+                continue
+            if "provider" in props and "id" in props:
+                return True
+        return False
+
+    return any(_plain_string(branch) for branch in branches) and any(
+        _secret_ref(branch) for branch in branches
+    )
+
+
+def _leaf_scalar_type(node: Any) -> Optional[str]:
+    """`"secret"` / `"string"` / `"number"` / `"boolean"`, or None when the
+    node is a composite (object/array/union of shapes) that no single form
+    control can express."""
+    if not isinstance(node, dict):
+        return None
+    if _is_secret_ref_union(node):
+        return "secret"
+    node_type = node.get("type")
+    if node_type == "string":
+        return "string"
+    if node_type in ("number", "integer"):
+        return "number"
+    if node_type == "boolean":
+        return "boolean"
+    return None
+
+
+def _channel_schema_nodes(home: Path) -> Dict[str, Any]:
+    raw = _run_openclaw(["config", "schema"], home=home)
+    try:
+        schema = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GenerationError(f"`openclaw config schema` was not JSON: {exc}") from exc
+    channels = _properties(_properties(schema).get("channels"))
+    if not channels:
+        raise GenerationError(
+            "`openclaw config schema` declared no `channels` properties. "
+            "Refusing to generate a manifest with no policy shapes."
+        )
+    return channels
+
+
+def _generic_field_names(channel_nodes: Dict[str, Any]) -> Dict[str, int]:
+    """Leaf-scalar property name -> how many channel nodes carry it.
+
+    The cross-channel axis of the credential derivation. A name shared by many
+    platforms is boilerplate the transport gives every channel; a credential
+    companion belongs to one platform.
+    """
+    counts: collections.Counter = collections.Counter()
+    for node in channel_nodes.values():
+        for field_name, field_node in _properties(node).items():
+            if _leaf_scalar_type(field_node) is not None:
+                counts[field_name] += 1
+    return dict(counts)
+
+
+def _credential_fields(
+    channel_node: Any, *, name_frequency: Dict[str, int]
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """The owner-supplied connection fields for one channel, plus the path
+    fields that were folded into them as `file_alternative`."""
+    props = _properties(channel_node)
+    path_fields = {name for name in props if _PATH_FIELD_SUFFIX.search(name)}
+
+    # ── Does this channel take a pasted credential AT ALL? ───────────────
+    # Two independent schema signals, and a channel needs neither typed out:
+    #   * a SecretRef field (their own credential type), or
+    #   * a `<name>File` field — OpenClaw offers a file-backed variant ONLY
+    #     for values that are credentials, which is why LINE (whose
+    #     `channelAccessToken`/`channelSecret` are plain strings, so signal one
+    #     misses them) still lands here via `tokenFile`/`secretFile`, and why
+    #     IRC's `password` is caught by `passwordFile`.
+    # Neither present means there is nothing to paste: WhatsApp, iMessage,
+    # Signal, Twitch, Synology Chat, Zalo Personal and Tlon each link by QR, by
+    # a local database, by signal-cli, or by an inbound webhook. Rendering a
+    # token form for one of those is a dead control, which is a product law.
+    takes_pasted_credential = bool(
+        any(_is_secret_ref_union(node) for node in props.values())
+        or any(name.endswith("File") for name in props)
+    )
+    if not takes_pasted_credential:
+        return [], []
+
+    fields: List[Dict[str, Any]] = []
+    consumed_paths: List[str] = []
+    for field_name, field_node in props.items():
+        if field_name in _POLICY_SURFACE_FIELDS or field_name in path_fields:
+            continue
+        field_type = _leaf_scalar_type(field_node)
+        if field_type is None:
+            continue
+        secret = field_type == "secret"
+        if not secret:
+            # (I) IDENTIFIER — a plain string the owner types, kept only when
+            # the name is channel-specific. Anything with a default or an enum
+            # is a behaviour knob OpenClaw can run without, and a non-string
+            # scalar is never a credential.
+            if field_type != "string":
+                continue
+            if "default" in field_node or "enum" in field_node or "const" in field_node:
+                continue
+            if name_frequency.get(field_name, 0) > GENERIC_FIELD_NAME_CHANNEL_LIMIT:
+                continue
+
+        # A `<name>File` sibling is the same credential read off disk instead.
+        # Recorded, never rendered: a form has no business writing a path on
+        # someone else's machine.
+        file_alternative = next(
+            (candidate for candidate in (f"{field_name}File",) if candidate in path_fields),
+            None,
+        )
+        if file_alternative:
+            consumed_paths.append(file_alternative)
+        fields.append(
+            {
+                "name": field_name,
+                "secret": secret,
+                "type": "string" if secret else field_type,
+                "file_alternative": file_alternative,
+            }
+        )
+
+    fields.sort(key=lambda field: (not field["secret"], field["name"]))
+    return fields, sorted(set(consumed_paths))
+
+
+def _credential_shapes(
+    channel_nodes: Dict[str, Any], channel_meta: Dict[str, Dict[str, Any]], ids: List[str]
+) -> Dict[str, Dict[str, Any]]:
+    """Source 6 — the generated setup form, one per channel."""
+    name_frequency = _generic_field_names(channel_nodes)
+    shapes: Dict[str, Dict[str, Any]] = {}
+    for channel_id in ids:
+        meta = channel_meta.get(channel_id) or {}
+        node = channel_nodes.get(channel_id)
+        if node is None:
+            # The plugin contributes `channels.<id>` only once installed, so
+            # its fields are genuinely unknown here. Saying so beats guessing.
+            connect_method = CONNECT_METHOD_PLUGIN_ABSENT
+            fields: List[Dict[str, Any]] = []
+            file_alternatives: List[str] = []
+        else:
+            fields, file_alternatives = _credential_fields(node, name_frequency=name_frequency)
+            connect_method = (
+                CONNECT_METHOD_CREDENTIAL if fields else CONNECT_METHOD_PAIRING
+            )
+        shapes[channel_id] = {
+            "connect_method": connect_method,
+            # Their own words for how this channel connects. Better copy than
+            # ours and it cannot drift from their product.
+            "selection_label": str(meta.get("selectionLabel") or meta.get("label") or channel_id),
+            "docs_path": (str(meta["docsPath"]).strip() if meta.get("docsPath") else None),
+            "fields": fields,
+            "file_alternatives": file_alternatives,
+        }
+    return shapes
+
+
 def build_manifest() -> Dict[str, Any]:
     package_root = _openclaw_package_root()
     with tempfile.TemporaryDirectory(prefix="empyralis-openclaw-manifest-") as tmp:
@@ -415,10 +738,16 @@ def build_manifest() -> Dict[str, Any]:
         version = _parse_version(_run_openclaw(["--version"], home=home))
         ids = _catalog_ids(home)
         origins = _catalog_origins(home)
-        shapes = _policy_shapes(home)
+        channel_nodes = _channel_schema_nodes(home)
+        shapes = _policy_shapes(channel_nodes)
 
-    labels = _disk_labels(package_root)
+    channel_meta = _disk_channel_meta(package_root)
+    labels = {
+        channel_id: str(meta.get("label") or channel_id)
+        for channel_id, meta in channel_meta.items()
+    }
     plugin_installs = _plugin_installs(package_root, ids)
+    credential_shapes = _credential_shapes(channel_nodes, channel_meta, ids)
 
     # ── The two-source conformance check ─────────────────────────────────
     # `channels list --all --json` (their live registry) versus the on-disk
@@ -465,6 +794,12 @@ def build_manifest() -> Dict[str, Any]:
                 # install"), not "unknown" — the partition check above is what
                 # makes that reading safe.
                 "plugin_install": plugin_installs.get(channel_id),
+                # Source 6 — the generated setup form. Never null: a channel
+                # whose plugin has not contributed a schema node still gets a
+                # shape saying exactly that (`connect_method:
+                # "plugin_absent"`), because "we cannot know yet" is a state
+                # the owner has to be shown, not an absence to render blank.
+                "credential_shape": credential_shapes[channel_id],
             }
         )
 
@@ -561,6 +896,36 @@ export interface GeneratedOpenClawPluginInstall {{
   readonly expected_integrity: string | null;
 }}
 
+/** One control on the generated setup form. Derived from OpenClaw's own
+ *  config schema — `secret: true` is THEIR SecretRef union, not our guess. */
+export interface GeneratedOpenClawCredentialField {{
+  readonly name: string;
+  readonly secret: boolean;
+  readonly type: "string" | "number" | "boolean";
+  /** A `<name>File` sibling OpenClaw also accepts. Recorded so the pair is
+   *  visible; never rendered — a browser form may not write a path on the
+   *  owner's machine. */
+  readonly file_alternative: string | null;
+}}
+
+/** How an owner connects this channel, and what they type to do it.
+ *
+ *  `connect_method`:
+ *    "credential"     fields below. render them.
+ *    "pairing"        the schema declares no credential field at all — this
+ *                     channel links by QR / local pairing / inbound webhook.
+ *                     Rendering a token form here would be a dead control.
+ *    "plugin_absent"  the plugin contributes `channels.<id>` only once
+ *                     installed, so its fields are not knowable yet. */
+export interface GeneratedOpenClawCredentialShape {{
+  readonly connect_method: "credential" | "pairing" | "plugin_absent";
+  /** OpenClaw's own selection label — "WhatsApp (QR link)", "SMS (Twilio)". */
+  readonly selection_label: string;
+  readonly docs_path: string | null;
+  readonly fields: readonly GeneratedOpenClawCredentialField[];
+  readonly file_alternatives: readonly string[];
+}}
+
 export interface GeneratedOpenClawChannel {{
   readonly id: string;
   readonly channel_key: string;
@@ -569,6 +934,7 @@ export interface GeneratedOpenClawChannel {{
   readonly config_schema_present: boolean;
   readonly policy_shape: GeneratedOpenClawPolicyShape | null;
   readonly plugin_install: GeneratedOpenClawPluginInstall | null;
+  readonly credential_shape: GeneratedOpenClawCredentialShape;
 }}
 
 export interface GeneratedOpenClawManifest {{

@@ -22,6 +22,7 @@ import {
 } from "../runtime/desktop-permissions";
 import { openClawTransportCapabilities } from "../openclaw/capabilities";
 import { OpenClawProvisioningRuntime } from "../openclaw/provisioning/openclaw-provisioning-runtime";
+import { OpenClawChannelSetupRuntime } from "../openclaw/provisioning/openclaw-channel-setup";
 
 const RUN_EXECUTOR_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -86,6 +87,12 @@ export class GatewayCapabilityRouter {
     // can provision and what we can actually provision are never two
     // different sets). See openclaw/provisioning/openclaw-provisioning-runtime.ts.
     private readonly openClawProvisioningRuntime?: OpenClawProvisioningRuntime,
+    // openclaw.channel_setup: reads the three per-channel states (plugin
+    // installed / credential present / channel enabled) and writes the ONE
+    // value provisioning must never generate — the owner's own credential.
+    // Gated on the same condition as openclaw.provision above, for the same
+    // reason. See openclaw/provisioning/openclaw-channel-setup.ts.
+    private readonly openClawChannelSetupRuntime?: OpenClawChannelSetupRuntime,
   ) {}
 
   supportedCapabilities(): string[] {
@@ -116,6 +123,7 @@ export class GatewayCapabilityRouter {
       ...(this.doctorRuntime?.requestedCapabilities() ?? []),
       ...(this.restartRuntime?.requestedCapabilities() ?? []),
       ...(this.openClawProvisioningRuntime?.requestedCapabilities() ?? []),
+      ...(this.openClawChannelSetupRuntime?.requestedCapabilities() ?? []),
     ];
   }
 
@@ -254,6 +262,18 @@ export class GatewayCapabilityRouter {
     if (this.openClawProvisioningRuntime?.supportsCapability(capabilityId)) {
       this.trackExecutor(runId, "openclaw_provision");
       const result = await this.openClawProvisioningRuntime.handleCapabilityInvoke(
+        frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
+      );
+      return {
+        request_id: frame.id,
+        capability_id: capabilityId,
+        run_id: runId,
+        result,
+      };
+    }
+    if (this.openClawChannelSetupRuntime?.supportsCapability(capabilityId)) {
+      this.trackExecutor(runId, "openclaw_provision");
+      const result = await this.openClawChannelSetupRuntime.handleCapabilityInvoke(
         frame as unknown as GatewayRequestEnvelope<GatewayToolInvokePayload>,
       );
       return {

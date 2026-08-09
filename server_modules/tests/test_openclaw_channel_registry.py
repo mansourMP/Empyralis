@@ -174,10 +174,29 @@ class OpenClawChannelSetIsDerivedTests(unittest.TestCase):
                 "plugin_hook_flags": [],
                 "unhandled_plugin_hook_flags": [],
             },
+            # Emitted by the generator for every channel, from the same
+            # `openclaw config schema` parse as the policy shape above. Present
+            # here because the claim under test is that an upstream channel
+            # reaches a usable lane — and "usable" now includes a setup form
+            # somebody can actually fill in, which is generated too.
+            "credential_shape": {
+                "connect_method": "credential",
+                "selection_label": "Not A Real Channel (Bot API)",
+                "docs_path": "/channels/notarealchannel",
+                "fields": [
+                    {"name": "botToken", "secret": True, "type": "string", "file_alternative": None}
+                ],
+                "file_alternatives": [],
+            },
         }
         channel = openclaw_channel_registry.OpenClawChannel(invented)
         self.assertEqual(channel.channel_key, "openclaw_notarealchannel")
         self.assertEqual(channel.label, "Not A Real Channel")
+        # The form for a channel nobody wrote code for exists, and it is the
+        # channel's own — not a default, not empty.
+        self.assertEqual(
+            [field["name"] for field in channel.credential_shape["fields"]], ["botToken"]
+        )
 
         # It is not a first-party platform, so ownership resolution hands it to
         # the transport with no edit anywhere.

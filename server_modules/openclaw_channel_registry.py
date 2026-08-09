@@ -112,6 +112,7 @@ class OpenClawChannel:
         "config_schema_present",
         "policy_shape",
         "plugin_install",
+        "credential_shape",
     )
 
     def __init__(self, record: Mapping[str, Any]) -> None:
@@ -148,6 +149,24 @@ class OpenClawChannel:
         # two a channel is in without attempting a send.
         install = record.get("plugin_install")
         self.plugin_install: Optional[Dict[str, Any]] = dict(install) if isinstance(install, dict) else None
+        # The GENERATED setup form: which fields an owner types to connect this
+        # channel, which of them OpenClaw types as secrets, and — when there is
+        # nothing to type — how it connects instead. Derived in the same pass as
+        # the policy shape, from the same `openclaw config schema`, so a channel
+        # upstream adds tomorrow grows its own form with no Empyralis code
+        # change. That is the whole reason it is here rather than in twenty-odd
+        # hand-written React components. Never None: a channel whose plugin has
+        # not contributed a schema node yet carries
+        # `connect_method: "plugin_absent"`, because "we cannot know yet" is a
+        # state an owner must be shown, not an absence to render blank.
+        credential = record.get("credential_shape")
+        if not isinstance(credential, dict):
+            raise RuntimeError(
+                f"OpenClaw channel manifest entry {channel_id!r} has no credential_shape. The "
+                "manifest predates the setup-form derivation — regenerate it with "
+                "scripts/generate_openclaw_channel_manifest.py."
+            )
+        self.credential_shape: Dict[str, Any] = dict(credential)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<OpenClawChannel {self.channel_key} {self.label!r}>"
