@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } fr
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
+  AlertTriangle,
   ArrowLeft,
   BookOpen,
   Brain,
@@ -23,7 +24,9 @@ import {
   Play,
   Plug,
   Radio,
+  RefreshCw,
   Settings,
+  Smartphone,
   Sparkles,
   Square,
   SquarePen,
@@ -1791,7 +1794,13 @@ function ChatTab({
 // ── Channels ────────────────────────────────────────────────────────────────
 
 import { IMessageSetupPanel } from "./IMessageSetupPanel";
-import { OpenClawChannelsPanel } from "./OpenClawChannelsPanel";
+import {
+  CredentialDialog as OpenClawCredentialDialog,
+  StateChip,
+  useOpenClawChannelSetup,
+  type OpenClawChannelCatalogEntry,
+} from "./OpenClawChannelsPanel";
+import { formatChannelList } from "./openclaw-channel-copy";
 import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
 import {
   isPersonalChannelStatusActive,
@@ -1936,6 +1945,14 @@ export function ChannelsTab({
   // workspace-wide behavior in PersonalChannelConnectPanel; passing a
   // possibly-empty string here always keeps it agent-scoped.
   const agentGatewayId = agent?.preferred_gateway_id?.trim() || null;
+
+  // The OpenClaw-transported channels this gateway carries (CHANNEL-ADOPTION-
+  // PLAN.md step 8) — one merged list with the first-party rows below, never
+  // a second stacked section. `agentGatewayId: null` resolves instantly with
+  // no rows and no fetch: OpenClaw is structurally box-only, so a cloud-only
+  // agent has nothing here to show, not a spinner that never resolves.
+  const openclaw = useOpenClawChannelSetup(agentGatewayId, agentId);
+  const [openclawDialogEntry, setOpenclawDialogEntry] = useState<OpenClawChannelCatalogEntry | null>(null);
 
   // Which door is picked inside the open banner. Only channels with more than
   // one door need an explicit pick — a single-door channel auto-selects its
@@ -2256,59 +2273,267 @@ export function ChannelsTab({
     setWechatWebhookUrl(null);
   }
 
+  // ── The unified row list ────────────────────────────────────────────────
+  // ONE array, ONE render loop, merged alphabetically — first-party rows
+  // (this agent's real, working Telegram/Slack/Discord/WhatsApp/Signal/
+  // iMessage/WeChat setup, unchanged) and OpenClaw-transported rows (real,
+  // working, generated-form setup for whatever OpenClaw carries that isn't
+  // one of those platforms) share the exact same row shell. This is the
+  // literal fix for "two components stacked is not one interface" — there
+  // used to be a `fleet-channel-grid` of cards followed by a completely
+  // separate `<OpenClawChannelsPanel>` section below it; now there is one
+  // `.fleet-list`.
+  //
+  // First-party rows do NOT switch to OpenClaw's generated-credential-form
+  // pattern even when this agent has a gateway. That was considered and
+  // rejected: `openclaw_channel_setup_catalog()` (openclaw_channel_setup_
+  // service.py) filters to `channel_lane_contract_service.OPENCLAW_ACTIVE_
+  // CHANNELS`, which excludes every one of these 8 platforms today (none is
+  // in `OPENCLAW_CUT_OVER_CHANNEL_IDS` — see CLAUDE.md). Writing a credential
+  // through OpenClaw's config-patch RPC for a channel that isn't active would
+  // still be accepted by the box (it doesn't know Empyralis's "active"
+  // concept) but would never be enabled by `provision_openclaw_gateway`
+  // (which only iterates `OPENCLAW_PERSONAL_CHANNELS`, the active set) —
+  // a credential the owner believes is "set" that no inbound path will ever
+  // use. That is a dead control wearing a real-looking form, which is worse
+  // than the two-section split it would replace. The three-state VISUAL
+  // language is shared below regardless (bundled / credential / on chips,
+  // the same action-column shapes) — only the backend each row talks to
+  // differs, and only where the backend genuinely differs today.
+  type UnifiedChannelRow = {
+    key: string;
+    label: string;
+    iconSrc?: string;
+    selectionLabel: string;
+    chips: ReactNode;
+    detail: string;
+    action: ReactNode;
+  };
+
+  const legacyRows: UnifiedChannelRow[] = CHANNEL_GRID_PLATFORMS.map((platform) => {
+    const channel = byId.get(platform.id);
+    const pill = channelStatePill(channel);
+    const doors = (CHANNEL_DOORS[platform.id] || []).filter((d) => d.real);
+    const connected = pill.tone === "connected";
+    const chips = (
+      <>
+        {/* First-party channels have no plugin-install concept — they ship
+            built into Empyralis, so "bundled" is always true, the same
+            visual fact an OpenClaw row without `requires_plugin` shows. */}
+        <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
+          bundled
+        </span>
+        <StateChip ok={connected} on="credential set" off="no credential" />
+        <StateChip ok={connected} on="on" off="off" />
+      </>
+    );
+    const action =
+      pill.tone === "locked" ? (
+        <span className="openclaw-ready openclaw-ready--muted">Not configured here</span>
+      ) : pill.tone === "connected" ? (
+        <>
+          <span className="openclaw-ready">
+            <Check size={14} aria-hidden /> Connected
+          </span>
+          <button type="button" className="fleet-btn" onClick={() => handleCardClick(platform, pill)}>
+            Manage
+          </button>
+        </>
+      ) : (
+        <button type="button" className="fleet-btn" onClick={() => handleCardClick(platform, pill)}>
+          {pill.label}
+        </button>
+      );
+    return {
+      key: `first_party:${platform.id}`,
+      label: platform.label,
+      iconSrc: CHANNEL_ICONS[platform.id],
+      selectionLabel: doors.map((d) => d.label).join(" or "),
+      chips,
+      detail: doors[0]?.body || "",
+      action,
+    };
+  });
+
+  const openclawRows: UnifiedChannelRow[] = agentGatewayId
+    ? openclaw.rows.map(({ entry, observed, remediation }) => {
+        const chips = (
+          <>
+            {entry.requires_plugin ? (
+              <StateChip ok={Boolean(observed?.installed)} on="installed" off="not installed" />
+            ) : (
+              <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
+                bundled
+              </span>
+            )}
+            {entry.connect_method === "credential" ? (
+              <StateChip ok={Boolean(observed?.configured)} on="credential set" off="no credential" />
+            ) : null}
+            <StateChip ok={Boolean(observed?.enabled)} on="on" off="off" />
+          </>
+        );
+        const action =
+          remediation.kind === "install" || remediation.kind === "enable" ? (
+            <button
+              type="button"
+              className="fleet-btn"
+              onClick={() => void openclaw.provision([entry.channel_key])}
+              disabled={openclaw.busy !== null}
+            >
+              {openclaw.busy === entry.channel_key ? <Loader2 size={14} className="openclaw-spin" /> : null}
+              {remediation.label}
+            </button>
+          ) : remediation.kind === "credential" ? (
+            <button
+              type="button"
+              className="fleet-btn"
+              onClick={() => setOpenclawDialogEntry(entry)}
+              disabled={openclaw.busy !== null}
+            >
+              {remediation.label}
+            </button>
+          ) : remediation.kind === "ready" ? (
+            <>
+              <span className="openclaw-ready">
+                <Check size={14} aria-hidden /> Ready
+              </span>
+              <button type="button" className="fleet-btn" onClick={() => setOpenclawDialogEntry(entry)}>
+                Replace credential
+              </button>
+            </>
+          ) : remediation.kind === "elsewhere" ? (
+            <span className="openclaw-ready openclaw-ready--muted">
+              <Smartphone size={14} aria-hidden /> Links on the device
+            </span>
+          ) : (
+            <span className="openclaw-ready openclaw-ready--muted">Unknown</span>
+          );
+        return {
+          key: `openclaw:${entry.channel_key}`,
+          label: entry.label,
+          // None of these 19 channels has a licensed brand asset fetched yet
+          // (only the 7 first-party platforms above do) — a neutral
+          // monogram tile (the same fallback every first-party row already
+          // uses when CHANNEL_ICONS has no entry) rather than a guessed or
+          // hand-drawn logo.
+          iconSrc: undefined,
+          selectionLabel: entry.selection_label,
+          chips,
+          detail: remediation.detail,
+          action,
+        };
+      })
+    : [];
+
+  const unifiedChannelRows = [...legacyRows, ...openclawRows].sort((a, b) =>
+    a.label.localeCompare(b.label),
+  );
+
+  // OpenClaw's own catalog carries every channel that overlaps a first-party
+  // platform too (channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS)
+  // so the owner can be told WHY a channel they've heard of is missing from
+  // the OpenClaw rows above. Most of those are already real rows via
+  // legacyRows now (Telegram/WhatsApp/Discord/Signal/iMessage/Slack) — this
+  // is only the leftover that has no first-party row anywhere in this tab
+  // (SMS today: it is a Studio business connector, not a per-agent channel).
+  // Computed, never a second hand-typed list.
+  const legacyLabels = new Set(CHANNEL_GRID_PLATFORMS.map((p) => p.label));
+  const unmappedSupersededChannels = openclaw.alreadyAvailable.filter((label) => !legacyLabels.has(label));
+
   return (
     <div>
       {/* Channels vs. Connectors reads as one undifferentiated "integrations"
           blob otherwise — this one-liner is the whole fix: it's how people
           reach the agent, not what the agent can use. */}
       <p className="fleet-tab-subtitle">Where people can message this agent</p>
-      <div className="fleet-channel-grid">
-        {CHANNEL_GRID_PLATFORMS.map((platform) => {
-          const channel = byId.get(platform.id);
-          const pill = channelStatePill(channel);
-          const icon = CHANNEL_ICONS[platform.id];
-          const isExpanded = expanded === platform.id;
+
+      {openclaw.error ? (
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>{openclaw.error}</span>
+        </div>
+      ) : null}
+      {openclaw.observedError ? (
+        <div className="openclaw-banner" role="status">
+          <AlertTriangle size={14} aria-hidden />
+          <span>
+            This agent&apos;s computer could not be reached, so some rows below show an unknown state.
+            Their setup fields are still accurate.
+          </span>
+        </div>
+      ) : null}
+
+      {agentGatewayId ? (
+        <div className="openclaw-toolbar">
+          <button
+            type="button"
+            className={`fleet-btn ${openclaw.repairable.length > 0 ? "fleet-btn--accent-fill" : ""}`}
+            onClick={() => void openclaw.provision(openclaw.repairable)}
+            disabled={openclaw.busy !== null || openclaw.loading}
+          >
+            {openclaw.busy === "__all__" ? <Loader2 size={14} className="openclaw-spin" /> : <Plug size={14} />}
+            {openclaw.repairable.length > 0
+              ? `Set up ${openclaw.repairable.length} channel${openclaw.repairable.length === 1 ? "" : "s"}`
+              : "Re-check this computer"}
+          </button>
+          <button
+            type="button"
+            className="fleet-btn"
+            onClick={() => void openclaw.refresh()}
+            disabled={openclaw.busy !== null || openclaw.loading}
+            aria-label="Refresh channel state"
+          >
+            <RefreshCw size={14} /> Refresh
+          </button>
+        </div>
+      ) : null}
+
+      <div className="fleet-list openclaw-channel-list">
+        {unifiedChannelRows.map((row) => {
+          const isExpandedLegacy = row.key === `first_party:${expanded}`;
           return (
-            <button
-              key={platform.id}
-              type="button"
-              className={`fleet-channel-card${isExpanded ? " fleet-channel-card--active" : ""}`}
-              onClick={() => handleCardClick(platform, pill)}
-              disabled={pill.tone === "locked"}
+            <div
+              key={row.key}
+              className={`fleet-list-row openclaw-channel-row${isExpandedLegacy ? " fleet-channel-card--active" : ""}`}
             >
-              <span className="fleet-channel-card-icon">
-                {icon ? <img src={icon} alt="" width={32} height={32} /> : platform.label.charAt(0)}
+              <span className="fleet-channel-card-icon" style={{ width: 32, height: 32, flexShrink: 0 }}>
+                {row.iconSrc ? <img src={row.iconSrc} alt="" width={32} height={32} /> : row.label.charAt(0)}
               </span>
-              <span className="fleet-channel-card-label">{platform.label}</span>
-              <span className={`fleet-channel-card-pill fleet-channel-card-pill--${pill.tone}`}>
-                {pill.tone === "connected" ? <span className="fleet-channel-card-dot" /> : null}
-                {pill.label}
-              </span>
-            </button>
+              <div className="fleet-list-row-main">
+                <div className="fleet-list-row-title">{row.label}</div>
+                {row.selectionLabel ? <div className="openclaw-channel-selection">{row.selectionLabel}</div> : null}
+                <div className="openclaw-chips">{row.chips}</div>
+                {row.detail ? <div className="openclaw-channel-detail">{row.detail}</div> : null}
+              </div>
+              <div className="openclaw-channel-actions">{row.action}</div>
+            </div>
           );
         })}
       </div>
 
-      {/* The OpenClaw transport (CHANNEL-ADOPTION-PLAN.md step 8). Its own
-          component, deliberately NOT wired into the grid above: that grid is
-          the outgoing per-channel implementation step 6 retires one platform
-          at a time, and growing it would be building on a system that is being
-          replaced. This section is the replacement, and it has no per-channel
-          code at all — every channel in it, and every field of every form,
-          comes from the pinned OpenClaw manifest.
+      {agentGatewayId && openclaw.loading ? (
+        <p className="fleet-subtitle">Reading this agent&apos;s computer…</p>
+      ) : null}
 
-          Gated on the agent having a box, because the transport runs on
-          hardware and hardware attaches to its owner. No box means nothing to
-          configure, so nothing renders — never a disabled panel explaining
-          itself, which is a dead control with a caption. */}
-      {agentGatewayId ? (
-        <div style={{ marginTop: "var(--space-8)" }}>
-          <OpenClawChannelsPanel
-            workspaceId={workspaceId}
-            gatewayId={agentGatewayId}
-            agentId={agentId}
-          />
-        </div>
+      {unmappedSupersededChannels.length > 0 ? (
+        <p className="fleet-subtitle openclaw-elsewhere-note">
+          {formatChannelList(unmappedSupersededChannels)}{" "}
+          {unmappedSupersededChannels.length === 1 ? "connects" : "connect"} elsewhere in Empyralis and{" "}
+          {unmappedSupersededChannels.length === 1 ? "isn't" : "aren't"} shown here.
+        </p>
+      ) : null}
+
+      {openclawDialogEntry && agentGatewayId ? (
+        <OpenClawCredentialDialog
+          gatewayId={agentGatewayId}
+          entry={openclawDialogEntry}
+          observed={openclaw.observedById.get(openclawDialogEntry.channel_id)}
+          onClose={() => setOpenclawDialogEntry(null)}
+          onSaved={async () => {
+            setOpenclawDialogEntry(null);
+            await openclaw.refresh({ silent: true });
+          }}
+        />
       ) : null}
 
       {activePlatform && (

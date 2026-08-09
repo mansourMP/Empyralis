@@ -1,8 +1,23 @@
 "use client";
 
 /**
- * Channel setup for the OpenClaw transport — every channel, one screen, from
- * the browser. No terminal, no SSH.
+ * Data + shared UI for the OpenClaw-transported channels inside the ONE
+ * unified channel list on the Channels tab (FleetAgentDetail.tsx's
+ * ChannelsTab). No terminal, no SSH.
+ *
+ * FORMERLY A STANDALONE PANEL, NOW A HOOK + A DIALOG
+ * ---------------------------------------------------
+ * Until 2026-08-09 this file exported a full `<OpenClawChannelsPanel>`
+ * section, rendered by ChannelsTab as its OWN block underneath a separate
+ * `fleet-channel-grid` of the first-party channel cards — two visually
+ * distinct components stacked in one tab, which is exactly the "old vs new"
+ * split the founder called out: two components stacked, even visually
+ * similar, is not one user interface. ChannelsTab now owns ONE merged list
+ * and ONE render loop over every channel (first-party + OpenClaw), so the
+ * data-fetching (`useOpenClawChannelSetup`) and the generated-credential-form
+ * dialog (`CredentialDialog`) are exported here for it to use directly; the
+ * section chrome (heading, toolbar, list container) moved to ChannelsTab
+ * itself since it is no longer this file's own section.
  *
  * THE FORM IS GENERATED, NOT WRITTEN
  * ---------------------------------
@@ -44,22 +59,14 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  AlertTriangle,
-  Check,
-  Loader2,
-  Plug,
-  RefreshCw,
-  Smartphone,
-  X,
-} from "lucide-react";
+import { AlertTriangle, Loader2, X } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import {
-  formatChannelList,
   remediationFor,
   type OpenClawChannelCatalogEntry,
   type OpenClawObservedChannel,
+  type Remediation,
 } from "./openclaw-channel-copy";
 
 import "./openclaw-channels.css";
@@ -78,15 +85,24 @@ type SetupResponse = {
   observed_error?: string | null;
   // Channels a first-party Empyralis runtime already carries (Telegram,
   // WhatsApp, ...) — computed on the backend from the same overlap logic
-  // that decides which channels THIS panel lists, never hand-typed here.
-  // See channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS.
+  // that decides which channels this hook's catalog carries, never
+  // hand-typed here. See channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS.
+  // ChannelsTab uses this only to render a real row for each one (via the
+  // first-party grid data) instead of the old "these connect elsewhere" note.
   already_available_channels?: string[];
 };
 
-// .fleet-badge is the shared status-chip primitive (Members, Hardware,
-// Connections all use it) — this only adds the ok/off colour, never a new
-// shape, so a chip here reads as the same control everywhere else it appears.
-function StateChip({ ok, on, off }: { ok: boolean; on: string; off: string }) {
+export type OpenClawChannelRow = {
+  entry: OpenClawChannelCatalogEntry;
+  observed: OpenClawObservedChannel | undefined;
+  remediation: Remediation;
+};
+
+/** .fleet-badge is the shared status-chip primitive (Members, Hardware,
+ *  Connections all use it) — this only adds the ok/off colour, never a new
+ *  shape, so a chip here reads as the same control everywhere else it
+ *  appears, including the first-party rows in the same unified list. */
+export function StateChip({ ok, on, off }: { ok: boolean; on: string; off: string }) {
   return (
     <span
       className={`fleet-badge openclaw-chip ${ok ? "openclaw-chip--ok" : "openclaw-chip--off"}`}
@@ -97,23 +113,25 @@ function StateChip({ ok, on, off }: { ok: boolean; on: string; off: string }) {
   );
 }
 
-export function OpenClawChannelsPanel({
-  workspaceId,
-  gatewayId,
-  agentId,
-}: {
-  workspaceId: string;
-  gatewayId: string;
-  agentId: string;
-}) {
+/** Every OpenClaw channel this gateway carries, joined with its observed
+ *  state, plus the provisioning action. `gatewayId: null` (no paired
+ *  computer) is a valid, common state — OpenClaw is structurally box-only, so
+ *  this resolves immediately with an empty row set and no fetch, rather than
+ *  spinning forever on a request that can never succeed. */
+export function useOpenClawChannelSetup(gatewayId: string | null, agentId: string) {
   const [data, setData] = useState<SetupResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(gatewayId));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [open, setOpen] = useState<OpenClawChannelCatalogEntry | null>(null);
 
   const load = useCallback(
     async (opts?: { silent?: boolean }) => {
+      if (!gatewayId) {
+        setData(null);
+        setError(null);
+        setLoading(false);
+        return;
+      }
       if (!opts?.silent) setLoading(true);
       try {
         const res = await fetch(
@@ -144,6 +162,7 @@ export function OpenClawChannelsPanel({
    *  row re-reads its own three states straight afterwards. */
   const provision = useCallback(
     async (installChannels: string[]) => {
+      if (!gatewayId) return;
       setBusy(installChannels[0] ?? "__all__");
       try {
         const res = await fetch(
@@ -181,7 +200,7 @@ export function OpenClawChannelsPanel({
     [observedList],
   );
 
-  const rows = useMemo(
+  const rows: OpenClawChannelRow[] = useMemo(
     () =>
       catalog.map((entry) => {
         const observed = observedById.get(entry.channel_id);
@@ -194,165 +213,23 @@ export function OpenClawChannelsPanel({
     .filter((row) => row.remediation.kind === "install" || row.remediation.kind === "enable")
     .map((row) => row.entry.channel_key);
 
-  return (
-    <section aria-labelledby="openclaw-channels-heading">
-      <h2 className="fleet-detail-section-title" id="openclaw-channels-heading">
-        Channels
-      </h2>
-      <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Messaging channels connected through this computer.
-      </p>
-      {alreadyAvailable.length > 0 ? (
-        // Makes the exclusion legible instead of silent: the founder read a
-        // missing Telegram card as "did you turn this off?" with nothing on
-        // screen to answer that. These channels are correct to omit here —
-        // they already work through the setup above — but the omission
-        // needs a reason, in one line, not a per-card explanation.
-        <p className="fleet-subtitle openclaw-elsewhere-note" style={{ marginTop: 0 }}>
-          {formatChannelList(alreadyAvailable)} already connect through the setup above. They will move
-          into this list once each is verified here individually.
-        </p>
-      ) : null}
-
-      {error ? (
-        <div className="openclaw-banner" role="alert">
-          <AlertTriangle size={14} aria-hidden />
-          <span>{error}</span>
-        </div>
-      ) : null}
-
-      {data?.observed_error ? (
-        <div className="openclaw-banner" role="status">
-          <AlertTriangle size={14} aria-hidden />
-          <span>
-            This computer could not be reached, so the states below are unknown. The setup fields below
-            are still accurate.
-          </span>
-        </div>
-      ) : null}
-
-      <div className="openclaw-toolbar">
-        {/* The single accent action in this view. Everything in a row is
-            neutral, so there is exactly one primary action on screen. */}
-        <button
-          type="button"
-          className={`fleet-btn ${repairable.length > 0 ? "fleet-btn--accent-fill" : ""}`}
-          onClick={() => void provision(repairable)}
-          disabled={busy !== null || loading}
-        >
-          {busy === "__all__" ? <Loader2 size={14} className="openclaw-spin" /> : <Plug size={14} />}
-          {repairable.length > 0 ? `Set up ${repairable.length} channel${repairable.length === 1 ? "" : "s"}` : "Re-check this computer"}
-        </button>
-        <button
-          type="button"
-          className="fleet-btn"
-          onClick={() => void load()}
-          disabled={busy !== null || loading}
-          aria-label="Refresh channel state"
-        >
-          <RefreshCw size={14} /> Refresh
-        </button>
-      </div>
-
-      {loading ? (
-        <p className="fleet-subtitle">Reading this computer…</p>
-      ) : rows.length === 0 ? (
-        <div className="fleet-empty">
-          <div className="fleet-empty-title">No channels</div>
-          <div className="fleet-empty-desc">
-            This computer reported no channels, which should be impossible. Contact support.
-          </div>
-        </div>
-      ) : (
-        // .fleet-list / .fleet-list-row: the same flat-hairline-row primitive
-        // Members, Hardware and Connections already use — not a bespoke
-        // bordered card floating inside the section. That card-within-a-card
-        // treatment was exactly what read as bolted on.
-        <div className="fleet-list openclaw-channel-list">
-          {rows.map(({ entry, observed, remediation }) => (
-            <div key={entry.channel_key} className="fleet-list-row openclaw-channel-row">
-              <div className="fleet-list-row-main">
-                <div className="fleet-list-row-title">{entry.label}</div>
-                <div className="openclaw-channel-selection">{entry.selection_label}</div>
-                <div className="openclaw-chips">
-                  {entry.requires_plugin ? (
-                    <StateChip ok={Boolean(observed?.installed)} on="installed" off="not installed" />
-                  ) : (
-                    <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
-                      bundled
-                    </span>
-                  )}
-                  {entry.connect_method === "credential" ? (
-                    <StateChip ok={Boolean(observed?.configured)} on="credential set" off="no credential" />
-                  ) : null}
-                  <StateChip ok={Boolean(observed?.enabled)} on="on" off="off" />
-                </div>
-                <div className="openclaw-channel-detail">{remediation.detail}</div>
-              </div>
-              <div className="openclaw-channel-actions">
-                {remediation.kind === "install" || remediation.kind === "enable" ? (
-                  <button
-                    type="button"
-                    className="fleet-btn"
-                    onClick={() => void provision([entry.channel_key])}
-                    disabled={busy !== null}
-                  >
-                    {busy === entry.channel_key ? (
-                      <Loader2 size={14} className="openclaw-spin" />
-                    ) : null}
-                    {remediation.label}
-                  </button>
-                ) : null}
-                {remediation.kind === "credential" ? (
-                  <button
-                    type="button"
-                    className="fleet-btn"
-                    onClick={() => setOpen(entry)}
-                    disabled={busy !== null}
-                  >
-                    {remediation.label}
-                  </button>
-                ) : null}
-                {remediation.kind === "ready" ? (
-                  <>
-                    <span className="openclaw-ready">
-                      <Check size={14} aria-hidden /> Ready
-                    </span>
-                    <button type="button" className="fleet-btn" onClick={() => setOpen(entry)}>
-                      Replace credential
-                    </button>
-                  </>
-                ) : null}
-                {remediation.kind === "elsewhere" ? (
-                  <span className="openclaw-ready openclaw-ready--muted">
-                    <Smartphone size={14} aria-hidden /> Links on the device
-                  </span>
-                ) : null}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {open ? (
-        <CredentialDialog
-          gatewayId={gatewayId}
-          entry={open}
-          observed={observedById.get(open.channel_id)}
-          onClose={() => setOpen(null)}
-          onSaved={async () => {
-            setOpen(null);
-            await load({ silent: true });
-          }}
-        />
-      ) : null}
-    </section>
-  );
+  return {
+    loading,
+    error,
+    observedError: data?.observed_error ?? null,
+    busy,
+    rows,
+    alreadyAvailable,
+    repairable,
+    refresh: load,
+    provision,
+    observedById,
+  };
 }
 
 /** The generated form. Every control below is driven by `entry.fields`; there
  *  is no branch on a channel id anywhere in it. */
-function CredentialDialog({
+export function CredentialDialog({
   gatewayId,
   entry,
   observed,
@@ -416,10 +293,10 @@ function CredentialDialog({
 
   return (
     <div className="fleet-detail-backdrop" onClick={onClose}>
-      {/* .fleet-channel-banner: the exact shape the Telegram/WhatsApp/Discord/
-          Signal/iMessage/Slack/WeChat cards above already open into (header +
-          icon + title + close, then a scrolling body) — this dialog reuses it
-          rather than the bespoke, differently-sized panel it used to be. */}
+      {/* .fleet-channel-banner: the exact shape every row in the unified list
+          opens into (header + icon + title + close, then a scrolling body) —
+          this dialog reuses it rather than a bespoke, differently-sized
+          panel. */}
       <div
         className="fleet-channel-banner"
         role="dialog"
