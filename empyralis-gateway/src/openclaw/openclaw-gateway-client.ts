@@ -79,7 +79,16 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
  *  inside its own `channel.outbound` request timeout. */
 const MAX_SEND_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 400;
-const RETRY_MAX_DELAY_MS = 2_000;
+/** Ceiling on the backoff THIS CLIENT invents when OpenClaw did not say how
+ *  long to wait. It is deliberately NOT a ceiling on a wait OpenClaw asked
+ *  for — see waitBeforeRetry. */
+const RETRY_MAX_SELF_BACKOFF_MS = 2_000;
+/** The longest this client will hold the cloud's `channel.outbound` request
+ *  open for ONE in-band retry wait. When OpenClaw asks for longer than this
+ *  we stop retrying and hand the outcome back — never retry earlier than we
+ *  were told to. See waitBeforeRetry for why that direction is the only safe
+ *  one on a messaging transport. */
+const RETRY_HONOUR_BUDGET_MS = 5_000;
 /** How long handleChannelOutbound will wait for a socket that is mid-
  *  (re)connect before giving up. Short on purpose — a send that waits
  *  longer than this is better reported as unavailable than left hanging. */
@@ -534,7 +543,20 @@ export class OpenClawGatewayClient {
         detail: this.safeLog(lastOutcome.message),
       });
       if (attempt < MAX_SEND_ATTEMPTS) {
-        await this.delayBeforeRetry(attempt, lastOutcome.retryAfterMs);
+        const waited = await this.waitBeforeRetry(attempt, lastOutcome.retryAfterMs);
+        if (!waited) {
+          // OpenClaw asked us to wait longer than one in-band retry may hold
+          // the cloud's request open. Stop here and return the outcome (which
+          // carries retryAfterMs) instead of sleeping less and trying again.
+          await this.record("openclaw.outbound.retry_deferred", {
+            channel: request.channel,
+            idempotency_key: request.idempotencyKey,
+            attempt,
+            code: lastOutcome.code,
+            retry_after_ms: lastOutcome.retryAfterMs ?? null,
+          });
+          break;
+        }
       }
     }
 
@@ -547,13 +569,51 @@ export class OpenClawGatewayClient {
     );
   }
 
-  private async delayBeforeRetry(attempt: number, retryAfterMs: number | undefined): Promise<void> {
-    const backoff = Math.min(RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1), RETRY_MAX_DELAY_MS);
-    const delay = Math.min(Math.max(retryAfterMs ?? backoff, 0), RETRY_MAX_DELAY_MS);
-    if (delay <= 0) return;
+  /**
+   * Waits before the next `message.action` attempt, or refuses to retry.
+   *
+   * A SERVER-SUPPLIED `retryAfterMs` IS A FLOOR, NEVER A CEILING.
+   * ------------------------------------------------------------
+   * This method used to compute `Math.min(retryAfterMs ?? backoff,
+   * RETRY_MAX_DELAY_MS)` — i.e. it read OpenClaw's own structured backoff
+   * signal and then CLAMPED IT DOWNWARD to 2s. Told "wait 30 seconds", it
+   * waited two and tried again. On a messaging transport that is the one
+   * behaviour that turns a rate-limit into an account action: it is exactly
+   * the shape of the incident OpenClaw's own
+   * `extensions/telegram/src/sendchataction-401-backoff.ts` was written for
+   * ("the infinite loop that caused Telegram to delete bots"), and adopting
+   * their transport specifically to inherit that hardening while overriding
+   * their backoff downward at our own seam would be the appearance of the
+   * protection without the substance.
+   *
+   * `retryable`/`retryAfterMs` are the two structural fields this whole lane
+   * is built on reading rather than string-matching (see outbound-payload.ts).
+   * Honouring one and discarding the other is not a partial contract; it is
+   * the wrong contract.
+   *
+   *   asked  <= budget   ─▶ wait max(asked, our own backoff), then retry
+   *   asked  >  budget   ─▶ DO NOT RETRY. return false; the caller returns
+   *                         the transient outcome (carrying retryAfterMs) and
+   *                         the cloud's at-least-once layer owns the wait.
+   *   not asked          ─▶ our own capped exponential backoff, as before
+   *
+   * Refusing to retry is strictly LESS traffic than the old clamp produced,
+   * never more, so it cannot push the cloud's `channel.outbound` request past
+   * its own timeout — the failure mode a longer sleep here would have had.
+   *
+   * @returns true when it waited and the caller should retry; false when the
+   *          caller must stop retrying.
+   */
+  private async waitBeforeRetry(attempt: number, retryAfterMs: number | undefined): Promise<boolean> {
+    const selfBackoff = Math.min(RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1), RETRY_MAX_SELF_BACKOFF_MS);
+    const requested = typeof retryAfterMs === "number" && retryAfterMs > 0 ? retryAfterMs : undefined;
+    if (requested !== undefined && requested > RETRY_HONOUR_BUDGET_MS) return false;
+    const delay = Math.max(requested ?? 0, selfBackoff);
+    if (delay <= 0) return true;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, delay);
       timer.unref?.();
     });
+    return true;
   }
 }

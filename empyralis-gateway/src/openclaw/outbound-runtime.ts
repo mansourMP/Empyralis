@@ -219,6 +219,13 @@ export class OpenClawPersonalChannelRuntime implements PersonalChannelRuntime {
         outcome: outcome.status,
         code: outcome.code,
         detail: outcome.message,
+        // How long OpenClaw asked us to wait, when it said. Journaled because
+        // it is the difference between "this box is briefly busy" and "the
+        // platform is rate-limiting this account", and nothing downstream can
+        // tell those apart from the sentence. See
+        // OpenClawGatewayClient.waitBeforeRetry: a request longer than one
+        // in-band wait STOPS the retry rather than shortening it.
+        retry_after_ms: outcome.retryAfterMs ?? null,
       });
       throw new Error(
         `OpenClaw refused delivery for ${this.channelKey} (${outcome.status}/${outcome.code}): ${outcome.message}`,
