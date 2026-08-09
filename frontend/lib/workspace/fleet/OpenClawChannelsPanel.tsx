@@ -47,126 +47,51 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Check,
-  ExternalLink,
   Loader2,
   Plug,
   RefreshCw,
   Smartphone,
+  X,
 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import {
+  formatChannelList,
+  remediationFor,
+  type OpenClawChannelCatalogEntry,
+  type OpenClawObservedChannel,
+} from "./openclaw-channel-copy";
 
 import "./openclaw-channels.css";
 
-export type OpenClawCredentialField = {
-  name: string;
-  secret: boolean;
-  type: string;
-  file_alternative?: string | null;
-};
-
-export type OpenClawChannelCatalogEntry = {
-  channel_key: string;
-  channel_id: string;
-  label: string;
-  connect_method: "credential" | "pairing" | "plugin_absent";
-  selection_label: string;
-  docs_path: string | null;
-  fields: OpenClawCredentialField[];
-  requires_plugin: boolean;
-  plugin_id: string | null;
-};
-
-export type OpenClawObservedField = { name: string; secret: boolean; type: string; set: boolean };
-
-export type OpenClawObservedChannel = {
-  channel_id: string;
-  channel_key: string;
-  installed: boolean;
-  requires_plugin: boolean;
-  enabled: boolean;
-  configured: boolean;
-  fields: OpenClawObservedField[];
-  accounts: string[];
-};
+export type {
+  OpenClawCredentialField,
+  OpenClawChannelCatalogEntry,
+  OpenClawObservedField,
+  OpenClawObservedChannel,
+} from "./openclaw-channel-copy";
 
 type SetupResponse = {
   openclaw_version?: string;
   channels?: OpenClawChannelCatalogEntry[];
   observed?: { status?: string; channels?: OpenClawObservedChannel[]; refusal?: { detail?: string } | null } | null;
   observed_error?: string | null;
+  // Channels a first-party Empyralis runtime already carries (Telegram,
+  // WhatsApp, ...) — computed on the backend from the same overlap logic
+  // that decides which channels THIS panel lists, never hand-typed here.
+  // See channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS.
+  already_available_channels?: string[];
 };
 
-/** The one thing this row needs the reader to do next, and why.
- *  Exactly one per row — a row with two calls to action has no call to action. */
-type Remediation =
-  | { kind: "install"; label: string; detail: string }
-  | { kind: "credential"; label: string; detail: string }
-  | { kind: "enable"; label: string; detail: string }
-  | { kind: "elsewhere"; detail: string }
-  | { kind: "unknown"; detail: string }
-  | { kind: "ready"; detail: string };
-
-function remediationFor(
-  entry: OpenClawChannelCatalogEntry,
-  observed: OpenClawObservedChannel | undefined,
-  reachable: boolean,
-): Remediation {
-  if (!reachable || !observed) {
-    return {
-      kind: "unknown",
-      detail: "This computer could not be reached, so its channel state is unknown.",
-    };
-  }
-  if (entry.requires_plugin && !observed.installed) {
-    return {
-      kind: "install",
-      // Deliberately not "not connected": the plugin is the thing that is
-      // missing, and installing it is a button, not a support ticket.
-      label: "Install plugin",
-      detail: "The channel's plugin is not on this computer yet.",
-    };
-  }
-  if (entry.connect_method === "plugin_absent") {
-    return {
-      kind: "unknown",
-      detail: "OpenClaw declares this channel's connection fields only once its plugin is installed.",
-    };
-  }
-  if (entry.connect_method === "pairing") {
-    return {
-      kind: "elsewhere",
-      // The honest version of a dead control. Their own selection label says
-      // how it links; we do not invent a form that would submit nothing.
-      detail: `${entry.selection_label} — there is no token to paste. Link it from the OpenClaw session on this computer.`,
-    };
-  }
-  const missing = observed.fields.filter((field) => !field.set);
-  if (missing.length > 0) {
-    return {
-      kind: "credential",
-      label: observed.fields.some((field) => field.set) ? "Finish credential" : "Add credential",
-      detail: `Waiting on ${missing.map((field) => field.name).join(", ")}.`,
-    };
-  }
-  if (!observed.enabled) {
-    return {
-      kind: "enable",
-      label: "Turn on",
-      detail: "Credential is in place, but the channel is switched off on this computer.",
-    };
-  }
-  return {
-    kind: "ready",
-    // "Ready", never "Connected". A connection is proven by a real message
-    // arriving, and nothing on this screen has seen one.
-    detail: "Plugin installed, credential in place, channel on.",
-  };
-}
-
+// .fleet-badge is the shared status-chip primitive (Members, Hardware,
+// Connections all use it) — this only adds the ok/off colour, never a new
+// shape, so a chip here reads as the same control everywhere else it appears.
 function StateChip({ ok, on, off }: { ok: boolean; on: string; off: string }) {
   return (
-    <span className={`openclaw-chip ${ok ? "openclaw-chip--ok" : "openclaw-chip--off"}`}>
+    <span
+      className={`fleet-badge openclaw-chip ${ok ? "openclaw-chip--ok" : "openclaw-chip--off"}`}
+      style={{ marginLeft: 0 }}
+    >
       {ok ? on : off}
     </span>
   );
@@ -248,6 +173,7 @@ export function OpenClawChannelsPanel({
   );
 
   const catalog = data?.channels ?? [];
+  const alreadyAvailable = data?.already_available_channels ?? [];
   const observedList = data?.observed?.channels ?? [];
   const reachable = Boolean(data?.observed) && !data?.observed_error;
   const observedById = useMemo(
@@ -274,10 +200,19 @@ export function OpenClawChannelsPanel({
         Channels
       </h2>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        {data?.openclaw_version
-          ? `Carried by the OpenClaw transport on this computer (v${data.openclaw_version}).`
-          : "Carried by the OpenClaw transport on this computer."}
+        Messaging channels connected through this computer.
       </p>
+      {alreadyAvailable.length > 0 ? (
+        // Makes the exclusion legible instead of silent: the founder read a
+        // missing Telegram card as "did you turn this off?" with nothing on
+        // screen to answer that. These channels are correct to omit here —
+        // they already work through the setup above — but the omission
+        // needs a reason, in one line, not a per-card explanation.
+        <p className="fleet-subtitle openclaw-elsewhere-note" style={{ marginTop: 0 }}>
+          {formatChannelList(alreadyAvailable)} already connect through the setup above. They will move
+          into this list once each is verified here individually.
+        </p>
+      ) : null}
 
       {error ? (
         <div className="openclaw-banner" role="alert">
@@ -290,8 +225,8 @@ export function OpenClawChannelsPanel({
         <div className="openclaw-banner" role="status">
           <AlertTriangle size={14} aria-hidden />
           <span>
-            This computer could not be reached, so the states below are unknown. The setup fields are
-            still correct for OpenClaw {data.openclaw_version ?? ""}.
+            This computer could not be reached, so the states below are unknown. The setup fields below
+            are still accurate.
           </span>
         </div>
       ) : null}
@@ -325,22 +260,27 @@ export function OpenClawChannelsPanel({
         <div className="fleet-empty">
           <div className="fleet-empty-title">No channels</div>
           <div className="fleet-empty-desc">
-            This build of the transport carries no channels, which should be impossible — regenerate
-            the OpenClaw channel manifest.
+            This computer reported no channels, which should be impossible. Contact support.
           </div>
         </div>
       ) : (
-        <ul className="openclaw-channel-list">
+        // .fleet-list / .fleet-list-row: the same flat-hairline-row primitive
+        // Members, Hardware and Connections already use — not a bespoke
+        // bordered card floating inside the section. That card-within-a-card
+        // treatment was exactly what read as bolted on.
+        <div className="fleet-list openclaw-channel-list">
           {rows.map(({ entry, observed, remediation }) => (
-            <li key={entry.channel_key} className="openclaw-channel-row">
-              <div className="openclaw-channel-main">
-                <div className="openclaw-channel-title">{entry.label}</div>
+            <div key={entry.channel_key} className="fleet-list-row openclaw-channel-row">
+              <div className="fleet-list-row-main">
+                <div className="fleet-list-row-title">{entry.label}</div>
                 <div className="openclaw-channel-selection">{entry.selection_label}</div>
                 <div className="openclaw-chips">
                   {entry.requires_plugin ? (
                     <StateChip ok={Boolean(observed?.installed)} on="installed" off="not installed" />
                   ) : (
-                    <span className="openclaw-chip openclaw-chip--ok">bundled</span>
+                    <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
+                      bundled
+                    </span>
                   )}
                   {entry.connect_method === "credential" ? (
                     <StateChip ok={Boolean(observed?.configured)} on="credential set" off="no credential" />
@@ -388,20 +328,10 @@ export function OpenClawChannelsPanel({
                     <Smartphone size={14} aria-hidden /> Links on the device
                   </span>
                 ) : null}
-                {entry.docs_path ? (
-                  <a
-                    className="openclaw-docs"
-                    href={`https://docs.openclaw.ai${entry.docs_path}`}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                  >
-                    Docs <ExternalLink size={12} aria-hidden />
-                  </a>
-                ) : null}
               </div>
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
 
       {open ? (
@@ -486,76 +416,97 @@ function CredentialDialog({
 
   return (
     <div className="fleet-detail-backdrop" onClick={onClose}>
+      {/* .fleet-channel-banner: the exact shape the Telegram/WhatsApp/Discord/
+          Signal/iMessage/Slack/WeChat cards above already open into (header +
+          icon + title + close, then a scrolling body) — this dialog reuses it
+          rather than the bespoke, differently-sized panel it used to be. */}
       <div
-        className="openclaw-dialog"
+        className="fleet-channel-banner"
         role="dialog"
         aria-modal="true"
         aria-labelledby="openclaw-dialog-heading"
         onClick={(event) => event.stopPropagation()}
       >
-        <h3 className="fleet-detail-section-title" id="openclaw-dialog-heading" style={{ marginTop: 0 }}>
-          {entry.label}
-        </h3>
-        <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-          {entry.selection_label}. Fields are the ones OpenClaw declares for this channel.
-        </p>
-
-        {error ? (
-          <div className="openclaw-banner" role="alert">
-            <AlertTriangle size={14} aria-hidden />
-            <span>{error}</span>
-          </div>
-        ) : null}
-
-        <div className="openclaw-form">
-          {entry.fields.map((field) => {
-            const inputId = `openclaw-${entry.channel_id}-${field.name}`;
-            const already = setFields.has(field.name);
-            return (
-              <div key={field.name} className="openclaw-form-field">
-                <label htmlFor={inputId}>
-                  <span className="openclaw-form-name">{field.name}</span>
-                  {field.secret ? <span className="openclaw-chip openclaw-chip--secret">secret</span> : null}
-                  {already ? <span className="openclaw-chip openclaw-chip--ok">set</span> : null}
-                </label>
-                <input
-                  id={inputId}
-                  className="fleet-wizard-input"
-                  /* A secret is a password input and is ALWAYS empty on open:
-                     there is no stored value to prefill, because OpenClaw
-                     redacts it before it ever leaves the customer's machine. */
-                  type={field.secret ? "password" : "text"}
-                  autoComplete="off"
-                  spellCheck={false}
-                  value={values[field.name] ?? ""}
-                  placeholder={already ? "Set — type to replace" : ""}
-                  onChange={(event) =>
-                    setValues((current) => ({ ...current, [field.name]: event.target.value }))
-                  }
-                />
-              </div>
-            );
-          })}
+        <div className="fleet-channel-banner-header">
+          <span className="fleet-channel-banner-icon">{entry.label.charAt(0)}</span>
+          <span className="fleet-channel-banner-title" id="openclaw-dialog-heading">
+            {entry.label}
+          </span>
+          <button type="button" className="fleet-detail-close fleet-detail-close--inline" onClick={onClose} aria-label="Close">
+            <X size={16} strokeWidth={2} />
+          </button>
         </div>
 
-        <p className="openclaw-form-note">
-          Leave a field blank to keep what is already on the computer. Values are sent straight to it
-          and are not stored here.
-        </p>
+        <div className="fleet-channel-banner-body">
+          <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+            {entry.selection_label}. These are the fields this channel needs to connect.
+          </p>
 
-        <div className="openclaw-dialog-actions">
-          <button type="button" className="fleet-btn" onClick={onClose} disabled={saving}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="fleet-btn fleet-btn--accent-fill"
-            onClick={() => void save()}
-            disabled={saving || filled === 0}
-          >
-            {saving ? <Loader2 size={14} className="openclaw-spin" /> : null}
-            {saving ? "Saving…" : "Save credential"}
-          </button>
+          {error ? (
+            <div className="openclaw-banner" role="alert">
+              <AlertTriangle size={14} aria-hidden />
+              <span>{error}</span>
+            </div>
+          ) : null}
+
+          <div className="openclaw-form">
+            {entry.fields.map((field) => {
+              const inputId = `openclaw-${entry.channel_id}-${field.name}`;
+              const already = setFields.has(field.name);
+              return (
+                <div key={field.name} className="openclaw-form-field">
+                  <label htmlFor={inputId}>
+                    <span className="openclaw-form-name">{field.name}</span>
+                    {field.secret ? (
+                      <span className="fleet-badge openclaw-chip openclaw-chip--secret" style={{ marginLeft: 0 }}>
+                        secret
+                      </span>
+                    ) : null}
+                    {already ? (
+                      <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
+                        set
+                      </span>
+                    ) : null}
+                  </label>
+                  <input
+                    id={inputId}
+                    className="fleet-wizard-input"
+                    /* A secret is a password input and is ALWAYS empty on open:
+                       there is no stored value to prefill — this computer
+                       redacts it before it ever leaves the machine. */
+                    type={field.secret ? "password" : "text"}
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={values[field.name] ?? ""}
+                    placeholder={already ? "Set — type to replace" : ""}
+                    onChange={(event) =>
+                      setValues((current) => ({ ...current, [field.name]: event.target.value }))
+                    }
+                  />
+                </div>
+              );
+            })}
+          </div>
+
+          <p className="openclaw-form-note">
+            Leave a field blank to keep what is already on the computer. Values are sent straight to it
+            and are not stored here.
+          </p>
+
+          <div className="openclaw-dialog-actions">
+            <button type="button" className="fleet-btn" onClick={onClose} disabled={saving}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="fleet-btn fleet-btn--accent-fill"
+              onClick={() => void save()}
+              disabled={saving || filled === 0}
+            >
+              {saving ? <Loader2 size={14} className="openclaw-spin" /> : null}
+              {saving ? "Saving…" : "Save credential"}
+            </button>
+          </div>
         </div>
       </div>
     </div>

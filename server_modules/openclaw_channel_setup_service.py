@@ -92,8 +92,8 @@ def _validate_credential_values(channel_key: str, values: Any) -> Dict[str, str]
     fields = {field["name"]: field for field in shape.get("fields") or []}
     if not fields:
         raise OpenClawProvisioningError(
-            f"{channel_key} does not take a pasted credential: OpenClaw declares no credential "
-            "field for it, so it connects another way (QR, local pairing, or an inbound webhook).",
+            f"{channel_key} does not take a pasted credential: this channel has no credential "
+            "field to set, so it connects another way (QR, local pairing, or an inbound webhook).",
             status_code=400,
         )
     if not isinstance(values, dict) or not values:
@@ -105,7 +105,7 @@ def _validate_credential_values(channel_key: str, values: Any) -> Dict[str, str]
             # Named rather than dropped: a silently ignored field is a save that
             # reports success and changes nothing.
             raise OpenClawProvisioningError(
-                f"{name!r} is not a credential field OpenClaw declares for {channel_key} "
+                f"{name!r} is not a credential field for {channel_key} "
                 f"({', '.join(sorted(fields))}).",
                 status_code=400,
             )
