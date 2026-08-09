@@ -315,3 +315,27 @@ test("the transport Node goes FIRST on the child PATH, and only the child's", as
   // which most resolvers read as "the current directory".
   assert.equal(withOpenClawNodeOnPath({ PATH: "/usr/bin" }).PATH, "/usr/bin");
 });
+
+test("every openclaw invocation gets the transport Node, not the caller's", async () => {
+  // The gap this closes: the provisioner put the transport Node on the npm
+  // child's PATH but the OpenClawCli was still built from the caller's env, so
+  // `openclaw --version` — the read the whole install is gated on — answered
+  // "Node.js v22.19+ is required" forever. A correct install would then report
+  // itself `openclaw_runtime_install_unverified`, and the box would end up
+  // with the software present and provisioning refusing.
+  let seenPath = "";
+  const cli = new OpenClawCli({
+    profile: "acme",
+    env: { PATH: "/usr/bin", [OPENCLAW_NODE_BIN_DIR_ENV]: "/opt/transport-node/bin" },
+    exec: async () => ({ code: 0, stdout: OPENCLAW_PINNED_VERSION, stderr: "" }),
+  });
+  seenPath = String(cli.childEnv().PATH ?? "");
+  assert.equal(seenPath, "/opt/transport-node/bin:/usr/bin");
+  // And the credential sanitization it already did is not lost by composing.
+  const sanitized = new OpenClawCli({
+    profile: "acme",
+    env: { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-should-never-reach-openclaw" },
+    exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+  }).childEnv();
+  assert.equal(sanitized.ANTHROPIC_API_KEY, undefined);
+});
