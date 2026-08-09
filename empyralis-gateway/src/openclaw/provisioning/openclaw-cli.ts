@@ -27,6 +27,16 @@
  *     still only runs when the child exits, so a CLI that ignores SIGTERM
  *     left the promise pending and the child on the event loop forever.
  *
+ *   THE TRANSPORT'S OWN NODE, first on PATH. openclaw@2026.6.10 requires
+ *     Node >= 22.19 and the gateway runs on Node 20 (its prebuilt native
+ *     modules are compiled against that ABI), so the two runtimes coexist and
+ *     every `openclaw` invocation must resolve the newer one. Applied HERE
+ *     rather than at each construction site for the same reason `--profile`
+ *     is: a caller that forgets gets `openclaw: Node.js v22.19+ is required`
+ *     back from every command — including the `--version` read the install is
+ *     gated on, which would make a perfectly good install report itself as
+ *     unverified. See ./openclaw-node-runtime.ts.
+ *
  * Secrets are never passed as argv (argv is world-readable in `ps`): the
  * gateway token reaches OpenClaw through the config file it writes, and the
  * audit's `--token` is only ever used for a deep probe we do not run.
@@ -37,6 +47,7 @@ import path from "path";
 
 import { execFileWithTimeout } from "../../shell/exec-file-with-timeout";
 import { sanitizeOpenClawChildEnv } from "./openclaw-config-plan";
+import { withOpenClawNodeOnPath } from "./openclaw-node-runtime";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 /** Conventional shell exit code for "killed by a timeout" (`timeout(1)`), so a
@@ -96,7 +107,10 @@ export class OpenClawCli {
   constructor(options: OpenClawCliOptions) {
     this.profile = assertValidOpenClawProfile(options.profile);
     this.binaryPath = String(options.binaryPath || "").trim() || "openclaw";
-    this.env = sanitizeOpenClawChildEnv(options.env ?? process.env);
+    // Sanitize (no model credential) AND put the transport's own Node first —
+    // both are properties of "a child that runs openclaw", so both belong on
+    // this one seam.
+    this.env = withOpenClawNodeOnPath(sanitizeOpenClawChildEnv(options.env ?? process.env));
     this.exec = options.exec ?? this.defaultExec.bind(this);
   }
 

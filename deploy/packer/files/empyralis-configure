@@ -127,6 +127,10 @@ umask 0077
   printf 'HOME=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/home")"
   printf 'NPM_CONFIG_CACHE=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/npm-cache")"
   printf 'PATH=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/cli/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
+  # The channel transport's own Node, baked by deploy/packer/scripts/
+  # 70-channel-transport.sh. Named, never prepended: the gateway must keep
+  # running on the Node its prebuilt native modules were compiled against.
+  printf 'EMPYRALIS_OPENCLAW_NODE_BIN_DIR=%s\n' "$(shell_quote_env "${INSTALL_ROOT}/openclaw-node/bin")"
   if [[ -n "${existing_gateway_token}" ]]; then
     printf 'EMPYRALIS_GATEWAY_TOKEN=%s\n' "$(shell_quote_env "${existing_gateway_token}")"
   fi
@@ -157,6 +161,63 @@ if ! command -v systemctl >/dev/null 2>&1 || [[ ! -d /run/systemd/system ]]; the
   echo "empyralis-configure: systemd is not active on this host; refusing to run the gateway unconfined" >&2
   exit 1
 fi
+
+# ── Channels, the per-box half ───────────────────────────────────────────────
+#
+# The transport SOFTWARE is already on this image (deploy/packer/scripts/
+# 70-channel-transport.sh). What is deliberately not on it — because every
+# droplet in the fleet boots from this one image — is anything per-box: the two
+# loopback secrets, OpenClaw's generated config, and the systemd unit that
+# carries one of those secrets. Those are minted here, on this machine, once.
+#
+# Runs BEFORE the gateway service starts, so the transport is already up the
+# first time the gateway looks for it, and the unit's first start finds a
+# config (OpenClaw refuses to start without one).
+#
+# NON-FATAL, exactly like install_channel_transport() in
+# scripts/install-agent-computer.sh, which this is the port of: a box that
+# cannot finish this still comes up as a fully working Agent Computer. Channels
+# degrade; nothing else does.
+setup_channel_transport() {
+  local plan_entry plan unit_path unit_name unit_contents
+  plan_entry="${CURRENT_DIR}/gateway/dist/openclaw/provisioning/openclaw-install-plan-cli.js"
+  if [[ ! -f "${plan_entry}" ]]; then
+    echo "empyralis-configure: this gateway build has no channel transport installer; channels stay unavailable" >&2
+    return 1
+  fi
+  # As ${SERVICE_USER}: this writes the gateway's own state directory, and a
+  # root-owned secrets file there is one the gateway cannot read — a transport
+  # that is dead in a way that looks like nothing happened.
+  if ! plan="$(sudo -u "${SERVICE_USER}" \
+      env -i HOME="${INSTALL_ROOT}/cli/home" \
+        PATH="${INSTALL_ROOT}/cli/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        NPM_CONFIG_PREFIX="${INSTALL_ROOT}/cli" \
+        NPM_CONFIG_CACHE="${INSTALL_ROOT}/cli/npm-cache" \
+        EMPYRALIS_GATEWAY_STATE_DIR="${STATE_ROOT}/gateway" \
+        EMPYRALIS_OPENCLAW_NODE_BIN_DIR="${INSTALL_ROOT}/openclaw-node/bin" \
+        node "${plan_entry}" --ensure-runtime --provision --require-user "${SERVICE_USER}")"; then
+    echo "empyralis-configure: could not set up messaging channels; the Agent Computer is unaffected" >&2
+    return 1
+  fi
+  unit_path="$(printf '%s' "${plan}" | python3 -c 'import json,sys; p=json.load(sys.stdin)["unit"]; print(p["path"] if p else "")')"
+  unit_name="$(printf '%s' "${plan}" | python3 -c 'import json,sys; p=json.load(sys.stdin)["unit"]; print(p["name"] if p else "")')"
+  if [[ -z "${unit_path}" ]]; then
+    echo "empyralis-configure: messaging channels installed but could not be set to start automatically" >&2
+    return 1
+  fi
+  unit_contents="$(printf '%s' "${plan}" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["unit"]["contents"])')"
+  printf '%s' "${unit_contents}" > "${unit_path}"
+  chmod 0644 "${unit_path}"
+  systemctl daemon-reload
+  systemctl enable "${unit_name}" >/dev/null 2>&1 || true
+  systemctl restart "${unit_name}" || {
+    echo "empyralis-configure: messaging channel support did not start (systemctl status ${unit_name})" >&2
+    return 1
+  }
+  echo "empyralis-configure: messaging channels ready"
+}
+
+setup_channel_transport || echo "empyralis-configure: continuing without messaging channel support"
 
 # The unit is already enabled on the image; daemon-reload is cheap insurance in
 # case anything dropped a drop-in. `restart` rather than `start` so re-running

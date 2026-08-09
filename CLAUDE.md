@@ -1257,6 +1257,106 @@ genuinely cannot happen in a browser (a QR scan) the row says so instead of
 rendering a control that submits nothing. Never "Connected" — a connection is
 proven by a real message arriving, and the screen has seen none.
 
+**Every hardware path installs the transport itself, and the customer never
+types a command.** Landed 2026-08-09. Neither path did before:
+`scripts/install-agent-computer.sh` (which the DigitalOcean/Hetzner/Vultr
+cloud-init runs verbatim — `cloud_init_script` only downloads and executes it)
+had zero OpenClaw references, and neither did `deploy/packer`, the BAKED image
+path DigitalOcean actually prefers when a snapshot resolves. So
+`provision_openclaw_gateway` had no trigger on a fresh box.
+
+```
+WHERE THE INSTALL HAPPENS NOW, AND WHY THERE
+  gateway, every boot        AUTHORITATIVE. openclaw-runtime-install.ts, step 1
+    ensureProvisionedAtBoot  of provision(). The only thing that reaches boxes
+                             installed BEFORE this (they never re-run an
+                             installer; they do take self-updates), the only
+                             thing that works on an unprivileged Mac, and it
+                             keeps the pin in ONE file beside its check.
+  shell installers           SAME CODE, via openclaw-install-plan-cli.ts. They
+    (root, pre-gateway)      own only what the gateway cannot: /etc/systemd/
+                             system, and a moment before the gateway exists.
+                             No version literal, no unit body, no npm knowledge
+                             in bash — they write bytes they were handed.
+  packer image               --runtime-only: the SOFTWARE only. Secrets, config
+                             and the unit are per-box, at first boot.
+```
+
+Corollaries. **A boot reconcile that no-ops on a never-provisioned box is a
+feature nobody can reach** — `reconcileFromLastAppliedPolicy` returned
+undefined there, so the state that needed provisioning most was the one state
+that never got it. `ensureProvisionedAtBoot` baselines with the EMPTY channel
+policy: every lockdown step is channel-independent, so the box comes up
+installed, locked down, audited and supervised while carrying no inbound
+policy and fetching no third-party plugin. And **a secret baked into an image
+is one credential for the whole fleet wearing a per-box costume** —
+`80-verify.sh` now refutes the presence of `local-secrets.json` on the image.
+
+**`EMPYRALIS_BRIDGE_TOKEN` and `EMPYRALIS_OPENCLAW_GATEWAY_TOKEN` were never
+set by anything, so the entire channel transport was un-constructed on every
+box this product has ever provisioned.** `index.ts` gated the inbound
+listener, the outbound WS client, the OpenClaw channel runtimes AND the
+`openclaw.provision` advertisement on both being present; no installer in the
+repo wrote either name. Not broken — never built. "Built, tested, and never
+wired", one level up from the code. Both are loopback-only secrets whose two
+ends are BOTH written by us (the bridge plugin runs inside OpenClaw on the
+same box; OpenClaw's `gateway.auth.token` is written by our own provisioning),
+so there was never anything for a human to supply: `openclaw-local-secrets.ts`
+mints and persists them under `stateDir`, env still wins, and an env-supplied
+value is deliberately NOT copied to disk (a copy would make a later edit of
+the env file silently ineffective). This is also what fixes already-installed
+boxes, which never re-run an installer but do restart.
+
+**OpenClaw needs a NEWER Node than the gateway, and the box must run both.**
+`openclaw@2026.6.10` requires Node >= 22.19. `install_node20()` installs Node
+20 on every Agent Computer; the founder's Mac runs Node 26, which is the only
+reason hand-testing ever worked. The box cannot simply move: the gateway ships
+as a PREBUILT artifact whose native modules (bufferutil, utf-8-validate,
+sharp) are compiled against Node 20's ABI, so bumping it would break every
+published artifact on every existing box. Hence `${INSTALL_ROOT}/openclaw-node`
+and `withOpenClawNodeOnPath`, which prepends that bin dir to the CHILD's PATH
+only — the npm install and the supervised unit, never the gateway itself.
+
+```
+npm install --global openclaw@2026.6.10   under Node 20
+  exit 0, ~10min, 350MB of node_modules, /…/bin/openclaw on PATH
+  then EVERY invocation:
+    "openclaw: Node.js v22.19+ is required (current: v20.20.2)."
+  unit: Restart=always + RestartSec=5  ─▶  restart loop, forever
+  installer log:  "channel transport installed and running"
+```
+
+Three rules follow. **`npm install --global` does not enforce `engines`**, so
+a package's own runtime floor is ours to check — before the install, because
+350MB that can never run is worse than nothing (`openclaw_runtime_node_too_old`).
+**The Node that INSTALLS is not the Node that RUNS**: the installed bin is
+`#!/usr/bin/env node`, so the runtime is decided by PATH at exec time, and
+installing under one while supervising under another is a transport that
+installs cleanly and exits on every call. And **exit 0 is not a decision** —
+the first live run wrote and STARTED a unit because the plan CLI exited 0,
+while the plan it printed said `refused`; the installer now reads
+`runtimeInstall.action` and `provision.status`, and a plan with no usable Node
+carries no unit at all, so there is nothing to start.
+
+**A `warn` from their audit is BLOCKING, so a directory nobody looked at can
+make a box provision once and refuse forever.** The OpenClaw profile state dir
+came out `755` on a real box — a `mkdir` inheriting a systemd service's 022
+umask, or OpenClaw creating it before we get there — and their
+`fs.state_dir.perms_readable` check reports that at `warn`, which
+`blockingAuditFindings` treats as blocking. First run: provisioned. Every run
+after it: `openclaw_security_audit_not_clean`. Nothing about that reads as a
+permissions problem. Now chmod 0700 on EVERY run rather than at creation,
+because the directory that broke it already existed — and it holds the gateway
+token and the conversation state, so 755 was wrong on its own terms too.
+
+**A systemd unit with no `User=` runs as root, and `--profile` resolves against
+`$HOME`.** Both halves matter for the co-located transport: root is absurd
+authority for a process whose whole job is to be a radio, and a root-run
+OpenClaw keeps its state in `/root/.openclaw-<p>` while the gateway reads and
+writes its own — one config, two instances, no error anywhere. The shared
+renderer took a `user` field for this; omitting it renders byte-identically,
+so the gateway's own unit is unchanged and no existing box reports drift.
+
 **A gateway frame `seq` is allocated ONCE, through
 `GatewayCheckpoints.allocateClientSeq()`.** Never
 `(await checkpoints.load()).lastClientSeq + 1` at a call site: that shape lost

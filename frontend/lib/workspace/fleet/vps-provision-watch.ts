@@ -214,6 +214,11 @@ const INSTALL_PHASE_LABELS: Record<string, string> = {
   prepare_host: 'Preparing the host',
   docker_install: 'Installing Docker',
   gateway_download: 'Downloading Agent Computer',
+  // The channel transport. Named for what it does FOR THE CUSTOMER, never for
+  // the software it installs — they press one button, authorise their cloud
+  // provider, and come back to a server that can carry messages. OpenClaw is
+  // an implementation detail and must not appear on a screen anyone reads.
+  channel_transport: 'Setting up messaging channels',
   service_setup: 'Setting up the service',
   service_start: 'Starting the service',
   registration_wait: 'Waiting for it to connect',

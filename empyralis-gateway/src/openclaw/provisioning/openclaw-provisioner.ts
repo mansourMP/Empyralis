@@ -126,6 +126,13 @@ import {
   type OpenClawChannelPluginState,
   type OpenClawPluginRefusalCode,
 } from "./openclaw-plugin-install";
+import { resolveOpenClawNodeVersion, withOpenClawNodeOnPath } from "./openclaw-node-runtime";
+import {
+  ensureOpenClawRuntimeInstalled,
+  type NpmRunner,
+  type OpenClawRuntimeInstallOutcome,
+  type OpenClawRuntimeInstallRefusalCode,
+} from "./openclaw-runtime-install";
 import { checkOpenClawVersion, type OpenClawVersionCheck } from "./openclaw-version";
 import {
   auditAndRepairOpenClawSupervisorUnit,
@@ -229,6 +236,10 @@ export type OpenClawProvisionRefusalCode =
   | "openclaw_lockdown_violated"
   | "openclaw_policy_not_applied"
   | "openclaw_security_audit_not_clean"
+  // Acquisition of the OpenClaw CLI itself (./openclaw-runtime-install.ts).
+  // Distinct from `openclaw_not_installed`, which now means "absent AND this
+  // run was not allowed to install it" rather than "absent".
+  | OpenClawRuntimeInstallRefusalCode
   // Channel-plugin acquisition (./openclaw-plugin-install.ts). A channel whose
   // plugin is absent answers an outbound send with a rejection that means "no
   // plugin AND no credential" at once, so these refuse the whole run rather
@@ -270,6 +281,9 @@ export interface OpenClawProvisionResult {
   /** Model-provider credential env vars found in this process's environment
    *  and therefore withheld from OpenClaw. Names only, never values. */
   strippedCredentialEnvNames: string[];
+  /** How the `openclaw` CLI itself got onto this box on this run. Always
+   *  populated; `already_installed` is the steady state. */
+  runtimeInstall?: OpenClawRuntimeInstallOutcome;
   supervisor?: OpenClawSupervisorInstallOutcome;
   /** True when the supervised instance answered a health probe afterwards. */
   healthy?: boolean;
@@ -302,11 +316,27 @@ export interface OpenClawProvisionerOptions {
     writeFile: (filePath: string, contents: string) => Promise<void>;
     mkdir: (dirPath: string) => Promise<void>;
     rm: (filePath: string) => Promise<void>;
+    /** Optional so existing callers/tests need no change; the default
+     *  implementation uses the real fs. */
+    chmod?: (dirPath: string, mode: number) => Promise<void>;
   };
   registerJob?: Parameters<typeof auditAndRepairOpenClawSupervisorUnit>[0]["registerJob"];
   /** Probes the provisioned instance. Injectable so a test never opens a
    *  socket. */
   probeHealth?: () => Promise<boolean>;
+  /**
+   * Whether this run may INSTALL the pinned `openclaw` CLI when it is absent
+   * or off the pin. Default true — a customer must never have to type a
+   * command, which is the whole point.
+   *
+   * Set false only by a caller that deliberately wants a read-only report of
+   * what is on the box.
+   */
+  installRuntime?: boolean;
+  /** Test seam for the npm child; see ./openclaw-runtime-install.ts. */
+  runNpm?: NpmRunner;
+  /** npm binary path, when it is not simply `npm` on PATH. */
+  npmPath?: string;
 }
 
 /**
@@ -355,6 +385,9 @@ function defaultFs(): NonNullable<OpenClawProvisionerOptions["fs"]> {
     },
     rm: async (filePath) => {
       await fsp.rm(filePath, { force: true });
+    },
+    chmod: async (dirPath, mode) => {
+      await fsp.chmod(dirPath, mode);
     },
   };
 }
@@ -525,7 +558,32 @@ export class OpenClawProvisioner {
     const profile = this.options.cli.profile;
     const strippedCredentialEnvNames = detectForbiddenCredentialEnvNames(this.env);
 
-    // ── 1. Version pin, before anything is touched ──────────────────────
+    // ── 1. Acquire the CLI at the pin, then check the pin ───────────────
+    //
+    // ACQUIRE FIRST, VERIFY SECOND, and the verification is a fresh
+    // `openclaw --version` rather than the installer's own opinion of how it
+    // went. The two steps stay separate on purpose: everything below this
+    // point already assumed a pinned CLI and refused loudly without one, and
+    // that refusal is what must keep working — installing is a new way to
+    // SATISFY the pin, never a new way to skip checking it.
+    //
+    // On a correct box `ensureOpenClawRuntimeInstalled` executes nothing at
+    // all (it is gated on the same `--version` read), so a boot-time
+    // reconcile on a box with no network is unaffected.
+    // The transport's OWN Node, first on the child's PATH — never this
+    // process's (./openclaw-node-runtime.ts explains why they must differ).
+    // A test that injects `runNpm` never reaches a real `node`, so the
+    // version probe is skipped for it rather than shelling out.
+    const transportEnv = withOpenClawNodeOnPath(this.env);
+    const runtimeInstall = await ensureOpenClawRuntimeInstalled({
+      cli: this.options.cli,
+      install: this.options.installRuntime !== false,
+      env: transportEnv,
+      npmPath: this.options.npmPath,
+      runNpm: this.options.runNpm,
+      nodeVersion: this.options.runNpm ? undefined : await resolveOpenClawNodeVersion(this.env),
+      record: this.options.record,
+    });
     const version = checkOpenClawVersion(await this.options.cli.version());
     const base: OpenClawProvisionResult = {
       status: "refused",
@@ -541,8 +599,16 @@ export class OpenClawProvisioner {
       auditFindings: [],
       channelPlugins: [],
       strippedCredentialEnvNames,
+      runtimeInstall,
     };
     if (!version.ok) {
+      // A failed ACQUISITION is reported as itself, so "this box cannot reach
+      // npm" is never flattened into "OpenClaw is not installed" — those need
+      // different answers from whoever reads the result, and the second one
+      // reads as a box nobody set up.
+      if (runtimeInstall.refusal) {
+        return this.refuse(base, runtimeInstall.refusal.code, runtimeInstall.refusal.detail);
+      }
       return this.refuse(base, version.code ?? "openclaw_version_mismatch", version.detail ?? "");
     }
 
@@ -642,11 +708,29 @@ export class OpenClawProvisioner {
     }
 
     // ── 5. Apply ────────────────────────────────────────────────────────
-    const patchPath = path.join(
-      openClawProfileStateDir(profile, this.homeDir),
-      "empyralis-generated.config.json",
-    );
-    await this.fs.mkdir(path.dirname(patchPath));
+    const profileStateDir = openClawProfileStateDir(profile, this.homeDir);
+    const patchPath = path.join(profileStateDir, "empyralis-generated.config.json");
+    await this.fs.mkdir(profileStateDir);
+    // 0700, and re-asserted every run rather than only at creation.
+    //
+    // OpenClaw's own audit fails a state dir any local user can read
+    // (`fs.state_dir.perms_readable`, a WARN — which blockingAuditFindings
+    // treats as blocking), and that directory holds the gateway token and the
+    // conversation state. Two ways it lands at 755 anyway: a `mkdir` that
+    // inherits the process umask (022 on a systemd service), and OpenClaw
+    // creating the directory itself before we ever get there. Measured on a
+    // real box: the first provisioning run succeeded and every run after it
+    // would have refused with `openclaw_security_audit_not_clean` — provision
+    // once, then refuse forever, for a directory nobody looked at.
+    //
+    // Best-effort: a chmod that fails must not take provisioning down, and if
+    // the permissions really are wrong their audit refuses the run two steps
+    // later, which is the honest place for that verdict.
+    try {
+      await this.fs.chmod?.(profileStateDir, 0o700);
+    } catch {
+      // Reported by their audit below, not swallowed into a silent pass.
+    }
     await this.fs.writeFile(patchPath, JSON.stringify(rendered.config, null, 2));
     const patch = await this.options.cli.configPatch(patchPath);
     // The rendered document carries the gateway token; it must not outlive
@@ -748,6 +832,7 @@ export class OpenClawProvisioner {
         action: state.action,
       })),
       stripped_credential_env: strippedCredentialEnvNames,
+      runtime_install: runtimeInstall.action,
       supervisor_action: supervisor.repair?.action ?? null,
       healthy: healthy ?? null,
       restart_required: result.restartRequired,
@@ -759,7 +844,11 @@ export class OpenClawProvisioner {
     return buildOpenClawSupervisedEnv({
       profile: this.options.cli.profile,
       homeDir: this.homeDir,
-      pathEnv: String(this.env.PATH || "/usr/local/bin:/usr/bin:/bin"),
+      // The SAME PATH the install ran under. The installed `openclaw` bin is
+      // `#!/usr/bin/env node`, so the runtime that executes it is decided
+      // here, at run time — installing under one Node and supervising under
+      // another is a transport that installs cleanly and exits on every call.
+      pathEnv: String(withOpenClawNodeOnPath(this.env).PATH || "/usr/local/bin:/usr/bin:/bin"),
       bridgeToken: this.options.bridgeToken,
       bridgeEndpointUrl: this.options.bridgeEndpointUrl,
     });
