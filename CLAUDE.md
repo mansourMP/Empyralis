@@ -377,6 +377,49 @@ renaming a provider/model/route, make stale config **fail loudly** rather
 than fall through to a default — see `model_router`'s deliberate retention of
 a `vertex` branch after Vertex was removed.
 
+**A second engine behind one dispatch seam must be symmetric about MONEY,
+not just about its return value.** MAN-310 put the Claude Agent SDK behind
+`_run_sage_action_loop_v3._collect_stream_events` and made it the production
+default (2026-08-06). Both branches produce the identical event contract —
+which is what got reviewed, and what the branch's own comment asserts
+("same return contract... the two paths never interact"). But the credit
+debit for an ordinary turn was never IN that contract: it lived inside the
+legacy branch's *callee*, `stream_provider_backed_direct_chat` ->
+`direct_chat_hosted_usage_service`, which labels itself "the PRIMARY debit
+path". Swapping the engine swapped the debit out with it.
+
+```
+_collect_stream_events
+  ├ legacy → stream_provider_backed_direct_chat → …hosted_usage… ─▶ DEBIT ✓
+  └ sdk    → collect_events_via_claude_agent_sdk ───────────────▶ nothing  ✗
+              ↑ THE PRODUCTION DEFAULT
+```
+
+The other debit (`debit_workspace_credits_for_turn_atomic`) sat in the
+cloud-fallthrough block, which a normal turn never reaches — the action-loop
+branch `return`s ~500 lines earlier. So every ordinary turn on the default
+engine wrote a real `usage_events` row and charged nothing: spend metered,
+never billed, no error anywhere, the billing page showing usage nobody paid
+for. Fixed 2026-08-09 by fusing metering and debiting into one function
+(`_meter_and_debit_turn`), so "record spend without charging for it" is not
+expressible in that module.
+
+Three rules follow. **When you add a branch behind a dispatch seam,
+enumerate the SIDE EFFECTS of the old branch's callees, not just its return
+value** — identical return contracts are exactly what made this review pass.
+**A test-only default is a permanent blind spot over the real default
+path**: `_resolve_turn_engine_id` returns `""` under `PYTEST_CURRENT_TEST`
+so old mocks keep working, which means every test that does not pass
+`engine_options={"engine": "claude_agent_sdk"}` exercises the engine
+production does NOT use — that is how a suite carrying a whole file on
+double-charge prevention never noticed a zero-charge bug. And **a money path
+needs a call-COUNT assertion**: "a debit happened" is satisfied by a double
+charge just as happily as by a correct one, so
+`test_default_engine_credit_debit.py` asserts `== 1`, plus AST assertions
+that the debit primitive has exactly one call site and that the two seam
+call sites are mutually exclusive by control flow — behavioural tests can
+only cover the engines that exist today.
+
 **Stale string matching.** An error bucket matched `"ai limit"`; the message
 was reworded to `"AI usage limit reached"` and users got a generic "Something
 went wrong" for five weeks. Match on stable codes, never on prose.
