@@ -165,6 +165,48 @@ for (const channel of manifest.channels) {
 
 assertNoOpenClaw("Messaging channels connected through this computer.", "the fixed panel subtitle (pinned literal)");
 
+// --- The unified Channels tab (FleetAgentDetail.tsx's ChannelsTab). This
+//     screen merges the first-party channel rows (Telegram/WhatsApp/Discord/
+//     Signal/iMessage/Slack/WeChat) and the OpenClaw-transported rows into
+//     ONE list, in both the gateway-paired and no-gateway states — no
+//     separate "OpenClawChannelsPanel" component or section any more,
+//     confirmed by grep at commit time (grep -n "OpenClawChannelsPanel"
+//     frontend/lib/workspace/fleet/FleetAgentDetail.tsx must show ONLY the
+//     import-path string and a code comment, never a JSX usage). Since this
+//     file cannot render React (see the header comment), the static strings
+//     that screen shows in BOTH states are pinned here by hand, literal
+//     copy-paste from FleetAgentDetail.tsx — this is the same technique the
+//     panel subtitle pin above already uses, extended to the merged screen.
+//     A human editing either copy site is expected to keep both in sync;
+//     this test exists so a slip that reintroduces the transport's name is
+//     loud immediately instead of waiting for a browser check. -------------
+
+assertNoOpenClaw("Where people can message this agent", "unified Channels tab subtitle (both states, pinned literal)");
+assertNoOpenClaw(
+  "This agent's computer could not be reached, so some rows below show an unknown state. Their setup fields are still accurate.",
+  "unified Channels tab observed-error banner (gateway state, pinned literal)",
+);
+assertNoOpenClaw("Reading this agent's computer…", "unified Channels tab loading line (gateway state, pinned literal)");
+assertNoOpenClaw("connect elsewhere in Empyralis and", "unified Channels tab superseded-channel note (pinned literal fragment)");
+assertNoOpenClaw("isn't shown here", "unified Channels tab superseded-channel note (pinned literal fragment)");
+
+// The first-party platform labels (CHANNEL_GRID_PLATFORMS) now render inside
+// the SAME row list as the OpenClaw catalog rows — pin them too, since a
+// label is exactly the kind of string this file already treats as reaching
+// the DOM verbatim (see the manifest-label loop above).
+const FIRST_PARTY_CHANNEL_GRID_LABELS = [
+  "Telegram",
+  "Slack",
+  "Discord",
+  "WhatsApp",
+  "Signal",
+  "iMessage",
+  "WeChat / WeCom",
+];
+for (const label of FIRST_PARTY_CHANNEL_GRID_LABELS) {
+  assertNoOpenClaw(label, `CHANNEL_GRID_PLATFORMS label ${JSON.stringify(label)} (pinned literal)`);
+}
+
 // --- Summary ---
 
 console.log(`\n${passed} passed, ${failed} failed`);
