@@ -380,8 +380,14 @@ install_channel_transport() {
         node "${plan_entry}" --ensure-runtime --provision --require-user "${SERVICE_USER}" 2>/tmp/empyralis-channel-transport.err)"; then
     local err
     err="$(tail -c 400 /tmp/empyralis-channel-transport.err 2>/dev/null | tr '\n' ' ')"
+    # The detail goes to the console for whoever is debugging the box; the
+    # BEACON carries a fixed sentence. That text reaches a customer's screen,
+    # and this failure's stderr is full of npm output and the name of a piece
+    # of software they must never have to know about. Code in, frozen literal
+    # out — the same posture platform_event.CHANNEL_OWNER_SAFE_CODES takes for
+    # channel replies.
     log "WARNING: channel transport install failed: ${err}"
-    report_beacon 0 "could not install messaging channel support on this server (${err}); everything else is installed and working, and channels can be set up later"
+    report_beacon 0 "could not set up messaging channels on this server; everything else is installed and working, and channels can be set up later"
     return 1
   fi
 
