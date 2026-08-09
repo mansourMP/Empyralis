@@ -333,6 +333,170 @@ def _turn_credit_idempotency_key(request_id: Any, trace_id: Any) -> str:
     return _coerce_text(request_id) or _coerce_text(trace_id)
 
 
+def _resolve_turn_payer_mode(workspace_record: Any) -> str:
+    """Who pays for this turn: ``platform_credits`` or ``byok``.
+
+    A workspace that has configured its OWN ``sage_ai_provider`` in
+    admin_defaults is bringing its own key — its turns run on its own
+    provider account and must NEVER draw down Empyralis platform credits.
+    Anything else (no record, unreadable metadata, empty provider) is a
+    platform-paid turn.
+
+    Extracted from handle_sage_chat's cloud-fallthrough block, which was the
+    only place that made this distinction; the claude_agent_sdk-engine
+    metering call hardcoded ``mode="platform_credits"`` instead and therefore
+    mislabelled every BYOK turn on the production default engine. One
+    implementation now, so the two cannot disagree about who is paying.
+    """
+    try:
+        from server_modules.workspace_config_schema import (
+            workspace_admin_defaults_from_metadata as _admin_defaults,
+        )
+
+        metadata = dict((workspace_record or {}).get("metadata") or {}) if isinstance(workspace_record, dict) else {}
+        if _coerce_text(_admin_defaults(metadata).sage_ai_provider):
+            return "byok"
+    except Exception:
+        pass
+    return "platform_credits"
+
+
+async def _meter_and_debit_turn(
+    *,
+    workspace_id: str,
+    tenant_id: str,
+    credit_idempotency_key: str,
+    workspace_record: Any,
+    provider: str | None,
+    model: str | None,
+    tokens_in: int,
+    tokens_out: int,
+    usd_cost: float | None = None,
+    tokens_cache_creation: int = 0,
+    tokens_cache_read: int = 0,
+    run_id: str | None = None,
+    trace_id: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Record ONE turn's usage AND debit its credits. The single seam.
+
+    Metering and debiting are deliberately ONE call, because the bug this
+    function exists to close was precisely their separation: the
+    claude_agent_sdk engine — the production default since MAN-310 — metered
+    its turns (``record_usage_from_context``) and then returned without ever
+    debiting, because the only debit for a normal turn lived inside the
+    LEGACY engine's generation service
+    (``direct_chat_generation_service.stream_provider_backed_direct_chat`` ->
+    ``direct_chat_hosted_usage_service.persist_direct_chat_hosted_usage_best_effort``).
+    Swapping the engine at ``_collect_stream_events`` swapped the debit out
+    with it. Spend was recorded; nothing was charged.
+
+    Fusing the two makes that class of drift unrepresentable: in this module
+    you cannot record spend without charging for it, and you cannot charge
+    without recording. ``test_default_engine_credit_debit.py`` AST-asserts
+    that this stays true — that this is the ONLY caller of
+    ``debit_workspace_credits_for_turn_atomic`` and of
+    ``record_usage_from_context`` in this file — because a behavioural test
+    can only cover the engines that exist today.
+
+    COST. ``usd_cost`` when the caller has a ground-truth number
+    (the legacy generation's own pricing lookup); otherwise
+    ``pricing_registry_service.estimate_cost_usd``, which is the exact rule
+    ``usage_events_repository.record_usage_event`` applies to the row it is
+    about to write. So the credits charged always correspond to the
+    ``usage_events.usd_cost`` the customer is shown for the same turn —
+    never a second, independently-derived number. An unknown price
+    (``None``) charges nothing: never a fabricated zero, never a guess.
+
+    BYOK. Debits only when ``_resolve_turn_payer_mode`` says
+    ``platform_credits``. A bring-your-own-key turn is metered (the customer
+    still wants to see it) and never charged.
+
+    NON-BLOCKING BY CONSTRUCTION. The turn has already produced its reply
+    before anything here runs. ``debit_workspace_credits_for_turn_atomic``
+    clamps at zero, never goes negative and never raises; an insufficient
+    balance is logged as a warning and the reply still ships. A billing
+    shortfall must never turn into a refused answer — see
+    billing_credit_config.py and control_plane_repository.py's "Direct
+    per-turn credit debit" section. Every failure here is swallowed for the
+    same reason.
+
+    Idempotent per ``credit_idempotency_key``: the ledger dedupes on it, and
+    it is the same key threaded into the legacy engine's own in-generation
+    debit, so the two can never both charge one logical turn.
+    """
+    outcome: dict[str, Any] = {
+        "mode": _resolve_turn_payer_mode(workspace_record),
+        "usd_cost": None,
+        "credits_owed": 0,
+        "debit": None,
+    }
+    logger = logging.getLogger(__name__)
+    clean_tokens_in = max(0, int(tokens_in or 0))
+    clean_tokens_out = max(0, int(tokens_out or 0))
+
+    try:
+        from server_modules import usage_events_repository as _usage_repo
+
+        await _usage_repo.record_usage_from_context(
+            provider=provider or None,
+            model=model or None,
+            tokens_in=clean_tokens_in,
+            tokens_out=clean_tokens_out,
+            tokens_cache_creation=max(0, int(tokens_cache_creation or 0)),
+            tokens_cache_read=max(0, int(tokens_cache_read or 0)),
+            usd_cost=usd_cost,
+            run_id=run_id or None,
+            mode=outcome["mode"],
+            metadata=metadata,
+        )
+    except Exception:
+        logger.warning("turn metering failed (non-fatal) for workspace=%s trace_id=%s", workspace_id, trace_id)
+
+    try:
+        resolved_cost = usd_cost
+        if resolved_cost is None:
+            from server_modules import pricing_registry_service as _pricing
+
+            resolved_cost = _pricing.estimate_cost_usd(provider, model, clean_tokens_in, clean_tokens_out)
+        outcome["usd_cost"] = resolved_cost
+        if outcome["mode"] != "platform_credits" or resolved_cost is None:
+            return outcome
+
+        from server_modules import billing_credit_config as _credit_cfg
+        from server_modules import control_plane_repository as _cpr
+
+        credits_owed = _credit_cfg.credits_for_turn_cost_usd(resolved_cost)
+        outcome["credits_owed"] = credits_owed
+        if credits_owed <= 0:
+            return outcome
+
+        # Native await straight to the repository — we're already inside this
+        # async turn, so there's no need for billing_service's sync-callers
+        # wrapper and its asyncio sync-bridge hop.
+        debit_result = await _cpr.debit_workspace_credits_for_turn_atomic(
+            workspace_id=workspace_id,
+            tenant_id=tenant_id,
+            request_id=credit_idempotency_key,
+            credits_to_charge=credits_owed,
+            floor_usd=_credit_cfg.NEW_ACCOUNT_SIGNUP_CREDIT_USD,
+            credits_per_usd=_credit_cfg.HOSTED_SAGE_AI_CREDITS_PER_USD,
+        )
+        outcome["debit"] = debit_result
+        if isinstance(debit_result, dict) and debit_result.get("insufficient"):
+            logger.warning(
+                "credit_debit: workspace=%s ran short covering %s credits "
+                "(only %s debited) for trace_id=%s — turn was NOT blocked.",
+                workspace_id, credits_owed, debit_result.get("credits_debited"), trace_id,
+            )
+    except Exception as exc:
+        logger.warning(
+            "credit_debit: best-effort debit failed for workspace=%s trace_id=%s: %s",
+            workspace_id, trace_id, exc,
+        )
+    return outcome
+
+
 def resolve_model_for_capability(
     workspace_id: str,
     capability: str = "tools",
@@ -6120,8 +6284,21 @@ async def _handle_sage_chat_unguarded(
                     if isinstance(_raw_final_payload_for_context_usage, dict)
                     else None
                 )
-                from server_modules import usage_events_repository as _usage_repo_sdk_meter
-                await _usage_repo_sdk_meter.record_usage_from_context(
+                # Meter AND debit in one call — see _meter_and_debit_turn's
+                # docstring. This branch returns below (the action-loop
+                # `return`), so it never reaches the cloud-fallthrough block
+                # further down; before this fix that made it the ONLY exit
+                # from a normal production turn with no debit anywhere on it.
+                # _sdk_total_cost is usually None here (it is gated on
+                # served_by_anthropic upstream and the platform-credit tier
+                # is DeepSeek-only), which is exactly why the helper falls
+                # back to the same pricing lookup usage_events itself uses —
+                # otherwise the SDK engine would "debit" zero forever.
+                await _meter_and_debit_turn(
+                    workspace_id=normalized_workspace_id,
+                    tenant_id=normalized_tenant_id,
+                    credit_idempotency_key=turn_credit_idempotency_key,
+                    workspace_record=_ws_record,
                     provider=provider or None,
                     model=requested_model or None,
                     tokens_in=_sdk_tokens_in,
@@ -6130,7 +6307,7 @@ async def _handle_sage_chat_unguarded(
                     tokens_cache_read=int(_sdk_usage_metadata.get("cache_read_input_tokens") or 0),
                     usd_cost=_sdk_total_cost,
                     run_id=trace_id or None,
-                    mode="platform_credits",
+                    trace_id=trace_id,
                     metadata=_sdk_usage_metadata,
                 )
         except Exception:
@@ -6832,73 +7009,28 @@ async def _handle_sage_chat_unguarded(
         _sage_usd_cost = (
             _usage_dict.get("estimated_cost_usd") if _usage_dict.get("pricing_known") else None
         )
-        _sage_usage_mode = "platform_credits"
-        try:
-            from server_modules.workspace_config_schema import workspace_admin_defaults_from_metadata as _admin_defaults_for_mode
-            _ws_meta_for_mode = dict((_ws_record or {}).get("metadata") or {}) if isinstance(_ws_record, dict) else {}
-            if str(_admin_defaults_for_mode(_ws_meta_for_mode).sage_ai_provider or "").strip():
-                _sage_usage_mode = "byok"
-        except Exception:
-            pass
-        from server_modules import usage_events_repository as _usage_repo_meter
-        await _usage_repo_meter.record_usage_from_context(
+        # ── Credit-system reconnect (2026-07-20), moved 2026-08-09 ────
+        # The debit that used to be spelled out inline here now lives in
+        # _meter_and_debit_turn, together with the metering call it was
+        # always paired with. It did not move because this path was wrong —
+        # this path worked. It moved because it was the ONLY copy, so the
+        # claude_agent_sdk engine (the production default, which returns
+        # from the action-loop branch long before reaching this block)
+        # metered its turns and charged for none of them. Both paths now
+        # share one implementation; see that function's docstring.
+        await _meter_and_debit_turn(
+            workspace_id=normalized_workspace_id,
+            tenant_id=normalized_tenant_id,
+            credit_idempotency_key=turn_credit_idempotency_key,
+            workspace_record=_ws_record,
             provider=effective_provider or None,
             model=effective_model or None,
             tokens_in=_sage_tokens_in,
             tokens_out=_sage_tokens_out,
             usd_cost=_sage_usd_cost,
             run_id=trace_id or None,
-            mode=_sage_usage_mode,
+            trace_id=trace_id,
         )
-
-        # ── Credit-system reconnect (2026-07-20) ──────────────────────
-        # Convert THIS turn's ground-truth cost (the same _sage_usd_cost
-        # the metering call above just recorded) into credits and debit
-        # the workspace's credit_balance_usd. Platform-paid turns only —
-        # BYOK/local turns aren't billed by Empyralis. This is the
-        # previously-DORMANT credit debit, reconnected right next to the
-        # metering call the earlier audit identified as the "next to"
-        # anchor point.
-        #
-        # Deliberately best-effort and non-blocking: the turn has already
-        # produced its reply by this point, so nothing here can affect the
-        # user's response. debit_workspace_credits_for_turn_atomic clamps
-        # at zero balance (never negative, never raises) and seeds a
-        # generous free floor on first touch — see billing_credit_config.py
-        # and control_plane_repository.py's "Direct per-turn credit debit"
-        # section for the full non-blocking-by-construction rationale.
-        if _sage_usage_mode == "platform_credits" and _sage_usd_cost is not None:
-            try:
-                from server_modules import billing_credit_config as _credit_cfg
-                from server_modules import control_plane_repository as _cpr
-
-                _credits_owed = _credit_cfg.credits_for_turn_cost_usd(_sage_usd_cost)
-                if _credits_owed > 0:
-                    # Native await straight to the repository — we're already
-                    # inside this async turn, so there's no need to go
-                    # through billing_service's sync-callers wrapper (which
-                    # exists for non-async call sites) and its asyncio
-                    # sync-bridge hop.
-                    _debit_result = await _cpr.debit_workspace_credits_for_turn_atomic(
-                        workspace_id=normalized_workspace_id,
-                        tenant_id=normalized_tenant_id,
-                        request_id=turn_credit_idempotency_key,
-                        credits_to_charge=_credits_owed,
-                        floor_usd=_credit_cfg.NEW_ACCOUNT_SIGNUP_CREDIT_USD,
-                        credits_per_usd=_credit_cfg.HOSTED_SAGE_AI_CREDITS_PER_USD,
-                    )
-                    if isinstance(_debit_result, dict) and _debit_result.get("insufficient"):
-                        logging.getLogger(__name__).warning(
-                            "credit_debit: workspace=%s ran short covering %s credits "
-                            "(only %s debited) for trace_id=%s — turn was NOT blocked.",
-                            normalized_workspace_id, _credits_owed,
-                            _debit_result.get("credits_debited"), trace_id,
-                        )
-            except Exception as _credit_debit_exc:
-                logging.getLogger(__name__).warning(
-                    "credit_debit: best-effort debit failed for workspace=%s trace_id=%s: %s",
-                    normalized_workspace_id, trace_id, _credit_debit_exc,
-                )
     except Exception:
         pass
 
