@@ -618,3 +618,155 @@ test("a rejected token never yields a session, and a send reports it rather than
     await gateway.close();
   }
 });
+
+// ── client: a server-supplied backoff is a FLOOR, never a ceiling ─────────
+//
+// These four cover the one thing this transport can do to make a platform
+// rate-limit WORSE: retry earlier than OpenClaw told us to. Everything else
+// on the outbound path (chunking, per-channel throttling, the plugin's own
+// retry-after handling) happens INSIDE OpenClaw and is inherited identically
+// by `message.action` and by their own agent's reply — verified against the
+// pinned v2026.6.10 bundle, see openclaw-gateway-client.ts's waitBeforeRetry.
+// The retry interval is the only pacing lever this seam actually owns, so it
+// is the only one asserted here.
+
+test("a retryAfterMs longer than one in-band wait STOPS the retry instead of retrying early", async () => {
+  const journal: Array<[string, Record<string, unknown>]> = [];
+  let attempts = 0;
+  const gateway = await startFakeOpenClawGateway({
+    expectedToken: "openclaw-token",
+    respond: () => {
+      attempts += 1;
+      // 30s is the shape a real platform flood-wait takes. The old code
+      // clamped this to 2s and tried again — twice.
+      return { ok: false, error: { code: "UNAVAILABLE", message: "flood wait", retryAfterMs: 30_000 } };
+    },
+  });
+  const client = new OpenClawGatewayClient({
+    url: gateway.url,
+    token: "openclaw-token",
+    record: async (type, payload) => {
+      journal.push([type, payload]);
+    },
+  });
+  try {
+    await client.start();
+    const startedAt = Date.now();
+    const outcome = await client.sendMessageAction({
+      channel: "line",
+      action: "send",
+      params: { target: "C-999", message: "hello" },
+      idempotencyKey: "k-backoff-long",
+    });
+    const elapsed = Date.now() - startedAt;
+
+    assert.equal(outcome.status, "transient");
+    // EXACTLY one attempt. A count assertion, not "a failure happened": the
+    // old clamp also produced a transient outcome, just after three sends.
+    assert.equal(attempts, 1, "a backoff longer than the budget must not be retried at all");
+    // And it must not have slept the 30s either — refusing is cheaper than
+    // waiting, and the cloud's at-least-once layer owns the real wait.
+    assert.ok(elapsed < 5_000, `expected an immediate return, took ${elapsed}ms`);
+    // The number OpenClaw asked for survives to the caller and the journal,
+    // so "briefly busy" and "rate-limited" stay distinguishable downstream.
+    assert.equal(outcome.status === "transient" ? outcome.retryAfterMs : undefined, 30_000);
+    const deferred = journal.find(([type]) => type === "openclaw.outbound.retry_deferred");
+    assert.ok(deferred, "the refusal to retry must be journaled, never silent");
+    assert.equal(deferred?.[1].retry_after_ms, 30_000);
+  } finally {
+    await client.stop();
+    await gateway.close();
+  }
+});
+
+test("a retryAfterMs within budget is honoured as a FLOOR, not shortened to our own backoff", async () => {
+  let attempts = 0;
+  const gateway = await startFakeOpenClawGateway({
+    expectedToken: "openclaw-token",
+    respond: () => {
+      attempts += 1;
+      // 1200ms is longer than our own first backoff (400ms) and, critically,
+      // longer than the 2000ms ceiling would have mattered for — it is here
+      // to prove the wait is driven by THEIR number, not ours.
+      if (attempts === 1) return { ok: false, error: { code: "UNAVAILABLE", message: "busy", retryAfterMs: 1_200 } };
+      return { ok: true, payload: { messageId: "line-9" } };
+    },
+  });
+  const client = new OpenClawGatewayClient({ url: gateway.url, token: "openclaw-token" });
+  try {
+    await client.start();
+    const startedAt = Date.now();
+    const outcome = await client.sendMessageAction({
+      channel: "line",
+      action: "send",
+      params: { target: "C-999", message: "hello" },
+      idempotencyKey: "k-backoff-floor",
+    });
+    const elapsed = Date.now() - startedAt;
+    assert.equal(outcome.status, "delivered");
+    assert.equal(attempts, 2);
+    // Allow a small scheduling slack below the asked-for figure; the point is
+    // that it is nowhere near our own 400ms first backoff.
+    assert.ok(elapsed >= 1_100, `expected to wait the asked-for 1200ms, waited ${elapsed}ms`);
+  } finally {
+    await client.stop();
+    await gateway.close();
+  }
+});
+
+test("with no retryAfterMs the client still uses its own capped backoff and all attempts", async () => {
+  let attempts = 0;
+  const gateway = await startFakeOpenClawGateway({
+    expectedToken: "openclaw-token",
+    respond: () => {
+      attempts += 1;
+      // OpenClaw's real shape for anything the send path throws:
+      // errorShape(ErrorCodes.UNAVAILABLE, String(err)) — no `retryable`,
+      // no `retryAfterMs` (dist/send-BMn-S3XR.js,
+      // createGatewayInflightUnavailableFailure).
+      return { ok: false, error: { code: "UNAVAILABLE", message: "adapter threw" } };
+    },
+  });
+  const client = new OpenClawGatewayClient({ url: gateway.url, token: "openclaw-token" });
+  try {
+    await client.start();
+    const outcome = await client.sendMessageAction({
+      channel: "line",
+      action: "send",
+      params: { target: "C-999", message: "hello" },
+      idempotencyKey: "k-backoff-none",
+    });
+    assert.equal(outcome.status, "transient");
+    assert.equal(attempts, 3, "an unqualified transient still gets the bounded self-backoff retry");
+  } finally {
+    await client.stop();
+    await gateway.close();
+  }
+});
+
+test("the client source contains no downward clamp of a server-supplied backoff", () => {
+  // A behavioural test can only cover the shapes that exist today, and the
+  // defect being guarded is a one-token change (`Math.min` in place of
+  // `Math.max`) that type-checks, passes every existing assertion, and is
+  // silent in production. So the shape itself is banned in source — the same
+  // reason __tests__/exec-file-timeout-child-leak.test.ts bans a raw option.
+  const source = fs.readFileSync(
+    // Tests run from dist/__tests__, so ../../ is the package root — same
+    // shape as the cancel-predicate drift assertion above.
+    path.resolve(__dirname, "../../src/openclaw/openclaw-gateway-client.ts"),
+    "utf8",
+  );
+  const body = source
+    .split("\n")
+    .filter((line) => !line.trimStart().startsWith("*") && !line.trimStart().startsWith("//"))
+    .join("\n");
+  assert.equal(
+    /Math\.min\([^)]*retryAfterMs/.test(body),
+    false,
+    "retryAfterMs must never be an argument to Math.min — a server-supplied backoff is a floor, never a ceiling",
+  );
+  assert.ok(
+    /Math\.max\(\s*requested\s*\?\?\s*0\s*,\s*selfBackoff\s*\)/.test(body),
+    "the retry wait must be the MAXIMUM of the asked-for backoff and our own",
+  );
+});

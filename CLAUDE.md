@@ -1288,6 +1288,90 @@ sending out of order trips the identical guard.
 turns green as soon as the race is closed while production still emits
 duplicates — "a mock protects a seam, not a path", measured.
 
+**Outbound anti-ban: we inherit the chunking and the per-channel throttling,
+and we inherit NOTHING from their agent loop — which turns out to be almost
+nothing.** Verified 2026-08-09 against the pinned v2026.6.10 bundle, no live
+traffic. `message.action` and OpenClaw's own agent reply converge on the SAME
+function three frames down, so anything below that line is ours for free:
+
+```
+OURS    message.action (WS RPC) ─▶ sendHandlers["message.action"]  send-BMn-S3XR.js
+                                   dispatchChannelMessageAction
+                                   plugin.actions.handleAction     e.g. telegram
+                                                                   action-runtime-*.js
+THEIRS  inbound ─▶ reply dispatcher ─▶ deliver ──┐
+                   (humanDelay, typing, sendChain)│
+                                                  ▼
+                          BOTH ─▶ sendDurableMessageBatch
+                                  deliverOutboundPayloadsInternal  deliver-BPqL55uX.js
+                                    ├ sendTextChunks   CHUNKING, per-plugin limit ✓
+                                    └ plugin.sendText  the plugin's own API client ✓
+        ─────────── everything ABOVE the join is theirs alone ───────────
+                 humanDelay ✗   typing ✗   inbound debounce ✗
+```
+
+Four things this settles, each of which a code reading gets wrong by default:
+
+- **Chunking is INHERITED** and is not ours to do. Split happens in
+  `deliverOutboundPayloadsInternal`'s `sendTextChunks` using the plugin's own
+  `chunker`/`textChunkLimit`/`resolveEffectiveTextChunkLimit` (Telegram 4000
+  capped to 4096, SMS 1500, IRC 350, ClickClack none at all). Never pre-split
+  on our side: N pre-split messages are N `message.action` calls, which is
+  strictly worse than one call they chunk.
+- **Neither path paces the chunks.** `for (const unit of units) results.push(
+  await sendHandler.sendText(...))` has no delay — for their agent too. So
+  there is no gap here to close, and no version of "their pipeline paces and
+  ours doesn't". Spacing, where it exists, is the PLUGIN's transport:
+  Telegram's `getOrCreateAccountThrottler` (`send-B-QsV5Qz.js`) installs
+  grammY's `apiThrottler` on `bot.api.config.use` — 1 msg/s per chat, 20/min
+  per group, 30/s per token — plus a `GroupFairQueue` per forum topic; Discord,
+  Matrix and Synology ship their own send queues. **Signal, iMessage, IRC, SMS
+  and ClickClack have none, and no 429/retry-after handling either.** Adopting
+  OpenClaw buys real pacing per channel, not uniform pacing — do not describe
+  it as a blanket protection. And for the channels this lane actually routes
+  today (feishu/line/qqbot/zalo/msteams) the plugin is third-party npm that
+  provisioning installs, so whether it paces **cannot be determined from
+  OpenClaw's own source** — it is a property of each plugin, not of the
+  transport. Say that, rather than generalising from Telegram.
+- **Presence is structurally unreachable through this transport.**
+  `CHANNEL_MESSAGE_ACTION_NAMES` has no typing action at all (`read` and
+  `set-presence` exist; typing does not). Typing lives on the plugin's
+  `heartbeat.sendTyping`, driven by `createTypingCallbacks` from their inbound
+  dispatch and heartbeat runner under `session.typingMode` — agent-loop only.
+  Nothing at our seam can send it; it needs an upstream action, not a fix here.
+- **`agents.defaults.humanDelay`** (a random 800–2500ms between reply BLOCKS,
+  `reply-dispatcher.ts`) is their only above-the-plugin pacing, it is
+  **`mode: "off"` by default**, and it spaces blocks — we emit one final text
+  per turn, so there would be nothing for it to space. Not a gap.
+
+**A server-supplied `retryAfterMs` is a FLOOR, never a ceiling.** The one real
+defect found, and the only pacing lever this seam actually owns:
+`OpenClawGatewayClient.delayBeforeRetry` computed
+`Math.min(retryAfterMs ?? backoff, 2000)` — it read OpenClaw's own structured
+backoff and clamped it DOWNWARD. Told "wait 30s" it waited 2s and retried,
+twice. That is the exact shape of the incident their
+`extensions/telegram/src/sendchataction-401-backoff.ts` exists for, reintroduced
+at our own seam while adopting them to avoid it. Now `waitBeforeRetry`: wait
+`max(asked, our own backoff)`, and when the ask exceeds one in-band wait
+(`RETRY_HONOUR_BUDGET_MS`) **stop retrying** and return the transient outcome
+carrying `retryAfterMs`, so the cloud owns the wait. Refusing is strictly less
+traffic than the clamp was, so it can never push `channel.outbound` past its own
+120s timeout. Guarded behaviourally AND by a source assertion banning
+`Math.min(… retryAfterMs …)` — the defect is a one-token change that
+type-checks and is silent in production.
+
+Two facts that make our retry safe and that a reader will otherwise re-derive.
+OpenClaw caches `message.action` FAILURES under the idempotency key for
+**5 minutes** (`DEDUPE_TTL_MS`, `resolveGatewayInflightRequest`), so an in-band
+retry replays the cached error and never re-hits the platform — the retry only
+ever helps a transport-level failure. And **every error the send path throws
+comes back as `UNAVAILABLE` with no `retryable` and no `retryAfterMs`**
+(`createGatewayInflightUnavailableFailure`), so "Feishu account not configured",
+"chat not found" and "bot was kicked" are indistinguishable from a busy adapter
+at the wire. Do not add a keyword matcher for them; the structural fact is
+`channels list --all --json` -> `installed`, already surfaced as
+`channel_plugins[].installed`.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**
