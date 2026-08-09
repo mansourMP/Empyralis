@@ -15,6 +15,7 @@ import { openClawChannelIdFromChannelKey } from "../openclaw/outbound-payload";
 import {
   OPENCLAW_CHANNEL_POLICY_SHAPES,
   auditOpenClawChannelShapes,
+  resolveOpenClawChannelToolFlags,
   resolveOpenClawPluginHookFlags,
 } from "../openclaw/provisioning/openclaw-channel-shapes";
 import {
@@ -38,6 +39,10 @@ import {
   flattenConfigPaths,
 } from "../openclaw/provisioning/openclaw-provisioner";
 import { OpenClawCli, assertValidOpenClawProfile } from "../openclaw/provisioning/openclaw-cli";
+import {
+  channelPluginInstallDescriptor,
+  checkPluginHostCompatibility,
+} from "../openclaw/provisioning/openclaw-plugin-install";
 import {
   buildOpenClawSupervisedEnv,
   openClawSupervisorLabel,
@@ -618,15 +623,69 @@ interface FakeCliState {
   effectiveAfterPatch?: Record<string, unknown>;
   audit: unknown;
   patchCode: number;
+  /** channelId -> OpenClaw's own `installed` flag from `channels list`.
+   *  Modelled because `installed` is the ONE structural fact that separates
+   *  "no plugin" from "no credential"; their send-error prose is not. */
+  channelsInstalled?: Record<string, boolean>;
+  /** pluginId -> resolved `<name>@<version>` in their install registry. */
+  installRecords?: Record<string, string>;
+  /** Every `plugins install` argv this run attempted, in order. A test that
+   *  asserts an install did NOT happen is the entire content of the
+   *  idempotency and "only what is needed" claims — an outcome assertion
+   *  alone cannot tell a skipped install from a repeated one. */
+  installCalls?: string[][];
+  /** Makes `plugins install` fail — a 404, or an unreachable registry. */
+  installFailure?: { code: number; stderr: string };
+  /** `plugins install` exits 0 and prints "Installed plugin: …" while nothing
+   *  actually lands. Their CLI's success is a claim; this is what makes the
+   *  read-back the only thing entitled to promote a channel to installed. */
+  installSilentlyDoesNothing?: boolean;
 }
 
 function fakeProvisioner(state: FakeCliState, overrides: Record<string, unknown> = {}) {
   const files = new Map<string, string>();
+  state.installCalls = state.installCalls ?? [];
   const cli = new OpenClawCli({
     profile: "acme",
     env: { PATH: "/usr/bin" },
     exec: async (args) => {
       const rest = args.slice(2);
+      if (rest[0] === "channels" && rest[1] === "list") {
+        const chat: Record<string, unknown> = {};
+        for (const channel of GENERATED_OPENCLAW_MANIFEST.channels) {
+          chat[channel.id] = { installed: state.channelsInstalled?.[channel.id] === true };
+        }
+        return { code: 0, stdout: JSON.stringify({ chat }), stderr: "" };
+      }
+      if (rest[0] === "plugins" && rest[1] === "registry") {
+        const installRecords: Record<string, unknown> = {};
+        for (const [pluginId, spec] of Object.entries(state.installRecords ?? {})) {
+          installRecords[pluginId] = { resolvedSpec: spec };
+        }
+        return { code: 0, stdout: JSON.stringify({ persisted: { installRecords } }), stderr: "" };
+      }
+      if (rest[0] === "plugins" && rest[1] === "install") {
+        state.installCalls!.push(rest);
+        if (state.installFailure) {
+          return { code: state.installFailure.code, stdout: "", stderr: state.installFailure.stderr };
+        }
+        // A real install makes both read-back sources agree; the spec is the
+        // one their resolver settled on, which is NOT always the one asked
+        // for (`@openclaw/feishu` -> `@openclaw/feishu@2026.6.10`).
+        const spec = String(rest[2]);
+        const pkg = spec.includes("@", 1) ? spec.slice(0, spec.lastIndexOf("@")) : spec;
+        const entry = GENERATED_OPENCLAW_MANIFEST.channels.find(
+          (channel) => channel.plugin_install?.npm_package === pkg,
+        );
+        if (entry?.plugin_install && !state.installSilentlyDoesNothing) {
+          state.installRecords = {
+            ...(state.installRecords ?? {}),
+            [entry.plugin_install.plugin_id]: `${pkg}@${OPENCLAW_PINNED_VERSION}`,
+          };
+          state.channelsInstalled = { ...(state.channelsInstalled ?? {}), [entry.id]: true };
+        }
+        return { code: 0, stdout: `Installed plugin: ${entry?.id ?? spec}`, stderr: "" };
+      }
       if (rest[0] === "--version") {
         return state.version === undefined
           ? { code: 127, stdout: "", stderr: "not found" }
@@ -687,8 +746,19 @@ function schemaFixture(): unknown {
   return JSON.parse(fs.readFileSync(fixturePath(), "utf8"));
 }
 
-function effectiveFor(channels: EmpyralisChannelPolicy[]): Record<string, unknown> {
-  const rendered = renderOpenClawConfig(plan(channels), { gatewayToken: "a-suitably-long-gateway-token" });
+/** What the instance reads back as once the generated config is in force.
+ *
+ * `installedPluginIds` must mirror what the run's install pass will produce,
+ * because `plugins.allow` is generated FROM that — a helper that ignored it
+ * would make every install scenario report residual drift. */
+function effectiveFor(
+  channels: EmpyralisChannelPolicy[],
+  installedPluginIds: readonly string[] = [],
+): Record<string, unknown> {
+  const rendered = renderOpenClawConfig(
+    { ...plan(channels), installedChannelPluginIds: installedPluginIds },
+    { gatewayToken: "a-suitably-long-gateway-token" },
+  );
   const effective = JSON.parse(JSON.stringify(rendered.config)) as Record<string, any>;
   effective.gateway.auth.token = "__OPENCLAW_REDACTED__";
   return effective;
@@ -918,4 +988,412 @@ test("a run that changed the config reports restartRequired, and a no-op run doe
   }).provision();
   assert.equal(refused.status, "refused");
   assert.equal(refused.restartRequired, false);
+});
+
+// ── channel plugin installation (step 5) ──────────────────────────────────
+//
+// The gap these cover: twenty of OpenClaw's twenty-seven channels are separate
+// npm packages, and until provisioning installed them a `channels.<id>` policy
+// was written for code that was not there. The resulting outbound rejection
+// meant "no plugin AND no credential" at once — indistinguishable, from
+// outside, from the ordinary "not connected yet" state.
+
+test("plugin install: the descriptor is READ from OpenClaw's catalog, never guessed from the channel id", () => {
+  // The `@openclaw/<id>` convention holds for the official plugins and is
+  // wrong for every external one. A guess would produce four broken installs.
+  assert.equal(channelPluginInstallDescriptor("feishu")?.npm_package, "@openclaw/feishu");
+  assert.equal(channelPluginInstallDescriptor("wecom")?.npm_package, "@wecom/wecom-openclaw-plugin");
+  // …and the PLUGIN id is not the channel id there either, which is what the
+  // install registry keys on.
+  assert.equal(channelPluginInstallDescriptor("wecom")?.plugin_id, "wecom-openclaw-plugin");
+  assert.equal(channelPluginInstallDescriptor("feishu")?.plugin_id, "feishu");
+  // Bundled channels have no descriptor at all — `null` in the manifest is a
+  // positive statement ("ships in the pinned build"), not "unknown".
+  assert.equal(channelPluginInstallDescriptor("telegram"), undefined);
+  assert.equal(channelPluginInstallDescriptor("irc"), undefined);
+});
+
+test("plugin install: every transported channel is either bundled or installable, never neither", () => {
+  // A channel in neither bucket would be advertised by Empyralis and
+  // impossible to bring up — the shape that made this whole gap invisible.
+  const bundled = new Set(["clickclack", "imessage", "irc", "mattermost", "signal", "sms", "telegram"]);
+  for (const channelId of OPENCLAW_TRANSPORT_CHANNEL_IDS) {
+    const descriptor = channelPluginInstallDescriptor(channelId);
+    assert.equal(
+      Boolean(descriptor) !== bundled.has(channelId),
+      true,
+      `${channelId} is in neither the installable catalog nor the bundled set, or in both`,
+    );
+    if (descriptor) {
+      assert.ok(descriptor.npm_spec.length > 0, `${channelId} has an empty npm spec`);
+      assert.ok(descriptor.plugin_id.length > 0, `${channelId} has an empty plugin id`);
+    }
+  }
+});
+
+test("plugin install: a plugin needing a newer host than the pin REFUSES, and an unreadable range does too", () => {
+  assert.equal(checkPluginHostCompatibility(">=2026.5.29", "2026.6.10").ok, true);
+  assert.equal(checkPluginHostCompatibility(">=2026.6.10", "2026.6.10").ok, true);
+  assert.equal(checkPluginHostCompatibility(null, "2026.6.10").ok, true);
+  // Needs a host we are not pinned to. Installing anyway silently gets an
+  // older plugin build than the catalog describes.
+  assert.equal(checkPluginHostCompatibility(">=2026.7.1", "2026.6.10").ok, false);
+  // A prerelease sorts below its release, so a 2026.5.12 host does NOT
+  // satisfy `>=2026.5.12-beta.1`… it exceeds it.
+  assert.equal(checkPluginHostCompatibility(">=2026.5.12-beta.1", "2026.5.12").ok, true);
+  assert.equal(checkPluginHostCompatibility(">=2026.5.12-beta.1", "2026.5.11").ok, false);
+  // A range shape we cannot evaluate is a refusal, never an assumed pass:
+  // an unevaluated compatibility claim is one we cannot vouch for.
+  assert.equal(checkPluginHostCompatibility("^2026.6.0", "2026.6.10").ok, false);
+  assert.equal(checkPluginHostCompatibility("<2026.9.0", "2026.6.10").ok, false);
+});
+
+test("plugin install: a requested channel with no plugin is INSTALLED, then verified by read-back", async () => {
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })], ["feishu"]),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state, {
+    plan: plan([policy({ channelId: "feishu", installPlugin: true })]),
+  }).provision();
+
+  assert.equal(result.status, "provisioned", result.refusal?.detail);
+  assert.deepEqual(state.installCalls, [["plugins", "install", "@openclaw/feishu", "--pin"]]);
+  const feishu = result.channelPlugins.find((entry) => entry.channelId === "feishu");
+  assert.equal(feishu?.installed, true);
+  assert.equal(feishu?.action, "installed");
+  assert.equal(feishu?.resolvedSpec, `@openclaw/feishu@${OPENCLAW_PINNED_VERSION}`);
+});
+
+test("plugin install: re-provisioning an installed box shells out to NO install at all", async () => {
+  // Not a cosmetic optimisation. Their `plugins install` re-downloads the
+  // package and then exits 1 with "plugin already exists", so a naive re-run
+  // would make every reprovision fail — and fail only when the network is up,
+  // which is the worst possible shape for a boot-time reconcile.
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })], ["feishu"]),
+    audit: { findings: [] },
+    patchCode: 0,
+    channelsInstalled: { feishu: true },
+    installRecords: { feishu: `@openclaw/feishu@${OPENCLAW_PINNED_VERSION}` },
+  };
+  const result = await fakeProvisioner(state, {
+    plan: plan([policy({ channelId: "feishu", installPlugin: true })]),
+  }).provision();
+
+  assert.equal(result.status, "provisioned", result.refusal?.detail);
+  assert.deepEqual(state.installCalls, [], "an already-installed plugin must never be re-fetched");
+  const feishu = result.channelPlugins.find((entry) => entry.channelId === "feishu");
+  assert.equal(feishu?.installed, true);
+  // "adopted" on the first run that meets a pre-existing install: the pin is
+  // captured from what is really there rather than asserted against nothing.
+  assert.equal(feishu?.action, "adopted");
+});
+
+test("plugin install: a plugin that changed under a pinned box REFUSES rather than carrying traffic", async () => {
+  const files = new Map<string, string>();
+  const stateDir = "/tmp/fake-state";
+  const recordPath = `${stateDir}/openclaw/acme.provisioning.json`;
+  files.set(
+    recordPath,
+    JSON.stringify({
+      fingerprint: "whatever",
+      appliedAt: new Date().toISOString(),
+      pinnedVersion: OPENCLAW_PINNED_VERSION,
+      channels: [],
+      pluginPins: { feishu: "@openclaw/feishu@2026.6.10" },
+    }),
+  );
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })]),
+    audit: { findings: [] },
+    patchCode: 0,
+    channelsInstalled: { feishu: true },
+    // Something ran `openclaw plugins update`, or a human installed by hand.
+    installRecords: { feishu: "@openclaw/feishu@2026.7.1" },
+  };
+  const result = await fakeProvisioner(state, {
+    plan: plan([policy({ channelId: "feishu", installPlugin: true })]),
+    stateDir,
+    fs: {
+      readFile: async (filePath: string) => {
+        const found = files.get(filePath);
+        if (found === undefined) throw new Error("ENOENT");
+        return found;
+      },
+      writeFile: async (filePath: string, contents: string) => {
+        files.set(filePath, contents);
+      },
+      mkdir: async () => undefined,
+      rm: async (filePath: string) => {
+        files.delete(filePath);
+      },
+    },
+  }).provision();
+
+  assert.equal(result.status, "refused");
+  assert.equal(result.refusal?.code, "openclaw_plugin_version_drift");
+  assert.match(result.refusal?.detail ?? "", /2026\.6\.10/);
+  assert.match(result.refusal?.detail ?? "", /2026\.7\.1/);
+  assert.deepEqual(state.installCalls, []);
+});
+
+test("plugin install: a 404 or an unreachable registry REFUSES, carrying OpenClaw's own words", async () => {
+  for (const failure of [
+    { code: 1, stderr: "Package not found on npm: @openclaw/feishu." },
+    { code: 1, stderr: "npm view failed: npm error code ECONNREFUSED" },
+  ]) {
+    const state: FakeCliState = {
+      version: OPENCLAW_PINNED_VERSION,
+      schema: schemaFixture(),
+      effective: effectiveFor([policy({ channelId: "feishu" })]),
+      audit: { findings: [] },
+      patchCode: 0,
+      installFailure: failure,
+    };
+    const result = await fakeProvisioner(state, {
+      plan: plan([policy({ channelId: "feishu", installPlugin: true })]),
+    }).provision();
+
+    assert.equal(result.status, "refused");
+    assert.equal(result.refusal?.code, "openclaw_plugin_install_failed");
+    // Verbatim, so a 404 and a dead registry stay distinguishable without
+    // this codebase pattern-matching either sentence.
+    assert.ok(result.refusal?.detail.includes(failure.stderr), result.refusal?.detail);
+    // Nothing was written: a failed install must not leave a half-provisioned
+    // instance that reads as configured.
+    assert.equal(result.configChanged, false);
+    assert.equal(result.supervisor, undefined);
+  }
+});
+
+test("plugin install: an install that claims success but produces nothing loadable REFUSES", async () => {
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })]),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  // Their CLI prints "Installed plugin: feishu" and exits 0; the read-back is
+  // the only thing that can contradict it.
+  state.installSilentlyDoesNothing = true;
+  const result = await fakeProvisioner(state, {
+    plan: plan([policy({ channelId: "feishu", installPlugin: true })]),
+  }).provision();
+  assert.equal(result.status, "refused");
+  assert.equal(result.refusal?.code, "openclaw_plugin_not_loaded");
+  // The instance is not left half-provisioned by the optimistic claim.
+  assert.equal(result.configChanged, false);
+  assert.equal(result.supervisor, undefined);
+});
+
+test("plugin install: only what was asked for is fetched; everything else is REPORTED, not installed", async () => {
+  // "Install only what is needed" and "no plugin is separately reportable"
+  // are the same assertion from two sides: line is observed as absent, feishu
+  // is brought up, and neither fact is inferred from a failed send.
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor(
+      [policy({ channelId: "feishu" }), policy({ channelId: "line" }), policy({ channelId: "irc" })],
+      ["feishu"],
+    ),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state, {
+    plan: plan([
+      policy({ channelId: "feishu", installPlugin: true }),
+      policy({ channelId: "line" }),
+      policy({ channelId: "irc" }),
+    ]),
+  }).provision();
+
+  assert.equal(result.status, "provisioned", result.refusal?.detail);
+  assert.deepEqual(state.installCalls, [["plugins", "install", "@openclaw/feishu", "--pin"]]);
+
+  const byChannel = new Map(result.channelPlugins.map((entry) => [entry.channelId, entry]));
+  assert.equal(byChannel.get("feishu")?.installed, true);
+  // NO PLUGIN — reported as a fact, not as a refusal and not as a send error.
+  assert.equal(byChannel.get("line")?.installed, false);
+  assert.equal(byChannel.get("line")?.requiresPlugin, true);
+  assert.equal(byChannel.get("line")?.action, "not-installed");
+  // Bundled: needs nothing fetched, and we do not claim it is installed
+  // unless OpenClaw said so.
+  assert.equal(byChannel.get("irc")?.requiresPlugin, false);
+  assert.equal(byChannel.get("irc")?.action, "bundled");
+});
+
+test("plugin install: the security audit runs AFTER the plugin is loaded, and still gates", async () => {
+  // A third-party plugin is new code inside the instance. "The audit was
+  // clean before we added it" is not a claim worth making, so the audit must
+  // run downstream of the install — and must still refuse when it is dirty.
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })], ["feishu"]),
+    audit: {
+      findings: [
+        { checkId: "security.exposure.open_groups_with_elevated", severity: "critical", title: "elevated tools" },
+      ],
+    },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state, {
+    plan: plan([policy({ channelId: "feishu", installPlugin: true })]),
+  }).provision();
+
+  assert.equal(result.status, "refused");
+  assert.equal(result.refusal?.code, "openclaw_security_audit_not_clean");
+  // The install DID happen first — that is the ordering being asserted.
+  assert.deepEqual(state.installCalls, [["plugins", "install", "@openclaw/feishu", "--pin"]]);
+});
+
+test("plugin install: install_plugin is opt-IN across the cloud boundary", async () => {
+  // Fetching third-party code onto a customer's machine is the expensive,
+  // irreversible direction; not fetching it is a reported state. So an absent
+  // or non-boolean flag must mean "do not install", never "install".
+  const parsed = parseChannelPolicies([
+    { channel_id: "feishu", dm_policy: { mode: "open" }, group_policy: { mode: "open" }, install_plugin: true },
+    { channel_id: "line", dm_policy: { mode: "open" }, group_policy: { mode: "open" } },
+    { channel_id: "zalo", dm_policy: { mode: "open" }, group_policy: { mode: "open" }, install_plugin: "yes" },
+  ]);
+  assert.deepEqual(parsed.errors, []);
+  const byChannel = new Map(parsed.channels.map((channel) => [channel.channelId, channel]));
+  assert.equal(byChannel.get("feishu")?.installPlugin, true);
+  assert.equal(byChannel.get("line")?.installPlugin, false);
+  assert.equal(byChannel.get("zalo")?.installPlugin, false, "a truthy non-boolean must not install");
+});
+
+test("plugin install: the instance's plugin inventory is an explicit allowlist", async () => {
+  // OpenClaw said this itself on the first live run that installed a plugin:
+  //   "plugins.allow is empty; discovered non-bundled plugins may auto-load:
+  //    feishu (…). Set plugins.allow to explicit trusted ids."
+  // Provisioning now writes into that plugin directory, so "whatever is on
+  // disk" is no longer a safe inventory.
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" }), policy({ channelId: "irc" })], ["feishu"]),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state, {
+    plan: plan([policy({ channelId: "feishu", installPlugin: true }), policy({ channelId: "irc" })]),
+  }).provision();
+  assert.equal(result.status, "provisioned", result.refusal?.detail);
+
+  const rendered = renderOpenClawConfig(
+    {
+      ...plan([policy({ channelId: "feishu" }), policy({ channelId: "irc" })]),
+      installedChannelPluginIds: ["feishu"],
+    },
+    { gatewayToken: "t" },
+  );
+  const plugins = rendered.config.plugins as Record<string, unknown>;
+  // Exactly the bridge plus what this box installed. `irc` is bundled and
+  // needs no entry — their allowlist still lets an explicitly-enabled bundled
+  // chat channel activate, which is why this is a safe control and not a
+  // blunt one.
+  assert.deepEqual(plugins.allow, ["empyralis-bridge", "feishu"]);
+
+  // An empty allowlist is a lockdown violation, so an instance can never end
+  // up loading whatever lands in its plugin directory.
+  const empty = JSON.parse(JSON.stringify(rendered.config)) as Record<string, any>;
+  empty.plugins.allow = [];
+  const violations = findOpenClawLockdownViolations(empty);
+  assert.equal(violations.some((violation) => violation.code === "plugin_allowlist_empty"), true);
+  // …and the generated config satisfies its own rule.
+  assert.equal(
+    findOpenClawLockdownViolations(rendered.config).some((v) => v.code === "plugin_allowlist_empty"),
+    false,
+  );
+});
+
+test("plugin install: a channel plugin's OWN tool surface is switched off, discovered not listed", () => {
+  // Only reachable once a channel plugin is installed: `@openclaw/feishu`
+  // contributes `channels.feishu.tools` (doc/chat/wiki/drive/perm/scopes/
+  // bitable/base), which the GLOBAL tools.* lockdown does not reach. Their own
+  // audit found it the moment a credential was configured:
+  //   channels.feishu.doc_owner_open_id [warn] "feishu_doc action \"create\"
+  //   can grant document access to the trusted requesting Feishu user."
+  // A radio must not be able to create documents in the owner's tenant.
+  const schema = {
+    properties: {
+      channels: {
+        properties: {
+          feishu: {
+            properties: {
+              tools: {
+                properties: {
+                  doc: { type: "boolean" },
+                  drive: { type: "boolean" },
+                  perm: { type: "boolean" },
+                },
+              },
+            },
+          },
+          // No tools node at all — the ordinary case, and it must contribute
+          // nothing rather than an empty object.
+          line: { properties: {} },
+        },
+      },
+    },
+  };
+
+  const resolved = resolveOpenClawChannelToolFlags(schema, ["feishu", "line"]);
+  assert.deepEqual(resolved.findings, []);
+  assert.deepEqual(
+    resolved.disable.map((entry) => `${entry.channelId}.${entry.flag}`).sort(),
+    ["feishu.doc", "feishu.drive", "feishu.perm"],
+  );
+
+  const rendered = renderOpenClawConfig(
+    { ...plan([policy({ channelId: "feishu" }), policy({ channelId: "line" })]), channelToolFlags: resolved.disable },
+    { gatewayToken: "t" },
+  );
+  assert.deepEqual(channelBlock(rendered, "feishu").tools, { doc: false, drive: false, perm: false });
+  assert.equal(channelBlock(rendered, "line").tools, undefined);
+
+  // A flag shape we cannot switch off is a FINDING, and a shape finding
+  // refuses the whole run — never a silent "leave it on".
+  const odd = resolveOpenClawChannelToolFlags(
+    {
+      properties: {
+        channels: { properties: { feishu: { properties: { tools: { properties: { doc: { type: "object" } } } } } } },
+      },
+    },
+    ["feishu"],
+  );
+  assert.deepEqual(odd.disable, []);
+  assert.equal(odd.findings.length, 1);
+  assert.equal(odd.findings[0].code, "unhandled_channel_tool");
+});
+
+test("plugin install: a channel tool surface we cannot switch off REFUSES the whole run", async () => {
+  const schema = schemaFixture() as Record<string, any>;
+  schema.properties.channels.properties.feishu.properties.tools = {
+    properties: { doc: { type: "object" } },
+  };
+  const result = await fakeProvisioner(
+    {
+      version: OPENCLAW_PINNED_VERSION,
+      schema,
+      effective: effectiveFor([policy({ channelId: "feishu" })], ["feishu"]),
+      audit: { findings: [] },
+      patchCode: 0,
+    },
+    { plan: plan([policy({ channelId: "feishu", installPlugin: true })]) },
+  ).provision();
+  assert.equal(result.status, "refused");
+  assert.equal(result.refusal?.code, "openclaw_channel_shape_drift");
+  assert.match(result.refusal?.detail ?? "", /unhandled_channel_tool/);
 });

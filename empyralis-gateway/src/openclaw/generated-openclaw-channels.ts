@@ -27,6 +27,24 @@ export interface GeneratedOpenClawPolicyShape {
   readonly unhandled_plugin_hook_flags: readonly string[];
 }
 
+/** How to install a channel's plugin, read from OpenClaw's own
+ *  `channel-catalog.json` `openclaw.install` block. `null` on the seven
+ *  channels whose implementation ships inside the pinned bundle. */
+export interface GeneratedOpenClawPluginInstall {
+  readonly required: boolean;
+  /** The PLUGIN id, which is what `openclaw plugins list` keys on. Equal to
+   *  the channel id for the official plugins, different for every external
+   *  one (`wecom` -> `wecom-openclaw-plugin`). */
+  readonly plugin_id: string;
+  readonly npm_package: string;
+  /** Their spec verbatim, version included when THEY pinned one. */
+  readonly npm_spec: string;
+  readonly catalog_pinned_version: string | null;
+  readonly source: string;
+  readonly min_host_version: string | null;
+  readonly expected_integrity: string | null;
+}
+
 export interface GeneratedOpenClawChannel {
   readonly id: string;
   readonly channel_key: string;
@@ -34,6 +52,7 @@ export interface GeneratedOpenClawChannel {
   readonly origin: string;
   readonly config_schema_present: boolean;
   readonly policy_shape: GeneratedOpenClawPolicyShape | null;
+  readonly plugin_install: GeneratedOpenClawPluginInstall | null;
 }
 
 export interface GeneratedOpenClawManifest {
@@ -65,7 +84,8 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
-      }
+      },
+      "plugin_install": null
     },
     {
       "id": "discord",
@@ -91,6 +111,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "discord",
+        "npm_package": "@openclaw/discord",
+        "npm_spec": "@openclaw/discord",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -116,6 +146,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "feishu",
+        "npm_package": "@openclaw/feishu",
+        "npm_spec": "@openclaw/feishu",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.5.29",
+        "expected_integrity": null
       }
     },
     {
@@ -137,6 +177,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "googlechat",
+        "npm_package": "@openclaw/googlechat",
+        "npm_spec": "@openclaw/googlechat",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -163,7 +213,8 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
-      }
+      },
+      "plugin_install": null
     },
     {
       "id": "irc",
@@ -189,7 +240,8 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
-      }
+      },
+      "plugin_install": null
     },
     {
       "id": "line",
@@ -215,6 +267,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "line",
+        "npm_package": "@openclaw/line",
+        "npm_spec": "@openclaw/line",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -236,6 +298,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "matrix",
+        "npm_package": "@openclaw/matrix",
+        "npm_spec": "@openclaw/matrix",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -262,7 +334,8 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
-      }
+      },
+      "plugin_install": null
     },
     {
       "id": "msteams",
@@ -288,6 +361,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "msteams",
+        "npm_package": "@openclaw/msteams",
+        "npm_spec": "@openclaw/msteams",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -314,6 +397,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "nextcloud-talk",
+        "npm_package": "@openclaw/nextcloud-talk",
+        "npm_spec": "@openclaw/nextcloud-talk",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -336,6 +429,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "nostr",
+        "npm_package": "@openclaw/nostr",
+        "npm_spec": "@openclaw/nostr",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -344,7 +447,17 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
       "label": "Weixin",
       "origin": "installable",
       "config_schema_present": false,
-      "policy_shape": null
+      "policy_shape": null,
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "openclaw-weixin",
+        "npm_package": "@tencent-weixin/openclaw-weixin",
+        "npm_spec": "@tencent-weixin/openclaw-weixin@2.4.3",
+        "catalog_pinned_version": "2.4.3",
+        "source": "external",
+        "min_host_version": ">=2026.3.22",
+        "expected_integrity": "sha512-dPQbidUNWigC6V10vGW4i+GLH09x+6zUhafZRjuxkJ9GDu8o62WBsnUTojp4KqUH756hz+t2v9khiCRSi0dBDw=="
+      }
     },
     {
       "id": "openclaw-zaloclawbot",
@@ -352,7 +465,17 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
       "label": "Zalo ClawBot",
       "origin": "installable",
       "config_schema_present": false,
-      "policy_shape": null
+      "policy_shape": null,
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "openclaw-zaloclawbot",
+        "npm_package": "@zalo-platforms/openclaw-zaloclawbot",
+        "npm_spec": "@zalo-platforms/openclaw-zaloclawbot@0.1.4",
+        "catalog_pinned_version": "0.1.4",
+        "source": "external",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": "sha512-5IxZriHJYACLLGqkCPPsTP9tas62kXEOFqTFAFMdunAM3SPhIJwVFRp0WvoP/m7L2PX85weD0g8LOtxM93VDYg=="
+      }
     },
     {
       "id": "qqbot",
@@ -377,6 +500,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "qqbot",
+        "npm_package": "@openclaw/qqbot",
+        "npm_spec": "@openclaw/qqbot",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -403,7 +536,8 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
-      }
+      },
+      "plugin_install": null
     },
     {
       "id": "slack",
@@ -429,6 +563,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "slack",
+        "npm_package": "@openclaw/slack",
+        "npm_spec": "@openclaw/slack",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.5.12-beta.1",
+        "expected_integrity": null
       }
     },
     {
@@ -451,7 +595,8 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
-      }
+      },
+      "plugin_install": null
     },
     {
       "id": "synology-chat",
@@ -468,6 +613,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "synology-chat",
+        "npm_package": "@openclaw/synology-chat",
+        "npm_spec": "@openclaw/synology-chat",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -494,7 +649,8 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": true,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
-      }
+      },
+      "plugin_install": null
     },
     {
       "id": "tlon",
@@ -511,6 +667,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "tlon",
+        "npm_package": "@openclaw/tlon",
+        "npm_spec": "@openclaw/tlon",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -528,6 +694,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "twitch",
+        "npm_package": "@openclaw/twitch",
+        "npm_spec": "@openclaw/twitch",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -536,7 +712,17 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
       "label": "WeCom",
       "origin": "installable",
       "config_schema_present": false,
-      "policy_shape": null
+      "policy_shape": null,
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "wecom-openclaw-plugin",
+        "npm_package": "@wecom/wecom-openclaw-plugin",
+        "npm_spec": "@wecom/wecom-openclaw-plugin@2026.5.7",
+        "catalog_pinned_version": "2026.5.7",
+        "source": "external",
+        "min_host_version": null,
+        "expected_integrity": "sha512-TCkP9as00WfEhgFWG8YL/rcmaWGIshAki2HQh83nTRccGfVBCoGjrEboTTqq3yDmK9koWTV11zi8u8A4dNtvug=="
+      }
     },
     {
       "id": "whatsapp",
@@ -564,6 +750,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
           "messageReceived"
         ],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "whatsapp",
+        "npm_package": "@openclaw/whatsapp",
+        "npm_spec": "@openclaw/whatsapp",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.25",
+        "expected_integrity": null
       }
     },
     {
@@ -572,7 +768,17 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
       "label": "Yuanbao",
       "origin": "installable",
       "config_schema_present": false,
-      "policy_shape": null
+      "policy_shape": null,
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "openclaw-plugin-yuanbao",
+        "npm_package": "openclaw-plugin-yuanbao",
+        "npm_spec": "openclaw-plugin-yuanbao@2.13.1",
+        "catalog_pinned_version": "2.13.1",
+        "source": "external",
+        "min_host_version": null,
+        "expected_integrity": "sha512-lH2I9/nsmrg7l0YJJSQhOSpWMEFBAa6FwKbZcRLDFHDT2+mOZkHa44XE+8KYN4VmorlUdAxHzpZQmVr7C98IuA=="
+      }
     },
     {
       "id": "zalo",
@@ -598,6 +804,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "zalo",
+        "npm_package": "@openclaw/zalo",
+        "npm_spec": "@openclaw/zalo",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     },
     {
@@ -624,6 +840,16 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "config_writes": false,
         "plugin_hook_flags": [],
         "unhandled_plugin_hook_flags": []
+      },
+      "plugin_install": {
+        "required": true,
+        "plugin_id": "zalouser",
+        "npm_package": "@openclaw/zalouser",
+        "npm_spec": "@openclaw/zalouser",
+        "catalog_pinned_version": null,
+        "source": "official",
+        "min_host_version": ">=2026.4.10",
+        "expected_integrity": null
       }
     }
   ]

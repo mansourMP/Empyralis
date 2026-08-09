@@ -127,6 +127,12 @@ export function parseChannelPolicies(raw: unknown): {
     channels.push({
       channelId,
       enabled: record.enabled !== false,
+      // Opt-IN, and fail-closed the other way round from `enabled`: an absent
+      // or unreadable flag means "do not fetch third-party code onto this
+      // customer's machine". Installing a plugin nobody asked for is the
+      // expensive, irreversible direction; not installing one is a reported
+      // state (`channel_plugins[].installed: false`) the cloud can act on.
+      installPlugin: record.install_plugin === true,
       dmPolicy: { mode: dmMode, allowlist: toList(dm.allowlist) },
       groupPolicy: {
         mode: groupMode,
@@ -256,6 +262,18 @@ function serialize(result: OpenClawProvisionResult): Record<string, unknown> {
       detail: finding.detail,
     })),
     lockdown_violations: result.lockdownViolations,
+    // The plugin half of "is this channel actually usable". `installed: false`
+    // means no plugin; `installed: true` plus a failing send means no
+    // credential. Reported structurally so nothing downstream has to classify
+    // OpenClaw's send-error prose to tell the two apart.
+    channel_plugins: result.channelPlugins.map((state) => ({
+      channel_id: state.channelId,
+      plugin_id: state.pluginId ?? null,
+      requires_plugin: state.requiresPlugin,
+      installed: state.installed,
+      resolved_spec: state.resolvedSpec ?? null,
+      action: state.action,
+    })),
     audit_findings: result.auditFindings.map((finding) => ({
       check_id: finding.checkId,
       severity: finding.severity,

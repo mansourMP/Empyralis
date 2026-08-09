@@ -147,7 +147,11 @@ export interface OpenClawChannelShapeFinding {
     | "require_mention_support_changed"
     | "per_chat_map_changed"
     | "config_writes_support_changed"
-    | "unhandled_plugin_hook";
+    | "unhandled_plugin_hook"
+    // A `channels.<id>.tools.<flag>` provisioning cannot switch off. Only
+    // reachable once a channel PLUGIN is installed — plugins contribute their
+    // own tool surface, and the global `tools.*` lockdown does not reach it.
+    | "unhandled_channel_tool";
   detail: string;
 }
 
@@ -311,4 +315,72 @@ export function resolveOpenClawPluginHookFlags(
   }
 
   return { enable, findings };
+}
+
+/**
+ * Every `channels.<id>.tools.<flag>` boolean the installed schema declares.
+ * Provisioning sets all of them to FALSE.
+ *
+ * WHY THIS EXISTS, AND WHY IT COULD ONLY APPEAR IN STEP 5
+ * -------------------------------------------------------
+ * The lockdown's tool posture is GLOBAL — `tools.profile: "minimal"`,
+ * `tools.elevated.enabled: false`, `tools.fs.workspaceOnly`, plus an explicit
+ * `tools.deny`. A CHANNEL PLUGIN can contribute its own per-channel tool
+ * surface that none of those cover, and until provisioning started installing
+ * channel plugins there was no plugin present to contribute one.
+ *
+ * `@openclaw/feishu` does: `channels.feishu.tools` carries doc / chat / wiki /
+ * drive / perm / scopes / bitable / base — create documents, manage
+ * permissions, reach Drive. Their own audit flags it the moment a credential
+ * is configured, which is exactly how this was found:
+ *
+ *   channels.feishu.doc_owner_open_id [warn]
+ *   "channels.feishu tools include \"doc\"; feishu_doc action \"create\" can
+ *    grant document access to the trusted requesting Feishu user."
+ *   remediation: "Disable channels.feishu.tools.doc when not needed…"
+ *
+ * A transport instance has no agent and therefore no legitimate use for any of
+ * it, and OpenClaw's own trust model is explicit that anyone who can message a
+ * tool-enabled agent shares that agent's authority. An instance carrying a
+ * customer's contacts' messages must not also be able to create documents in
+ * their company's Feishu tenant.
+ *
+ * DISCOVERED, never listed: hard-coding the eight flags Feishu ships today
+ * would silently stop covering the ninth, and would cover nothing at all for
+ * the next plugin that grows a `tools` node. Same reason
+ * resolveOpenClawPluginHookFlags discovers rather than special-cases WhatsApp.
+ *
+ * A non-boolean under `tools` is a FINDING, not a guess — and a shape finding
+ * refuses the whole provisioning run, which is the right outcome for "this
+ * channel has a tool surface we do not know how to switch off".
+ */
+export function resolveOpenClawChannelToolFlags(
+  schema: unknown,
+  channelIds: readonly string[],
+): { disable: Array<{ channelId: string; flag: string }>; findings: OpenClawChannelShapeFinding[] } {
+  const disable: Array<{ channelId: string; flag: string }> = [];
+  const findings: OpenClawChannelShapeFinding[] = [];
+  const channels = schemaProperties(schemaProperties(schema).channels);
+
+  for (const channelId of channelIds) {
+    const tools = schemaProperties(channels[channelId]).tools;
+    if (!tools) continue;
+    for (const [flag, node] of Object.entries(schemaProperties(tools))) {
+      const type = node && typeof node === "object" ? (node as Record<string, unknown>).type : undefined;
+      if (type === "boolean") {
+        disable.push({ channelId, flag });
+        continue;
+      }
+      findings.push({
+        channelId,
+        code: "unhandled_channel_tool",
+        detail:
+          `channels.${channelId}.tools.${flag} is not a boolean (type ${String(type)}), so provisioning cannot ` +
+          "switch it off. A transport instance must carry NO tool authority; refusing rather than leaving a " +
+          "channel-contributed tool surface enabled on a machine we do not own.",
+      });
+    }
+  }
+
+  return { disable, findings };
 }

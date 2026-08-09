@@ -998,10 +998,134 @@ NOT feishu, line, qqbot, zalo or msteams, all five of which are separate
 bundled "in current releases"; in the pinned build they are not. Provisioning
 writes `channels.<id>.*` policy for a channel whose plugin is absent, which is
 exactly why `message.action` answers `unsupported channel: <id>` — that clean
-rejection means "no plugin AND no credential", not "no credential". Step 5
-needs `openclaw plugins install` in the provisioning run (and a decision about
-pinning those packages, which version independently of the CLI — 2026.7.1
-against a 2026.6.10 CLI today).
+rejection means "no plugin AND no credential", not "no credential". **Closed
+2026-08-09 — see below.**
+
+**Channel plugins are INSTALLED by provisioning now, and their idempotency is
+ours to enforce.** Landed 2026-08-09 (step 5,
+`empyralis-gateway/src/openclaw/provisioning/openclaw-plugin-install.ts`), run
+between the version pin and the schema audit so that BOTH the schema audit and
+`openclaw security audit` see the third-party code loaded — "the audit was
+clean before we added it" is not a claim worth making. Four things only running
+the real CLI reveals:
+
+```
+openclaw plugins install <spec>            (measured, not read)
+  first time   ─▶ exit 0, ~35s, writes plugins.entries.<id> + an install record
+  SECOND time  ─▶ RE-DOWNLOADS the tarball, then exit 1
+                  "plugin already exists … (delete it first)"
+```
+
+A naive install call therefore turns every reprovision into a failure — and a
+NETWORK-DEPENDENT one, on a box that is fully installed and working. The
+install is gated on read state (`plugins registry --json` ->
+`installRecords[<pluginId>].resolvedSpec`), never on a try/catch, and the skip
+branch shells out to nothing. Verified live: reprovisioning with the npm
+registry blackholed returns `provisioned`, `configChanged: false`, no drift.
+
+**The plugin version pin is OBSERVED, never authored.** Their installer
+resolves host compatibility out loud: `Resolved @openclaw/feishu to
+@openclaw/feishu@2026.7.1, but that version is incompatible with this OpenClaw
+runtime; using newest compatible @openclaw/feishu@2026.6.10.` Authoring a
+version literal would transcribe a compatibility decision only they can make;
+but "newest compatible" MOVES, so two boxes provisioned a month apart would
+silently run different code — the MAN-306 shape again. Both closed by letting
+them choose once and holding them to it: `--pin` records an exact
+`<name>@<version>`, that spec is copied into the Empyralis provisioning record
+(`pluginPins`), and every later run refuses with
+`openclaw_plugin_version_drift` when the live install record no longer equals
+it. Their catalog's `min_host_version` is checked against our own pin BEFORE
+the install, so "this plugin needs a newer OpenClaw" is a refusal rather than a
+silent downgrade — and a range shape we cannot evaluate is ALSO a refusal, since
+an unevaluated compatibility claim is one we cannot vouch for.
+
+**The install descriptor is DERIVED from `dist/channel-catalog.json`, not
+guessed.** `@openclaw/<id>` is right for the 16 official plugins and wrong for
+all four external ones (`wecom` -> `@wecom/wecom-openclaw-plugin`, whose PLUGIN
+id is `wecom-openclaw-plugin` — and the install registry keys on the plugin id,
+not the channel id). The manifest generator emits `plugin_install` per channel
+and FAILS unless the installable catalog (20) and the bundled extensions (7)
+PARTITION the 27: a channel in neither would be advertised by Empyralis and
+impossible to bring up, which is exactly the state Feishu was in.
+
+**"No plugin" and "no credential" are now separately reportable, structurally.**
+Measured on a real instance either side of one provisioning run:
+
+```
+                      plugin   credential   what OpenClaw says on a send
+BEFORE                absent   absent       "Channel is unavailable: feishu.
+                                             Install the official external
+                                             plugin with: openclaw plugins
+                                             install @openclaw/feishu"
+AFTER  provisioning   present  absent       "Feishu account \"default\" not
+                                             configured"
+```
+
+Never classify those by the sentence — both are bare `new Error(...)` in their
+`channel-selection` module with no error code attached, and "stale string
+matching" is already a documented failure here. The structural fact is
+`channels list --all --json` -> `installed: true|false`, surfaced per channel
+as `channel_plugins[].installed`. After a `provisioned` result, "no plugin" is
+impossible for a requested channel, so any remaining failure IS the credential.
+
+**Install only what is asked for; report on everything.** Twenty plugins on
+every box is minutes of network per boot plus twenty third-party packages
+running beside a customer's messages. Reporting scope is every enabled channel;
+INSTALL scope is `install_plugin`, opt-IN across the cloud boundary and
+computed from (an enabled `agent_channel_bindings` row) ∪ (a stored policy KEY
+in the agent's install metadata) ∪ an explicit `install_channels` request on
+the provision route. Bindings alone DEADLOCK — a binding is written when a
+session connects, and a channel cannot connect before its plugin exists. Key
+PRESENCE, never the policy's value: the loaders normalize a missing entry into
+a full default document, so a value comparison cannot tell "never configured"
+from "configured, and happens to match the default".
+
+**A channel PLUGIN contributes its own tool surface, and the global `tools.*`
+lockdown does not reach it.** The sharpest thing step 5 turned up, and it was
+invisible before it because there were no plugins installed to contribute one.
+`@openclaw/feishu` ships `channels.feishu.tools` — doc / chat / wiki / drive /
+perm / scopes / bitable / base — i.e. create documents, manage permissions and
+reach Drive in the owner's Feishu tenant, on an instance whose entire job is to
+be a radio. `tools.profile: "minimal"` + `tools.elevated.enabled: false` +
+`tools.deny` do not touch it. Their own audit catches it, but ONLY once a
+credential is configured, which is precisely the moment the owner is least able
+to act on it:
+
+```
+channels.feishu.doc_owner_open_id [warn]
+  "channels.feishu tools include \"doc\"; feishu_doc action \"create\" can grant
+   document access to the trusted requesting Feishu user."
+  remediation: "Disable channels.feishu.tools.doc when not needed…"
+```
+
+`resolveOpenClawChannelToolFlags` now discovers every `channels.<id>.tools.<flag>`
+boolean from the installed schema and writes them all FALSE, and a non-boolean
+there is a shape finding that refuses the run. DISCOVERED, never listed — a
+hard-coded set of Feishu's eight would stop covering the ninth and would cover
+nothing for the next plugin that grows the node. Anything else a plugin
+contributes to `channels.<id>.*` deserves the same question: the global
+lockdown was written against a bundle with no third-party channel code in it.
+
+**Provisioning never wipes a channel credential, and that is verified rather
+than assumed.** `config patch` merges recursively and `findConfigDrift` is
+one-directional, so `channels.<id>.appId`/`appSecret` — which the generator
+does not write — survive every reprovision. Checked live with a placeholder
+credential across a full provisioning run. It matters because the owner's setup
+step and the boot reconcile would otherwise race, and the failure would present
+as a channel that mysteriously logs out.
+
+**`plugins.allow` must be non-empty, and that only became true once we started
+installing.** OpenClaw said it itself on the first live run: *"plugins.allow is
+empty; discovered non-bundled plugins may auto-load: feishu (…). Set
+plugins.allow to explicit trusted ids."* Once provisioning writes into that
+plugin directory, "whatever is on disk" stops being a safe inventory. The
+generated config now names the bridge plugin plus exactly what that box
+installed, and `plugin_allowlist_empty` is a lockdown violation. Safe rather
+than blunt because of their own semantics — *"Configured bundled chat channels
+can still activate their bundled plugin when the channel is explicitly enabled
+in config"* — and this generator always writes an explicit `channels.<id>`
+block. Verified live: bridge + installed feishu + bundled irc all `loaded`,
+telegram (not enabled) `disabled`.
 
 Two smaller ones, both live-path: `OpenClawProvisioningRuntime` never passes
 `probeHealth` to the provisioner, so `healthy` is ALWAYS null in every result
