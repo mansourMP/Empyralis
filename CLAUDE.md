@@ -795,6 +795,37 @@ requires an Empyralis code change, it is wired wrong.** Same test for any
 future transport we adopt: derive the capability set from the thing that owns
 it, never transcribe it.
 
+**Groups on the OpenClaw transport use gate-before-model, never see-and-decide
+— founder's decision, 2026-08-09, overriding Ruling A for this path only.**
+Ruling A (2026-07-16, `personal_channels_service.py`'s own comment block):
+"Groups = see-and-decide, NOT mention-gated... the agent should SEE every
+group message and decide to reply or stay silent by its own judgment." That
+stays the rule for first-party channels (Telegram/WhatsApp/etc, still
+running, being cut over and deleted per channel — see step 6 below) because
+CLAUDE.md's own "stop building on the outgoing system" rule forbids new gate
+logic on code scheduled for deletion.
+
+For the OpenClaw transport the founder wants their behavior instead: never
+let the model see a group message it hasn't been cleared to answer, full
+stop, no judgment call delegated to the model. **This is already what
+happens, structurally, for two independent reasons** — nothing new to build:
+
+1. OpenClaw's own `decideChannelIngress` gates before we ever see the
+   message (see the entry immediately below) — there is no code path on
+   their transport where an unadmitted message reaches a model at all.
+2. `normalize_openclaw_gate_facts` (below) treats unknown group-ness as a
+   GROUP and routes to Gates 2/3, so even a message their gate admits still
+   needs an explicit owner allowlist + mention-off before Empyralis dispatches
+   a turn. No [SILENT] marker, no model judgment, no leak surface — the
+   category of bug Ruling A's see-and-decide model is structurally exposed
+   to (an agent choosing wrong in public) cannot occur on this path.
+
+Net effect: the founder's two channel worlds already have two different
+policies, correctly, without anyone writing a switch — old world sees and
+decides, new world never sees until cleared. When the old world is deleted
+(step 6), see-and-decide goes with it and gate-before-model is what's left,
+which is exactly the target state.
+
 **OpenClaw's `message_received` tap is post-gate and fact-less.** Verified
 against the shipped v2026.6.10 bundle 2026-08-08, correcting the earlier
 belief (recorded in the bridge plugin and in CHANNEL-ADOPTION-PLAN.md) that
