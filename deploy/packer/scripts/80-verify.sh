@@ -104,6 +104,13 @@ refute "NO gateway registration baked in" test -e /var/lib/empyralis/agent-compu
 refute "NO gateway state files baked in" bash -c 'find /var/lib/empyralis/agent-computer -mindepth 1 -type f | grep -q .'
 refute "NO self-updated gateway release baked in" test -e /var/lib/empyralis/gateway-releases
 refute "NO EMPYRALIS_PAIRING_TOKEN anywhere under /etc" grep -rql 'EMPYRALIS_PAIRING_TOKEN' /etc
+# The channel transport is baked; its per-box secrets must NOT be. Every
+# droplet boots from this one image, so a secrets file resolved at bake time is
+# a single credential shared across the whole fleet while looking per-box.
+# 70-channel-transport.sh passes --runtime-only precisely to prevent this, and
+# this is the assertion that keeps that true.
+refute "NO baked channel-transport secrets" \
+  test -e /var/lib/empyralis/agent-computer/gateway/openclaw/local-secrets.json
 refute "NO git checkout under the install root" test -d /opt/empyralis/agent-computer/current/.git
 
 echo

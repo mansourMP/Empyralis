@@ -629,6 +629,19 @@ interface FakeCliState {
   channelsInstalled?: Record<string, boolean>;
   /** pluginId -> resolved `<name>@<version>` in their install registry. */
   installRecords?: Record<string, string>;
+  /**
+   * Every `npm` argv this run attempted, in order — the acquisition of the
+   * OpenClaw CLI itself.
+   *
+   * `npmInstall` is deliberately OPT-IN and its absence THROWS rather than
+   * defaulting to a stub that succeeds. A provisioning run that reaches for a
+   * real `npm install --global` from a unit test is the same class of hazard
+   * as a test reaching a live LLM provider (CLAUDE.md): slow, networked,
+   * machine-mutating, and green either way. Only a test that says it is
+   * testing acquisition gets an npm at all.
+   */
+  npmCalls?: string[][];
+  npmInstall?: "succeeds" | "fails";
   /** Every `plugins install` argv this run attempted, in order. A test that
    *  asserts an install did NOT happen is the entire content of the
    *  idempotency and "only what is needed" claims — an outcome assertion
@@ -645,6 +658,7 @@ interface FakeCliState {
 function fakeProvisioner(state: FakeCliState, overrides: Record<string, unknown> = {}) {
   const files = new Map<string, string>();
   state.installCalls = state.installCalls ?? [];
+  state.npmCalls = state.npmCalls ?? [];
   const cli = new OpenClawCli({
     profile: "acme",
     env: { PATH: "/usr/bin" },
@@ -738,6 +752,20 @@ function fakeProvisioner(state: FakeCliState, overrides: Record<string, unknown>
     },
     registerJob: async () => undefined,
     probeHealth: async () => true,
+    runNpm: async (args: string[]) => {
+      state.npmCalls!.push(args);
+      if (state.npmInstall === undefined) {
+        throw new Error(
+          "this test shelled out to npm without opting in; set npmInstall to declare that it is testing acquisition",
+        );
+      }
+      if (state.npmInstall === "fails") {
+        return { code: 1, stdout: "", stderr: "npm ERR! network ETIMEDOUT" };
+      }
+      // A real `npm i -g openclaw@<pin>` makes the CLI answer as the pin.
+      state.version = OPENCLAW_PINNED_VERSION;
+      return { code: 0, stdout: "added 1 package", stderr: "" };
+    },
     ...overrides,
   });
 }
@@ -764,18 +792,123 @@ function effectiveFor(
   return effective;
 }
 
-test("a version mismatch refuses BEFORE anything is written", async () => {
-  const provisioner = fakeProvisioner({
-    version: "2026.7.0",
-    schema: schemaFixture(),
-    effective: {},
-    audit: { findings: [] },
-    patchCode: 0,
-  });
+test("a version mismatch refuses BEFORE anything is written, when installing is off", async () => {
+  const provisioner = fakeProvisioner(
+    {
+      version: "2026.7.0",
+      schema: schemaFixture(),
+      effective: {},
+      audit: { findings: [] },
+      patchCode: 0,
+    },
+    { installRuntime: false },
+  );
   const result = await provisioner.provision();
   assert.equal(result.status, "refused");
   assert.equal(result.refusal?.code, "openclaw_version_mismatch");
   assert.equal(result.configFingerprint, undefined, "nothing may be generated before the pin is satisfied");
+});
+
+test("a box that already has the pinned CLI executes no npm at all", async () => {
+  // The idempotency claim, and the only assertion that can carry it: an
+  // outcome of "already_installed" is produced just as happily by a run that
+  // reinstalled. On a boot-time reconcile with no network, a single
+  // `npm install --global` is a multi-minute stall on a box that is correct.
+  const state: FakeCliState = {
+    version: OPENCLAW_PINNED_VERSION,
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })]),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state).provision();
+  assert.equal(result.status, "provisioned");
+  assert.equal(result.runtimeInstall?.action, "already_installed");
+  assert.equal(state.npmCalls!.length, 0, "a correct box must shell out to nothing");
+});
+
+test("a box with no OpenClaw installs the pin, once, and then provisions", async () => {
+  const state: FakeCliState = {
+    version: undefined,
+    npmInstall: "succeeds",
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })]),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state).provision();
+  assert.equal(result.status, "provisioned", result.refusal?.detail);
+  assert.equal(result.runtimeInstall?.action, "installed");
+  // Call COUNT, not merely "an install happened" — a double install is
+  // satisfied by an existence assertion just as happily as a correct one.
+  assert.equal(state.npmCalls!.length, 1);
+  const args = state.npmCalls![0];
+  assert.ok(args.includes("--global"), args.join(" "));
+  assert.ok(
+    args.includes(`openclaw@${OPENCLAW_PINNED_VERSION}`),
+    "the spec must be the exact pin, never a range: " + args.join(" "),
+  );
+});
+
+test("an off-pin CLI is replaced with the pin rather than refused", async () => {
+  // `npm i -g <name>@<exact>` downgrades as willingly as it upgrades, which is
+  // the entire point of pinning: a box that drifted forward is brought back,
+  // not left running three transcribed contracts against a build nobody
+  // verified.
+  const state: FakeCliState = {
+    version: "2026.7.0",
+    npmInstall: "succeeds",
+    schema: schemaFixture(),
+    effective: effectiveFor([policy({ channelId: "feishu" })]),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state).provision();
+  assert.equal(result.status, "provisioned", result.refusal?.detail);
+  assert.equal(result.runtimeInstall?.action, "installed");
+  assert.equal(result.version.observed, OPENCLAW_PINNED_VERSION);
+});
+
+test("an install that cannot reach npm refuses as ITSELF, and writes nothing", async () => {
+  // Never flattened into `openclaw_not_installed`. The two need different
+  // answers from whoever reads the result, and the second one reads as a box
+  // nobody bothered to set up.
+  const state: FakeCliState = {
+    version: undefined,
+    npmInstall: "fails",
+    schema: schemaFixture(),
+    effective: {},
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state).provision();
+  assert.equal(result.status, "refused");
+  assert.equal(result.refusal?.code, "openclaw_runtime_install_failed");
+  assert.equal(result.configFingerprint, undefined, "nothing may be generated before the pin is satisfied");
+  assert.equal(result.runtimeInstall?.action, "failed");
+});
+
+test("the baseline (no channels at all) provisions and satisfies the lockdown", async () => {
+  // What a freshly provisioned box does on its own, with no cloud round trip
+  // and nobody pressing anything: install, lock down, audit, supervise. Zero
+  // channels is zero inbound policy, not a weaker instance — every lockdown
+  // expectation is channel-independent, so this is the state a box should sit
+  // in until its owner enables something.
+  const state: FakeCliState = {
+    version: undefined,
+    npmInstall: "succeeds",
+    schema: schemaFixture(),
+    effective: effectiveFor([]),
+    audit: { findings: [] },
+    patchCode: 0,
+  };
+  const result = await fakeProvisioner(state, { plan: plan([]) }).provision();
+  assert.equal(result.status, "provisioned", result.refusal?.detail);
+  assert.deepEqual(result.lockdownViolations, []);
+  assert.deepEqual(result.driftedPaths, []);
+  assert.equal(result.channelPlugins.length, 0, "an empty policy fetches no third-party plugin");
+  assert.equal(state.installCalls!.length, 0);
+  assert.ok(result.supervisor?.supported, "the baseline still installs supervision");
 });
 
 test("a happy path provisions, records a fingerprint, and reports no drift", async () => {
@@ -979,13 +1112,19 @@ test("a run that changed the config reports restartRequired, and a no-op run doe
   assert.equal(changed.restartRequired, true);
 
   // A refusal never claims a restart is pending — nothing was applied.
-  const refused = await fakeProvisioner({
-    version: "2026.7.0",
-    schema: schemaFixture(),
-    effective: clean,
-    audit: { findings: [] },
-    patchCode: 0,
-  }).provision();
+  // `installRuntime: false` so the off-pin version stays a refusal instead of
+  // being corrected by an install: what is under test here is what a refusal
+  // reports, not which refusal it is.
+  const refused = await fakeProvisioner(
+    {
+      version: "2026.7.0",
+      schema: schemaFixture(),
+      effective: clean,
+      audit: { findings: [] },
+      patchCode: 0,
+    },
+    { installRuntime: false },
+  ).provision();
   assert.equal(refused.status, "refused");
   assert.equal(refused.restartRequired, false);
 });

@@ -253,6 +253,7 @@ build {
       "${path.root}/scripts/30-user-and-dirs.sh",
       "${path.root}/scripts/40-gateway-artifact.sh",
       "${path.root}/scripts/50-launcher-and-systemd.sh",
+      "${path.root}/scripts/70-channel-transport.sh",
       "${path.root}/scripts/80-verify.sh",
       "${path.root}/scripts/90-cleanup.sh",
     ]

@@ -126,6 +126,12 @@ import {
   type OpenClawChannelPluginState,
   type OpenClawPluginRefusalCode,
 } from "./openclaw-plugin-install";
+import {
+  ensureOpenClawRuntimeInstalled,
+  type NpmRunner,
+  type OpenClawRuntimeInstallOutcome,
+  type OpenClawRuntimeInstallRefusalCode,
+} from "./openclaw-runtime-install";
 import { checkOpenClawVersion, type OpenClawVersionCheck } from "./openclaw-version";
 import {
   auditAndRepairOpenClawSupervisorUnit,
@@ -229,6 +235,10 @@ export type OpenClawProvisionRefusalCode =
   | "openclaw_lockdown_violated"
   | "openclaw_policy_not_applied"
   | "openclaw_security_audit_not_clean"
+  // Acquisition of the OpenClaw CLI itself (./openclaw-runtime-install.ts).
+  // Distinct from `openclaw_not_installed`, which now means "absent AND this
+  // run was not allowed to install it" rather than "absent".
+  | OpenClawRuntimeInstallRefusalCode
   // Channel-plugin acquisition (./openclaw-plugin-install.ts). A channel whose
   // plugin is absent answers an outbound send with a rejection that means "no
   // plugin AND no credential" at once, so these refuse the whole run rather
@@ -270,6 +280,9 @@ export interface OpenClawProvisionResult {
   /** Model-provider credential env vars found in this process's environment
    *  and therefore withheld from OpenClaw. Names only, never values. */
   strippedCredentialEnvNames: string[];
+  /** How the `openclaw` CLI itself got onto this box on this run. Always
+   *  populated; `already_installed` is the steady state. */
+  runtimeInstall?: OpenClawRuntimeInstallOutcome;
   supervisor?: OpenClawSupervisorInstallOutcome;
   /** True when the supervised instance answered a health probe afterwards. */
   healthy?: boolean;
@@ -307,6 +320,19 @@ export interface OpenClawProvisionerOptions {
   /** Probes the provisioned instance. Injectable so a test never opens a
    *  socket. */
   probeHealth?: () => Promise<boolean>;
+  /**
+   * Whether this run may INSTALL the pinned `openclaw` CLI when it is absent
+   * or off the pin. Default true — a customer must never have to type a
+   * command, which is the whole point.
+   *
+   * Set false only by a caller that deliberately wants a read-only report of
+   * what is on the box.
+   */
+  installRuntime?: boolean;
+  /** Test seam for the npm child; see ./openclaw-runtime-install.ts. */
+  runNpm?: NpmRunner;
+  /** npm binary path, when it is not simply `npm` on PATH. */
+  npmPath?: string;
 }
 
 /**
@@ -525,7 +551,26 @@ export class OpenClawProvisioner {
     const profile = this.options.cli.profile;
     const strippedCredentialEnvNames = detectForbiddenCredentialEnvNames(this.env);
 
-    // ── 1. Version pin, before anything is touched ──────────────────────
+    // ── 1. Acquire the CLI at the pin, then check the pin ───────────────
+    //
+    // ACQUIRE FIRST, VERIFY SECOND, and the verification is a fresh
+    // `openclaw --version` rather than the installer's own opinion of how it
+    // went. The two steps stay separate on purpose: everything below this
+    // point already assumed a pinned CLI and refused loudly without one, and
+    // that refusal is what must keep working — installing is a new way to
+    // SATISFY the pin, never a new way to skip checking it.
+    //
+    // On a correct box `ensureOpenClawRuntimeInstalled` executes nothing at
+    // all (it is gated on the same `--version` read), so a boot-time
+    // reconcile on a box with no network is unaffected.
+    const runtimeInstall = await ensureOpenClawRuntimeInstalled({
+      cli: this.options.cli,
+      install: this.options.installRuntime !== false,
+      env: this.env,
+      npmPath: this.options.npmPath,
+      runNpm: this.options.runNpm,
+      record: this.options.record,
+    });
     const version = checkOpenClawVersion(await this.options.cli.version());
     const base: OpenClawProvisionResult = {
       status: "refused",
@@ -541,8 +586,16 @@ export class OpenClawProvisioner {
       auditFindings: [],
       channelPlugins: [],
       strippedCredentialEnvNames,
+      runtimeInstall,
     };
     if (!version.ok) {
+      // A failed ACQUISITION is reported as itself, so "this box cannot reach
+      // npm" is never flattened into "OpenClaw is not installed" — those need
+      // different answers from whoever reads the result, and the second one
+      // reads as a box nobody set up.
+      if (runtimeInstall.refusal) {
+        return this.refuse(base, runtimeInstall.refusal.code, runtimeInstall.refusal.detail);
+      }
       return this.refuse(base, version.code ?? "openclaw_version_mismatch", version.detail ?? "");
     }
 
@@ -748,6 +801,7 @@ export class OpenClawProvisioner {
         action: state.action,
       })),
       stripped_credential_env: strippedCredentialEnvNames,
+      runtime_install: runtimeInstall.action,
       supervisor_action: supervisor.repair?.action ?? null,
       healthy: healthy ?? null,
       restart_required: result.restartRequired,

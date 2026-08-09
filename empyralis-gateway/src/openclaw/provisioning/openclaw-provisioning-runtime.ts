@@ -29,8 +29,11 @@
 import os from "os";
 import path from "path";
 
+import type { GatewayConfig } from "../../config";
+import { openClawGatewayPortFromUrl } from "../../config";
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../../protocol/types";
 import { OPENCLAW_TRANSPORT_CHANNEL_IDS } from "../capabilities";
+import { OPENCLAW_INBOUND_PATH } from "../inbound-listener";
 import { OpenClawCli, openClawProfileStateDir } from "./openclaw-cli";
 import {
   OpenClawProvisioner,
@@ -228,14 +231,66 @@ export class OpenClawProvisioningRuntime {
    * the exact silent-misrouting failure step 4 exists to prevent.
    *
    * Returns undefined when this box has never been provisioned (nothing to
-   * reconcile TO — inventing a policy here would be worse than waiting for the
-   * cloud to push one).
+   * reconcile TO). Callers wanting a box to come up channel-ready with no
+   * cloud round trip use ensureProvisionedAtBoot() below instead.
    */
   async reconcileFromLastAppliedPolicy(): Promise<OpenClawProvisionResult | undefined> {
     const provisioner = this.buildProvisioner([]);
     const channels = await provisioner.lastAppliedChannelPolicies();
     if (!channels) return undefined;
     return this.runProvision(channels);
+  }
+
+  /**
+   * What index.ts calls on boot: reconcile a box that has a policy, and
+   * BASELINE a box that has never been provisioned at all.
+   *
+   * ═══════════════════════════════════════════════════════════════════════
+   * WHY A FRESH BOX MUST PROVISION ITSELF, WITH NO CLOUD TRIGGER
+   * ═══════════════════════════════════════════════════════════════════════
+   *
+   * The requirement is that a customer presses one button, authorises
+   * DigitalOcean, and comes back to a machine where everything is installed —
+   * never learning that OpenClaw exists. Before this, a freshly provisioned
+   * box did nothing about OpenClaw until somebody called
+   * `POST /personal-channels/openclaw/gateways/{id}/provision`, and the boot
+   * reconcile was a documented no-op on exactly the boxes that needed it most:
+   *
+   *   BEFORE                               AFTER
+   *   boot ─▶ stored policy? ─ no ─▶ ✗     boot ─▶ stored policy?
+   *                          └ yes ─▶ rec.         ├ yes ─▶ reconcile
+   *                                                └ no  ─▶ BASELINE []
+   *   nothing installed, nothing           openclaw@pin installed, locked
+   *   configured, no unit, until a         down, audited, supervised —
+   *   human triggers the route             before any channel exists
+   *
+   * THE BASELINE IS THE EMPTY POLICY, AND THAT IS NOT A SHORTCUT. Every step
+   * that makes an instance safe is channel-independent: the version pin, the
+   * loopback bind, token auth, mDNS off, no model credential, no tool
+   * authority, the plugin allowlist, `openclaw security audit`, the pinned
+   * agent workspace and the supervised unit. What zero channels means is
+   * exactly zero inbound policy — nothing enabled, nothing reachable, and no
+   * third-party channel plugin fetched (install scope is opt-in per channel
+   * and an empty plan asks for none). The box is left running, locked down,
+   * and carrying no traffic until the owner enables something.
+   *
+   * Baselining with a GUESSED channel set would be the opposite: minutes of
+   * network and twenty third-party packages running beside a customer's
+   * messages, for channels they may never use — and an inbound policy nobody
+   * chose, which is the failure the whole gating design exists to prevent.
+   *
+   * IDEMPOTENT BY CONSTRUCTION: the second boot finds a stored record and
+   * takes the reconcile branch, which is itself a no-op when nothing drifted.
+   */
+  async ensureProvisionedAtBoot(): Promise<{
+    result: OpenClawProvisionResult;
+    mode: "reconciled" | "baseline";
+  }> {
+    const channels = await this.buildProvisioner([]).lastAppliedChannelPolicies();
+    if (channels) {
+      return { result: await this.runProvision(channels), mode: "reconciled" };
+    }
+    return { result: await this.runProvision([]), mode: "baseline" };
   }
 }
 
@@ -280,6 +335,18 @@ function serialize(result: OpenClawProvisionResult): Record<string, unknown> {
       title: finding.title,
     })),
     stripped_credential_env: result.strippedCredentialEnvNames,
+    // How the `openclaw` CLI itself got here. `already_installed` on every
+    // steady-state run; `installed` exactly once per box; `failed` carries
+    // the refusal above. Surfaced so the product can say "this computer could
+    // not reach the software registry" instead of the customer-facing
+    // nonsense of "OpenClaw is not installed".
+    runtime_install: result.runtimeInstall
+      ? {
+          action: result.runtimeInstall.action,
+          observed_version: result.runtimeInstall.observedVersion ?? null,
+          expected_version: result.runtimeInstall.expectedVersion,
+        }
+      : null,
     supervisor: result.supervisor
       ? {
           supported: result.supervisor.supported,
@@ -298,4 +365,46 @@ function serialize(result: OpenClawProvisionResult): Record<string, unknown> {
 export function defaultBridgePluginPath(entryPath: string): string {
   // dist/index.js -> <package root>/openclaw-bridge-plugin
   return path.resolve(path.dirname(entryPath), "..", "openclaw-bridge-plugin");
+}
+
+/**
+ * The ONE place an `OpenClawProvisioningRuntime` is constructed from a
+ * gateway config.
+ *
+ * Two callers need an identical one: index.ts, on every boot, and
+ * ./openclaw-install-plan-cli.ts, once at install time under the root
+ * installer (which has to provision BEFORE it starts the systemd unit, or the
+ * unit's first start finds no config and restart-loops until something else
+ * happens to write one). Two hand-rolled constructions of the same eleven
+ * arguments is how a box ends up provisioned against a different port, a
+ * different bridge endpoint or a different profile than the one it runs — all
+ * silent, all presenting as a channel that simply never answers.
+ */
+export function buildOpenClawProvisioningRuntime(params: {
+  config: GatewayConfig;
+  /** Both loopback secrets, already resolved — ../openclaw-local-secrets.ts. */
+  secrets: { bridgeToken: string; gatewayToken: string };
+  /** The dist/index.js this process was launched from, for the bridge plugin
+   *  path. The install-time caller passes its own entry, which resolves to the
+   *  same package root. */
+  entryPath: string;
+  env?: NodeJS.ProcessEnv;
+  record?: (messageType: string, payload: Record<string, unknown>) => Promise<unknown>;
+}): OpenClawProvisioningRuntime {
+  const { config, secrets } = params;
+  return new OpenClawProvisioningRuntime({
+    profile: config.openclawProfile,
+    // Derived from the SAME url the outbound WS client dials, so the port we
+    // provision OpenClaw to listen on and the port we connect to can never be
+    // two different numbers.
+    gatewayPort: openClawGatewayPortFromUrl(config.openclawGatewayUrl),
+    gatewayToken: secrets.gatewayToken,
+    bridgeToken: secrets.bridgeToken,
+    bridgeEndpointUrl: `http://127.0.0.1:${config.openclawBridgePort}${OPENCLAW_INBOUND_PATH}`,
+    bridgePluginPath: config.openclawBridgePluginPath || defaultBridgePluginPath(params.entryPath),
+    stateDir: config.stateDir,
+    binaryPath: config.openclawBinaryPath,
+    env: params.env,
+    record: params.record,
+  });
 }

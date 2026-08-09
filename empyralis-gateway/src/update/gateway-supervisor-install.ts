@@ -175,6 +175,23 @@ export interface SupervisedProgramDefinition {
   environment?: Record<string, string>;
   /** systemd `Description=`. */
   description?: string;
+  /**
+   * systemd `User=`/`Group=`. IGNORED by the launchd renderer, which already
+   * runs a LaunchAgent as the logged-in user by construction.
+   *
+   * Exists because a systemd unit in /etc/systemd/system with no `User=` runs
+   * as ROOT. For the Empyralis gateway that never mattered — its unit is
+   * written by scripts/install-agent-computer.sh, which sets `User=` itself.
+   * For the co-located OpenClaw instance it matters twice over: root is
+   * absurd authority for a process whose entire job is to be a radio, and
+   * `--profile <p>` resolves against `$HOME`, so a root-run OpenClaw would
+   * keep its state in /root/.openclaw-<p> while the gateway reads and writes
+   * ~empyralis/.openclaw-<p> — two instances, one config, silently.
+   *
+   * Omitted renders byte-identically to before, so the gateway's own unit is
+   * unchanged.
+   */
+  user?: string;
 }
 
 export function renderLaunchAgentPlist(opts: SupervisedProgramDefinition): string {
@@ -224,6 +241,7 @@ export function renderSystemdUnit(opts: SupervisedProgramDefinition): string {
     .sort()
     .map((key) => `Environment=${key}=${String(opts.environment?.[key] ?? "")}`)
     .join("\n");
+  const userLines = opts.user ? `User=${opts.user}\nGroup=${opts.user}\n` : "";
   return `[Unit]
 Description=${opts.description ?? "Empyralis Agent Computer Gateway"}
 Documentation=https://empyralis.ai
@@ -232,7 +250,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${opts.workingDirectory}
+${userLines}WorkingDirectory=${opts.workingDirectory}
 ExecStart=${opts.programArguments.join(" ")}
 ${envLines ? `${envLines}\n` : ""}Restart=always
 RestartSec=5

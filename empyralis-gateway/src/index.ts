@@ -32,10 +32,8 @@ import { OpenClawInboundListener, OPENCLAW_INBOUND_PATH } from "./openclaw/inbou
 import { setOpenClawTransportEnabled } from "./openclaw/capabilities";
 import { OpenClawGatewayClient } from "./openclaw/openclaw-gateway-client";
 import { buildOpenClawPersonalChannelRuntimes } from "./openclaw/outbound-runtime";
-import {
-  OpenClawProvisioningRuntime,
-  defaultBridgePluginPath,
-} from "./openclaw/provisioning/openclaw-provisioning-runtime";
+import { resolveOpenClawLocalSecrets } from "./openclaw/openclaw-local-secrets";
+import { buildOpenClawProvisioningRuntime } from "./openclaw/provisioning/openclaw-provisioning-runtime";
 import { GatewayCliSetupRuntime } from "./llm/cli-setup-runtime";
 import { GatewaySelfUpdateRuntime } from "./update/gateway-self-update-runtime";
 import { GatewayRestartRuntime } from "./update/gateway-restart-runtime";
@@ -250,6 +248,26 @@ async function main(): Promise<void> {
   const outbox = new GatewayOutbox(db);
   const checkpoints = new GatewayCheckpoints(db);
   const tokenStore = new GatewayTokenStore(db);
+  // The two OpenClaw loopback secrets. Read from the environment when an
+  // operator set them; otherwise minted here and persisted under stateDir
+  // (./openclaw/openclaw-local-secrets.ts).
+  //
+  // Everything OpenClaw on this box used to hang off
+  // `config.openclawBridgeToken && config.openclawGatewayToken`, and NO
+  // INSTALLER IN THIS REPO EVER SET EITHER — so the inbound listener, the
+  // outbound client, the channel runtimes and `openclaw.provision` were all
+  // silently un-constructed on every box this product has ever provisioned.
+  // Both values are ours on both ends and never leave the machine, so there
+  // was never anything for a human to supply; resolving them here is what
+  // makes "every hardware path comes up channel-ready" true without a
+  // customer typing anything.
+  const openclawSecrets = await resolveOpenClawLocalSecrets({
+    stateDir: config.stateDir,
+    envBridgeToken: config.openclawBridgeToken,
+    envGatewayToken: config.openclawGatewayToken,
+  });
+  const openclawBridgeToken = openclawSecrets.bridgeToken;
+  const openclawGatewayToken = openclawSecrets.gatewayToken;
   // ARCHIVED (Phase U1): supervisorClient instantiation removed.
   const browserWorker = new GatewayBrowserWorker(config);
   const browserRuntime = new GatewayBrowserRuntime(db, browserWorker);
@@ -267,10 +285,10 @@ async function main(): Promise<void> {
   // channel.outbound — with a named "not configured" failure, which is far
   // more diagnosable than GatewayWsClient's generic "Unsupported personal
   // channel key".
-  const openclawGatewayClient = config.openclawGatewayToken
+  const openclawGatewayClient = openclawGatewayToken
     ? new OpenClawGatewayClient({
         url: config.openclawGatewayUrl,
-        token: config.openclawGatewayToken,
+        token: openclawGatewayToken,
         record: (messageType, payload) => journal.append("outbound", messageType, payload),
         logger: {
           info: (message: string) => console.log(`[gateway] ${message}`),
@@ -286,7 +304,7 @@ async function main(): Promise<void> {
           ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((bridgeConfig) => buildLocalBridgeChannelRuntime(bridgeConfig, db)),
         ]
       : []),
-    ...(config.openclawBridgeToken
+    ...(openclawBridgeToken
       ? buildOpenClawPersonalChannelRuntimes(openclawGatewayClient, (messageType, payload) =>
           journal.append("outbound", messageType, payload),
         )
@@ -324,7 +342,7 @@ async function main(): Promise<void> {
   // and must be known before the one-time supportedCapabilities()
   // computation below, because the cloud rejects a channel.inbound for any
   // channel this gateway never advertised.
-  setOpenClawTransportEnabled(Boolean(config.openclawBridgeToken));
+  setOpenClawTransportEnabled(Boolean(openclawBridgeToken));
   // Same "static local policy choice, set once before the first
   // supportedCapabilities() computation" shape as cliSetupLocallyEnabled
   // just above — see desktop-permissions.ts's shellFullAccessLocallyEnabled
@@ -373,29 +391,22 @@ async function main(): Promise<void> {
     stateDir: config.stateDir,
   });
   // OpenClaw provisioning (CHANNEL-ADOPTION-PLAN.md step 4). Constructed
-  // under EXACTLY the same condition as the inbound listener and the
-  // transport capability advertisement above — the bridge secret plus
-  // OpenClaw's own gateway token. Without both there is no OpenClaw instance
-  // for this box to own, and advertising `openclaw.provision` would let the
-  // cloud dispatch a capability that could only fail.
-  const openclawProvisioningRuntime =
-    config.openclawBridgeToken && config.openclawGatewayToken
-      ? new OpenClawProvisioningRuntime({
-          profile: config.openclawProfile,
-          // Derived from the SAME url the outbound WS client dials, so the
-          // port we provision OpenClaw to listen on and the port we connect
-          // to can never be two different numbers.
-          gatewayPort: openClawGatewayPortFromUrl(config.openclawGatewayUrl),
-          gatewayToken: config.openclawGatewayToken,
-          bridgeToken: config.openclawBridgeToken,
-          bridgeEndpointUrl: `http://127.0.0.1:${config.openclawBridgePort}${OPENCLAW_INBOUND_PATH}`,
-          bridgePluginPath:
-            config.openclawBridgePluginPath || defaultBridgePluginPath(require.main?.filename || process.argv[1] || process.execPath),
-          stateDir: config.stateDir,
-          binaryPath: config.openclawBinaryPath,
-          record: (messageType, payload) => journal.append("system", messageType, payload),
-        })
-      : null;
+  // through the shared builder, which the root installer also uses at install
+  // time — the port, the bridge endpoint and the plugin path are derived
+  // there, once, so the two callers cannot provision a box against a
+  // different port than it runs on.
+  //
+  // No longer conditional. Both secrets now always resolve (env, else the
+  // box's own persisted pair), so every box that runs this gateway is an
+  // OpenClaw transport box. That is the point: "there is only one thing which
+  // is channels", and a hardware path where channels silently do not exist is
+  // not a smaller product, it is a broken one.
+  const openclawProvisioningRuntime = buildOpenClawProvisioningRuntime({
+    config,
+    secrets: { bridgeToken: openclawBridgeToken, gatewayToken: openclawGatewayToken },
+    entryPath: require.main?.filename || process.argv[1] || process.execPath,
+    record: (messageType, payload) => journal.append("system", messageType, payload),
+  });
   const capabilityRouter = new GatewayCapabilityRouter(
     browserRuntime,
     personalChannelRuntimes,
@@ -441,10 +452,10 @@ async function main(): Promise<void> {
   // mode, so an unset EMPYRALIS_BRIDGE_TOKEN means the listener simply does
   // not exist, and the OpenClaw plugin's POSTs pile up in its own durable
   // queue instead of being accepted by an open port.
-  const openclawInboundListener = config.openclawBridgeToken
+  const openclawInboundListener = openclawBridgeToken
     ? new OpenClawInboundListener({
         port: config.openclawBridgePort,
-        token: config.openclawBridgeToken,
+        token: openclawBridgeToken,
         publisher: client,
         record: (messageType, payload) => journal.append("inbound", messageType, payload),
         logger: {
@@ -600,34 +611,65 @@ async function main(): Promise<void> {
             });
           });
         }
-        // Boot-time OpenClaw reconcile (CHANNEL-ADOPTION-PLAN.md step 4).
-        // Re-asserts the last policy the cloud pushed against whatever the
-        // local OpenClaw config actually says now — their in-chat
-        // `/activation` command and the box operator's editor can both have
-        // changed it since, with no cloud round trip and nothing logged
-        // anywhere. Runs on every boot, like the supervisor-install check
-        // just below, rather than waiting for someone to notice a channel
-        // has gone quiet. A box that has never been provisioned is a no-op.
+        // Boot-time OpenClaw provisioning (CHANNEL-ADOPTION-PLAN.md step 4).
+        //
+        // TWO JOBS, one call. On a box with a stored policy it re-asserts it
+        // against whatever the local OpenClaw config actually says now —
+        // their in-chat `/activation` command and the box operator's editor
+        // can both have changed it since, with no cloud round trip and
+        // nothing logged anywhere. On a box that has NEVER been provisioned
+        // it installs the pinned OpenClaw, locks it down, audits it and
+        // supervises it with an empty channel policy
+        // (ensureProvisionedAtBoot's doc comment has the full argument).
+        //
+        // That second half is what makes the product's promise true: press
+        // one button, authorise the cloud provider, come back to a machine
+        // that is already channel-ready. It used to require a human calling
+        // the provision route, which is precisely the step a customer must
+        // never know exists.
+        //
+        // Fire-and-forget, like every other boot task here: a box that cannot
+        // reach the npm registry still comes up as a fully working gateway
+        // with every other capability. Channels degrade; nothing else does.
         if (openclawProvisioningRuntime) {
           void openclawProvisioningRuntime
-            .reconcileFromLastAppliedPolicy()
-            .then(async (result) => {
-              if (!result) return;
+            .ensureProvisionedAtBoot()
+            .then(async ({ result, mode }) => {
               await journal.append("system", "gateway.openclaw_provision.boot_reconcile", {
+                mode,
                 status: result.status,
                 refusal_code: result.refusal?.code ?? null,
+                runtime_install: result.runtimeInstall?.action ?? null,
                 config_changed: result.configChanged,
                 drifted_paths: result.driftedPaths,
               });
               // Same gateway.state.update -> registration.metadata path the
               // restart health check and supervisor install already use, so a
               // refused instance is a VISIBLE state rather than a line in a
-              // log file on someone else's machine.
+              // log file on someone else's machine. This is the ONLY way a
+              // customer learns that their box could not install the channel
+              // transport — they are never shown a shell, and the box's own
+              // logs are not somewhere they can read.
               await client.publishStateUpdate({
                 openclaw_provisioning: {
+                  mode,
                   status: result.status,
                   profile: result.profile,
                   refusal: result.refusal ?? null,
+                  runtime_install: result.runtimeInstall
+                    ? {
+                        action: result.runtimeInstall.action,
+                        observed_version: result.runtimeInstall.observedVersion ?? null,
+                        expected_version: result.runtimeInstall.expectedVersion,
+                      }
+                    : null,
+                  supervisor: result.supervisor
+                    ? {
+                        supported: result.supervisor.supported,
+                        action: result.supervisor.repair?.action ?? null,
+                        detail: result.supervisor.repair?.detail ?? null,
+                      }
+                    : null,
                   config_fingerprint: result.configFingerprint ?? null,
                   drifted_paths: result.driftedPaths,
                   disabled_channels: result.disabledChannels,

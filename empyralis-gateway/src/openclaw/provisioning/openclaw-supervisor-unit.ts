@@ -53,6 +53,32 @@ export interface OpenClawSupervisorUnitOptions {
   platform?: NodeJS.Platform;
   homeDir?: string;
   logDir: string;
+  /**
+   * systemd `User=` for the OpenClaw unit. Linux only; a launchd LaunchAgent
+   * already runs as its own user.
+   *
+   * Defaults to the account THIS process runs as, resolved from the OS rather
+   * than configured. Two things go wrong without it, and both are quiet: a
+   * unit in /etc/systemd/system with no `User=` runs as ROOT, which is absurd
+   * authority for a process whose whole job is to be a radio; and `--profile
+   * <p>` resolves against `$HOME`, so a root-run OpenClaw keeps its state in
+   * /root/.openclaw-<p> while the gateway reads and writes its own home —
+   * two instances of one config, presenting as settings that keep reverting.
+   */
+  systemdUser?: string;
+}
+
+/** The account a systemd unit for THIS process's OpenClaw should run as.
+ *  `os.userInfo()` reads the real uid's passwd entry, so it is right even
+ *  under systemd's own `User=`, where `$USER` is typically unset. Only a
+ *  genuinely unreadable passwd entry yields undefined. */
+export function resolveDefaultOpenClawSystemdUser(): string | undefined {
+  try {
+    const name = String(os.userInfo().username || "").trim();
+    return name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** launchd label / systemd unit name for one customer's instance. */
@@ -153,6 +179,7 @@ export function resolveExpectedOpenClawSupervisorUnit(
         logPath: path.join(options.logDir, `openclaw-${profile}.log`),
         environment: options.environment,
         description: `Empyralis-managed OpenClaw channel transport (${profile})`,
+        user: options.systemdUser ?? resolveDefaultOpenClawSystemdUser(),
       }),
     };
   }
