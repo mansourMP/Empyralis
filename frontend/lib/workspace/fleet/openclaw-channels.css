@@ -5,26 +5,22 @@
  * is hard-coded, and there is no `@media (prefers-color-scheme)` — the app
  * stamps `data-theme` on <html> and the tokens flip underneath.
  *
- * SAME SYSTEM AS THE CARDS ABOVE IT, NOT A BOLTED-ON SECTION
+ * SAME SYSTEM AS EVERY OTHER CHANNEL, NOT A BOLTED-ON SECTION
  * ------------------------------------------------------------------------
- * This used to be its own bordered card list (`.openclaw-channel-list`, a
- * card-within-a-card floating inside the section) and its own dialog chrome,
- * both different in shape, weight and texture from the rest of Settings.
- * Fixed 2026-08-09: the list now IS `.fleet-list`/`.fleet-list-row` (the
- * exact flat-hairline-row primitive Members, Hardware and Connections already
- * use — see OpenClawChannelsPanel.tsx), the status chips ARE `.fleet-badge`,
- * and the credential dialog IS `.fleet-channel-banner` (the same
- * header+icon+title+close, scrolling-body shape the Telegram/WhatsApp/
- * Discord/Signal/iMessage/Slack/WeChat cards already open into). What
- * remains here is only what genuinely has no equivalent yet: the row's
- * secondary caption/detail lines, the chip TONE colours, and the generated
- * credential form — never a parallel card/list/dialog shell.
+ * This file owns NO card, NO list and NO dialog shell. Every transported
+ * channel is a `.fleet-channel-card` in the one `.fleet-channel-grid`
+ * (fleet-theme.css) alongside the first-party ones, its status chips ARE
+ * `.fleet-badge`, and the panel it opens IS `.fleet-channel-banner` — the
+ * same header+icon+title+close, scrolling-body shape the Telegram/WhatsApp/
+ * Discord/Signal/iMessage/Slack/WeChat cards open into. What remains here is
+ * only what genuinely has no equivalent: the chip TONE colours, the panel's
+ * detail sentence, and the generated credential form.
  *
  * ACCENT DISCIPLINE: not one rule in this file paints `--accent`. The single
- * accent-filled control on the screen is `.fleet-btn--accent-fill`, applied to
- * exactly one button per view (the toolbar's primary action in the list, the
- * dialog's Save in the dialog). Row actions are neutral on purpose — a list
- * where every row shouts has no primary action at all.
+ * accent-filled control per view is `.fleet-btn--accent-fill` — the toolbar's
+ * primary action on the grid, and the one remediation control inside an
+ * opened panel. Card faces carry no button at all, so a 26-card grid has
+ * exactly one accent on it.
  */
 
 .openclaw-toolbar {
@@ -62,61 +58,21 @@
   color: var(--text-muted);
 }
 
-/* .openclaw-channel-list/.openclaw-channel-row are applied ALONGSIDE
-   .fleet-list/.fleet-list-row (see OpenClawChannelsPanel.tsx) — they carry no
-   shape, border, background or radius of their own; that all still comes
-   from the shared primitive. What's left here is layout genuinely specific
-   to this row's content (wrapping many chips + an action cluster on narrow
-   viewports) PLUS density spacing (below) — .fleet-list-row's own padding
-   and .fleet-list-row-main's own stacking gap were sized for the terse
-   one/two-line rows Members, Hardware and Connections actually carry. A
-   channel row here can run title + selection label + a 3-chip cluster + a
-   full detail sentence + an action — 4-5 lines — and at that density the
-   shared 12px row padding and 2px inter-line gap read as one merged block
-   across 16-26 rows, with no sense of where one channel ends and the next
-   begins. CLAUDE.md: "dense inside a group, airy between groups" — this was
-   violated in both directions: the row's own sections ran together AND
-   different channels ran together. Fixed by widening the ROW's own padding
-   and the divider between DIFFERENT channels, and by using margin-top on
-   this row's own sub-blocks (chips/detail below) instead of a uniform gap,
-   so the title+selection-label pair stays tight while the chip cluster and
-   the detail sentence each get a real break before them — never by
-   reverting to a per-row card/border/radius, which is exactly what the
-   flat-list pattern above replaced to match the rest of the product.
-   Scoped via a compound selector (`.fleet-list-row.openclaw-channel-row`),
-   the same convention task-detail.css documents for overriding a
-   fleet-theme.css rule: it beats fleet-theme.css's single-class rule on
-   specificity outright, so it holds regardless of which stylesheet the
-   bundler happens to load first. Agents and Hardware rows never carry
-   `.openclaw-channel-row` and are byte-for-byte unaffected. */
-.openclaw-channel-row {
-  justify-content: space-between;
-}
-
-.fleet-list-row.openclaw-channel-row {
-  padding-top: var(--space-4);
-  padding-bottom: var(--space-4);
-  /* A touch more presence than the shared 8%-alpha hairline gives at this
-     density, short of a full per-row card. Light theme already renders
-     .fleet-list-row's divider at --border-strong list-wide (see
-     fleet-theme.css's light-mode override just below .fleet-list-row); this
-     brings dark mode's channel rows up to that same divider weight so
-     "airy between groups" holds in both themes, not just light. */
-  border-bottom-color: var(--border-strong);
-}
-
-/* Tight within the title block (title + selection label sit right under
-   each other) — the airy break before the next section comes from
-   margin-top on .openclaw-chips / .openclaw-channel-detail below, not from
-   widening this gap uniformly. */
-.openclaw-channel-row .fleet-list-row-main {
-  gap: 3px;
-}
-
-.openclaw-channel-selection {
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-}
+/* NO ROW SHELL LIVES HERE ANY MORE.
+   A 2026-08-09 pass rendered every channel as a flat text row carrying a
+   subtitle, three chips, a full sentence and a button — ~26 of them — and
+   this file grew a pile of density overrides (`.openclaw-channel-row`
+   padding, divider weight, `.fleet-list-row-main` gap, a per-row action
+   column, a 720px stacking breakpoint) trying to make that wall of text
+   readable. It could not be made readable, because the shape was wrong: the
+   channel surface is a `.fleet-channel-grid` of square `.fleet-channel-card`s
+   (fleet-theme.css), face = icon + label + ONE pill, and everything those
+   overrides were spacing out now lives in the panel a card opens. All of
+   those rules were deleted on 2026-08-10 rather than left behind — dead CSS
+   is how the next author rebuilds the list. What remains below is only what
+   the OPENED PANEL genuinely needs and the shared primitives do not already
+   provide: the chip tone colours, the detail sentence, and the generated
+   credential form. */
 
 .openclaw-chips {
   display: flex;
@@ -150,15 +106,6 @@
   line-height: 1.5;
   max-width: 62ch;
   margin-top: var(--space-2);
-}
-
-.openclaw-channel-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .openclaw-ready {
@@ -240,20 +187,5 @@
 @media (prefers-reduced-motion: reduce) {
   .openclaw-spin {
     animation: none;
-  }
-}
-
-/* Narrow viewport: the row stops being two columns rather than squeezing the
-   action off the edge. */
-@media (max-width: 720px) {
-  .openclaw-channel-row {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-2);
-  }
-
-  .openclaw-channel-actions {
-    justify-content: flex-start;
-    width: 100%;
   }
 }

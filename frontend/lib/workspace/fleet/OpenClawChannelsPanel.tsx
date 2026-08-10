@@ -5,19 +5,29 @@
  * unified channel list on the Channels tab (FleetAgentDetail.tsx's
  * ChannelsTab). No terminal, no SSH.
  *
- * FORMERLY A STANDALONE PANEL, NOW A HOOK + A DIALOG
- * ---------------------------------------------------
+ * FORMERLY A STANDALONE PANEL, NOW A HOOK + A FORM BODY
+ * -----------------------------------------------------
  * Until 2026-08-09 this file exported a full `<OpenClawChannelsPanel>`
  * section, rendered by ChannelsTab as its OWN block underneath a separate
  * `fleet-channel-grid` of the first-party channel cards — two visually
  * distinct components stacked in one tab, which is exactly the "old vs new"
  * split the founder called out: two components stacked, even visually
- * similar, is not one user interface. ChannelsTab now owns ONE merged list
- * and ONE render loop over every channel (first-party + OpenClaw), so the
- * data-fetching (`useOpenClawChannelSetup`) and the generated-credential-form
- * dialog (`CredentialDialog`) are exported here for it to use directly; the
- * section chrome (heading, toolbar, list container) moved to ChannelsTab
- * itself since it is no longer this file's own section.
+ * similar, is not one user interface. ChannelsTab now owns ONE
+ * `.fleet-channel-grid` of square `.fleet-channel-card`s over EVERY channel
+ * (first-party + transported), so the data-fetching
+ * (`useOpenClawChannelSetup`) and the generated credential form
+ * (`CredentialForm`) are exported here for it to use directly; the section
+ * chrome (heading, toolbar, grid container) and the panel a card opens into
+ * both live in ChannelsTab, since neither is this file's own section any more.
+ *
+ * A CARD FACE HOLDS ICON + LABEL + ONE PILL, AND NOTHING ELSE
+ * ----------------------------------------------------------
+ * The three states below are not shown on the grid. They are shown, all
+ * three, in the panel a card opens — which is also where the remediation
+ * sentence and its button live. A 2026-08-09 pass put all of it on the face
+ * of every row (subtitle + three chips + a full sentence + a button, ~26
+ * times) and the screen became a wall of text; that is the thing this file's
+ * `channelCardPill` sibling in openclaw-channel-copy.ts exists to prevent.
  *
  * THE FORM IS GENERATED, NOT WRITTEN
  * ---------------------------------
@@ -35,13 +45,14 @@
  *
  *     - Feishu: not installed, configured, disabled, run openclaw plugins …
  *
- * Three independent facts and the specific next action, on one line. A single
+ * Three independent facts and the specific next action. A single
  * "Connected / Not connected" light throws away exactly the information that
- * says which of the three to go fix. So each row reads its three states
- * separately, and each non-working state carries its own remediation — a
- * BUTTON here rather than a command, because the cloud can already drive the
- * device. Where the action genuinely cannot happen in a browser (a QR scan on
- * a phone), the row says so instead of rendering a control that does nothing.
+ * says which of the three to go fix. So the panel a channel opens reads its
+ * three states separately, and each non-working state carries its own
+ * remediation — a BUTTON there rather than a command, because the cloud can
+ * already drive the device. Where the action genuinely cannot happen in a
+ * browser (a QR scan on a phone), the panel says so instead of rendering a
+ * control that does nothing.
  *
  * OBSERVED, NEVER DECLARED
  * ------------------------
@@ -59,7 +70,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Loader2, X } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import {
@@ -228,18 +239,28 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
 }
 
 /** The generated form. Every control below is driven by `entry.fields`; there
- *  is no branch on a channel id anywhere in it. */
-export function CredentialDialog({
+ *  is no branch on a channel id anywhere in it.
+ *
+ *  A FORM BODY, NOT A DIALOG. Until 2026-08-10 this was `CredentialDialog`,
+ *  which carried its own `.fleet-detail-backdrop` + `.fleet-channel-banner`
+ *  shell. The unified channel GRID opens one panel per card — the same panel
+ *  a first-party card opens — so the shell belongs to that panel and this is
+ *  only what goes inside it. Two stacked dialogs (a card's detail panel, then
+ *  a second modal on top of it for the credential) is the "two components
+ *  stacked is not one interface" defect one level down. */
+export function CredentialForm({
   gatewayId,
   entry,
   observed,
-  onClose,
+  onCancel,
   onSaved,
 }: {
   gatewayId: string;
   entry: OpenClawChannelCatalogEntry;
   observed: OpenClawObservedChannel | undefined;
-  onClose: () => void;
+  /** Rendered as the form's secondary button. The panel that hosts this form
+   *  owns closing itself; this only says "not now". */
+  onCancel: () => void;
   onSaved: () => void | Promise<void>;
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
@@ -292,100 +313,76 @@ export function CredentialDialog({
   };
 
   return (
-    <div className="fleet-detail-backdrop" onClick={onClose}>
-      {/* .fleet-channel-banner: the exact shape every row in the unified list
-          opens into (header + icon + title + close, then a scrolling body) —
-          this dialog reuses it rather than a bespoke, differently-sized
-          panel. */}
-      <div
-        className="fleet-channel-banner"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="openclaw-dialog-heading"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="fleet-channel-banner-header">
-          <span className="fleet-channel-banner-icon">{entry.label.charAt(0)}</span>
-          <span className="fleet-channel-banner-title" id="openclaw-dialog-heading">
-            {entry.label}
-          </span>
-          <button type="button" className="fleet-detail-close fleet-detail-close--inline" onClick={onClose} aria-label="Close">
-            <X size={16} strokeWidth={2} />
-          </button>
+    <>
+      <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
+        These are the fields this channel needs to connect.
+      </p>
+
+      {error ? (
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>{error}</span>
         </div>
+      ) : null}
 
-        <div className="fleet-channel-banner-body">
-          <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-            {entry.selection_label}. These are the fields this channel needs to connect.
-          </p>
-
-          {error ? (
-            <div className="openclaw-banner" role="alert">
-              <AlertTriangle size={14} aria-hidden />
-              <span>{error}</span>
+      <div className="openclaw-form">
+        {entry.fields.map((field) => {
+          const inputId = `openclaw-${entry.channel_id}-${field.name}`;
+          const already = setFields.has(field.name);
+          return (
+            <div key={field.name} className="openclaw-form-field">
+              <label htmlFor={inputId}>
+                <span className="openclaw-form-name">{field.name}</span>
+                {field.secret ? (
+                  <span className="fleet-badge openclaw-chip openclaw-chip--secret" style={{ marginLeft: 0 }}>
+                    secret
+                  </span>
+                ) : null}
+                {already ? (
+                  <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
+                    set
+                  </span>
+                ) : null}
+              </label>
+              <input
+                id={inputId}
+                className="fleet-wizard-input"
+                /* A secret is a password input and is ALWAYS empty on open:
+                   there is no stored value to prefill — this computer
+                   redacts it before it ever leaves the machine. */
+                type={field.secret ? "password" : "text"}
+                autoComplete="off"
+                spellCheck={false}
+                value={values[field.name] ?? ""}
+                placeholder={already ? "Set — type to replace" : ""}
+                onChange={(event) =>
+                  setValues((current) => ({ ...current, [field.name]: event.target.value }))
+                }
+              />
             </div>
-          ) : null}
-
-          <div className="openclaw-form">
-            {entry.fields.map((field) => {
-              const inputId = `openclaw-${entry.channel_id}-${field.name}`;
-              const already = setFields.has(field.name);
-              return (
-                <div key={field.name} className="openclaw-form-field">
-                  <label htmlFor={inputId}>
-                    <span className="openclaw-form-name">{field.name}</span>
-                    {field.secret ? (
-                      <span className="fleet-badge openclaw-chip openclaw-chip--secret" style={{ marginLeft: 0 }}>
-                        secret
-                      </span>
-                    ) : null}
-                    {already ? (
-                      <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
-                        set
-                      </span>
-                    ) : null}
-                  </label>
-                  <input
-                    id={inputId}
-                    className="fleet-wizard-input"
-                    /* A secret is a password input and is ALWAYS empty on open:
-                       there is no stored value to prefill — this computer
-                       redacts it before it ever leaves the machine. */
-                    type={field.secret ? "password" : "text"}
-                    autoComplete="off"
-                    spellCheck={false}
-                    value={values[field.name] ?? ""}
-                    placeholder={already ? "Set — type to replace" : ""}
-                    onChange={(event) =>
-                      setValues((current) => ({ ...current, [field.name]: event.target.value }))
-                    }
-                  />
-                </div>
-              );
-            })}
-          </div>
-
-          <p className="openclaw-form-note">
-            Leave a field blank to keep what is already on the computer. Values are sent straight to it
-            and are not stored here.
-          </p>
-
-          <div className="openclaw-dialog-actions">
-            <button type="button" className="fleet-btn" onClick={onClose} disabled={saving}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="fleet-btn fleet-btn--accent-fill"
-              onClick={() => void save()}
-              disabled={saving || filled === 0}
-            >
-              {saving ? <Loader2 size={14} className="openclaw-spin" /> : null}
-              {saving ? "Saving…" : "Save credential"}
-            </button>
-          </div>
-        </div>
+          );
+        })}
       </div>
-    </div>
+
+      <p className="openclaw-form-note">
+        Leave a field blank to keep what is already on the computer. Values are sent straight to it
+        and are not stored here.
+      </p>
+
+      <div className="openclaw-dialog-actions">
+        <button type="button" className="fleet-btn" onClick={onCancel} disabled={saving}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="fleet-btn fleet-btn--accent-fill"
+          onClick={() => void save()}
+          disabled={saving || filled === 0}
+        >
+          {saving ? <Loader2 size={14} className="openclaw-spin" /> : null}
+          {saving ? "Saving…" : "Save credential"}
+        </button>
+      </div>
+    </>
   );
 }
