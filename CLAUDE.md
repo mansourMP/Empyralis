@@ -1288,6 +1288,36 @@ genuinely cannot happen in a browser (a QR scan) the row says so instead of
 rendering a control that submits nothing. Never "Connected" — a connection is
 proven by a real message arriving, and the screen has seen none.
 
+**Those three states live in the panel a channel CARD opens, never on the card
+face. The channel surface is a square-card grid — settled, and violated twice
+already.** Every channel — first-party and transported alike — is one
+`.fleet-channel-card` in one `.fleet-channel-grid` (4 across, 2 at <=900px),
+and a card face is **icon + label + ONE pill, full stop**. Two failure modes
+sit on either side of that and both have shipped:
+
+```
+✗ 2026-08-08  two sections     grid of 7 cards, then a separate panel below
+                               "two components stacked is not one interface"
+✗ 2026-08-09  one flat LIST    merged correctly, then rendered as text rows
+                               carrying subtitle + 3 chips + a sentence + a
+                               button, ×26 — a wall of text, rejected outright
+✓ 2026-08-10  ONE card grid    face = icon + label + 1 pill
+                               everything else ─▶ the panel the card OPENS
+```
+
+Fixing the second by reverting to the first is not available; both
+instructions stand at once. `channelCardPill` (openclaw-channel-copy.ts, beside
+`remediationFor`) is what makes them compatible: it reduces a channel to the
+single most actionable word for the face off the SAME remediation the panel
+renders, so pill and panel cannot drift. Nothing is dropped — the three states,
+the remediation sentence and its button all live in the panel, which is the
+shared `.fleet-channel-banner` shell both kinds of card open, so a transported
+channel and a first-party one behave identically. The credential form is a
+FORM BODY (`CredentialForm`), not a dialog: the panel owns the shell, so a
+credential state renders inline rather than stacking a second modal on the
+first. When a shell is replaced, delete the CSS it needed — the row-density
+overrides left behind are how the next author rebuilds the list.
+
 **Every hardware path installs the transport itself, and the customer never
 types a command.** Landed 2026-08-09. Neither path did before:
 `scripts/install-agent-computer.sh` (which the DigitalOcean/Hetzner/Vultr
