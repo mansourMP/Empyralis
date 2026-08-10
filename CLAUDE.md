@@ -1318,6 +1318,39 @@ credential state renders inline rather than stacking a second modal on the
 first. When a shell is replaced, delete the CSS it needed — the row-density
 overrides left behind are how the next author rebuilds the list.
 
+**A brand mark is SOURCED or it is a monogram — it is never drawn.** Landed
+2026-08-10; 17 of the 19 transported channels now carry a real logo. The rule
+that produced them, in priority order: the brand's own press/brand/developer-
+download page > a CC0/MIT/PD file whose licence was actually READ > nothing.
+The provenance table (asset -> source URL -> licence basis) lives in the
+`RAW_CHANNEL_ICONS` comment in `fleet-icons.ts` and each SVG repeats its own
+line; a row without one does not ship. Cropping an official lockup down to its
+own icon element is allowed — recolouring, redrawing, tracing or "close
+enough" is not, and neither is a CSS `filter`/`invert` on someone's artwork.
+
+```
+NOT SHIPPED, AND WHY — three DIFFERENT failures, do not collapse them
+  irc            no mark EXISTS. A 1988 protocol, no owner, nothing to source.
+  yuanbao        mark exists, NO LICENCE. Tencent publishes no brand page for
+                 it and nothing free-licensed exists; the icon sets that carry
+                 it are redraws.
+  synology-chat  licence FINE (CC0), MARK WRONG. Synology publishes only a
+                 wordmark and forbids modifying it, so no symbol can be cropped
+                 out — at 32px it was illegible grey mush. A monogram beats a
+                 smear.
+```
+
+Two things a code reading gets wrong. **The existing first-party assets are
+simple-icons SVGs recoloured to the brand hex** — that is the house style, so a
+monochrome mark in a 24x24 viewBox is consistent, not lazy. And **`--bg-inset`
+is `#1d1d1d` on dark, so a solid-black mark scores ~1.2:1 and disappears**;
+Matrix and Tlon are fixed the way every brand guide says to fix it — put the
+black mark on a light chip (one path-keyed rule in `fleet-theme.css`), never by
+filtering the artwork. Any future near-black or near-white mark joins that rule.
+Assets are verified by loading them in a real browser in BOTH themes and
+asserting HTTP 200 per file — `tests/e2e/channels-card-grid-capture.spec.ts`
+already does both; an `<img>` tag in the DOM proves nothing.
+
 **Every hardware path installs the transport itself, and the customer never
 types a command.** Landed 2026-08-09. Neither path did before:
 `scripts/install-agent-computer.sh` (which the DigitalOcean/Hetzner/Vultr

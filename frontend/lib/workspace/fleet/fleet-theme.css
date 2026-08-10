@@ -3097,6 +3097,25 @@ a.fleet-breadcrumb:hover {
   object-fit: contain;
 }
 
+/* Two brand marks are published as solid black — Matrix and Tlon — and
+   --bg-inset on the dark canvas is #1d1d1d, so on that surface they render at
+   about 1.2:1 and simply vanish (verified in a real browser, both themes).
+   The remedy every brand guide gives for a black mark is the one taken here:
+   put it on a light neutral. NOT a filter/invert — recolouring someone's mark
+   is the thing this whole change is careful not to do; the artwork ships
+   byte-identical to what its owner publishes and only the surface under it
+   changes. Keyed on the asset path so it lives entirely in the icon layer:
+   adding a mark needs no component change, and a mark that stops being black
+   needs only its line deleted here. Any future near-black or near-white mark
+   joins this list rather than getting recoloured. */
+[data-theme="dark"] img[src*="/brand-assets/channels/matrix.svg"],
+[data-theme="dark"] img[src*="/brand-assets/channels/tlon.svg"] {
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 2px;
+  box-sizing: border-box;
+}
+
 .fleet-channel-card-label,
 .fleet-connector-card-label {
   font-size: 13px;

@@ -9,7 +9,7 @@
 // is forced to fetch the new URL fresh instead of reusing the poisoned entry.
 // This is why a channel logo could stay broken for a user across normal
 // refreshes even after the file went live — the fix is a new URL, not a reload.
-const ASSET_VERSION = "20260731";
+const ASSET_VERSION = "20260810";
 
 const withVersion = (map: Record<string, string>): Record<string, string> =>
   Object.fromEntries(
@@ -30,6 +30,98 @@ const RAW_CHANNEL_ICONS: Record<string, string> = {
   wechat_official: "/brand-assets/channels/wechat.svg",
   apple_messages_business: "/brand-assets/channels/imessage.svg",
   email: "/brand-assets/generic/email.svg",
+
+  // ── Transported (OpenClaw) channels ───────────────────────────────────────
+  // Keyed by `channel_key` verbatim (`openclaw_<their channel id>`), so the
+  // lookup is the same one-liner every other card uses and nothing here has to
+  // know what a channel IS. Adding an OpenClaw channel still needs no code
+  // change: an id with no entry falls through to the neutral monogram tile,
+  // which is the correct rendering for "we have no licensed mark for that one".
+  //
+  // Provenance, per mark. This table is the record that makes shipping these
+  // defensible; do not add a row without one. Priority order followed was the
+  // brand's own press/brand page > official developer documentation > a
+  // Wikimedia/CC0 file whose licence was actually read. Nothing here is drawn,
+  // traced, guessed or approximated, and no mark's geometry, proportions or
+  // colours were altered — the only edits made were cropping an official
+  // lockup down to its own icon element and dropping page-background cruft.
+  //
+  //   feishu      feishu.png   Wikimedia Commons File:Lark_Suite_logo_2022.png,
+  //                            {{PD-textlogo}} (below the threshold of
+  //                            originality) + {{Trademarked}}; nominative use.
+  //                            PNG because ByteDance publishes no vector and no
+  //                            brand page at all. Downscaled 792->128px only.
+  //   googlechat  googlechat.svg  simple-icons (CC0-1.0), vectorised from
+  //                            support.google.com/chat/answer/9455386.
+  //   line        line.svg     OFFICIAL: LY Corporation's own brand-icon vector
+  //                            at line.me/en/logo (LINE_Brand_icon_RGB.ai).
+  //                            Their guidelines demand the icon be used as-is,
+  //                            which is exactly why the official file is used
+  //                            here and not a monochrome redraw of it.
+  //   matrix      matrix.svg   simple-icons (CC0-1.0), source matrix.org.
+  //   mattermost  mattermost.svg simple-icons (CC0-1.0), source
+  //                            mattermost.org/brand-guidelines/.
+  //   msteams     msteams.svg  Wikimedia Commons File:Microsoft_Office_Teams_
+  //                            (2025-present).svg, {{PD-textlogo}} +
+  //                            {{Trademarked}}. Microsoft had simple-icons drop
+  //                            its marks, so no CC0 vectorisation exists; the
+  //                            Commons file's own licence is the basis and the
+  //                            use is nominative.
+  //   nextcloud-talk  nextcloud.svg  simple-icons (CC0-1.0), source
+  //                            nextcloud.com/press/. The Nextcloud platform
+  //                            mark — Talk's own app icon is AGPL-3.0 inside
+  //                            nextcloud/spreed, and a copyleft asset is not
+  //                            something to drag into a closed product.
+  //   nostr       nostr.svg    OFFICIAL: the Nostr logo pack,
+  //                            github.com/mbarulli/nostr-logo, CC0-1.0.
+  //   qqbot       qq.svg       simple-icons (CC0-1.0), guidelines
+  //                            qq.design/brand/BrandDesign/Logo.
+  //   tlon        tlon.svg     OFFICIAL: Tlon's own app icon in
+  //                            github.com/tloncorp/tlon-apps, MIT.
+  //   twitch      twitch.svg   simple-icons (CC0-1.0), source brand.twitch.tv.
+  //   wecom       wecom.svg    OFFICIAL: Tencent's developer design-resource
+  //                            download (developer.work.weixin.qq.com/document/
+  //                            path/90306 -> wwopen/downloadfile/logo.zip),
+  //                            published for third-party integrators. Cropped
+  //                            from the lockup to the icon element.
+  //   zalo/zalouser/zaloclawbot  zalo.svg  simple-icons (CC0-1.0), source
+  //                            zalo.me. All three are the same platform, the
+  //                            same way telegram_bot and telegram_personal
+  //                            already share one mark.
+  //   clickclack  clickclack.svg  OFFICIAL: the project's own icon in
+  //                            github.com/openclaw/clickclack, MIT.
+  //
+  // Deliberately ABSENT, and each stays a neutral monogram tile until this
+  // changes — a lookalike is worse than no mark:
+  //   irc      IRC is a 1988 protocol with no owner and no official mark.
+  //            There is nothing to source. Do not substitute a client's logo.
+  //   yuanbao  Tencent Yuanbao publishes no brand/press page and no free-
+  //            licensed file exists (nothing on Commons; the third-party icon
+  //            sets that carry it are redraws, which the founder ruled out).
+  //   synology-chat  Licence is fine (simple-icons, CC0) — the MARK is wrong
+  //            for this size. Synology publishes only a WORDMARK, confirmed on
+  //            their own branding page ("Standard / Gray / Black / Reversion",
+  //            no symbol), and their guidelines forbid modifying it, so a
+  //            symbol cannot be cropped out of it either. At 32px it rendered
+  //            as illegible grey mush in both themes; shipped as a monogram
+  //            instead, because a smear is worse than a letter. Revisit only
+  //            if Synology publishes an icon-only mark.
+  "openclaw_clickclack": "/brand-assets/channels/clickclack.svg",
+  "openclaw_feishu": "/brand-assets/channels/feishu.png",
+  "openclaw_googlechat": "/brand-assets/channels/googlechat.svg",
+  "openclaw_line": "/brand-assets/channels/line.svg",
+  "openclaw_matrix": "/brand-assets/channels/matrix.svg",
+  "openclaw_mattermost": "/brand-assets/channels/mattermost.svg",
+  "openclaw_msteams": "/brand-assets/channels/msteams.svg",
+  "openclaw_nextcloud-talk": "/brand-assets/channels/nextcloud.svg",
+  "openclaw_nostr": "/brand-assets/channels/nostr.svg",
+  "openclaw_openclaw-zaloclawbot": "/brand-assets/channels/zalo.svg",
+  "openclaw_qqbot": "/brand-assets/channels/qq.svg",
+  "openclaw_tlon": "/brand-assets/channels/tlon.svg",
+  "openclaw_twitch": "/brand-assets/channels/twitch.svg",
+  "openclaw_wecom": "/brand-assets/channels/wecom.svg",
+  "openclaw_zalo": "/brand-assets/channels/zalo.svg",
+  "openclaw_zalouser": "/brand-assets/channels/zalo.svg",
 };
 
 const RAW_CONNECTOR_ICONS: Record<string, string> = {
