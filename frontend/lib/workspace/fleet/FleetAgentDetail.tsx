@@ -2366,12 +2366,13 @@ export function ChannelsTab({
     ? openclaw.rows.map(({ entry, remediation }) => ({
         key: `openclaw:${entry.channel_key}`,
         label: entry.label,
-        // None of these 19 channels has a licensed brand asset fetched yet
-        // (only the 7 first-party platforms above do) — a neutral monogram
-        // tile (the same fallback every first-party card already uses when
-        // CHANNEL_ICONS has no entry) rather than a guessed or hand-drawn
-        // logo.
-        iconSrc: undefined,
+        // Same lookup a first-party card does, on the `channel_key` verbatim —
+        // no per-channel code here, and no list of which channels have a mark.
+        // 17 of the 19 do (see the provenance table in fleet-icons.ts); IRC and
+        // Yuanbao have no obtainable official mark and fall through to the
+        // neutral monogram tile, which is also what a channel OpenClaw adds
+        // tomorrow will get. Never a guessed or hand-drawn logo.
+        iconSrc: CHANNEL_ICONS[entry.channel_key],
         pill: channelCardPill(remediation),
         disabled: false,
         active: openclawDetailKey === entry.channel_key,
@@ -2509,7 +2510,11 @@ export function ChannelsTab({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="fleet-channel-banner-header">
-              <span className="fleet-channel-banner-icon">{openclawDetail.entry.label.charAt(0)}</span>
+              <span className="fleet-channel-banner-icon">
+                {CHANNEL_ICONS[openclawDetail.entry.channel_key]
+                  ? <img src={CHANNEL_ICONS[openclawDetail.entry.channel_key]} alt="" width={24} height={24} />
+                  : openclawDetail.entry.label.charAt(0)}
+              </span>
               <span className="fleet-channel-banner-title" id="channel-detail-heading">
                 {openclawDetail.entry.label}
               </span>
