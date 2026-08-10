@@ -163,6 +163,148 @@ for (const theme of ["light", "dark"] as const) {
   });
 }
 
+/** ONE PLATFORM = ONE CARD. The transport ships Zalo as three channels; the
+ *  grid must show one card that opens a three-door picker, exactly like
+ *  Telegram — not three cards beside a Telegram that is one. */
+test("a platform's variants are one card with doors, never several cards", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1700 });
+  await authenticateOwner(page);
+  await page.goto(`/w/${WORKSPACE_ID}/agents`, { waitUntil: "domcontentloaded" });
+  await setTheme(page, "light");
+  await stubObserved(page);
+  await openChannelsTab(page, "Gateway Agent");
+
+  const zaloCards = page.locator(".fleet-channel-card-label", { hasText: /^Zalo/ });
+  expect(await zaloCards.count()).toBe(1);
+  expect((await zaloCards.first().innerText()).trim()).toBe("Zalo");
+
+  await page.locator(".fleet-channel-card", { hasText: "Zalo" }).first().click();
+  await page.waitForTimeout(400);
+  await expect(page.locator(".fleet-channel-banner")).toBeVisible();
+  const doors = page.locator(".fleet-channel-banner .fleet-wizard-option");
+  expect(await doors.count()).toBe(3);
+  await page.screenshot({ path: `${OUT}-zalo-doors-light.png` });
+
+  // Picking a door shows that variant's own three states + its one control.
+  await doors.nth(1).click();
+  await page.waitForTimeout(300);
+  await expect(page.locator(".fleet-door-chosen--compact")).toBeVisible();
+  await page.screenshot({ path: `${OUT}-zalo-door-chosen-light.png` });
+});
+
+/** THE CHOSEN DOOR IS ONE LINE WHILE A FORM IS SHOWING. Telegram's picker,
+ *  Chatbot door: the bar above the token field must be a single row, not a
+ *  second card-sized block over the field being typed into. */
+test("the chosen-door bar collapses to one line once the form is up", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1700 });
+  await authenticateOwner(page);
+  await page.goto(`/w/${WORKSPACE_ID}/agents`, { waitUntil: "domcontentloaded" });
+  await setTheme(page, "light");
+  await openChannelsTab(page, "Gateway Agent");
+
+  await page.locator(".fleet-channel-card", { hasText: "Telegram" }).first().click();
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: `${OUT}-telegram-picker-light.png` });
+  await page.locator(".fleet-wizard-option", { hasText: "Chatbot" }).first().click();
+  await page.waitForTimeout(400);
+
+  const bar = page.locator(".fleet-door-chosen");
+  await expect(bar).toBeVisible();
+  await expect(page.locator(".fleet-door-chosen--compact")).toBeVisible();
+  const height = (await bar.boundingBox())!.height;
+  console.log("CHOSEN DOOR BAR HEIGHT", height);
+  expect(height).toBeLessThan(46);
+  // The risk is still on screen — collapsed, never dropped.
+  expect((await bar.innerText()).toLowerCase()).toContain("ban");
+  await page.screenshot({ path: `${OUT}-telegram-chosen-compact-light.png` });
+
+  // The founder's exact scenario: the full-account door, whose setup asks for
+  // a phone number. This is where two card-sized blocks used to sit above the
+  // field.
+  await page.locator(".fleet-door-chosen-change").first().click();
+  await page.waitForTimeout(300);
+  await page.locator(".fleet-wizard-option", { hasText: "Full account" }).first().click();
+  await page.waitForTimeout(600);
+  const fullBar = page.locator(".fleet-door-chosen--compact");
+  await expect(fullBar).toBeVisible();
+  console.log("FULL ACCOUNT BAR HEIGHT", (await fullBar.boundingBox())!.height);
+  await page.screenshot({ path: `${OUT}-telegram-fullaccount-compact-light.png` });
+  await setTheme(page, "dark");
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForTimeout(1200);
+  await page.locator(".fleet-channel-card", { hasText: "Telegram" }).first().click();
+  await page.waitForTimeout(400);
+  await page.locator(".fleet-wizard-option", { hasText: "Full account" }).first().click();
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: `${OUT}-telegram-fullaccount-compact-dark.png` });
+});
+
+/** THE CONTROL DOES THE WORK; IT DOES NOT EXPLAIN IT. A channel whose plugin
+ *  is not on the box shows its three states as chips and ONE button — never a
+ *  sentence telling the customer about a package on a disk. */
+test("a channel that needs setting up shows a control, not an instruction", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1700 });
+  await authenticateOwner(page);
+  await page.goto(`/w/${WORKSPACE_ID}/agents`, { waitUntil: "domcontentloaded" });
+  await setTheme(page, "light");
+  await stubObserved(page);
+  await openChannelsTab(page, "Gateway Agent");
+
+  // observedFor() puts every 4th channel in the not-installed state; find the
+  // card whose pill says so rather than naming a channel.
+  const setupCard = page.locator(".fleet-channel-card", { has: page.locator(".fleet-channel-card-pill", { hasText: "Set up" }) });
+  expect(await setupCard.count()).toBeGreaterThan(0);
+  await setupCard.first().click();
+  await page.waitForTimeout(500);
+  const panel = page.locator(".fleet-channel-banner");
+  await expect(panel).toBeVisible();
+  const text = (await panel.innerText()).toLowerCase();
+  expect(text).not.toContain("plugin");
+  // The three state CHIPS stay — "not installed" is one of the three honest
+  // facts, and collapsing them is the thing this panel exists to avoid. What
+  // is gone is the SENTENCE: the remediation paragraph is not rendered at all
+  // when the button already says everything.
+  await expect(panel.locator(".openclaw-channel-detail")).toHaveCount(0);
+  await expect(panel.locator(".fleet-btn--accent-fill")).toBeVisible();
+  expect((await panel.locator(".fleet-btn--accent-fill").innerText()).trim()).toBe("Set up");
+  await page.screenshot({ path: `${OUT}-setup-control-light.png` });
+  await setTheme(page, "dark");
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForTimeout(1500);
+  await setupCard.first().click();
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: `${OUT}-setup-control-dark.png` });
+});
+
+/** NO FETCH ON CLICK. Opening a first-party card must not start a request and
+ *  must not show a spinner: the tab already holds the gateway's channel state.
+ *  Measured against a gateway that is NOT reachable — the founder's own case,
+ *  and the one where the old per-mount fetch cost 2-3 seconds. */
+test("a first-party card opens instantly, with no fetch of its own", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1700 });
+  await authenticateOwner(page);
+  await page.goto(`/w/${WORKSPACE_ID}/agents`, { waitUntil: "domcontentloaded" });
+  await setTheme(page, "light");
+  await openChannelsTab(page, "Gateway Agent");
+  // Let the tab's own shared subscription settle first — that is the whole
+  // point: the state is loaded before anything is clicked.
+  await page.waitForTimeout(3000);
+
+  const surfaceCalls: string[] = [];
+  page.on("request", (req) => {
+    if (/\/personal-channels\/gateways\/[^/]+\/channels/.test(req.url())) surfaceCalls.push(req.url());
+  });
+
+  const startedAt = Date.now();
+  await page.locator(".fleet-channel-card", { hasText: "Signal" }).first().click();
+  await page.locator(".fleet-channel-banner .fleet-channel-expand-hint").first().waitFor({ state: "visible" });
+  const openMs = Date.now() - startedAt;
+  console.log("SIGNAL PANEL OPEN MS", openMs, "surface calls during open:", surfaceCalls.length);
+  expect(openMs).toBeLessThan(500);
+  expect(surfaceCalls.length).toBe(0);
+  await page.screenshot({ path: `${OUT}-signal-panel-light.png` });
+});
+
 test("unified channel card grid — gateway agent, real offline device state", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1700 });
   await authenticateOwner(page);
@@ -197,4 +339,10 @@ test("unified channel card grid — gateway agent, real offline device state", a
   await page.waitForTimeout(400);
   const panelText = (await page.locator(".fleet-channel-banner").innerText()).toLowerCase();
   expect(panelText).not.toContain("openclaw");
+  // NO MECHANISM IN THE COPY. The install state used to read "The channel's
+  // plugin is not on this computer yet." above a button labelled "Install
+  // plugin" — a fact about a package on a disk, handed to the customer as
+  // something to act on. Nothing on this screen names one.
+  expect(panelText).not.toContain("plugin");
+  expect(gridText).not.toContain("plugin");
 });

@@ -64,9 +64,12 @@ import {
   channelDoorHardwareNote,
   channelDoorHardwareState,
   channelDoorUnavailableReason,
+  groupTransportedChannels,
   isChannelDoorAvailable,
   planChannelDoors,
+  planDoors,
   type ChannelDoor,
+  type TransportedChannelInput,
 } from "./channel-doors";
 
 let passed = 0;
@@ -161,6 +164,41 @@ for (const connect_method of CONNECT_METHODS) {
                 !/connected/i.test(pill.label),
                 `channelCardPill(${caseLabel}).label must not claim "Connected", got ${JSON.stringify(pill.label)}`,
               );
+              // THE CUSTOMER IS NEVER SHOWN MECHANISM. Standing instruction,
+              // and the reason the install row was rewritten: it read "The
+              // channel's plugin is not on this computer yet." above a button
+              // labelled "Install plugin" — a fact about a package on a disk,
+              // handed to the person as a thing to act on. Asserted over every
+              // branch rather than as a pinned sentence, because the leak was
+              // inside a branch both times.
+              const mechanism = /\bplugin(s)?\b|\bnpm\b|\bpackage\b|\bbinary\b/i;
+              assert(
+                !mechanism.test(remediation.detail),
+                `remediationFor(${caseLabel}).detail must not name mechanism, got ${JSON.stringify(remediation.detail)}`,
+              );
+              if ("label" in remediation) {
+                assert(
+                  !mechanism.test(remediation.label),
+                  `remediationFor(${caseLabel}).label must not name mechanism, got ${JSON.stringify(remediation.label)}`,
+                );
+              }
+              assert(
+                !mechanism.test(pill.label),
+                `channelCardPill(${caseLabel}).label must not name mechanism, got ${JSON.stringify(pill.label)}`,
+              );
+              // A state whose whole remedy is one button carries no sentence at
+              // all — the chips already say what is true and the button says
+              // what happens next. This is the shape, asserted, not a comment.
+              if (remediation.kind === "install" || remediation.kind === "enable") {
+                assert(
+                  remediation.detail === "",
+                  `remediationFor(${caseLabel}) is a one-button state and must carry no explanatory sentence, got ${JSON.stringify(remediation.detail)}`,
+                );
+                assert(
+                  remediation.label.trim().length > 0,
+                  `remediationFor(${caseLabel}) must label its button — the control is the whole remedy`,
+                );
+              }
             }
           }
         }
@@ -190,8 +228,13 @@ assert(
 
 type ManifestChannel = {
   id: string;
+  channel_key: string;
   label: string;
-  credential_shape?: { selection_label?: string; docs_path?: string | null } | null;
+  credential_shape?: {
+    selection_label?: string;
+    docs_path?: string | null;
+    connect_method?: "credential" | "pairing" | "plugin_absent";
+  } | null;
 };
 type Manifest = { channels: ManifestChannel[] };
 
@@ -434,6 +477,134 @@ for (const channelId of doorChannelIds) {
     assert(
       door.consequence?.tone === "risk",
       `${channelId}'s ${door.key} door signs in as the owner and must carry a risk consequence`,
+    );
+  }
+}
+
+// --- ONE PLATFORM = ONE CARD (groupTransportedChannels). ----------------
+//
+// Driven off the CHECKED-IN MANIFEST, which is generated from the transport's
+// own registry — so the expected set (what upstream ships) and the actual set
+// (what the grouping produces) come from different places, and this can
+// actually fail. A hand-written list of "these ids are one platform" is
+// exactly the mistake this surface has already made and corrected twice.
+
+const transportInputs: TransportedChannelInput[] = manifest.channels.map((channel) => ({
+  channel_key: channel.channel_key,
+  channel_id: channel.id,
+  label: channel.label,
+  selection_label: channel.credential_shape?.selection_label || channel.label,
+  connect_method: channel.credential_shape?.connect_method || "credential",
+}));
+
+const platforms = groupTransportedChannels(transportInputs);
+assert(platforms.length > 0, "the transported channels group into at least one platform");
+
+// Every channel ends up in exactly one platform — nothing dropped, nothing
+// duplicated. A grouping that loses a channel loses a way to reach an agent.
+const groupedKeys = platforms.flatMap((platform) => platform.variants.map((v) => v.channel_key));
+assert(
+  groupedKeys.length === transportInputs.length && new Set(groupedKeys).size === transportInputs.length,
+  `every transported channel appears in exactly one platform (${transportInputs.length} in, ${groupedKeys.length} out, ${new Set(groupedKeys).size} distinct)`,
+);
+
+// The founder's own example: the transport ships Zalo as three channels
+// (bot API, personal account, QR bot). One platform, three doors — never
+// three cards beside a Telegram that is one card with two doors.
+const zaloIds = transportInputs
+  .filter((entry) => /^zalo/i.test(entry.label))
+  .map((entry) => entry.channel_id);
+assert(zaloIds.length >= 2, `the manifest still carries several Zalo variants (got ${JSON.stringify(zaloIds)})`);
+const zaloPlatforms = platforms.filter((platform) =>
+  platform.variants.some((variant) => zaloIds.includes(variant.channel_id)),
+);
+assert(zaloPlatforms.length === 1, `Zalo's variants collapse to ONE card, got ${zaloPlatforms.length}`);
+assert(
+  zaloPlatforms[0].variants.length === zaloIds.length,
+  `that one Zalo card carries every Zalo variant as a door (${zaloPlatforms[0].variants.length} of ${zaloIds.length})`,
+);
+assert(zaloPlatforms[0].label === "Zalo", `the card takes the PLATFORM's name, got ${JSON.stringify(zaloPlatforms[0].label)}`);
+assert(
+  planDoors(zaloPlatforms[0].doors).mode === "picker",
+  "a platform with several ways in asks first — the same door-COUNT rule the first-party cards use",
+);
+
+// WeCom (WeChat Work) and Weixin (consumer WeChat) are DIFFERENT PRODUCTS —
+// CLAUDE.md says so explicitly. The two axes must both keep them apart.
+const wecomPlatform = platforms.find((p) => p.variants.some((v) => v.channel_id === "wecom"));
+const weixinPlatform = platforms.find((p) => p.variants.some((v) => /weixin/i.test(v.channel_id)));
+if (wecomPlatform && weixinPlatform) {
+  assert(wecomPlatform !== weixinPlatform, "WeCom and Weixin are different products and must never share a card");
+}
+
+// A NEW upstream variant groups WITHOUT a code change. This is the whole
+// claim the derivation makes; a fixture that upstream has not shipped is the
+// only way to assert it, and it is a synthetic INPUT, never a synthetic
+// expectation.
+const futureVariant: TransportedChannelInput = {
+  channel_key: "openclaw_telegrambusiness",
+  channel_id: "telegrambusiness",
+  label: "Telegram Business",
+  selection_label: "Telegram (Business API)",
+  connect_method: "credential",
+};
+const telegramBase: TransportedChannelInput = {
+  channel_key: "openclaw_telegram",
+  channel_id: "telegram",
+  label: "Telegram",
+  selection_label: "Telegram (Bot API)",
+  connect_method: "credential",
+};
+const withFuture = groupTransportedChannels([...transportInputs, telegramBase, futureVariant]);
+const futureHome = withFuture.find((p) => p.variants.some((v) => v.channel_id === "telegrambusiness"));
+assert(!!futureHome, "a newly shipped variant lands somewhere");
+assert(
+  futureHome!.variants.some((v) => v.channel_id === "telegram"),
+  "a newly shipped variant joins its platform's existing card with no code change",
+);
+assert(futureHome!.label === "Telegram", "and the card keeps the platform's own name");
+
+// A variant that shares a label word but NOT an id family stays its own card —
+// the "Google Chat" / "Google Meet" shape, which is two products.
+const sameWordDifferentProduct = groupTransportedChannels([
+  { channel_key: "openclaw_googlechat", channel_id: "googlechat", label: "Google Chat", selection_label: "Google Chat", connect_method: "credential" },
+  { channel_key: "openclaw_googlemeet", channel_id: "googlemeet", label: "Google Meet", selection_label: "Google Meet", connect_method: "credential" },
+]);
+assert(
+  sameWordDifferentProduct.length === 2,
+  "sharing a label word is not enough to merge — the id family must agree too",
+);
+
+// Every derived door goes through the SAME rules the authored ones do.
+for (const platform of platforms) {
+  const plan = planDoors(platform.doors);
+  assert(
+    plan.mode === (platform.doors.length === 1 ? "direct" : "picker"),
+    `${platform.key} follows the door-count rule (${platform.doors.length} doors, got ${plan.mode})`,
+  );
+  assertNoOpenClaw(platform.label, `platform ${platform.key}.label`);
+  for (const door of platform.doors) {
+    assertNoOpenClaw(door.label, `platform ${platform.key} door ${door.key}.label`);
+    assertNoOpenClaw(door.body, `platform ${platform.key} door ${door.key}.body`);
+    assert(door.label.trim().length > 0, `platform ${platform.key} door ${door.key} has a name`);
+    assert(door.body.trim().length > 0, `platform ${platform.key} door ${door.key} says what it is`);
+    assert(door.real, `a derived door is a door the transport actually carries`);
+  }
+  // The picker rule, in the form a DERIVED door can honour. An authored door
+  // carries an explicit `consequence` because a human knows the specific risk
+  // ("Telegram can ban your number"); the manifest cannot tell a personal
+  // account login from a webhook — both arrive as `pairing` — so inventing one
+  // here would be the "never invent a consequence to make a door look
+  // symmetrical" this model already forbids. What the derivation CAN
+  // guarantee, and what the picker actually needs, is that the faces differ:
+  // each says which way in it is and where that setup happens.
+  if (plan.mode === "picker") {
+    const labels = new Set(platform.doors.map((d) => d.label));
+    const bodies = new Set(platform.doors.map((d) => d.body));
+    assert(labels.size === platform.doors.length, `${platform.key}'s doors have distinct names`);
+    assert(
+      bodies.size === platform.doors.length,
+      `${platform.key}'s doors state distinct faces — two doors reading the same way is not a choice`,
     );
   }
 }

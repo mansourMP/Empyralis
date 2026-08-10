@@ -1804,8 +1804,10 @@ import {
   channelDoorHardwareNote,
   channelDoorHardwareState,
   channelDoorUnavailableReason,
+  groupTransportedChannels,
   isChannelDoorAvailable,
   planChannelDoors,
+  planDoors,
   type ChannelDoor,
 } from "./channel-doors";
 import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
@@ -1813,6 +1815,7 @@ import {
   isPersonalChannelStatusActive,
   useGatewayPersonalChannelSurfaces,
   usePersonalChannelStatus,
+  type GatewayPersonalChannelSurfaceItem,
   type PersonalChannelKey,
 } from "./personal-channel-pairing";
 
@@ -1848,9 +1851,29 @@ const LOCAL_BRIDGE_NO_GATEWAY_HINT: Record<string, string> = {
   signal_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a signal-cli bridge.",
 };
 
-function LocalBridgeChannelStatus({ channelKey, gatewayId }: { channelKey: string; gatewayId: string | null }) {
-  const { items, loading } = useGatewayPersonalChannelSurfaces(gatewayId);
-
+//
+// TAKES THE SURFACES AS PROPS. IT DOES NOT FETCH.
+// ----------------------------------------------
+// This used to call useGatewayPersonalChannelSurfaces itself, which meant a
+// fresh request with `loading: true` on every MOUNT — i.e. every time the
+// customer clicked the Signal card. Against an unreachable box that is a 2-3
+// second spinner between the click and anything appearing, while a transported
+// card opened instantly on state the tab already had. ChannelsTab now holds
+// the one subscription for the whole tab and hands the result down, so a card
+// opens with what is already known and the shared poll refreshes underneath.
+// The honest "state unknown" rendering is untouched: an unreachable box still
+// produces no item, and that still reads as not connected with the reason.
+function LocalBridgeChannelStatus({
+  channelKey,
+  gatewayId,
+  items,
+  loading,
+}: {
+  channelKey: string;
+  gatewayId: string | null;
+  items: GatewayPersonalChannelSurfaceItem[];
+  loading: boolean;
+}) {
   if (!gatewayId) {
     return (
       <p className="fleet-channel-expand-hint">
@@ -1876,6 +1899,58 @@ function LocalBridgeChannelStatus({ channelKey, gatewayId }: { channelKey: strin
       <p className="fleet-channel-expand-hint">{item?.next_step || "Configure the bridge on this agent's gateway, then this status updates on its own."}</p>
       <p className="fleet-channel-expand-hint" style={{ color: "var(--text-tertiary)" }}>{item?.status_label || "Not connected yet"}</p>
     </>
+  );
+}
+
+/** The door that was chosen, kept on screen while its setup runs.
+ *
+ *  COMPACT ONCE A FORM IS SHOWING
+ *  ------------------------------
+ *  Before the pick, a door is a card: label, what it is, what it costs. AFTER
+ *  the pick that block kept its full height and sat above the form, so the
+ *  customer typing a phone number had two card-sized blocks of already-read
+ *  text above the field — the founder's words: "two very very big node, it's
+ *  just there regardless while I'm just typing my phone number."
+ *
+ *      picking            ─▶  filling in the form
+ *      ┌───────────────┐      ─ Full account · ⚠ Telegram can ban…  [Change] ─
+ *      │ Full account  │      ┌─────────────────────────────────────────────┐
+ *      │ signs in as…  │      │ Phone number                                │
+ *      │ ⚠ can ban…    │      └─────────────────────────────────────────────┘
+ *      └───────────────┘
+ *
+ *  The consequence has already done its job at the moment of choosing, so it
+ *  stops being a block and becomes part of the one line — still there, still
+ *  readable, no longer dominant. It is never dropped: the risk must stay
+ *  discoverable for as long as the door is open. */
+function ChosenDoorBar({
+  door,
+  compact,
+  onChange,
+}: {
+  door: ChannelDoor;
+  compact: boolean;
+  onChange: (() => void) | null;
+}) {
+  return (
+    <div className={`fleet-door-chosen${compact ? " fleet-door-chosen--compact" : ""}`}>
+      <div className="fleet-door-chosen-text">
+        <span className="fleet-door-chosen-label">{door.label}</span>
+        {door.consequence ? (
+          <span className={`fleet-door-consequence fleet-door-consequence--${door.consequence.tone}`}>
+            {door.consequence.tone === "risk"
+              ? <AlertTriangle size={11} strokeWidth={2} aria-hidden />
+              : <Check size={11} strokeWidth={2} aria-hidden />}
+            {door.consequence.text}
+          </span>
+        ) : null}
+      </div>
+      {onChange ? (
+        <button type="button" className="fleet-btn fleet-door-chosen-change" onClick={onChange}>
+          <ArrowLeft size={13} strokeWidth={2} aria-hidden /> Change
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -1925,10 +2000,21 @@ export function ChannelsTab({
   // transport is structurally box-only, so a cloud-only agent has nothing here
   // to show, not a spinner that never resolves.
   const openclaw = useOpenClawChannelSetup(agentGatewayId, agentId);
-  // Which transported card's panel is open, held as its channel_key (not the
-  // entry object) so an open panel re-reads the LIVE row after a provision or
-  // a credential save instead of showing a snapshot from click time.
+  // ONE subscription to the local-bridge surfaces for the whole tab, started
+  // when the tab opens rather than when a card is clicked. Every card that
+  // needs it reads from here (LocalBridgeChannelStatus takes it as props;
+  // IMessageSetupPanel's own call now hits the same shared store), so opening
+  // a first-party channel costs no request and shows no spinner — the fix for
+  // "clicking Signal takes 2-3 seconds while a transported card is instant".
+  const localBridge = useGatewayPersonalChannelSurfaces(agentGatewayId);
+  // Which transported PLATFORM's panel is open, held as its base channel_key
+  // (not the entry object) so an open panel re-reads the LIVE row after a
+  // provision or a credential save instead of showing a snapshot from click
+  // time.
   const [openclawDetailKey, setOpenclawDetailKey] = useState<string | null>(null);
+  // Which VARIANT of that platform is being set up — the transported half of
+  // the same door pick the first-party panel makes with `selectedDoor`.
+  const [openclawDoorKey, setOpenclawDoorKey] = useState<string | null>(null);
 
   // Which door is picked inside the open banner. Only channels with more than
   // one door need an explicit pick — a single-door channel auto-selects its
@@ -2362,35 +2448,72 @@ export function ChannelsTab({
     };
   });
 
+  // ONE PLATFORM = ONE CARD, on both halves of the grid. The transport models
+  // every variant of a platform as its own channel (Zalo ships as `zalo`,
+  // `zalouser` and `zaloclawbot`), which put THREE Zalo cards in the same grid
+  // where Telegram — the same concept, one platform reachable several ways —
+  // is one card with two doors. Grouped structurally in channel-doors.ts, not
+  // by a list of ids typed out here; see its comment for the two independent
+  // axes and why WeCom and Weixin can never merge.
+  const transportedPlatforms = groupTransportedChannels(
+    openclaw.rows.map((row) => row.entry),
+  );
+  const openclawRowByKey = new Map(openclaw.rows.map((row) => [row.entry.channel_key, row]));
+
   const openclawCards: UnifiedChannelCard[] = agentGatewayId
-    ? openclaw.rows.map(({ entry, remediation }) => ({
-        key: `openclaw:${entry.channel_key}`,
-        label: entry.label,
-        // Same lookup a first-party card does, on the `channel_key` verbatim —
-        // no per-channel code here, and no list of which channels have a mark.
-        // 17 of the 19 do (see the provenance table in fleet-icons.ts); IRC and
-        // Yuanbao have no obtainable official mark and fall through to the
-        // neutral monogram tile, which is also what a channel OpenClaw adds
-        // tomorrow will get. Never a guessed or hand-drawn logo.
-        iconSrc: CHANNEL_ICONS[entry.channel_key],
-        pill: channelCardPill(remediation),
-        disabled: false,
-        active: openclawDetailKey === entry.channel_key,
-        open: () => setOpenclawDetailKey(entry.channel_key),
-      }))
+    ? transportedPlatforms.map((platform) => {
+        const rows = platform.variants
+          .map((variant) => openclawRowByKey.get(variant.channel_key))
+          .filter((row): row is NonNullable<typeof row> => Boolean(row));
+        // A card face carries ONE pill for the whole platform. A platform is
+        // ready if any way into it is; otherwise the base variant's own state
+        // is what the customer is being asked to act on, which is the same
+        // "single most actionable state" channelCardPill already picks.
+        const pillRow = rows.find((row) => row.remediation.kind === "ready") ?? rows[0];
+        return {
+          key: `openclaw:${platform.key}`,
+          label: platform.label,
+          // Same lookup a first-party card does, on the `channel_key` verbatim —
+          // no per-channel code here, and no list of which channels have a mark.
+          // 17 of the 19 do (see the provenance table in fleet-icons.ts); IRC and
+          // Yuanbao have no obtainable official mark and fall through to the
+          // neutral monogram tile, which is also what a channel the transport
+          // adds tomorrow will get. Never a guessed or hand-drawn logo.
+          iconSrc: CHANNEL_ICONS[platform.iconKey],
+          pill: pillRow
+            ? channelCardPill(pillRow.remediation)
+            : { label: "Unknown", tone: "locked" as const },
+          disabled: false,
+          active: openclawDetailKey === platform.key,
+          open: () => {
+            setOpenclawDetailKey(platform.key);
+            setOpenclawDoorKey(null);
+          },
+        };
+      })
     : [];
 
   const unifiedChannelCards = [...legacyCards, ...openclawCards].sort((a, b) =>
     a.label.localeCompare(b.label),
   );
 
-  // The transported channel whose panel is open, re-resolved from the live row
+  // The transported PLATFORM whose panel is open, re-resolved from the live row
   // set on every render rather than captured at click time — provisioning and
   // a credential save both refresh those rows underneath an open panel, and a
   // captured copy would keep showing the state that made the owner click.
-  const openclawDetail = openclawDetailKey
-    ? openclaw.rows.find((row) => row.entry.channel_key === openclawDetailKey) || null
+  const openclawPlatform = openclawDetailKey
+    ? transportedPlatforms.find((platform) => platform.key === openclawDetailKey) || null
     : null;
+  // The SAME door-count rule the first-party panel uses, run on the derived
+  // doors: one way in opens straight into it, two or more ask first.
+  const openclawDoorPlan = planDoors(openclawPlatform?.doors ?? []);
+  const openclawActiveDoor =
+    openclawDoorPlan.mode === "direct"
+      ? openclawDoorPlan.door
+      : openclawDoorPlan.mode === "picker"
+        ? openclawDoorPlan.doors.find((door) => door.key === openclawDoorKey) || null
+        : null;
+  const openclawDetail = openclawActiveDoor ? openclawRowByKey.get(openclawActiveDoor.key) || null : null;
 
   // OpenClaw's own catalog carries every channel that overlaps a first-party
   // platform too (channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS)
@@ -2491,7 +2614,7 @@ export function ChannelsTab({
           differently-shaped modal. This is where the three states live — all
           three, never collapsed — beside the one sentence that says what to do
           and the one control that does it. */}
-      {openclawDetail && agentGatewayId ? (
+      {openclawPlatform && agentGatewayId ? (
         <div
           className="fleet-detail-backdrop"
           onClick={() => setOpenclawDetailKey(null)}
@@ -2511,12 +2634,12 @@ export function ChannelsTab({
           >
             <div className="fleet-channel-banner-header">
               <span className="fleet-channel-banner-icon">
-                {CHANNEL_ICONS[openclawDetail.entry.channel_key]
-                  ? <img src={CHANNEL_ICONS[openclawDetail.entry.channel_key]} alt="" width={24} height={24} />
-                  : openclawDetail.entry.label.charAt(0)}
+                {CHANNEL_ICONS[openclawPlatform.iconKey]
+                  ? <img src={CHANNEL_ICONS[openclawPlatform.iconKey]} alt="" width={24} height={24} />
+                  : openclawPlatform.label.charAt(0)}
               </span>
               <span className="fleet-channel-banner-title" id="channel-detail-heading">
-                {openclawDetail.entry.label}
+                {openclawPlatform.label}
               </span>
               <button
                 type="button"
@@ -2529,62 +2652,136 @@ export function ChannelsTab({
             </div>
 
             <div className="fleet-channel-banner-body">
-              <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-                {openclawDetail.entry.selection_label}
-              </p>
-
-              <div className="openclaw-chips">
-                {openclawDetail.entry.requires_plugin ? (
-                  <StateChip ok={Boolean(openclawDetail.observed?.installed)} on="installed" off="not installed" />
-                ) : (
-                  <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
-                    bundled
-                  </span>
-                )}
-                {openclawDetail.entry.connect_method === "credential" ? (
-                  <StateChip ok={Boolean(openclawDetail.observed?.configured)} on="credential set" off="no credential" />
-                ) : null}
-                <StateChip ok={Boolean(openclawDetail.observed?.enabled)} on="on" off="off" />
-              </div>
-
-              <p className="openclaw-channel-detail">{openclawDetail.remediation.detail}</p>
-
-              {/* One control, and only the one this state actually needs. A
-                  credential state renders the generated form inline (never a
-                  second stacked modal); install/enable render the button that
-                  drives the device; the two states with no browser action say
-                  so instead of rendering a control that submits nothing. */}
-              {openclawDetail.remediation.kind === "credential" || openclawDetail.remediation.kind === "ready" ? (
-                <div style={{ marginTop: "var(--space-4)" }}>
-                  <CredentialForm
-                    gatewayId={agentGatewayId}
-                    entry={openclawDetail.entry}
-                    observed={openclawDetail.observed}
-                    onCancel={() => setOpenclawDetailKey(null)}
-                    onSaved={async () => {
-                      await openclaw.refresh({ silent: true });
-                    }}
-                  />
+              {/* The SAME picker a first-party card opens, on the SAME rule:
+                   a platform reachable one way opens straight into it, a
+                   platform reachable several ways asks first. Nothing here
+                   names a channel — the door count is the whole input. */}
+              {openclawDoorPlan.mode === "picker" && !openclawActiveDoor ? (
+                <div className="fleet-wizard-options">
+                  {openclawDoorPlan.doors.map((door) => {
+                    const row = openclawRowByKey.get(door.key);
+                    const connected = row?.remediation.kind === "ready";
+                    const hardware = channelDoorHardwareState(door, {
+                      hasHardware: !!agentGatewayId,
+                      doorConnected: connected,
+                    });
+                    const hardwareNote = channelDoorHardwareNote(hardware);
+                    return (
+                      <button
+                        key={door.key}
+                        type="button"
+                        className="fleet-wizard-option"
+                        onClick={() => setOpenclawDoorKey(door.key)}
+                      >
+                        <span className="fleet-wizard-option-label">
+                          {door.label}
+                          {connected ? (
+                            <span className="fleet-wizard-option-connected">
+                              <span className="fleet-channel-card-dot" /> Ready
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="fleet-wizard-option-body">{door.body}</span>
+                        {hardwareNote ? (
+                          <span className="fleet-wizard-option-note">
+                            <Cpu size={11} strokeWidth={2} aria-hidden /> {hardwareNote}
+                          </span>
+                        ) : null}
+                      </button>
+                    );
+                  })}
                 </div>
-              ) : openclawDetail.remediation.kind === "install" || openclawDetail.remediation.kind === "enable" ? (
-                <div style={{ marginTop: "var(--space-4)" }}>
-                  <button
-                    type="button"
-                    className="fleet-btn fleet-btn--accent-fill"
-                    onClick={() => void openclaw.provision([openclawDetail.entry.channel_key])}
-                    disabled={openclaw.busy !== null}
-                  >
-                    {openclaw.busy === openclawDetail.entry.channel_key ? (
-                      <Loader2 size={14} className="openclaw-spin" />
+              ) : null}
+
+              {openclawActiveDoor && openclawDoorPlan.mode === "picker" ? (
+                <ChosenDoorBar
+                  door={openclawActiveDoor}
+                  compact
+                  onChange={() => setOpenclawDoorKey(null)}
+                />
+              ) : null}
+
+              {openclawDetail ? (
+                <>
+                  {openclawDoorPlan.mode === "direct" ? (
+                    <p className="fleet-subtitle" style={{ marginTop: 0 }}>
+                      {openclawDetail.entry.selection_label}
+                    </p>
+                  ) : null}
+
+                  <div className="openclaw-chips">
+                    {openclawDetail.entry.requires_plugin ? (
+                      <StateChip ok={Boolean(openclawDetail.observed?.installed)} on="installed" off="not installed" />
+                    ) : (
+                      <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
+                        bundled
+                      </span>
+                    )}
+                    {openclawDetail.entry.connect_method === "credential" ? (
+                      <StateChip ok={Boolean(openclawDetail.observed?.configured)} on="credential set" off="no credential" />
                     ) : null}
-                    {openclawDetail.remediation.label}
-                  </button>
-                </div>
-              ) : openclawDetail.remediation.kind === "elsewhere" ? (
-                <p className="openclaw-ready openclaw-ready--muted" style={{ marginTop: "var(--space-4)" }}>
-                  <Smartphone size={14} aria-hidden /> Link this one directly on the computer — there is nothing to
-                  paste here.
-                </p>
+                    <StateChip ok={Boolean(openclawDetail.observed?.enabled)} on="on" off="off" />
+                  </div>
+
+                  {/* Only when there is something to say the chips and the
+                      button cannot already say — see Remediation's own doc
+                      comment. An empty detail renders nothing at all rather
+                      than an empty paragraph holding space open. */}
+                  {openclawDetail.remediation.detail ? (
+                    <p className="openclaw-channel-detail">{openclawDetail.remediation.detail}</p>
+                  ) : null}
+
+                  {/* One control, and only the one this state actually needs. A
+                      credential state renders the generated form inline (never a
+                      second stacked modal); install/enable render a control that
+                      DOES the work and verify-polls the box until its own state
+                      catches up, then disappears; the two states with no browser
+                      action say so instead of rendering a control that submits
+                      nothing. */}
+                  {openclawDetail.remediation.kind === "credential" || openclawDetail.remediation.kind === "ready" ? (
+                    <div style={{ marginTop: "var(--space-4)" }}>
+                      <CredentialForm
+                        gatewayId={agentGatewayId}
+                        entry={openclawDetail.entry}
+                        observed={openclawDetail.observed}
+                        onCancel={() => setOpenclawDetailKey(null)}
+                        onSaved={async () => {
+                          await openclaw.refresh({ silent: true });
+                        }}
+                      />
+                    </div>
+                  ) : openclawDetail.remediation.kind === "install" || openclawDetail.remediation.kind === "enable" ? (
+                    <div style={{ marginTop: "var(--space-4)" }}>
+                      {(() => {
+                        const channelKey = openclawDetail.entry.channel_key;
+                        const setupState = openclaw.setupStateFor(channelKey);
+                        // "Queued" is not busy — nothing is running on the box
+                        // for this one yet, it is only waiting its turn.
+                        const working = setupState === "working";
+                        return (
+                          <button
+                            type="button"
+                            className="fleet-btn fleet-btn--accent-fill"
+                            onClick={() => openclaw.requestSetup(channelKey)}
+                            disabled={setupState !== "idle"}
+                          >
+                            {working ? <Loader2 size={14} className="openclaw-spin" /> : null}
+                            {setupState === "queued"
+                              ? "Queued"
+                              : working
+                                ? "Setting up…"
+                                : openclawDetail.remediation.label}
+                          </button>
+                        );
+                      })()}
+                    </div>
+                  ) : openclawDetail.remediation.kind === "elsewhere" ? (
+                    <p className="openclaw-ready openclaw-ready--muted" style={{ marginTop: "var(--space-4)" }}>
+                      <Smartphone size={14} aria-hidden /> Link this one directly on the computer — there is nothing to
+                      paste here.
+                    </p>
+                  ) : null}
+                </>
               ) : null}
             </div>
           </div>
@@ -2688,29 +2885,17 @@ export function ChannelsTab({
               {/* The door that was chosen, kept on screen while its setup
                    runs — the consequence line especially, which is the whole
                    reason the picker exists and would otherwise vanish the
-                   moment it mattered most. "Change" is hidden while a pairing
-                   is mid-flight: going back would unmount
-                   PersonalChannelConnectPanel and silently discard a
+                   moment it mattered most. Collapsed to ONE line the moment a
+                   setup form is on screen (see ChosenDoorBar). "Change" is
+                   hidden while a pairing is mid-flight: going back would
+                   unmount PersonalChannelConnectPanel and silently discard a
                    half-entered code. */}
               {activeDoor && doorPlan.mode === "picker" && activeDoorAvailable ? (
-                <div className="fleet-door-chosen">
-                  <div className="fleet-door-chosen-text">
-                    <span className="fleet-door-chosen-label">{activeDoor.label}</span>
-                    {activeDoor.consequence ? (
-                      <span className={`fleet-door-consequence fleet-door-consequence--${activeDoor.consequence.tone}`}>
-                        {activeDoor.consequence.tone === "risk"
-                          ? <AlertTriangle size={11} strokeWidth={2} aria-hidden />
-                          : <Check size={11} strokeWidth={2} aria-hidden />}
-                        {activeDoor.consequence.text}
-                      </span>
-                    ) : null}
-                  </div>
-                  {canChangeDoor ? (
-                    <button type="button" className="fleet-btn fleet-door-chosen-change" onClick={() => setSelectedDoor(null)}>
-                      <ArrowLeft size={13} strokeWidth={2} aria-hidden /> Change
-                    </button>
-                  ) : null}
-                </div>
+                <ChosenDoorBar
+                  door={activeDoor}
+                  compact={setupDoorKey !== null}
+                  onChange={canChangeDoor ? () => setSelectedDoor(null) : null}
+                />
               ) : null}
 
               {/* A one-door channel has no face to carry its consequence, so
@@ -2902,7 +3087,12 @@ export function ChannelsTab({
                    not a fake "connect" button. */}
               {activePlatform.id === "signal_personal" && setupDoorKey === "full_account" && (
                 <div style={{ marginTop: 12 }}>
-                  <LocalBridgeChannelStatus channelKey="signal_personal" gatewayId={agentGatewayId} />
+                  <LocalBridgeChannelStatus
+                    channelKey="signal_personal"
+                    gatewayId={agentGatewayId}
+                    items={localBridge.items}
+                    loading={localBridge.loading}
+                  />
                 </div>
               )}
 

@@ -69,7 +69,7 @@
  * the customer's machine, so the browser only ever learns `set: true`.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -129,19 +129,27 @@ export function StateChip({ ok, on, off }: { ok: boolean; on: string; off: strin
  *  computer) is a valid, common state — OpenClaw is structurally box-only, so
  *  this resolves immediately with an empty row set and no fetch, rather than
  *  spinning forever on a request that can never succeed. */
+const SETUP_VERIFY_POLL_MS = 3_000;
+const SETUP_VERIFY_TIMEOUT_MS = 120_000;
+
 export function useOpenClawChannelSetup(gatewayId: string | null, agentId: string) {
   const [data, setData] = useState<SetupResponse | null>(null);
   const [loading, setLoading] = useState(Boolean(gatewayId));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  /** `[active, ...waiting]`. See `requestSetup` — installs are serialized for
+   *  the same reason `useInstallQueue` serializes CLI installs on the Hardware
+   *  page: several fired at once are several installer processes on ONE box. */
+  const [setupQueue, setSetupQueue] = useState<string[]>([]);
+  const runningRef = useRef<string | null>(null);
 
   const load = useCallback(
-    async (opts?: { silent?: boolean }) => {
+    async (opts?: { silent?: boolean }): Promise<SetupResponse | null> => {
       if (!gatewayId) {
         setData(null);
         setError(null);
         setLoading(false);
-        return;
+        return null;
       }
       if (!opts?.silent) setLoading(true);
       try {
@@ -151,12 +159,15 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
         );
         if (!res.ok) {
           setError(`Could not load channels (${res.status}).`);
-          return;
+          return null;
         }
         setError(null);
-        setData((await res.json()) as SetupResponse);
+        const body = (await res.json()) as SetupResponse;
+        setData(body);
+        return body;
       } catch {
         setError("Could not load channels.");
+        return null;
       } finally {
         setLoading(false);
       }
@@ -202,6 +213,58 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
     [agentId, gatewayId, load],
   );
 
+  /** Ask for ONE channel to be set up. The caller never runs the work itself:
+   *  it joins the queue, and the effect below starts it the instant it is this
+   *  channel's turn. Two rows clicked in quick succession therefore run one
+   *  after the other rather than launching two package installs onto the same
+   *  machine at once — the defect `useInstallQueue` exists for on the Hardware
+   *  page, in a surface that can trigger the same thing. */
+  const requestSetup = useCallback((channelKey: string) => {
+    setSetupQueue((queue) => (queue.includes(channelKey) ? queue : [...queue, channelKey]));
+  }, []);
+
+  const activeSetup = setupQueue[0] ?? null;
+
+  useEffect(() => {
+    if (!activeSetup || !gatewayId) return;
+    if (runningRef.current === activeSetup) return;
+    runningRef.current = activeSetup;
+    let cancelled = false;
+    void (async () => {
+      try {
+        await provision([activeSetup]);
+        // VERIFY, don't declare. The provisioning call returning is not the
+        // same fact as the box reporting the channel installed, so this keeps
+        // reading the device's own state until it catches up (or gives up
+        // loudly) — the pattern CliSetupControl uses for exactly this reason.
+        const startedAt = Date.now();
+        while (!cancelled && Date.now() - startedAt < SETUP_VERIFY_TIMEOUT_MS) {
+          const body = await load({ silent: true });
+          const observedRow = (body?.observed?.channels ?? []).find(
+            (row) => row.channel_key === activeSetup,
+          );
+          if (observedRow?.installed) break;
+          await new Promise((resolve) => setTimeout(resolve, SETUP_VERIFY_POLL_MS));
+        }
+      } finally {
+        runningRef.current = null;
+        setSetupQueue((queue) => queue.filter((key) => key !== activeSetup));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSetup, gatewayId, provision, load]);
+
+  /** What this one channel's setup control should show right now. `working`
+   *  means something is genuinely running on the box for it; `queued` means
+   *  nothing is, it is only waiting its turn. */
+  const setupStateFor = useCallback(
+    (channelKey: string): "idle" | "queued" | "working" =>
+      activeSetup === channelKey ? "working" : setupQueue.includes(channelKey) ? "queued" : "idle",
+    [activeSetup, setupQueue],
+  );
+
   const catalog = data?.channels ?? [];
   const alreadyAvailable = data?.already_available_channels ?? [];
   const observedList = data?.observed?.channels ?? [];
@@ -234,6 +297,8 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
     repairable,
     refresh: load,
     provision,
+    requestSetup,
+    setupStateFor,
     observedById,
   };
 }

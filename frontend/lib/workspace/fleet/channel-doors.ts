@@ -164,12 +164,21 @@ export type ChannelDoorPlan =
   | { mode: "direct"; door: ChannelDoor; doors: ChannelDoor[] }
   | { mode: "picker"; doors: ChannelDoor[] };
 
-/** The whole behavioural rule, in one place, driven by the count. */
-export function planChannelDoors(channelId: string | null | undefined): ChannelDoorPlan {
-  const doors = (channelId ? CHANNEL_DOORS[channelId] || [] : []).filter((door) => door.real);
+/** The whole behavioural rule, in one place, driven by the count.
+ *
+ *  Takes the doors themselves rather than a channel id, so a channel whose
+ *  doors are DERIVED (the transported platforms below) goes through the exact
+ *  same rule as one whose doors are authored — one rule, not two that agree
+ *  today. */
+export function planDoors(candidates: ChannelDoor[]): ChannelDoorPlan {
+  const doors = candidates.filter((door) => door.real);
   if (doors.length === 0) return { mode: "none", doors };
   if (doors.length === 1) return { mode: "direct", door: doors[0], doors };
   return { mode: "picker", doors };
+}
+
+export function planChannelDoors(channelId: string | null | undefined): ChannelDoorPlan {
+  return planDoors(channelId ? CHANNEL_DOORS[channelId] || [] : []);
 }
 
 /** Whether this agent can walk through this door RIGHT NOW.
@@ -217,4 +226,171 @@ export function channelDoorUnavailableReason(door: ChannelDoor): string {
   return door.requiresHardware
     ? "This one runs on the agent's own computer, and this agent doesn't have one yet. Connect a computer on the Hardware tab, then come back."
     : "This one can't be set up from here yet.";
+}
+
+// ── ONE PLATFORM = ONE CARD. VARIANTS ARE ALWAYS DOORS. ─────────────────────
+//
+// Telegram has been one card with two doors since the picker landed. The
+// transported channels arrived modelled the opposite way, because the
+// transport models every variant of a platform as its own channel:
+//
+//     BEFORE                                AFTER
+//       ▢ Zalo            (Bot API)           ▢ Zalo ──opens──▶ ┌ Bot API ┐
+//       ▢ Zalo Personal   (QR on the box)                       │ Personal│
+//       ▢ Zalo ClawBot    (QR)                                  └ ClawBot ┘
+//       three cards, one platform             one card, three doors,
+//       — the same concept rendered           the same door-COUNT rule
+//       two opposite ways in one grid         Telegram already uses
+//
+// A hand-written list of "these ids are really one platform" is the exact
+// mistake this codebase has already made and corrected twice on this surface
+// (the five-channel tuple, the parallel label map). So the grouping is
+// DERIVED, from two INDEPENDENT axes that must BOTH agree:
+//
+//   1. ID FAMILY     one channel's id is a proper prefix of the other's
+//                    (a variant id extends its platform's id: zalo ⊂ zalouser,
+//                    zalo ⊂ zaloclawbot). Comes from the transport's registry.
+//   2. LABEL FAMILY  both labels open with the same word ("Zalo", "Zalo
+//                    Personal", "Zalo ClawBot"). Comes from their catalog /
+//                    package display names — a different upstream field.
+//
+// Requiring both is what makes the dangerous direction safe. WeCom (WeChat
+// Work) and Weixin (consumer WeChat) are DIFFERENT PRODUCTS — CLAUDE.md says
+// so explicitly — and they fail BOTH axes ("wecom" is no prefix of "weixin";
+// the leading label words differ). A future "Google Chat"/"Google Meet" pair
+// shares a label word and no id prefix, so it stays two cards. The failure
+// mode of a miss is a variant that keeps its own card, i.e. exactly today's
+// behaviour; the failure mode of a false merge would be two products sharing
+// one card, and that needs two independent upstream fields to conspire.
+
+/** The structural shape this derivation needs from a transported channel —
+ *  a subset of OpenClawChannelCatalogEntry, declared locally so this module
+ *  stays free of the copy module (and of anything that imports React). */
+export type TransportedChannelInput = {
+  channel_key: string;
+  channel_id: string;
+  label: string;
+  selection_label: string;
+  connect_method: "credential" | "pairing" | "plugin_absent";
+};
+
+export type TransportedChannelPlatform = {
+  /** The base variant's channel_key. Identity of the CARD. */
+  key: string;
+  /** The platform's own name — the base variant's label ("Zalo"), never a
+   *  variant's ("Zalo Personal"). */
+  label: string;
+  /** The same key a first-party card looks its icon up by. All variants of a
+   *  platform share one mark, so the base's is the platform's. */
+  iconKey: string;
+  variants: TransportedChannelInput[];
+  /** One door per variant, in the same order. `door.key` is the variant's
+   *  channel_key, so the panel resolves a pick straight back to a live row. */
+  doors: ChannelDoor[];
+};
+
+/** The transport namespaces some of its own channel ids with its own name
+ *  (`openclaw-zaloclawbot`). That prefix is not part of the platform, and it
+ *  is recoverable structurally: `channel_key` is the prefix plus the id, so
+ *  the prefix names the transport without this module naming it. */
+function platformToken(entry: TransportedChannelInput): string {
+  const key = String(entry.channel_key || "").toLowerCase();
+  const id = String(entry.channel_id || "").toLowerCase();
+  const vendor = key.endsWith(id) ? key.slice(0, key.length - id.length).replace(/[^a-z0-9]+$/, "") : "";
+  const stripped = vendor && id.startsWith(`${vendor}-`) ? id.slice(vendor.length + 1) : id;
+  return stripped.replace(/[^a-z0-9]/g, "");
+}
+
+/** The first word of the display label, normalised. "Zalo Personal" -> "zalo",
+ *  "WeCom（企业微信）" -> "wecom（企业微信）"'s leading run -> "wecom". */
+function labelToken(entry: TransportedChannelInput): string {
+  return String(entry.label || "")
+    .trim()
+    .split(/[\s/]+/)[0]
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function sameChannelPlatform(a: TransportedChannelInput, b: TransportedChannelInput): boolean {
+  const [ta, tb] = [platformToken(a), platformToken(b)];
+  if (!ta || !tb || ta === tb) return false;
+  const idFamily = tb.startsWith(ta) || ta.startsWith(tb);
+  if (!idFamily) return false;
+  const [la, lb] = [labelToken(a), labelToken(b)];
+  return Boolean(la) && la === lb;
+}
+
+/** The variant's own name for its door face. Their label minus the platform's
+ *  ("Zalo Personal" -> "Personal"), falling back to the parenthetical in their
+ *  selection label ("Zalo (Bot API)" -> "Bot API") for the base variant, whose
+ *  label IS the platform name and therefore leaves nothing behind. Their words
+ *  throughout — the same rule the panel already follows by rendering
+ *  `selection_label` verbatim. */
+export function transportedDoorLabel(entry: TransportedChannelInput, platformLabel: string): string {
+  const label = String(entry.label || "").trim();
+  const remainder =
+    label.toLowerCase().startsWith(platformLabel.toLowerCase()) && label.length > platformLabel.length
+      ? label.slice(platformLabel.length).trim()
+      : label === platformLabel
+        ? ""
+        : label;
+  if (remainder) return remainder;
+  const parenthetical = /\(([^)]+)\)/.exec(String(entry.selection_label || ""));
+  return parenthetical ? parenthetical[1].trim() : label;
+}
+
+/** What a door IS, in one line — and, since these doors are derived, the place
+ *  the difference between them is stated before the pick. Their own selection
+ *  label plus the one fact that actually differs between two ways into the
+ *  same platform: whether it is set up from here, or linked physically on the
+ *  agent's computer.
+ *
+ *  Deliberately NOT a `consequence`: that field carries a real, specific risk
+ *  ("Telegram can ban your number"), and the manifest cannot tell a personal
+ *  account login apart from a webhook — both arrive as `pairing`. Inventing a
+ *  risk to make derived doors look like authored ones would be exactly the
+ *  "never invent one to make a door look symmetrical" this file already
+ *  forbids. */
+export function transportedDoorBody(entry: TransportedChannelInput): string {
+  const what = String(entry.selection_label || entry.label || "").trim();
+  return entry.connect_method === "pairing"
+    ? `${what}. Linked on this agent's computer — there is nothing to paste here.`
+    : `${what}. Set up from here.`;
+}
+
+/** Group the transported channels a gateway carries into platforms, each with
+ *  one door per variant. Order is preserved: platforms in the order their base
+ *  variant first appears, variants in catalog order. */
+export function groupTransportedChannels(entries: TransportedChannelInput[]): TransportedChannelPlatform[] {
+  const groups: TransportedChannelInput[][] = [];
+  for (const entry of entries) {
+    const group = groups.find((members) => members.some((member) => sameChannelPlatform(member, entry)));
+    if (group) group.push(entry);
+    else groups.push([entry]);
+  }
+
+  return groups.map((members) => {
+    // The base is the shortest id in the family — the platform every variant
+    // extends. Ties cannot happen: a proper prefix is strictly shorter.
+    const base = members.reduce((shortest, member) =>
+      platformToken(member).length < platformToken(shortest).length ? member : shortest,
+    );
+    const ordered = [base, ...members.filter((member) => member !== base)];
+    const platformLabel = String(base.label || "").trim();
+    return {
+      key: base.channel_key,
+      label: platformLabel,
+      iconKey: base.channel_key,
+      variants: ordered,
+      doors: ordered.map((variant) => ({
+        key: variant.channel_key,
+        label: transportedDoorLabel(variant, platformLabel),
+        body: transportedDoorBody(variant),
+        real: true,
+        // A pairing variant is linked ON the box by hand; a credential one is
+        // pasted from here. Same question, same answer, on both paths.
+        requiresHardware: variant.connect_method === "pairing",
+      })),
+    };
+  });
 }

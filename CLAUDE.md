@@ -1398,6 +1398,81 @@ Assets are verified by loading them in a real browser in BOTH themes and
 asserting HTTP 200 per file — `tests/e2e/channels-card-grid-capture.spec.ts`
 already does both; an `<img>` tag in the DOM proves nothing.
 
+**ONE PLATFORM = ONE CARD. A VARIANT IS ALWAYS A DOOR.** Landed 2026-08-10.
+The surface grew in two eras and they disagreed on this: Telegram was one card
+with two doors, while the transport's own model — every variant of a platform
+is its own channel — put THREE Zalo cards in the same grid. Same concept,
+opposite rendering, side by side.
+
+```
+BEFORE                          AFTER
+  ▢ Zalo          (Bot API)       ▢ Zalo ──opens──▶ ┌ Bot API  ┐
+  ▢ Zalo ClawBot  (QR)                              │ ClawBot  │  planDoors()
+  ▢ Zalo Personal (on the box)                      └ Personal ┘  → picker
+  26 cards                        24 cards, ONE door-count rule for both eras
+```
+
+The grouping is DERIVED (`channel-doors.ts`'s `groupTransportedChannels`),
+never a list of "these ids are really one platform" — that list is the mistake
+this surface has already made and corrected twice. Two INDEPENDENT axes must
+BOTH agree: **the id family** (one channel id is a proper prefix of the other:
+`zalo` ⊂ `zalouser`, `zalo` ⊂ `zaloclawbot` — from their registry) and **the
+label family** (both display labels open with the same word — from their
+catalog/package names). Requiring both is what keeps the dangerous direction
+safe: **WeCom (WeChat Work) and Weixin (consumer WeChat) are different
+products** and fail both axes; a future "Google Chat"/"Google Meet" pair shares
+a label word and has no id prefix, so it stays two cards. A missed merge
+degrades to today's behaviour (its own card); a false merge would need two
+upstream fields to conspire. The transport namespaces some of its own ids
+(`openclaw-zaloclawbot`); that prefix is recovered structurally from
+`channel_key` minus `channel_id`, so no module names the transport to strip it.
+
+`planDoors(doors)` is the count rule lifted off the authored table, so derived
+and authored doors go through ONE rule rather than two that agree today.
+Derived doors carry a `body` (their own selection label plus where the setup
+happens) and NO `consequence`: the manifest cannot tell a personal-account
+login from a webhook — both arrive as `pairing` — and inventing a risk to make
+derived doors look symmetrical is exactly what that field's own comment
+forbids. The copy test asserts the weaker honest rule for them (faces must
+differ) and the strict consequence rule for the authored table.
+
+**A card opens with what is already known. It does not fetch on click.**
+`useGatewayPersonalChannelSurfaces` fetched per MOUNT with `loading: true`, so
+clicking Signal started a request and showed a spinner while a transported card
+opened instantly on state the tab already had. The state is a property of the
+GATEWAY, so it now lives in one module-level store keyed by gateway id: a later
+mount reads the snapshot synchronously, one poll serves every reader, and
+ChannelsTab holds the subscription for the whole tab (LocalBridgeChannelStatus
+takes it as props and cannot fetch at all). Measured on one backend, same seed,
+surfaces endpoint delayed 2500ms to model an unreachable box: **2864ms and 2
+fetches -> 114ms and 0**. `loading` stays honest — true only while nothing at
+all is known about that gateway yet.
+
+**The chosen door collapses to ONE LINE once its form is showing.** Before the
+pick a door is a card, because the choice deserves the room. After it, the same
+words are a caption over a field the customer is typing into — the founder's
+words: *"two very very big node, it's just there regardless while I'm just
+typing my phone number."* `.fleet-door-chosen--compact` (61px -> 44px) keeps
+the consequence ON that line, smaller and unboxed: a warning that vanishes the
+moment it becomes actionable is worse than no warning. Both eras share one
+`ChosenDoorBar`.
+
+**A setup control DOES the work; it does not explain it.** The install state
+read *"The channel's plugin is not on this computer yet."* above a button
+labelled *"Install plugin"* — a fact about a package on a disk, handed to the
+customer as something to act on, against the standing instruction that they are
+never told to install things or shown mechanism. Now: the three state chips
+(unchanged — "not installed" is one of the three honest facts) plus ONE button
+reading **"Set up"**, no sentence at all, verify-polling the box's own state
+until it catches up and then disappearing, with installs serialized through a
+queue so two clicks are never two package installs on one machine. Straight
+from `CliSetupControl` on the Hardware page, the pattern the founder already
+approved. `Remediation.detail` is now allowed to be empty and usually is; the
+copy test asserts install/enable carry NO sentence, and that no remediation,
+label or pill anywhere names mechanism (`plugin`/`npm`/`package`/`binary`) — a
+mechanical guard, because both leaks lived inside a branch rather than in a
+heading someone re-reads.
+
 **Every hardware path installs the transport itself, and the customer never
 types a command.** Landed 2026-08-09. Neither path did before:
 `scripts/install-agent-computer.sh` (which the DigitalOcean/Hetzner/Vultr
