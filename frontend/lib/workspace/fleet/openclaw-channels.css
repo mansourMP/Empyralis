@@ -64,12 +64,53 @@
 
 /* .openclaw-channel-list/.openclaw-channel-row are applied ALONGSIDE
    .fleet-list/.fleet-list-row (see OpenClawChannelsPanel.tsx) — they carry no
-   shape, border, background or padding of their own any more; that all comes
-   from the shared primitive now. What's left here is layout that is genuinely
-   specific to this row's content (wrapping many chips + an action cluster on
-   narrow viewports). */
+   shape, border, background or radius of their own; that all still comes
+   from the shared primitive. What's left here is layout genuinely specific
+   to this row's content (wrapping many chips + an action cluster on narrow
+   viewports) PLUS density spacing (below) — .fleet-list-row's own padding
+   and .fleet-list-row-main's own stacking gap were sized for the terse
+   one/two-line rows Members, Hardware and Connections actually carry. A
+   channel row here can run title + selection label + a 3-chip cluster + a
+   full detail sentence + an action — 4-5 lines — and at that density the
+   shared 12px row padding and 2px inter-line gap read as one merged block
+   across 16-26 rows, with no sense of where one channel ends and the next
+   begins. CLAUDE.md: "dense inside a group, airy between groups" — this was
+   violated in both directions: the row's own sections ran together AND
+   different channels ran together. Fixed by widening the ROW's own padding
+   and the divider between DIFFERENT channels, and by using margin-top on
+   this row's own sub-blocks (chips/detail below) instead of a uniform gap,
+   so the title+selection-label pair stays tight while the chip cluster and
+   the detail sentence each get a real break before them — never by
+   reverting to a per-row card/border/radius, which is exactly what the
+   flat-list pattern above replaced to match the rest of the product.
+   Scoped via a compound selector (`.fleet-list-row.openclaw-channel-row`),
+   the same convention task-detail.css documents for overriding a
+   fleet-theme.css rule: it beats fleet-theme.css's single-class rule on
+   specificity outright, so it holds regardless of which stylesheet the
+   bundler happens to load first. Agents and Hardware rows never carry
+   `.openclaw-channel-row` and are byte-for-byte unaffected. */
 .openclaw-channel-row {
   justify-content: space-between;
+}
+
+.fleet-list-row.openclaw-channel-row {
+  padding-top: var(--space-4);
+  padding-bottom: var(--space-4);
+  /* A touch more presence than the shared 8%-alpha hairline gives at this
+     density, short of a full per-row card. Light theme already renders
+     .fleet-list-row's divider at --border-strong list-wide (see
+     fleet-theme.css's light-mode override just below .fleet-list-row); this
+     brings dark mode's channel rows up to that same divider weight so
+     "airy between groups" holds in both themes, not just light. */
+  border-bottom-color: var(--border-strong);
+}
+
+/* Tight within the title block (title + selection label sit right under
+   each other) — the airy break before the next section comes from
+   margin-top on .openclaw-chips / .openclaw-channel-detail below, not from
+   widening this gap uniformly. */
+.openclaw-channel-row .fleet-list-row-main {
+  gap: 3px;
 }
 
 .openclaw-channel-selection {
@@ -81,7 +122,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
-  margin-top: var(--space-1);
+  margin-top: var(--space-2);
 }
 
 /* Chip TONE only. Shape, size, border and padding all come from the shared
@@ -108,6 +149,7 @@
   color: var(--text-secondary);
   line-height: 1.5;
   max-width: 62ch;
+  margin-top: var(--space-2);
 }
 
 .openclaw-channel-actions {
