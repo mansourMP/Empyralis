@@ -39,6 +39,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  channelCardPill,
   formatChannelList,
   remediationFor,
   type OpenClawChannelCatalogEntry,
@@ -116,6 +117,27 @@ for (const connect_method of CONNECT_METHODS) {
               if ("label" in remediation) {
                 assertNoOpenClaw(remediation.label, `remediationFor(${caseLabel}).label`);
               }
+              // The one word that reaches a CARD FACE in the unified grid.
+              // Same treatment as the remediation copy above and for the same
+              // reason: it is produced inside a branch, not typed into a
+              // heading a human re-reads on every edit.
+              const pill = channelCardPill(remediation);
+              assertNoOpenClaw(pill.label, `channelCardPill(${caseLabel}).label`);
+              assert(
+                pill.label.trim().length > 0,
+                `channelCardPill(${caseLabel}) must produce a non-empty label — a card face with a blank pill says nothing`,
+              );
+              assert(
+                ["connected", "gateway", "locked", "setup"].includes(pill.tone),
+                `channelCardPill(${caseLabel}).tone must be one of the first-party pill tones, got ${JSON.stringify(pill.tone)}`,
+              );
+              // "Connected" is a claim this screen has no evidence for — a
+              // connection is proven by a real message arriving, and nothing
+              // here has seen one. The transported cards say "Ready".
+              assert(
+                !/connected/i.test(pill.label),
+                `channelCardPill(${caseLabel}).label must not claim "Connected", got ${JSON.stringify(pill.label)}`,
+              );
             }
           }
         }
@@ -183,12 +205,28 @@ assertNoOpenClaw("Messaging channels connected through this computer.", "the fix
 
 assertNoOpenClaw("Where people can message this agent", "unified Channels tab subtitle (both states, pinned literal)");
 assertNoOpenClaw(
-  "This agent's computer could not be reached, so some rows below show an unknown state. Their setup fields are still accurate.",
+  "This agent's computer could not be reached, so some channels below show an unknown state. Their setup fields are still accurate.",
   "unified Channels tab observed-error banner (gateway state, pinned literal)",
 );
 assertNoOpenClaw("Reading this agent's computer…", "unified Channels tab loading line (gateway state, pinned literal)");
 assertNoOpenClaw("connect elsewhere in Empyralis and", "unified Channels tab superseded-channel note (pinned literal fragment)");
 assertNoOpenClaw("isn't shown here", "unified Channels tab superseded-channel note (pinned literal fragment)");
+
+// The panel a transported card OPENS (2026-08-10: the grid restored, so
+// everything past the pill moved in here). Same pin technique — literal
+// copy-paste from FleetAgentDetail.tsx / OpenClawChannelsPanel.tsx.
+assertNoOpenClaw(
+  "Link this one directly on the computer — there is nothing to paste here.",
+  "channel detail panel, pairing-only state (pinned literal)",
+);
+assertNoOpenClaw(
+  "These are the fields this channel needs to connect.",
+  "channel detail panel, generated credential form intro (pinned literal)",
+);
+assertNoOpenClaw(
+  "Leave a field blank to keep what is already on the computer. Values are sent straight to it and are not stored here.",
+  "channel detail panel, credential form note (pinned literal)",
+);
 
 // The first-party platform labels (CHANNEL_GRID_PLATFORMS) now render inside
 // the SAME row list as the OpenClaw catalog rows — pin them too, since a

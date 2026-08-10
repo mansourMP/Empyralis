@@ -58,6 +58,43 @@ export type Remediation =
   | { kind: "unknown"; detail: string }
   | { kind: "ready"; detail: string };
 
+/** The ONE status word a channel CARD FACE shows.
+ *
+ *  A card face holds an icon, a label and exactly one pill — that is the whole
+ *  card. The three independent facts (plugin installed / credential set /
+ *  switched on) are NOT collapsed away: they are shown, all three, in the panel
+ *  the card opens, beside the remediation sentence and the button that fixes
+ *  it. What is collapsed is only what fits on a 4-across tile, and it collapses
+ *  to the single most actionable state — the same thing `remediationFor`
+ *  already picks, so the pill and the panel can never disagree.
+ *
+ *  Tones are the first-party pill vocabulary verbatim
+ *  (.fleet-channel-card-pill--connected/--gateway/--locked/--setup), so a
+ *  transported channel and a first-party one read as one grid rather than two
+ *  colour systems side by side. "Ready", never "Connected": a connection is
+ *  proven by a real message arriving and nothing on this screen has seen one. */
+export type ChannelCardPill = {
+  label: string;
+  tone: "connected" | "gateway" | "locked" | "setup";
+};
+
+export function channelCardPill(remediation: Remediation): ChannelCardPill {
+  switch (remediation.kind) {
+    case "ready":
+      return { label: "Ready", tone: "connected" };
+    case "install":
+      return { label: "Not installed", tone: "setup" };
+    case "credential":
+      return { label: "Needs credential", tone: "setup" };
+    case "enable":
+      return { label: "Switched off", tone: "setup" };
+    case "elsewhere":
+      return { label: "Link on the device", tone: "locked" };
+    default:
+      return { label: "Unknown", tone: "locked" };
+  }
+}
+
 export function remediationFor(
   entry: OpenClawChannelCatalogEntry,
   observed: OpenClawObservedChannel | undefined,
