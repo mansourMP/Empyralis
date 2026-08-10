@@ -295,49 +295,118 @@ export interface GatewayPersonalChannelSurfaceItem {
 // itself (env vars), and this is the one honest signal a UI can show: is the
 // bridge actually reachable, per the SAME merged surfaces endpoint the
 // Gateway's own health snapshot feeds. No client-invented "connected" state.
-export function useGatewayPersonalChannelSurfaces(gatewayId: string | null) {
-  const [items, setItems] = useState<GatewayPersonalChannelSurfaceItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+//
+// ONE FETCH PER GATEWAY, SHARED — NOT ONE PER MOUNT
+// -------------------------------------------------
+// Until 2026-08-10 every mount of this hook started its OWN fetch with
+// `loading: true` and its OWN 10s interval. Two things followed, both
+// founder-reported:
+//
+//     click a first-party channel card
+//       └─ LocalBridgeChannelStatus mounts
+//            └─ fetch #1  ── setLoading(true) ── spinner ── 2-3s on an
+//                            unreachable box, EVERY time the card is opened
+//
+// while a transported card opened instantly, because its data was already
+// loaded by the tab. The state is a property of the GATEWAY, not of whoever
+// happens to be rendering, so it lives in one store keyed by gateway id: a
+// later mount reads what is already known SYNCHRONOUSLY (no spinner, no
+// second request) while the shared poll keeps it fresh underneath.
+//
+// `loading` stays honest — it is true only while nothing at all is known
+// about that gateway yet, which is exactly when there is genuinely nothing
+// to show. A failed refresh keeps the last-known list rather than flashing
+// empty, unchanged from before.
+type SurfacesSnapshot = { items: GatewayPersonalChannelSurfaceItem[]; loading: boolean };
 
-  const refresh = useCallback(async () => {
-    if (!gatewayId) {
-      setItems([]);
-      setLoading(false);
-      return;
-    }
+type SurfacesEntry = {
+  snapshot: SurfacesSnapshot;
+  listeners: Set<(snapshot: SurfacesSnapshot) => void>;
+  timer: ReturnType<typeof setInterval> | null;
+  inflight: Promise<void> | null;
+};
+
+const EMPTY_SURFACES: SurfacesSnapshot = { items: [], loading: false };
+const surfacesStore = new Map<string, SurfacesEntry>();
+
+function surfacesEntry(gatewayId: string): SurfacesEntry {
+  let entry = surfacesStore.get(gatewayId);
+  if (!entry) {
+    entry = { snapshot: { items: [], loading: true }, listeners: new Set(), timer: null, inflight: null };
+    surfacesStore.set(gatewayId, entry);
+  }
+  return entry;
+}
+
+function publishSurfaces(entry: SurfacesEntry, snapshot: SurfacesSnapshot): void {
+  entry.snapshot = snapshot;
+  for (const listener of entry.listeners) listener(snapshot);
+}
+
+/** Single-flight: a second caller during an in-flight read rides on the same
+ *  request rather than adding another. */
+function refreshSurfaces(gatewayId: string): Promise<void> {
+  const entry = surfacesEntry(gatewayId);
+  if (entry.inflight) return entry.inflight;
+  const run = (async () => {
     try {
       const res = await fetch(`/api/personal-channels/gateways/${encodeURIComponent(gatewayId)}/channels`, {
         credentials: "include",
       });
       const data = await parseJsonResponse(res);
-      setItems(Array.isArray(data?.items) ? data.items : []);
+      publishSurfaces(entry, {
+        items: Array.isArray(data?.items) ? data.items : [],
+        loading: false,
+      });
     } catch {
-      // Transient — keep the last-known list rather than flashing empty.
+      // Transient — keep the last-known list rather than flashing empty, and
+      // stop claiming to be loading: an unreachable box is a known state, not
+      // an indefinite wait.
+      publishSurfaces(entry, { items: entry.snapshot.items, loading: false });
     } finally {
-      setLoading(false);
+      entry.inflight = null;
     }
-  }, [gatewayId]);
+  })();
+  entry.inflight = run;
+  return run;
+}
+
+function readSurfaces(gatewayId: string | null): SurfacesSnapshot {
+  if (!gatewayId) return EMPTY_SURFACES;
+  return surfacesStore.get(gatewayId)?.snapshot ?? { items: [], loading: true };
+}
+
+export function useGatewayPersonalChannelSurfaces(gatewayId: string | null) {
+  // Seeded from the store SYNCHRONOUSLY, so a component that mounts after the
+  // gateway is already known renders its real state on the first paint.
+  const [snapshot, setSnapshot] = useState<SurfacesSnapshot>(() => readSurfaces(gatewayId));
 
   useEffect(() => {
-    setLoading(true);
-    void refresh();
-  }, [refresh]);
-
-  useEffect(() => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    if (gatewayId) {
-      pollRef.current = setInterval(refresh, 10_000);
+    setSnapshot(readSurfaces(gatewayId));
+    if (!gatewayId) return;
+    const entry = surfacesEntry(gatewayId);
+    entry.listeners.add(setSnapshot);
+    void refreshSurfaces(gatewayId);
+    if (!entry.timer) {
+      entry.timer = setInterval(() => void refreshSurfaces(gatewayId), 10_000);
     }
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      entry.listeners.delete(setSnapshot);
+      // The poll belongs to the gateway, not to any one subscriber — it stops
+      // only when the last reader goes away.
+      if (entry.listeners.size === 0 && entry.timer) {
+        clearInterval(entry.timer);
+        entry.timer = null;
+      }
     };
-  }, [gatewayId, refresh]);
+  }, [gatewayId]);
 
-  return { items, loading, refresh };
+  const refresh = useCallback(async () => {
+    if (!gatewayId) return;
+    await refreshSurfaces(gatewayId);
+  }, [gatewayId]);
+
+  return { items: snapshot.items, loading: snapshot.loading, refresh };
 }
 
 // iMessage-only live actions — see server_modules/routes_personal_channels.py

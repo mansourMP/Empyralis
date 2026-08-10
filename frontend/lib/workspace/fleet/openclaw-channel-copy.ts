@@ -49,7 +49,22 @@ export function formatChannelList(labels: string[]): string {
 }
 
 /** The one thing this row needs the reader to do next, and why.
- *  Exactly one per row — a row with two calls to action has no call to action. */
+ *  Exactly one per row — a row with two calls to action has no call to action.
+ *
+ *  `detail` IS ALLOWED TO BE EMPTY, AND USUALLY SHOULD BE
+ *  ------------------------------------------------------
+ *  A state whose whole remedy is one button does not also need a sentence
+ *  explaining the state to the customer. The panel already shows the three
+ *  facts as chips; a sentence under them either repeats a chip or explains
+ *  mechanism the customer never asked to know. The founder's standing
+ *  instruction is that the customer is never told to install things — so the
+ *  control does the work and says nothing. `detail` survives only where it
+ *  carries something the chips and the button genuinely cannot: WHICH fields
+ *  are still missing, and the two states with no browser action at all.
+ *
+ *  Modelled on CliSetupControl (hardware/[gatewayId]/page.tsx), which replaced
+ *  this build's SSH copy-paste guidance with a button that just runs the
+ *  install and verify-polls until the box's own state catches up. */
 export type Remediation =
   | { kind: "install"; label: string; detail: string }
   | { kind: "credential"; label: string; detail: string }
@@ -83,7 +98,10 @@ export function channelCardPill(remediation: Remediation): ChannelCardPill {
     case "ready":
       return { label: "Ready", tone: "connected" };
     case "install":
-      return { label: "Not installed", tone: "setup" };
+      // "Set up", not "Not installed": the first-party cards in the same grid
+      // already say "Set up" for the same situation, and a plugin on a box is
+      // mechanism the customer never asked about. Same word, same grid.
+      return { label: "Set up", tone: "setup" };
     case "credential":
       return { label: "Needs credential", tone: "setup" };
     case "enable":
@@ -109,16 +127,20 @@ export function remediationFor(
   if (entry.requires_plugin && !observed.installed) {
     return {
       kind: "install",
-      // Deliberately not "not connected": the plugin is the thing that is
-      // missing, and installing it is a button, not a support ticket.
-      label: "Install plugin",
-      detail: "The channel's plugin is not on this computer yet.",
+      // The control DOES the work; it does not describe it. "Install plugin"
+      // above a sentence reading "The channel's plugin is not on this computer
+      // yet." told the customer about a mechanism they never asked for and
+      // then asked them to act on it. One button, in their terms.
+      label: "Set up",
+      detail: "",
     };
   }
   if (entry.connect_method === "plugin_absent") {
     return {
       kind: "unknown",
-      detail: "This channel's connection fields aren't known until its plugin is installed on this computer.",
+      // No mechanism: what the customer needs is that there is nothing for
+      // them to fill in here yet, not which package is or isn't on a disk.
+      detail: "Setup fields aren't known for this one yet.",
     };
   }
   if (entry.connect_method === "pairing") {
@@ -141,13 +163,17 @@ export function remediationFor(
     return {
       kind: "enable",
       label: "Turn on",
-      detail: "Credential is in place, but the channel is switched off on this computer.",
+      // The chips above already say "credential set" and "off". A sentence
+      // repeating them is not information, it is furniture.
+      detail: "",
     };
   }
   return {
     kind: "ready",
     // "Ready", never "Connected". A connection is proven by a real message
-    // arriving, and nothing on this screen has seen one.
-    detail: "Plugin installed, credential in place, channel on.",
+    // arriving, and nothing on this screen has seen one. The three chips above
+    // already carry the three facts, so this says the one thing they do not:
+    // what the customer is still waiting for.
+    detail: "Set up and switched on. A message arriving is what proves it.",
   };
 }
