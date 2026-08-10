@@ -1318,6 +1318,53 @@ credential state renders inline rather than stacking a second modal on the
 first. When a shell is replaced, delete the CSS it needed — the row-density
 overrides left behind are how the next author rebuilds the list.
 
+**Inside that panel, whether the customer is asked to CHOOSE is decided by the
+door COUNT, never by naming a channel.** Landed 2026-08-10
+(`frontend/lib/workspace/fleet/channel-doors.ts`). A "door" is one way to
+connect one channel; `planChannelDoors` is the whole rule:
+
+```
+real doors == 1  ─▶ "direct"  the card opens STRAIGHT into that setup.
+                              An intermediate screen offering one option
+                              is a dead click.
+real doors >= 2  ─▶ "picker"  the choice is shown FIRST, because the doors
+                              differ in CONSEQUENCE, not in procedure.
+```
+
+Hardcoding "Telegram gets a picker" rots on contact — Telegram gains a third
+door and WhatsApp a second as transported paths land — so the count is the only
+input, and adding a row to the table is the whole change. A door with
+`real: false` is not rendered and does not count: a door that cannot be walked
+through is not a way to connect.
+
+**A door's CONSEQUENCE is stated on its face, before it is chosen, or the
+picker has not earned its place.** Telegram's two doors are two RISK profiles,
+not two procedures — the chatbot is a separate identity, the full account signs
+in as the owner and puts the owner's own number in reach of a ban, which has
+already happened to a real person here. So: *"Telegram can ban your number for
+automated use."* on the door, never in a warning after a code has been sent.
+One line, in the tone the fact deserves (`--warning-text` / `--online-text`,
+both themes) — a professional tool labels, it does not lecture, and the natural
+drift on a risk warning is always toward more of it. A one-door channel has no
+face, so its risk line rides above the form it opened straight into; that is
+the only reason WhatsApp's ban risk is stated at all.
+
+**Hardware is answered the same way on both paths**, so it is never discovered
+at a different moment depending on which one the customer took, and a door that
+cannot be completed is **not a control at all** — an inert card on a picker, and
+on a one-door channel a panel that says so and renders NO setup form.
+WhatsApp/Signal/iMessage on a cloud-only agent were doing the opposite: the
+single door auto-selected and mounted a setup panel that could only fail.
+`setupDoorKey` is the ONE gate all eight setup forms hang off — the same two
+conditions repeated at eight call sites is exactly the shape the next branch
+forgets.
+
+The model is pure data + pure functions in its own module for the same reason
+`openclaw-channel-copy.ts` is: `openclaw-channel-copy.test.ts` imports the REAL
+doors, so the expected set and the actual set come from different places. Its
+sibling pinned literals (strings living inside a React component the `tsx`
+runner cannot load) are the shape that check exists to avoid — do not add more.
+
 **Every hardware path installs the transport itself, and the customer never
 types a command.** Landed 2026-08-09. Neither path did before:
 `scripts/install-agent-computer.sh` (which the DigitalOcean/Hetzner/Vultr

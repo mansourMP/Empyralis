@@ -6783,6 +6783,105 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   color: var(--offline-text);
 }
 
+/* ── The channel door picker (channel-doors.ts + ChannelsTab) ───────────────
+   A door's CONSEQUENCE, stated on its face before it is chosen. This is the
+   whole reason a picker earns its place: Telegram's two doors are two risk
+   profiles, not two procedures, and the one that signs in as the owner can
+   get the owner's own number banned. One line, in the tone the fact deserves
+   — never a red box, never a paragraph. Both tones come from theme-tokens.css
+   and are defined in light and dark alike. */
+.fleet-door-consequence {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: 1.45;
+}
+.fleet-door-consequence svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.fleet-door-consequence--risk { color: var(--warning-text); }
+.fleet-door-consequence--safe { color: var(--online-text); }
+
+/* A one-door channel opens straight into its setup and so has no door face to
+   carry the line — it rides above the form instead. */
+.fleet-door-consequence--standalone {
+  margin: 0 0 var(--space-3);
+}
+
+/* The door already chosen, kept visible while its setup runs, so the
+   consequence does not vanish at the moment it matters most. Dense inside the
+   group, airy against the form below it. */
+.fleet-door-chosen {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 10px 12px;
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-inset);
+}
+.fleet-door-chosen-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.fleet-door-chosen-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+.fleet-door-chosen .fleet-door-consequence {
+  margin-top: 3px;
+}
+/* Neutral, never accent-filled: the primary action in this panel is the setup
+   form's own save/connect button, and two accent fills in one view is a bug. */
+.fleet-door-chosen-change {
+  flex-shrink: 0;
+}
+
+/* A door this agent cannot walk through is not a disabled button with a
+   caption — it is not a control at all (product law: no dead controls). It
+   renders as an inert card carrying the same face plus the way out. */
+.fleet-wizard-option--unavailable {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.fleet-door-unavailable {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-rail);
+}
+.fleet-door-unavailable-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--offline-text);
+}
+.fleet-door-unavailable .fleet-channel-expand-hint {
+  margin: 0;
+}
+
+/* At the grid's own 900px breakpoint the chosen-door bar stops being a row:
+   the label + consequence need the full width, and "Change" drops under it
+   rather than squeezing the line it exists to keep readable. */
+@media (max-width: 900px) {
+  .fleet-door-chosen {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
 /* ── Thin scrollbars — every scroll container inside the fleet surface.
    Overrides the 12px global in globals.css. Firefox takes the standard
    properties; WebKit takes the pseudo-elements. ──────────────────────────── */

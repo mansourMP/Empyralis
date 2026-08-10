@@ -1800,6 +1800,14 @@ import {
   useOpenClawChannelSetup,
 } from "./OpenClawChannelsPanel";
 import { channelCardPill, formatChannelList } from "./openclaw-channel-copy";
+import {
+  channelDoorHardwareNote,
+  channelDoorHardwareState,
+  channelDoorUnavailableReason,
+  isChannelDoorAvailable,
+  planChannelDoors,
+  type ChannelDoor,
+} from "./channel-doors";
 import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
 import {
   isPersonalChannelStatusActive,
@@ -1820,45 +1828,11 @@ const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
   { label: "WeChat / WeCom", id: "wechat_official" },
 ];
 
-// `requiresHardware` doors bind to THIS agent's own gateway (a paired
-// computer / VPS) — a "full account" login runs a real client process on that
-// box, which a cloud-only agent has nowhere to run. When the agent has no
-// gateway, the door renders disabled + "Hardware required" (never a pickable
-// door that would fail once opened), so the customer understands up front.
-type ChannelDoor = { key: string; label: string; body: string; real: boolean; requiresHardware?: boolean };
-
-// Each channel shows only the connection MODES that are real, safe, and built
-// today for that platform — never a door that fails, and never a second mode
-// standing in for one that doesn't exist yet (contract rule #4). Telegram is
-// the one channel with a genuine two-mode choice (Chatbot vs. Full account);
-// every other channel has exactly one real path, so its door auto-selects
-// with no picker step. "Full account" doors bind to THIS agent's own
-// preferred_gateway_id (see ChannelsTab's `agentGatewayId`), never to a
-// workspace-wide/Sage-routed session.
-const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
-  sage_telegram_hosted: [
-    { key: "byo_bot", label: "Chatbot", body: "Agent replies as a separate bot — paste the token BotFather gave you. No control of your own account.", real: true },
-    { key: "full_account", label: "Full account", body: "This agent's own Telegram number — phone, code, and 2FA if enabled — running on this agent's own gateway.", real: true, requiresHardware: true },
-  ],
-  slack: [
-    { key: "oauth", label: "App", body: "Connect a Slack workspace — signed mentions and DMs route to your AI.", real: true },
-  ],
-  discord_bot: [
-    { key: "byo_bot", label: "Bot", body: "Give this agent its own Discord bot — paste the token from Discord's developer portal.", real: true },
-  ],
-  whatsapp_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own WhatsApp number, on its own gateway — scan a QR code or use a pairing code. No chatbot/business-API mode.", real: true, requiresHardware: true },
-  ],
-  signal_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own Signal, via a signal-cli bridge on its gateway. Requires a real signal-cli install — no cloud path.", real: true, requiresHardware: true },
-  ],
-  imessage_personal: [
-    { key: "full_account", label: "Full account", body: "This agent's own iMessage, via imsg — a small CLI that talks to Messages.app on a Mac running as its gateway. Requires a real Mac — no cloud path.", real: true, requiresHardware: true },
-  ],
-  wechat_official: [
-    { key: "app_credential_pair", label: "Official Account / WeCom", body: "This agent's own WeChat Official Account or WeChat Work (WeCom) bot — paste the AppID/AppSecret (or CorpID/CorpSecret/AgentId) from your own admin console.", real: true },
-  ],
-};
+// The doors model — CHANNEL_DOORS, the door-count rule that decides whether a
+// picker is shown at all, and the hardware/consequence copy each door face
+// carries — lives in channel-doors.ts, imported at the top of this file. It is
+// pure data + pure functions precisely so channel-doors.test.ts can drive the
+// REAL doors instead of re-typing their strings as pinned literals.
 
 // Local-bridge channels (Signal and iMessage today; WeChat has no bridge to
 // check at all) have no in-app pairing step — the bridge runs on hardware
@@ -2142,10 +2116,21 @@ export function ChannelsTab({
   }, [workspaceId, agentId, slackChannelId, handleChannelsChanged]);
 
   const activePlatform = CHANNEL_GRID_PLATFORMS.find((p) => p.id === expanded) || null;
-  const doors = expanded ? CHANNEL_DOORS[expanded] || [] : [];
-  // A lone real door needs no picker — it auto-activates. Otherwise the user's
-  // click on a specific (real) door decides which one is active.
-  const activeDoor = doors.length === 1 && doors[0].real ? doors[0] : doors.find((d) => d.key === selectedDoor) || null;
+  // THE DOOR-COUNT RULE, in one call (see channel-doors.ts). One real door →
+  // "direct": the card opens straight into that door's setup, with no picker
+  // step at all, because an intermediate screen offering one option is a dead
+  // click. Two or more → "picker": the choice is shown FIRST, because the
+  // doors differ in consequence, not merely in procedure. Nothing here names a
+  // channel — Telegram gains a third door and WhatsApp a second as transported
+  // paths land, and the count is what has to keep being true.
+  const doorPlan = planChannelDoors(expanded);
+  const doors = doorPlan.doors;
+  const activeDoor =
+    doorPlan.mode === "direct"
+      ? doorPlan.door
+      : doorPlan.mode === "picker"
+        ? doors.find((d) => d.key === selectedDoor) || null
+        : null;
 
   // Live pairing status for this channel's full-account door — read as soon
   // as the channel has one and its banner is open, NOT gated on that door
@@ -2166,7 +2151,7 @@ export function ChannelsTab({
   // would fetch "idle" once, stop (idle isn't an ACTIVE_STATUSES status), and
   // never notice the user going on to actually pair from inside the panel
   // below.
-  const hasFullAccountDoor = doors.some((d) => d.key === "full_account" && d.real);
+  const hasFullAccountDoor = doors.some((d) => d.key === "full_account");
   const pairingChannelKey: PersonalChannelKey | null =
     !hasFullAccountDoor ? null
       : expanded === "sage_telegram_hosted" ? "telegram_personal"
@@ -2192,9 +2177,46 @@ export function ChannelsTab({
   // so far — the founder-reported bug this gates. Once pairing settles
   // (connected, or back to idle/disconnected) the picker returns to normal.
   const pairingActive = activeDoor?.key === "full_account" && !!pairingChannelKey && isPersonalChannelStatusActive(pairingView?.state?.status);
-  // The doors picker's actual render list: collapsed to just the in-flight
-  // door while pairingActive, otherwise the full set (unchanged behavior).
-  const displayDoors = pairingActive && activeDoor ? [activeDoor] : doors;
+
+  // Which door is ALREADY connected, so the picker itself says so instead of
+  // making the founder click into a door just to discover it's the one he
+  // already paired (the reported bug: Telegram's "Full account" showed
+  // "Connected as …" only once you opened it). Chatbot's connected state rides
+  // in on telegramBotConnected (see isChannelConnected — the same "separate
+  // catalog item from the grid pill" shape); full_account's comes from the live
+  // pairing status polled just above, already scoped to whichever channel is on
+  // screen.
+  const isDoorConnected = (door: ChannelDoor): boolean =>
+    expanded === "sage_telegram_hosted" && door.key === "byo_bot"
+      ? telegramBotConnected
+      : door.key === "full_account"
+        ? fullAccountDoorConnected
+        : false;
+  // Hardware is a fact about a door, so it is answered the same way for the
+  // picker face and for a direct-mode channel that has no face — never
+  // discovered at two different moments depending on which path the customer
+  // took, and never after the pick.
+  const doorHardware = (door: ChannelDoor) =>
+    channelDoorHardwareState(door, { hasHardware: !!agentGatewayId, doorConnected: isDoorConnected(door) });
+  const doorAvailable = (door: ChannelDoor) =>
+    isChannelDoorAvailable(door, { hasHardware: !!agentGatewayId, doorConnected: isDoorConnected(door) });
+  // A direct-mode door the agent cannot complete must read as unavailable
+  // instead of rendering a setup form that only fails once it's on screen —
+  // this is the one-door half of the same "no dead controls" rule the picker
+  // applies per door face.
+  const activeDoorAvailable = !activeDoor || doorAvailable(activeDoor);
+  // The picker is the step BEFORE a pick, so it is on screen exactly while
+  // there is no pick. Going back is offered afterwards ("Change") — except
+  // while a pairing is mid-flight, since unmounting
+  // PersonalChannelConnectPanel silently discards a half-entered code.
+  const showDoorPicker = doorPlan.mode === "picker" && !activeDoor;
+  const canChangeDoor = doorPlan.mode === "picker" && !!activeDoor && !pairingActive;
+  // THE one gate every setup form below hangs off. A door key rather than a
+  // boolean pair, so a form cannot be reached while the picker is still asking
+  // (activeDoor null), nor while the chosen door is unavailable on this agent.
+  // One narrow waist instead of the same two conditions repeated at eight call
+  // sites — exactly the shape CLAUDE.md warns the next branch will forget.
+  const setupDoorKey = activeDoor && activeDoorAvailable ? activeDoor.key : null;
 
   // Only the TRUE first load (no channels fetched yet) gets the full-tab
   // skeleton — refresh() (called after every connect-success, see
@@ -2592,85 +2614,125 @@ export function ChannelsTab({
             </div>
 
             <div className="fleet-channel-banner-body">
-              {/* While a full_account pairing is actively mid-flight (a
-                   code/QR/password step with real typed input at stake —
-                   see pairingActive/displayDoors above), the picker collapses
-                   to JUST the active door, rendered the same inert way a
-                   single-door channel already is below (no onClick). Tapping
-                   an alternate-door button right now would unmount
-                   PersonalChannelConnectPanel below and silently discard
-                   whatever's been entered — this is what stops that. */}
-              {displayDoors.length >= 1 && (
+              {/* ── THE DOOR PICKER ────────────────────────────────────────
+                   Rendered ONLY when this channel has two or more real doors
+                   (doorPlan.mode === "picker") and none is chosen yet. A
+                   one-door channel never reaches this — its card opens
+                   straight into the setup below, because an intermediate
+                   screen offering one option is a dead click.
+
+                   Everything that makes the choice a real choice is on the
+                   face, BEFORE it is made: what the door is, what it costs
+                   (Telegram's full account puts the owner's own number in
+                   reach of a platform ban — that has already happened to a
+                   real person here), whether it needs a computer, and whether
+                   it is already connected. A door this agent cannot complete
+                   is inert and says why — never a pick that fails after the
+                   fact. */}
+              {showDoorPicker && (
                 <div className="fleet-wizard-options">
-                  {displayDoors.map((door) => {
-                    const isOnlyRealDoor = displayDoors.length === 1 && door.real;
-                    // Which door is ALREADY connected, so the picker itself
-                    // says so instead of making the founder click into a door
-                    // just to discover it's the one he already paired (the
-                    // reported bug: Telegram's "Full account" showed
-                    // "Connected as Mansur阿龙" only once you opened it).
-                    // Chatbot's connected state rides in on telegramBotConnected
-                    // (see isChannelConnected's doc above — same "separate
-                    // catalog item from the grid pill" shape); full_account's
-                    // comes from the live pairing status polled just above,
-                    // already scoped to whichever channel is on screen.
-                    const doorConnected =
-                      activePlatform.id === "sage_telegram_hosted" && door.key === "byo_bot" ? telegramBotConnected
-                        : door.key === "full_account" ? fullAccountDoorConnected
-                        : false;
-                    const connectedBadge = doorConnected ? (
-                      <span className="fleet-wizard-option-connected">
-                        <span className="fleet-channel-card-dot" /> Connected
-                      </span>
-                    ) : null;
-                    if (!door.real) {
-                      return (
-                        <button key={door.key} type="button" disabled className="fleet-wizard-option fleet-wizard-option--soon">
-                          <span className="fleet-wizard-option-label">{door.label}</span>
-                          <span className="fleet-wizard-option-body">{door.body}</span>
-                          <span className="fleet-wizard-option-note"><Lock size={11} strokeWidth={2} /> Not available on this deployment yet</span>
-                        </button>
-                      );
-                    }
-                    // A full-account login runs a real client process on THIS
-                    // agent's own gateway. No gateway (a cloud-only agent) → the
-                    // door is inert + colorless, labeled "Hardware required", so
-                    // the customer sees up front they must connect a computer —
-                    // never a door that only fails once opened.
-                    if (door.requiresHardware && !agentGatewayId && !doorConnected) {
-                      return (
-                        <button key={door.key} type="button" disabled className="fleet-wizard-option fleet-wizard-option--soon">
-                          <span className="fleet-wizard-option-label">{door.label}</span>
-                          <span className="fleet-wizard-option-body">{door.body}</span>
-                          <span className="fleet-wizard-option-note"><Cpu size={11} strokeWidth={2} /> Hardware required — connect a computer for this agent first</span>
-                        </button>
-                      );
-                    }
-                    if (isOnlyRealDoor) {
-                      return (
-                        <div key={door.key} className="fleet-wizard-option is-selected" style={{ cursor: "default" }}>
-                          <span className="fleet-wizard-option-label">{door.label}{connectedBadge}</span>
-                          <span className="fleet-wizard-option-body">{door.body}</span>
-                        </div>
-                      );
-                    }
-                    return (
+                  {doors.map((door) => {
+                    const connected = isDoorConnected(door);
+                    const hardware = doorHardware(door);
+                    const hardwareNote = channelDoorHardwareNote(hardware);
+                    const available = hardware !== "missing";
+                    const face = (
+                      <>
+                        <span className="fleet-wizard-option-label">
+                          {door.label}
+                          {connected ? (
+                            <span className="fleet-wizard-option-connected">
+                              <span className="fleet-channel-card-dot" /> Connected
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="fleet-wizard-option-body">{door.body}</span>
+                        {door.consequence ? (
+                          <span className={`fleet-door-consequence fleet-door-consequence--${door.consequence.tone}`}>
+                            {door.consequence.tone === "risk"
+                              ? <AlertTriangle size={11} strokeWidth={2} aria-hidden />
+                              : <Check size={11} strokeWidth={2} aria-hidden />}
+                            {door.consequence.text}
+                          </span>
+                        ) : null}
+                        {hardwareNote ? (
+                          <span className={`fleet-wizard-option-note${available ? "" : " fleet-wizard-option-note--gateway"}`}>
+                            <Cpu size={11} strokeWidth={2} aria-hidden /> {hardwareNote}
+                          </span>
+                        ) : null}
+                      </>
+                    );
+                    return available ? (
                       <button
                         key={door.key}
                         type="button"
-                        className={`fleet-wizard-option${selectedDoor === door.key ? " is-selected" : ""}`}
-                        onClick={() => setSelectedDoor(selectedDoor === door.key ? null : door.key)}
+                        className="fleet-wizard-option"
+                        onClick={() => setSelectedDoor(door.key)}
                       >
-                        <span className="fleet-wizard-option-label">{door.label}{connectedBadge}</span>
-                        <span className="fleet-wizard-option-body">{door.body}</span>
+                        {face}
                       </button>
+                    ) : (
+                      <div key={door.key} className="fleet-wizard-option fleet-wizard-option--soon fleet-wizard-option--unavailable">
+                        {face}
+                      </div>
                     );
                   })}
                 </div>
               )}
 
+              {/* The door that was chosen, kept on screen while its setup
+                   runs — the consequence line especially, which is the whole
+                   reason the picker exists and would otherwise vanish the
+                   moment it mattered most. "Change" is hidden while a pairing
+                   is mid-flight: going back would unmount
+                   PersonalChannelConnectPanel and silently discard a
+                   half-entered code. */}
+              {activeDoor && doorPlan.mode === "picker" && activeDoorAvailable ? (
+                <div className="fleet-door-chosen">
+                  <div className="fleet-door-chosen-text">
+                    <span className="fleet-door-chosen-label">{activeDoor.label}</span>
+                    {activeDoor.consequence ? (
+                      <span className={`fleet-door-consequence fleet-door-consequence--${activeDoor.consequence.tone}`}>
+                        {activeDoor.consequence.tone === "risk"
+                          ? <AlertTriangle size={11} strokeWidth={2} aria-hidden />
+                          : <Check size={11} strokeWidth={2} aria-hidden />}
+                        {activeDoor.consequence.text}
+                      </span>
+                    ) : null}
+                  </div>
+                  {canChangeDoor ? (
+                    <button type="button" className="fleet-btn fleet-door-chosen-change" onClick={() => setSelectedDoor(null)}>
+                      <ArrowLeft size={13} strokeWidth={2} aria-hidden /> Change
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {/* A one-door channel has no face to carry its consequence, so
+                   the fact rides above the form it opened straight into. Only
+                   a real risk earns the line — never a reassurance nobody
+                   asked for. */}
+              {activeDoor && doorPlan.mode === "direct" && activeDoorAvailable && activeDoor.consequence?.tone === "risk" ? (
+                <p className="fleet-door-consequence fleet-door-consequence--risk fleet-door-consequence--standalone">
+                  <AlertTriangle size={12} strokeWidth={2} aria-hidden /> {activeDoor.consequence.text}
+                </p>
+              ) : null}
+
+              {/* The door cannot be walked through on this agent as it stands.
+                   Say so here, with the way out — and render NO setup form
+                   below (see `setupDoorKey`), rather than a form whose first
+                   action would fail. */}
+              {activeDoor && !activeDoorAvailable ? (
+                <div className="fleet-door-unavailable">
+                  <p className="fleet-door-unavailable-title">
+                    <Cpu size={14} strokeWidth={2} aria-hidden /> {activeDoor.label} needs a computer
+                  </p>
+                  <p className="fleet-channel-expand-hint">{channelDoorUnavailableReason(activeDoor)}</p>
+                </div>
+              ) : null}
+
               {/* Telegram: BYO bot token */}
-              {activePlatform.id === "sage_telegram_hosted" && activeDoor?.key === "byo_bot" && (
+              {activePlatform.id === "sage_telegram_hosted" && setupDoorKey === "byo_bot" && (
                 <div style={{ marginTop: 12 }}>
                   {byoBotSaved ? (
                     <div className="fleet-channel-expand-success">
@@ -2724,7 +2786,7 @@ export function ChannelsTab({
                    credential. No OAuth path exists (or is needed): Discord's
                    Terms forbid automating a real user account, so a bot token
                    pasted from the developer portal is the only path. */}
-              {activePlatform.id === "discord_bot" && activeDoor?.key === "byo_bot" && (
+              {activePlatform.id === "discord_bot" && setupDoorKey === "byo_bot" && (
                 <div style={{ marginTop: 12 }}>
                   {byoBotSaved ? (
                     <div className="fleet-channel-expand-success">
@@ -2757,7 +2819,7 @@ export function ChannelsTab({
                    install is workspace-wide and can serve many agents,
                    unlike Discord's dedicated-bot-per-agent model, so
                    ownership here is per-channel, not per-connection. */}
-              {activePlatform.id === "slack" && activeDoor && (
+              {activePlatform.id === "slack" && setupDoorKey && (
                 <div style={{ marginTop: 12 }}>
                   <button
                     type="button"
@@ -2801,7 +2863,7 @@ export function ChannelsTab({
               {/* Telegram / WhatsApp: full-account (real MTProto / Baileys session),
                    bound to this agent's own gateway via agentGatewayId — not
                    Sage's workspace-wide Connect tab. */}
-              {activePlatform.id === "sage_telegram_hosted" && activeDoor?.key === "full_account" && (
+              {activePlatform.id === "sage_telegram_hosted" && setupDoorKey === "full_account" && (
                 <div style={{ marginTop: 12 }}>
                   <PersonalChannelConnectPanel
                     workspaceId={workspaceId}
@@ -2814,7 +2876,7 @@ export function ChannelsTab({
                   />
                 </div>
               )}
-              {activePlatform.id === "whatsapp_personal" && activeDoor?.key === "full_account" && (
+              {activePlatform.id === "whatsapp_personal" && setupDoorKey === "full_account" && (
                 <div style={{ marginTop: 12 }}>
                   <PersonalChannelConnectPanel
                     workspaceId={workspaceId}
@@ -2833,7 +2895,7 @@ export function ChannelsTab({
                    user runs themselves, configured via env vars on this agent's
                    gateway. The only honest thing to show is real bridge health,
                    not a fake "connect" button. */}
-              {activePlatform.id === "signal_personal" && activeDoor?.key === "full_account" && (
+              {activePlatform.id === "signal_personal" && setupDoorKey === "full_account" && (
                 <div style={{ marginTop: 12 }}>
                   <LocalBridgeChannelStatus channelKey="signal_personal" gatewayId={agentGatewayId} />
                 </div>
@@ -2846,7 +2908,7 @@ export function ChannelsTab({
                    one truly manual step is Full Disk Access, which macOS will
                    not let any process grant to itself — see
                    IMessageSetupPanel.tsx. */}
-              {activePlatform.id === "imessage_personal" && activeDoor?.key === "full_account" && (
+              {activePlatform.id === "imessage_personal" && setupDoorKey === "full_account" && (
                 <div style={{ marginTop: 12 }}>
                   <IMessageSetupPanel gatewayId={agentGatewayId} />
                 </div>
@@ -2859,7 +2921,7 @@ export function ChannelsTab({
                    happens server-side (a live access_token fetch against
                    Tencent) before anything is stored — see
                    wechat_official_service.assign_wechat_official. */}
-              {activePlatform.id === "wechat_official" && activeDoor?.key === "app_credential_pair" && (
+              {activePlatform.id === "wechat_official" && setupDoorKey === "app_credential_pair" && (
                 <div style={{ marginTop: 12 }}>
                   {wechatSaved ? (
                     <div className="fleet-channel-expand-success">
