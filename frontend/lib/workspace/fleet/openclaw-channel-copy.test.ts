@@ -32,6 +32,20 @@
  * against a real running instance — see the verification note in the
  * commit/PR this file shipped with.
  *
+ * A THIRD SOURCE, ADDED WITH THE DOOR PICKER (2026-08-10)
+ * -------------------------------------------------------
+ * The final section drives channel-doors.ts — the real door table and the
+ * real rule functions ChannelsTab renders — rather than pinning their
+ * strings. That module was split out of FleetAgentDetail.tsx precisely so
+ * this file could import it: a check whose expected values are transcribed
+ * from the thing it checks can only ever confirm itself, and the pinned
+ * literals below are exactly that shape (kept only where the string lives
+ * inside a React component this runner cannot load). It asserts the
+ * door-COUNT rule that decides whether a picker appears at all, that a
+ * picker's doors state their differing consequences on their faces, and
+ * that a hardware requirement is answerable before the pick — none of
+ * which any pinned sentence could express.
+ *
  * Run: npx tsx lib/workspace/fleet/openclaw-channel-copy.test.ts
  */
 
@@ -45,6 +59,15 @@ import {
   type OpenClawChannelCatalogEntry,
   type OpenClawObservedChannel,
 } from "./openclaw-channel-copy";
+import {
+  CHANNEL_DOORS,
+  channelDoorHardwareNote,
+  channelDoorHardwareState,
+  channelDoorUnavailableReason,
+  isChannelDoorAvailable,
+  planChannelDoors,
+  type ChannelDoor,
+} from "./channel-doors";
 
 let passed = 0;
 let failed = 0;
@@ -243,6 +266,176 @@ const FIRST_PARTY_CHANNEL_GRID_LABELS = [
 ];
 for (const label of FIRST_PARTY_CHANNEL_GRID_LABELS) {
   assertNoOpenClaw(label, `CHANNEL_GRID_PLATFORMS label ${JSON.stringify(label)} (pinned literal)`);
+}
+
+// --- The channel DOOR PICKER (channel-doors.ts). ------------------------
+//
+// Unlike every pinned literal above, this section imports the REAL door
+// table and the REAL rule functions the screen renders — the expected set
+// and the actual set come from different places, which is the only version
+// of a conformance check that can ever fail (CLAUDE.md: "a check that
+// derives its own expectations from the thing it checks is blind, and
+// reports 'passed'"). Editing a door's copy in channel-doors.ts is
+// therefore covered here automatically; nobody has to remember to re-type
+// it into this file.
+
+const doorChannelIds = Object.keys(CHANNEL_DOORS);
+assert(doorChannelIds.length > 0, "CHANNEL_DOORS is non-empty");
+
+for (const channelId of doorChannelIds) {
+  const plan = planChannelDoors(channelId);
+  const realDoors = CHANNEL_DOORS[channelId].filter((d) => d.real);
+
+  // THE RULE, asserted as a rule rather than per channel: the door COUNT —
+  // and nothing else, no channel name — decides whether a picker is shown.
+  // A hardcoded "Telegram gets a picker" would rot the day Telegram gains a
+  // third door and WhatsApp a second.
+  assert(
+    plan.mode === (realDoors.length === 0 ? "none" : realDoors.length === 1 ? "direct" : "picker"),
+    `planChannelDoors(${channelId}) mode must follow the real-door count (${realDoors.length} real), got ${plan.mode}`,
+  );
+  assert(
+    plan.doors.length === realDoors.length && plan.doors.every((d) => d.real),
+    `planChannelDoors(${channelId}).doors must be exactly the REAL doors — a door that is not built is not a way to connect`,
+  );
+  if (plan.mode === "direct") {
+    assert(
+      plan.door === plan.doors[0],
+      `planChannelDoors(${channelId}) direct mode must hand back the one door, so the caller never re-derives it`,
+    );
+  }
+
+  // A picker that shows two doors and says nothing about how they differ is
+  // an extra click for nothing. Every door on a picker must state its
+  // consequence ON ITS FACE, before it is chosen — this is the whole reason
+  // the intermediate step earns its place.
+  if (plan.mode === "picker") {
+    for (const door of plan.doors) {
+      assert(
+        !!door.consequence && door.consequence.text.trim().length > 0,
+        `${channelId} door ${door.key} is on a PICKER and must state its consequence on its face`,
+      );
+    }
+    const consequences = new Set(plan.doors.map((d) => d.consequence?.text));
+    assert(
+      consequences.size === plan.doors.length,
+      `${channelId}'s picker doors must not repeat one another's consequence — identical consequences mean there is no choice to make`,
+    );
+  }
+
+  for (const door of CHANNEL_DOORS[channelId]) {
+    const where = `${channelId} door ${door.key}`;
+    assertNoOpenClaw(door.label, `${where}.label`);
+    assertNoOpenClaw(door.body, `${where}.body`);
+    assertNoOpenClaw(door.consequence?.text, `${where}.consequence.text`);
+    assert(door.label.trim().length > 0, `${where}.label is non-empty — a door face with no name says nothing`);
+    assert(door.body.trim().length > 0, `${where}.body is non-empty`);
+
+    if (door.consequence) {
+      const text = door.consequence.text;
+      assert(
+        door.consequence.tone === "safe" || door.consequence.tone === "risk",
+        `${where}.consequence.tone must be safe|risk, got ${JSON.stringify(door.consequence.tone)}`,
+      );
+      // "A professional tool labels; it does not lecture" — one clear line,
+      // never a paragraph of warnings, and never shouted. These bounds are
+      // the doctrine made mechanical, because the natural drift on a risk
+      // warning is always toward more of it.
+      assert(text.length <= 120, `${where}.consequence.text must fit one line (<=120 chars), got ${text.length}`);
+      assert(!text.includes("!"), `${where}.consequence.text must not shout — no exclamation marks`);
+      assert(
+        text.split(".").filter((s) => s.trim().length > 0).length <= 2,
+        `${where}.consequence.text must be at most two short sentences, got ${JSON.stringify(text)}`,
+      );
+    }
+
+    // Hardware is a fact about a door, answered the SAME way wherever it is
+    // asked, so the customer meets it before the pick rather than after.
+    const noBox = { hasHardware: false, doorConnected: false };
+    const withBox = { hasHardware: true, doorConnected: false };
+    const alreadyOn = { hasHardware: false, doorConnected: true };
+    if (door.requiresHardware) {
+      assert(channelDoorHardwareState(door, noBox) === "missing", `${where} with no computer is "missing"`);
+      assert(channelDoorHardwareState(door, withBox) === "ready", `${where} with a computer is "ready"`);
+      // An already-connected session must stay reachable even with no
+      // gateway attached right now — otherwise the customer cannot open it
+      // to see or disconnect the session that already exists.
+      assert(channelDoorHardwareState(door, alreadyOn) === "ready", `${where} already connected stays reachable`);
+      assert(!isChannelDoorAvailable(door, noBox), `${where} is UNAVAILABLE with no computer, not a pick that fails later`);
+      assert(isChannelDoorAvailable(door, withBox), `${where} is available once a computer is attached`);
+    } else {
+      assert(
+        channelDoorHardwareState(door, noBox) === "not-required" && isChannelDoorAvailable(door, noBox),
+        `${where} needs no computer, so it is available on a cloud-only agent`,
+      );
+    }
+
+    assertNoOpenClaw(channelDoorUnavailableReason(door), `${where} unavailable reason`);
+    assert(
+      channelDoorUnavailableReason(door).trim().length > 0,
+      `${where} unavailable reason must say something — an unavailable door that does not say why is a dead end`,
+    );
+  }
+}
+
+// An unknown / absent channel opens nothing rather than throwing or
+// inventing a door.
+for (const missing of [null, undefined, "", "not_a_channel"]) {
+  const plan = planChannelDoors(missing as string | null | undefined);
+  assert(plan.mode === "none" && plan.doors.length === 0, `planChannelDoors(${JSON.stringify(missing)}) is "none"`);
+}
+
+// The hardware note itself: something to say in both hardware states, and
+// deliberately NOTHING to say when the door needs no computer — a note
+// reading "no computer needed" is noise on six of the seven channels.
+assertNoOpenClaw(channelDoorHardwareNote("missing") || "", "channelDoorHardwareNote(missing)");
+assertNoOpenClaw(channelDoorHardwareNote("ready") || "", "channelDoorHardwareNote(ready)");
+assert((channelDoorHardwareNote("missing") || "").trim().length > 0, "the missing-hardware note says something");
+assert((channelDoorHardwareNote("ready") || "").trim().length > 0, "the satisfied-hardware note says something");
+assert(channelDoorHardwareNote("not-required") === null, "a door needing no computer renders no hardware note");
+
+// Telegram is the one channel with a genuine two-door choice today, and the
+// two doors carry OPPOSITE consequences — that asymmetry is the product
+// fact the picker exists to show, and the reason the founder's own account
+// was previously banned. Asserted structurally (the tones differ, one names
+// a ban) rather than as a pinned sentence, so rewording the copy is free
+// and dropping the fact is not.
+const telegramDoors: ChannelDoor[] = planChannelDoors("sage_telegram_hosted").doors;
+assert(telegramDoors.length >= 2, "Telegram has a real two-door choice");
+assert(
+  new Set(telegramDoors.map((d) => d.consequence?.tone)).size === telegramDoors.length,
+  "Telegram's doors must differ in consequence TONE — two doors reading the same way is not a choice",
+);
+const telegramFullAccount = telegramDoors.find((d) => d.key === "full_account");
+assert(!!telegramFullAccount?.requiresHardware, "Telegram's full-account door declares its hardware requirement");
+assert(
+  /ban/i.test(telegramFullAccount?.consequence?.text || ""),
+  "Telegram's full-account door names the ban risk ON THE DOOR — never in a warning after a code has been sent",
+);
+assert(
+  telegramFullAccount?.consequence?.tone === "risk",
+  "Telegram's full-account door is toned as a risk",
+);
+const telegramChatbot = telegramDoors.find((d) => d.key === "byo_bot");
+assert(telegramChatbot?.consequence?.tone === "safe", "Telegram's chatbot door is toned as the safe one");
+assert(
+  !telegramChatbot?.requiresHardware,
+  "Telegram's chatbot door needs no computer — that difference is half the choice",
+);
+
+// Every door that signs in AS the owner must name its consequence. This is
+// the rule the WhatsApp door would otherwise quietly miss: it is a
+// one-door channel today, so it has no picker face to carry the line, and
+// the line rides above its form instead — but it still has to exist.
+for (const channelId of doorChannelIds) {
+  for (const door of CHANNEL_DOORS[channelId]) {
+    if (door.key !== "full_account") continue;
+    if (!/signs in as you/i.test(door.body)) continue;
+    assert(
+      door.consequence?.tone === "risk",
+      `${channelId}'s ${door.key} door signs in as the owner and must carry a risk consequence`,
+    );
+  }
 }
 
 // --- Summary ---
