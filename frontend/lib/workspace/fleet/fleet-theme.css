@@ -3163,6 +3163,23 @@ a.fleet-breadcrumb:hover {
   color: var(--offline-text);
 }
 
+/* "3 ways to connect" — the ONE secondary signal a card face carries, and only
+   on the cards that genuinely offer a choice (Zalo's three doors, Telegram's
+   two). It is not a second pill: no background, no dot, a step smaller and a
+   step dimmer than the status pill above it, so the face still reads as
+   icon + label + one pill with a footnote rather than as two competing chips.
+   Tightened line-height because it sits inside the card's 8px flex gap. */
+.fleet-channel-card-ways {
+  font-size: 10px;
+  line-height: 1.2;
+  color: var(--text-tertiary);
+  margin-top: -3px;
+}
+
+.fleet-channel-card:disabled .fleet-channel-card-ways {
+  color: var(--text-muted);
+}
+
 .fleet-channel-card-dot {
   width: 6px;
   height: 6px;

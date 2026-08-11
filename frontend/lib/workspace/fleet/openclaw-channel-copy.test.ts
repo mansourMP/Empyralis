@@ -61,6 +61,8 @@ import {
 } from "./openclaw-channel-copy";
 import {
   CHANNEL_DOORS,
+  CHANNEL_GRID_PLATFORMS,
+  channelDoorChoiceNote,
   channelDoorHardwareNote,
   channelDoorHardwareState,
   channelDoorUnavailableReason,
@@ -71,6 +73,18 @@ import {
   type ChannelDoor,
   type TransportedChannelInput,
 } from "./channel-doors";
+import {
+  CHANNEL_POPULARITY_ORDER,
+  channelPopularityKeys,
+  channelPopularityRank,
+  compareChannelsByPopularity,
+} from "./channel-popularity";
+import {
+  QR_NO_CODE_TEXT,
+  QR_RENDER_FAILED_TEXT,
+  resolveQrPanelView,
+  type QrPanelInputs,
+} from "./channel-qr-phase";
 
 let passed = 0;
 let failed = 0;
@@ -294,21 +308,26 @@ assertNoOpenClaw(
   "channel detail panel, credential form note (pinned literal)",
 );
 
-// The first-party platform labels (CHANNEL_GRID_PLATFORMS) now render inside
-// the SAME row list as the OpenClaw catalog rows — pin them too, since a
-// label is exactly the kind of string this file already treats as reaching
-// the DOM verbatim (see the manifest-label loop above).
-const FIRST_PARTY_CHANNEL_GRID_LABELS = [
-  "Telegram",
-  "Slack",
-  "Discord",
-  "WhatsApp",
-  "Signal",
-  "iMessage",
-  "WeChat / WeCom",
-];
+// The first-party platform labels render inside the SAME card grid as the
+// transported ones, so they get the same treatment as the manifest labels
+// above. NO LONGER PINNED: CHANNEL_GRID_PLATFORMS moved into channel-doors.ts
+// (2026-08-11) precisely so this drives the REAL list. A pinned copy of it
+// could only ever confirm itself, and would silently stop covering an eighth
+// platform the moment one was added.
+const FIRST_PARTY_CHANNEL_GRID_LABELS = CHANNEL_GRID_PLATFORMS.map((platform) => platform.label);
+assert(FIRST_PARTY_CHANNEL_GRID_LABELS.length > 0, "CHANNEL_GRID_PLATFORMS is non-empty");
 for (const label of FIRST_PARTY_CHANNEL_GRID_LABELS) {
-  assertNoOpenClaw(label, `CHANNEL_GRID_PLATFORMS label ${JSON.stringify(label)} (pinned literal)`);
+  assertNoOpenClaw(label, `CHANNEL_GRID_PLATFORMS label ${JSON.stringify(label)}`);
+  assert(label.trim().length > 0, `CHANNEL_GRID_PLATFORMS label is non-empty`);
+}
+// Every first-party card must have doors, or clicking it opens a panel with
+// nothing in it. Two lists that were only informally the same set — now
+// asserted, which is the point of moving the grid list next to the door table.
+for (const platform of CHANNEL_GRID_PLATFORMS) {
+  assert(
+    planChannelDoors(platform.id).mode !== "none",
+    `CHANNEL_GRID_PLATFORMS entry ${platform.id} must have at least one real door — a card that opens nothing is a dead control`,
+  );
 }
 
 // --- The channel DOOR PICKER (channel-doors.ts). ------------------------
@@ -363,6 +382,33 @@ for (const channelId of doorChannelIds) {
     assert(
       consequences.size === plan.doors.length,
       `${channelId}'s picker doors must not repeat one another's consequence — identical consequences mean there is no choice to make`,
+    );
+  }
+
+  // THE CARD FACE SAYS A CHOICE IS COMING, or the picker is a surprise. Driven
+  // off the same plan the picker itself is driven off, so the face and the
+  // panel behind it cannot disagree, and asserted as the RULE (a note exactly
+  // when there is a picker) rather than per channel.
+  const choiceNote = channelDoorChoiceNote(plan);
+  if (plan.mode === "picker") {
+    assert(!!choiceNote, `${channelId} opens a picker, so its card face must say a choice is coming`);
+    assert(
+      (choiceNote || "").includes(String(plan.doors.length)),
+      `${channelId}'s card note must carry the real door count, got ${JSON.stringify(choiceNote)}`,
+    );
+    assertNoOpenClaw(choiceNote || "", `${channelId} card choice note`);
+    assert(
+      !/\bplugin(s)?\b|\bnpm\b|\bpackage\b|\bbinary\b/i.test(choiceNote || ""),
+      `${channelId}'s card note must not name mechanism, got ${JSON.stringify(choiceNote)}`,
+    );
+    assert(
+      (choiceNote || "").length <= 24,
+      `${channelId}'s card note must fit a 4-across tile (<=24 chars), got ${JSON.stringify(choiceNote)}`,
+    );
+  } else {
+    assert(
+      choiceNote === null,
+      `${channelId} has no choice to offer, so its card face says nothing extra — got ${JSON.stringify(choiceNote)}`,
     );
   }
 
@@ -607,6 +653,356 @@ for (const platform of platforms) {
       `${platform.key}'s doors state distinct faces — two doors reading the same way is not a choice`,
     );
   }
+  // The card-face choice signal is ONE rule across both halves of the grid: a
+  // transported platform with several ways in says so exactly like Telegram
+  // does, off the same plan.
+  const platformNote = channelDoorChoiceNote(plan);
+  assert(
+    plan.mode === "picker" ? !!platformNote : platformNote === null,
+    `${platform.key}'s card note must follow the door count (${platform.doors.length} doors, note ${JSON.stringify(platformNote)})`,
+  );
+  assertNoOpenClaw(platformNote || "", `platform ${platform.key} card choice note`);
+}
+
+// --- GRID ORDER (channel-popularity.ts). -------------------------------
+//
+// The one authored table on this surface, and the reason it is allowed is that
+// it is a PREFIX rather than a membership test: it decides what leads, never
+// what exists. So the assertions below are about that property, not about any
+// particular channel's position — reordering the founder's ranking must be free,
+// and dropping the graceful-fallback property must not be.
+
+assert(CHANNEL_POPULARITY_ORDER.length > 0, "the grid ranking is non-empty");
+assert(
+  new Set(CHANNEL_POPULARITY_ORDER).size === CHANNEL_POPULARITY_ORDER.length,
+  "the grid ranking has no duplicate keys — a repeated key is a rank nobody can reach",
+);
+for (const key of CHANNEL_POPULARITY_ORDER) {
+  assert(
+    /^[a-z0-9]+$/.test(key),
+    `ranking key ${JSON.stringify(key)} must be normalised (lowercase alphanumerics) or it can never match a label`,
+  );
+  assertNoOpenClaw(key, `ranking key ${JSON.stringify(key)}`);
+}
+
+// EVERY RANKED KEY MUST NAME SOMETHING THAT IS ACTUALLY RENDERED. The expected
+// set (the authored ranking) and the actual set (the transport's own manifest
+// plus the real first-party grid list) come from different places, so this can
+// genuinely fail — which is what makes it worth having. A key left behind after
+// upstream renames a channel is dead data that silently ranks nothing.
+const renderedGridLabels = [
+  ...FIRST_PARTY_CHANNEL_GRID_LABELS,
+  ...manifest.channels.map((channel) => channel.label),
+];
+const reachableKeys = new Set(renderedGridLabels.flatMap((label) => channelPopularityKeys(label)));
+for (const key of CHANNEL_POPULARITY_ORDER) {
+  assert(
+    reachableKeys.has(key),
+    `ranking key ${JSON.stringify(key)} matches no channel this grid renders — a rank for nothing is stale data`,
+  );
+}
+
+// The ranking's own contract, asserted directly.
+assert(
+  channelPopularityRank(CHANNEL_POPULARITY_ORDER[0]) === 0,
+  "the first ranking key ranks first",
+);
+assert(
+  channelPopularityRank("Not A Real Channel") === Number.POSITIVE_INFINITY,
+  "an unranked channel has no rank at all, rather than a middling one",
+);
+// "WeChat / WeCom" is the whole reason a leading-word fallback exists: nobody
+// should have to author `wechatwecom`.
+assert(
+  channelPopularityRank("WeChat / WeCom") < Number.POSITIVE_INFINITY,
+  "a compound first-party label is ranked via its leading word",
+);
+// ...but the WHOLE label is tried first, so a vendor word can never silently
+// rank a second product that merely shares it.
+assert(
+  channelPopularityKeys("Microsoft Teams")[0] === "microsoftteams",
+  "the whole label is the first ranking key, ahead of the leading word",
+);
+
+// THE ACTUAL ORDERING, over the real grid contents: every first-party card plus
+// every transported PLATFORM (grouped, so Zalo is one entry, not three).
+const gridOrderCards = [
+  ...FIRST_PARTY_CHANNEL_GRID_LABELS.map((label) => ({ label })),
+  ...platforms.map((platform) => ({ label: platform.label })),
+];
+const sortedGrid = [...gridOrderCards].sort(compareChannelsByPopularity);
+
+// Ranked before unranked, always — the grid leads with the messengers people
+// use and ends with the ones they have not heard of.
+const firstUnranked = sortedGrid.findIndex((card) => channelPopularityRank(card.label) === Number.POSITIVE_INFINITY);
+if (firstUnranked >= 0) {
+  assert(
+    sortedGrid
+      .slice(firstUnranked)
+      .every((card) => channelPopularityRank(card.label) === Number.POSITIVE_INFINITY),
+    "no ranked channel sorts after an unranked one — the ranking is a prefix of the grid",
+  );
+  // ...and the unranked tail is alphabetical among itself, so it is at least
+  // scannable rather than arbitrary.
+  const tail = sortedGrid.slice(firstUnranked).map((card) => card.label);
+  assert(
+    tail.every((label, i) => i === 0 || tail[i - 1].localeCompare(label) <= 0),
+    `the unranked tail is alphabetical, got ${JSON.stringify(tail)}`,
+  );
+}
+assert(
+  channelPopularityRank(sortedGrid[0].label) === 0 ||
+    sortedGrid.slice(0, 3).some((card) => /whatsapp/i.test(card.label)),
+  "the grid opens with the top-ranked messenger",
+);
+// The two the founder actually called out on the live screen: alphabetical put
+// ClickClack above Discord and Nostr above WhatsApp.
+for (const [popular, obscure] of [
+  ["Discord", "ClickClack"],
+  ["WhatsApp", "Nostr"],
+  ["Telegram", "Tlon"],
+] as const) {
+  const popularIndex = sortedGrid.findIndex((card) => card.label === popular);
+  const obscureIndex = sortedGrid.findIndex((card) => card.label === obscure);
+  if (popularIndex >= 0 && obscureIndex >= 0) {
+    assert(
+      popularIndex < obscureIndex,
+      `${popular} must lead ${obscure} in the grid (got ${popularIndex} vs ${obscureIndex})`,
+    );
+  }
+}
+
+// A CHANNEL UPSTREAM HAS NOT SHIPPED STILL LANDS CORRECTLY, WITH NO CODE
+// CHANGE. This is the whole claim the "prefix, not membership test" design
+// makes, and a synthetic input is the only way to prove it. A synthetic INPUT,
+// never a synthetic expectation.
+const syntheticUnranked = { label: "Mumblewire" }; // absent from the ranking by construction
+assert(
+  channelPopularityRank(syntheticUnranked.label) === Number.POSITIVE_INFINITY,
+  "the synthetic channel really is unranked, or this proves nothing",
+);
+const withSynthetic = [...gridOrderCards, syntheticUnranked].sort(compareChannelsByPopularity);
+const syntheticIndex = withSynthetic.findIndex((card) => card.label === syntheticUnranked.label);
+assert(
+  withSynthetic
+    .slice(0, syntheticIndex)
+    .some((card) => channelPopularityRank(card.label) < Number.POSITIVE_INFINITY),
+  "a brand-new channel sorts BELOW every ranked one with no code change",
+);
+assert(
+  withSynthetic
+    .slice(syntheticIndex + 1)
+    .every((card) => channelPopularityRank(card.label) === Number.POSITIVE_INFINITY),
+  "and only unranked channels follow it",
+);
+// Alphabetically placed among its unranked peers, not simply dumped last.
+const unrankedWithSynthetic = withSynthetic
+  .filter((card) => channelPopularityRank(card.label) === Number.POSITIVE_INFINITY)
+  .map((card) => card.label);
+assert(
+  unrankedWithSynthetic.every((label, i) => i === 0 || unrankedWithSynthetic[i - 1].localeCompare(label) <= 0),
+  `the unranked tail stays alphabetical once a new channel joins it, got ${JSON.stringify(unrankedWithSynthetic)}`,
+);
+
+// Two unranked channels compare as +Infinity vs +Infinity. Subtracting those
+// gives NaN, which Array.prototype.sort reads as "these two are equal" and
+// leaves the tail in an order that depends on the input — the comparator must
+// never produce NaN.
+for (const [a, b] of [
+  ["Mumblewire", "Nostr"],
+  ["Nostr", "Mumblewire"],
+  ["Nostr", "Nostr"],
+] as const) {
+  assert(
+    Number.isFinite(compareChannelsByPopularity({ label: a }, { label: b })),
+    `comparing two unranked channels (${a}, ${b}) must produce a real number, never NaN`,
+  );
+}
+
+// --- THE QR PANEL'S STATE (channel-qr-phase.ts). -----------------------
+//
+// The founder's bug was a spinner drawn above a button reading "Generate QR
+// code" — the panel telling him to start something it had already started. The
+// fix is that ONE function decides both, so the two can no longer disagree; the
+// assertions below are what makes that a guarantee rather than a claim, by
+// driving EVERY combination of its six inputs (2^6 = 64) and refuting the
+// pairing in both directions. A behavioural check on the live screen can only
+// ever cover the states that screen happened to be in.
+
+const QR_INPUT_COUNT = 6;
+const qrCases: QrPanelInputs[] = [];
+for (let bits = 0; bits < 1 << QR_INPUT_COUNT; bits += 1) {
+  const on = (index: number) => (bits & (1 << index)) !== 0;
+  qrCases.push({
+    qrImageReady: on(0),
+    requestInFlight: on(1),
+    // The only non-boolean input, and the string is the one a real failure
+    // carries — so "a failure always says what happened" is driven by a value
+    // the panel could actually hold.
+    errorText: on(2) ? "Heads up: the Gateway is offline right now — check it's running and try again." : null,
+    codeIssued: on(3),
+    accepted: on(4),
+    waitExpired: on(5),
+  });
+}
+assert(qrCases.length === 64, "every combination of the QR panel's inputs is covered");
+
+const qrPhasesSeen = new Set<string>();
+for (const inputs of qrCases) {
+  const view = resolveQrPanelView(inputs);
+  const where = `QR panel ${JSON.stringify(inputs)}`;
+  qrPhasesSeen.add(view.phase);
+
+  // THE INVARIANT. Both directions, because the bug is symmetric: a spinner
+  // beside a start control is the same lie whichever one is wrong.
+  assert(
+    !(view.showSpinner && view.startControlLabel !== null),
+    `${where} must never show a spinner and a start control together — that is the contradiction this module exists to remove`,
+  );
+  // A control that cannot be used is NOT RENDERED (product law: no dead
+  // controls). Expressed as "the label is null", never as a disabled button —
+  // a disabled "Generate QR code" under a running spinner still says starting
+  // it is the customer's job.
+  assert(
+    (view.startControlLabel !== null) === (view.phase === "idle" || view.phase === "failed"),
+    `${where}: a control exists exactly in the phases where nothing is running, got ${JSON.stringify(view.startControlLabel)} in ${view.phase}`,
+  );
+  // An image and a spinner are the same slot — nothing is ever drawn twice over.
+  assert(!(view.showQrImage && view.showSpinner), `${where} must not draw a QR and a spinner in the same frame`);
+  assert(view.showQrImage === (view.phase === "ready"), `${where}: the QR shows exactly when there is one`);
+  assert(
+    view.showSpinner === (view.phase === "starting" || view.phase === "waiting"),
+    `${where}: the spinner runs exactly while something is running`,
+  );
+  // A FAILURE ALWAYS SAYS WHAT HAPPENED. The wait running out carries no error
+  // of its own, which is precisely the case that would otherwise present as a
+  // stopped spinner with no explanation.
+  assert(
+    (view.failureText !== null) === (view.phase === "failed"),
+    `${where}: a failure says what happened, and nothing else claims one`,
+  );
+  if (view.failureText !== null) {
+    assert(view.failureText.trim().length > 0, `${where}: the failure line is not blank`);
+  }
+  // The scan instruction is only correct once there is something to scan —
+  // telling someone to scan an empty frame is the same category of lie.
+  assert(view.hint.trim().length > 0, `${where}: the hint is never blank`);
+  assert(
+    view.hint.includes("scan:") === (view.phase === "ready"),
+    `${where}: only a ready panel tells the customer to scan the thing in front of them`,
+  );
+
+  // Same copy rules as every other string on this surface.
+  for (const [text, what] of [
+    [view.hint, "hint"],
+    [view.failureText, "failure line"],
+    [view.startControlLabel, "start control"],
+  ] as const) {
+    if (!text) continue;
+    assertNoOpenClaw(text, `${where} ${what}`);
+    assert(
+      !/\bplugin(s)?\b|\bnpm\b|\bpackage\b|\bbinary\b/i.test(text),
+      `${where} ${what} must not name mechanism, got ${JSON.stringify(text)}`,
+    );
+  }
+}
+// Every phase is reachable. A state machine with a state nothing can enter is a
+// branch that has never run.
+for (const phase of ["idle", "starting", "waiting", "ready", "failed"]) {
+  assert(qrPhasesSeen.has(phase), `the QR panel can actually reach "${phase}"`);
+}
+
+// THE FOUNDER'S EXACT SCREEN, pinned as its own case: the request has been
+// accepted, no code has come back yet, nothing of ours is in flight. This is
+// the state that produced "I have not clicked this button that says generate QR
+// code. Yet the QR code is already being generated right there."
+const acceptedNoCodeYet = resolveQrPanelView({
+  qrImageReady: false,
+  requestInFlight: false,
+  errorText: null,
+  codeIssued: false,
+  accepted: true,
+  waitExpired: false,
+});
+assert(acceptedNoCodeYet.phase === "waiting", "an accepted request with no code yet is WAITING, not idle");
+assert(acceptedNoCodeYet.showSpinner, "...so it spins");
+assert(acceptedNoCodeYet.startControlLabel === null, "...and offers NO control to start what is already running");
+
+// THE DISCONNECT -> REOPEN PATH, which is the regression this fix could most
+// easily cause: the panel auto-starts on reopen, so the very first paint after
+// a disconnect must already read as "starting" rather than flashing the idle
+// control for a frame. The component folds its pending auto-start into
+// `requestInFlight` for exactly this; assert the consequence.
+function reopenedAfterDisconnect(overrides: Partial<QrPanelInputs> = {}): QrPanelInputs {
+  return {
+    qrImageReady: false,
+    requestInFlight: true, // busy || autoStartPending, on the first render back in idle
+    errorText: null,
+    codeIssued: false,
+    accepted: false,
+    waitExpired: false,
+    ...overrides,
+  };
+}
+const reopened = resolveQrPanelView(reopenedAfterDisconnect());
+assert(reopened.phase === "starting", "reopening after a disconnect starts immediately");
+assert(reopened.startControlLabel === null, "...and never shows a start control over its own auto-start");
+assert(reopened.showSpinner, "...it says so, rather than showing an empty frame");
+// A stale error left over from the disconnect itself must not paint the new
+// attempt as failed — an in-flight request outranks it. This is why the phase
+// ORDER lives in the module rather than being re-derived at each element.
+assert(
+  resolveQrPanelView(reopenedAfterDisconnect({ errorText: "Heads up: something went wrong." })).phase === "starting",
+  "a stale error never masks a request that is currently running",
+);
+// ...and the attempt it starts carries all the way to a rendered code, which is
+// the whole point of the path: disconnect -> reopen -> QR, no restart.
+assert(
+  resolveQrPanelView(reopenedAfterDisconnect({ requestInFlight: false, accepted: true })).phase === "waiting",
+  "the reopened attempt is accepted and waits",
+);
+assert(
+  resolveQrPanelView(reopenedAfterDisconnect({ requestInFlight: false, accepted: true, codeIssued: true })).phase ===
+    "waiting",
+  "a code that has arrived but is not drawn yet still reads as work in progress",
+);
+const reopenedReady = resolveQrPanelView(
+  reopenedAfterDisconnect({ requestInFlight: false, accepted: true, codeIssued: true, qrImageReady: true }),
+);
+assert(reopenedReady.phase === "ready", "...and the reopened panel reaches a QR");
+assert(reopenedReady.showQrImage && !reopenedReady.showSpinner, "...with the code on screen and the spinner gone");
+assert(
+  reopenedReady.startControlLabel === null,
+  "...and no control asking to generate the code already in front of the customer",
+);
+
+// A wait that runs out ends in a control and an explanation, never a stopped
+// spinner. The customer must always have a way out.
+const waitRanOut = resolveQrPanelView({
+  qrImageReady: false,
+  requestInFlight: false,
+  errorText: null,
+  codeIssued: false,
+  accepted: true,
+  waitExpired: true,
+});
+assert(waitRanOut.phase === "failed", "a wait that runs out is a failure, not an eternal spinner");
+assert(!waitRanOut.showSpinner, "...the spinner stops");
+assert(waitRanOut.failureText === QR_NO_CODE_TEXT, "...it says what happened, in its own words");
+assert(waitRanOut.startControlLabel === "Try again", "...and the control says it is retrying, not starting");
+
+// The two authored sentences reach the DOM verbatim, so they answer to the same
+// copy rules as everything else on this surface.
+for (const [text, what] of [
+  [QR_NO_CODE_TEXT, "QR_NO_CODE_TEXT"],
+  [QR_RENDER_FAILED_TEXT, "QR_RENDER_FAILED_TEXT"],
+] as const) {
+  assertNoOpenClaw(text, what);
+  assert(
+    !/\bplugin(s)?\b|\bnpm\b|\bpackage\b|\bbinary\b/i.test(text),
+    `${what} must not name mechanism, got ${JSON.stringify(text)}`,
+  );
+  assert(text.trim().length > 0, `${what} is a real sentence`);
 }
 
 // --- Summary ---

@@ -70,6 +70,28 @@ export type ChannelDoor = {
   consequence?: ChannelDoorConsequence;
 };
 
+/** The first-party half of the channel grid: the platform Empyralis implements
+ *  itself, and the backend connection id that carries its live status.
+ *
+ *  LIVES HERE, NOT IN ChannelsTab, so the copy test can import it.
+ *  ---------------------------------------------------------------
+ *  These seven labels are rendered into the DOM verbatim, so they belong to the
+ *  same family of strings openclaw-channel-copy.test.ts already checks. While
+ *  they sat inside FleetAgentDetail.tsx — a React component that imports a
+ *  stylesheet, which the `tsx` test runner cannot load — the test could only
+ *  carry them as hand-copied literals, i.e. a check transcribing its
+ *  expectations from the thing it checks. Every id here is also a key of
+ *  CHANNEL_DOORS below, which is now assertable rather than merely true. */
+export const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
+  { label: "Telegram", id: "sage_telegram_hosted" },
+  { label: "Slack", id: "slack" },
+  { label: "Discord", id: "discord_bot" },
+  { label: "WhatsApp", id: "whatsapp_personal" },
+  { label: "Signal", id: "signal_personal" },
+  { label: "iMessage", id: "imessage_personal" },
+  { label: "WeChat / WeCom", id: "wechat_official" },
+];
+
 /** Each channel shows only the connection MODES that are real, safe, and built
  *  today for that platform — never a door that fails, and never a second mode
  *  standing in for one that doesn't exist yet. "Full account" doors bind to
@@ -179,6 +201,23 @@ export function planDoors(candidates: ChannelDoor[]): ChannelDoorPlan {
 
 export function planChannelDoors(channelId: string | null | undefined): ChannelDoorPlan {
   return planDoors(channelId ? CHANNEL_DOORS[channelId] || [] : []);
+}
+
+/** The one secondary signal a CARD FACE carries: that opening this card asks a
+ *  question rather than starting a setup.
+ *
+ *  Since one platform became one card, a card can hide two or three genuinely
+ *  different ways in (Zalo has three, Telegram two) and nothing on the grid said
+ *  so — the picker arrived as a surprise. This is the smallest honest fix: the
+ *  COUNT, from the same `planDoors` that decides whether a picker is shown at
+ *  all, so the face and the panel cannot disagree and nothing here names a
+ *  channel. A one-door card has nothing to say, and says nothing — a caption
+ *  reading "1 way to connect" on nineteen of twenty-four cards is furniture.
+ *
+ *  Never a second pill: the card face is icon + label + one status pill, and
+ *  this rides under it as a smaller, dimmer line (.fleet-channel-card-ways). */
+export function channelDoorChoiceNote(plan: ChannelDoorPlan): string | null {
+  return plan.mode === "picker" ? `${plan.doors.length} ways to connect` : null;
 }
 
 /** Whether this agent can walk through this door RIGHT NOW.
