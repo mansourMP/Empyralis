@@ -27,7 +27,7 @@ LOGGER = logging.getLogger(__name__)
 
 RESEND_API_URL = "https://api.resend.com/emails"
 DEFAULT_TIMEOUT_SECONDS = 10.0
-DEFAULT_FROM_ADDRESS = "Empyralis <onboarding@empyralis.dev>"
+DEFAULT_FROM_ADDRESS = "Empyralis <onboarding@empyralis.ai>"
 
 
 class EmailProviderError(RuntimeError):
