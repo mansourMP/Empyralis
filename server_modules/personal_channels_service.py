@@ -867,6 +867,164 @@ async def _control_command_block_result(
     }
 
 
+# ── Shared /command dispatcher waist ───────────────────────────────────
+#
+# sage_command_dispatcher.dispatch_command() -> command_registry (/new /main
+# /compact /stop /clear /export /model /thinking /help /commands /tools
+# /status /whoami /usage /memory /forget /tasks /agents /skills /config /mcp
+# /plugins /debug /tts /bash — 24 commands) was only reached from
+# _deliver_whatsapp_personal_reply, handle_cloud_channel_inbound, and the
+# hosted-Telegram route. Every OTHER personal-channel delivery path —
+# Telegram-personal (QR) and the whole local-bridge/OpenClaw family
+# (Signal, iMessage, WeChat, and every openclaw_* transported channel) —
+# never dispatched a command at all: an owner's "/compact" passed
+# _control_command_block_result (above) and then fell through to an
+# ordinary LLM turn, which received the literal text "/compact" and chatted
+# about it.
+#
+# Fixed by giving every Gateway-WS delivery path ONE waist to cross instead
+# of growing its own copy of this block — which is exactly how WhatsApp's
+# own inline block acquired its OWN bug (see
+# git blame on _deliver_whatsapp_personal_reply's command branch): it wrote
+# the outbound row and returned WITHOUT ever calling dispatch_channel_
+# outbound, so a recognized command stayed "pending" forever. Authorization
+# is NOT decided here: the dmPolicy/group gates (_enforce_dm_policy,
+# _enforce_group_policy) and _control_command_block_result already ran in
+# every caller before this is reached, and this function does not re-derive
+# owner-ness from the inbound payload — OpenClaw has a real CVE from a
+# client-asserted senderIsOwner.
+async def _dispatch_personal_channel_command(
+    *,
+    gateway_id: str,
+    registration: Dict[str, Any],
+    inbound: Dict[str, Any],
+    channel_key: str,
+    provider: str,
+    capability_id: str,
+    # REQUIRED, no default — mark_inbound_processed is an UPDATE scoped by
+    # (gateway_id, channel_key, agent_id, external_message_id). A default
+    # here would silently address the legacy-unscoped row instead of the one
+    # record_inbound_message actually wrote, and lose the "this inbound
+    # message was handled" marker — the exact defect documented on
+    # _deliver_local_bridge_personal_reply's own agent_id parameter above.
+    agent_id: str,
+    # Whether OUTBOUND rows for this channel family are scoped by agent_id.
+    # WhatsApp and Telegram-personal scope them (pass agent_id here too); the
+    # local-bridge/OpenClaw family deliberately does NOT — its outbound rows
+    # must share one unscoped idempotency namespace with the explicit
+    # POST .../messages send route, which has no agent_id to pass at all (see
+    # _deliver_local_bridge_personal_reply's own comment on its outbound
+    # calls). Leave this None (the default) to stay unscoped, matching that.
+    outbound_agent_id: Optional[str] = None,
+    external_message_id: str,
+    remote_jid: str,
+    text: str,
+    duplicate: bool,
+    trace_id: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Run *text* through the shared /command registry; return None when it
+    was not a recognised command (caller falls through to a normal turn), or
+    the standard {"duplicate", "inbound", "outbound"} envelope once the
+    command's reply has been durably dispatched.
+    """
+    from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
+
+    workspace_id = str(registration.get("workspace_id") or "").strip()
+    cmd_reply = await _dispatch_cmd(
+        command=text,
+        workspace_id=workspace_id,
+        thread_id="sage-main",
+        channel_origin=channel_key,
+        sender_id=remote_jid or None,
+    )
+    if cmd_reply is None:
+        return None
+
+    idempotency_key = f"{channel_key}:cmd:{external_message_id}"
+    outbound_scope_kwargs: Dict[str, Any] = (
+        {"agent_id": outbound_agent_id} if outbound_agent_id is not None else {}
+    )
+    outbound, _ = personal_channels_repository.create_or_get_outbound_message(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=channel_key,
+        idempotency_key=idempotency_key,
+        remote_jid=remote_jid,
+        text=cmd_reply,
+        reply_to_external_message_id=external_message_id,
+        **outbound_scope_kwargs,
+    )
+
+    if str(outbound.get("status") or "").strip() == "delivered":
+        personal_channels_repository.mark_inbound_processed(
+            gateway_id=str(gateway_id or "").strip(),
+            channel_key=channel_key,
+            agent_id=agent_id,
+            external_message_id=external_message_id,
+            reply_idempotency_key=idempotency_key,
+        )
+        return {"duplicate": duplicate, "inbound": inbound, "outbound": outbound, "command_handled": True}
+
+    _enforce_personal_channel_dispatch_decision(
+        gateway_id=str(gateway_id or "").strip(),
+        registration=registration,
+        capability_id=capability_id,
+        request_id=idempotency_key,
+    )
+    # THE fix this whole helper exists for: a per-branch copy of this block
+    # (WhatsApp's own inline version, before it was routed through here) once
+    # wrote the outbound row above and RETURNED without ever calling
+    # dispatch_channel_outbound, leaving the command's reply "pending"
+    # forever — nothing ever actually sent it. Continuing to the real
+    # dispatch below is the whole difference, and a single call site means
+    # there is only one place this can regress.
+    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=channel_key,
+        provider=provider,
+        remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
+        text=str(outbound.get("text") or "").strip(),
+        idempotency_key=idempotency_key,
+        # Command replies are never threaded as a quote-reply bubble, same
+        # as every other automatic reply on these channels.
+        reply_to_external_message_id=None,
+        media=[],
+    )
+    delivered = personal_channels_repository.mark_outbound_delivered(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=channel_key,
+        idempotency_key=idempotency_key,
+        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
+        metadata={"dispatch_result": dispatch_result},
+        **outbound_scope_kwargs,
+    )
+    personal_channels_repository.mark_inbound_processed(
+        gateway_id=str(gateway_id or "").strip(),
+        channel_key=channel_key,
+        agent_id=agent_id,
+        external_message_id=external_message_id,
+        reply_idempotency_key=idempotency_key,
+    )
+    _emit_automatic_reply_audit(
+        action=f"personal_channel.{channel_key.split('_', 1)[0]}.command",
+        status="delivered",
+        registration=registration,
+        gateway_id=gateway_id,
+        channel_key=channel_key,
+        provider=provider,
+        detail="Slash command reply was dispatched immediately.",
+        metadata={
+            "remote_jid": remote_jid,
+            "inbound_external_message_id": external_message_id,
+            "reply_text_length": len(cmd_reply),
+            "dispatched": True,
+            "dispatch_external_message_id": str(dispatch_result.get("external_message_id") or "").strip() or None,
+        },
+        trace_id=trace_id,
+        idempotency_key=f"personal_channel.{channel_key}.command.delivered:{gateway_id}:{idempotency_key}",
+    )
+    return {"duplicate": duplicate, "inbound": inbound, "outbound": delivered or outbound, "command_handled": True}
+
+
 # ── dmPolicy: sender allowlist / pairing enforcement ──────────────────
 #
 # The channel manifests (empyralis-gateway's PersonalChannelCapabilityManifest)
@@ -2839,135 +2997,120 @@ async def _deliver_whatsapp_personal_reply(
             agent_id=agent_id,
         )
         linked_user_name = str((_wa_state or {}).get("linked_name") or "").strip() or None
-        # ── Shared command dispatcher ──
-        from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
-        _ws_id = str(registration.get("workspace_id") or "").strip()
-        _cmd_reply = await _dispatch_cmd(
-            command=text,
-            workspace_id=_ws_id,
-            thread_id="sage-main",
-            channel_origin="whatsapp_personal",
-            sender_id=remote_jid or None,
+        # ── Shared command dispatcher (the one waist every personal-channel
+        # delivery path crosses — see _dispatch_personal_channel_command) ──
+        command_result = await _dispatch_personal_channel_command(
+            gateway_id=gateway_id,
+            registration=registration,
+            inbound=inbound,
+            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            provider=WHATSAPP_PERSONAL_PROVIDER,
+            capability_id="channel.whatsapp.personal.send",
+            agent_id=agent_id,
+            outbound_agent_id=agent_id,
+            external_message_id=external_message_id,
+            remote_jid=remote_jid,
+            text=text,
+            duplicate=duplicate,
+            trace_id=trace_id,
         )
-        if _cmd_reply is not None:
-            # Falls through to the SAME shared delivery block below (the
-            # "delivered?" check + the dispatch_channel_outbound call
-            # beneath it) instead of returning here. This used to return
-            # immediately after only writing the DB row — no
-            # gateway_protocol_service.dispatch_channel_outbound call at
-            # all — so a recognized command (e.g. /help) created a
-            # permanently "pending" outbound row and delivered nothing to
-            # the channel. That was moot in production until now: this
-            # whole branch was unreachable while _control_command_block_
-            # result blocked every slash-prefixed message outright (see
-            # that function's own comment) — fixing the gate would have
-            # silently traded "blocked before this branch" for "silently
-            # stuck inside it" without this half of the fix too.
-            idempotency_key = f"whatsapp_personal:cmd:{external_message_id}"
-            outbound, _ = personal_channels_repository.create_or_get_outbound_message(
-                gateway_id=str(gateway_id or "").strip(),
-                channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-                agent_id=agent_id,
-                idempotency_key=idempotency_key,
-                remote_jid=remote_jid,
-                text=_cmd_reply,
-                reply_to_external_message_id=external_message_id,
-            )
-        else:
-            reply = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
-                workspace_id=str(registration.get("workspace_id") or "").strip(),
-                gateway_id=str(gateway_id or "").strip(),
-                remote_jid=remote_jid,
-                text=text,
-                push_name=push_name,
-                sender_id=sender_id,
-                source_event_id=external_message_id,
-                linked_user_name=linked_user_name,
-                agent_id=agent_id,
-                attachments=attachments,
-                is_owner=is_owner,
-                is_group=is_group,
-                chat_label=chat_label,
-                was_addressed=was_addressed,
-            )
-            # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
-            # be sent into a channel (DM or group). resolve_channel_reply_outcome
-            # applies filter_channel_outbound_reply internally as the backstop
-            # regardless of what the bridge service returned — it catches
-            # [SILENT] markers AND any text matching a known platform
-            # status/error string, so a turn error/quota denial/timeout can never
-            # masquerade as a deliverable reply. It ALSO separates "the agent
-            # chose silence" from "the turn never completed", which this seam
-            # used to record identically.
-            outcome = channel_adapter.resolve_channel_reply_outcome(reply, is_owner=is_owner)
-            reply_media = list(outcome.media)
-            _safe_reply_text = outcome.text
-            # A media-only reply (send_image/generate_image queued an attachment
-            # but the model had nothing more to say, or its text was filtered
-            # above) still has something to deliver — only skip when there is
-            # genuinely neither safe text nor media.
-            if not _safe_reply_text and not reply_media:
-                _undelivered = outcome.is_undelivered
-                # See the matching comment in _deliver_local_bridge_personal_reply:
-                # the no-reply marker means "the agent DELIBERATELY said nothing",
-                # so an undelivered turn must not write it — doing so records a
-                # message the platform failed to answer as answered and cancels
-                # its redelivery retry.
-                refreshed_inbound = None
-                if not _undelivered:
-                    no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
-                    refreshed_inbound = personal_channels_repository.mark_inbound_processed(
-                        gateway_id=str(gateway_id or "").strip(),
-                        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-                        agent_id=agent_id,
-                        external_message_id=external_message_id,
-                        reply_idempotency_key=no_reply_idempotency_key,
-                    )
-                _emit_automatic_reply_audit(
-                    action="personal_channel.whatsapp.automatic_reply",
-                    status="failed" if _undelivered else "skipped",
-                    registration=registration,
-                    gateway_id=gateway_id,
-                    channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    provider=WHATSAPP_PERSONAL_PROVIDER,
-                    detail=(
-                        "Automatic WhatsApp personal reply was NOT delivered: the turn did not complete "
-                        f"({outcome.status_code}). The inbound message is left unprocessed so a redelivery retries it."
-                        if _undelivered
-                        else "Automatic WhatsApp personal reply was skipped because the agent returned no reply."
-                    ),
-                    metadata={
-                        "remote_jid": remote_jid,
-                        "inbound_external_message_id": external_message_id,
-                        "undelivered": _undelivered,
-                        "status_code": outcome.status_code or None,
-                    },
-                    trace_id=trace_id,
-                    idempotency_key=(
-                        "personal_channel.whatsapp.automatic_reply."
-                        f"{'failed' if _undelivered else 'skipped'}:{gateway_id}:{external_message_id}"
-                    ),
-                )
-                return {"duplicate": duplicate, "inbound": refreshed_inbound or inbound, "outbound": None}
+        if command_result is not None:
+            return command_result
 
-            outbound, _ = personal_channels_repository.create_or_get_outbound_message(
-                gateway_id=str(gateway_id or "").strip(),
+        reply = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+            workspace_id=str(registration.get("workspace_id") or "").strip(),
+            gateway_id=str(gateway_id or "").strip(),
+            remote_jid=remote_jid,
+            text=text,
+            push_name=push_name,
+            sender_id=sender_id,
+            source_event_id=external_message_id,
+            linked_user_name=linked_user_name,
+            agent_id=agent_id,
+            attachments=attachments,
+            is_owner=is_owner,
+            is_group=is_group,
+            chat_label=chat_label,
+            was_addressed=was_addressed,
+        )
+        # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
+        # be sent into a channel (DM or group). resolve_channel_reply_outcome
+        # applies filter_channel_outbound_reply internally as the backstop
+        # regardless of what the bridge service returned — it catches
+        # [SILENT] markers AND any text matching a known platform
+        # status/error string, so a turn error/quota denial/timeout can never
+        # masquerade as a deliverable reply. It ALSO separates "the agent
+        # chose silence" from "the turn never completed", which this seam
+        # used to record identically.
+        outcome = channel_adapter.resolve_channel_reply_outcome(reply, is_owner=is_owner)
+        reply_media = list(outcome.media)
+        _safe_reply_text = outcome.text
+        # A media-only reply (send_image/generate_image queued an attachment
+        # but the model had nothing more to say, or its text was filtered
+        # above) still has something to deliver — only skip when there is
+        # genuinely neither safe text nor media.
+        if not _safe_reply_text and not reply_media:
+            _undelivered = outcome.is_undelivered
+            # See the matching comment in _deliver_local_bridge_personal_reply:
+            # the no-reply marker means "the agent DELIBERATELY said nothing",
+            # so an undelivered turn must not write it — doing so records a
+            # message the platform failed to answer as answered and cancels
+            # its redelivery retry.
+            refreshed_inbound = None
+            if not _undelivered:
+                no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
+                refreshed_inbound = personal_channels_repository.mark_inbound_processed(
+                    gateway_id=str(gateway_id or "").strip(),
+                    channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+                    agent_id=agent_id,
+                    external_message_id=external_message_id,
+                    reply_idempotency_key=no_reply_idempotency_key,
+                )
+            _emit_automatic_reply_audit(
+                action="personal_channel.whatsapp.automatic_reply",
+                status="failed" if _undelivered else "skipped",
+                registration=registration,
+                gateway_id=gateway_id,
                 channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-                agent_id=agent_id,
-                idempotency_key=idempotency_key,
-                remote_jid=remote_jid,
-                text=_safe_reply_text,
-                reply_to_external_message_id=external_message_id,
+                provider=WHATSAPP_PERSONAL_PROVIDER,
+                detail=(
+                    "Automatic WhatsApp personal reply was NOT delivered: the turn did not complete "
+                    f"({outcome.status_code}). The inbound message is left unprocessed so a redelivery retries it."
+                    if _undelivered
+                    else "Automatic WhatsApp personal reply was skipped because the agent returned no reply."
+                ),
                 metadata={
-                    "reply_source": (
-                        "platform_status_owner_only"
-                        if outcome.is_undelivered
-                        else str((reply or {}).get("source") or "").strip() or None
-                    ),
-                    "media": reply_media or None,
-                    "undelivered_status_code": outcome.status_code or None,
+                    "remote_jid": remote_jid,
+                    "inbound_external_message_id": external_message_id,
+                    "undelivered": _undelivered,
+                    "status_code": outcome.status_code or None,
                 },
+                trace_id=trace_id,
+                idempotency_key=(
+                    "personal_channel.whatsapp.automatic_reply."
+                    f"{'failed' if _undelivered else 'skipped'}:{gateway_id}:{external_message_id}"
+                ),
             )
+            return {"duplicate": duplicate, "inbound": refreshed_inbound or inbound, "outbound": None}
+
+        outbound, _ = personal_channels_repository.create_or_get_outbound_message(
+            gateway_id=str(gateway_id or "").strip(),
+            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
+            agent_id=agent_id,
+            idempotency_key=idempotency_key,
+            remote_jid=remote_jid,
+            text=_safe_reply_text,
+            reply_to_external_message_id=external_message_id,
+            metadata={
+                "reply_source": (
+                    "platform_status_owner_only"
+                    if outcome.is_undelivered
+                    else str((reply or {}).get("source") or "").strip() or None
+                ),
+                "media": reply_media or None,
+                "undelivered_status_code": outcome.status_code or None,
+            },
+        )
 
     if str(outbound.get("status") or "").strip() == "delivered":
         personal_channels_repository.mark_inbound_processed(
@@ -3394,6 +3537,28 @@ async def _handle_telegram_gateway_channel_inbound(
         return {"duplicate": not created, "inbound": inbound, "outbound": outbound}
 
     if outbound is None:
+        # ── Shared command dispatcher (the one waist every personal-channel
+        # delivery path crosses — see _dispatch_personal_channel_command).
+        # Runs on the raw inbound text, same as _control_command_block_result
+        # above — a command message has no media to process. ──
+        command_result = await _dispatch_personal_channel_command(
+            gateway_id=gateway_id,
+            registration=registration,
+            inbound=inbound,
+            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
+            provider=TELEGRAM_PERSONAL_PROVIDER,
+            capability_id="channel.telegram.personal.send",
+            agent_id=agent_id,
+            outbound_agent_id=agent_id,
+            external_message_id=external_message_id,
+            remote_jid=remote_jid,
+            text=text,
+            duplicate=not created,
+            trace_id=trace_id,
+        )
+        if command_result is not None:
+            return command_result
+
         effective_text, attachments = await _process_inbound_media_for_turn(
             gateway_id=gateway_id,
             channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
@@ -3659,6 +3824,28 @@ async def _deliver_local_bridge_personal_reply(
         return {"duplicate": duplicate, "inbound": inbound, "outbound": outbound}
 
     if outbound is None:
+        # ── Shared command dispatcher (the one waist every personal-channel
+        # delivery path crosses — see _dispatch_personal_channel_command).
+        # outbound_agent_id is deliberately omitted: this channel family's
+        # outbound rows stay unscoped on purpose (see this function's own
+        # comment on its outbound calls below). ──
+        command_result = await _dispatch_personal_channel_command(
+            gateway_id=gateway_id,
+            registration=registration,
+            inbound=inbound,
+            channel_key=channel_key,
+            provider=provider,
+            capability_id=f"{channel_key}.send",
+            agent_id=agent_id,
+            external_message_id=external_message_id,
+            remote_jid=remote_jid,
+            text=text,
+            duplicate=duplicate,
+            trace_id=trace_id,
+        )
+        if command_result is not None:
+            return command_result
+
         reply = await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
             surface_channel=channel_key,
             workspace_id=str(registration.get("workspace_id") or "").strip(),
