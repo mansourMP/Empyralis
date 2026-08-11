@@ -440,11 +440,26 @@ class MasterModelConfigHonestBlockTests(unittest.TestCase):
 
 
 class SignupCreditGrantTests(unittest.TestCase):
-    """Verify new workspaces receive the 10,000-credit signup grant."""
+    """Verify new workspaces receive the lean 100-credit signup grant.
+
+    The numbers below are PRICING DECISIONS and are deliberately written as
+    literals, not derived from billing_credit_config. A test that computed
+    them from the same constant the code reads could only ever confirm
+    itself, and would stay green through an accidental 20x change to what
+    every new account is given away for free. If an assertion here fails,
+    the correct response is to confirm the pricing change was intended and
+    then update the literal -- never to derive it.
+
+    This file was missed by f452d44cc ("reconcile stale docs/tests with the
+    lean-grant rate change"), so it kept asserting the OLD rate -- 10,000
+    credits, and 2,000 credits per dollar -- for weeks after the product
+    deliberately moved to 100 credits at 1 credit = 1 cent. It failed the
+    whole time; nothing gates on this suite, so nobody saw it.
+    """
 
     def test_new_workspace_billing_metadata_includes_credit_grant(self):
         """_new_workspace_billing_metadata() must include credit_balance_usd
-        and a bonus transaction recording the 10,000-credit grant."""
+        and a bonus transaction recording the 100-credit grant."""
         from server_modules.control_plane_repository import (
             _new_workspace_billing_metadata,
             NEW_ACCOUNT_SIGNUP_CREDIT_USD,
@@ -464,11 +479,19 @@ class SignupCreditGrantTests(unittest.TestCase):
         self.assertEqual(bonus["kind"], "bonus")
         self.assertEqual(bonus["amount_usd"], NEW_ACCOUNT_SIGNUP_CREDIT_USD)
         self.assertEqual(bonus["source"], "signup_grant")
-        self.assertEqual(bonus["credits"], 10000)
-        self.assertIn("10,000", bonus.get("label", ""))
+        # $1.00 at 100 credits/$ -- the lean grant, 1 credit = 1 cent.
+        self.assertEqual(bonus["credits"], 100)
+        self.assertIn("100", bonus.get("label", ""))
 
     def test_signup_credit_grant_env_var_override(self):
-        """EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD overrides the grant."""
+        """EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD overrides the grant.
+
+        The override value must DIFFER from the default. It used to be
+        "1.00", which is exactly the default -- so this test passed whether
+        the env var was honoured or ignored completely, and proved nothing
+        about overriding. 7.50 is picked precisely because no default in
+        billing_credit_config is 7.50.
+        """
         # Re-import to pick up env var. The constant now lives in
         # billing_credit_config.py (single source of truth) and
         # control_plane_repository re-exports it at import time, so both
@@ -490,7 +513,7 @@ class SignupCreditGrantTests(unittest.TestCase):
         try:
             with patch.dict(
                 os.environ,
-                {"EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD": "1.00"},
+                {"EMPYRALIS_NEW_ACCOUNT_SIGNUP_CREDIT_USD": "7.50"},
                 clear=False,
             ):
                 importlib.reload(bcc)
@@ -498,10 +521,14 @@ class SignupCreditGrantTests(unittest.TestCase):
 
                 meta = cpr._new_workspace_billing_metadata()
                 billing = meta.get("billing", {})
-                self.assertEqual(billing["credit_balance_usd"], 1.0)
+                self.assertEqual(billing["credit_balance_usd"], 7.5)
                 transactions = billing.get("credit_transactions", [])
-                self.assertEqual(transactions[0]["amount_usd"], 1.0)
-                self.assertEqual(transactions[0]["credits"], 2000)
+                self.assertEqual(transactions[0]["amount_usd"], 7.5)
+                # 7.50 at 100 credits/$ = 750.
+                self.assertEqual(transactions[0]["credits"], 750)
+                # The default is 1.00/100 -- asserting the overridden value is
+                # NOT the default is what makes this an override test at all.
+                self.assertNotEqual(transactions[0]["credits"], 100)
         finally:
             # env is no longer patched here, so these reload the real defaults
             importlib.reload(bcc)
