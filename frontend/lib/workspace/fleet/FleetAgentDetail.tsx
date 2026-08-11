@@ -1801,6 +1801,8 @@ import {
 } from "./OpenClawChannelsPanel";
 import { channelCardPill, formatChannelList } from "./openclaw-channel-copy";
 import {
+  CHANNEL_GRID_PLATFORMS,
+  channelDoorChoiceNote,
   channelDoorHardwareNote,
   channelDoorHardwareState,
   channelDoorUnavailableReason,
@@ -1810,6 +1812,7 @@ import {
   planDoors,
   type ChannelDoor,
 } from "./channel-doors";
+import { compareChannelsByPopularity } from "./channel-popularity";
 import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
 import {
   isPersonalChannelStatusActive,
@@ -1819,17 +1822,12 @@ import {
   type PersonalChannelKey,
 } from "./personal-channel-pairing";
 
-// Fixed platform order the grid renders in, mapped to the backend
-// connection id that carries that platform's live status.
-const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
-  { label: "Telegram", id: "sage_telegram_hosted" },
-  { label: "Slack", id: "slack" },
-  { label: "Discord", id: "discord_bot" },
-  { label: "WhatsApp", id: "whatsapp_personal" },
-  { label: "Signal", id: "signal_personal" },
-  { label: "iMessage", id: "imessage_personal" },
-  { label: "WeChat / WeCom", id: "wechat_official" },
-];
+// CHANNEL_GRID_PLATFORMS — the first-party half of the grid — moved to
+// channel-doors.ts (imported above) so openclaw-channel-copy.test.ts can drive
+// the REAL labels instead of the hand-copied literals it used to pin. The order
+// declared there is no longer the render order: the grid is sorted by
+// channel-popularity.ts (see `unifiedChannelCards` below), which is the one
+// place both halves of the grid agree on what leads.
 
 // The doors model — CHANNEL_DOORS, the door-count rule that decides whether a
 // picker is shown at all, and the hardware/consequence copy each door face
@@ -2426,6 +2424,12 @@ export function ChannelsTab({
     label: string;
     iconSrc?: string;
     pill: { label: string; tone: "connected" | "gateway" | "locked" | "setup" };
+    /** The one secondary signal a face carries: that this card opens a CHOICE.
+     *  Null on every card with a single way in, which is most of them. Derived
+     *  from the same door count that decides whether a picker is shown at all
+     *  (channelDoorChoiceNote), on both halves of the grid — never a list of
+     *  "these channels have variants". */
+    waysNote: string | null;
     /** A card that cannot be opened at all is rendered `disabled` rather than
      *  clicked-into-a-dead-end (product law: no dead controls). Only
      *  first-party "Not configured here" is that — every transported card
@@ -2442,6 +2446,7 @@ export function ChannelsTab({
       label: platform.label,
       iconSrc: CHANNEL_ICONS[platform.id],
       pill,
+      waysNote: channelDoorChoiceNote(planChannelDoors(platform.id)),
       disabled: pill.tone === "locked",
       active: expanded === platform.id,
       open: () => handleCardClick(platform, pill),
@@ -2483,6 +2488,7 @@ export function ChannelsTab({
           pill: pillRow
             ? channelCardPill(pillRow.remediation)
             : { label: "Unknown", tone: "locked" as const },
+          waysNote: channelDoorChoiceNote(planDoors(platform.doors)),
           disabled: false,
           active: openclawDetailKey === platform.key,
           open: () => {
@@ -2493,9 +2499,13 @@ export function ChannelsTab({
       })
     : [];
 
-  const unifiedChannelCards = [...legacyCards, ...openclawCards].sort((a, b) =>
-    a.label.localeCompare(b.label),
-  );
+  // Sorted by how many people actually use the platform, not by its first
+  // letter — alphabetical opened the grid with ClickClack above Discord and
+  // Nostr above WhatsApp. The ranking is authored (it exists in no data we
+  // hold) but it is a PREFIX, never a membership test: a channel the transport
+  // ships tomorrow is simply unranked and lands at the bottom in alphabetical
+  // order, with no code change. See channel-popularity.ts.
+  const unifiedChannelCards = [...legacyCards, ...openclawCards].sort(compareChannelsByPopularity);
 
   // The transported PLATFORM whose panel is open, re-resolved from the live row
   // set on every render rather than captured at click time — provisioning and
@@ -2591,6 +2601,11 @@ export function ChannelsTab({
               {card.pill.tone === "connected" ? <span className="fleet-channel-card-dot" /> : null}
               {card.pill.label}
             </span>
+            {/* The card offers a CHOICE, said on the face so the picker behind
+                it is not a surprise. Deliberately not a second pill competing
+                with the status one — one line, smaller and dimmer, and absent
+                entirely on the single-door cards (most of them). */}
+            {card.waysNote ? <span className="fleet-channel-card-ways">{card.waysNote}</span> : null}
           </button>
         ))}
       </div>

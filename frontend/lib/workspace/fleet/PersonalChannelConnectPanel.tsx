@@ -5,6 +5,7 @@ import { Check, Loader2, LogOut } from "lucide-react";
 
 import { GatewayPairPanel, type GatewayRegistrationRecord } from "@/lib/gateway/GatewayPairPanel";
 import { useWorkspaceGateways } from "./gateway-box-picker";
+import { QR_RENDER_FAILED_TEXT, resolveQrPanelView } from "./channel-qr-phase";
 import {
   disconnectPersonalChannel,
   friendlyPersonalChannelError,
@@ -385,6 +386,20 @@ function TelegramConnectBody({
   );
 }
 
+/** How long the box gets to hand back a QR after it has ACCEPTED the request,
+ *  before the wait is called off and the customer gets a control back. Roughly
+ *  fifteen status polls (POLL_MS is 2s in personal-channel-pairing.ts) — long
+ *  enough that a slow box is not interrupted, short enough that a box which is
+ *  never going to answer does not present as an indefinite spinner. A wait with
+ *  no end is indistinguishable from a hang.
+ *
+ *  The DEADLINE BELONGS TO THIS CALLER, which is why the phase module takes
+ *  `waitExpired` as an input rather than a clock: a pure function of the panel's
+ *  facts is exhaustively testable, and a pure function that reads Date.now() is
+ *  not. Same split as `channel-doors.ts` — the rule is pure, the timers are the
+ *  component's. */
+const QR_WAIT_MS = 30_000;
+
 function WhatsAppConnectBody({
   label,
   gatewayId,
@@ -408,6 +423,12 @@ function WhatsAppConnectBody({
   const [error, setError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const autoStartedFor = useRef<string | null>(null);
+  // Set the moment the box ACCEPTS a request, cleared whenever the attempt is
+  // abandoned or superseded. This is the fact `busy` cannot carry: `busy` ends
+  // when our fetch resolves, and everything interesting happens after that.
+  // State, not a ref, precisely because the screen has to change when it does.
+  const [acceptedAt, setAcceptedAt] = useState<number | null>(null);
+  const [waitExpired, setWaitExpired] = useState(false);
 
   const qrCode = view?.state?.qr_code || null;
   const pairingCode = view?.state?.metadata?.pairing_code || null;
@@ -429,8 +450,13 @@ function WhatsAppConnectBody({
   const beginOrRetry = useCallback(async () => {
     setBusy(true);
     setError(null);
+    setAcceptedAt(null);
+    setWaitExpired(false);
     try {
       await setupWhatsAppPersonalChannel(gatewayId, {}, agentId);
+      // 200 means ACCEPTED, not "here is a QR" — the code arrives later, on the
+      // status poll. This is where "waiting" begins.
+      setAcceptedAt(Date.now());
       onRefresh();
     } catch (e) {
       setError(friendlyPersonalChannelError(e instanceof Error ? e.message : String(e), label));
@@ -442,19 +468,48 @@ function WhatsAppConnectBody({
   // The gap this closes: after disconnect(), the runtime sits in idle
   // forever -- previously a QR only ever appeared because the whole Gateway
   // process happened to auto-attempt a connection on its own boot. Fire the
-  // same begin/retry call the "Generate QR code" button below uses, once per
-  // idle state entered (not once per poll), so opening the wizard (including
-  // right after disconnecting) reaches a QR without a restart.
+  // same begin/retry call the retry button below uses, once per idle state
+  // entered (not once per poll), so opening the wizard (including right after
+  // disconnecting) reaches a QR without a restart.
+  //
+  // Read one render EARLIER as `autoStartPending` below, so the very first
+  // paint already renders "starting" rather than flashing the idle state's
+  // start control for a frame before this effect runs. Same condition, one
+  // place: the effect fires exactly when that flag is true.
+  const autoStartPending =
+    isRestIdle && !usePhone && !qrCode && !pairingCode && autoStartedFor.current !== gatewayId;
+
   useEffect(() => {
-    if (!isRestIdle || usePhone || qrCode || pairingCode) return;
+    if (!autoStartPending) return;
+    // The ref is re-checked here as well as in the flag above: an effect can be
+    // invoked twice for one render (React's development double-invoke), and the
+    // flag is a value from that render, so only the ref can refuse the second
+    // call. This is the guard the original effect carried; it has not moved,
+    // only gained a render-time reader.
     if (autoStartedFor.current === gatewayId) return;
     autoStartedFor.current = gatewayId;
     void beginOrRetry();
-  }, [isRestIdle, usePhone, qrCode, pairingCode, gatewayId, beginOrRetry]);
+  }, [autoStartPending, gatewayId, beginOrRetry]);
 
   useEffect(() => {
-    if (!isRestIdle) autoStartedFor.current = null;
+    if (isRestIdle) return;
+    // Left the resting states — a QR was issued, the session connected, or the
+    // runtime moved on. Whatever this component was tracking is over, so the
+    // next return to idle starts clean and auto-starts again (the
+    // disconnect -> reconnect path) rather than inheriting a stale expiry.
+    autoStartedFor.current = null;
+    setAcceptedAt(null);
+    setWaitExpired(false);
   }, [isRestIdle]);
+
+  // The wait has an end. Without this a box that accepts the request and never
+  // produces a code leaves a spinner with no control under it — the same
+  // "something is happening" lie in a different shape.
+  useEffect(() => {
+    if (acceptedAt === null || qrCode || waitExpired) return;
+    const timer = setTimeout(() => setWaitExpired(true), QR_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [acceptedAt, qrCode, waitExpired]);
 
   useEffect(() => {
     if (!qrCode) {
@@ -462,11 +517,21 @@ function WhatsAppConnectBody({
       return;
     }
     let cancelled = false;
-    void loadQrcode().then((QRCode) =>
-      QRCode.toDataURL(qrCode, { margin: 1, width: 220 }).then((url) => {
-        if (!cancelled) setQrDataUrl(url);
-      }),
-    );
+    void loadQrcode()
+      .then((QRCode) =>
+        QRCode.toDataURL(qrCode, { margin: 1, width: 220 }).then((url) => {
+          if (!cancelled) setQrDataUrl(url);
+        }),
+      )
+      // A code that arrives and cannot be DRAWN is the one way "waiting" could
+      // outlive its own deadline: the QR_WAIT_MS timer stands down as soon as a
+      // code exists, so a rejection here (the lazy chunk fails to load, the
+      // payload is malformed) used to leave a spinner with no control under it
+      // and no error anywhere — an unhandled rejection in the console at best.
+      // Naming it moves the panel to `failed`, which has a way out.
+      .catch(() => {
+        if (!cancelled) setError(QR_RENDER_FAILED_TEXT);
+      });
     return () => {
       cancelled = true;
     };
@@ -546,23 +611,48 @@ function WhatsAppConnectBody({
 
   // idle / disconnected / logged_out / authorization_required, or qr_required
   // once a QR has actually been issued.
+  //
+  // ONE value decides what every element below shows, and this component does
+  // not decide it — channel-qr-phase.ts does, so the "never a spinner above a
+  // start control" invariant is enforced in a place a test can drive
+  // exhaustively rather than restated at each element. Everything below reads
+  // `qr` and nothing below re-derives anything from the raw state.
+  const qr = resolveQrPanelView({
+    qrImageReady: qrDataUrl !== null,
+    // `busy` and the pending auto-start are the same fact to a customer: we are
+    // asking. Folding them here is why the very first paint renders "starting"
+    // instead of flashing the idle control for one frame.
+    requestInFlight: busy || autoStartPending,
+    errorText: error,
+    codeIssued: qrCode !== null,
+    accepted: acceptedAt !== null,
+    waitExpired,
+  });
+
   return (
     <div className="pc-connect-step">
-      <p className="fleet-channel-expand-hint">Open WhatsApp on your phone → Linked Devices → Link a device, then scan:</p>
-      {qrDataUrl ? (
+      <p className="fleet-channel-expand-hint">{qr.hint}</p>
+      {/* The frame exists only while there is something in it or on its way.
+          It used to render its spinner whenever no image was present, which is
+          also true of every state where nothing at all is happening. */}
+      {qr.showQrImage && qrDataUrl ? (
         <img className="pc-connect-qr" src={qrDataUrl} alt="WhatsApp pairing QR code" width={220} height={220} />
-      ) : (
+      ) : qr.showSpinner ? (
         <div className="pc-connect-qr pc-connect-qr--pending">
           <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
         </div>
-      )}
-      {error && <p className="fleet-channel-expand-error">{error}</p>}
-      {isRestIdle && !qrCode && (
-        <button type="button" className="fleet-btn" onClick={() => void beginOrRetry()} disabled={busy}>
-          {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-          {busy ? "Requesting…" : error ? "Try again" : "Generate QR code"}
+      ) : null}
+      {qr.failureText && <p className="fleet-channel-expand-error">{qr.failureText}</p>}
+      {/* NO control while it is already generating — that pairing (a spinner
+          above a button asking to start) is the contradiction this whole state
+          machine exists to remove. A null label is NO BUTTON, never a disabled
+          one: a disabled "Generate QR code" under a running spinner still tells
+          the customer that starting it is their job. */}
+      {qr.startControlLabel ? (
+        <button type="button" className="fleet-btn" onClick={() => void beginOrRetry()}>
+          {qr.startControlLabel}
         </button>
-      )}
+      ) : null}
       <button type="button" className="pc-connect-alt-link" onClick={() => { setUsePhone(true); setError(null); }}>
         Use phone number instead
       </button>
