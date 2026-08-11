@@ -117,7 +117,12 @@ def test_register_user_kicks_off_email_verification_for_the_new_account() -> Non
         )
         payload = auth.register_user("owner@example.com", "password-123", name="Owner")
 
-    assert payload == {"ok": True}
+    # Still exact equality: the payload carries the issued-user payload PLUS
+    # the verification-email outcome, and nothing else. See
+    # test_signup_verification_email_delivery.py for why the outcome is
+    # reported at all -- a silent failure here left people waiting on a code
+    # that was never sent.
+    assert payload == {"ok": True, "email_verification": {"status": "sent"}}
     start_mock.assert_awaited_once_with(user_id="user-1", email="owner@example.com")
 
 
@@ -139,7 +144,12 @@ def test_register_user_signup_survives_email_verification_provider_failure() -> 
         )
         payload = auth.register_user("owner@example.com", "password-123", name="Owner")
 
-    assert payload == {"ok": True}
+    # The account still exists and the caller still gets its payload -- that is
+    # the point of this test and it is unchanged. What is added is that the
+    # caller is now TOLD the email did not go out: a bare RuntimeError is not
+    # EmailProviderUnavailable, so it reports "failed" (worth a retry) rather
+    # than "not_configured" (never worth a retry).
+    assert payload == {"ok": True, "email_verification": {"status": "failed"}}
 
 
 def test_register_user_accepts_pending_workspace_invites_before_resolving_access() -> None:
@@ -179,6 +189,8 @@ def test_register_user_accepts_pending_workspace_invites_before_resolving_access
     ):
         payload = auth.register_user("owner@example.com", "password-123", name="Owner")
 
-    assert payload == {"ok": True}
+    # start_verification is NOT mocked here, so the real one runs and hits an
+    # unconfigured provider under test -- hence "not_configured".
+    assert payload == {"ok": True, "email_verification": {"status": "not_configured"}}
     accept_mock.assert_called_once_with("user-1", "owner@example.com")
     assert issue_mock.call_args.kwargs["workspace_access"]["ws-invited"]["workspace_id"] == "ws-invited"

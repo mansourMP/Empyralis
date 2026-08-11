@@ -15,6 +15,10 @@ import {
   watchExternalAuthCompletion,
 } from '@/lib/auth/auth-client';
 import { GoogleProviderIcon } from '@/lib/auth/auth-provider-icons';
+import {
+  readDeliveryFromSignupPayload,
+  rememberVerificationDelivery,
+} from '@/lib/auth/verification-delivery';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
 function authErrorCopy(error: string): string {
@@ -214,7 +218,17 @@ export default function SignupPage() {
     setSubmitting(true);
     setError(null);
     try {
-      await signup(email, password, name || undefined, pilotCode || undefined, inviteCode || undefined);
+      const signupPayload = await signup(
+        email,
+        password,
+        name || undefined,
+        pilotCode || undefined,
+        inviteCode || undefined,
+      );
+      // Carry "the verification email did NOT go out" across the full page
+      // load below, so /verify-email can say so instead of claiming a code is
+      // on its way. A successful send stores nothing.
+      rememberVerificationDelivery(readDeliveryFromSignupPayload(signupPayload));
       await awaitBrowserAuthReady({ attempts: 12, delayMs: 250 });
       // A brand-new signup goes straight to the "check your email" screen
       // before it ever sees the app -- see docs/design/email-verification-plan.md.

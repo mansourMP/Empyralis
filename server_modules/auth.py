@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Header, HTTPException, Request, Response
 from server_modules import control_plane_repository
 from server_modules import auth_store_repository
+from server_modules import email_provider_service
 from server_modules import email_verification_service
 from server_modules import entitlements_service
 from server_modules import client_identity_service, quota_policy_service, quota_response_service
@@ -5721,6 +5722,25 @@ def register_user(
     # silently -- the user can still hit /auth/verify-email/resend once the
     # provider is configured, which surfaces the same failure as a real HTTP
     # error instead of a no-op.
+    #
+    # The OUTCOME is reported to the caller, because "we sent you a code" and
+    # "we could not send you a code" are different facts and the signup
+    # response is the only place that knows which one happened. Without this
+    # the client redirected to /verify-email and stated "We sent a 6-digit
+    # code" unconditionally -- so a person whose email never went out sat
+    # waiting on a code that did not exist, with nothing on screen and nothing
+    # in the product admitting it. That is exactly what happened for every
+    # signup while EMAIL_PROVIDER_FROM_ADDRESS pointed at an unregistered
+    # domain and Resend answered 403.
+    #
+    # Three facts, never two -- and deliberately the SAME three names the
+    # invite path already settled on (`sent` / `failed` / `not_configured`,
+    # see test_workspace_invite_email.py), because one concept with two
+    # vocabularies is how the next reader ends up handling only half the
+    # cases. `not_configured` can never succeed on retry; `failed` means the
+    # provider was reached and refused, which a resend may well fix.
+    # Collapsing those two tells a person to retry something impossible.
+    delivery: Dict[str, Any] = {"status": "sent"}
     try:
         run_async_tool_call(
             email_verification_service.start_verification(
@@ -5728,14 +5748,23 @@ def register_user(
                 email=str(user.get("email") or "").strip().lower() or email_token,
             )
         )
-    except Exception:
+    except email_provider_service.EmailProviderUnavailable:
+        delivery = {"status": "not_configured"}
         LOGGER.error(
-            "signup_email_verification_start_failed: could not send verification email "
-            "for user_id=%s (email provider may be unconfigured -- see "
-            "EMAIL_PROVIDER_API_KEY).",
+            "signup_email_verification_start_failed: no email provider is configured, so "
+            "no verification email was sent for user_id=%s (see EMAIL_PROVIDER_API_KEY).",
             user_id,
             exc_info=True,
         )
+    except Exception:
+        delivery = {"status": "failed"}
+        LOGGER.error(
+            "signup_email_verification_start_failed: the email provider rejected or failed "
+            "the verification email for user_id=%s.",
+            user_id,
+            exc_info=True,
+        )
+    payload["email_verification"] = delivery
     return payload
 
 
