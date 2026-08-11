@@ -2465,39 +2465,48 @@ export function ChannelsTab({
   );
   const openclawRowByKey = new Map(openclaw.rows.map((row) => [row.entry.channel_key, row]));
 
-  const openclawCards: UnifiedChannelCard[] = agentGatewayId
-    ? transportedPlatforms.map((platform) => {
-        const rows = platform.variants
-          .map((variant) => openclawRowByKey.get(variant.channel_key))
-          .filter((row): row is NonNullable<typeof row> => Boolean(row));
-        // A card face carries ONE pill for the whole platform. A platform is
-        // ready if any way into it is; otherwise the base variant's own state
-        // is what the customer is being asked to act on, which is the same
-        // "single most actionable state" channelCardPill already picks.
-        const pillRow = rows.find((row) => row.remediation.kind === "ready") ?? rows[0];
-        return {
-          key: `openclaw:${platform.key}`,
-          label: platform.label,
-          // Same lookup a first-party card does, on the `channel_key` verbatim —
-          // no per-channel code here, and no list of which channels have a mark.
-          // 17 of the 19 do (see the provenance table in fleet-icons.ts); IRC and
-          // Yuanbao have no obtainable official mark and fall through to the
-          // neutral monogram tile, which is also what a channel the transport
-          // adds tomorrow will get. Never a guessed or hand-drawn logo.
-          iconSrc: CHANNEL_ICONS[platform.iconKey],
-          pill: pillRow
-            ? channelCardPill(pillRow.remediation)
-            : { label: "Unknown", tone: "locked" as const },
-          waysNote: channelDoorChoiceNote(planDoors(platform.doors)),
-          disabled: false,
-          active: openclawDetailKey === platform.key,
-          open: () => {
-            setOpenclawDetailKey(platform.key);
-            setOpenclawDoorKey(null);
-          },
-        };
-      })
-    : [];
+  // Rendered regardless of `agentGatewayId`. The catalog
+  // (`useOpenClawChannelSetup`) is a property of the pinned transport, not
+  // of any one box, and now loads with no gateway bound — see that hook's
+  // doc comment. A cloud-only agent's transported cards read "Needs Gateway"
+  // (via `remediationFor`'s `needs_hardware` kind, fed by `Boolean
+  // (agentGatewayId)` inside the hook), the same pill the first-party
+  // WhatsApp/Signal/iMessage cards already show in this state — never
+  // absent from the grid, which is the defect this fixes.
+  const openclawCards: UnifiedChannelCard[] = transportedPlatforms.map((platform) => {
+    const rows = platform.variants
+      .map((variant) => openclawRowByKey.get(variant.channel_key))
+      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+    // A card face carries ONE pill for the whole platform. A platform is
+    // ready if any way into it is; otherwise the base variant's own state
+    // is what the customer is being asked to act on, which is the same
+    // "single most actionable state" channelCardPill already picks.
+    const pillRow = rows.find((row) => row.remediation.kind === "ready") ?? rows[0];
+    return {
+      key: `openclaw:${platform.key}`,
+      label: platform.label,
+      // Same lookup a first-party card does, on the `channel_key` verbatim —
+      // no per-channel code here, and no list of which channels have a mark.
+      // 17 of the 19 do (see the provenance table in fleet-icons.ts); IRC and
+      // Yuanbao have no obtainable official mark and fall through to the
+      // neutral monogram tile, which is also what a channel the transport
+      // adds tomorrow will get. Never a guessed or hand-drawn logo.
+      iconSrc: CHANNEL_ICONS[platform.iconKey],
+      pill: pillRow
+        ? channelCardPill(pillRow.remediation)
+        : { label: "Unknown", tone: "locked" as const },
+      waysNote: channelDoorChoiceNote(planDoors(platform.doors)),
+      // "Needs Gateway" stays clickable, exactly like the first-party cards
+      // in the same state (channelStatePill / handleCardClick) — pairing a
+      // Gateway is a real, actionable next step, so this is never `disabled`.
+      disabled: false,
+      active: openclawDetailKey === platform.key,
+      open: () => {
+        setOpenclawDetailKey(platform.key);
+        setOpenclawDoorKey(null);
+      },
+    };
+  });
 
   // Sorted by how many people actually use the platform, not by its first
   // letter — alphabetical opened the grid with ClickClack above Discord and
@@ -2629,7 +2638,7 @@ export function ChannelsTab({
           differently-shaped modal. This is where the three states live — all
           three, never collapsed — beside the one sentence that says what to do
           and the one control that does it. */}
-      {openclawPlatform && agentGatewayId ? (
+      {openclawPlatform ? (
         <div
           className="fleet-detail-backdrop"
           onClick={() => setOpenclawDetailKey(null)}
@@ -2724,78 +2733,97 @@ export function ChannelsTab({
                     </p>
                   ) : null}
 
-                  <div className="openclaw-chips">
-                    {openclawDetail.entry.requires_plugin ? (
-                      <StateChip ok={Boolean(openclawDetail.observed?.installed)} on="installed" off="not installed" />
-                    ) : (
-                      <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
-                        bundled
-                      </span>
-                    )}
-                    {openclawDetail.entry.connect_method === "credential" ? (
-                      <StateChip ok={Boolean(openclawDetail.observed?.configured)} on="credential set" off="no credential" />
-                    ) : null}
-                    <StateChip ok={Boolean(openclawDetail.observed?.enabled)} on="on" off="off" />
-                  </div>
+                  {/* No computer bound to this agent at all — never a form
+                      the customer could not possibly complete. The generated
+                      chips/detail/button below all read a live device's state
+                      (`openclawDetail.observed`), which does not exist yet
+                      when there is no gateway; showing them here would print
+                      invented facts ("not installed", "off") about a box that
+                      was never asked. This is the SAME interaction the
+                      first-party gateway-less cards already use
+                      (LocalBridgeChannelStatus's no-gateway hint below) —
+                      one honest sentence pointing at the Hardware tab, no
+                      dead control. */}
+                  {agentGatewayId ? (
+                    <>
+                      <div className="openclaw-chips">
+                        {openclawDetail.entry.requires_plugin ? (
+                          <StateChip ok={Boolean(openclawDetail.observed?.installed)} on="installed" off="not installed" />
+                        ) : (
+                          <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
+                            bundled
+                          </span>
+                        )}
+                        {openclawDetail.entry.connect_method === "credential" ? (
+                          <StateChip ok={Boolean(openclawDetail.observed?.configured)} on="credential set" off="no credential" />
+                        ) : null}
+                        <StateChip ok={Boolean(openclawDetail.observed?.enabled)} on="on" off="off" />
+                      </div>
 
-                  {/* Only when there is something to say the chips and the
-                      button cannot already say — see Remediation's own doc
-                      comment. An empty detail renders nothing at all rather
-                      than an empty paragraph holding space open. */}
-                  {openclawDetail.remediation.detail ? (
-                    <p className="openclaw-channel-detail">{openclawDetail.remediation.detail}</p>
-                  ) : null}
+                      {/* Only when there is something to say the chips and the
+                          button cannot already say — see Remediation's own doc
+                          comment. An empty detail renders nothing at all rather
+                          than an empty paragraph holding space open. */}
+                      {openclawDetail.remediation.detail ? (
+                        <p className="openclaw-channel-detail">{openclawDetail.remediation.detail}</p>
+                      ) : null}
 
-                  {/* One control, and only the one this state actually needs. A
-                      credential state renders the generated form inline (never a
-                      second stacked modal); install/enable render a control that
-                      DOES the work and verify-polls the box until its own state
-                      catches up, then disappears; the two states with no browser
-                      action say so instead of rendering a control that submits
-                      nothing. */}
-                  {openclawDetail.remediation.kind === "credential" || openclawDetail.remediation.kind === "ready" ? (
-                    <div style={{ marginTop: "var(--space-4)" }}>
-                      <CredentialForm
-                        gatewayId={agentGatewayId}
-                        entry={openclawDetail.entry}
-                        observed={openclawDetail.observed}
-                        onCancel={() => setOpenclawDetailKey(null)}
-                        onSaved={async () => {
-                          await openclaw.refresh({ silent: true });
-                        }}
-                      />
-                    </div>
-                  ) : openclawDetail.remediation.kind === "install" || openclawDetail.remediation.kind === "enable" ? (
-                    <div style={{ marginTop: "var(--space-4)" }}>
-                      {(() => {
-                        const channelKey = openclawDetail.entry.channel_key;
-                        const setupState = openclaw.setupStateFor(channelKey);
-                        // "Queued" is not busy — nothing is running on the box
-                        // for this one yet, it is only waiting its turn.
-                        const working = setupState === "working";
-                        return (
-                          <button
-                            type="button"
-                            className="fleet-btn fleet-btn--accent-fill"
-                            onClick={() => openclaw.requestSetup(channelKey)}
-                            disabled={setupState !== "idle"}
-                          >
-                            {working ? <Loader2 size={14} className="openclaw-spin" /> : null}
-                            {setupState === "queued"
-                              ? "Queued"
-                              : working
-                                ? "Setting up…"
-                                : openclawDetail.remediation.label}
-                          </button>
-                        );
-                      })()}
-                    </div>
-                  ) : openclawDetail.remediation.kind === "elsewhere" ? (
-                    <p className="openclaw-ready openclaw-ready--muted" style={{ marginTop: "var(--space-4)" }}>
-                      <Smartphone size={14} aria-hidden /> Link this one directly on the computer — there is nothing to
-                      paste here.
+                      {/* One control, and only the one this state actually needs. A
+                          credential state renders the generated form inline (never a
+                          second stacked modal); install/enable render a control that
+                          DOES the work and verify-polls the box until its own state
+                          catches up, then disappears; the two states with no browser
+                          action say so instead of rendering a control that submits
+                          nothing. */}
+                      {openclawDetail.remediation.kind === "credential" || openclawDetail.remediation.kind === "ready" ? (
+                        <div style={{ marginTop: "var(--space-4)" }}>
+                          <CredentialForm
+                            gatewayId={agentGatewayId}
+                            entry={openclawDetail.entry}
+                            observed={openclawDetail.observed}
+                            onCancel={() => setOpenclawDetailKey(null)}
+                            onSaved={async () => {
+                              await openclaw.refresh({ silent: true });
+                            }}
+                          />
+                        </div>
+                      ) : openclawDetail.remediation.kind === "install" || openclawDetail.remediation.kind === "enable" ? (
+                        <div style={{ marginTop: "var(--space-4)" }}>
+                          {(() => {
+                            const channelKey = openclawDetail.entry.channel_key;
+                            const setupState = openclaw.setupStateFor(channelKey);
+                            // "Queued" is not busy — nothing is running on the box
+                            // for this one yet, it is only waiting its turn.
+                            const working = setupState === "working";
+                            return (
+                              <button
+                                type="button"
+                                className="fleet-btn fleet-btn--accent-fill"
+                                onClick={() => openclaw.requestSetup(channelKey)}
+                                disabled={setupState !== "idle"}
+                              >
+                                {working ? <Loader2 size={14} className="openclaw-spin" /> : null}
+                                {setupState === "queued"
+                                  ? "Queued"
+                                  : working
+                                    ? "Setting up…"
+                                    : openclawDetail.remediation.label}
+                              </button>
+                            );
+                          })()}
+                        </div>
+                      ) : openclawDetail.remediation.kind === "elsewhere" ? (
+                        <p className="openclaw-ready openclaw-ready--muted" style={{ marginTop: "var(--space-4)" }}>
+                          <Smartphone size={14} aria-hidden /> Link this one directly on the computer — there is nothing to
+                          paste here.
+                        </p>
+                      ) : null}
+                    </>
+                  ) : (
+                    <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
+                      {openclawDetail.remediation.detail}
                     </p>
-                  ) : null}
+                  )}
                 </>
               ) : null}
             </div>

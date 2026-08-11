@@ -71,6 +71,7 @@ export type Remediation =
   | { kind: "enable"; label: string; detail: string }
   | { kind: "elsewhere"; detail: string }
   | { kind: "unknown"; detail: string }
+  | { kind: "needs_hardware"; detail: string }
   | { kind: "ready"; detail: string };
 
 /** The ONE status word a channel CARD FACE shows.
@@ -87,7 +88,11 @@ export type Remediation =
  *  (.fleet-channel-card-pill--connected/--gateway/--locked/--setup), so a
  *  transported channel and a first-party one read as one grid rather than two
  *  colour systems side by side. "Ready", never "Connected": a connection is
- *  proven by a real message arriving and nothing on this screen has seen one. */
+ *  proven by a real message arriving and nothing on this screen has seen one.
+ *  "needs_hardware" reuses the "gateway" tone AND THE EXACT LABEL
+ *  `channelStatePill` (FleetAgentDetail.tsx) uses for the first-party
+ *  no-gateway state — "Needs Gateway" — so the two halves of the grid read as
+ *  one colour system in this state too, not just in the other four. */
 export type ChannelCardPill = {
   label: string;
   tone: "connected" | "gateway" | "locked" | "setup";
@@ -108,6 +113,8 @@ export function channelCardPill(remediation: Remediation): ChannelCardPill {
       return { label: "Switched off", tone: "setup" };
     case "elsewhere":
       return { label: "Link on the device", tone: "locked" };
+    case "needs_hardware":
+      return { label: "Needs Gateway", tone: "gateway" };
     default:
       return { label: "Unknown", tone: "locked" };
   }
@@ -117,7 +124,24 @@ export function remediationFor(
   entry: OpenClawChannelCatalogEntry,
   observed: OpenClawObservedChannel | undefined,
   reachable: boolean,
+  // Three different facts collapsed into one boolean here on purpose:
+  // callers with no gateway bound at all pass `hasGateway: false` and never
+  // reach the `reachable`/`observed` branch below — "no computer paired" and
+  // "a paired computer could not be reached" are different facts (the first
+  // has no button that could ever do anything; the second is worth a retry)
+  // and must not share the "unknown" copy. See the module-level Remediation
+  // comment: this is the "needs_hardware" state that copy used to lie about.
+  hasGateway: boolean,
 ): Remediation {
+  if (!hasGateway) {
+    return {
+      kind: "needs_hardware",
+      // Same fact, same words, as the first-party no-gateway hint
+      // (FleetAgentDetail.tsx's LOCAL_BRIDGE_NO_GATEWAY_HINT) — a computer
+      // that does not exist yet, not a computer that could not be reached.
+      detail: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at this channel.",
+    };
+  }
   if (!reachable || !observed) {
     return {
       kind: "unknown",
