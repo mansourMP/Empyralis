@@ -1779,6 +1779,32 @@ at the wire. Do not add a keyword matcher for them; the structural fact is
 `channels list --all --json` -> `installed`, already surfaced as
 `channel_plugins[].installed`.
 
+**Slash commands now execute on every personal channel through ONE waist,
+`_dispatch_personal_channel_command`.** `sage_command_dispatcher.
+dispatch_command` -> `command_registry` (24 commands: /new /main /compact
+/stop /clear /export /model /thinking /help /commands /tools /status /whoami
+/usage /memory /forget /tasks /agents /skills /config /mcp /plugins /debug
+/tts /bash) was only reached from `_deliver_whatsapp_personal_reply`,
+`handle_cloud_channel_inbound`, and hosted Telegram — Telegram-personal (QR)
+and the whole local-bridge/OpenClaw family (Signal, iMessage, WeChat, every
+`openclaw_*` channel) never dispatched a command at all, so an owner's
+`/compact` passed every gate and reached the model as literal chat text.
+Fixed by giving every Gateway-WS delivery path (WhatsApp included) ONE
+shared function to cross instead of each growing its own copy — which is
+exactly how WhatsApp's own inline block had acquired ITS bug: it wrote the
+command's reply into the outbound table and returned WITHOUT ever calling
+`gateway_protocol_service.dispatch_channel_outbound`, so a recognized
+command sat "pending" forever. `_dispatch_personal_channel_command` runs
+`dispatch_command`, and only if it returns a reply does it write the
+outbound row, call `_enforce_personal_channel_dispatch_decision`, and
+actually dispatch — a single call site is the only place that sequence can
+regress again. It does not decide authorization: the dmPolicy/group gates
+and `_control_command_block_result` already ran in every caller before this
+is reached, and `outbound_agent_id` is the one axis that still varies by
+caller — WhatsApp/Telegram-personal scope outbound rows by `agent_id`,
+local-bridge stays unscoped on purpose (same reason
+`_deliver_local_bridge_personal_reply`'s own outbound calls do).
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**

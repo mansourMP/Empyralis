@@ -224,7 +224,19 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.get("blocked", False))
 
     async def test_owner_slash_help_on_telegram_reaches_reply_path(self) -> None:
-        """Same fix, the Telegram-personal (QR) call site."""
+        """Same fix, the Telegram-personal (QR) call site.
+
+        Updated alongside the "commands on every channel" fix
+        (_dispatch_personal_channel_command in personal_channels_service.py):
+        Telegram-personal now routes a recognized command through the real
+        command_registry BEFORE ever falling back to the LLM reply builder,
+        exactly like WhatsApp already does above — so a correctly un-blocked
+        /help must reach dispatch_channel_outbound WITHOUT ever calling
+        build_telegram_personal_reply. Before that fix (and still, before
+        THIS test file's own fix), /help passed this gate and then fell
+        through to the LLM reply builder with the literal text "/help" —
+        this test used to assert exactly that fallback as correct, which was
+        an artifact of the gap, not the intended behavior."""
         with (
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
@@ -232,7 +244,7 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "Available commands: ...", "source": "sage"},
+                return_value={"text": "I would have chatted about it.", "source": "sage"},
             ) as build_reply_mock,
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
@@ -258,15 +270,29 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     },
                 },
             )
-        build_reply_mock.assert_called_once()
+        build_reply_mock.assert_not_called()
         dispatch_mock.assert_awaited_once()
         self.assertFalse(result.get("blocked", False))
+        self.assertEqual(result["outbound"]["status"], "delivered")
+        self.assertTrue(str(result["outbound"].get("text") or "").strip(), "the dispatched reply must not be empty")
 
     async def test_owner_slash_help_on_local_bridge_channels_reaches_reply_path(self) -> None:
         """Same fix, the shared local-bridge call site — Signal, iMessage,
         WeChat, and every OpenClaw-transported channel (the
         _OpenClawPersonalChannelHandler subclass funnels into the same
-        handle_inbound -> this same handler)."""
+        handle_inbound -> this same handler).
+
+        Updated alongside the "commands on every channel" fix
+        (_dispatch_personal_channel_command in personal_channels_service.py):
+        the local-bridge family now routes a recognized command through the
+        real command_registry BEFORE ever falling back to the LLM reply
+        builder, exactly like WhatsApp already does above — so a correctly
+        un-blocked /help must reach dispatch_channel_outbound WITHOUT ever
+        calling build_personal_channel_reply_async. Before that fix, /help
+        passed this gate and then fell through to the LLM reply builder with
+        the literal text "/help" — this test used to assert exactly that
+        fallback as correct, which was an artifact of the gap, not the
+        intended behavior."""
         for channel_key, meta in personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS.items():
             with self.subTest(channel_key=channel_key):
                 with (
@@ -303,9 +329,10 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         provider=meta["provider"],
                         label=meta["label"],
                     )
-                build_reply_mock.assert_called_once()
+                build_reply_mock.assert_not_called()
                 dispatch_mock.assert_awaited_once()
                 self.assertFalse(result.get("blocked", False), f"{channel_key}: owner /help must not be blocked")
+                self.assertEqual(result["outbound"]["status"], "delivered")
 
     # ── a non-owner: owner-only commands stay refused, but honestly ─────
 
