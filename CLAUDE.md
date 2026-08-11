@@ -1860,3 +1860,15 @@ tab, read the console.
   11GB `.git`) filled the disk to 100% mid-session on 2026-08-07 and killed
   several running agents. Prune merged ones periodically; never force-remove
   one with uncommitted work.
+
+**Never test against the founder's Claude subscription. Not once, not "just
+one call".** Founder's instruction, 2026-08-11, given while planning
+BYO-subscription testing: *"I'm not sure if I will have a thing that might get
+me banned from my subscription but we just not gonna do it because I don't
+want to put risk even if it's 1%."* An automated agent driving a personal
+Claude plan is exactly the usage pattern that gets a plan flagged, and the
+downside (losing the account this company is built on) is unbounded while the
+upside is one test. BYO-subscription work is exercised against OpenAI, xAI/Grok
+and Cursor instead; the Claude BYO path is verified by reading code and by
+mocked tests, never by a live call on a personal plan. Platform/API credentials
+billed to the company are a different thing and are fine.
