@@ -1184,6 +1184,56 @@ async def provision_openclaw_transport(
 # vault, and note the consequence that no GET on this router can return one.
 
 
+@router.get("/personal-channels/openclaw/catalog")
+async def get_openclaw_channel_catalog(
+    request: Request,
+    current_user=Depends(require_api_key),
+):
+    """The CATALOG half of `get_openclaw_channel_setup` below, with no
+    gateway involved at all.
+
+    `openclaw_channel_setup_catalog()` is a pure read of the checked-in
+    manifest — true before any computer has ever been paired, exactly like
+    that route's own catalog half. This route exists because the unified
+    channel grid (FleetAgentDetail.tsx's ChannelsTab) was rendering the
+    transported cards ONLY when an agent had a bound gateway —
+    `agentGatewayId ? [...] : []` — so with no gateway paired, ~20
+    transported platforms (Feishu, LINE, Matrix, Zalo, ...) were silently
+    absent from the grid instead of showing the same "Needs Gateway" state
+    the first-party cards (WhatsApp, Signal, iMessage) already render in that
+    situation. The customer could not discover those channels exist at all —
+    the "built, tested, and never wired" shape one level up from the code:
+    the catalog was always gateway-independent, only the route to reach it
+    wasn't.
+
+    `require_api_key` only — deliberately no
+    `_require_accessible_gateway_registration`, unlike every other route in
+    this file: there is no `gateway_id` in this path and nothing tenant- or
+    customer-scoped in the response. This returns a static product catalog —
+    channel ids, labels and generated-form FIELD NAMES straight off the
+    pinned manifest, the same values `get_openclaw_channel_setup` below
+    returns as its `channels` key — with no secret, no per-customer state and
+    no observed device data. `require_api_key`'s "someone is logged in, any
+    tenant" is exactly the right amount of gate for that, not a shortcut
+    around a missing tenancy check (see CLAUDE.md on `require_api_key` not
+    being an authorization check for anything that IS tenant-scoped — this
+    route is the case where there is genuinely nothing to scope).
+    """
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    catalog = openclaw_channel_setup_service.openclaw_channel_setup_catalog()
+    # Same computation as the gateway-scoped route below, never a second
+    # hand-typed list beside it.
+    already_available_channels = sorted(
+        (channel.label for channel in channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS),
+        key=str.lower,
+    )
+    return {
+        "openclaw_version": openclaw_channel_registry.OPENCLAW_VERSION,
+        "channels": catalog,
+        "already_available_channels": already_available_channels,
+    }
+
+
 @router.get("/personal-channels/openclaw/gateways/{gateway_id}/setup")
 async def get_openclaw_channel_setup(
     request: Request,

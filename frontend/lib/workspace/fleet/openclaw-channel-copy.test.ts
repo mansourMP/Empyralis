@@ -151,7 +151,13 @@ for (const connect_method of CONNECT_METHODS) {
               const o = observedIsUndefined
                 ? undefined
                 : observed({ installed, requires_plugin, configured, enabled });
-              const remediation = remediationFor(e, o, reachable);
+              // `hasGateway: true` throughout this matrix — it exists to
+              // cover every branch REACHABLE ONLY ONCE a gateway is bound.
+              // The no-gateway state (`hasGateway: false`) collapses every
+              // one of these combinations to a single "needs_hardware"
+              // result and is covered in its own block below, so it is not
+              // part of this matrix.
+              const remediation = remediationFor(e, o, reachable, true);
               const caseLabel = `connect_method=${connect_method} requires_plugin=${requires_plugin} reachable=${reachable} observed=${observedIsUndefined ? "undefined" : `{installed:${installed},configured:${configured},enabled:${enabled}}`}`;
               assertNoOpenClaw(remediation.detail, `remediationFor(${caseLabel}).detail`);
               if ("label" in remediation) {
@@ -221,6 +227,63 @@ for (const connect_method of CONNECT_METHODS) {
   }
 }
 assert(cases > 0, "the remediationFor matrix actually ran at least one case");
+
+// --- `hasGateway: false`: the third fact `remediationFor` used to collapse
+//     into "unknown", THE BUG THIS FILE SHIPS WITH. Before this fix, a
+//     transported channel with no gateway bound at all was simply absent
+//     from the grid (agentGatewayId ? [...] : [] in FleetAgentDetail.tsx),
+//     so `remediationFor` was never even called in that state — there was
+//     nothing to collapse because there was no card. Now that the catalog
+//     loads without a gateway, "no computer paired" must read differently
+//     from "a paired computer could not be reached": the first has no retry
+//     that could ever help, the second is worth trying again. Run across
+//     the same reachable/observed matrix as above to prove `hasGateway:
+//     false` wins over EVERY other input — a card must not flicker between
+//     "needs hardware" and some other state depending on stale observed data
+//     left over from a previously-bound gateway. -----------------------
+
+for (const connect_method of CONNECT_METHODS) {
+  for (const requires_plugin of [true, false]) {
+    for (const reachable of [true, false]) {
+      for (const observedIsUndefined of [true, false]) {
+        const e = entry({ connect_method, requires_plugin });
+        const o = observedIsUndefined ? undefined : observed({ requires_plugin });
+        const remediation = remediationFor(e, o, reachable, false);
+        const caseLabel = `connect_method=${connect_method} requires_plugin=${requires_plugin} reachable=${reachable} observed=${observedIsUndefined ? "undefined" : "defined"} hasGateway=false`;
+
+        assert(
+          remediation.kind === "needs_hardware",
+          `remediationFor(${caseLabel}).kind must be "needs_hardware" regardless of reachable/observed — got ${JSON.stringify(remediation.kind)}`,
+        );
+        assertNoOpenClaw(remediation.detail, `remediationFor(${caseLabel}).detail`);
+        assert(
+          !/could not be reached|unknown/i.test(remediation.detail),
+          `remediationFor(${caseLabel}).detail must not borrow the "unreachable" copy — no gateway bound is a different fact, got ${JSON.stringify(remediation.detail)}`,
+        );
+        assert(
+          /computer/i.test(remediation.detail) && /hardware/i.test(remediation.detail),
+          `remediationFor(${caseLabel}).detail must point at the Hardware tab like the first-party no-gateway hint does, got ${JSON.stringify(remediation.detail)}`,
+        );
+
+        const pill = channelCardPill(remediation);
+        assertNoOpenClaw(pill.label, `channelCardPill(${caseLabel}).label`);
+        assert(
+          pill.label === "Needs Gateway",
+          `channelCardPill(${caseLabel}).label must read "Needs Gateway" — VERBATIM what channelStatePill (FleetAgentDetail.tsx) shows a first-party card in this exact state, so the two halves of the grid read as one vocabulary. Got ${JSON.stringify(pill.label)}`,
+        );
+        assert(
+          pill.tone === "gateway",
+          `channelCardPill(${caseLabel}).tone must be "gateway" — the same tone the first-party "Needs Gateway" pill uses. Got ${JSON.stringify(pill.tone)}`,
+        );
+        const mechanism = /\bplugin(s)?\b|\bnpm\b|\bpackage\b|\bbinary\b/i;
+        assert(
+          !mechanism.test(remediation.detail),
+          `remediationFor(${caseLabel}).detail must not name mechanism, got ${JSON.stringify(remediation.detail)}`,
+        );
+      }
+    }
+  }
+}
 
 // --- formatChannelList: sanity on the join logic the "already available
 //     elsewhere" note is built from. Not an OpenClaw check on its own —

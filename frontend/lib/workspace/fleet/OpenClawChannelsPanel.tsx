@@ -126,15 +126,23 @@ export function StateChip({ ok, on, off }: { ok: boolean; on: string; off: strin
 
 /** Every OpenClaw channel this gateway carries, joined with its observed
  *  state, plus the provisioning action. `gatewayId: null` (no paired
- *  computer) is a valid, common state — OpenClaw is structurally box-only, so
- *  this resolves immediately with an empty row set and no fetch, rather than
- *  spinning forever on a request that can never succeed. */
+ *  computer) is a valid, common state — OpenClaw is structurally box-only —
+ *  but it is NOT "nothing to show": the CATALOG (which channels exist and
+ *  what their setup form looks like) is a property of the pinned transport,
+ *  not of any one box, so it still loads from
+ *  `GET /personal-channels/openclaw/catalog` with no gateway_id in the URL.
+ *  Only the OBSERVED half (installed/configured/enabled on a real machine)
+ *  is genuinely box-only and stays absent. Before this, `gatewayId: null`
+ *  resolved to an empty row set and the whole transported half of the
+ *  channel grid silently vanished for a cloud-only agent — the "built,
+ *  tested, and never wired" shape, since the catalog was reachable, just not
+ *  through any route that didn't require a gateway_id. */
 const SETUP_VERIFY_POLL_MS = 3_000;
 const SETUP_VERIFY_TIMEOUT_MS = 120_000;
 
 export function useOpenClawChannelSetup(gatewayId: string | null, agentId: string) {
   const [data, setData] = useState<SetupResponse | null>(null);
-  const [loading, setLoading] = useState(Boolean(gatewayId));
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   /** `[active, ...waiting]`. See `requestSetup` — installs are serialized for
@@ -145,18 +153,17 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
 
   const load = useCallback(
     async (opts?: { silent?: boolean }): Promise<SetupResponse | null> => {
-      if (!gatewayId) {
-        setData(null);
-        setError(null);
-        setLoading(false);
-        return null;
-      }
       if (!opts?.silent) setLoading(true);
       try {
-        const res = await fetch(
-          `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/setup`,
-          { credentials: "include" },
-        );
+        // With a gateway bound, join the catalog against this box's live
+        // state. With none, the catalog alone — no `observed` key at all,
+        // which is exactly what makes `reachable` (below) false and every
+        // row's remediation `needs_hardware` rather than a stale/invented
+        // "not installed" read from a device that was never asked.
+        const url = gatewayId
+          ? `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/setup`
+          : "/api/personal-channels/openclaw/catalog";
+        const res = await fetch(url, { credentials: "include" });
         if (!res.ok) {
           setError(`Could not load channels (${res.status}).`);
           return null;
@@ -278,9 +285,13 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
     () =>
       catalog.map((entry) => {
         const observed = observedById.get(entry.channel_id);
-        return { entry, observed, remediation: remediationFor(entry, observed, reachable) };
+        // `Boolean(gatewayId)` — not `reachable` — is the "is there a
+        // computer at all" fact. With no gateway bound, every row reads
+        // `needs_hardware` regardless of what a PREVIOUS gateway's observed
+        // data might still be sitting in `data` from a stale response.
+        return { entry, observed, remediation: remediationFor(entry, observed, reachable, Boolean(gatewayId)) };
       }),
-    [catalog, observedById, reachable],
+    [catalog, observedById, reachable, gatewayId],
   );
 
   const repairable = rows
