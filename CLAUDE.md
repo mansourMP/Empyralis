@@ -120,6 +120,32 @@ ceremony every customer leaves empty.
 **Non-owners never see personal or self-chat threads.** Conservative default,
 enforced without asking.
 
+**A customer may upload notes and pictures. Never code, archives or
+binaries.** Founder's instruction, and it is positioning rather than
+hygiene: a file surface that accepts anything becomes a code-sharing tool by
+accident, which is the product we are explicitly not building.
+`upload_content_policy.assert_allowed_upload` is the one gate, server-side,
+run before any byte reaches disk — **the EXTENSION is the decision and the
+BYTES are only a refutation**. A `.txt` holding a shell script is text, is
+not detectable, and stays accepted; a `.txt` whose first bytes are a
+ZIP/ELF/Mach-O is a renamed binary and is refused, as is a `.png` that is
+not a PNG. SVG is deliberately not an accepted picture — attachments are
+served straight back by `FileResponse`, so an SVG is a picture that is also
+a program on the workspace's own origin. Every refusal names what IS
+accepted. A frontend `accept` attribute is a courtesy on the picker, never
+the guardrail.
+
+**`POST /api/sage-chat/attachments` is registered TWICE, and the one that
+wins is decided by registration order.** `routes_workflows.py` calls
+`register_sage_context_file_routes` before `register_sage_chat_routes`, and
+FastAPI serves the first match — so `sage_context_files_api`'s handler is
+live and `sage_chat_api`'s identical declaration is dead code that still
+type-checks, still passes its own tests, and had the only size cap of the
+two. Both now call the same policy, with a source assertion that they do.
+Before changing behaviour on a path, check whether something else registered
+it first; a test against the shadowed twin asserts nothing about what a
+customer hits.
+
 **Hardware attaches to its owner, never to the project.** Decided 2026-08-06.
 An agent joining a project must never implicitly give that project's members
 hands on the hardware the agent runs on — a person's Mac holds their sessions,
@@ -513,6 +539,21 @@ requires updating every legitimate "home tenant" reader
 (`account_shell_service.py`'s cache-key seed, `routes_workspaces.py`'s
 `create_workspace` bootstrap). Before reading `tenant_id` off a user record
 anywhere, resolve it from the workspace instead.
+
+**A workspace invite created a row, returned a token, and sent nothing.**
+`email_provider_service.py` was a complete, working Resend integration with
+exactly ONE caller (email verification) while `create_workspace_invite_route`
+had no mailer at all — the "built, tested, and never wired" shape, except the
+unwired half was the sender and the UI honestly said so ("No email sender
+yet"), so it read as a decision rather than a gap for weeks. Fixed 2026-08-11
+(`workspace_invite_email_service`). Two rules follow. **The email must never
+cost the invite**: the row and token exist before the send is attempted and
+are returned whatever the mailer does, so every failure — including a
+control-plane read for the workspace NAME — is caught and reported, never
+raised. And **"provider unset" / "send failed" / "sent" are three facts, not
+two**: collapsing the first two tells an owner to retry something that can
+never work, and either rendering as "sent" is the original bug. The
+copy-link fallback stays on screen in all three states.
 
 **A channel list copied into a third place.** The local-bridge channel map
 exists in `personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS`, in
