@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Empyralis">
+  <!--
+    Empyralis mark, small-size variant. NOT a redesign: same three bars, same
+    amber-to-ember ramp, same dot beside the middle bar, same hex values.
+
+    Two deliberate differences from empyralis-mark.svg, both forced by the
+    16px render and both measured before they were made:
+
+      empyralis-mark.svg  content occupies 256 of 512 units (50% padding), so
+                          a 16px favicon draws the artwork into 8px and each
+                          bar into 1.75px — the bars grey out and the dot
+                          (r=30/512) lands on ~1px and merges with the middle
+                          bar's row.
+      this file           content is cropped to the artwork with a 1-unit
+                          margin (30 of 32), so a 16px favicon draws bars at
+                          3px, and the dot is enlarged from 1.07x to 1.33x
+                          the bar height so it survives as a dot rather than
+                          a square pixel.
+
+    Used ONLY where the render box is <= 32px (the favicon). Every surface
+    that renders the mark at a legible size uses empyralis-mark.svg unchanged.
+
+    NOTE: the comment lives INSIDE <svg> on purpose — sharp/librsvg sniff the
+    first bytes of the file for the SVG root and reject a leading comment.
+  -->
+  <rect x="1" y="2" width="30" height="6" rx="3" fill="#F2A65A"/>
+  <rect x="1" y="13" width="18" height="6" rx="3" fill="#E8853D"/>
+  <circle cx="27" cy="16" r="4" fill="#E8853D"/>
+  <rect x="1" y="24" width="30" height="6" rx="3" fill="#C95F27"/>
+</svg>

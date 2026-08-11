@@ -3,7 +3,7 @@
  *
  * RULE: The platform's own AI must NEVER expose the underlying provider
  * (model names, logos, raw model IDs) to the consumer. The hosted path
- * ALWAYS renders as "Platform AI" with the Empyralis hex mark.
+ * ALWAYS renders as "Platform AI" with the Empyralis mark.
  *
  * EXCEPTION: BYO-key providers keep their real name/logo — the user chose them.
  *
@@ -13,7 +13,7 @@
 
 const PLATFORM_AI_LABEL = 'Platform AI';
 
-const PLATFORM_AI_LOGO = '/brand-assets/empyralis/empyralis-hex-mark.svg';
+const PLATFORM_AI_LOGO = '/brand-assets/empyralis/empyralis-mark.svg';
 
 const PLATFORM_CREDENTIAL_PLANE = 'platform_runtime';
 
@@ -71,7 +71,7 @@ export function platformSafeProviderLabel(
 /**
  * Safe consumer-facing provider logo path.
  *
- * Platform path  → Empyralis hex mark (neutral)
+ * Platform path  → Empyralis mark (neutral)
  * BYOK / local   → the provider's real logo
  *
  * Accepts any provider-like object.
@@ -133,7 +133,7 @@ export { PLATFORM_AI_LOGO, PLATFORM_AI_LABEL };
  * Use this when the caller already knows the credential plane
  * (e.g. from ProviderCardRecord.provider.credentialPlane).
  *
- * Platform path  → Empyralis hex mark
+ * Platform path  → Empyralis mark
  * BYOK / local   → the fallback image unchanged
  */
 export function platformSafeImage(

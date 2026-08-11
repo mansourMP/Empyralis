@@ -83,7 +83,7 @@ function LandingNav() {
       <div className="landing__container landing-nav__inner">
         <Link href="/" className="landing-nav__brand">
           <img
-            src="/brand-assets/empyralis/empyralis-hex-mark.svg"
+            src="/brand-assets/empyralis/empyralis-mark.svg"
             alt=""
             width={24}
             height={24}

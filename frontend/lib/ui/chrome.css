@@ -2468,6 +2468,21 @@ body[data-theme='dark'] .app-auth-card--elevated {
   margin-bottom: var(--app-space-4);
 }
 
+/* Brand mark above the auth heading. justify-self stops the grid stretching
+   it to the card width, and the extra bottom margin is the group break —
+   the mark is its own group, the kicker/title/subtitle below are one (dense
+   inside a group, airy between groups). No theme rule: the amber ramp is the
+   same artwork on both surfaces and was checked against each. */
+.app-auth-brand-mark {
+  justify-self: start;
+  /* 64, not 40: the mark carries 50% padding inside its own viewBox, so a
+     64px box draws 32px of artwork — the size that sits level with the
+     24px h1 beneath it. Measured on the real page, not assumed. */
+  width: 64px;
+  height: 64px;
+  margin-bottom: var(--app-space-1);
+}
+
 /* Was never actually styled (signup's identical kicker has the same gap) —
    it rendered at inherited body size/weight, indistinguishable from
    .app-auth-title next to it. Combined with --app-font-24 being undefined

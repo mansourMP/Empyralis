@@ -1439,6 +1439,56 @@ Assets are verified by loading them in a real browser in BOTH themes and
 asserting HTTP 200 per file — `tests/e2e/channels-card-grid-capture.spec.ts`
 already does both; an `<img>` tag in the DOM proves nothing.
 
+**OUR OWN mark has two files, and the second one is arithmetic, not taste.**
+Landed 2026-08-11. `empyralis-mark.svg` is the founder's design and is never
+edited; `empyralis-mark-compact.svg` is the same bars, same hex values,
+cropped to the artwork with the dot at 1.33x the bar height instead of 1.07x.
+It exists because the design carries 50% padding inside its own viewBox:
+
+```
+                     16px favicon draws...    verdict
+empyralis-mark.svg   8px of artwork,          bars grey out, dot ~1px
+                     bars 1.75px, dot 0.9px   and merges into the middle row
+compact.svg          30 of 32 units,          three bars + a separate dot
+                     bars 3px, dot 4px        still readable
+```
+
+Rule: `<= 32px render box` uses compact (the favicon, nothing else today);
+anything larger uses the founder's mark unchanged. The favicon is declared
+through Next's Metadata `icons` object and NOT the `app/icon.*` file
+convention, because the convention emits one asset for every size and this
+mark needs two. `public/favicon.ico` (hand-built, 16/32/48) sits beside it
+for the bare `/favicon.ico` request nothing reads a `<link>` for — in
+`public/` and never `app/favicon.ico`, which would inject a competing link.
+
+Two things measured while wiring it, both worth not re-deriving. **On white
+the top bar is 2.02:1 and the middle 2.67:1** — below WCAG's 3:1 for a
+graphical object; the bottom bar (4.08:1) is what carries the mark, and on
+`#1d1d1d` all three clear easily (8.3 / 6.3 / 4.1). The mark reads on both,
+verified in a real browser in both themes, but a light-surface use that
+depends on the top bar alone will not. And **an email may never carry the
+SVG**: Gmail strips `<img>` pointing at SVG and drops `data:` sources too, so
+`workspace_invite_email_service` links a hosted PNG on the same public origin
+the accept link uses, `alt="Empyralis"`, `logo_url` optional so a caller with
+no resolvable origin emits no tag rather than a broken one. Images are
+blocked by default in every major client, so the mark carries no fact —
+`test_the_email_still_reads_with_images_blocked` builds the same email both
+ways and requires the imageless one to still name the inviter, workspace,
+address, expiry and link.
+
+Found while doing it, both the "built, tested, and never wired" shape:
+`platform-brand.ts`'s `PLATFORM_AI_LOGO` / `platformSafeProviderImage` /
+`platformSafeImage` have **zero production callers** — `chat-message.tsx` is
+the module's only importer and takes `isPlatformBillingSource` alone, so the
+hosted-AI turn renders a LABEL and no avatar anywhere. And
+`lib/marketing/landing-page.tsx`'s `LandingPage` has **zero importers** —
+`app/page.tsx` redirects to `/login` or the workspace, so the marketing page
+renders on no route. Both were swapped to the new mark; neither is on screen
+today. The logo constant now has a filesystem assertion in
+`platform-brand.test.ts` (source constant vs. a real file under `public/`,
+two different sources) because every other assertion in that file compares
+the constant against itself and stays green pointing at a deleted asset.
+
 **ONE PLATFORM = ONE CARD. A VARIANT IS ALWAYS A DOOR.** Landed 2026-08-10.
 The surface grew in two eras and they disagreed on this: Telegram was one card
 with two doors, while the transport's own model — every variant of a platform

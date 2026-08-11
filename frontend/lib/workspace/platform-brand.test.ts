@@ -5,6 +5,9 @@
  * Run: npx tsx lib/workspace/platform-brand.test.ts
  */
 
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   isPlatformProvider,
   isPlatformBillingSource,
@@ -62,7 +65,7 @@ assert(!isPlatformBillingSource(null), 'rejects null');
 assertEqual(
   platformSafeImage('platform_runtime', '/brand-assets/providers/deepseek.svg'),
   PLATFORM_AI_LOGO,
-  'platform path → hex mark, regardless of fallback',
+  'platform path → Empyralis mark, regardless of fallback',
 );
 assertEqual(
   platformSafeImage('workspace_connection', '/brand-assets/providers/openai.svg'),
@@ -103,7 +106,7 @@ assertEqual(
 assertEqual(
   platformSafeProviderImage({ credential_plane: 'platform_runtime', image: '/brand-assets/providers/deepseek.svg' }),
   PLATFORM_AI_LOGO,
-  'object form: platform → hex mark',
+  'object form: platform → Empyralis mark',
 );
 assertEqual(
   platformSafeProviderImage({ credential_plane: 'workspace_connection', image: '/brand-assets/providers/openai.svg' }),
@@ -148,6 +151,20 @@ assertEqual(platformSafeModelLabel('deepseek-v4-flash', 'pro'), 'Platform Fast',
 
 assert(typeof PLATFORM_AI_LOGO === 'string' && PLATFORM_AI_LOGO.length > 0, 'PLATFORM_AI_LOGO is a non-empty string');
 assert(typeof PLATFORM_AI_LABEL === 'string' && PLATFORM_AI_LABEL.length > 0, 'PLATFORM_AI_LABEL is a non-empty string');
+
+// --- The logo path names a file that actually exists ---
+//
+// Every other assertion in this file compares PLATFORM_AI_LOGO against
+// PLATFORM_AI_LOGO, so the whole suite stays green when the constant points
+// at a deleted or misspelt asset -- a check that derives its expectation from
+// the thing it checks (CLAUDE.md). The expected side comes from the source
+// constant; the actual side comes from the filesystem, which is a different
+// source. A missing brand asset renders as an empty box with no error.
+
+assert(
+  existsSync(join(__dirname, '..', '..', 'public', PLATFORM_AI_LOGO.replace(/^\//, ''))),
+  `PLATFORM_AI_LOGO resolves to a real file under public/ (${PLATFORM_AI_LOGO})`,
+);
 
 // --- Summary ---
 

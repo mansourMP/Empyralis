@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-labelledby="title desc">
-  <title id="title">Empyralis hex mark</title>
-  <desc id="desc">A minimal black hexagonal brand mark with a small connected center node.</desc>
-  <rect width="120" height="120" rx="24" fill="#ffffff"/>
-  <path d="M60 17.5 96.8 38.8v42.4L60 102.5 23.2 81.2V38.8L60 17.5Z" fill="none" stroke="#111111" stroke-width="8" stroke-linejoin="round"/>
-  <path d="M60 39.5 77.8 49.8v20.4L60 80.5 42.2 70.2V49.8L60 39.5Z" fill="none" stroke="#111111" stroke-width="6" stroke-linejoin="round"/>
-  <circle cx="60" cy="60" r="6.8" fill="#111111"/>
-</svg>
