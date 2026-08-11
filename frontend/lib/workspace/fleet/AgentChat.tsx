@@ -360,6 +360,24 @@ type PendingAttachment = {
   url: string;
 };
 
+/** FastAPI's error envelope carries the human sentence in `detail`, with
+ *  this platform's error middleware repeating it under `error.message`. Read
+ *  either; fall back to the raw body only when it is neither. */
+function uploadErrorMessage(body: string): string {
+  const raw = String(body || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as { detail?: unknown; error?: { message?: unknown } };
+    const detail = typeof parsed.detail === "string" ? parsed.detail.trim() : "";
+    if (detail) return detail;
+    const message = typeof parsed.error?.message === "string" ? parsed.error.message.trim() : "";
+    if (message) return message;
+  } catch {
+    // Not JSON — a proxy or gateway error page. Show what came back.
+  }
+  return raw.slice(0, 200);
+}
+
 async function uploadChatAttachment(workspaceId: string, file: File): Promise<PendingAttachment> {
   const formData = new FormData();
   formData.append("file", file);
@@ -373,8 +391,13 @@ async function uploadChatAttachment(workspaceId: string, file: File): Promise<Pe
     body: formData,
   });
   if (!res.ok) {
+    // The server's refusal is written FOR the person holding the file —
+    // upload_content_policy names what is accepted — so surface that
+    // sentence, not the JSON envelope carrying it. Slicing the raw body at
+    // 200 chars put `{"detail":"Empyralis does not accept .py files. Accep`
+    // on screen and cut off the half that says what would have worked.
     const body = await res.text().catch(() => "");
-    throw new Error(body.slice(0, 200) || `HTTP ${res.status}`);
+    throw new Error(uploadErrorMessage(body) || `HTTP ${res.status}`);
   }
   return res.json();
 }
@@ -1343,11 +1366,17 @@ export function AgentChat({
           </div>
         )}
         <div className="fleet-agent-composer-controls">
+          {/* A courtesy filter on the picker, never the guardrail — the
+              server (upload_content_policy.assert_allowed_upload) is what
+              refuses anything that is not a note or a picture, and it reads
+              the bytes rather than trusting the name. This only spares
+              someone the round trip. */}
           <input
             ref={fileInputRef}
             type="file"
             multiple
             hidden
+            accept=".txt,.text,.md,.markdown,.csv,.json,.png,.jpg,.jpeg,.gif,.webp,.heic,.heif"
             onChange={(e) => void onFilesSelected(e)}
           />
           <button

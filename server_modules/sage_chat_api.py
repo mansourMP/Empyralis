@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import Depends, File, HTTPException, Query, UploadFile
 
 from server_modules import activity_ledger_service, sage_proof_log_service, security_audit_service
+from server_modules import upload_content_policy
 from server_modules.auth import enforce_workspace_access, workspace_tenant_id
 from server_modules.sage_agent_runtime_contract import (
     SAGE_MODE,
@@ -245,6 +246,19 @@ def register_sage_chat_routes(app) -> None:
         raw = await file.read()
         if len(raw) > MAX_ATTACHMENT_BYTES:
             raise HTTPException(status_code=413, detail="File exceeds maximum size.")
+        # Same policy as the live twin in sage_context_files_api.py, which
+        # registers this exact path first and is therefore the handler
+        # customers actually reach. Two registrations of one route must not
+        # accept two different sets of files.
+        try:
+            upload_content_policy.assert_allowed_upload(
+                filename=file.filename,
+                data=raw,
+                content_type=file.content_type,
+                max_bytes=MAX_ATTACHMENT_BYTES,
+            )
+        except upload_content_policy.UploadRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         file_id = str(uuid.uuid4())
         attach_dir = workspace_attachments_dir(resolved_workspace_id)
         safe_name = f"{file_id}_{Path(file.filename).name}"

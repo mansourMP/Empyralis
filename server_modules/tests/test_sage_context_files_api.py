@@ -8,12 +8,22 @@ from server_modules import sage_context_files_api
 
 
 class _FakeUploadFile:
+    """Mirrors the two members of Starlette's UploadFile the route touches:
+    the sync `.file` handle and the ASYNC `.read()`. The route reads the
+    bytes up front now (upload_content_policy has to see them before
+    anything lands on disk), so a stand-in without `read()` would keep this
+    file green while diverging from the real object."""
+
     def __init__(self, filename: str, content: bytes, content_type: str = "text/plain") -> None:
         self.filename = filename
         self.content_type = content_type
         import io
 
+        self._content = content
         self.file = io.BytesIO(content)
+
+    async def read(self) -> bytes:
+        return self._content
 
 
 class _FakeApp:

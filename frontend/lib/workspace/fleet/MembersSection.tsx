@@ -2,9 +2,11 @@
 
 // Workspace members + invites — Settings section (Multiplayer Projects Phase
 // 1, MAN-114). See members-data.ts's file header for the full backend
-// contract (routes_workspaces.py). No email sender exists anywhere on this
-// platform, so "Invite" mints a link the owner copies and shares however
-// they like — it never sends anything itself.
+// contract (routes_workspaces.py). "Invite" now actually sends the email
+// (workspace_invite_email_service) and the response says whether it went.
+// The link stays on screen either way — it is the fallback when the provider
+// is unset or the send fails, and a fallback that hides itself on a good day
+// is one nobody can find on a bad one.
 
 import { useMemo, useState } from "react";
 import { Check, Copy, Plus, UserPlus } from "lucide-react";
@@ -12,11 +14,14 @@ import { Check, Copy, Plus, UserPlus } from "lucide-react";
 import {
   createWorkspaceInvite,
   buildWorkspaceInviteJoinUrl,
+  inviteDeliveryHint,
+  inviteEmailDelivery,
   useOwnWorkspaceRole,
   useWorkspaceMembers,
   useWorkspacePendingInvites,
   WORKSPACE_ROLE_ORDER,
   WORKSPACE_ROLES,
+  type InviteEmailDelivery,
   type WorkspaceRole,
 } from "@/lib/workspace/fleet/members-data";
 import { formatDate } from "@/lib/workspace/fleet/fleet-presentation";
@@ -60,6 +65,7 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [freshLink, setFreshLink] = useState<string | null>(null);
+  const [delivery, setDelivery] = useState<InviteEmailDelivery | null>(null);
   const [copied, setCopied] = useState(false);
 
   // Only offer roles at or below the caller's own — the invite form itself
@@ -79,9 +85,11 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
     setInviting(true);
     setInviteError(null);
     setFreshLink(null);
+    setDelivery(null);
     try {
       const created = await createWorkspaceInvite(workspaceId, clean, role);
       setFreshLink(buildWorkspaceInviteJoinUrl(created.token));
+      setDelivery(inviteEmailDelivery(created));
       setEmail("");
       await refreshInvites();
     } catch (e2) {
@@ -103,8 +111,8 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
     <>
       <h2 className="fleet-detail-section-title" style={{ marginTop: "var(--space-6)" }}>Members</h2>
       <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-        Everyone with access to this workspace — and every project in it (there's no separate per-project
-        membership yet). Invites are shared as a link; there's no email sender on this platform to send one through.
+        Everyone with access to this workspace — and every project in it (there&apos;s no separate per-project
+        membership yet).
       </p>
 
       {error ? <div className="fleet-page-state-body" role="alert" style={{ color: "var(--offline-text)" }}>{error}</div> : null}
@@ -143,8 +151,11 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
                 <option key={r} value={r}>{roleLabel(r)}</option>
               ))}
             </select>
-            <button type="submit" className="fleet-btn fleet-btn--accent" disabled={inviting || !email.trim()}>
-              <Plus size={14} strokeWidth={1.75} /> {inviting ? "Creating…" : "Create invite link"}
+            {/* Neutral, not accent: the "Invite" trigger above already
+                spends this view's one accent-filled action (craft doctrine).
+                Two accent buttons in one view is a bug. */}
+            <button type="submit" className="fleet-btn" disabled={inviting || !email.trim()}>
+              <Plus size={14} strokeWidth={1.75} /> {inviting ? "Sending…" : "Send invite"}
             </button>
           </form>
 
@@ -154,7 +165,9 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
 
           {freshLink ? (
             <div className="fleet-card" style={{ borderColor: "var(--accent)", marginTop: 10, padding: "var(--space-3)" }}>
-              <div className="fleet-list-row-title">Copy this link and share it — it won&apos;t be shown again here.</div>
+              <div className="fleet-list-row-title">
+                {inviteDeliveryHint(delivery ?? { status: "failed", email: "" })}
+              </div>
               <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginTop: "var(--space-2)" }}>
                 <code style={{ flex: 1, overflow: "auto", fontSize: "var(--text-sm)", background: "var(--bg-inset)", padding: "var(--space-2)", borderRadius: "var(--radius-control)" }}>
                   {freshLink}
