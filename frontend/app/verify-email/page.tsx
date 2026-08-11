@@ -9,6 +9,12 @@ import {
   resendVerificationEmail,
   verifyEmailCode,
 } from '@/lib/auth/auth-client';
+import {
+  clearRememberedVerificationDelivery,
+  readRememberedVerificationDelivery,
+  verificationDeliveryNotice,
+  type VerificationDelivery,
+} from '@/lib/auth/verification-delivery';
 import { AppButton, AppInput } from '@/lib/ui/primitives';
 
 // Mirrors signup's/login's own safeNextPath (frontend/app/signup/page.tsx,
@@ -64,10 +70,14 @@ function VerifyEmailForm() {
   const [resendNotice, setResendNotice] = useState<string | null>(null);
   const [checkingStatus, setCheckingStatus] = useState(true);
   const [nextTarget, setNextTarget] = useState('/');
+  // Set only when signup TOLD us the email did not go out. Everything below
+  // reads it so the screen never claims a code is on its way when none is.
+  const [delivery, setDelivery] = useState<VerificationDelivery | null>(null);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     setNextTarget(safeNextPath(String(params.get('next') || '')));
+    setDelivery(readRememberedVerificationDelivery());
   }, []);
 
   useEffect(() => {
@@ -98,6 +108,7 @@ function VerifyEmailForm() {
     setError(null);
     try {
       await verifyEmailCode(code);
+      clearRememberedVerificationDelivery();
       window.location.replace(nextTarget);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Verification failed.');
@@ -112,6 +123,11 @@ function VerifyEmailForm() {
     setError(null);
     try {
       await resendVerificationEmail();
+      // A resend that succeeds retires the signup-time failure notice: a code
+      // really is on its way now, so leaving "we could not send your code" on
+      // screen would be the same dishonesty in the other direction.
+      clearRememberedVerificationDelivery();
+      setDelivery(null);
       setResendNotice('A new code is on its way. It can take a minute to arrive.');
     } catch (nextError) {
       setResendNotice(resendErrorCopy(nextError instanceof Error ? nextError.message : ''));
@@ -119,6 +135,8 @@ function VerifyEmailForm() {
       setResendBusy(false);
     }
   }
+
+  const deliveryNotice = verificationDeliveryNotice(delivery);
 
   if (checkingStatus) {
     return (
@@ -138,10 +156,16 @@ function VerifyEmailForm() {
         <section className="app-auth-hero" aria-label="Empyralis email verification">
           <div className="app-auth-hero__badge">Empyralis</div>
           <div className="app-auth-hero__copy">
-            <h1 className="app-auth-hero__title">Check your email.</h1>
+            <h1 className="app-auth-hero__title">
+              {deliveryNotice ? 'We couldn’t send your code.' : 'Check your email.'}
+            </h1>
+            {/* The hero states the SITUATION; the alert beside the Resend
+                button states what to do about it. Repeating the notice here
+                verbatim just makes a person read the same sentence twice. */}
             <p className="app-auth-hero__body">
-              We sent a 6-digit code to the address you signed up with. Enter it below to finish
-              setting up your account.
+              {deliveryNotice
+                ? 'Your account is created — it still needs a verified email to finish setting up.'
+                : 'We sent a 6-digit code to the address you signed up with. Enter it below to finish setting up your account.'}
             </p>
           </div>
           <div className="app-auth-hero__rail">
@@ -175,6 +199,12 @@ function VerifyEmailForm() {
               />
             </span>
           </label>
+          {deliveryNotice ? (
+            <div role="alert" className="app-auth-error">
+              <strong>No code was sent</strong>
+              <span>{deliveryNotice}</span>
+            </div>
+          ) : null}
           {error ? (
             <div role="alert" className="app-auth-error">
               <strong>Couldn’t verify that code</strong>
