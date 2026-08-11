@@ -230,6 +230,16 @@ function LoginPageContent() {
       <div className="app-auth-shell app-auth-shell--centered">
         <form method="post" onSubmit={handleSubmit} className="app-auth-card app-auth-form">
           <div className="app-auth-header">
+            {/* Decorative: the h1 beneath it already names Empyralis, so an
+                alt string here would be read out twice by a screen reader. */}
+            <img
+              src="/brand-assets/empyralis/empyralis-mark.svg"
+              alt=""
+              aria-hidden="true"
+              width={64}
+              height={64}
+              className="app-auth-brand-mark"
+            />
             <h1 className="app-auth-title">Log in to Empyralis</h1>
             <p className="app-auth-subtitle">Your personal control surface for autonomous work.</p>
           </div>

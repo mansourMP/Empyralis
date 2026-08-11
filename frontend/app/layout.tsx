@@ -9,9 +9,32 @@ import { AccountShellProvider } from '@/lib/shell/account-shell-context';
 import { ACCOUNT_SHELL_STORAGE_KEY } from '@/lib/shell/account-shell-storage';
 import { loadAccountShellSessionSafely } from '@/lib/server/load-account-shell-session';
 
+// Declared through the Metadata `icons` object rather than Next's app/icon.*
+// file convention, because the file convention emits ONE asset for every size
+// and the mark needs two: empyralis-mark.svg carries 50% padding by design, so
+// at 16px it draws the artwork into 8px and its dot into ~1px. The compact
+// variant (same bars, same hex values, cropped to the artwork, dot enlarged to
+// 1.33x the bar height) is what a tab actually renders. Only the `icons` object
+// can say "this asset at 16, that one at 32".
+//
+// public/favicon.ico exists alongside these for the bare /favicon.ico request
+// browsers, bookmark managers and crawlers make without reading any <link>.
+// It lives in public/ and NOT app/favicon.ico on purpose: the file convention
+// would inject its own competing <link rel="icon">.
 export const metadata: Metadata = {
   title: 'Empyralis',
   description: 'Empyralis browser shell',
+  icons: {
+    icon: [
+      { url: '/brand-assets/empyralis/empyralis-mark-compact.svg', type: 'image/svg+xml' },
+      { url: '/brand-assets/empyralis/empyralis-favicon-32.png', sizes: '32x32', type: 'image/png' },
+      { url: '/brand-assets/empyralis/empyralis-favicon-16.png', sizes: '16x16', type: 'image/png' },
+    ],
+    apple: [
+      { url: '/brand-assets/empyralis/empyralis-apple-touch-180.png', sizes: '180x180', type: 'image/png' },
+    ],
+    shortcut: ['/favicon.ico'],
+  },
 };
 
 // Fleet UI font: self-hosted Inter (Linear's typeface). next/font/google was

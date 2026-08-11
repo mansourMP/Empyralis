@@ -61,6 +61,23 @@ def build_invite_accept_url(token: str) -> str:
     return f"{origin}/join/{quote(str(token or '').strip(), safe='')}"
 
 
+def build_invite_logo_url() -> str:
+    """The Empyralis mark, as a PNG on the same public origin as the link.
+
+    PNG and not the SVG the app itself uses: Gmail strips <img> pointing at
+    SVG outright and several other clients do too, so an SVG logo is a mark
+    that is simply absent for most recipients. Hosted over HTTPS and not
+    inlined as a data: URI for the same reason -- Gmail drops data: image
+    sources as well, and a CID attachment would turn a one-call Resend send
+    into a multipart build for a decoration.
+
+    Same origin resolution as build_invite_accept_url, so no domain is
+    hardcoded and a deployment that cannot resolve one raises there first.
+    """
+    origin = resolve_public_frontend_origin(os.environ).rstrip("/")
+    return f"{origin}/brand-assets/empyralis/empyralis-mark-email-128.png"
+
+
 def _expiry_line(expires_at_epoch: Optional[int]) -> str:
     try:
         epoch = int(expires_at_epoch or 0)
@@ -79,12 +96,20 @@ def build_invite_email_content(
     inviter_label: str,
     accept_url: str,
     expires_at_epoch: Optional[int] = None,
+    logo_url: str = "",
 ) -> tuple[str, str, str]:
     """(subject, html, text).
 
     Labels, does not lecture (CLAUDE.md): who invited them, to what, one
     link, and the two facts they cannot guess -- which address the invite is
     bound to, and when it expires.
+
+    logo_url is OPTIONAL and the email is complete without it. Mail clients
+    block remote images by default, so the mark can never be load-bearing:
+    every fact and the link itself live in text, the <img> carries alt="Empyralis"
+    for the blocked case, and a caller with no resolvable public origin simply
+    omits the tag rather than emitting a broken image. The plaintext part is
+    unchanged -- a logo has no plaintext form.
     """
     workspace = str(workspace_name or "").strip() or "a workspace"
     inviter = str(inviter_label or "").strip() or "A teammate"
@@ -93,7 +118,18 @@ def build_invite_email_content(
     subject = f"{inviter} invited you to {workspace} on Empyralis"
     expiry = _expiry_line(expires_at_epoch)
 
-    html_parts = [
+    html_parts = []
+    logo = str(logo_url or "").strip()
+    if logo:
+        # Inline styles and width/height attributes both: Outlook ignores the
+        # style, everything else ignores the attributes, and a logo that
+        # renders at its intrinsic 128px in one client and 64px in another is
+        # the reason to state it twice.
+        html_parts.append(
+            f'<p style="margin:0 0 16px;"><img src="{escape(logo, quote=True)}" alt="Empyralis"'
+            ' width="64" height="64" style="display:block;width:64px;height:64px;border:0;"></p>'
+        )
+    html_parts += [
         f"<p>{escape(inviter)} invited you to join <strong>{escape(workspace)}</strong> on Empyralis.</p>",
         f'<p><a href="{escape(accept_url, quote=True)}">Accept the invite</a></p>',
     ]
@@ -155,6 +191,7 @@ async def send_workspace_invite_email(
         inviter_label=inviter_label,
         accept_url=accept_url,
         expires_at_epoch=expires_at_epoch,
+        logo_url=build_invite_logo_url(),
     )
     await email_provider_service.send_email(
         to=invitee_email,

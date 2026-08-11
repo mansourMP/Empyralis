@@ -129,6 +129,12 @@ async def test_configured_provider_sends_the_invite_email_exactly_once():
     assert kwargs["to"] == invitee
     assert payload["token"] in kwargs["html"]
     assert payload["token"] in kwargs["text"]
+    # The mark reaches the real send path, not just the pure copy builder --
+    # build_invite_email_content takes logo_url as an OPTIONAL argument, so
+    # only an assertion on what send_email actually received proves the
+    # caller passes it.
+    assert 'alt="Empyralis"' in kwargs["html"]
+    assert "empyralis-mark-email-128.png" in kwargs["html"]
 
 
 @pytest.mark.anyio
@@ -268,6 +274,51 @@ class TestInviteEmailCopy:
             assert "https://app.example.com/join/tok" in body
             assert "teammate@example.com" in body
         assert "expires on" in text
+
+    def test_logo_is_a_png_on_the_configured_origin_never_an_svg(self):
+        """The one rule the brand mark in an email has to keep. Gmail strips
+        <img> pointing at SVG, so the app's own .svg mark would be an image
+        most recipients never see -- and the failure is silent, which is why
+        the extension is asserted rather than eyeballed. Same origin
+        resolution as the accept link, so no domain is baked in."""
+        with patch.dict(
+            os.environ,
+            {"EMPYRALIS_PUBLIC_FRONTEND_ORIGIN": "https://app.example.com"},
+            clear=False,
+        ):
+            url = workspace_invite_email_service.build_invite_logo_url()
+        assert url.startswith("https://app.example.com/")
+        assert url.endswith(".png"), "an SVG logo is invisible in Gmail"
+
+        with patch.dict(os.environ, {"EMPYRALIS_PUBLIC_FRONTEND_ORIGIN": "https://other.example"}, clear=False):
+            assert workspace_invite_email_service.build_invite_logo_url().startswith("https://other.example/")
+
+    def test_the_email_still_reads_with_images_blocked(self):
+        """Mail clients block remote images by DEFAULT, so the mark may never
+        carry a fact. Asserted the only way that means anything: build the
+        same email with and without the logo and require the version with no
+        image at all to still name the inviter, the workspace, the address,
+        the expiry and the link."""
+        common = dict(
+            invitee_email="teammate@example.com",
+            workspace_name="Acme Ops",
+            inviter_label="Mansur",
+            accept_url="https://app.example.com/join/tok",
+            expires_at_epoch=1_755_000_000,
+        )
+        _, html_no_logo, _ = workspace_invite_email_service.build_invite_email_content(**common)
+        _, html_with_logo, _ = workspace_invite_email_service.build_invite_email_content(
+            **common, logo_url="https://app.example.com/brand-assets/empyralis/empyralis-mark-email-128.png"
+        )
+
+        assert "<img" not in html_no_logo, "no logo_url must emit no image tag, never a broken one"
+        for fact in ("Mansur", "Acme Ops", "teammate@example.com", "expires on", "https://app.example.com/join/tok"):
+            assert fact in html_no_logo, f"{fact} must survive with the image gone"
+            assert fact in html_with_logo
+
+        # And when the image IS there, a blocked one still says what it was.
+        assert '<img' in html_with_logo
+        assert 'alt="Empyralis"' in html_with_logo
 
     def test_inviter_label_prefers_a_name_over_an_id(self):
         assert (
