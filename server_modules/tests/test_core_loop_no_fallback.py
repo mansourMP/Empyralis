@@ -344,7 +344,12 @@ class MasterModelConfigHonestBlockTests(unittest.TestCase):
                 asyncio.run(_resolve_cloud_provider("ws_master_cli_sub", check_master_model_config=True))
             msg = str(ctx.exception)
             self.assertIn("cli_subscription", msg)
-            self.assertIn("Sage", msg)
+            # Was assertIn("Sage", msg). "Sage" is retired naming -- the
+            # message correctly says "this agent" now, and this assertion had
+            # been failing ever since. It asserts the message names what the
+            # setting applies to, without pinning a product name that is
+            # deliberately being removed.
+            self.assertIn("agent", msg.lower())
             self.assertNotIn("No cloud provider", msg, "must be the specific honest-block message, not the generic fallback")
 
     def test_master_local_mode_is_blocked_with_a_clear_reason(self):
@@ -614,10 +619,24 @@ class HardStopMessageTests(unittest.TestCase):
     """Verify the hard-stop messages are consistent and actionable."""
 
     def test_credit_exhaustion_message_is_present(self):
-        """The AI limit message must exist and direct to AI Setup."""
-        self.assertIn("reached your ai limit", SAGE_AI_LIMIT_MESSAGE.lower())
-        self.assertIn("AI", SAGE_AI_LIMIT_MESSAGE)
-        self.assertIn("Setup", SAGE_AI_LIMIT_MESSAGE)
+        """The AI limit message must be the canonical one and direct to AI Setup.
+
+        Asserted by IDENTITY against platform_event, not by matching prose.
+        This test used to require the phrase "reached your ai limit"; the
+        message was reworded to "AI usage limit reached. Open AI & Setup" and
+        the test simply failed from then on. CLAUDE.md already records this
+        exact failure mode ("Stale string matching... Match on stable codes,
+        never on prose") from the time an error BUCKET matched dead prose and
+        real users got "Something went wrong" for five weeks.
+
+        Identity is the stronger check anyway: it catches the thing that
+        actually matters -- a caller hand-typing its own copy of this message
+        instead of using the shared constant -- and it survives rewording.
+        """
+        from server_modules import platform_event
+
+        self.assertEqual(SAGE_AI_LIMIT_MESSAGE, platform_event.AI_LIMIT_REACHED_WEB.detail)
+        self.assertTrue(SAGE_AI_LIMIT_MESSAGE.strip(), "the limit message must not be empty")
         self.assertIn("ai-runtime", _SAGE_AI_SETUP_PATH)
 
     def test_ai_needs_attention_message_is_present(self):
@@ -636,28 +655,44 @@ class HardStopMessageTests(unittest.TestCase):
             SAGE_ERROR_REPLY,
         )
 
-        # Bucket 1 — Credits exhausted
-        self.assertIn("credit exhausted", SAGE_AI_LIMIT_REPLY.lower())
-        self.assertIn("heads up", SAGE_AI_LIMIT_REPLY.lower())
-        self.assertIn("api key", SAGE_AI_LIMIT_REPLY.lower())
+        # The property that actually matters is that the five buckets are
+        # DISTINGUISHABLE -- collapsing two of them is the failure this whole
+        # classification exists to prevent, and it is the shape CLAUDE.md
+        # documents over and over ("an empty string is not a decision",
+        # "three facts, not two").
+        replies = {
+            "ai_limit": SAGE_AI_LIMIT_REPLY,
+            "needs_attention": SAGE_AI_NEEDS_ATTENTION_REPLY,
+            "rate_limited": SAGE_RATE_LIMITED_REPLY,
+            "unreachable": SAGE_PROVIDER_UNREACHABLE_REPLY,
+            "generic": SAGE_ERROR_REPLY,
+        }
+        for name, reply in replies.items():
+            self.assertTrue(str(reply or "").strip(), f"{name} reply must not be empty")
+        self.assertEqual(
+            len(set(replies.values())),
+            len(replies),
+            "every bucket must read differently, or the classification tells the user nothing",
+        )
 
-        # Bucket 2 — Rate limited
-        self.assertIn("heads up", SAGE_RATE_LIMITED_REPLY.lower())
-        self.assertIn("rate limited", SAGE_RATE_LIMITED_REPLY.lower())
-        self.assertIn("try again", SAGE_RATE_LIMITED_REPLY.lower())
+        # Bucket 1 is the canonical shared constant rather than a hand-typed
+        # twin. Asserted by identity so a rewording cannot break it -- the
+        # previous version required the chatty "Heads up" prefix, which was
+        # deliberately removed (a professional tool labels, it does not
+        # lecture), and these assertions have failed ever since.
+        from server_modules.platform_event import AI_LIMIT_REACHED
 
-        # Bucket 3 — Auth / key failed
-        self.assertIn("heads up", SAGE_AI_NEEDS_ATTENTION_REPLY.lower())
+        self.assertEqual(SAGE_AI_LIMIT_REPLY, AI_LIMIT_REACHED.channel_text)
         self.assertIn("authentication", SAGE_AI_NEEDS_ATTENTION_REPLY.lower())
         self.assertIn("api key", SAGE_AI_NEEDS_ATTENTION_REPLY.lower())
 
-        # Bucket 4 — Provider unreachable
-        self.assertIn("heads up", SAGE_PROVIDER_UNREACHABLE_REPLY.lower())
+        # Bucket 4 — Provider unreachable. The "heads up" prefix these
+        # assertions required was deliberately dropped from every reply; only
+        # the load-bearing word is checked now.
         self.assertIn("unreachable", SAGE_PROVIDER_UNREACHABLE_REPLY.lower())
         self.assertIn("try again", SAGE_PROVIDER_UNREACHABLE_REPLY.lower())
 
         # Bucket 5 — Catch-all
-        self.assertIn("heads up", SAGE_ERROR_REPLY.lower())
         self.assertIn("something went wrong", SAGE_ERROR_REPLY.lower())
         self.assertIn("try again", SAGE_ERROR_REPLY.lower())
 
@@ -678,10 +713,15 @@ class HardStopMessageTests(unittest.TestCase):
             "hosted_sage_credit_balance_usd": 0.0,
         }
 
+        from server_modules import platform_event
+
         result = es.hosted_sage_ai_access_state(state=state)
         self.assertFalse(result["allowed"])
-        self.assertIn("reached your ai limit", result["message"].lower())
-        self.assertIn("ai & setup", result["message"].lower())
+        # Identity, not prose -- see test_credit_exhaustion_message_is_present.
+        # A blocked turn must hand back the ONE canonical limit message, so
+        # that rewording it is a single edit rather than a hunt through
+        # every module that happened to retype the sentence.
+        self.assertEqual(result["message"], platform_event.AI_LIMIT_REACHED_WEB.detail)
 
 
 class ClassifyErrorTests(unittest.TestCase):
@@ -1021,6 +1061,9 @@ class NoFallbackDefaultTests(unittest.TestCase):
             )
 
 
+from server_modules.platform_event import AI_LIMIT_REACHED_WEB
+
+
 class CreditHoldSettleTests(unittest.TestCase):
     """Verify the hold→settle credit accounting pattern.
 
@@ -1072,7 +1115,11 @@ class CreditHoldSettleTests(unittest.TestCase):
                 requested_model="deepseek-chat",
                 credit_available_usd=0.0,
             )
-        self.assertIn("reached your AI limit", str(ctx.exception))
+        # The REFUSAL above is what this test guards -- that part never broke.
+        # Only the message match was stale ("reached your AI limit" was
+        # reworded to "AI usage limit reached"), so assert identity against
+        # the canonical constant instead of retyping the sentence.
+        self.assertEqual(str(ctx.exception), AI_LIMIT_REACHED_WEB.detail)
 
     def test_reservation_allows_when_credit_available_sufficient(self):
         """When credit is sufficient, reservation succeeds."""
@@ -1182,7 +1229,7 @@ class CreditHoldSettleTests(unittest.TestCase):
                     requested_model="deepseek-chat",
                     credit_available_usd=available,
                 )
-            self.assertIn("reached your AI limit", str(ctx.exception))
+            self.assertEqual(str(ctx.exception), AI_LIMIT_REACHED_WEB.detail)
         finally:
             self._svc.release_direct_chat_hosted_usage_reservation_best_effort(
                 workspace_id=ws_id,
