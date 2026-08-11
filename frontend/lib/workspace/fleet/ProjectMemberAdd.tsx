@@ -46,8 +46,11 @@ import { Check, Copy, Plus } from "lucide-react";
 import {
   createWorkspaceInvite,
   buildWorkspaceInviteJoinUrl,
+  inviteDeliveryHint,
+  inviteEmailDelivery,
   useOwnWorkspaceRole,
   WORKSPACE_ROLES,
+  type InviteEmailDelivery,
   type WorkspaceMember,
   type WorkspaceRole,
 } from "@/lib/workspace/fleet/members-data";
@@ -107,6 +110,7 @@ export function ProjectMemberAdd({
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [freshLink, setFreshLink] = useState<string | null>(null);
+  const [delivery, setDelivery] = useState<InviteEmailDelivery | null>(null);
   const [copied, setCopied] = useState(false);
 
   // FleetToolbar's dismissal contract, verbatim: outside pointerdown, or Esc.
@@ -162,9 +166,11 @@ export function ProjectMemberAdd({
     setInviting(true);
     setInviteError(null);
     setFreshLink(null);
+    setDelivery(null);
     try {
       const created = await createWorkspaceInvite(workspaceId, clean, role, projectId);
       setFreshLink(buildWorkspaceInviteJoinUrl(created.token));
+      setDelivery(inviteEmailDelivery(created));
       setEmail("");
     } catch (e2) {
       setInviteError(e2 instanceof Error ? e2.message : "Could not create this invite.");
@@ -267,7 +273,9 @@ export function ProjectMemberAdd({
                     {copied ? <Check size={13} /> : <Copy size={13} />}
                   </button>
                 </div>
-                <div className="fleet-member-invite-hint">No email sender yet — copy this link and share it yourself.</div>
+                <div className="fleet-member-invite-hint">
+                  {inviteDeliveryHint(delivery ?? { status: "failed", email: "" })}
+                </div>
               </>
             ) : null}
           </div>

@@ -11,9 +11,12 @@
 // /api/[...path]/route.ts proxy every other live page in this directory
 // already uses (see McpServersSection.tsx's file header for the same note).
 //
-// There is no outbound email sender anywhere in this codebase — an invite is
-// never emailed. create_workspace_invite mints a signed, expiring token; the
-// owner copies a /join/{token} link and shares it however they like. See
+// An invite IS emailed now — create_workspace_invite_route mints the signed,
+// expiring token and then hands it to workspace_invite_email_service, which
+// sends a /join/{token} link through email_provider_service (Resend). The
+// send is best-effort: the token comes back whatever happens, and the
+// response's `email_delivery` says which of sent / not_configured / failed
+// occurred, so the copy-link fallback appears exactly when it is needed. See
 // frontend/app/join/[token]/page.tsx for the accept side.
 //
 // "Project member" == "workspace member" was the MAN-70 placeholder ruling —
@@ -215,6 +218,17 @@ export function useWorkspacePendingInvites(workspaceId: string) {
   return { invites, loading, error, refresh };
 }
 
+/** The three states create_workspace_invite_route reports back, mirroring
+ *  workspace_invite_email_service's own DELIVERY_* constants exactly. They
+ *  are kept apart on purpose: "the provider isn't set up" and "the send
+ *  failed" call for different words, and neither may be shown as "sent". */
+export type InviteEmailDeliveryStatus = "sent" | "not_configured" | "failed";
+
+export type InviteEmailDelivery = {
+  status: InviteEmailDeliveryStatus;
+  email: string;
+};
+
 export type CreatedWorkspaceInvite = {
   invite: {
     id: string;
@@ -227,12 +241,43 @@ export type CreatedWorkspaceInvite = {
   };
   token: string;
   expires_at: number;
+  /** Absent only if the response predates the mailer wiring — read it
+   *  through inviteEmailDelivery() below rather than trusting the shape. */
+  email_delivery?: InviteEmailDelivery;
 };
 
+/** Never throws and never guesses: an unknown or missing `email_delivery`
+ *  reads as "failed", which shows the copy-link fallback. The dangerous
+ *  default is the other one — telling an owner an email went out when
+ *  nothing did is the exact bug this whole path had. */
+export function inviteEmailDelivery(created: CreatedWorkspaceInvite | null | undefined): InviteEmailDelivery {
+  const raw = created?.email_delivery;
+  const status = String(raw?.status || "").toLowerCase();
+  const email = String(raw?.email || created?.invite?.email || "");
+  if (status === "sent" || status === "not_configured" || status === "failed") {
+    return { status: status as InviteEmailDeliveryStatus, email };
+  }
+  return { status: "failed", email };
+}
+
+/** One line for each state. The link itself stays on screen in every case —
+ *  it is the fallback, and a fallback that disappears on a good day is one
+ *  nobody can find on a bad one. */
+export function inviteDeliveryHint(delivery: InviteEmailDelivery): string {
+  if (delivery.status === "sent") {
+    return delivery.email ? `Invite sent to ${delivery.email}.` : "Invite sent.";
+  }
+  if (delivery.status === "not_configured") {
+    return "Email isn't set up here — share this link instead.";
+  }
+  return "The invite email didn't send — share this link instead.";
+}
+
 /** Owner-only (server-enforced, see create_workspace_invite_route's
- *  minimum_role="owner"). Mints a signed, expiring token — never sends an
- *  email, there is no mailer anywhere in this platform. The caller turns
- *  `token` into a /join/{token} link and shares it however they like.
+ *  minimum_role="owner"). Mints a signed, expiring token AND emails it to
+ *  the invitee, reporting the outcome in `email_delivery` — the send is
+ *  best-effort by design, so `token` is always usable whatever the mailer
+ *  did, and the caller turns it into a /join/{token} link for the fallback.
  *
  *  `projectId` is the MAN-115 follow-up (create_workspace_invite_route,
  *  routes_workspaces.py:919-927): optional, no implicit default. Omitted,

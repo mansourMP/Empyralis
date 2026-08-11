@@ -11,6 +11,7 @@ from server_modules import control_plane_repository
 from server_modules import rust_runtime_kernel_client
 from server_modules import session_service
 from server_modules import workspace_admin_service
+from server_modules import workspace_invite_email_service
 from server_modules.workspace_ai_route_service import (
     build_workspace_ai_route_payload,
     update_workspace_default_ai_route,
@@ -909,9 +910,15 @@ async def upsert_workspace_identity_link(
 
 
 # ── Members & Invites (Multiplayer Projects Phase 1) ─────────────────────────
-# Invite-link only -- the platform has no outbound email sender anywhere, so
-# create_workspace_invite mints a signed, expiring token and returns it for
-# the owner to copy/share however they like. The MAN-70 placeholder ruling
+# create_workspace_invite mints a signed, expiring token; this route then
+# EMAILS it (workspace_invite_email_service) and reports whether that
+# worked. It used to send nothing at all -- the token came back and the UI
+# said "No email sender yet", so multiplayer never started for anyone who
+# did not also hand-deliver a link. The email is best-effort by design: the
+# row and its token exist before the send is attempted and are returned
+# whatever the mailer does, with the outcome carried in `email_delivery` so
+# the copy-link fallback can appear exactly when it is needed. The MAN-70
+# placeholder ruling
 # ("project member" == "workspace member", no per-project ACL) is superseded:
 # MAN-115 added the real project_memberships table, and this route can now
 # carry an optional project_id on the invite so acceptance (both paths --
@@ -986,6 +993,29 @@ async def create_workspace_invite_route(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not isinstance(invite, dict) or not invite.get("token"):
         raise HTTPException(status_code=500, detail="Invite could not be created.")
+
+    # Send it -- but never at the cost of the invite. deliver_workspace_
+    # invite_email catches every provider failure and reports one of
+    # sent / not_configured / failed, so this route's contract is unchanged
+    # for the token and additive for the delivery outcome.
+    # The name lookup is part of the EMAIL, not part of the invite, so it
+    # obeys the same rule: the invite is already written, and a control-plane
+    # read that fails here must cost the owner nothing more than a generic
+    # subject line. Without this guard the one un-caught await between
+    # creating the row and returning it could 500 a real invite.
+    try:
+        workspace_record = await control_plane_repository.get_workspace_by_id(resolved_workspace_id)
+    except Exception:  # noqa: BLE001 -- see above; the invite outlives this read
+        workspace_record = None
+    workspace_name = str((workspace_record or {}).get("name") or "").strip()
+    email_delivery = await workspace_invite_email_service.deliver_workspace_invite_email(
+        invitee_email=clean_email,
+        workspace_name=workspace_name,
+        inviter_label=workspace_invite_email_service.inviter_label_from_user(user),
+        token=str(invite.get("token") or ""),
+        expires_at_epoch=invite.get("expires_at"),
+    )
+
     return {
         "invite": {
             "id": invite.get("id"),
@@ -998,6 +1028,7 @@ async def create_workspace_invite_route(
         },
         "token": invite.get("token"),
         "expires_at": invite.get("expires_at"),
+        "email_delivery": email_delivery,
     }
 
 
