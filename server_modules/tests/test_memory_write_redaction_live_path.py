@@ -152,7 +152,6 @@ class _LiveMemoryTestBase(unittest.TestCase):
         patchers = [
             patch.object(workspace_context, "_WORKSPACE_DIR", self._workspace_root),
             patch.object(memory_service._workspace_memory_store, "_MEMORY_DIR", self._memory_root),
-            patch.object(memory_service._workspace_memory_store, "_SEMANTIC_MODEL", False),
             patch.object(rk, "run_runtime_kernel_enforced", _run_enforced),
             patch.object(rk, "runtime_state_store_decision", _state_decision),
             patch.object(rk, "enforce_kernel_decision", lambda *_a, **_k: None),

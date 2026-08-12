@@ -19,13 +19,10 @@ class SharedOperationalBoardServiceTests(unittest.TestCase):
         self._memory_root = tmp_root / "runtime-memory"
         self._workspace_patch = patch.object(workspace_context, "_WORKSPACE_DIR", self._workspace_root)
         self._memory_patch = patch.object(memory_service._workspace_memory_store, "_MEMORY_DIR", self._memory_root)
-        self._semantic_model_patch = patch.object(memory_service._workspace_memory_store, "_SEMANTIC_MODEL", False)
         self._workspace_patch.start()
         self._memory_patch.start()
-        self._semantic_model_patch.start()
         self.addCleanup(self._workspace_patch.stop)
         self.addCleanup(self._memory_patch.stop)
-        self.addCleanup(self._semantic_model_patch.stop)
 
     def test_write_shared_board_entry_rejects_publish_without_permission(self) -> None:
         with self.assertRaises(HTTPException) as ctx:

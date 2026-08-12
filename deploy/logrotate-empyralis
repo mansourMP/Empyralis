@@ -1,0 +1,46 @@
+# Log rotation for every Empyralis log that is NOT already rotated.
+#
+# MAN-296 was filed when production hit 94% disk with "a 195 MB error log and
+# no rotation". The disk was cleared but the CAUSE was never fixed, so it grew
+# straight back: on 2026-08-13 /var/log/empyralis-gw/gateway.log was 895 MB,
+# still with no logrotate config anywhere for it, and the gateway unit was not
+# even running -- 895 MB of a stopped service's output waiting to fill the
+# disk again the moment it starts.
+#
+# WHAT IS ALREADY COVERED, so this file does not fight it:
+#   pm2 logs (~/.pm2/logs/*)   pm2-logrotate module, rotating by date
+#   nginx (/var/log/nginx/*)   /etc/logrotate.d/nginx
+#   postgres                   /etc/logrotate.d/postgresql-common
+# Everything under /var/log/empyralis*/ was covered by NOTHING.
+#
+# Install: copy to /etc/logrotate.d/empyralis (root:root, 0644 -- logrotate
+# silently SKIPS a config file that is group- or world-writable), then
+# `logrotate --debug /etc/logrotate.d/empyralis` to check it parses and
+# `logrotate -f /etc/logrotate.d/empyralis` to force a first rotation.
+#
+# `su` names the owning user because the gateway log directory belongs to
+# empyralis-gw, not root, and logrotate refuses to rotate inside a directory
+# it does not own without being told whose it is.
+/var/log/empyralis-gw/*.log {
+    su empyralis-gw empyralis-gw
+    daily
+    rotate 7
+    maxsize 100M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 empyralis-gw empyralis-gw
+}
+
+# `copytruncate` rather than a signal-based reopen, deliberately: the gateway
+# is a long-lived Node process holding an open file descriptor, and nothing in
+# this repo implements a SIGHUP reopen handler for it. Without copytruncate a
+# renamed file keeps being written to by the still-open fd and the "rotated"
+# log grows forever while the new one stays empty -- the failure looks exactly
+# like rotation working.
+#
+# `maxsize 100M` in ADDITION to `daily`: daily alone lets a single bad day
+# write an unbounded file, which is precisely how 895 MB accumulated. maxsize
+# rotates early when the size is hit, whichever comes first.

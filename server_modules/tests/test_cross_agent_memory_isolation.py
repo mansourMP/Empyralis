@@ -43,7 +43,6 @@ class CrossAgentMemoryIsolationCertificationTests(unittest.IsolatedAsyncioTestCa
         self._patchers = [
             patch.object(workspace_context, "_WORKSPACE_DIR", self._workspace_root),
             patch.object(memory_service._workspace_memory_store, "_MEMORY_DIR", self._memory_root),
-            patch.object(memory_service._workspace_memory_store, "_SEMANTIC_MODEL", False),
         ]
         for patcher in self._patchers:
             patcher.start()

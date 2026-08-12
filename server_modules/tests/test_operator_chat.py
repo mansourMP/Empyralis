@@ -235,8 +235,6 @@ class OperatorChatTests(unittest.TestCase):
         return intervention
 
     def setUp(self) -> None:
-        self._semantic_model_patch = patch.object(operator_chat.memory_service._workspace_memory_store, "_SEMANTIC_MODEL", False)
-        self._semantic_model_patch.start()
         self._supports_direct_message_patch = patch.object(
             operator_chat,
             "supports_direct_message_native_chat",
@@ -269,7 +267,6 @@ class OperatorChatTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._resolve_cloud_provider_patch.stop()
         self._supports_direct_message_patch.stop()
-        self._semantic_model_patch.stop()
 
     def test_preferred_provider_keeps_explicit_openai_oauth_selection(self):
         def fake_credentials(_workspace_id, provider):

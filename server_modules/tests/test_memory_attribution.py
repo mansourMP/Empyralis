@@ -183,9 +183,6 @@ class TestAgentMemoryAttributionMigration(unittest.TestCase):
         self._patch = patch.object(self.m, "_MEMORY_DIR", self._memory_root)
         self._patch.start()
         self.addCleanup(self._patch.stop)
-        self._semantic_patch = patch.object(self.m, "_SEMANTIC_MODEL", False)
-        self._semantic_patch.start()
-        self.addCleanup(self._semantic_patch.stop)
 
     def _create_legacy_row(self, workspace_id: str, agent_install_id: str, key: str, content: str) -> None:
         """Write directly via a pre-migration schema (no source_* columns) --
@@ -361,7 +358,6 @@ class TestMemoryWriteFileIndexDiscipline(unittest.TestCase):
         patchers = [
             patch.object(workspace_context, "_WORKSPACE_DIR", self._workspace_root),
             patch.object(memory_service._workspace_memory_store, "_MEMORY_DIR", self._memory_root),
-            patch.object(memory_service._workspace_memory_store, "_SEMANTIC_MODEL", False),
             patch.object(rk, "run_runtime_kernel_enforced", _run_enforced),
             patch.object(rk, "runtime_state_store_decision", _state_decision),
             patch.object(rk, "enforce_kernel_decision", lambda *_a, **_k: None),

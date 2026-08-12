@@ -95,7 +95,7 @@ class TestBrotherScenarioStructuredStore(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory(prefix="memory-provenance-")
         self.addCleanup(self._tmpdir.cleanup)
         self._memory_root = Path(self._tmpdir.name) / "runtime-memory"
-        for target, value in (("_MEMORY_DIR", self._memory_root), ("_SEMANTIC_MODEL", False)):
+        for target, value in (("_MEMORY_DIR", self._memory_root),):
             p = patch.object(self.m, target, value)
             p.start()
             self.addCleanup(p.stop)
@@ -203,7 +203,6 @@ class TestBrotherScenarioFileBased(unittest.TestCase):
         patchers = [
             patch.object(workspace_context, "_WORKSPACE_DIR", self._workspace_root),
             patch.object(memory_service._workspace_memory_store, "_MEMORY_DIR", self._memory_root),
-            patch.object(memory_service._workspace_memory_store, "_SEMANTIC_MODEL", False),
             patch.object(rk, "run_runtime_kernel_enforced", _run_enforced),
             patch.object(rk, "runtime_state_store_decision", _state_decision),
             patch.object(rk, "enforce_kernel_decision", lambda *_a, **_k: None),
@@ -325,7 +324,6 @@ class TestIndexCapExactNumbers(unittest.TestCase):
         patchers = [
             patch.object(workspace_context, "_WORKSPACE_DIR", self._workspace_root),
             patch.object(memory_service._workspace_memory_store, "_MEMORY_DIR", self._memory_root),
-            patch.object(memory_service._workspace_memory_store, "_SEMANTIC_MODEL", False),
             patch.object(rk, "run_runtime_kernel_enforced", _run_enforced),
             patch.object(rk, "runtime_state_store_decision", _state_decision),
             patch.object(rk, "enforce_kernel_decision", lambda *_a, **_k: None),
@@ -392,7 +390,7 @@ class TestUpdateDontDuplicateAuditTrail(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory(prefix="memory-provenance-audit-")
         self.addCleanup(self._tmpdir.cleanup)
         self._memory_root = Path(self._tmpdir.name) / "runtime-memory"
-        for target, value in (("_MEMORY_DIR", self._memory_root), ("_SEMANTIC_MODEL", False)):
+        for target, value in (("_MEMORY_DIR", self._memory_root),):
             p = patch.object(self.m, target, value)
             p.start()
             self.addCleanup(p.stop)
@@ -482,7 +480,7 @@ class TestPerAgentIsolationPreserved(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory(prefix="memory-provenance-isolation-")
         self.addCleanup(self._tmpdir.cleanup)
         self._memory_root = Path(self._tmpdir.name) / "runtime-memory"
-        for target, value in (("_MEMORY_DIR", self._memory_root), ("_SEMANTIC_MODEL", False)):
+        for target, value in (("_MEMORY_DIR", self._memory_root),):
             p = patch.object(self.m, target, value)
             p.start()
             self.addCleanup(p.stop)

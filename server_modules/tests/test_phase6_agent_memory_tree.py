@@ -52,7 +52,6 @@ class Phase6MemoryTreeTests(unittest.TestCase):
         patchers = [
             patch.object(wc, "_WORKSPACE_DIR", root / "ws"),
             patch.object(am, "_MEMORY_DIR", root / "mem"),
-            patch.object(am, "_SEMANTIC_MODEL", False),
             patch.object(rk, "run_runtime_kernel_enforced", _run_enforced),
             patch.object(rk, "runtime_state_store_decision", _state_decision),
             patch.object(rk, "enforce_kernel_decision", lambda *_a, **_k: None),

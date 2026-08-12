@@ -20,7 +20,6 @@ from server_modules.workspace_context import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _MEMORY_DIR = _REPO_ROOT / ".orion-stack" / "memory"
-_SEMANTIC_MODEL: Any = None
 _NOTEBOOK_DIRNAME = "memory"
 _MEMORY_PROJECTION_SECTION_LIMIT = 8
 _MEMORY_PROJECTION_TOTAL_LIMIT = 40
@@ -509,39 +508,6 @@ def _connect_memory_db(workspace_id: str, agent_install_id: str | None = None):
         connection.close()
 
 
-def _cosine_similarity(left: List[float], right: List[float]) -> float:
-    if not left or not right or len(left) != len(right):
-        return 0.0
-    return float(sum(float(a) * float(b) for a, b in zip(left, right)))
-
-
-def _semantic_model():
-    global _SEMANTIC_MODEL
-    if _SEMANTIC_MODEL is False:
-        return None
-    if _SEMANTIC_MODEL is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-
-            _SEMANTIC_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-        except Exception:
-            _SEMANTIC_MODEL = False
-    return _SEMANTIC_MODEL
-
-
-def _embed_text(text: str) -> List[float]:
-    normalized = re.sub(r"\s+", " ", str(text or "").strip())
-    if not normalized:
-        return []
-    model = _semantic_model()
-    if model is None or isinstance(model, bool) or not hasattr(model, "encode"):
-        return []
-    vector = model.encode(normalized, normalize_embeddings=True)
-    if hasattr(vector, "tolist"):
-        return [float(item) for item in vector.tolist()]
-    return [float(item) for item in vector]
-
-
 def _list_memory_entries(workspace_id: str, agent_install_id: str | None = None) -> List[Dict[str, Any]]:
     with _connect_memory_db(workspace_id, agent_install_id=agent_install_id) as connection:
         rows = connection.execute(
@@ -766,29 +732,48 @@ def _semantic_search(
     top_k: int = 5,
     agent_install_id: str | None = None,
 ) -> List[Dict[str, Any]]:
+    """Keyword search. The name is historical -- see below.
+
+    This used to embed the query and every stored entry with
+    sentence-transformers' all-MiniLM-L6-v2 and rank by cosine similarity,
+    falling back to `_search_memory` whenever `_embed_text` returned []. In
+    production it ALWAYS returned [] and always took the fallback: the model
+    weights were never downloaded on the box (no `~/.cache/huggingface` at
+    all, verified 2026-08-13), so `_semantic_model` caught the exception on
+    first use and latched `_SEMANTIC_MODEL = False` forever. The embedding
+    branch was unreachable there for the whole life of the feature, and
+    every test in the repo patched the model off explicitly, so nothing
+    exercised it anywhere either.
+
+    Removed rather than fixed, for three reasons.
+
+    It is off-doctrine: CLAUDE.md records rejecting RAG/embeddings for
+    agentic search, following Claude Code's own reversal, and the RAG
+    deletion of 2026-08-08 took `lancedb`+`pandas` while leaving this behind
+    -- the same "two implementations of one idea, and the agentic one is the
+    live one" that entry already describes.
+
+    It cost 2.7GB: `sentence-transformers` pulls `torch`, which pulls the
+    NVIDIA CUDA runtime onto a VPS with no GPU, on every deploy, to run a
+    model that was never fetched.
+
+    And keeping it would mean SEARCH RESULTS DIFFER depending on whether an
+    optional 90MB download happened to succeed on a given box -- silently,
+    with no way for anyone to tell which ranking they got. That is worse
+    than either choice on its own.
+
+    `_search_memory`'s ranking is unchanged; this is the exact call
+    production has always made.
+    """
     normalized_query = str(query or "").strip()
     if not normalized_query:
         return []
     entries = _list_memory_entries(workspace_id, agent_install_id=agent_install_id)
     if not entries:
         return []
-    query_vector = _embed_text(normalized_query)
-    if not query_vector:
-        return _search_memory(workspace_id, normalized_query, agent_install_id=agent_install_id)[: max(1, min(int(top_k or 5), 20))]
-    scored: List[Dict[str, Any]] = []
-    for entry in entries:
-        combined_text = f"{entry.get('key')}: {entry.get('content')}"
-        memory_vector = _embed_text(combined_text)
-        if not memory_vector:
-            continue
-        scored.append(
-            {
-                **entry,
-                "score": _cosine_similarity(query_vector, memory_vector),
-            }
-        )
-    scored.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
-    return scored[: max(1, min(int(top_k or 5), 20))]
+    return _search_memory(workspace_id, normalized_query, agent_install_id=agent_install_id)[
+        : max(1, min(int(top_k or 5), 20))
+    ]
 
 
 def _delete_memory(workspace_id: str, key: str, agent_install_id: str | None = None) -> bool:

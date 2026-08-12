@@ -20,8 +20,6 @@ spec.loader.exec_module(operator_chat)
 
 class OperatorChatNoProviderTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._semantic_model_patcher = patch.object(operator_chat.memory_service._workspace_memory_store, "_SEMANTIC_MODEL", False)
-        self._semantic_model_patcher.start()
         self._live_runs_patcher = patch(
             "server_modules.direct_chat_operator_support_service.run_state_repository.sync_list_live_runs",
             return_value=[],
@@ -36,7 +34,6 @@ class OperatorChatNoProviderTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._workspace_context_patcher.stop()
         self._live_runs_patcher.stop()
-        self._semantic_model_patcher.stop()
 
     @patch("operator_chat_no_provider_under_test._preferred_provider", return_value=("openai", {}))
     @patch("operator_chat_no_provider_under_test._supports_direct_message_native_chat", return_value=False)
