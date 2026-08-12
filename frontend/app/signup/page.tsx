@@ -252,23 +252,35 @@ export default function SignupPage() {
         <section className="app-auth-hero" aria-label="Empyralis sign up overview">
           <div className="app-auth-hero__badge">Empyralis</div>
           <div className="app-auth-hero__copy">
-            <h1 className="app-auth-hero__title">Start simple, then expand into connected work.</h1>
+            {/* Leads with the WORKSPACE, never with agents. CLAUDE.md's
+                positioning entry is explicit: "The WORKSPACE is the product.
+                The agent layer is the second thing, not the headline," and
+                "Linear never says 'AI'. They say track your issues, work
+                with your teammates. Copy that."
+
+                What was here led with "Ask AI, Build, Discover" — three
+                surface names that no longer exist — and claimed fresh
+                accounts land in the Agents list, which stopped being true
+                the moment signup started landing in the workspace. Copy that
+                names a screen is copy that goes wrong when the screen moves;
+                these lines name what a team OWNS instead. */}
+            <h1 className="app-auth-hero__title">Your projects, documents, and tasks in one place.</h1>
             <p className="app-auth-hero__body">
-              Create one account for Ask AI, Build, Discover, and your connected apps. Start with a clean core, then add power on your terms.
+              A workspace your team actually works in — and agents that work in it alongside them.
             </p>
           </div>
           <div className="app-auth-hero__rail">
             <div className="app-auth-hero__point">
-              <strong>No setup maze</strong>
-              <span>Fresh accounts land straight in your Agents list — nothing to configure first.</span>
+              <strong>Context that stays</strong>
+              <span>Documents and decisions live where the work happens, not in a repo nobody reads.</span>
             </div>
             <div className="app-auth-hero__point">
-              <strong>Cheap default AI</strong>
-              <span>Empyralis credits stay the normal launch path without forcing API keys.</span>
+              <strong>Work with your team</strong>
+              <span>Projects, tasks and status everyone can see. Private conversations stay private.</span>
             </div>
             <div className="app-auth-hero__point">
-              <strong>Connected apps later</strong>
-              <span>Add Google, Telegram, or your computer when the workflow actually calls for it.</span>
+              <strong>Bring what you already use</strong>
+              <span>Google, Telegram, or your own computer — connect them when the work calls for it.</span>
             </div>
           </div>
         </section>
@@ -278,7 +290,7 @@ export default function SignupPage() {
             <h2 className="app-auth-title">Sign up</h2>
             <p className="app-auth-subtitle">
               {channelAttribution
-                ? 'Create an Empyralis account to continue from Telegram, then finish inside Ask AI.'
+                ? 'Create an Empyralis account to continue from Telegram, then pick up in your workspace.'
                 : 'Choose the live sign-in path you want now. You can connect the rest later from inside Empyralis.'}
             </p>
           </div>
