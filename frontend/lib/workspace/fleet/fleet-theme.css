@@ -9117,11 +9117,102 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   box-shadow: none;
 }
 
+/* Inline title/description editing (click-to-edit) — same convention as
+   .fleet-overview-title's agent-rename button: a plain button wrapping the
+   text plus a hover-revealed pencil, no border until it's actually the
+   active control. The title stays a real <h2> either way (CLAUDE.md: real
+   heading structure) — only the inner button/input swaps. */
+.fleet-task-page-title-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 2px 6px;
+  margin: 0 0 0 -6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: text;
+}
+.fleet-task-page-title-edit:hover,
+.fleet-task-page-title-edit:focus-visible {
+  background: var(--bg-inset);
+  border-color: var(--border);
+}
+.fleet-task-page-title-edit:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+.fleet-task-page-title-pencil {
+  flex: none;
+  color: var(--text-muted);
+  opacity: 0;
+}
+.fleet-task-page-title-edit:hover .fleet-task-page-title-pencil,
+.fleet-task-page-title-edit:focus-visible .fleet-task-page-title-pencil {
+  opacity: 1;
+}
+.fleet-task-page-title-input {
+  display: block;
+  width: 100%;
+  padding: 2px 5px;
+  margin: 0 0 0 -6px;
+  border: 1px solid var(--accent-ring);
+  border-radius: var(--radius-control);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 24px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.01em;
+}
+.fleet-task-page-title-input:focus-visible {
+  outline: none;
+}
+
 .fleet-task-page-desc {
   margin: 16px 0 0;
   font-size: var(--text-sm);
   line-height: 1.65;
   color: var(--text-secondary);
+}
+.fleet-task-page-desc--editable {
+  padding: 6px 8px;
+  margin: 16px 0 0 -8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  cursor: text;
+}
+.fleet-task-page-desc--editable:hover,
+.fleet-task-page-desc--editable:focus-visible {
+  background: var(--bg-inset);
+  border-color: var(--border);
+}
+.fleet-task-page-desc--editable:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+.fleet-task-page-desc-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 16px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent-ring);
+  border-radius: var(--radius-control);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.65;
+  resize: none;
+  min-height: 72px;
+}
+.fleet-task-page-desc-input:focus-visible {
+  outline: none;
 }
 /* Paragraph breaks in the plain-text description column are preserved as real
    paragraphs; single newlines stay soft wraps. */
