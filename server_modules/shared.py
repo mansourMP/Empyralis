@@ -110,6 +110,33 @@ async def app_lifespan(_: Any):
             _logging.getLogger(__name__).warning(
                 "Telemetry retention loop startup failed: %s", _telemetry_retention_startup_exc
             )
+        # MAN-134 (metering half): periodic sweep that debits a workspace's
+        # real credit_balance_usd for the hours its Agent Computer(s) have
+        # run. Same startup/shutdown guarding convention as the telemetry
+        # retention block immediately above -- a failure here must never
+        # block startup, and is cancelled cleanly on shutdown via the exit
+        # stack. See server_modules/agent_computer_metering_service.py:
+        # metering only, never reaping/destruction.
+        try:
+            from server_modules import agent_computer_metering_service
+
+            _agent_computer_metering_task = asyncio.create_task(
+                agent_computer_metering_service.agent_computer_metering_loop()
+            )
+
+            async def _cancel_agent_computer_metering_task() -> None:
+                _agent_computer_metering_task.cancel()
+                try:
+                    await _agent_computer_metering_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            stack.push_async_callback(_cancel_agent_computer_metering_task)
+        except Exception as _agent_computer_metering_startup_exc:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Agent Computer metering loop startup failed: %s", _agent_computer_metering_startup_exc
+            )
         # Start Telegram background polling for local dev
         try:
             from server_modules import sage_telegram_hosted_service as _hosted
