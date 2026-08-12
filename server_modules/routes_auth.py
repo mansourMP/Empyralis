@@ -1,5 +1,6 @@
 import logging
 import os
+import secrets
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -264,7 +265,20 @@ def _validate_platform_invite_code(code: Optional[str]) -> None:
     required_code = str(os.environ.get("EMPYRALIS_INVITE_CODE") or "").strip()
     if not required_code:
         return
-    if str(code or "").strip() != required_code:
+    # Constant-time: this is a shared secret gating signup, the same
+    # category of comparison every other secret check in auth.py uses
+    # secrets.compare_digest for. A plain `!=` leaks match/mismatch timing.
+    #
+    # ENCODED TO BYTES, and that is not stylistic. compare_digest's str form
+    # accepts ASCII ONLY and raises TypeError on anything else — and `code`
+    # here is raw user input from the signup form. Comparing it as a str
+    # turns "someone typed an invite code containing an accent, a Cyrillic
+    # letter or an emoji" into an unhandled 500 instead of the clean 403
+    # this function exists to return. The bytes form has no such limit.
+    if not secrets.compare_digest(
+        str(code or "").strip().encode("utf-8"),
+        required_code.encode("utf-8"),
+    ):
         raise HTTPException(status_code=403, detail="Empyralis is invite-only right now.")
 
 
