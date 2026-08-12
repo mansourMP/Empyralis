@@ -540,5 +540,288 @@ class MCPChatToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reply", result)
 
 
+# ── (h) Document tools (feat/document-mcp-tools-and-revisions) ──────────
+#
+# MCP is for the FOUNDER'S USERS -- a teammate's own Claude/ChatGPT saying
+# "edit this document" -- so these prove exactly what that promise depends
+# on: project_id is resolved and VERIFIED server-side against the caller's
+# OWN workspace before anything is read or written (never trusted from the
+# argument to widen scope), a key for workspace A cannot touch workspace
+# B's documents or projects, and every write goes through project_documents_
+# repository EXACTLY ONCE (never zero, never twice) -- "an email was sent"
+# is satisfied by two emails just as happily as by one, so a bare
+# `assert_awaited` is not enough; every write test below asserts the count.
+
+def _doc_resolved(workspace_id="ws-doc-A", external_agent_id="ext_agent_doc_caller", writes_enabled=False):
+    return {
+        "workspace_id": workspace_id,
+        "writes_enabled": writes_enabled,
+        "external_agent_id": external_agent_id,
+        "external_agent_display_name": "Doc Caller Bot",
+    }
+
+
+def _patched_doc(*, resolved=None, tenant_id="tenant-doc-A"):
+    resolved = resolved if resolved is not None else _doc_resolved()
+    return (
+        patch.object(mcp_server, "_resolve_workspace", new=AsyncMock(return_value=resolved)),
+        patch.object(mcp_server, "_ledger_mcp_call", new=AsyncMock()),
+        patch(
+            "server_modules.control_plane_repository.resolve_tenant_id_for_workspace",
+            new=AsyncMock(return_value=tenant_id),
+        ),
+    )
+
+
+class _FakeDocCtx:
+    pass
+
+
+class MCPCreateDocumentToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_document_resolves_and_verifies_project_before_writing(self):
+        """project_id is looked up through projects_repository.get_project,
+        which itself filters WHERE tenant_id = ... AND workspace_id = ...
+        -- this is the server-side resolution the brief asked for, proven
+        by asserting get_project was called with the CALLER's own
+        workspace/tenant, never anything from the argument alone."""
+        project = {"id": "proj-1", "workspace_id": "ws-doc-A", "name": "Alpha"}
+        created = {"id": "doc-new-1", "title": "Runbook", "slug": "runbook", "body": "hi",
+                   "revision_recorded": True}
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.projects_repository.get_project", new=AsyncMock(return_value=project),
+            ) as project_mock, \
+            patch(
+                "server_modules.project_documents_repository.create_document",
+                new=AsyncMock(return_value=created),
+            ) as create_mock:
+            result = await mcp_server.empyralis_create_document(
+                project_id="proj-1", title="Runbook", body="hi", ctx=_FakeDocCtx(),
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["document"]["id"], "doc-new-1")
+        project_mock.assert_awaited_once_with(tenant_id="tenant-doc-A", workspace_id="ws-doc-A", project_id="proj-1")
+        create_mock.assert_awaited_once()
+        kwargs = create_mock.await_args.kwargs
+        self.assertEqual(kwargs["workspace_id"], "ws-doc-A")
+        self.assertEqual(kwargs["project_id"], "proj-1")
+        self.assertEqual(kwargs["created_by"], "ext_agent_doc_caller")
+        self.assertEqual(kwargs["changed_by_type"], "external_agent")
+        self.assertEqual(kwargs["changed_by_display_name"], "Doc Caller Bot")
+
+    async def test_create_document_rejects_a_project_from_another_workspace_without_writing_anything(self):
+        """THE cross-workspace proof: a project_id that does not resolve
+        inside the caller's own workspace (because it belongs to a
+        DIFFERENT workspace, or does not exist) is refused before
+        create_document is ever reached -- zero document-write calls, not
+        one that then gets rolled back."""
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.projects_repository.get_project", new=AsyncMock(return_value=None),
+            ) as project_mock, \
+            patch(
+                "server_modules.project_documents_repository.create_document", new=AsyncMock(),
+            ) as create_mock:
+            result = await mcp_server.empyralis_create_document(
+                project_id="proj-belongs-to-workspace-B", title="Leak attempt", ctx=_FakeDocCtx(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("not found in your workspace", result["error"])
+        project_mock.assert_awaited_once_with(
+            tenant_id="tenant-doc-A", workspace_id="ws-doc-A", project_id="proj-belongs-to-workspace-B",
+        )
+        create_mock.assert_not_awaited()
+
+
+class MCPEditDocumentToolTests(unittest.IsolatedAsyncioTestCase):
+    """empyralis_edit_document -- the PRIMARY, patch-native way to change a
+    document (founder: "write a line and push it, not a whole rewrite")."""
+
+    async def test_edit_applies_a_targeted_patch_exactly_once(self):
+        updated = {"id": "doc-1", "title": "Runbook", "body": "line one\nline TWO\n", "revision_recorded": True}
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.edit_document_by_replace",
+                new=AsyncMock(return_value=updated),
+            ) as edit_mock:
+            result = await mcp_server.empyralis_edit_document(
+                document_id="doc-1", old_string="line two", new_string="line TWO", ctx=_FakeDocCtx(),
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["document"]["body"], "line one\nline TWO\n")
+        edit_mock.assert_awaited_once()
+        kwargs = edit_mock.await_args.kwargs
+        self.assertEqual(kwargs["document_id"], "doc-1")
+        self.assertEqual(kwargs["old_string"], "line two")
+        self.assertEqual(kwargs["new_string"], "line TWO")
+        self.assertEqual(kwargs["changed_by_type"], "external_agent")
+
+    async def test_edit_that_matches_zero_or_multiple_times_fails_loudly_not_silently(self):
+        """A non-unique old_string must come back ok:false with the real
+        reason -- never a silent no-op and never a fallback to a whole-body
+        rewrite."""
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.edit_document_by_replace",
+                new=AsyncMock(side_effect=RuntimeError(
+                    "old_string appears 2 times in document 'Runbook' — it must match exactly once."
+                )),
+            ) as edit_mock:
+            result = await mcp_server.empyralis_edit_document(
+                document_id="doc-1", old_string="dup", new_string="x", ctx=_FakeDocCtx(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("exactly once", result["error"])
+        self.assertNotIn("document", result)
+        edit_mock.assert_awaited_once()
+
+    async def test_edit_on_a_document_not_in_the_callers_workspace_reports_not_found(self):
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.edit_document_by_replace",
+                new=AsyncMock(return_value=None),
+            ):
+            result = await mcp_server.empyralis_edit_document(
+                document_id="doc-not-mine", old_string="x", new_string="y", ctx=_FakeDocCtx(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("not found in your workspace", result["error"])
+
+
+class MCPUpdateDocumentToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_update_with_both_fields_empty_is_rejected_without_calling_the_repository(self):
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.update_document", new=AsyncMock(),
+            ) as update_mock:
+            result = await mcp_server.empyralis_update_document(document_id="doc-1", ctx=_FakeDocCtx())
+        self.assertFalse(result["ok"])
+        self.assertIn("nothing to update", result["error"])
+        update_mock.assert_not_awaited()
+
+    async def test_update_calls_the_repository_exactly_once_with_the_callers_identity(self):
+        updated = {"id": "doc-1", "title": "New Title", "revision_recorded": True}
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.update_document",
+                new=AsyncMock(return_value=updated),
+            ) as update_mock:
+            result = await mcp_server.empyralis_update_document(
+                document_id="doc-1", title="New Title", ctx=_FakeDocCtx(),
+            )
+        self.assertTrue(result["ok"])
+        update_mock.assert_awaited_once()
+        kwargs = update_mock.await_args.kwargs
+        self.assertEqual(kwargs["document_id"], "doc-1")
+        self.assertEqual(kwargs["title"], "New Title")
+        self.assertIsNone(kwargs["body"])
+        self.assertEqual(kwargs["changed_by_type"], "external_agent")
+
+
+class MCPListAndGetDocumentToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_documents_verifies_the_project_before_listing(self):
+        project = {"id": "proj-1", "workspace_id": "ws-doc-A"}
+        rows = [{"id": "doc-1", "title": "Runbook", "slug": "runbook"}]
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.projects_repository.get_project", new=AsyncMock(return_value=project),
+            ), \
+            patch(
+                "server_modules.project_documents_repository.list_documents",
+                new=AsyncMock(return_value=rows),
+            ) as list_mock:
+            result = await mcp_server.empyralis_list_documents(project_id="proj-1", ctx=_FakeDocCtx())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["documents"], rows)
+        list_mock.assert_awaited_once_with(tenant_id="tenant-doc-A", workspace_id="ws-doc-A", project_id="proj-1")
+
+    async def test_list_documents_for_a_project_outside_the_workspace_lists_nothing(self):
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.projects_repository.get_project", new=AsyncMock(return_value=None),
+            ), \
+            patch(
+                "server_modules.project_documents_repository.list_documents", new=AsyncMock(),
+            ) as list_mock:
+            result = await mcp_server.empyralis_list_documents(project_id="proj-other-ws", ctx=_FakeDocCtx())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["documents"], [])
+        list_mock.assert_not_awaited()
+
+    async def test_get_document_not_found_in_workspace(self):
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.get_document", new=AsyncMock(return_value=None),
+            ):
+            result = await mcp_server.empyralis_get_document(document_id="doc-elsewhere", ctx=_FakeDocCtx())
+        self.assertFalse(result["ok"])
+        self.assertIn("not found in your workspace", result["error"])
+
+    async def test_get_document_found_returns_full_body(self):
+        doc = {"id": "doc-1", "title": "Runbook", "body": "full markdown here"}
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.get_document", new=AsyncMock(return_value=doc),
+            ) as get_mock:
+            result = await mcp_server.empyralis_get_document(document_id="doc-1", ctx=_FakeDocCtx())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["document"]["body"], "full markdown here")
+        get_mock.assert_awaited_once_with(tenant_id="tenant-doc-A", workspace_id="ws-doc-A", document_id="doc-1")
+
+
+class MCPListDocumentRevisionsToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lists_revisions_for_a_document_in_the_callers_workspace(self):
+        doc = {"id": "doc-1", "title": "Runbook"}
+        revisions = [
+            {"revision_number": 2, "diff": "-old\n+new\n", "changed_by_type": "external_agent"},
+            {"revision_number": 1, "diff": None, "changed_by_type": "human"},
+        ]
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.get_document", new=AsyncMock(return_value=doc),
+            ), \
+            patch(
+                "server_modules.project_documents_repository.list_document_revisions",
+                new=AsyncMock(return_value=revisions),
+            ) as list_rev_mock:
+            result = await mcp_server.empyralis_list_document_revisions(document_id="doc-1", ctx=_FakeDocCtx())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["revisions"], revisions)
+        list_rev_mock.assert_awaited_once_with(
+            tenant_id="tenant-doc-A", workspace_id="ws-doc-A", document_id="doc-1", include_body=False,
+        )
+
+    async def test_revisions_for_a_document_not_in_the_callers_workspace_is_not_found(self):
+        """Same workspace boundary as every other document tool: history
+        for a document that does not resolve in the caller's own
+        (tenant, workspace) never reaches list_document_revisions at all."""
+        p1, p2, p3 = _patched_doc()
+        with p1, p2, p3, \
+            patch(
+                "server_modules.project_documents_repository.get_document", new=AsyncMock(return_value=None),
+            ), \
+            patch(
+                "server_modules.project_documents_repository.list_document_revisions", new=AsyncMock(),
+            ) as list_rev_mock:
+            result = await mcp_server.empyralis_list_document_revisions(
+                document_id="doc-not-mine", ctx=_FakeDocCtx(),
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("not found in your workspace", result["error"])
+        list_rev_mock.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()

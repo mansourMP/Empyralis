@@ -6626,6 +6626,9 @@ def execute_single_direct_tool_call(
                     document_id=document["id"],
                     body=new_body,
                     updated_by=_caller_agent_id,
+                    # A platform agent's own tool call -- see project_documents_
+                    # repository's changed_by_type vocabulary (human/agent/external_agent).
+                    changed_by_type="agent",
                 )
             )
             if updated is None:
@@ -6670,6 +6673,7 @@ def execute_single_direct_tool_call(
                         body=str(body or ""),
                         slug=candidate_slug,
                         created_by=_caller_agent_id,
+                        changed_by_type="agent",
                     )
                 )
             except ValueError as exc:

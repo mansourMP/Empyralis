@@ -1278,6 +1278,9 @@ async def fleet_create_document(
             title=body.title,
             body=body.body,
             created_by=str((current_user or {}).get("user_id") or "").strip() or None,
+            # A dashboard session is always a human -- see project_documents_
+            # repository's changed_by_type vocabulary (human/agent/external_agent).
+            changed_by_type="human",
         )
         return {"ok": True, "document": document}
     except Exception as exc:
@@ -1318,6 +1321,7 @@ async def fleet_patch_document(
             title=body.title,
             body=body.body,
             updated_by=str((current_user or {}).get("user_id") or "").strip() or None,
+            changed_by_type="human",
         )
         if document is None:
             return {"ok": False, "error": "Document not found."}

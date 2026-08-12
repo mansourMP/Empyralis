@@ -421,4 +421,20 @@ CREATE POLICY empyralis_agent_goals_scope ON agent_goals
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- project_document_revisions is a BRAND NEW table (migrations/
+-- add_project_document_revisions.sql -- the durable history a document
+-- edit gets, see that file's own header for the full rationale). Same
+-- posture as project_documents/agent_goals just above: both call sites
+-- (project_documents_repository.py's _record_document_revision and
+-- list_document_revisions) were written against the scoped
+-- rls_execute/rls_fetch helpers from the start, so there is no ordering
+-- hazard and RLS ships in the same change that creates the table.
+ALTER TABLE project_document_revisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE project_document_revisions FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_project_document_revisions_scope ON project_document_revisions;
+CREATE POLICY empyralis_project_document_revisions_scope ON project_document_revisions
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;
