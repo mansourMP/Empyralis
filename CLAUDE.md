@@ -1898,3 +1898,19 @@ upside is one test. BYO-subscription work is exercised against OpenAI, xAI/Grok
 and Cursor instead; the Claude BYO path is verified by reading code and by
 mocked tests, never by a live call on a personal plan. Platform/API credentials
 billed to the company are a different thing and are fine.
+
+**AWS provisioning is DELIBERATELY UNWIRED until the founder is in San
+Francisco.** Decided 2026-08-12. The code is complete and tested
+(`_provision_aws`, `deploy/aws/empyralis-vps-role.yaml`, boto3 live) — what is
+missing is only the operator side: `EMPYRALIS_AWS_ACCOUNT_ID` and
+`EMPYRALIS_AWS_CFN_TEMPLATE_URL`. That account is Empyralis's permanent
+operator identity: its 12-digit id gets baked into EVERY customer's IAM trust
+policy, so losing access to it later breaks every AWS-provisioned Agent
+Computer at once and cannot be fixed without re-issuing the trust policy to
+every customer who ever connected. The founder is in China on a phone number
+he does not own and a card whose billing address does not match, so signup
+would tie a permanent company identity to borrowed credentials. Deferring is
+the correct call, not a gap to close. **Do not attempt to wire AWS, and do not
+report it as a defect** — "Connect AWS account" returning HTTP 500 on
+`empyralis_aws_account_id()` is the intended state until then. DigitalOcean is
+the working provider; Google Cloud is next.
