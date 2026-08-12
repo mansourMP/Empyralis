@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote, urlencode
 
 from fastapi import Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+
+from server_modules.safe_file_response import safe_file_response
 
 from scripts.platform_execution import current_platform_context, supported_device_actions
 from server_modules.api_contract import ApiArtifactListResponse, ApiArtifactPreviewResponse
@@ -213,7 +214,7 @@ def _artifact_file_response_for_id(
         current_user=current_user,
         request=request,
     )
-    return FileResponse(
+    return safe_file_response(
         path=str(target),
         media_type=media_type,
         headers={
@@ -2128,7 +2129,7 @@ def register_agent_workspace_routes(app) -> None:
                 or "application/octet-stream"
             ).strip() or "application/octet-stream"
             filename = str(artifact_metadata.get("file_name") or artifact_metadata.get("label") or target.name).strip() or target.name
-            return FileResponse(path=str(target), media_type=media_type, filename=filename)
+            return safe_file_response(path=str(target), media_type=media_type, filename=filename)
         if normalized_path.lower().startswith(("http://", "https://", "file://")):
             raise HTTPException(status_code=400, detail="Only local artifact files are supported.")
 
@@ -2139,7 +2140,7 @@ def register_agent_workspace_routes(app) -> None:
             _ensure_artifacts_access_for_workspace(str((current_user or {}).get("workspace_id") or "default"))
 
         media_type = mimetypes.guess_type(str(target.name))[0] or "application/octet-stream"
-        return FileResponse(path=str(target), media_type=media_type, filename=target.name)
+        return safe_file_response(path=str(target), media_type=media_type, filename=target.name)
 
     @app.get("/artifacts/content", dependencies=[Depends(require_api_key)])
     async def get_artifact_content(

@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { safeExternalHref } from "@/lib/workspace/safe-render-url";
 import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
 import { StatusChip, StatusDot, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { CHANNEL_ICONS, CHANNEL_LABELS } from "@/lib/workspace/fleet/fleet-icons";
@@ -1186,15 +1187,29 @@ function CliSetupControl({
         {urlText ? (
           <p style={{ margin: "0 0 4px", wordBreak: "break-all" }}>
             Open this link and approve:{" "}
-            <a
-              href={urlText}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="fleet-md-code"
-              style={{ color: "var(--accent)", textDecoration: "underline" }}
-            >
-              {urlText}
-            </a>
+            {(() => {
+              // safeExternalHref: `urlText` is a "url"-kind line read off the
+              // CLI login flow's own stdout on the owner's box (see
+              // setUrlText above) — text the app never authored, so it goes
+              // through the same allowlist as every other data-to-href seam
+              // rather than straight into href. A refused value still shows
+              // (the operator may need to read/copy it), just not as a live
+              // link.
+              const safeUrl = safeExternalHref(urlText);
+              return safeUrl ? (
+                <a
+                  href={safeUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="fleet-md-code"
+                  style={{ color: "var(--accent)", textDecoration: "underline" }}
+                >
+                  {urlText}
+                </a>
+              ) : (
+                <span className="fleet-md-code">{urlText}</span>
+              );
+            })()}
           </p>
         ) : chosenMethod.inputKind ? (
           // Stdin-secret method — no URL phase.

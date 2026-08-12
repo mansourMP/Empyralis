@@ -93,5 +93,5 @@ def register_sage_context_file_routes(app) -> None:
         if not file_path.exists() or not file_path.is_file():
             raise HTTPException(status_code=404, detail="Attachment not found.")
 
-        from fastapi.responses import FileResponse
-        return FileResponse(path=file_path)
+        from server_modules.safe_file_response import safe_file_response
+        return safe_file_response(path=file_path)
