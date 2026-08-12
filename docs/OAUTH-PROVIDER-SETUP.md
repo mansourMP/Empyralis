@@ -59,29 +59,49 @@ way — this was already known before MAN-111.
 
 ## Google Workspace
 
+**As of 2026-08-12, `empyralis-gws-cli` runs TWO scope tiers, not one.** The
+live consent screen declares only `openid`/`email`/`profile`/`drive.file` —
+non-sensitive, unverified-clean, no 100-user cap, no "unverified app"
+warning. `gmail.modify` (restricted) and `calendar` (sensitive) were
+deliberately removed and come back later behind a SEPARATE OAuth app that
+goes through Google's verification review. Which scopes this deployment may
+currently request is decided in exactly one place — `connection_oauth_
+service.google_workspace_enabled_capabilities()` — driven by
+`GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES`. Never hardcode a second "gmail is
+off" list anywhere.
+
 - [ ] Go to **https://console.cloud.google.com/apis/credentials** (create/select a GCP project first if needed)
 - [ ] Configure the OAuth consent screen if not already done (External user type, add scopes below)
 - [ ] Create Credentials → **OAuth client ID** → Application type **Web application**
 - [ ] Redirect URI: `https://empyralis.ai/api/connections/oauth/google_workspace/callback`
-- [ ] Scopes to request (must match code exactly, `connection_oauth_service.py:114-120`):
+- [ ] Scopes to request on THIS app (the identity + Drive baseline —
+  `connection_oauth_service.py`'s `OAUTH_PROVIDER_CONFIGS["google_workspace"].scopes`
+  plus `GOOGLE_WORKSPACE_CAPABILITY_SCOPES["drive"]`):
   - `openid`
   - `email`
   - `profile`
-  - `https://www.googleapis.com/auth/gmail.modify`
-  - `https://www.googleapis.com/auth/calendar`
+  - `https://www.googleapis.com/auth/drive.file`
 - [ ] Set env vars: `GOOGLE_WORKSPACE_OAUTH_CLIENT_ID`, `GOOGLE_WORKSPACE_OAUTH_CLIENT_SECRET`
   (code also accepts `GOOGLE_OAUTH_CLIENT_ID`/`_SECRET` or `GOOGLE_CLIENT_ID`/`_SECRET` as fallbacks —
   the stray existing `GOOGLE_OAUTH_CLIENT_ID` env var lines up with this fallback but has no matching
   secret set today)
-- [ ] **Verification review required.** `gmail.modify` and `calendar` are Google-classified
-  "sensitive" scopes — the OAuth consent screen needs Google's verification review before the app
-  can serve non-test users at scale (days-to-weeks, not instant). The privacy policy / terms pages
-  Google's review will check are already live at `frontend/app/privacy/page.tsx` and
-  `frontend/app/terms/page.tsx` (confirmed by `test_google_oauth_verification_readiness.py`) — nothing
-  to write, just submit for review.
-- [ ] Optional: Drive access is opt-in, not requested by default — only add
-  `https://www.googleapis.com/auth/drive.file` if you also set
-  `GOOGLE_WORKSPACE_ENABLE_DRIVE_SCOPE=1` (or `GOOGLE_OAUTH_ENABLE_DRIVE_SCOPE=1`)
+- [ ] Leave `GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES` unset — it already
+  defaults to `drive`, matching the scopes above exactly.
+- [ ] **Gmail and Calendar need a SEPARATE, verified OAuth app** (a second
+  GCP project or a second OAuth client, your call) before they can be
+  requested again. That app's consent screen needs
+  `https://www.googleapis.com/auth/gmail.modify` and
+  `https://www.googleapis.com/auth/calendar` added, plus Google's
+  verification review (days-to-weeks, not instant — the privacy policy /
+  terms pages the review checks are already live at
+  `frontend/app/privacy/page.tsx` and `frontend/app/terms/page.tsx`,
+  confirmed by `test_google_oauth_verification_readiness.py`). Once that
+  app is verified and its scopes are live, point this deployment at it and
+  set `GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES=drive gmail calendar` — that
+  one flip is the only code-side change needed; requesting a scope Google's
+  console doesn't yet declare fails the OAuth start with a coded
+  `google_workspace_scope_unavailable` error rather than Google's own raw
+  "invalid_scope" page.
 
 ## GitHub
 

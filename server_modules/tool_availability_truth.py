@@ -224,8 +224,16 @@ def capability_verification_from_test_result(connector_id: str, test_result: Any
     read_actions: List[str] = []
     write_actions: List[str] = []
     if normalized_connector_id == "google_workspace":
-        read_actions.append("gmail_threads.read")
-        write_actions.extend(["fetch_emails", "draft_email", "send_email"])
+        # Gmail is gated exactly like Calendar/Drive below it, on the
+        # connector's own test result -- it used to be unconditional,
+        # which meant a credential with Gmail's scope unavailable (this
+        # deployment's default as of 2026-08-12, see connection_oauth_
+        # service.google_workspace_enabled_capabilities()) still claimed
+        # gmail read/write actions the connector could not actually
+        # perform. See fix/google-connectors-honest-when-scopes-unavailable.
+        if bool(test_result.get("gmail_access")):
+            read_actions.append("gmail_threads.read")
+            write_actions.extend(["fetch_emails", "draft_email", "send_email"])
         if bool(test_result.get("calendar_access")):
             read_actions.append("calendar_events.read")
             write_actions.extend(["list_calendar_events", "create_calendar_event"])
