@@ -1829,6 +1829,53 @@ caller — WhatsApp/Telegram-personal scope outbound rows by `agent_id`,
 local-bridge stays unscoped on purpose (same reason
 `_deliver_local_bridge_personal_reply`'s own outbound calls do).
 
+**A page-shell class shared by two page SHAPES will be right for one and
+wrong for the other, silently.** `.fleet-task-page-body` (fleet-theme.css:
+`max-width: 720px`, left-aligned, no `margin: auto`) is correct on a task
+page because `.fleet-task-page-side` — a real flex sibling, 300px of
+Properties — fills the rest of a wide row; left-aligning the reading column
+next to it is Linear's own layout. A document page reuses the identical
+class but has no second column, so the same left alignment just left a
+lopsided blank strip down the right two-thirds of a ~1730px screen — the
+founder's "this doesn't look like a documents page" complaint, 2026-08-12.
+Fixed by centering `.fleet-task-page-body` ONLY inside a new sibling class
+on the document page's own root div (`.fleet-doc-detail-page`, matching
+`task-detail.css`'s own `.fleet-task-page.fleet-task-detail-page` override
+convention), never by changing the shared rule itself. Before touching a
+class two page shapes both reach for, check whether it's being asked to do
+two different jobs.
+
+**A page's own "⋯" menu belongs in the breadcrumb topbar
+(`HeaderAction`/`.fleet-topbar-action`), never inside the scrolling reading
+column.** The document page's menu trigger sat at the right edge of
+`.fleet-task-page-body` — correct relative to that 720px column, but on a
+wide screen the column is left-aligned (see above) so the trigger rendered
+visually mid-page, nowhere near "the top." `HeaderAction` already existed
+and was already in production use (FleetAgentDetail, the Agents/Projects
+list pages' primary-action buttons) — the document page had simply never
+been wired to it, a small instance of "built and not adopted" rather than
+"built, tested, and never wired." Portaling the menu there fixed the
+placement AND, for free, fixed the title's border-bottom divider reading as
+"orphaned" (nothing sits past its right edge any more) — two founder
+complaints from one relocation, not two fixes.
+
+**The document "⋯" menu grew from Delete-only to Copy link / Duplicate /
+Export as .md / Delete — each item independently justified, not "add a
+menu's worth."** Copy link and Export as .md are read-only and render for a
+VIEWER too, not just a writer (harmless, no network call for Export — it
+downloads whatever is already in the draft). Duplicate is canWrite-only and
+calls the SAME `fleet_create_document` route the list view's own "New
+document" already uses — no new backend. Rename and "Move to another
+project" were both considered and cut: Rename would duplicate the title
+input that's already a live, always-editable control (the exact mode-toggle
+friction the direct-editing rework removed); Move needs a genuinely new
+backend concept (`fleet_patch_document` has no `project_id` parameter, and
+moving one needs a destination-project membership check) rather than reuse
+of an existing route, so it was flagged as its own follow-up instead of
+shipped half-done. The rule this leaves behind: an item earns its place by
+(a) working end-to-end today and (b) reusing an existing route/control,
+never by "the menu should probably have this too."
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**

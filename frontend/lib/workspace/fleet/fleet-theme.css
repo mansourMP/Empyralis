@@ -7160,6 +7160,31 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
    matches the confirm dialog it opens. */
 .fleet-list-row-menu-item--danger { color: var(--app-danger); }
 .fleet-list-row-menu-item--danger:hover { background: color-mix(in srgb, var(--app-danger) 12%, transparent); }
+.fleet-list-row-menu-item:disabled { color: var(--text-muted); cursor: default; }
+.fleet-list-row-menu-item:disabled:hover { background: transparent; }
+
+/* A thin separator between a menu's ordinary items and a destructive one —
+   first needed by DocumentMenu (DocumentDetailView.tsx) once it grew past a
+   single Delete item; shared here rather than styled per-menu so the next
+   row menu that mixes safe and destructive actions (HardwareRowMenu today
+   just leans on --danger color for that, no divider) has one to reach for
+   instead of inventing its own. */
+.fleet-list-row-menu-divider {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+
+/* An inline error surfaced by a non-destructive menu item (e.g. a failed
+   Duplicate) — same size/color as .fleet-doc-menu-confirm-error's delete-
+   specific one (document-detail.css), generalized here since a future menu
+   item's failure is exactly this same shape, not a document-only concern. */
+.fleet-list-row-menu-error {
+  display: block;
+  padding: 2px 8px 4px;
+  font-size: var(--text-xs);
+  color: var(--app-danger);
+}
 
 .fleet-secondary-toggle {
   background: none;

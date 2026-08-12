@@ -25,12 +25,24 @@
  * moment on load — same contract useCanWriteProject's own doc comment
  * establishes.
  *
- * DELETE moved off the page into a "⋯" overflow menu, top-right of the
- * header row (see DocumentMenu below) — the founder's second complaint was a
- * standing red Delete button doing nothing but wait to be misclicked.
- * Confirmation is a small inline swap INSIDE the menu ("Delete" → "Delete
- * document? / Cancel"), not a blocking modal — this codebase's approval-gate
- * rule (CLAUDE.md) is about workflow approval states, not this: a destructive
+ * THE "⋯" MENU lives in the breadcrumb TOPBAR (via HeaderAction), not in the
+ * page's own header row. It used to sit at the right edge of
+ * .fleet-task-page-body — correct relative to ITS OWN column, wrong on a
+ * wide screen: that column is capped at 720px and left-aligned (a task page
+ * shares this width to leave room for its Properties sidebar; a document has
+ * no sidebar, see the centering rule in document-detail.css), so on a
+ * ~1730px screen the menu sat visually mid-page, nowhere near "the top" a
+ * person would look for it. HeaderAction is the same portal FleetAgentDetail
+ * and the Agents/Projects list pages already use for their own primary
+ * action — reused, not reinvented — and it renders on the SAME row as the
+ * breadcrumb, genuinely at the top of the page regardless of column width.
+ * DELETE moved off the page into this menu originally (the founder's second
+ * complaint was a standing red Delete button doing nothing but wait to be
+ * misclicked); Copy link / Duplicate / Export as .md joined it (see
+ * DocumentMenu below for which and why). Delete's confirmation is still a
+ * small inline swap INSIDE the menu ("Delete" → "Delete document? /
+ * Cancel"), not a blocking modal — this codebase's approval-gate rule
+ * (CLAUDE.md) is about workflow approval states, not this: a destructive
  * action asking "are you sure" once, inline, is a different thing and stays.
  *
  * Esc returns to the project's Documents list, mirroring TaskDetailView's
@@ -43,10 +55,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { MoreHorizontal } from "lucide-react";
 
-import type { FleetDocument } from "./documents-data";
+import {
+  createFleetDocument,
+  documentExportFilename,
+  duplicateDocumentTitle,
+  type FleetDocument,
+} from "./documents-data";
 import { MarkdownLite } from "./markdown-lite";
 import { timeAgo } from "./fleet-presentation";
 import { DocumentHistory } from "./DocumentHistory";
+import { HeaderAction } from "./Breadcrumbs";
 import type { FleetAgent } from "./fleet-data";
 import type { WorkspaceMember } from "./members-data";
 import "./document-detail.css";
@@ -267,8 +285,76 @@ export function DocumentDetailView({
     };
   }, [runSave]);
 
+  // Copies the page's own URL — available to a viewer too (read-only access
+  // is exactly when "let me hand you a link" comes up). navigator.clipboard
+  // is undefined over plain http:// in some browsers; DocumentMenu's own
+  // click handler is fire-and-forget either way, same as the pattern
+  // MembersSection.tsx already uses for its invite-link copy button.
+  const handleCopyLink = useCallback(async () => {
+    await navigator.clipboard?.writeText(window.location.href);
+  }, []);
+
+  // Downloads exactly what's on screen right now (draftRef, not the last-
+  // saved `document` prop) — no network round trip, so there's nothing to
+  // fail. window.document, not the bare `document` global: this component's
+  // own `document` PROP shadows it (see the Esc handler above, which
+  // already has to do the same thing).
+  const handleExport = useCallback(() => {
+    const blob = new Blob([draftRef.current.body], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = window.document.createElement("a");
+    link.href = url;
+    link.download = documentExportFilename(draftRef.current.title, document.slug);
+    window.document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }, [document.slug]);
+
+  // canWrite-only (DocumentMenu never renders this item for a viewer).
+  // Duplicates the DRAFT, not the last-saved document — a duplicate should
+  // match what the person is looking at, not silently drop whatever they
+  // typed in the seconds before the autosave debounce (900ms) settles.
+  const [duplicating, setDuplicating] = useState(false);
+  const [duplicateError, setDuplicateError] = useState<string | null>(null);
+  const handleDuplicate = useCallback(async () => {
+    if (duplicating) return;
+    setDuplicating(true);
+    setDuplicateError(null);
+    try {
+      const created = await createFleetDocument(workspaceId, {
+        project_id: document.project_id || "",
+        title: duplicateDocumentTitle(draftRef.current.title),
+        body: draftRef.current.body,
+      });
+      // No `finally` resetting `duplicating` on success — this component is
+      // about to unmount on navigation, and flipping it back to false first
+      // would let the menu item flash "Duplicate" again for one frame.
+      router.push(`${projectHref}/${encodeURIComponent(created.id)}`);
+    } catch (e) {
+      setDuplicateError(e instanceof Error ? e.message : "Could not duplicate this document.");
+      setDuplicating(false);
+    }
+  }, [duplicating, workspaceId, document.project_id, projectHref, router]);
+
   return (
-    <div className="fleet-task-page">
+    <div className="fleet-task-page fleet-doc-detail-page">
+      {/* canWrite === null (still resolving) renders nothing here too — same
+          contract as the title/body controls below, so the menu doesn't pop
+          into the topbar a beat after the rest of the page. */}
+      {canWrite !== null ? (
+        <HeaderAction>
+          <DocumentMenu
+            canWrite={canWrite}
+            onCopyLink={handleCopyLink}
+            onExport={handleExport}
+            onDuplicate={canWrite ? handleDuplicate : undefined}
+            duplicating={duplicating}
+            duplicateError={duplicateError}
+            onDelete={canWrite ? onDelete : undefined}
+          />
+        </HeaderAction>
+      ) : null}
       <div className="fleet-task-page-main">
         <div className="fleet-task-page-body">
           <div className="fleet-doc-header-row">
@@ -296,18 +382,17 @@ export function DocumentDetailView({
                 {document.title || "Untitled document"}
               </h2>
             )}
-
-            {/* Write-gated, right end of the header row, aligned with the
-                title — see DocumentMenu's own header for why this replaced
-                the standing red Delete button. `null` (still resolving)
-                hides it too, same contract as the title/body controls.
-                DocumentMenu owns the delete call's own busy/error state —
-                it is a distinct action from the autosave this view's own
-                `status`/`error` track, and conflating the two would mislabel
-                a failed delete as "Couldn't save". */}
-            {canWrite ? <DocumentMenu onDelete={onDelete} /> : null}
           </div>
 
+          {/* Directly under the title, small and muted (12px, --text-muted)
+              — assessed as part of this same pass and kept, not moved.
+              Two reasons: it is Notion/Linear's own byline placement for
+              "who/when touched this", and unlike a static byline it is ALSO
+              this view's live autosave status (Saving…/Saved/error) — the
+              one piece of feedback that must stay visible right next to the
+              field someone is typing into. Moving it up into the topbar
+              alongside the "⋯" menu would separate that feedback from the
+              editing surface it reports on. */}
           <div className={`fleet-doc-meta${status === "error" ? " fleet-doc-meta--error" : ""}`}>
             {status === "saving"
               ? "Saving…"
@@ -364,18 +449,78 @@ export function DocumentDetailView({
  * `.fleet-task-detail-icon-btn` (task-detail.css) instead of
  * `.fleet-list-row-menu-trigger`, because that class only reveals on
  * row-hover — right for a list row, wrong for a page header action that
- * must be reachable without hovering a whole row first.
+ * must be reachable without hovering a whole row first. Portaled into the
+ * breadcrumb topbar via HeaderAction (see DocumentDetailView's own render —
+ * the founder's "top of the page" complaint), not rendered inline here.
+ *
+ * FOUR ACTIONS, each earning its own place (CLAUDE.md: "best, not most" /
+ * "a surface must earn its place") — every candidate that came up and got
+ * cut is named below so the next pass doesn't re-litigate them from
+ * scratch:
+ *
+ *  - Copy link / Export as .md — read-only, so both render for a VIEWER
+ *    too (canWrite=false), not just a writer. Copy link writes the page's
+ *    own URL; Export downloads exactly what's on screen as `.md`. Neither
+ *    touches the network — nothing to fail, nothing to test against a
+ *    fake backend.
+ *  - Duplicate — canWrite only, since it's a write. Calls the SAME
+ *    fleet_create_document route the "New document" list action already
+ *    uses (documents-data.ts's createFleetDocument); nothing new on the
+ *    backend.
+ *  - Delete — unchanged from the first pass; still the only destructive
+ *    item, still the only one behind a confirm swap.
+ *
+ *  CUT, and why:
+ *  - Rename — the title is already a live, always-editable <input> for a
+ *    canWrite reader (see this file's own header, "DIRECT MANIPULATION").
+ *    A "Rename" menu item next to it would be the exact "why the fuck do I
+ *    need to edit for" mode-toggle the founder rejected the first time,
+ *    just moved one level down — a second way to do a thing that already
+ *    has zero friction is not a feature, it's a decoy control.
+ *  - Move to another project — needs a genuinely new backend concept
+ *    (fleet_patch_document only accepts title/body today; moving a
+ *    document means a destination-project membership check and extending
+ *    update_document's COALESCE contract to a third column) rather than
+ *    reusing an existing route the way Duplicate does. Per this task's own
+ *    instruction ("build it properly with tests, or leave it out — never
+ *    render a control that does nothing"), that is follow-up work, not a
+ *    CSS-and-wiring pass; flagged separately rather than shipped half-done.
  */
-function DocumentMenu({ onDelete }: { onDelete: () => Promise<void> }) {
+function DocumentMenu({
+  canWrite,
+  onCopyLink,
+  onExport,
+  onDuplicate,
+  duplicating,
+  duplicateError,
+  onDelete,
+}: {
+  canWrite: boolean;
+  onCopyLink: () => void | Promise<void>;
+  onExport: () => void;
+  /** Present only when canWrite — the item itself is omitted otherwise,
+   *  never rendered disabled (CLAUDE.md: no dead controls). */
+  onDuplicate?: () => void;
+  duplicating?: boolean;
+  duplicateError?: string | null;
+  /** Present only when canWrite — same reasoning as onDuplicate. */
+  onDelete?: () => Promise<void>;
+}) {
   const [open, setOpen] = useState(false);
   // Inline confirm swap INSIDE the menu, not a modal — see file header.
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  // This menu's OWN error, distinct from DocumentDetailView's autosave
-  // `status`/`error` — a failed delete is a different action with a
-  // different message, and showing it here (next to the control that
+  // This menu's OWN delete error, distinct from DocumentDetailView's
+  // autosave `status`/`error` — a failed delete is a different action with
+  // a different message, and showing it here (next to the control that
   // caused it) keeps it from being mislabeled as a save failure.
-  const [error, setError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  // "Copy link" / "Copied!" label swap, same convention MembersSection.tsx's
+  // invite-link copy button already uses — state change only, no icon
+  // animation, reverts on its own so the menu never needs a second click to
+  // reset it.
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -401,26 +546,40 @@ function DocumentMenu({ onDelete }: { onDelete: () => Promise<void> }) {
     };
   }, [open]);
 
-  // Closing the menu always drops a pending confirm (and any error it
-  // surfaced) — reopening it always starts from a plain "Delete", never
+  // Closing the menu always drops a pending confirm (and any error/copied
+  // state it surfaced) — reopening it always starts clean, never
   // mid-confirmation or showing a stale failure from a previous attempt.
   useEffect(() => {
     if (!open) {
       setConfirming(false);
-      setError(null);
+      setDeleteError(null);
+      setCopied(false);
     }
   }, [open]);
 
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  const handleCopyClick = useCallback(() => {
+    void onCopyLink();
+    setCopied(true);
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
+  }, [onCopyLink]);
+
   const handleDelete = useCallback(async () => {
-    if (deleting) return;
+    if (deleting || !onDelete) return;
     setDeleting(true);
-    setError(null);
+    setDeleteError(null);
     try {
       await onDelete();
       // On success the caller navigates away (documents/[documentId]/page.tsx's
       // handleDelete pushes back to the list) — nothing left to reset here.
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not delete this document.");
+      setDeleteError(e instanceof Error ? e.message : "Could not delete this document.");
       setDeleting(false);
     }
   }, [deleting, onDelete]);
@@ -460,21 +619,63 @@ function DocumentMenu({ onDelete }: { onDelete: () => Promise<void> }) {
                   {deleting ? "Deleting…" : "Delete"}
                 </button>
               </div>
-              {error ? (
+              {deleteError ? (
                 <span className="fleet-doc-menu-confirm-error" role="alert">
-                  {error}
+                  {deleteError}
                 </span>
               ) : null}
             </div>
           ) : (
-            <button
-              type="button"
-              role="menuitem"
-              className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
-              onClick={() => setConfirming(true)}
-            >
-              Delete
-            </button>
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                className="fleet-list-row-menu-item"
+                onClick={handleCopyClick}
+              >
+                {copied ? "Copied!" : "Copy link"}
+              </button>
+              {canWrite && onDuplicate ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="fleet-list-row-menu-item"
+                  disabled={duplicating}
+                  onClick={onDuplicate}
+                >
+                  {duplicating ? "Duplicating…" : "Duplicate"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                role="menuitem"
+                className="fleet-list-row-menu-item"
+                onClick={() => {
+                  onExport();
+                  setOpen(false);
+                }}
+              >
+                Export as .md
+              </button>
+              {duplicateError ? (
+                <span className="fleet-list-row-menu-error" role="alert">
+                  {duplicateError}
+                </span>
+              ) : null}
+              {canWrite && onDelete ? (
+                <>
+                  <div className="fleet-list-row-menu-divider" />
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="fleet-list-row-menu-item fleet-list-row-menu-item--danger"
+                    onClick={() => setConfirming(true)}
+                  >
+                    Delete
+                  </button>
+                </>
+              ) : null}
+            </>
           )}
         </div>
       ) : null}
