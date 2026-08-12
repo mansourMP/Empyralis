@@ -1,10 +1,12 @@
+import ast
 import base64
+import inspect
 import io
 import pathlib
 import time
 import uuid
 from urllib.parse import parse_qs, urlsplit
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -4514,10 +4516,21 @@ def test_provision_vps_uses_platform_account_for_baked_image(monkeypatch):
 
 def test_provision_vps_platform_path_off_without_token(monkeypatch):
     """No platform token -> exactly the pre-existing customer-account
-    behaviour, even with the baked-image flag on."""
+    behaviour, even with the baked-image flag on. Clears every candidate
+    the broker now resolves through (MAN-131), not just the one legacy env
+    var — otherwise a developer box with e.g. DIGITALOCEAN_ACCESS_TOKEN set
+    for doctl would flip this test's outcome."""
     monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    monkeypatch.delenv("EMPYRALIS_HOSTED_PROVIDER_SECRETS_JSON", raising=False)
     monkeypatch.delenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, raising=False)
+    monkeypatch.delenv("ORION_HOSTED_DIGITALOCEAN_TOKEN", raising=False)
+    monkeypatch.delenv("DIGITALOCEAN_ACCESS_TOKEN", raising=False)
     monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
+    monkeypatch.setattr(
+        vps.secrets_broker.control_plane_repository,
+        "append_agent_secret_access_event",
+        AsyncMock(),
+    )
 
     calls = []
 
@@ -4531,6 +4544,141 @@ def test_provision_vps_platform_path_off_without_token(monkeypatch):
 
     assert calls[0]["token"] == "customer_oauth_token"
     assert result.record_credentials is None
+
+
+# ── MAN-131: the platform DigitalOcean token resolves through the secrets
+# broker, never a bare os.getenv — the exact discipline gap the Twilio/
+# Telegram/Resend keys are still in (see CLAUDE.md's "recurring failure
+# modes"). Three things proven here: (1) the ONLY thing
+# _platform_digitalocean_token reads through is the broker — a source/AST
+# check, since a behavioural test cannot catch a bare os.getenv
+# reintroduced BESIDE the broker call it would just silently shadow;
+# (2) resolving it actually walks the broker's real hosted-secret
+# machinery (env fallback, with the audit row attempted); (3) the exact env
+# var name production has read since MAN-133
+# (EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN) still wins over the new aliases,
+# so registering "digitalocean" cannot silently orphan whatever is already
+# configured on a live box.
+
+
+def _platform_digitalocean_token_source_tree() -> ast.Module:
+    return ast.parse(inspect.getsource(vps._platform_digitalocean_token))
+
+
+def _direct_os_environ_reads(tree: ast.AST) -> list:
+    """Every AST node that touches os.getenv(...) or os.environ, called or
+    not (so it also catches `os.environ.get(...)`, `os.environ[...]`, and
+    `"X" in os.environ`, not just a bare os.getenv call)."""
+    hits = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "getenv"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "os"
+        ):
+            hits.append(node)
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "environ"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+        ):
+            hits.append(node)
+    return hits
+
+
+def test_platform_digitalocean_token_never_reads_os_environ_directly():
+    """A behavioural test cannot catch a bare os.getenv/os.environ
+    reintroduced beside the broker call — it would type-check, run, and
+    silently diverge from the broker's own candidate list and audit trail
+    the moment the two disagree. Only a source scan sees it. Same
+    discipline as FailOpenScopeFilterDriftTests in
+    test_run_state_scope_fails_closed.py, applied to this function."""
+    hits = _direct_os_environ_reads(_platform_digitalocean_token_source_tree())
+    assert hits == [], (
+        "_platform_digitalocean_token must resolve the platform DigitalOcean "
+        "token through secrets_broker.resolve_hosted_provider_secret only — "
+        "a direct os.getenv/os.environ read here bypasses the audit trail "
+        "and the managed-bundle path."
+    )
+
+
+def test_platform_digitalocean_token_calls_the_broker_exactly_once():
+    tree = _platform_digitalocean_token_source_tree()
+    broker_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "resolve_hosted_provider_secret"
+    ]
+    assert len(broker_calls) == 1
+
+
+def test_the_direct_env_read_scanner_catches_a_freshly_introduced_offender():
+    """Proof the scanner isn't vacuous: a textbook direct-env-read function
+    must trip it, in both the getenv and environ.get shapes."""
+    for offending_source in (
+        "def f():\n    return os.getenv('EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN') or None\n",
+        "def f():\n    return os.environ.get('EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN')\n",
+    ):
+        hits = _direct_os_environ_reads(ast.parse(offending_source))
+        assert hits, f"scanner failed to flag: {offending_source!r}"
+
+
+def test_digitalocean_registered_in_hosted_provider_env_candidates_with_the_live_env_var_first():
+    """Registration buys bundle support + the audit trail 'for free' per the
+    ticket — but only if the FIRST candidate is the exact env var name
+    production has read since MAN-133. A drift here would silently orphan
+    whatever token is already configured on a live box."""
+    candidates = vps.secrets_broker._HOSTED_PROVIDER_ENV_CANDIDATES.get("digitalocean")
+    assert candidates, '"digitalocean" must be registered in _HOSTED_PROVIDER_ENV_CANDIDATES'
+    assert candidates[0] == vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV
+
+
+def test_platform_digitalocean_token_resolves_through_the_broker_and_writes_an_audit_row(monkeypatch):
+    """Behavioural half of the AST proof above: the function still returns
+    the configured token, and the resolution is logged with
+    ownership="platform_hosted" — the same audit contract every other
+    hosted-provider secret gets."""
+    monkeypatch.delenv("EMPYRALIS_HOSTED_PROVIDER_SECRETS_JSON", raising=False)
+    monkeypatch.setenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, "dop_v1_broker_test")
+    audit_mock = AsyncMock()
+    monkeypatch.setattr(
+        vps.secrets_broker.control_plane_repository,
+        "append_agent_secret_access_event",
+        audit_mock,
+    )
+
+    token = vps._platform_digitalocean_token()
+
+    assert token == "dop_v1_broker_test"
+    audit_mock.assert_awaited_once()
+    kwargs = audit_mock.await_args.kwargs
+    assert kwargs.get("provider_id") == "digitalocean"
+    assert kwargs.get("secret_kind") == "platform_hosted_provider_secret"
+    metadata = dict(kwargs.get("metadata") or {})
+    assert metadata.get("ownership") == "platform_hosted"
+
+
+def test_platform_digitalocean_token_is_none_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("EMPYRALIS_HOSTED_PROVIDER_SECRETS_JSON", raising=False)
+    monkeypatch.delenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, raising=False)
+    monkeypatch.delenv("ORION_HOSTED_DIGITALOCEAN_TOKEN", raising=False)
+    monkeypatch.delenv("DIGITALOCEAN_ACCESS_TOKEN", raising=False)
+    audit_mock = AsyncMock()
+    monkeypatch.setattr(
+        vps.secrets_broker.control_plane_repository,
+        "append_agent_secret_access_event",
+        audit_mock,
+    )
+
+    assert vps._platform_digitalocean_token() is None
+    audit_mock.assert_awaited_once()
+    assert audit_mock.await_args.kwargs.get("status") == "denied"
+    assert audit_mock.await_args.kwargs.get("denial_code") == "hosted_provider_secret_missing"
 
 
 @pytest.mark.asyncio
