@@ -335,6 +335,79 @@ def provider_fallback_rates_per_1k() -> Dict[str, Dict[str, Any]]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Agent Computer (provisioned VPS) droplet pricing — provider size -> USD/hr
+# ---------------------------------------------------------------------------
+# MAN-134's "one genuinely new piece". Unlike the token tables above, DO
+# publishes no machine-readable price feed we can trust unauthenticated
+# (their live /v2/sizes endpoint requires a bearer token and is a real
+# network call — vps_provisioning_service.fetch_provider_plans already makes
+# that call for the plan picker, but a metering sweep must never depend on a
+# live provider call: this table is the offline source of truth for that
+# path, deliberately DB/network-free like the rest of this module).
+#
+# Fetched directly from DigitalOcean's own published pricing page on
+# 2026-08-13 (https://www.digitalocean.com/pricing/droplets, cross-checked
+# against https://docs.digitalocean.com/products/droplets/details/pricing/):
+# the "Basic" (Regular/shared-CPU) Droplet lineup — $/mo divided by 730
+# hours/month equals DO's own published $/hr figure exactly, confirming
+# these are not derived/rounded numbers but DO's stated prices.
+#
+# NOT the full DigitalOcean catalog. DO offers dozens of Premium Intel/AMD,
+# CPU-Optimized, General-Purpose, Memory-Optimized and Storage-Optimized
+# sizes, and nothing in this codebase curates an allowlist against them —
+# vps_provisioning_service.fetch_provider_plans passes through whatever
+# DO's live API returns, filtered only by vcpus/memory/price floors, not by
+# slug. Only DigitalOcean is covered — it is the one provisioning provider
+# actually wired to a platform-owned account today (CLAUDE.md: "DigitalOcean
+# is the working provider; Google Cloud is next"; AWS deliberately unwired).
+# A droplet on a size not in this table is UNPRICED:
+# agent_computer_metering_service treats that as "cannot bill safely" and
+# skips the box (never invents a price), reporting the gap rather than
+# guessing at it — see that module's docstring.
+#
+# THIS TABLE GOES STALE. DigitalOcean can and does change prices; there is
+# no live check that these numbers still match. Re-fetch the pricing page
+# and update DROPLET_PRICING_FETCHED_AT whenever prices are rechecked — a
+# stale hardcoded price silently under- or over-charges every workspace
+# running that size, forever, with no error anywhere.
+DROPLET_PRICING_SOURCE = "https://www.digitalocean.com/pricing/droplets"
+DROPLET_PRICING_FETCHED_AT = "2026-08-13"
+
+DROPLET_PRICING_USD_PER_HOUR: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "digitalocean": {
+        "s-1vcpu-512mb-10gb": {"hourly": 0.00595, "monthly": 4.00, "vcpus": 1, "memory_mb": 512},
+        "s-1vcpu-1gb": {"hourly": 0.00893, "monthly": 6.00, "vcpus": 1, "memory_mb": 1024},
+        "s-1vcpu-2gb": {"hourly": 0.01786, "monthly": 12.00, "vcpus": 1, "memory_mb": 2048},
+        "s-2vcpu-2gb": {"hourly": 0.02679, "monthly": 18.00, "vcpus": 2, "memory_mb": 2048},
+        "s-2vcpu-4gb": {"hourly": 0.03571, "monthly": 24.00, "vcpus": 2, "memory_mb": 4096},
+        "s-4vcpu-8gb": {"hourly": 0.07143, "monthly": 48.00, "vcpus": 4, "memory_mb": 8192},
+        "s-8vcpu-16gb": {"hourly": 0.14286, "monthly": 96.00, "vcpus": 8, "memory_mb": 16384},
+    },
+}
+
+
+def droplet_hourly_rate_usd(provider: Any, size: Any) -> Optional[float]:
+    """Raw (pre-margin) USD/hr for one provider size slug, or None when the
+    size is not in DROPLET_PRICING_USD_PER_HOUR -- callers must treat None as
+    "cannot price safely", never as zero. Margin is NOT applied here — same
+    split as the token tables above: this function returns ground truth,
+    billing_credit_config.credits_for_turn_cost_usd applies
+    CREDIT_COST_MARGIN_MULTIPLIER at the point of charging."""
+    provider_id = normalize_provider_id(provider)
+    size_id = str(size or "").strip().lower()
+    if not size_id:
+        return None
+    entry = DROPLET_PRICING_USD_PER_HOUR.get(provider_id, {}).get(size_id)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        rate = float(entry.get("hourly"))
+    except (TypeError, ValueError):
+        return None
+    return rate if rate > 0 else None
+
+
 def catalog_price_projection(provider: Any, model: Any) -> Dict[str, Any]:
     entry = lookup_pricing_entry(provider, model)
     if entry is not None and entry.rate.input_usd_per_million is not None and entry.rate.output_usd_per_million is not None:

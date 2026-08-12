@@ -16,6 +16,7 @@ CREDIT_LEDGER_ITEM_TYPES: tuple[str, ...] = (
     "virtual_browser_minutes",
     "virtual_desktop_minutes",
     "virtual_code_sandbox_minutes",
+    "agent_computer_minutes",
     "artifact_storage",
     "snapshot_storage",
     "gateway_relay",
@@ -40,7 +41,17 @@ PRODUCT_SURFACES: tuple[str, ...] = ("sage", "studio", "mini_app")
 LEDGER_PAYERS: tuple[str, ...] = ("platform_credits", "BYOK", "local", "subscription_passthrough")
 
 _TOKEN_ITEM_TYPES = {"ai_light_tokens", "ai_pro_tokens", "ai_max_tokens", "local_ai_tokens"}
-_MINUTE_ITEM_TYPES = {"virtual_browser_minutes", "virtual_desktop_minutes", "virtual_code_sandbox_minutes"}
+_MINUTE_ITEM_TYPES = {
+    "virtual_browser_minutes",
+    "virtual_desktop_minutes",
+    "virtual_code_sandbox_minutes",
+    # MAN-134: an Agent Computer (provisioned VPS) running by the hour is a
+    # minutes-based computer_runtime item, same shape as the three virtual
+    # runtimes above -- membership here is what gives it credit_type
+    # "computer_runtime" (via _credit_type_for_item_type), quantity_unit
+    # "minutes", and quantity-from-runtime_minutes for free.
+    "agent_computer_minutes",
+}
 
 
 @dataclass(frozen=True)
@@ -109,6 +120,8 @@ def _runtime_item_type(runtime_type: Any) -> Optional[str]:
         return "virtual_desktop_minutes"
     if token in {"virtual_code_sandbox", "code_sandbox", "sandbox"}:
         return "virtual_code_sandbox_minutes"
+    if token in {"agent_computer", "vps", "provisioned_vps"}:
+        return "agent_computer_minutes"
     return None
 
 

@@ -7148,6 +7148,7 @@ def _build_workspace_credit_turn_debit_result(
     credits_to_charge: int,
     floor_usd: float,
     credits_per_usd: int,
+    source: str = "hosted_sage_ai_turn",
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
     payload, wrapped = _workspace_admin_defaults_payload(metadata)
     transactions = _workspace_credit_transactions(payload)
@@ -7213,7 +7214,7 @@ def _build_workspace_credit_turn_debit_result(
                 "credits": -credits_debited,
                 "request_id": request_id,
                 "usage_month": "",
-                "source": "hosted_sage_ai_turn",
+                "source": str(source or "").strip() or "hosted_sage_ai_turn",
                 "created_at": int(time.time()),
             }
         )
@@ -7242,13 +7243,22 @@ async def debit_workspace_credits_for_turn_atomic(
     credits_to_charge: int,
     floor_usd: float,
     credits_per_usd: int,
+    source: str = "hosted_sage_ai_turn",
 ) -> Dict[str, Any]:
     """Directly debit ``credits_to_charge`` credits from a workspace's
     credit_balance_usd for ONE real turn. Idempotent per request_id.
     Clamps at zero — NEVER raises for an insufficient balance; the result
     dict's ``insufficient`` flag tells the caller to log a soft warning.
     Independent of, and never touches, the separate monthly-cap ledger/
-    entitlement hard-stop gate — see the module comment above."""
+    entitlement hard-stop gate — see the module comment above.
+
+    ``source`` is stamped onto the recorded credit_transactions entry
+    (default "hosted_sage_ai_turn" — every caller before MAN-134 relied on
+    this literal, so the default preserves their behavior byte-for-byte).
+    It is what lets a downstream reader (billing_service's usage-history
+    labeller, CreditsPanel.tsx's categoryForItem) tell an Agent Computer
+    hardware debit apart from a per-turn AI-chat debit without parsing
+    request_id prefixes."""
     clean_workspace_id = str(workspace_id or "").strip()
     clean_tenant_id = str(tenant_id or "").strip()
     clean_request_id = str(request_id or "").strip()
@@ -7278,6 +7288,7 @@ async def debit_workspace_credits_for_turn_atomic(
                         credits_to_charge=credits_to_charge,
                         floor_usd=floor_usd,
                         credits_per_usd=credits_per_usd,
+                        source=source,
                     )
                     _upsert_local_workspace_registry(
                         fallback,
@@ -7311,6 +7322,7 @@ async def debit_workspace_credits_for_turn_atomic(
                 credits_to_charge=credits_to_charge,
                 floor_usd=floor_usd,
                 credits_per_usd=credits_per_usd,
+                source=source,
             )
             await connection.execute(
                 """

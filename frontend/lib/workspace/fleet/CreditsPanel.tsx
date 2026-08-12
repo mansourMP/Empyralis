@@ -29,14 +29,17 @@ function dayLabel(key: string): string {
 }
 
 // Category grouping for the debit side of credit_transactions. "AI chat" is
-// the only real, populated category today (the direct per-turn debit this
-// panel reconnects); Hardware/Media are shown honestly at zero — those
-// surfaces exist in the product but aren't metered into credits yet (see
-// billing_credit_config.py's module docs and the platform's "no fake
-// coming-soon" rule) rather than being omitted or faked.
-function categoryForItem(item: CreditUsageHistoryItem): "AI chat" | "Other" {
+// the direct per-turn debit this panel reconnects. "Hardware" is MAN-134's
+// Agent Computer hourly meter (agent_computer_metering_service.py, source
+// "agent_computer_hourly" — see control_plane_repository.debit_workspace_
+// credits_for_turn_atomic's `source` kwarg for how a transaction gets
+// stamped with this instead of the AI-chat default). Media (image/video)
+// genuinely has no meter behind it yet — shown honestly at zero, per the
+// platform's "no fake coming-soon" rule, rather than being omitted or faked.
+function categoryForItem(item: CreditUsageHistoryItem): "AI chat" | "Hardware" | "Other" {
   const source = String(item.source || "").toLowerCase();
   if (source === "hosted_sage_ai_turn" || source === "hosted_sage_ai") return "AI chat";
+  if (source === "agent_computer_hourly") return "Hardware";
   return "Other";
 }
 
@@ -77,10 +80,11 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
   }, [debitItems, days]);
 
   const categoryTotals = useMemo(() => {
-    const totals = { "AI chat": 0, Hardware: 0, Media: 0 };
+    const totals = { "AI chat": 0, Hardware: 0 };
     for (const item of debitItems) {
       const category = categoryForItem(item);
       if (category === "AI chat") totals["AI chat"] += Math.abs(item.credits || 0);
+      else if (category === "Hardware") totals.Hardware += Math.abs(item.credits || 0);
     }
     return totals;
   }, [debitItems]);
@@ -198,9 +202,9 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
           <span className="fleet-usage-legend-name">AI chat</span>
           <span className="fleet-agent-cell-right">{categoryTotals["AI chat"].toLocaleString("en-US")}</span>
         </div>
-        <div className="fleet-usage-legend-row fleet-usage-legend-row--muted">
+        <div className="fleet-usage-legend-row">
           <span className="fleet-usage-legend-name">Hardware</span>
-          <span className="fleet-agent-cell-right">Not metered yet</span>
+          <span className="fleet-agent-cell-right">{categoryTotals.Hardware.toLocaleString("en-US")}</span>
         </div>
         <div className="fleet-usage-legend-row fleet-usage-legend-row--muted">
           <span className="fleet-usage-legend-name">Media (image / video)</span>

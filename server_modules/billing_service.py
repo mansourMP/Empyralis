@@ -1038,6 +1038,13 @@ def _credit_history_transaction_entry(transaction: Dict[str, Any], index: int) -
         label = "Welcome credit grant"
     if kind == "usage_debit" and source == "hosted_sage_ai_turn":
         label = "Agent AI chat"
+    elif kind == "usage_debit" and source == "agent_computer_hourly":
+        # MAN-134: the Agent Computer hourly meter's debits (control_plane_
+        # repository.debit_workspace_credits_for_turn_atomic's `source`
+        # kwarg) -- distinguished here so CreditsPanel.tsx's categoryForItem
+        # can bucket it under "Hardware" instead of the generic overage
+        # label every other unrecognized usage_debit source falls into.
+        label = "Agent Computer hours"
     elif kind == "usage_debit":
         label = "Hosted AI overage"
     return {
