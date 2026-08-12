@@ -59,6 +59,30 @@ adoption.
 
 ## Positioning
 
+**The WORKSPACE is the product. The agent layer is the second thing, not the
+headline.** Founder's correction, 2026-08-12, and it supersedes any reading of
+the "Target user" line below that puts agent-hosting first. The primary thing
+Empyralis sells is a workspace where people work alongside agents — humans,
+tasks, and CONTEXT (documents) in one place. Agent-hosting for other
+businesses is a real use case served by the agent layer, but it is not the
+positioning.
+
+The reasoning is a bet about where the floor goes: agents commoditize. Within
+a couple of years every tool has them, and "we host agents" differentiates
+nothing — the founder's analogy is electricity, which nobody advertises and
+nobody pays a premium for. What does NOT commoditize is the context a team
+accumulates and actually operates in. Documents are the sharp end of that:
+today a company's real knowledge is `.md` files pushed to a repo and never
+read again. A document surface that is indexed, current, and the thing people
+work IN is the durable asset — which is why documents/tasks quality is not
+polish, it is the product.
+
+Marketing consequence, stated by the founder: **Linear never says "AI".** They
+say track your issues, work with your teammates. Copy that. Never lead with
+agents; lead with what a team owns and does. See the landing-page entry — the
+hero that was rejected argued this same point and still put "models are
+rented" first, which is an AI-shaped claim.
+
 **Empyralis is the owned-context layer for a team, with execution attached.**
 Frontier models are rented and commoditizing — "AI agent platform" stops
 meaning anything once everyone has agents, the same way "has a website"
