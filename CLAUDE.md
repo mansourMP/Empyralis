@@ -683,6 +683,38 @@ same key. Now derived from the service map. The gateway's copy is a genuine
 cross-language duplicate and stays, guarded by drift assertions in both
 directions; a same-language third copy never earns its place.
 
+**A fixture that invents its own input cannot notice the real input is
+shaped differently.** The purest instance yet, 2026-08-13, and it killed a
+feature on the day it shipped. Both private-memory tools
+(`memory_write_private` / `memory_get_private`) keyed on
+`session_metadata["user_id"]`. `session_metadata` IS the whole `session_ctx`
+(`skills_service` does `session_metadata = session_ctx` at six call sites),
+and `sage_agent_runtime_service`'s turn builder nests the id one level down:
+
+```
+what production builds              what the tool read
+  session_ctx = {                     session_metadata.get("user_id")
+    "metadata": {"user_id": …},  ←── the id lives HERE
+    "sender_id": …,              ←── and is mirrored HERE
+  }                                   ─▶ None, on every real turn
+```
+
+So every live call raised "requires a resolved user identity" and the
+feature was dead from merge — while its own dispatch tests stayed green,
+because all of them hand-built a flat `{"user_id": …}` that production never
+produces. Fixed with one `_resolve_session_user_id`, so there is a single
+answer to "who is this turn's human" instead of each call site guessing a
+key; nested `metadata.user_id` wins over the flat mirror, because if they
+disagree the value the turn builder set deliberately is the one that decides
+whose private partition gets written.
+
+The rule: **when a test constructs the context object it passes in, the
+shape is an assumption, not an observation.** Build the fixture from the
+producer (or assert against it) — otherwise the test and the code can agree
+perfectly with each other and both be wrong about the caller. Same family as
+the entry below, one level up: a mock protects a seam, a fixture protects a
+shape, and neither protects a path.
+
 **A mock protects a seam, not a path.** `test_genuinely_silent_turn_still_returns_none`
 patched `execute_sage_turn`, got its `None`, and passed for months — while
 the code AFTER that seam ran a second, unmocked LLM turn. The sync
