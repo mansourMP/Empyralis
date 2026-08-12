@@ -41,13 +41,35 @@ from server_modules.cloud_cutover_config import (
 
 LOGGER = logging.getLogger(__name__)
 
-# The three honest outcomes of trying to email an invite. Collapsing
-# "provider is not configured" into "the send failed" would tell an owner to
-# retry something that can never work, and collapsing either into "sent"
-# is the failure mode this whole change exists to remove.
+# The honest outcomes of trying to email an invite. Collapsing "provider is
+# not configured" into "the send failed" would tell an owner to retry
+# something that can never work, and collapsing either into "sent" is the
+# failure mode this whole change exists to remove.
 DELIVERY_SENT = "sent"
 DELIVERY_NOT_CONFIGURED = "not_configured"
 DELIVERY_FAILED = "failed"
+
+# A fourth outcome, and the only one that is a DECISION rather than a
+# mishap: the inviter has not verified their own email address, so we did
+# not put mail into a stranger's inbox on their behalf.
+#
+# WHY THIS AND NOT A 403 ON THE INVITE. Email verification was fully built
+# and gated nothing (code, expiry, 5-attempt lock, resend cooldown, all
+# working, no consumer anywhere), which meant anyone could sign up as
+# someone else and send invites carrying our name to people who never asked.
+# The obvious fix — refuse the invite until the inviter verifies — was
+# measured against production first: 12 of 13 accounts there are `pending`,
+# so a hard refusal would have taken invites away from nearly every existing
+# account at once, including accounts whose owner never saw a code because
+# the mailer was down at signup (start_verification writes the code row
+# BEFORE it sends, so a failed send leaves a permanent `pending`).
+#
+# So the gate is on the SEND, not on the invite. The row, the token and the
+# copy-link are created and returned exactly as before — the owner can still
+# bring someone in by handing them the link — and nothing leaves this domain
+# on behalf of an account that has not proven it owns its own address. The
+# abuse vector closes completely; nobody loses a capability they had.
+DELIVERY_WITHHELD_UNVERIFIED_SENDER = "withheld_unverified_sender"
 
 
 def build_invite_accept_url(token: str) -> str:

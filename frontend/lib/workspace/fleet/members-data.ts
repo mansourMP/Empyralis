@@ -305,7 +305,15 @@ export async function declinePendingWorkspaceInvite(inviteId: string): Promise<{
  *  workspace_invite_email_service's own DELIVERY_* constants exactly. They
  *  are kept apart on purpose: "the provider isn't set up" and "the send
  *  failed" call for different words, and neither may be shown as "sent". */
-export type InviteEmailDeliveryStatus = "sent" | "not_configured" | "failed";
+export type InviteEmailDeliveryStatus =
+  | "sent"
+  | "not_configured"
+  | "failed"
+  // The inviter has not verified their own email address, so the backend
+  // deliberately did not send mail to the invitee under our name. NOT a
+  // failure — the invite and its link exist and work. See
+  // workspace_invite_email_service.DELIVERY_WITHHELD_UNVERIFIED_SENDER.
+  | "withheld_unverified_sender";
 
 export type InviteEmailDelivery = {
   status: InviteEmailDeliveryStatus;
@@ -337,7 +345,12 @@ export function inviteEmailDelivery(created: CreatedWorkspaceInvite | null | und
   const raw = created?.email_delivery;
   const status = String(raw?.status || "").toLowerCase();
   const email = String(raw?.email || created?.invite?.email || "");
-  if (status === "sent" || status === "not_configured" || status === "failed") {
+  if (
+    status === "sent" ||
+    status === "not_configured" ||
+    status === "failed" ||
+    status === "withheld_unverified_sender"
+  ) {
     return { status: status as InviteEmailDeliveryStatus, email };
   }
   return { status: "failed", email };
@@ -352,6 +365,12 @@ export function inviteDeliveryHint(delivery: InviteEmailDelivery): string {
   }
   if (delivery.status === "not_configured") {
     return "Email isn't set up here — share this link instead.";
+  }
+  if (delivery.status === "withheld_unverified_sender") {
+    // Names the cause and the one action that changes it. Deliberately not
+    // phrased as a failure: the invite is real and the link below works, so
+    // "didn't send" would be both wrong and alarming.
+    return "Verify your own email to send invites by email — share this link for now.";
   }
   return "The invite email didn't send — share this link instead.";
 }

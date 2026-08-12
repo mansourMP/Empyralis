@@ -229,7 +229,7 @@ export type ProjectInviteStatusItem = {
   status: ProjectInviteStatus;
   /** Persisted at send time (record_workspace_invite_email_delivery) — null
    *  only for an invite created before that wiring existed. */
-  email_delivery_status: "sent" | "not_configured" | "failed" | null;
+  email_delivery_status: "sent" | "not_configured" | "failed" | "withheld_unverified_sender" | null;
   invited_by_user_id: string | null;
   created_at: number | string | null;
 };

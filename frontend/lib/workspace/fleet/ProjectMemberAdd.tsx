@@ -74,6 +74,14 @@ function inviteStatusLabel(item: ProjectInviteStatusItem): { text: string; class
   if (item.email_delivery_status === "failed" || item.email_delivery_status === "not_configured") {
     return { text: "Didn't send", className: "fleet-badge--invite-warning" };
   }
+  // A SIXTH fact, and not a failure: we chose not to email this one because
+  // the inviter has not verified their own address. Sharing it with
+  // "Didn't send" would be the same collapse this function exists to avoid
+  // — one says the mailer broke, the other says the link is the way in
+  // until you verify. The invite itself is live either way.
+  if (item.email_delivery_status === "withheld_unverified_sender") {
+    return { text: "Link only", className: "fleet-badge--invite-warning" };
+  }
   return { text: "Pending", className: "" };
 }
 

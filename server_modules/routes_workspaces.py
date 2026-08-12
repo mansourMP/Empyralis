@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from server_modules import auth as auth_module
 from server_modules import control_plane_repository
+from server_modules import email_verification_service
 from server_modules import rust_runtime_kernel_client
 from server_modules import session_service
 from server_modules import workspace_admin_service
@@ -1008,13 +1009,52 @@ async def create_workspace_invite_route(
     except Exception:  # noqa: BLE001 -- see above; the invite outlives this read
         workspace_record = None
     workspace_name = str((workspace_record or {}).get("name") or "").strip()
-    email_delivery = await workspace_invite_email_service.deliver_workspace_invite_email(
-        invitee_email=clean_email,
-        workspace_name=workspace_name,
-        inviter_label=workspace_invite_email_service.inviter_label_from_user(user),
-        token=str(invite.get("token") or ""),
-        expires_at_epoch=invite.get("expires_at"),
-    )
+
+    # An unverified inviter gets the invite, but no mail goes out under our
+    # name on their behalf. See DELIVERY_WITHHELD_UNVERIFIED_SENDER's own
+    # comment for why this is a send-gate rather than a 403 on the invite.
+    #
+    # is_verified() is TRUE for status "none" — an account that never had a
+    # code issued at all (created before verification shipped, or through a
+    # path that doesn't start it). That backward-compatibility rule is the
+    # service's own, and it is what keeps this from retroactively silencing
+    # accounts that predate the feature.
+    #
+    # A failure to READ the verification status must not cost the send: this
+    # gate exists to stop abuse, not to make the mailer depend on one more
+    # database round trip. An unreadable status is treated as verified,
+    # because the alternative is that a control-plane blip silently stops
+    # every invite email in the product with no error anywhere.
+    try:
+        inviter_verified = await email_verification_service.is_verified(
+            str(user.get("id") or "").strip()
+        )
+    except Exception:  # noqa: BLE001 -- see above; the send outlives this read
+        LOGGER.exception(
+            "invite_email_verification_check_failed: treating inviter as verified for user_id=%s",
+            user.get("id"),
+        )
+        inviter_verified = True
+
+    if not inviter_verified:
+        LOGGER.warning(
+            "workspace_invite_email_withheld: inviter user_id=%s has not verified their own "
+            "email address, so no invite email was sent to the invitee. The invite and its "
+            "link were still created.",
+            user.get("id"),
+        )
+        email_delivery = {
+            "status": workspace_invite_email_service.DELIVERY_WITHHELD_UNVERIFIED_SENDER,
+            "email": clean_email,
+        }
+    else:
+        email_delivery = await workspace_invite_email_service.deliver_workspace_invite_email(
+            invitee_email=clean_email,
+            workspace_name=workspace_name,
+            inviter_label=workspace_invite_email_service.inviter_label_from_user(user),
+            token=str(invite.get("token") or ""),
+            expires_at_epoch=invite.get("expires_at"),
+        )
     # Persist the outcome onto the invite itself -- otherwise "failed to
     # send" is visible only in this response's one-time toast, and becomes
     # indistinguishable from "pending" the moment it's dismissed. See

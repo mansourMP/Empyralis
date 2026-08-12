@@ -136,10 +136,27 @@ async def _list_project_invite_status(app: FastAPI, current_user: dict, workspac
 @pytest.mark.anyio
 async def test_pending_project_invite_is_visible_with_delivery_status(monkeypatch: pytest.MonkeyPatch, _fake_projects_resolve_to_real):
     from server_modules import email_provider_service
+    from server_modules import routes_workspaces as _routes_workspaces
 
     # No provider configured in this test env -> deliver_workspace_invite_email
     # reports "not_configured", which must be recorded and read back.
     monkeypatch.setattr(email_provider_service, "email_provider_configured", lambda: False)
+
+    # This test is about the MAILER's outcome, so the inviter has to reach
+    # the mailer at all. create_workspace_invite_route now withholds the send
+    # entirely when the inviter has not verified their own address, and
+    # `_register_owner` registers for real -- register_user writes the
+    # verification code row before attempting a send that cannot succeed
+    # here, leaving every freshly registered owner `pending`. Without this
+    # the assertion below would read `withheld_unverified_sender` and the
+    # not_configured path would never run. See
+    # test_workspace_invite_email.py's own gate tests for that branch.
+    async def _verified(_user_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(
+        _routes_workspaces.email_verification_service, "is_verified", _verified
+    )
 
     app = _build_app()
     owner = _register_owner()

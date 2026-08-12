@@ -84,14 +84,39 @@ def _register_owner() -> dict:
     }
 
 
-async def _create_invite(app: FastAPI, caller: dict, workspace_id: str, *, email: str) -> httpx.Response:
+async def _create_invite(
+    app: FastAPI,
+    caller: dict,
+    workspace_id: str,
+    *,
+    email: str,
+    inviter_verified: bool = True,
+) -> httpx.Response:
+    """`inviter_verified` is EXPLICIT, and defaults to the case every mailer
+    test below is actually about: a legitimate owner who has confirmed their
+    own address.
+
+    It has to be stated rather than inherited, because `_register_owner`
+    registers for real and `register_user` calls
+    `email_verification_service.start_verification`, which writes the code
+    row BEFORE attempting the send. There is no provider in a test process,
+    so the send fails and every freshly registered owner is left `pending` —
+    i.e. UNVERIFIED. Without this parameter all five mailer tests would be
+    silently exercising the withheld-send branch instead of the mailer, and
+    would agree with each other while testing the wrong thing.
+    """
     app.dependency_overrides[routes_workspaces.get_current_user] = lambda: caller
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        return await client.post(
-            f"/workspaces/{workspace_id}/invites",
-            json={"email": email, "role": "member"},
-        )
+    with patch.object(
+        routes_workspaces.email_verification_service,
+        "is_verified",
+        AsyncMock(return_value=inviter_verified),
+    ):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post(
+                f"/workspaces/{workspace_id}/invites",
+                json={"email": email, "role": "member"},
+            )
 
 
 def _assert_token_is_usable(payload: dict, *, expected_email: str) -> None:
@@ -332,3 +357,128 @@ class TestInviteEmailCopy:
             == "m@example.com"
         )
         assert workspace_invite_email_service.inviter_label_from_user({"id": "usr_8f21"}) == ""
+
+
+# ── The inviter's OWN address gates the SEND, never the invite ─────────────
+# Email verification was fully built and gated nothing, so anyone could sign
+# up as someone else and send invites carrying our name to people who never
+# asked for them. The gate is on the send rather than on the invite because
+# production was measured first: 12 of 13 accounts there were `pending`, and
+# a hard refusal would have taken invites away from nearly all of them at
+# once — including any account whose owner never saw a code, since a failed
+# send at signup leaves a permanent `pending`.
+#
+# Call COUNTS throughout, for the reason this file's own docstring already
+# gives: "no email was sent" is the entire claim, and only a count can make
+# it.
+
+
+@pytest.mark.anyio
+async def test_an_unverified_inviter_sends_no_email_and_still_gets_a_usable_invite():
+    app = _build_app()
+    owner = _register_owner()
+    invitee = f"invitee-{uuid.uuid4().hex[:10]}@example.com"
+
+    send = AsyncMock()
+    with patch.dict(os.environ, {"EMAIL_PROVIDER_API_KEY": "test-key"}):
+        with patch.object(email_provider_service, "send_email", send):
+            response = await _create_invite(
+                app, owner["current_user"], owner["workspace_id"],
+                email=invitee, inviter_verified=False,
+            )
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    # Nothing left this domain on an unverified account's behalf. The whole
+    # point, and only a count says it: a single stray send is the bug.
+    assert send.await_count == 0
+
+    assert payload["email_delivery"]["status"] == (
+        workspace_invite_email_service.DELIVERY_WITHHELD_UNVERIFIED_SENDER
+    )
+    # ...and the owner lost NOTHING. The invite is real and the link works.
+    _assert_token_is_usable(payload, expected_email=invitee)
+
+
+@pytest.mark.anyio
+async def test_withheld_is_not_reported_as_sent_or_as_failed():
+    """The distinction is the feature.
+
+    "sent" would be the original lie in a new costume. "failed" would tell an
+    owner to retry a mailer that is working perfectly, and hide the one
+    action that actually changes the outcome.
+    """
+    app = _build_app()
+    owner = _register_owner()
+    invitee = f"invitee-{uuid.uuid4().hex[:10]}@example.com"
+
+    with patch.dict(os.environ, {"EMAIL_PROVIDER_API_KEY": "test-key"}):
+        with patch.object(email_provider_service, "send_email", AsyncMock()):
+            response = await _create_invite(
+                app, owner["current_user"], owner["workspace_id"],
+                email=invitee, inviter_verified=False,
+            )
+
+    status = response.json()["email_delivery"]["status"]
+    assert status not in {
+        workspace_invite_email_service.DELIVERY_SENT,
+        workspace_invite_email_service.DELIVERY_FAILED,
+        workspace_invite_email_service.DELIVERY_NOT_CONFIGURED,
+    }
+
+
+@pytest.mark.anyio
+async def test_a_verified_inviter_is_unaffected_and_still_sends_exactly_once():
+    """The gate must be invisible to everyone it is not aimed at."""
+    app = _build_app()
+    owner = _register_owner()
+    invitee = f"invitee-{uuid.uuid4().hex[:10]}@example.com"
+
+    send = AsyncMock()
+    with patch.dict(os.environ, {"EMAIL_PROVIDER_API_KEY": "test-key"}):
+        with patch.object(email_provider_service, "send_email", send):
+            response = await _create_invite(
+                app, owner["current_user"], owner["workspace_id"],
+                email=invitee, inviter_verified=True,
+            )
+
+    assert response.status_code == 200
+    assert send.await_count == 1
+    assert response.json()["email_delivery"]["status"] == workspace_invite_email_service.DELIVERY_SENT
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_verification_status_still_sends():
+    """Fails OPEN, deliberately, and this is the one place that is right.
+
+    This gate exists to stop abuse, not to make every invite email in the
+    product depend on one more database read. If the status cannot be read,
+    treating the inviter as unverified would silently stop ALL invite mail
+    during a control-plane blip, with no error anywhere — a far worse
+    outcome, and exactly the kind of silent platform-wide failure this
+    codebase has been bitten by before.
+    """
+    app = _build_app()
+    owner = _register_owner()
+    invitee = f"invitee-{uuid.uuid4().hex[:10]}@example.com"
+
+    send = AsyncMock()
+    app.dependency_overrides[routes_workspaces.get_current_user] = lambda: owner["current_user"]
+    transport = httpx.ASGITransport(app=app)
+    with patch.dict(os.environ, {"EMAIL_PROVIDER_API_KEY": "test-key"}):
+        with patch.object(email_provider_service, "send_email", send):
+            with patch.object(
+                routes_workspaces.email_verification_service,
+                "is_verified",
+                AsyncMock(side_effect=RuntimeError("control plane unavailable")),
+            ):
+                async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                    response = await client.post(
+                        f"/workspaces/{owner['workspace_id']}/invites",
+                        json={"email": invitee, "role": "member"},
+                    )
+
+    assert response.status_code == 200
+    assert send.await_count == 1
+    assert response.json()["email_delivery"]["status"] == workspace_invite_email_service.DELIVERY_SENT

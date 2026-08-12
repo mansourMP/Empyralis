@@ -624,6 +624,54 @@ two**: collapsing the first two tells an owner to retry something that can
 never work, and either rendering as "sent" is the original bug. The
 copy-link fallback stays on screen in all three states.
 
+**Email verification was fully built and gated NOTHING, and the fix is a
+send-gate, not a 403.** Found 2026-08-12. `email_verification_service` had
+the whole thing — hashed+peppered 6-digit code, TTL, a per-account 5-attempt
+lock independent of the HTTP rate limit, a resend cooldown — and the only
+consumers of `verification_status`/`is_verified` outside the module were the
+three routes that manage the code itself. Nothing in the product asked. So
+anyone could sign up as somebody else and send workspace invites carrying
+our name to people who never asked for them.
+
+The obvious fix (refuse the invite until the inviter verifies) was measured
+against production before being written, and would have been wrong:
+
+```
+prod email_verification_codes    pending 12 | verified 1
+  a hard 403 → invites taken away from ~every existing account at once
+  and start_verification writes the code row BEFORE it sends, so an
+  account whose signup email failed is PERMANENTLY pending — locked out
+  of a capability by a mailer outage it never saw
+```
+
+So the gate is on the SEND. The invite row, the token and the copy-link are
+created and returned exactly as before — the owner can still bring someone
+in by handing them the link — and no mail leaves this domain on behalf of an
+account that has not proven it owns its address. The abuse vector closes
+completely and nobody loses a capability.
+
+Three rules follow. **`DELIVERY_WITHHELD_UNVERIFIED_SENDER` is a FOURTH
+delivery state beside sent/not_configured/failed, never a reuse of one** —
+"sent" would be the original lie in a new costume, and "failed" tells an
+owner to retry a mailer that is working perfectly while hiding the one
+action that changes the outcome (the UI badge is "Link only", not "Didn't
+send"). **This gate fails OPEN on an unreadable status, deliberately**: it
+exists to stop abuse, not to make every invite email in the product depend
+on one more control-plane read, and treating a blip as "unverified" would
+silently stop all invite mail with no error anywhere. And **`is_verified()`
+is TRUE for status `none`** (no code ever issued — accounts predating the
+feature), which is the service's own backward-compatibility rule and the
+thing that keeps this from retroactively silencing anybody.
+
+Watch for this shape in the tests: `_register_owner`-style helpers register
+for REAL, so every freshly registered account in a test process is `pending`
+(no provider, send fails, row already written). Five mailer tests in
+`test_workspace_invite_email.py` went red the moment the gate landed — the
+fix is an explicit `inviter_verified` parameter on the helper, never a
+weakened assertion, because a test that quietly exercises the withheld
+branch while claiming to test the mailer agrees with itself and checks
+nothing.
+
 **A channel list copied into a third place.** The local-bridge channel map
 exists in `personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS`, in
 `empyralis-gateway/src/channels/local-bridge-runtime.ts`, and — until
