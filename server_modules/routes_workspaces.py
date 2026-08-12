@@ -1091,10 +1091,21 @@ async def list_project_invite_status_route(
     one-time creation toast is gone. See
     control_plane_repository.list_workspace_invites_for_project's docstring
     for why these are kept apart rather than collapsed to one state.
+
+    Security review 2026-08-13 (sec/cross-tenant-authz): this route is
+    scoped to ONE project exactly like routes_fleet.py's
+    fleet_list_project_members ("Reads are viewer-gated through
+    enforce_project_access (so a project member can see their own
+    project's roster)") but, unlike that sibling, only checked
+    workspace-viewer access -- any workspace member could read another
+    project's invited emails, roles, and invited-by ids just by knowing
+    its project_id, with no project_memberships row for it. Gated the
+    same way fleet_list_project_members is.
     """
-    resolved_workspace_id = auth_module.enforce_workspace_access(
+    resolved_workspace_id = await auth_module.enforce_project_access(
         current_user,
         workspace_id,
+        project_id,
         minimum_role="viewer",
     )
     items = await control_plane_repository.list_workspace_invites_for_project(

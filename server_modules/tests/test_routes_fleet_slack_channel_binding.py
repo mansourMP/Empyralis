@@ -47,6 +47,10 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
         with (
             patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
             patch(
+                "server_modules.agent_bindings_repository.agent_install_in_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
                 "server_modules.agent_bindings_repository.upsert_channel_binding",
                 new=AsyncMock(return_value={"id": "achbind_1", "enabled": True}),
             ) as upsert_mock,
@@ -72,6 +76,10 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
         body = routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="C123456")
         with (
             patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+            patch(
+                "server_modules.agent_bindings_repository.agent_install_in_scope",
+                new=AsyncMock(return_value=True),
+            ),
             patch(
                 "server_modules.agent_bindings_repository.upsert_channel_binding",
                 new=AsyncMock(return_value=None),
@@ -113,6 +121,10 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
         with (
             patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
             patch(
+                "server_modules.agent_bindings_repository.agent_install_in_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
                 "server_modules.agent_bindings_repository.find_inbound_owner_conflict",
                 new=AsyncMock(return_value=conflict_row),
             ),
@@ -141,6 +153,10 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
         conflict_row = {"agent_install_id": "agent-owner", "key": "slack"}
         with (
             patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+            patch(
+                "server_modules.agent_bindings_repository.agent_install_in_scope",
+                new=AsyncMock(return_value=True),
+            ),
             patch(
                 "server_modules.agent_bindings_repository.find_inbound_owner_conflict",
                 new=AsyncMock(return_value=conflict_row),
@@ -171,6 +187,10 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
         with (
             patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
             patch(
+                "server_modules.agent_bindings_repository.agent_install_in_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
                 "server_modules.agent_bindings_repository.find_inbound_owner_conflict",
                 new=AsyncMock(return_value=None),
             ),
@@ -190,10 +210,92 @@ class FleetSlackChannelBindingTests(unittest.TestCase):
         self.assertNotIn("duplicate key", result["error"].lower())
         self.assertIn("already connected", result["error"].lower())
 
+    def test_assign_rejects_an_agent_install_id_outside_the_caller_workspace(self):
+        """Security review 2026-08-13 (sec/cross-tenant-authz), MAN-206:
+        every sibling channel-bind route (Telegram assign_byo_bot, Discord
+        assign_agent_discord, WeChat, SMS) calls
+        agent_bindings_repository.agent_install_in_scope BEFORE writing a
+        binding -- this route was the one gap. Without this guard, a caller
+        supplies agent_id in the query string, and a fresh
+        upsert_channel_binding INSERT succeeds because Postgres RLS's
+        WITH CHECK only verifies the NEW row's own tenant_id/workspace_id
+        (the caller's), never that agent_install_id itself belongs to that
+        scope -- confirmed live: an attacker in a wholly separate tenant
+        bound their own workspace's Slack channel to another tenant's real
+        agent_install_id, and the DB row landed with the attacker's
+        tenant_id/workspace_id and the victim's agent_install_id. A second
+        live run showed the write also permanently blocks the victim's own
+        legitimate bind afterward (RLS makes the poisoned row invisible to
+        their session, so the ON CONFLICT UPDATE raises instead of
+        succeeding) -- a cross-tenant DoS, not just a poisoned row.
+
+        Must reject BEFORE find_inbound_owner_conflict/upsert_channel_binding
+        are ever called -- this proves the check runs first, not as an
+        afterthought."""
+        body = routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="C123456")
+        with (
+            patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+            patch(
+                "server_modules.agent_bindings_repository.agent_install_in_scope",
+                new=AsyncMock(return_value=False),
+            ) as scope_mock,
+            patch(
+                "server_modules.agent_bindings_repository.find_inbound_owner_conflict",
+                new=AsyncMock(side_effect=AssertionError("must never reach the conflict check")),
+            ),
+            patch(
+                "server_modules.agent_bindings_repository.upsert_channel_binding",
+                new=AsyncMock(side_effect=AssertionError("must never write a binding for a foreign agent")),
+            ),
+            _bypass_workspace_access(),
+        ):
+            result = _run(routes_fleet.fleet_assign_agent_slack(
+                request=None, workspace_id="ws-1", body=body,
+                agent_id="agent-belonging-to-another-tenant", current_user=_owner_user(),
+            ))
+
+        self.assertFalse(result["ok"])
+        self.assertIn("does not belong", result["error"].lower())
+        scope_mock.assert_awaited_once()
+        kwargs = scope_mock.await_args.kwargs
+        self.assertEqual(kwargs["tenant_id"], "tenant-1")
+        self.assertEqual(kwargs["workspace_id"], "ws-1")
+
+    def test_assign_still_succeeds_for_an_agent_install_id_in_scope(self):
+        """The other half of the boundary: this is a real, usable gate, not
+        a blanket lockout -- an agent that DOES belong to the caller's own
+        (tenant, workspace) still binds normally."""
+        body = routes_fleet.FleetSlackChannelBindRequest(slack_channel_id="C123456")
+        with (
+            patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+            patch(
+                "server_modules.agent_bindings_repository.agent_install_in_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "server_modules.agent_bindings_repository.upsert_channel_binding",
+                new=AsyncMock(return_value={"id": "achbind_1", "enabled": True}),
+            ) as upsert_mock,
+            _bypass_workspace_access(),
+        ):
+            result = _run(routes_fleet.fleet_assign_agent_slack(
+                request=None, workspace_id="ws-1", body=body, agent_id="agent-1", current_user=_owner_user(),
+            ))
+
+        self.assertTrue(result["ok"])
+        upsert_mock.assert_awaited_once()
+
     def test_two_agents_bind_two_different_channels_independently(self):
         """Mirrors the router-side proof: two POSTs for two different
         agents/channels must each write their own distinct row."""
-        with patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")), _bypass_workspace_access():
+        with (
+            patch("server_modules.routes_fleet._resolve_tenant", new=AsyncMock(return_value="tenant-1")),
+            patch(
+                "server_modules.agent_bindings_repository.agent_install_in_scope",
+                new=AsyncMock(return_value=True),
+            ),
+            _bypass_workspace_access(),
+        ):
             with patch(
                 "server_modules.agent_bindings_repository.upsert_channel_binding",
                 new=AsyncMock(return_value={"id": "achbind_support", "enabled": True}),
