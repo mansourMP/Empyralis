@@ -2869,12 +2869,14 @@ a.fleet-breadcrumb:hover {
    now actually USE this, as the paragraph above always said they should —
    they had been rendering .fleet-btn--accent's hairline instead, so the
    action a customer takes every day looked secondary while a first-run
-   empty state got the only fill on screen. KNOWN REMAINING OVERLAP: on a
-   genuinely empty project both this header fill and the centre empty-state
-   fill ("Create your first agent" / "+ New task") are on screen at once,
-   which is two fills in one view. Deliberate for now — the fix is to drop
-   the centre button, not to re-quiet the persistent one — flagged to the
-   founder rather than decided here. */
+   empty state got the only fill on screen. THE OVERLAP THAT NOTE FLAGGED
+   ("on a genuinely empty project both this header fill and the centre
+   empty-state fill are on screen at once") is resolved 2026-08-12, the
+   OPPOSITE way that note guessed: the centre empty-state button keeps the
+   fill (a first-run empty state is the one moment its own big button IS the
+   primary action), and the header action drops to .fleet-btn--accent's
+   quiet hairline for exactly as long as its list is empty — see the
+   HeaderAction block in each page for the per-view length check. */
 .fleet-btn--accent-fill {
   border-color: var(--accent);
   background: var(--accent);

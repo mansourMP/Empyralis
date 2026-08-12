@@ -162,6 +162,7 @@ export function TasksGroupedList({
   members,
   grouping = "status",
   display = DEFAULT_TASK_VIEW_OPTIONS.display,
+  hrefFor,
   onSelect,
   onStatusChange,
   onCreateTask,
@@ -183,6 +184,11 @@ export function TasksGroupedList({
   grouping?: Exclude<TaskGrouping, "none">;
   /** View-options "Display properties". Defaults to everything on. */
   display?: TaskDisplayState;
+  /** The task's own route (`{projectHref}/tasks/{id}`) — same prop name and
+   *  shape as DocumentsList's `hrefFor`. Makes the row a real `<a href>`
+   *  instead of an onClick div, per CLAUDE.md: "Primary navigation is real
+   *  links, so cmd-click and middle-click work." */
+  hrefFor: (taskId: string) => string;
   onSelect: (taskId: string) => void;
   /** Optional: makes the row's status ring a real control. Omit and the ring
    *  is a read-only glyph. */
@@ -343,6 +349,7 @@ export function TasksGroupedList({
                         index={index}
                         display={display}
                         rowStyle={rowStyle}
+                        href={hrefFor(task.id)}
                         onSelect={onSelect}
                         onStatusChange={onStatusChange}
                       />
@@ -417,6 +424,7 @@ function GroupedRow({
   index,
   display,
   rowStyle,
+  href,
   onSelect,
   onStatusChange,
 }: {
@@ -428,6 +436,7 @@ function GroupedRow({
   /** The grid tracks for the currently-visible cells, computed once by the
    *  parent rather than per row — every row on the page has the same set. */
   rowStyle: CSSProperties;
+  href: string;
   onSelect: (taskId: string) => void;
   onStatusChange?: (taskId: string, status: FleetTaskStatus) => void;
 }) {
@@ -440,13 +449,21 @@ function GroupedRow({
   const updated = timeAgo(task.updated_at || task.created_at);
 
   return (
-    <div
+    // A real link (CLAUDE.md: "Primary navigation is real links, so
+    // cmd-click and middle-click work") in place of the old
+    // role="button" div, same pattern as TasksBoard's card and
+    // DocumentsList's row. Plain clicks still run through onSelect for SPA
+    // navigation; modified/non-primary clicks get real browser behaviour.
+    <a
+      href={href}
       className="fleet-glist-row"
       style={rowStyle}
-      role="button"
-      tabIndex={0}
       aria-label={`${task.title || "Untitled task"} — open details`}
-      onClick={() => onSelect(task.id)}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+        e.preventDefault();
+        onSelect(task.id);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -476,7 +493,15 @@ function GroupedRow({
             value={task.status}
             aria-label={`Status of ${task.title || "Untitled task"}`}
             title={taskStatusLabel(task.status)}
-            onClick={(e) => e.stopPropagation()}
+            // The row is a real <a> now (see GroupedRow below): stopPropagation
+            // alone no longer stops the click from following the link, since
+            // link-following is resolved from the nearest <a> ancestor
+            // independent of JS bubbling. preventDefault is what actually
+            // cancels it.
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
             onKeyDown={(e) => e.stopPropagation()}
             onChange={(e) => {
               const next = e.currentTarget.value as FleetTaskStatus;
@@ -545,6 +570,6 @@ function GroupedRow({
         // aren't is noise, and "unassigned" reads fine from the absence.
         <span className="fleet-glist-cell-assignee fleet-glist-cell-unassigned" title="Unassigned" aria-hidden />
       )}
-    </div>
+    </a>
   );
 }

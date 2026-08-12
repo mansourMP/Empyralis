@@ -117,6 +117,7 @@ export function TasksBoard({
   members,
   selectedTaskId,
   display = DEFAULT_TASK_VIEW_OPTIONS.display,
+  hrefFor,
   onSelect,
   onStatusChange,
   onCreateTask,
@@ -136,6 +137,12 @@ export function TasksBoard({
    *  "Display properties"). Defaults to everything on, which is exactly the
    *  card this board drew before the popover existed. */
   display?: TaskDisplayState;
+  /** The task's own route (`{projectHref}/tasks/{id}`) — same pattern as
+   *  DocumentsList's `hrefFor`. Makes the card a real `<a href>` so
+   *  cmd-click/middle-click/hover-to-see-URL work (CLAUDE.md: "Primary
+   *  navigation is real links"). onSelect below still drives the plain-click
+   *  SPA path; this is what makes every OTHER way of opening a link work too. */
+  hrefFor: (taskId: string) => string;
   onSelect: (taskId: string) => void;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
   /** Column `+`: open the composer with this column's status pre-set. */
@@ -297,6 +304,7 @@ export function TasksBoard({
                     selected={selectedTaskId === task.id}
                     dragging={draggingTaskId === task.id}
                     display={display}
+                    href={hrefFor(task.id)}
                     onSelect={onSelect}
                     onStatusChange={onStatusChange}
                     onDragStateChange={setDraggingTaskId}
@@ -320,6 +328,7 @@ function TaskCard({
   selected,
   dragging,
   display,
+  href,
   onSelect,
   onStatusChange,
   onDragStateChange,
@@ -334,6 +343,7 @@ function TaskCard({
   selected: boolean;
   dragging: boolean;
   display: TaskDisplayState;
+  href: string;
   onSelect: (taskId: string) => void;
   onStatusChange: (taskId: string, status: FleetTaskStatus) => void;
   onDragStateChange: (taskId: string | null) => void;
@@ -391,10 +401,16 @@ function TaskCard({
   ) : null;
 
   return (
-    <article
+    // A real link (CLAUDE.md: "Primary navigation is real links, so
+    // cmd-click and middle-click work") — not `role="button"` on a div, which
+    // made cmd-click/middle-click/hover-URL/open-in-new-tab all dead on the
+    // board. draggable + onDragStart/onDragEnd keep native HTML5 drag-and-
+    // drop working on the anchor exactly as they did on the old <article>;
+    // the plain-click path still runs through onSelect (below) so it stays a
+    // client-side navigation rather than a full page load.
+    <a
+      href={href}
       className={`fleet-board-card${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
-      tabIndex={0}
-      role="button"
       aria-label={`${task.title || "Untitled task"} — open details`}
       draggable
       onDragStart={(e) => {
@@ -403,7 +419,15 @@ function TaskCard({
         onDragStateChange(task.id);
       }}
       onDragEnd={() => onDragStateChange(null)}
-      onClick={() => onSelect(task.id)}
+      onClick={(e) => {
+        // Modified/non-primary clicks (cmd/ctrl/shift/alt, or the middle
+        // button) get real browser behaviour — new tab, new window, etc.
+        // Only a plain left click is intercepted for SPA navigation, exactly
+        // TaskDetailView.tsx's subtask-link pattern.
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+        e.preventDefault();
+        onSelect(task.id);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -461,7 +485,16 @@ function TaskCard({
             value={task.status}
             aria-label={`Status of ${task.title || "Untitled task"}`}
             title={taskStatusLabel(task.status)}
-            onClick={(e) => e.stopPropagation()}
+            // The card is a real <a> now (see above), so stopPropagation
+            // alone no longer stops the click from following the link —
+            // the browser resolves link-following from the nearest <a>
+            // ancestor independent of JS bubbling. preventDefault is what
+            // actually cancels it; stopPropagation stays too so the card's
+            // own onClick/onKeyDown never even run.
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
             onKeyDown={(e) => e.stopPropagation()}
             onChange={(e) => {
               const next = e.currentTarget.value as FleetTaskStatus;
@@ -523,6 +556,6 @@ function TaskCard({
           </span>
         ) : null}
       </div>
-    </article>
+    </a>
   );
 }
