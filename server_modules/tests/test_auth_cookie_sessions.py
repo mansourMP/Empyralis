@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
+import time
+
 import httpx
 import pytest
 from fastapi import Depends, HTTPException
@@ -15,6 +21,47 @@ def _build_app() -> FastAPI:
     app = FastAPI()
     app.include_router(routes_auth.router)
     return app
+
+
+def _b64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("utf-8")
+
+
+def _live_access_token_cookie() -> str:
+    """A real, validly-HMAC-signed access-token JWT -- signed the same way
+    auth.issue_token signs one, but without the DB-backed session that
+    function also creates, since `_access_token_is_live` (the only thing
+    that inspects this value on the CSRF re-auth path) just decodes and
+    signature-checks it.
+
+    A cookie planted as the literal string "access-cookie" doesn't parse as
+    a JWT, so `_access_token_is_live` returns False, `validate_csrf(...,
+    allow_expired_session=True)` treats the access cookie as ABSENT, and
+    CSRF enforcement is skipped entirely -- which is why the two tests below
+    used to see a 401 (from the malformed refresh token, deeper in the
+    refresh handler) instead of the 403 they're actually testing for. A
+    real signed token makes `_access_token_is_live` return True, so CSRF is
+    genuinely exercised.
+    """
+    header = {"alg": "HS256", "typ": "JWT"}
+    now = int(time.time())
+    payload = {"sub": "user-1", "iat": now, "exp": now + 3600}
+    header_segment = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_segment = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_segment}.{payload_segment}".encode("utf-8")
+    signature = hmac.new(auth._jwt_secret().encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{header_segment}.{payload_segment}.{_b64url_encode(signature)}"
+
+
+def _structurally_valid_refresh_token_cookie() -> str:
+    """A real `esr_<session_id>.<secret>` shaped refresh token -- the only
+    thing `_refresh_token_is_structurally_valid` checks on the CSRF re-auth
+    path (its true DB-backed validity is verified deeper, by
+    refresh_authenticated_session itself, which these two CSRF tests never
+    reach). The literal "refresh-cookie" fails that structural check, so
+    the CSRF gate treated the refresh cookie as absent too.
+    """
+    return auth._encode_auth_session_refresh_token("session-1", "refresh-secret-1")
 
 
 def _browser_payload(channel: str = "web") -> dict[str, object]:
@@ -49,9 +96,16 @@ def _fake_set_auth_cookies(
 
 
 def _seed_browser_cookies(client: httpx.AsyncClient, *, refresh: bool = True, csrf: bool = True) -> None:
-    client.cookies.set("empyralis_access_token", "access-cookie", path="/")
+    # Access/refresh cookies are shaped like the real tokens
+    # `_access_token_is_live` / `_refresh_token_is_structurally_valid` (the
+    # predicates `validate_csrf(..., allow_expired_session=True)` uses to
+    # tell a live session from a stale cookie) actually require -- see
+    # `_live_access_token_cookie` / `_structurally_valid_refresh_token_cookie`
+    # above for why a plain placeholder string defeats CSRF enforcement
+    # entirely instead of exercising it.
+    client.cookies.set("empyralis_access_token", _live_access_token_cookie(), path="/")
     if refresh:
-        client.cookies.set("empyralis_refresh_token", "refresh-cookie", path="/")
+        client.cookies.set("empyralis_refresh_token", _structurally_valid_refresh_token_cookie(), path="/")
     if csrf:
         client.cookies.set("empyralis_csrf_token", "csrf-cookie", path="/")
 
@@ -230,7 +284,7 @@ async def test_browser_refresh_uses_cookie_refresh_token_and_sets_new_cookies(
         )
 
     assert response.status_code == 200
-    assert observed["refresh_token"] == "refresh-cookie"
+    assert observed["refresh_token"] == _structurally_valid_refresh_token_cookie()
     assert "token" not in response.json()
     assert any(
         "empyralis_access_token=" in header
