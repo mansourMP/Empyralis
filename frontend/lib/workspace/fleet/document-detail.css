@@ -15,17 +15,25 @@
  * typography (nothing else in this app renders parsed markdown) and the
  * plain-textarea editor.
  *
- * DIRECT EDITING (2026-08-07): the title/body are now live form controls
- * ALWAYS, for a canWrite reader — no more Edit-mode toggle, so there is no
- * more separate "edit mode" section below; .fleet-doc-title-input and
- * .fleet-doc-editor apply unconditionally now. Delete moved into the "⋯"
- * menu (DocumentMenu, in the .tsx file) built on the SAME
- * .fleet-list-row-menu* primitive HardwareSection.tsx's row menu already
- * defined in fleet-theme.css — nothing new to style for the menu itself,
- * only the inline delete-confirm swap inside it (bottom of this file).
+ * RENDERED BY DEFAULT (2026-08-12): the title/body render as plain
+ * markdown/heading for EVERY reader, writer included, and become live form
+ * controls only while that specific region is being edited — click in,
+ * type, blur or Escape flushes and returns to the rendered view. Neither an
+ * always-live control (the previous model) nor a global Edit-mode toggle
+ * (the model before that, rejected by the founder even earlier) — see
+ * DocumentDetailView.tsx's own file header for the full history and why.
+ * `.fleet-task-page-title-input`/`.fleet-task-page-title-edit` (shared with
+ * TaskDetailView, fleet-theme.css) style the title's two states;
+ * `.fleet-doc-editor` below styles the body's editing state and
+ * `.fleet-doc-body`/`.fleet-doc-body--editable` its two rendered states.
+ * Delete lives in the "⋯" menu (DocumentMenu, in the .tsx file) built on the
+ * SAME .fleet-list-row-menu* primitive HardwareSection.tsx's row menu
+ * already defined in fleet-theme.css — nothing new to style for the menu
+ * itself, only the inline delete-confirm swap inside it (bottom of this
+ * file).
  *
- * THE "⋯" MENU ITSELF now lives in the breadcrumb topbar (HeaderAction),
- * not on this page — see DocumentDetailView.tsx's file header for why. The
+ * THE "⋯" MENU ITSELF lives in the breadcrumb topbar (HeaderAction), not on
+ * this page — see DocumentDetailView.tsx's file header for why. The
  * page-level centering rule below is what actually fixed the founder's "this
  * doesn't look like a documents page" complaint at wide viewports; the menu
  * relocation fixed the separate "menu is stranded mid-page" complaint.
@@ -43,12 +51,58 @@
    15px/25.5px/rgb(24,24,27). The editor's comment claimed this could not
    happen; it did. A document's body is the page's primary content, so it
    takes --text-primary in both modes: secondary was quietly saying "this is
-   supporting text", which is wrong for the thing the page exists to show. */
+   supporting text", which is wrong for the thing the page exists to show.
+
+   LINE-HEIGHT 1.6, re-decided 2026-08-12 (supersedes the unmerged
+   fix/document-surface-finish, 500959424, which took this to 1.55 on the
+   premise that the TEXTAREA was the page's primary, most-looked-at surface
+   — the founder's own "a full blank line under every line... it reads like
+   a poem" complaint about composing in raw markdown source, where a blank
+   line between paragraphs is structurally one full line-height of dead
+   space a <textarea> cannot shrink. That premise is gone now that the
+   RENDERED view is what loads by default and what a reader spends most of
+   their time in — reading comfort, not textarea density, is now the thing
+   to optimize first. 1.6 is not a reversion to the original 1.7 either: the
+   editor's blank-line cost is still real whenever someone IS composing (a
+   click-to-edit region, not a rare event), so this still leans tighter than
+   1.7 was — 1.6 is a comfortable, unremarkable prose line-height on its own
+   terms (most reading UIs sit 1.5–1.6) while keeping the editor's dead-air
+   cost down from 25.5px to 24px per blank line, most of the improvement of
+   1.55's 23.25px without giving up as much reading comfort. MUST move
+   together with .fleet-doc-editor below — matching font/size/colour/leading
+   is what stops the SAME words visibly jumping the moment someone clicks
+   into or out of a region, which happens on every click now, not just once
+   per role. */
 .fleet-doc-body {
   margin-top: 20px;
   font-size: 15px;
-  line-height: 1.7;
+  line-height: 1.6;
   color: var(--text-primary);
+}
+
+/* The rendered body's OWN click-to-edit affordance, for a canWrite reader
+   only — same convention .fleet-task-page-desc--editable (fleet-theme.css)
+   already established for a task's description: a transparent border/no
+   padding at rest, a hover/focus fill that says "this is a control," never
+   a visible box sitting permanently around a reader's own prose. Negative
+   left margin (-10px) offsets the padding (10px) so the TEXT still starts
+   at the same horizontal position whether or not this class is present —
+   entering/exiting edit must not shift the reading column sideways. */
+.fleet-doc-body--editable {
+  margin: 20px 0 0 -10px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-card);
+  cursor: text;
+}
+.fleet-doc-body--editable:hover,
+.fleet-doc-body--editable:focus-visible {
+  background: var(--bg-inset);
+  border-color: var(--border);
+}
+.fleet-doc-body--editable:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
 }
 
 /* The global reset (app/globals.css: `a { color: inherit; text-decoration:
@@ -76,7 +130,14 @@ h4.fleet-doc-heading,
 h5.fleet-doc-heading,
 h6.fleet-doc-heading { font-size: 14px; }
 
-.fleet-doc-paragraph { margin: 0 0 14px; }
+/* 16px, re-decided 2026-08-12 alongside .fleet-doc-body's own line-height
+   (see that rule's comment for the full reasoning) — up from the original
+   14px for a touch more "airy between groups" breathing room now that
+   reading rhythm, not textarea-matching, is the first-order concern; down
+   from the unmerged branch's 18px, which pushed harder than a read-primary
+   page needs purely to narrow the gap against a 1.55 editor blank-line this
+   page no longer treats as the dominant constraint. */
+.fleet-doc-paragraph { margin: 0 0 16px; }
 .fleet-doc-paragraph:last-child { margin-bottom: 0; }
 
 .fleet-doc-inline-code {
@@ -279,32 +340,13 @@ h6.fleet-doc-heading { font-size: 14px; }
   color: var(--app-danger);
 }
 
-/* Title input, always live for a canWrite reader — no separate "edit mode"
-   any more (see file header). Same visual weight the read-mode <h2> it
-   replaces used to carry, so a viewer-to-writer role change doesn't shift
-   the page's own type scale. */
-.fleet-doc-title-input {
-  display: block;
-  width: 100%;
-  margin: 6px 0 0;
-  padding: 4px 0;
-  border: none;
-  border-bottom: 1px solid var(--border);
-  background: transparent;
-  font-size: 24px;
-  font-weight: var(--weight-semibold, 600);
-  line-height: 1.25;
-  letter-spacing: -0.01em;
-  color: var(--text-primary);
-  font-family: inherit;
-}
-.fleet-doc-title-input:focus-visible {
-  outline: none;
-  /* Same global :focus-visible box-shadow as the body editor below — without
-     this the title gets its own ring on top of the accent underline. */
-  box-shadow: none;
-  border-bottom-color: var(--accent);
-}
+/* No .fleet-doc-title-input here any more (2026-08-12): the title now
+   swaps between .fleet-task-page-title-edit (the click-to-edit button) and
+   .fleet-task-page-title-input on entering edit — the SAME two classes
+   TaskDetailView's own title already uses (fleet-theme.css) — rather than
+   a document-specific input style that duplicated them. See
+   DocumentDetailView.tsx's own file header for the click-to-edit model
+   this replaced the always-live input with. */
 
 /* The editor IS the page, not a field on it.
  *
@@ -319,8 +361,16 @@ h6.fleet-doc-heading { font-size: 14px; }
  * Prose face and prose measure now, matching .fleet-doc-body's reading
  * copy rather than introducing a second scale: the same words must not
  * jump font, size or colour when the page flips between editing and
- * reading. Height is driven by content (see autosizeEditor in the .tsx) so
- * the PAGE scrolls, never a box inside it. */
+ * reading — truer now than when this was written, since that flip happens
+ * on every click into/out of the body (see DocumentDetailView.tsx's file
+ * header), not once per role. Height is driven by content (see
+ * autosizeEditor in the .tsx) so the PAGE scrolls, never a box inside it.
+ *
+ * line-height 1.6, matching .fleet-doc-body — see that rule's own comment
+ * (2026-08-12) for the full reasoning on this specific value. Must keep
+ * moving together with .fleet-doc-body: this file's own comment two rules
+ * up already documents a real bug from these two values drifting apart
+ * once. */
 .fleet-doc-editor {
   display: block;
   width: 100%;
@@ -332,7 +382,7 @@ h6.fleet-doc-heading { font-size: 14px; }
   color: var(--text-primary);
   font-family: inherit;
   font-size: 15px;
-  line-height: 1.7;
+  line-height: 1.6;
   /* No resize grip: a document does not get dragged to a new size, and the
      grip was the single most form-like thing on the page. */
   resize: none;

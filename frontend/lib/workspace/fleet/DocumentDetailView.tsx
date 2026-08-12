@@ -7,23 +7,67 @@
  * with browser back/forward) but far smaller: a document has no status,
  * assignee, or comment thread — just a title and a body.
  *
- * DIRECT MANIPULATION, NOT A MODE TOGGLE. The founder's own verdict on the
- * first pass (an Edit button that flipped a read/write mode, a red Delete
- * button stacked above the body): "why the fuck do I need to edit for? I
- * edit it, it changed. That's it." So for a `canWrite` reader the title and
- * body are ALWAYS live form controls — an <input> and a <textarea>, not a
- * rendered view that becomes one after a click. There is no Save button:
- * typing schedules an autosave (see AUTOSAVE_DEBOUNCE_MS below), and blurring
- * either field flushes it immediately. CLAUDE.md is explicit this stays a
- * plain markdown-source textarea, never a rich/WYSIWYG editor.
+ * RENDERED BY DEFAULT, FOR EVERYONE (2026-08-12 fix). The first pass got
+ * "no mode toggle" right and something else badly wrong: it made a
+ * `canWrite` reader's title/body ALWAYS-LIVE form controls — an <input> and
+ * a <textarea> — so the person the product is FOR (the document's own
+ * author, the one with write access) never once saw `# Heading`, `**bold**`
+ * or a `| pipe | table |` actually render. Only a read-only viewer got
+ * MarkdownLite. Two founder complaints ("this is documents I'm telling this
+ * again... yet it renders differently") before anyone found it. Fixed by
+ * flipping the default: the rendered view is what LOADS, for a writer and a
+ * viewer alike, and editing is entered deliberately per region (title,
+ * body) — click the text, it becomes a field; blur or Escape, it flushes
+ * and goes back to being text. This is still direct manipulation, not the
+ * mode-toggle button the founder rejected on the first pass — there is no
+ * "Edit" button anywhere, no global read/write flip, just TaskDetailView's
+ * own click-to-edit idiom (`editingTitle`/`editingDescription`, the
+ * skipBlurCommit ref pattern also in FleetAgentDetail.tsx's AgentTitle)
+ * applied here as `editingTitle`/`editingBody`. There is still no Save
+ * button: typing schedules an autosave (see AUTOSAVE_DEBOUNCE_MS below),
+ * and blurring either field flushes it immediately AND returns to the
+ * rendered view. CLAUDE.md is explicit this stays a plain markdown-source
+ * textarea, never a rich/WYSIWYG editor.
  *
- * A `viewer` (no write access) gets the opposite: plain rendered markdown
- * (MarkdownLite) and a plain heading, with NO editing affordance anywhere —
- * no input, no cursor change, no placeholder text hinting it could be
+ * ONE EDITOR OVER THE WHOLE BODY, not per-block. A document has no block
+ * model today (MarkdownLite parses text straight into React elements, it
+ * doesn't keep an editable node per block) and `empyralis_edit_document`'s
+ * old_string/new_string MCP contract plus the diff-based revision history
+ * both operate on the body as one string — splitting the editor per block
+ * would mean either inventing that block model or reassembling one string
+ * from N boxes on every keystroke. Clicking anywhere in the rendered body
+ * opens the same single textarea the direct-editing rework already built;
+ * exiting it re-renders the (possibly larger) whole.
+ *
+ * BOTH REGIONS RENDER FROM THE DRAFT, NEVER FROM `document.title`/
+ * `document.body`, even outside edit mode. If a save fails, the draft
+ * (`draftTitle`/`draftBody`) is what stays on screen (the file's own
+ * pre-existing rule: "a failed save never clears or reverts what was
+ * typed") — rendering from the stale server prop after exiting edit mode
+ * would have silently un-shown a change the person just made. A `viewer`
+ * never diverges the draft from the prop at all (no write access, nothing
+ * to type), so this is a no-op for them.
+ *
+ * A `viewer` (no write access) gets plain rendered markdown (MarkdownLite)
+ * and a plain heading, with NO editing affordance anywhere — no input, no
+ * cursor change, no click target, no placeholder text hinting it could be
  * clicked into. `canWrite === null` (still resolving) reads as `false` here
  * too, so a viewer never sees an editable control flash into view for a
  * moment on load — same contract useCanWriteProject's own doc comment
  * establishes.
+ *
+ * ESCAPE FLUSHES, IT DOES NOT REVERT — the one deliberate deviation from
+ * TaskDetailView's own title/description Escape handling, which resets the
+ * draft back to the last-known server value and discards whatever was
+ * typed. A document autosaves while open; discarding on Escape would throw
+ * away keystrokes typed inside the debounce window (up to
+ * AUTOSAVE_DEBOUNCE_MS) that the person has no reason to think are at risk
+ * — "typing autosaves, clicking away commits, with no lost characters" is a
+ * hard requirement here in a way it never was for a task's single-shot
+ * title/description commit. Escape still reuses the exact same
+ * skipTitleBlur/skipBodyBlur ref mechanics (so the field's own onBlur
+ * doesn't double-fire the exit), it just calls flushSave() instead of
+ * resetting the draft.
  *
  * THE "⋯" MENU lives in the breadcrumb TOPBAR (via HeaderAction), not in the
  * page's own header row. It used to sit at the right edge of
@@ -53,7 +97,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { MoreHorizontal } from "lucide-react";
+import { MoreHorizontal, Pencil } from "lucide-react";
 
 import {
   createFleetDocument,
@@ -123,6 +167,23 @@ export function DocumentDetailView({
   const router = useRouter();
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+
+  // ── Per-region click-to-edit ────────────────────────────────────────────
+  // Two independent toggles (title, body) rather than one "editing"
+  // boolean — TaskDetailView's own editingTitle/editingDescription split,
+  // reused here as editingTitle/editingBody. Both regions still share the
+  // SAME draftTitle/draftBody + autosave machinery below: the backend PATCH
+  // (`onSave({title, body})`) always writes both fields together, so
+  // opening one region for editing must not disturb whatever's pending in
+  // the other. skipTitleBlur/skipBodyBlur are the identical skipBlurCommit
+  // ref AgentTitle (FleetAgentDetail.tsx) and TaskDetailView's own title/
+  // description edits already use, so Escape's own exit doesn't also let
+  // the field's onBlur fire a second, redundant flush.
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [editingBody, setEditingBody] = useState(false);
+  const skipTitleBlur = useRef(false);
+  const skipBodyBlur = useRef(false);
 
   // The draft is the source of truth for the title/body controls while this
   // document is open. It is reseeded from `document` ONLY when a genuinely
@@ -169,36 +230,26 @@ export function DocumentDetailView({
     lastSavedRef.current = { title: document.title, body: document.body ?? "" };
     setStatus("idle");
     setError(null);
+    // A different document opening mid-edit (task nav arrows have no
+    // document-page equivalent today, but Cmd+K / browser back can still
+    // swap `document` out without unmounting this view) must not leave a
+    // stale editing region open over the NEW document's own draft.
+    setEditingTitle(false);
+    setEditingBody(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [document.id]);
 
   // Focus the page's own content on open — screen-reader/SPA-navigation
-  // convention (same as TaskDetailView's identical effect). Only for the
-  // VIEWER's plain <h2>: a canWrite reader's title is a real form control,
-  // and auto-focusing text into it on every open would drop a blinking
-  // cursor into the title unasked, which reads as "you're now editing" —
-  // exactly the unsolicited mode-switch the direct-editing rework exists to
-  // remove. A control only becomes focused because someone clicked it.
+  // convention, unconditional now (same as TaskDetailView's identical
+  // effect): both the viewer's plain heading AND a writer's click-to-edit
+  // button render as a real <h2> by default, so there is no longer a
+  // canWrite branch here to auto-focus text INTO — that risk only existed
+  // when a canWrite reader's title was an always-live <input> (see file
+  // header). A control only becomes focused/editable because someone
+  // clicked it; this only moves screen-reader focus to the heading.
   useEffect(() => {
-    if (!canWrite) headingRef.current?.focus();
-  }, [document.id, canWrite]);
-
-  // Size the editor to the document it just LOADED. Without this an existing
-  // document opens at min-height with its own scrollbar — the exact box this
-  // view was rebuilt to stop being — and only corrects itself once the person
-  // types.
-  //
-  // Deliberately NOT keyed on draftBody. It was, and that was a real bug:
-  // typing already calls autosizeEditor from onChange, so every keystroke ran
-  // it twice, and under a fast continuous burst the two invocations raced on
-  // a stale scrollHeight and inflated the height ~27x — 34,731px measured on
-  // a document whose correct height was 1,275px, i.e. tens of thousands of
-  // pixels of blank page. onChange owns resize-while-typing; this effect owns
-  // resize-on-load. One trigger each, never both for the same event.
-  useEffect(() => {
-    if (canWrite) autosizeEditor(editorRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [document.id, canWrite]);
+    headingRef.current?.focus();
+  }, [document.id]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -285,6 +336,35 @@ export function DocumentDetailView({
     };
   }, [runSave]);
 
+  // ── Entering each region's edit mode ────────────────────────────────────
+  // Same shape as TaskDetailView's enterTitleEdit/enterDescriptionEdit:
+  // flip the toggle, then focus (and for the title, select — replacing the
+  // whole title is the common case) on the next paint, once the control
+  // actually exists in the DOM.
+  const enterTitleEdit = useCallback(() => {
+    if (!canWrite) return;
+    setEditingTitle(true);
+    requestAnimationFrame(() => {
+      titleInputRef.current?.focus();
+      titleInputRef.current?.select();
+    });
+  }, [canWrite]);
+
+  const enterBodyEdit = useCallback(() => {
+    if (!canWrite) return;
+    setEditingBody(true);
+    // autosizeEditor here replaces the old "size the editor to the document
+    // it just loaded" effect — the textarea no longer mounts on load at
+    // all, only once this fires, so sizing it belongs here instead. Same
+    // reasoning as that effect's own comment: without this an existing
+    // document would open its editor at min-height with its own internal
+    // scrollbar, the exact box this surface was rebuilt to stop being.
+    requestAnimationFrame(() => {
+      autosizeEditor(editorRef.current);
+      editorRef.current?.focus();
+    });
+  }, [canWrite]);
+
   // Copies the page's own URL — available to a viewer too (read-only access
   // is exactly when "let me hand you a link" comes up). navigator.clipboard
   // is undefined over plain http:// in some browsers; DocumentMenu's own
@@ -358,30 +438,60 @@ export function DocumentDetailView({
       <div className="fleet-task-page-main">
         <div className="fleet-task-page-body">
           <div className="fleet-doc-header-row">
-            {canWrite ? (
-              <input
-                className="fleet-doc-title-input"
-                value={draftTitle}
-                maxLength={200}
-                placeholder="Untitled document"
-                aria-label="Document title"
-                onChange={(e) => {
-                  setDraftTitle(e.currentTarget.value);
-                  scheduleSave();
-                }}
-                onBlur={flushSave}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    e.currentTarget.blur();
-                  }
-                }}
-              />
-            ) : (
-              <h2 className="fleet-task-page-title" tabIndex={-1} ref={headingRef}>
-                {document.title || "Untitled document"}
-              </h2>
-            )}
+            {/* Same h2-always, swap-the-inside idiom as TaskDetailView's own
+                title (see that file around line 977): tabIndex tracks
+                whether the CONTROL inside is what should own tab order
+                (editing — the real <input> is focusable on its own,
+                `undefined` leaves the h2 out of the tab sequence) or the
+                heading itself is the programmatically-focused target
+                (not editing — `-1`, focusable via headingRef.focus() for
+                the screen-reader announce above, never via Tab). */}
+            <h2 className="fleet-task-page-title" tabIndex={editingTitle ? undefined : -1} ref={headingRef}>
+              {editingTitle ? (
+                <input
+                  ref={titleInputRef}
+                  className="fleet-task-page-title-input"
+                  value={draftTitle}
+                  maxLength={200}
+                  placeholder="Untitled document"
+                  aria-label="Document title"
+                  onChange={(e) => {
+                    setDraftTitle(e.currentTarget.value);
+                    scheduleSave();
+                  }}
+                  onBlur={() => {
+                    if (skipTitleBlur.current) {
+                      skipTitleBlur.current = false;
+                      return;
+                    }
+                    flushSave();
+                    setEditingTitle(false);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      e.currentTarget.blur();
+                    } else if (e.key === "Escape") {
+                      // Flushes rather than reverting — see this file's own
+                      // header ("ESCAPE FLUSHES, IT DOES NOT REVERT") for why
+                      // this deliberately differs from TaskDetailView's own
+                      // Escape handling.
+                      e.preventDefault();
+                      skipTitleBlur.current = true;
+                      flushSave();
+                      setEditingTitle(false);
+                    }
+                  }}
+                />
+              ) : canWrite ? (
+                <button type="button" className="fleet-task-page-title-edit" onClick={enterTitleEdit}>
+                  {draftTitle || "Untitled document"}
+                  <Pencil size={14} strokeWidth={1.75} className="fleet-task-page-title-pencil" />
+                </button>
+              ) : (
+                draftTitle || "Untitled document"
+              )}
+            </h2>
           </div>
 
           {/* Directly under the title, small and muted (12px, --text-muted)
@@ -403,7 +513,7 @@ export function DocumentDetailView({
                   : `Updated ${timeAgo(document.updated_at)}`}
           </div>
 
-          {canWrite ? (
+          {editingBody ? (
             <textarea
               ref={editorRef}
               className="fleet-doc-editor"
@@ -416,8 +526,60 @@ export function DocumentDetailView({
                 autosizeEditor(e.currentTarget);
                 scheduleSave();
               }}
-              onBlur={flushSave}
+              onBlur={() => {
+                if (skipBodyBlur.current) {
+                  skipBodyBlur.current = false;
+                  return;
+                }
+                flushSave();
+                setEditingBody(false);
+              }}
+              onKeyDown={(e) => {
+                // No Enter-submits here (a document body is many lines,
+                // unlike the title) — only Escape has a special meaning.
+                // Flushes rather than reverting, same as the title above;
+                // see this file's own header for why.
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  skipBodyBlur.current = true;
+                  flushSave();
+                  setEditingBody(false);
+                }
+              }}
             />
+          ) : canWrite ? (
+            <div
+              className={`fleet-doc-body fleet-doc-body--editable${draftBody.trim() ? "" : " fleet-cell-muted"}`}
+              role="button"
+              tabIndex={0}
+              aria-label={draftBody.trim() ? "Edit document body" : "Add document content"}
+              onClick={(e) => {
+                // A click inside the RENDERED body means "edit this" only
+                // when it wasn't already a click on something. Two cases the
+                // bare handler got wrong, both of which cost the person the
+                // thing they were actually doing:
+                //
+                //  - A LINK. MarkdownLite renders `target="_blank"`, so the
+                //    click both opened a tab and (bubbling to here) flipped
+                //    the document behind it into a raw textarea. Come back
+                //    from the new tab and your document is source again.
+                //  - A TEXT SELECTION. Drag-selecting a paragraph to copy it
+                //    ends in a click; swapping in the textarea discards the
+                //    selection, so the document could not be quoted from
+                //    without being edited first.
+                if ((e.target as HTMLElement).closest("a")) return;
+                if (!window.getSelection()?.isCollapsed) return;
+                enterBodyEdit();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  enterBodyEdit();
+                }
+              }}
+            >
+              {draftBody.trim() ? <MarkdownLite text={draftBody} /> : "This document is empty. Click to start writing."}
+            </div>
           ) : document.body?.trim() ? (
             <div className="fleet-doc-body">
               <MarkdownLite text={document.body} />
