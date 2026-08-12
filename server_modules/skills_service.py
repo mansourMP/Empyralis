@@ -878,6 +878,58 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             audience_note="Blocked: can write instructions/config to agent memory. Owner-only.",
         ),
         ToolDescriptor(
+            tool_name="memory_write_private",
+            label="Memory write (private)",
+            connector_id="memory",
+            action_id="write_private",
+            description=(
+                "Save a note about how THIS specific person likes to be worked with — their own "
+                "preferences, communication style, or working habits. This is NEVER visible to, "
+                "and never shaped by, any other person who talks to this agent — it is not the "
+                "same store memory_write saves to. Use this for 'how I like things done', not for "
+                "facts about the company, project, or work itself — those belong in memory_write "
+                "(shared with every other person on this project) instead. Each call REPLACES the "
+                "full note (there is no filename/path — there is exactly one private note per "
+                "person per agent), so include everything still worth keeping, not just the new part."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The full private preference note (replaces the previous one for this person).",
+                    },
+                },
+                "required": ["content"],
+            },
+            audience_safe=False,
+            audience_note="Blocked: writes a specific person's private preferences. Not available to external audiences.",
+        ),
+        ToolDescriptor(
+            tool_name="memory_get_private",
+            label="Memory get (private)",
+            connector_id="memory",
+            action_id="get_private",
+            description=(
+                "Read back the private preference note previously saved for THIS specific person "
+                "with memory_write_private — never another person's. Returns empty if none was saved."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            # Not audience_safe: an external/audience caller (e.g. an anonymous
+            # customer on a deployed channel) has no internal user_id to scope
+            # to at all, so this tool would always return empty for them — a
+            # dead control (CLAUDE.md: "if a control cannot be used in the
+            # current state, it is not rendered"). Restricting it keeps that
+            # true structurally rather than leaving an always-empty tool
+            # visible to a caller it can never help.
+            audience_safe=False,
+            audience_note="Blocked: private per-person memory is an internal-workspace-member concept only.",
+        ),
+        ToolDescriptor(
             tool_name="memory_read",
             label="Memory read",
             connector_id="memory",
@@ -6033,6 +6085,74 @@ def execute_single_direct_tool_call(
                 "mode": saved.get("mode"),
                 **_memory_redaction_result_fields(saved),
             },
+            ensure_ascii=False,
+        )
+    if connector_id == "memory" and action_id == "write_private":
+        # SECURITY (feat/agent-memory-shared-vs-private): the private layer
+        # is keyed on session_metadata["user_id"] ONLY -- there is no
+        # user_id in argument_payload's schema at all (see the
+        # ToolDescriptor above: its parameters object has no such
+        # property), so there is no field here for a model to set to claim
+        # someone else's identity. Whoever the platform actually resolved
+        # as the caller for THIS turn is whose private note gets written --
+        # never a value the tool call itself supplies. This mirrors
+        # tool_honesty_guard/agent_goals.attempt_count's posture: the
+        # partitioning decision is made by the firing code, never narrated
+        # by the model.
+        content = str(argument_payload.get("content") or "").strip()
+        if not content:
+            raise RuntimeError("Tool 'memory_write_private' requires non-empty content.")
+        user_id = str(session_metadata.get("user_id") or "").strip()
+        if not user_id:
+            raise RuntimeError(
+                "Tool 'memory_write_private' requires a resolved user identity, which "
+                "this channel/session did not provide -- private memory is only "
+                "available to an authenticated internal workspace member."
+            )
+        from server_modules import agent_private_memory_service
+
+        saved = agent_private_memory_service.write_private_memory_note(
+            workspace_id,
+            agent_install_id=agent_private_memory_service.resolve_agent_install_scope(
+                session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id")
+            ),
+            user_id=user_id,
+            content=content,
+            reason="memory_write_private",
+        )
+        return json.dumps(
+            {
+                "ok": True,
+                "chars_written": len(str(saved.get("content") or "")),
+                "redacted": bool(saved.get("redacted")),
+                "revision_recorded": bool(saved.get("revision_recorded", True)),
+            },
+            ensure_ascii=False,
+        )
+    if connector_id == "memory" and action_id == "get_private":
+        # Same identity source as write_private above -- server-resolved
+        # only, never model-supplied. A caller with no resolved user_id
+        # (e.g. an anonymous external-channel turn) gets an honest "no
+        # identity available" response rather than another person's note --
+        # there is no fallback path here that reads without a real user_id.
+        user_id = str(session_metadata.get("user_id") or "").strip()
+        if not user_id:
+            return json.dumps(
+                {"content": "", "exists": False, "reason": "no_resolved_user_identity"},
+                ensure_ascii=False,
+            )
+        from server_modules import agent_private_memory_service
+
+        note = agent_private_memory_service.get_private_memory_note(
+            workspace_id,
+            agent_install_id=agent_private_memory_service.resolve_agent_install_scope(
+                session_metadata.get("agent_install_id") or session_metadata.get("active_agent_install_id")
+            ),
+            user_id=user_id,
+        )
+        content = str((note or {}).get("content") or "")
+        return json.dumps(
+            {"content": content, "exists": bool(content)},
             ensure_ascii=False,
         )
     if connector_id == "memory" and action_id == "stage_edit":

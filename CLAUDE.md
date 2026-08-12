@@ -1805,6 +1805,104 @@ caller — WhatsApp/Telegram-personal scope outbound rows by `agent_id`,
 local-bridge stays unscoped on purpose (same reason
 `_deliver_local_bridge_personal_reply`'s own outbound calls do).
 
+**Agent memory had ONE scope tuple, `(workspace_id, agent_install_id)`, and
+NO per-user dimension anywhere.** Verified 2026-08-12
+(feat/agent-memory-shared-vs-private) against `memory_service.py` /
+`agent_memory.py` (MEMORY.md, topic files, daily logs, the `memory_entries`
+key/value store), `agent_memory_tools.py`, `unified_memory_service.py`, and
+`workspace_context_memory_adapter.py`: every read and write function takes
+only `workspace_id`/`agent_install_id`. The only human-identity field
+touching memory anywhere was `actor`/`source` — stamped into a version/audit
+record and a "[name via X — not owner] " display marker, never used to
+partition storage or filter a read. So a teammate using a shared agent
+wrote into, and read out of, the literal same pool as the owner's own
+accumulated context — contradicting this file's own "the agent... is
+shared with the project" law, which was never actually implemented for
+memory. The founder's words: *"once I have every context and evolved
+agent, how is it going to work once I have my other person, which is also
+going to evolve its context window, which I may not like."*
+
+```
+BEFORE                                    AFTER
+  owner turn   ─┐                           owner turn   ─▶ SHARED pool (unchanged:
+  teammate turn ─┴─▶ ONE shared pool                         memory_service.py/agent_memory.py,
+                     (MEMORY.md, memory_entries)              workspace_id + agent_install_id)
+                     no per-user axis at all      ┌─▶ owner's   PRIVATE note
+                                        teammate ──┤   (agent_private_memory_notes,
+                                                    └─▶ teammate's PRIVATE note   +user_id)
+```
+
+Fixed by ADDING a private layer, not rescoping the existing one — the
+shared pool is already correct for "facts about the work every project
+member should benefit from" and stays exactly as-is.
+`agent_private_memory_notes` / `agent_private_memory_note_revisions`
+(Postgres, `migrations/add_agent_private_memory.sql`, RLS'd exactly like
+`project_documents` — two-column `tenant_id`/`workspace_id`
+`empyralis_rls_scope_match`, FORCE'd) hold one row per
+`(tenant, workspace, agent_install, user)`, upsert-in-place (the same
+Decision B posture `agent_memory.py`'s own `memory_entries` already uses).
+`user_id` is a REQUIRED keyword with no default on every function in
+`agent_private_memory_repository.py`/`agent_private_memory_service.py` — RLS
+is the tenant/workspace backstop (there is no third-column variant of
+`empyralis_rls_scope_match`, and there never should be one for a single
+table); the per-person boundary is application code, the identical split
+this file documents for `vault_credentials` and `run_state_repository`.
+
+**Which layer a write lands in is decided by the FIRING CODE, never a
+model-supplied flag.** Two model-visible tools, `memory_write_private` /
+`memory_get_private` (`skills_service._builtin_tool_descriptors`,
+dispatched in `execute_single_direct_tool_call`'s `("memory",
+"write_private"/"get_private")` branches) — neither tool's JSON schema has
+a `user_id` property, so there is no field for the model to set; the only
+source is `session_metadata["user_id"]`, resolved server-side before the
+tool body runs, the same honesty posture `tool_honesty_guard`/
+`agent_goals.attempt_count` already use elsewhere. Proved directly:
+`test_memory_write_private_tool_dispatch.py` stuffs a `user_id` into the
+model's own `argument_payload` and asserts the write still lands under
+`session_metadata`'s real identity, never the smuggled one.
+`memory_write`/the rest of the shared-pool tools are unchanged — they
+remain the correct surface for "facts about the company/project," never
+personal preferences.
+
+**The COMPANY-CONTEXT document reuses `project_documents`; no new store was
+built.** `project_documents_repository.py` (Postgres, project-scoped,
+real revision history via `project_document_revisions`, reachable by every
+agent through the existing `document__*` tools) already has every property
+a shared "how this company operates" document needs. Documented directly in
+that module's own docstring so the next person building this feature finds
+the existing table before inventing a parallel one — "prefer reusing
+documents over a new memory silo" held here without needing new code.
+
+**Isolation is proven, not asserted.**
+`test_agent_private_memory_repository.py`'s `AgentPrivateMemoryMockedIsolationTests`
+drives the real repository functions against an in-memory fake standing in
+for `control_plane_repository`'s pool: after user A writes, user B's read
+for the same workspace/agent returns `None` (zero rows) with exactly one
+downstream call made (a single `fetchrow`, not a broader read filtered
+client-side) — the literal "zero rows, zero unnecessary downstream calls"
+proof. A second, DB-optional class statically asserts every query in the
+module names `user_id` and that `user_id` has no default on any public
+function (an AST check, not a live-query one, since this suite normally
+runs with `DATABASE_URL` unset). Real-Postgres end-to-end tests (opt-in,
+skip cleanly without `DATABASE_URL`) round out the CRUD/scoping proof the
+mocked class can't give on its own.
+
+Two things NOT done in this pass, deliberately out of scope. The shared
+pool is never auto-injected with a per-person block into every turn's
+prompt (that would require threading `user_id` through the deep
+`direct_chat_*_facade_service.py` callback chain feeding
+`workspace_context_memory_adapter.load_workspace_context_payload` — a large,
+separately-verifiable change); the private note is pull-based instead
+(`memory_get_private`), consistent with how every OTHER memory surface
+except MEMORY.md itself already works ("index-first... everything else is
+pulled on demand," `memory_service.py`'s own stated discipline). And the
+authority-mandate model (`authority_mandate_service.py`) has exactly three
+tiers — `owner`/`audience`/`system`, no "project teammate" tier distinct
+from "owner" — so a teammate invited into a shared agent's project
+currently gets the SAME tool authority as the owner (full `memory_write`,
+etc.), a real but separate gap from memory scoping; fixing it would mean
+redesigning the tier model project-wide, which this pass did not touch.
+
 ## Testing the UI
 
 **Seed your own data. Never ask for the founder's account, and never copy secrets.**
