@@ -165,14 +165,22 @@ export function DocumentDetailView({
     if (!canWrite) headingRef.current?.focus();
   }, [document.id, canWrite]);
 
-  // Size the editor to the document it just loaded. Without this an existing
+  // Size the editor to the document it just LOADED. Without this an existing
   // document opens at min-height with its own scrollbar — the exact box this
   // view was rebuilt to stop being — and only corrects itself once the person
-  // types. Re-runs on document.id (a different document) and on draftBody so
-  // a reseed from the server resizes too, not just local typing.
+  // types.
+  //
+  // Deliberately NOT keyed on draftBody. It was, and that was a real bug:
+  // typing already calls autosizeEditor from onChange, so every keystroke ran
+  // it twice, and under a fast continuous burst the two invocations raced on
+  // a stale scrollHeight and inflated the height ~27x — 34,731px measured on
+  // a document whose correct height was 1,275px, i.e. tens of thousands of
+  // pixels of blank page. onChange owns resize-while-typing; this effect owns
+  // resize-on-load. One trigger each, never both for the same event.
   useEffect(() => {
     if (canWrite) autosizeEditor(editorRef.current);
-  }, [document.id, canWrite, draftBody]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [document.id, canWrite]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

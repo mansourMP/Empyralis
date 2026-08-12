@@ -30,11 +30,19 @@
    marketing page — headings step down in weight rather than blow up in
    size, and body copy matches .fleet-task-page-desc's own 14px/1.6 rather
    than introducing a second reading-copy scale. */
+/* Matched to .fleet-doc-editor deliberately. These were 14px / 1.65 /
+   --text-secondary against the editor's 15px / 1.7 / --text-primary, so the
+   SAME words changed size, leading AND colour depending on whether you could
+   edit them — measured at 14px/23.1px/rgb(82,82,91) versus
+   15px/25.5px/rgb(24,24,27). The editor's comment claimed this could not
+   happen; it did. A document's body is the page's primary content, so it
+   takes --text-primary in both modes: secondary was quietly saying "this is
+   supporting text", which is wrong for the thing the page exists to show. */
 .fleet-doc-body {
   margin-top: 20px;
-  font-size: 14px;
-  line-height: 1.65;
-  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text-primary);
 }
 
 /* The global reset (app/globals.css: `a { color: inherit; text-decoration:
@@ -211,6 +219,9 @@ h6.fleet-doc-heading { font-size: 14px; }
 }
 .fleet-doc-title-input:focus-visible {
   outline: none;
+  /* Same global :focus-visible box-shadow as the body editor below — without
+     this the title gets its own ring on top of the accent underline. */
+  box-shadow: none;
   border-bottom-color: var(--accent);
 }
 
@@ -257,6 +268,14 @@ h6.fleet-doc-heading { font-size: 14px; }
    already focused and accepting input. */
 .fleet-doc-editor:focus-visible {
   outline: none;
+  /* `outline: none` ALONE is not enough and shipping it that way put the box
+     straight back. app/globals.css's `:focus-visible { box-shadow:
+     var(--app-shadow-focus) }` still fires, drawing a 2px ring around the
+     ENTIRE document the moment someone clicks in to type — the worst possible
+     moment for it, and the exact effect the comment above says must not
+     happen. Same suppression .fleet-sage-chat-input:focus-visible already
+     uses in fleet-theme.css for the same reason. */
+  box-shadow: none;
 }
 
 /* ── History (DocumentHistory.tsx) ───────────────────────────────────────
