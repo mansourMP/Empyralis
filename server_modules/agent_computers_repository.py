@@ -499,6 +499,35 @@ async def list_records_for_pairing_scan() -> List[Dict[str, Any]]:
     return [row_to_record(row) for row in rows]
 
 
+async def list_active_vps_for_metering() -> List[Dict[str, Any]]:
+    """Every ACTIVE (non-terminal) agent computer record, across every
+    workspace and tenant — the candidate set for the MAN-134 hourly metering
+    sweep and the read-only orphan report.
+
+    Deliberately global and deliberately named for what it is: this is a
+    SYSTEM job's input, not a customer-facing read, so there is no
+    workspace/tenant scope to require here — same posture as
+    list_records_for_pairing_scan (the pairing-beacon matcher), which is the
+    only other cross-tenant reader of this table. See CLAUDE.md's
+    "`WHERE ($1 = '' OR tenant_id = $1)` fails OPEN" entry for why every
+    OTHER cross-tenant read in this codebase requires an explicit
+    include_all_workspaces=True — that rule protects a caller-suppliable
+    scope from silently widening; there is no caller-supplied scope here to
+    widen, because nothing about this function's caller (a background sweep,
+    never an HTTP request) is workspace-scoped in the first place.
+    """
+    async with _connection() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT {_SELECT_COLUMNS} FROM agent_computers
+            WHERE status = ANY($1::text[])
+            ORDER BY created_at ASC
+            """,
+            list(ACTIVE_VPS_STATUSES),
+        )
+    return [row_to_record(row) for row in rows]
+
+
 _IMPORT_SQL = f"""
 INSERT INTO agent_computers (
     vps_id, workspace_id, tenant_id, user_id, provider, provider_resource_id,
