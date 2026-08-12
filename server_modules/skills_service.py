@@ -5591,6 +5591,53 @@ def _queue_outbound_media(session_ctx: Optional[Dict[str, Any]], item: Dict[str,
     return True
 
 
+def _resolve_session_user_id(session_metadata: Any) -> str:
+    """The turn's SERVER-RESOLVED human identity, or "".
+
+    `session_metadata` is the whole `session_ctx` dict (every call site in
+    this module does `session_metadata = session_ctx`), and production does
+    NOT put `user_id` at its top level — `sage_agent_runtime_service`'s turn
+    builder nests it:
+
+        session_ctx = {
+            "metadata": {"user_id": actor_user_id or None, ...},
+            "sender_id": actor_user_id or "",
+            ...
+        }
+
+    So a bare `session_metadata.get("user_id")` is None on every real turn.
+    That is not hypothetical: it silently disabled BOTH private-memory tools
+    the day they shipped (2026-08-12) — every live call raised "requires a
+    resolved user identity", and the dispatch test passed only because it
+    hand-built a flat `{"user_id": ...}` shape production never produces. A
+    fixture that invents its own input cannot notice that the real input
+    looks different; this helper exists so there is ONE answer to "who is
+    this turn's human", used by every caller, instead of each one guessing a
+    key.
+
+    Order is authority, not convenience: the nested `metadata.user_id` is
+    what the turn builder sets deliberately, `sender_id` is its top-level
+    mirror, and the flat `user_id` is accepted last for callers that pass a
+    pre-flattened context.
+
+    Every source here is written by the platform. None of them is reachable
+    from a tool call's own arguments, which is the property the private
+    memory tools depend on — see their dispatch branches.
+    """
+    if not isinstance(session_metadata, dict):
+        return ""
+    nested = session_metadata.get("metadata")
+    if isinstance(nested, dict):
+        candidate = str(nested.get("user_id") or "").strip()
+        if candidate:
+            return candidate
+    for key in ("sender_id", "user_id"):
+        candidate = str(session_metadata.get(key) or "").strip()
+        if candidate:
+            return candidate
+    return ""
+
+
 def _memory_redaction_result_fields(saved: Any) -> Dict[str, Any]:
     """MAN-53: every native memory-writing tool result (memory_write,
     memory_update, memory_append_daily_note, memory_apply_edit) surfaces
@@ -6102,7 +6149,11 @@ def execute_single_direct_tool_call(
         content = str(argument_payload.get("content") or "").strip()
         if not content:
             raise RuntimeError("Tool 'memory_write_private' requires non-empty content.")
-        user_id = str(session_metadata.get("user_id") or "").strip()
+        # Through the shared resolver, NOT a bare .get("user_id"): production
+        # nests the id under session_ctx["metadata"], so the flat read returned
+        # None on every real turn and silently disabled this tool from the day
+        # it shipped. See _resolve_session_user_id.
+        user_id = _resolve_session_user_id(session_metadata)
         if not user_id:
             raise RuntimeError(
                 "Tool 'memory_write_private' requires a resolved user identity, which "
@@ -6135,7 +6186,11 @@ def execute_single_direct_tool_call(
         # (e.g. an anonymous external-channel turn) gets an honest "no
         # identity available" response rather than another person's note --
         # there is no fallback path here that reads without a real user_id.
-        user_id = str(session_metadata.get("user_id") or "").strip()
+        # Through the shared resolver, NOT a bare .get("user_id"): production
+        # nests the id under session_ctx["metadata"], so the flat read returned
+        # None on every real turn and silently disabled this tool from the day
+        # it shipped. See _resolve_session_user_id.
+        user_id = _resolve_session_user_id(session_metadata)
         if not user_id:
             return json.dumps(
                 {"content": "", "exists": False, "reason": "no_resolved_user_identity"},

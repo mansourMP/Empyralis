@@ -216,3 +216,96 @@ class ToolDescriptorAudienceSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrivateMemoryUsesTheRealProductionSessionShapeTests(unittest.TestCase):
+    """The shape a LIVE turn actually passes — not the one a fixture invents.
+
+    Every test above builds `session_ctx={"user_id": ...}` by hand, flat. A
+    real turn does not look like that. `sage_agent_runtime_service`'s turn
+    builder produces:
+
+        session_ctx = {
+            "metadata": {"user_id": actor_user_id or None, ...},
+            "sender_id": actor_user_id or "",
+            ...
+        }
+
+    and `skills_service` sets `session_metadata = session_ctx` — the WHOLE
+    dict. So the original `session_metadata.get("user_id")` was None on
+    every real turn, and both private-memory tools raised "requires a
+    resolved user identity" from the day they shipped (2026-08-12) while
+    their own dispatch tests stayed green.
+
+    That is this codebase's documented "a mock protects a seam, not a path"
+    failure in its purest form: a fixture that invents its own input cannot
+    notice that the real input is shaped differently. These tests build the
+    context the way production does, so they fail if the resolver regresses.
+    """
+
+    def _write(self, *, session_ctx: dict):
+        return skills_service.execute_single_direct_tool_call(
+            tool_call={
+                "name": "memory_write_private",
+                "arguments": {"content": "I like short replies."},
+            },
+            workspace_id="ws-1",
+            thread_id="t-1",
+            session_ctx=session_ctx,
+            callbacks=_callbacks(),
+        )
+
+    def _production_session_ctx(self, user_id):
+        """Mirrors sage_agent_runtime_service's own turn builder."""
+        return {
+            "authority_tier": "owner",
+            "metadata": {
+                "source": "sage_chat",
+                "surface": "sage",
+                "agent_scope": "sage",
+                "user_id": user_id,
+                "envelope": None,
+            },
+            "sender_id": user_id or "",
+        }
+
+    def test_a_real_turns_nested_identity_is_resolved(self) -> None:
+        with patch(
+            "server_modules.agent_private_memory_service.write_private_memory_note",
+            return_value={"content": "x", "redacted": False, "revision_recorded": True},
+        ) as mocked_write:
+            raw = self._write(session_ctx=self._production_session_ctx("user-real"))
+        self.assertTrue(json.loads(raw)["ok"])
+        self.assertEqual(mocked_write.call_count, 1)
+        _, kwargs = mocked_write.call_args
+        self.assertEqual(kwargs["user_id"], "user-real")
+
+    def test_the_nested_identity_wins_over_a_stale_flat_one(self) -> None:
+        """metadata.user_id is what the turn builder sets deliberately.
+
+        If the two ever disagree, the deliberate one is the answer — a flat
+        key left over from an older context must not silently redirect a
+        private note into somebody else's partition.
+        """
+        ctx = self._production_session_ctx("user-real")
+        ctx["user_id"] = "user-stale"
+        with patch(
+            "server_modules.agent_private_memory_service.write_private_memory_note",
+            return_value={"content": "x", "redacted": False, "revision_recorded": True},
+        ) as mocked_write:
+            self._write(session_ctx=ctx)
+        self.assertEqual(mocked_write.call_count, 1)
+        _, kwargs = mocked_write.call_args
+        self.assertEqual(kwargs["user_id"], "user-real")
+
+    def test_an_anonymous_real_turn_still_refuses(self) -> None:
+        """A channel turn with no internal user (an external customer) has
+        no private partition to write to, and must still say so rather than
+        inventing one. The production shape carries the key with a None
+        value, which is not the same as the key being absent."""
+        with patch(
+            "server_modules.agent_private_memory_service.write_private_memory_note",
+        ) as mocked_write:
+            with self.assertRaises(RuntimeError):
+                self._write(session_ctx=self._production_session_ctx(None))
+        self.assertEqual(mocked_write.call_count, 0)
