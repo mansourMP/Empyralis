@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 
 /** The owner stop control's live state — set by POST .../stop, cleared by
  *  .../resume (agent-scoped) or .../stop-all, .../resume-all (workspace-
@@ -303,7 +304,7 @@ async function postFleetStopControl(path: string, reason?: string): Promise<Stop
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.ok === false) {
-      return { ok: false, error: String(data?.error || data?.detail || `HTTP ${res.status}`) };
+      return { ok: false, error: getErrorMessage(data, `HTTP ${res.status}`) };
     }
     return { ok: true, stopped: data?.stopped };
   } catch (e) {
@@ -855,7 +856,7 @@ export async function previewFleetAgentSchedule(
       }
     );
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) return { ok: false, error: String(data?.error || `HTTP ${res.status}`) };
+    if (!res.ok || data?.ok === false) return { ok: false, error: getErrorMessage(data, `HTTP ${res.status}`) };
     return { ok: true, due_at: data.due_at };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
@@ -876,7 +877,7 @@ export async function createFleetAgentSchedule(
       }
     );
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) return { ok: false, error: String(data?.error || data?.detail || `HTTP ${res.status}`) };
+    if (!res.ok || data?.ok === false) return { ok: false, error: getErrorMessage(data, `HTTP ${res.status}`) };
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Request failed" };
@@ -896,7 +897,7 @@ export async function deleteFleetAgentSchedule(
       }
     );
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) return { ok: false, error: String(data?.error || `HTTP ${res.status}`) };
+    if (!res.ok || data?.ok === false) return { ok: false, error: getErrorMessage(data, `HTTP ${res.status}`) };
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : "Request failed" };

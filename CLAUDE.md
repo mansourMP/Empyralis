@@ -1985,3 +1985,67 @@ the correct call, not a gap to close. **Do not attempt to wire AWS, and do not
 report it as a defect** — "Connect AWS account" returning HTTP 500 on
 `empyralis_aws_account_id()` is the intended state until then. DigitalOcean is
 the working provider; Google Cloud is next.
+
+**An agent opens to Chat. Overview/Work/Memory are tabs beside it, never a
+gate in front of it.** Fixed 2026-08-12 — every path into an agent (list row,
+⌘K, direct URL, wizard finish) used to land on `/overview`, a config screen,
+with Chat reachable only through one button and absent from `[tab]/page.tsx`'s
+own tab bar. `FleetAgentDetail.tsx`'s `TABS`/`TOP_TAB_IDS` now lead with
+`"chat"`; the no-tab redirect (`agents/[agentId]/page.tsx`), the agents-list/
+project-detail/FleetHome row hrefs, the ⌘K entry, and the wizard's `finish()`
+all point at `/chat`. Deep links to `/overview` etc. are untouched — same
+`[tab]` route, still directly linkable.
+
+**A backend error body's `detail`/`error` is not always a string, and
+`new Error(x)` silently stringifies whatever it is.** FastAPI's own
+validation-error shape wraps a structured object under `error` (not `detail`)
+in this codebase's error-handler middleware — `data?.error || data?.detail`
+picks the OBJECT (truthy) over the human string sitting right next to it,
+and `new Error(thatObject).message` is the literal text `"[object Object]"`,
+rendered verbatim in the create-agent wizard's Placement step. `getErrorMessage`
+(`frontend/lib/ui/api-error.ts`) is now the one place that decides: return
+`detail`/`error` only if `typeof === "string"`, else the caller's fallback.
+Landed at ~29 call sites across the fleet/wizard surfaces (`FleetAgentDetail.tsx`
+alone had 11) plus `cloud-vps-setup-panel.tsx`/`ssh-server-connect-panel.tsx`
+(reachable from the wizard's Placement step) and `projects/page.tsx`. A
+follow-on sweep of the rest of the frontend for the same `data?.error ||
+data?.detail` / `String(data?.detail …)` shape was NOT done — this pass
+covered wizard/fleet reachability, not the whole app.
+
+**The wizard now asks for a name and a project, on Placement — neither used
+to have a field at all.** `FleetCreateAgentWizard.tsx`'s Name field is
+pre-filled via `GET .../fleet/agents/suggested-name` (`fleet_tools.
+suggest_agent_name`, the SAME pool+dedup function `fleet_create_agent` itself
+falls back to for a blank name — one function, not two copies of the pool).
+Project defaults to `initialProjectId` when the wizard was opened from inside
+a project, else the workspace's own default project (`is_default`), else
+"+ New project" — always a real `<select>`, never a silent auto-create. Left
+blank, "+ New project" still creates one named after the agent (old behavior,
+unchanged) but now SAYS so under the control.
+
+**A refresh token's single-use rotation raced two callers, and the loser's
+401 wiped the winner's cookies.** Root cause of "every in-flight request then
+401s simultaneously, with no warning, losing wizard progress" — NOT a short
+token lifetime (`ORION_JWT_EXP_SECONDS` defaults to 1h; no code path sets it
+under 15 minutes, so if that figure is real in some environment it needs
+separate verification against that box's actual env). `SessionRefreshTimer`'s
+proactive 20-minute tick and `WorkspaceTransportAdapter`'s reactive per-401
+refresh (`workspace-services.tsx`) each called `/auth/refresh` independently;
+`_upsert_auth_session_refresh_token_locked` (auth.py) rotates the stored
+refresh token in place on every success, so two concurrent calls always
+produce a winner and a loser, and `routes_auth.refresh_session` cleared
+EVERY auth cookie on the loser's failure — including the ones the winner had
+just set. Fixed two ways. `auth-client.ts`'s `refresh()` is now single-flighted
+(same pattern `awaitBrowserAuthReady` already used) and `workspace-services.tsx`
+calls THAT function instead of issuing its own duplicate fetch, so concurrent
+401s in one tab share one refresh call. And `auth.RefreshTokenSupersededError`
+distinguishes "this token was just rotated out by a concurrent, legitimate
+refresh" (session still active — don't touch cookies) from "genuinely dead"
+(revoked/expired/gone — clear cookies as before), closing the remaining
+cross-tab case single-flighting can't cover. `login/page.tsx`'s `authErrorCopy`
+gained a `"session expired"` branch so `redirectToLogin`'s honest message
+actually renders instead of falling through to the generic "could not finish"
+copy. `fleet-authorized-fetch.ts` wraps the wizard's own fetch calls (which
+don't go through `WorkspaceTransportAdapter` at all) with a refresh-and-retry-
+once on 401 — the other ~33 raw `fetch()` call sites in `fleet-data.ts` and
+elsewhere do NOT have this yet; same gap, separate cleanup.

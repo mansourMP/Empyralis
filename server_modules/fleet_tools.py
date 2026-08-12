@@ -2300,6 +2300,26 @@ async def fleet_resume_workspace(
     return {"ok": True, "workspace_id": workspace_id, "stopped": {"active": False}}
 
 
+async def suggest_agent_name(*, tenant_id: str, workspace_id: str) -> str:
+    """A ready-to-use, not-already-taken agent name — same pool + dedup
+    logic `fleet_create_agent` below falls back to when no explicit `name`
+    is given. Exposed as its own function (and its own GET route,
+    `fleet_suggested_agent_name_route`) so the create-agent wizard's
+    Placement step can show a real name in the Name field before the agent
+    exists, rather than leaving it blank or inventing its own copy of the
+    pool client-side (see agent_name_pool.py's own doc comment on why the
+    pool is curated once, not duplicated per caller)."""
+    from server_modules import agent_registry_repository as repo
+    from server_modules import agent_name_pool
+
+    _existing_installs = await repo.list_workspace_agent_installs(
+        tenant_id=tenant_id, workspace_id=workspace_id, include_master=True,
+    )
+    return agent_name_pool.assign_agent_name(
+        str(i.get("label") or "") for i in (_existing_installs or [])
+    )
+
+
 async def fleet_create_agent(
     *,
     actor_id: str,
@@ -2347,17 +2367,13 @@ async def fleet_create_agent(
     if clean_name:
         agent_label = clean_name
     else:
-        # NAME IS NOT A STEP: the create-agent wizard creates the agent on
-        # Placement, before the owner has picked a name. Auto-assign from the
-        # curated pool (collision-checked within this workspace) — the owner
-        # renames it anytime from the Overview tab.
-        from server_modules import agent_name_pool
-        _existing_installs = await repo.list_workspace_agent_installs(
-            tenant_id=tenant_id, workspace_id=workspace_id, include_master=True,
-        )
-        agent_label = agent_name_pool.assign_agent_name(
-            str(i.get("label") or "") for i in (_existing_installs or [])
-        )
+        # The wizard's Placement step now shows (and pre-fills) a Name field
+        # via suggest_agent_name above, so this branch is only reached by a
+        # caller that skips it entirely (e.g. a direct API call with no
+        # name) — same curated-pool fallback, collision-checked within this
+        # workspace, the owner can still rename anytime from the Overview
+        # tab.
+        agent_label = await suggest_agent_name(tenant_id=tenant_id, workspace_id=workspace_id)
     meta = seed_specialist_metadata()
     meta["fleet_created_by"] = actor_id
     meta["fleet_created_at"] = datetime.now(timezone.utc).isoformat()

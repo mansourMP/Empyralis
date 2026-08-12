@@ -80,6 +80,7 @@ import { HeaderAction } from "./Breadcrumbs";
 import { CHANNEL_ICONS } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import { RUNTIME_LABELS } from "./gateway-box-picker";
 import { resolveAgentModelSummary, platformCreditsTierLabel } from "./fleet-model-config";
 
@@ -131,16 +132,20 @@ function isChannelConnected(
 
 type TabId = "overview" | "work" | "channels" | "connectors" | "hardware" | "model" | "skills" | "memory" | "tools" | "capabilities" | "chat";
 
-// Single source of id/label/icon truth for every one of the nine sections —
-// both the permanent top strip (three of these, TOP_TAB_IDS below) and the
+// Single source of id/label/icon truth for every one of the ten sections —
+// both the permanent top strip (four of these, TOP_TAB_IDS below) and the
 // Configure sheet's GroupedRail groups (the other six, CONFIGURE_GROUPS
 // below) read labels/icons from here so neither surface can drift from the
-// other. Nine ids remain valid [tab] route segments regardless of which
+// other. Ten ids remain valid [tab] route segments regardless of which
 // surface renders them (VALID_TABS, [tab]/page.tsx) — collapsing the tab
-// BAR from nine to three is a rendering change, not a routing one. Order
-// here no longer drives on-screen order (each surface picks its own
-// members/grouping explicitly by id below), so it's just declaration order.
+// BAR from ten to four is a rendering change, not a routing one. Declared
+// with "chat" first because TOP_TAB_IDS below renders in THIS array's
+// order — chat is the agent's front door (an agent opens to Chat, not a
+// config screen — see [tab]/page.tsx's own "chat" fallback), so it leads
+// the strip. The Configure sheet ignores this order entirely (each group
+// below picks its own members/grouping explicitly by id).
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
+  { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "overview", label: "Overview", icon: LayoutGrid },
   { id: "model", label: "Model", icon: Sparkles },
   { id: "skills", label: "Skills", icon: BookOpen },
@@ -153,12 +158,13 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "memory", label: "Memory", icon: Brain },
 ];
 
-// The three you actually watch day to day — permanent top strip. Everything
-// else (six ids below) moved into the Configure sheet, opened by the
-// trigger button next to this strip; nothing was deleted (founder: "the
-// rest must not be deleted"), it just isn't equal-billing top-level nav
-// anymore (UI-CONTRACT: "a surface must earn its place").
-const TOP_TAB_IDS = new Set<TabId>(["overview", "work", "memory"]);
+// The four you actually watch day to day — permanent top strip, Chat
+// leading it as the front door. Everything else (six ids below) moved into
+// the Configure sheet, opened by the trigger button next to this strip;
+// nothing was deleted (founder: "the rest must not be deleted"), it just
+// isn't equal-billing top-level nav anymore (UI-CONTRACT: "a surface must
+// earn its place").
+const TOP_TAB_IDS = new Set<TabId>(["chat", "overview", "work", "memory"]);
 
 // Configure sheet groups — BRAIN (what it thinks with) / REACH (how it's
 // reached, and what it can reach out to) / COMPUTE (what it runs on).
@@ -369,14 +375,15 @@ export function FleetAgentDetail({
   // bug: a re-render mid-navigation (rapid tab clicks, or clicking a
   // second tab while the first was still loading) could see `initialTab`
   // transiently unresolved, and a sync effect here plus the parent's own
-  // unresolved-defaults-to-"overview" coercion combined to silently stomp
-  // whatever tab the user had just clicked back to Overview. Deriving
-  // instead of storing means there is no local copy to desync — whatever
-  // the URL says is what renders. [tab]/page.tsx now passes `undefined`
-  // (never a manufactured "overview") while a navigation is still
-  // resolving, so the "overview" fallback below only ever fires for a
-  // genuine first paint before routing has resolved at all.
-  const activeTab: TabId = initialTab || "overview";
+  // unresolved-defaults-to-"chat" coercion combined to silently stomp
+  // whatever tab the user had just clicked back to Chat. Deriving instead
+  // of storing means there is no local copy to desync — whatever the URL
+  // says is what renders. [tab]/page.tsx now passes `undefined` (never a
+  // manufactured "chat") while a navigation is still resolving, so the
+  // "chat" fallback below only ever fires for a genuine first paint before
+  // routing has resolved at all — the agent's front door, matching
+  // .../agents/[agentId]/page.tsx's own no-tab redirect.
+  const activeTab: TabId = initialTab || "chat";
   // Properties panel — a floating overlay (FleetRightPanel), the SAME
   // component and behaviour the project/agents LIST pages use for their own
   // Properties toggle (FleetToolbar's panelOpen), reused directly rather
@@ -719,11 +726,10 @@ export function FleetAgentDetail({
           contract as the list pages' .fleet-content-with-panel. */}
       <div className="fleet-detail-columns">
         <div className="fleet-detail-body">
-          {/* Only the three top-level tabs (plus Chat, reached via
-              onChat/"Chat with this agent" rather than this bar) render
-              here now. The other six render inside the Configure sheet
-              below — configureSheet — same components, same props, moved
-              rather than duplicated. */}
+          {/* Only the four top-level tabs (Chat, Overview, Work, Memory)
+              render here now. The other six render inside the Configure
+              sheet below — configureSheet — same components, same props,
+              moved rather than duplicated. */}
           {activeTab === "overview" && (
             <OverviewTab
               workspaceId={workspaceId}
@@ -777,12 +783,11 @@ export function FleetAgentDetail({
     }),
   }));
 
-  // Closing goes to Overview — the natural top-level default — mirroring
-  // [tab]/page.tsx's own convention of coercing an unresolved/invalid tab to
-  // "overview" (see its rawTab comment). Same selectTab→onTabChange→
-  // router.replace path every other tab switch in this file already uses,
-  // not a one-off router call.
-  const closeSheet = () => selectTab("overview");
+  // Closing goes to Chat — the agent's front door — mirroring [tab]/page.tsx's
+  // own convention of coercing an unresolved/invalid tab to "chat" (see its
+  // rawTab comment). Same selectTab→onTabChange→router.replace path every
+  // other tab switch in this file already uses, not a one-off router call.
+  const closeSheet = () => selectTab("chat");
 
   const configureSheet = sheetOpen ? (
     <div className="agent-configure-backdrop" onClick={closeSheet}>
@@ -1221,7 +1226,7 @@ function AgentTitle({
         body: JSON.stringify({ patch: { display_name: next } }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       setEditing(false);
       onRenamed?.();
     } catch (e) {
@@ -1325,7 +1330,7 @@ function PersonaEditor({
         body: JSON.stringify({ patch: { instructions: draft } }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save.");
@@ -2070,7 +2075,7 @@ export function ChannelsTab({
         },
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       setByoBotSaved(true);
       handleChannelsChanged();
     } catch (e) {
@@ -2109,7 +2114,7 @@ export function ChannelsTab({
         },
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       setWechatSaved(true);
       setWechatWebhookUrl(typeof data?.channel?.webhook_url === "string" ? data.channel.webhook_url : null);
       handleChannelsChanged();
@@ -2156,7 +2161,7 @@ export function ChannelsTab({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+        throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       }
       if (data?.authorization_url) {
         window.location.href = data.authorization_url;
@@ -2188,7 +2193,7 @@ export function ChannelsTab({
         },
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       setSlackBindSaved(true);
       handleChannelsChanged();
     } catch (e) {
@@ -3382,7 +3387,7 @@ function ToolsTab({
         body: JSON.stringify({ patch: { tool_toggles: { [toolId]: next } } }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not update this tool.");
@@ -3407,7 +3412,7 @@ function ToolsTab({
         body: JSON.stringify({ patch: { mandate: { audience_tools: Array.from(nextGranted) } } }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not update customer access for this tool.");
@@ -3571,7 +3576,7 @@ function SkillsTab({
         body: JSON.stringify({ patch: { skills: nextSkills } }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       onSaved?.();
       return true;
     } catch (e) {
@@ -3929,7 +3934,7 @@ function CapabilitiesTab({
         body: JSON.stringify({ patch: { capability_config: { [capabilityId]: { mode, provider } } } }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not update this capability.");
@@ -4228,7 +4233,7 @@ function ContextPolicySection({
         body: JSON.stringify({ patch: { context_policy: { max_context_tokens: parsed, on_context_full: onFull } } }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       setSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save.");

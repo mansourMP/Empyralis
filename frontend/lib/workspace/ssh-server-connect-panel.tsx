@@ -5,6 +5,7 @@ import { X } from 'lucide-react';
 
 import { AppButton } from '@/lib/ui/primitives';
 import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
+import { getErrorMessage } from '@/lib/ui/api-error';
 
 // Same fleet/legacy-shell trade-off as cloud-vps-setup-panel.tsx: talk to the
 // backend directly rather than through useWorkspaceServices(), which fleet
@@ -15,7 +16,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   const response = await fetch(path, { ...init, headers, credentials: 'include' });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(String(data?.detail || data?.error || `Request failed with status ${response.status}.`));
+    throw new Error(getErrorMessage(data, `Request failed with status ${response.status}.`));
   }
   return data as T;
 }

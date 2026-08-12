@@ -1759,6 +1759,31 @@ async def fleet_list_bug_reports(
         return {"ok": False, "error": str(exc), "reports": []}
 
 
+@router.get("/api/w/{workspace_id}/fleet/agents/suggested-name")
+async def fleet_suggested_agent_name_route(
+    request: Request,
+    workspace_id: str,
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """A ready-to-use agent name for the create-agent wizard's Placement
+    step's Name field, so it's never blank before the owner has typed
+    anything. Same pool + dedup logic fleet_create_agent falls back to when
+    no name is given (fleet_tools.suggest_agent_name) — this route lets the
+    wizard SHOW that name before commit, rather than duplicating the pool
+    client-side."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+    from server_modules.fleet_tools import suggest_agent_name
+
+    try:
+        name = await suggest_agent_name(
+            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            workspace_id=resolved_workspace_id,
+        )
+        return {"ok": True, "name": name}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "name": ""}
+
+
 class FleetCreateAgentRequest(BaseModel):
     name: str = ""  # optional — server assigns a pool name when absent (see agent_name_pool.py)
     instructions: str = ""

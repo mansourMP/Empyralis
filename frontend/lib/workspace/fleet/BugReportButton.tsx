@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Bug } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 
 const MAX_TITLE = 200;
 const MAX_DESCRIPTION = 5000;
@@ -23,7 +24,7 @@ async function submitBugReport(
   // failure -- see routes_fleet.py's fleet_create_bug_report -- so res.ok
   // alone would silently swallow a rejected submission.
   if (!res.ok || data?.ok === false) {
-    throw new Error(data?.error || data?.detail || `Could not send report (HTTP ${res.status})`);
+    throw new Error(getErrorMessage(data, `Could not send report (HTTP ${res.status})`));
   }
 }
 

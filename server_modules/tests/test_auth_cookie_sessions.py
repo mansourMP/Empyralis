@@ -427,6 +427,39 @@ async def test_browser_refresh_clears_cookies_when_refresh_token_is_stale(
 
 
 @pytest.mark.anyio
+async def test_browser_refresh_does_not_clear_cookies_when_token_was_superseded_by_a_concurrent_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Two refresh calls racing the same session's single-use refresh token
+    end with a winner and a loser (see auth.RefreshTokenSupersededError's
+    own doc comment) — the loser must fail its own request without wiping
+    cookies the winner may have just set. Contrast with the test just above
+    (genuinely stale/dead token), which must still clear cookies."""
+    app = _build_app()
+
+    def _superseded_refresh(*args, **kwargs):
+        raise auth.RefreshTokenSupersededError("Refresh token was already used by a concurrent request.")
+
+    monkeypatch.setattr(routes_auth, "refresh_authenticated_session", _superseded_refresh)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        _seed_browser_cookies(client)
+        response = await client.post(
+            "/auth/refresh",
+            json={"channel": "web"},
+            headers={"x-csrf-token": "csrf-cookie"},
+        )
+
+    assert response.status_code == 401
+    set_cookie_headers = response.headers.get_list("set-cookie")
+    assert not set_cookie_headers, (
+        "a losing race must not touch cookies at all — a winning concurrent "
+        "refresh may have just set the good ones"
+    )
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("method", "path", "json_body"),
     [

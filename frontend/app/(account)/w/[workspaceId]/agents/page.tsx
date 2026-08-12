@@ -217,9 +217,10 @@ export default function AgentsPage() {
   ];
 
   // Where an agent row goes on a plain click, via `router.push` in
-  // goToAgent below.
+  // goToAgent below — straight into Chat, the agent's front door (Overview
+  // is still one click/tab away, never gone).
   const agentHref = (agentId: string, projectId: string) =>
-    `${base}/projects/${encodeURIComponent(resolveAgentProjectId(projectId, projects))}/agents/${encodeURIComponent(agentId)}/overview`;
+    `${base}/projects/${encodeURIComponent(resolveAgentProjectId(projectId, projects))}/agents/${encodeURIComponent(agentId)}/chat`;
 
   const goToAgent = (agentId: string, projectId: string) => {
     rememberLastViewedAgent(agentId);

@@ -5,6 +5,7 @@ import { ArrowLeft, Check, ExternalLink, X } from 'lucide-react';
 
 import { AppButton, joinClassNames } from '@/lib/ui/primitives';
 import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
+import { getErrorMessage } from '@/lib/ui/api-error';
 import { CountryFlag, countryFlagEmoji, resolveRegionCountry } from '@/lib/workspace/geo/country-flag';
 import {
   formatElapsed,
@@ -30,16 +31,17 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
     // Surface the backend's own detail message when there is one (e.g. "This
     // AWS connection request expired.") instead of just the status code —
     // the AWS connect/confirm steps in particular rely on this to explain
-    // *why* a retryable failure happened. Falls back to the old generic
-    // message for a non-JSON or detail-less error body.
-    let detail = '';
+    // *why* a retryable failure happened. getErrorMessage falls back to the
+    // generic message below for a non-JSON, detail-less, or non-string
+    // (e.g. FastAPI's structured validation-error array) error body — never
+    // coercing that shape into the literal text "[object Object]".
+    let body: unknown = null;
     try {
-      const body = (await response.json()) as { detail?: unknown };
-      detail = typeof body?.detail === 'string' ? body.detail : '';
+      body = await response.json();
     } catch {
       // Not JSON (or empty) — fall through to the generic message below.
     }
-    throw new Error(detail || `Request failed with status ${response.status}.`);
+    throw new Error(getErrorMessage(body, `Request failed with status ${response.status}.`));
   }
   return (await response.json()) as T;
 }

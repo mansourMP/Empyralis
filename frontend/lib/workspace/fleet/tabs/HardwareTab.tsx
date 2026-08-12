@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import type { FleetAgent } from "../fleet-data";
 import {
   GatewayBoxPicker,
@@ -127,7 +128,7 @@ export function HardwareTab({
         },
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       onSaved?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save.");

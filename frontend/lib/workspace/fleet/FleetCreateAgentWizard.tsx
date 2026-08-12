@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Loader2, X } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
+import { fleetAuthorizedFetch } from "./fleet-authorized-fetch";
 import {
   BYOK_PROVIDERS,
   SUBSCRIPTION_PROVIDERS,
@@ -20,7 +22,7 @@ import {
   normalizeCliRuntime,
   type CliSubscriptionRuntime,
 } from "./fleet-provider-constants";
-import { useFleetAgentChannels, type FleetAgent } from "./fleet-data";
+import { useFleetAgentChannels, useFleetProjects, type FleetAgent } from "./fleet-data";
 import { GatewayBoxPicker, RUNTIME_LABELS } from "./gateway-box-picker";
 import { ChannelsTab } from "./FleetAgentDetail";
 import { ConnectorPicker } from "./ConnectorPicker";
@@ -96,7 +98,7 @@ function useWorkspaceHardwareNodes(workspaceId: string) {
   async function refresh(): Promise<HardwareNode[]> {
     setLoading(true);
     try {
-      const res = await fetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" });
+      const res = await fleetAuthorizedFetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" });
       const data = res.ok ? await res.json() : {};
       const list = data?.items || data?.registrations || (Array.isArray(data) ? data : []);
       const arr = Array.isArray(list) ? list : [];
@@ -120,12 +122,16 @@ function useWorkspaceHardwareNodes(workspaceId: string) {
 
 /**
  * Create-agent wizard v2 — Placement → Brain → Channels → Connections.
- * The agent is created the moment Placement is committed (auto pool name,
- * project "General" unless opened from a specific project, capability_preset
- * standard) — everything after that is a PATCH, so closing early still
- * leaves a real, usable agent behind. Name/Project/Capability preset are no
- * longer steps: they're sane defaults, editable later from the Overview and
- * Model tabs.
+ * The agent is created the moment Placement is committed — everything after
+ * that is a PATCH, so closing early still leaves a real, usable agent
+ * behind. Name and Project are fields ON Placement now (not separate
+ * steps), pre-filled with a real suggestion (a pool name; the caller's
+ * project, or the workspace's default project, or an explicit "create a
+ * new project" — never a silent auto-create with nothing shown for it) so
+ * accepting the default costs zero keystrokes but nothing happens off
+ * screen. Both stay editable later — Name from the Overview pencil icon,
+ * Project from the agent's own settings. Capability preset has no field at
+ * all yet; it's a sane default, editable from the Model tab.
  */
 export function FleetCreateAgentWizard({
   workspaceId,
@@ -165,6 +171,46 @@ export function FleetCreateAgentWizard({
   const vpsNodes = nodes.filter((n) => n.hardware_kind === "cloud_vps");
   const gatewayNodes = nodes.filter((n) => n.hardware_kind !== "cloud_vps");
 
+  // Name — the wizard used to have no Name field at all (an agent was
+  // always auto-named from the curated pool, renamed later via the
+  // Overview pencil icon). Pre-filled from the same pool a blank `name`
+  // would fall back to server-side (fleet_tools.suggest_agent_name), so
+  // it's real and non-blank on first paint — accept it with zero keystrokes,
+  // or type over it, same as every other Step 1 default.
+  const [agentName, setAgentName] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/suggested-name`, { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        // Never stomp a name the owner already started typing while this
+        // was in flight.
+        if (cancelled || !d?.ok) return;
+        setAgentName((current) => current || String(d.name || ""));
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
+  // Project — creating an agent used to silently mint a brand-new project
+  // (named after the agent) whenever none was picked, with nothing in the
+  // UI saying so. Opened from inside a project, default to THAT project
+  // (initialProjectId) and show it; opened workspace-level, default to the
+  // workspace's own default project when one exists (projects_repository
+  // orders is_default first) and otherwise to "create a new project" —
+  // always visible, always changeable, never a silent side effect.
+  const NEW_PROJECT = "__new__";
+  const { projects } = useFleetProjects(workspaceId);
+  const [projectChoice, setProjectChoice] = useState<string>(initialProjectId || "");
+  const projectDefaultApplied = useRef(Boolean(initialProjectId));
+  useEffect(() => {
+    if (projectDefaultApplied.current || projects.length === 0) return;
+    projectDefaultApplied.current = true;
+    const def = projects.find((p) => p.is_default) || projects[0];
+    setProjectChoice(def ? def.id : NEW_PROJECT);
+  }, [projects]);
+
   // Step 2 — Brain
   const [providerMode, setProviderMode] = useState<WizardProviderMode>("platform");
   const [platformProvider, setPlatformProvider] = useState("");
@@ -202,20 +248,20 @@ export function FleetCreateAgentWizard({
   const channelsConnected = channels.filter((c: any) => c?.connected).length;
 
   async function patchAgent(id: string, patch: Record<string, any>) {
-    const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(id)}`, {
+    const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(id)}`, {
       method: "PATCH",
       credentials: "include",
       headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
       body: JSON.stringify({ patch }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+    if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
     return data;
   }
 
   async function hydrateCreatedAgent(id: string) {
     try {
-      const res = await fetch(`/api/w/${workspaceId}/fleet/agents`, { credentials: "include" });
+      const res = await fleetAuthorizedFetch(`/api/w/${workspaceId}/fleet/agents`, { credentials: "include" });
       const data = res.ok ? await res.json() : {};
       const found = (data?.agents || []).find((a: FleetAgent) => a.agent_id === id) || null;
       setCreatedAgent(found);
@@ -224,8 +270,8 @@ export function FleetCreateAgentWizard({
     }
   }
 
-  // Step 1 (Placement) → creates the agent on first commit (auto name, the
-  // caller's project or "General", capability_preset standard), then always
+  // Step 1 (Placement) → creates the agent on first commit (the name and
+  // project shown on this step, capability_preset standard), then always
   // (re)patches hardware_access/preferred_gateway_id to match the current
   // choice — placement is changeable anytime, including by coming back here
   // after already advancing.
@@ -240,19 +286,21 @@ export function FleetCreateAgentWizard({
       let id = agentId;
       let projId = resolvedProjectId;
       if (!id) {
-        const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
+        const chosenProjectId = projectChoice && projectChoice !== NEW_PROJECT ? projectChoice : "";
+        const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
           method: "POST",
           credentials: "include",
           headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
           body: JSON.stringify({
+            name: agentName.trim(),
             capability_preset: "standard",
-            project_id: initialProjectId || "",
+            project_id: chosenProjectId,
             purpose_preset: purposePreset,
             audience: audienceForPreset(purposePreset),
           }),
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+        if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
         id = String(data.agent_id || "");
         projId = String(data.project_id || initialProjectId || "");
         setAgentId(id);
@@ -324,7 +372,7 @@ export function FleetCreateAgentWizard({
     try {
       if (providerMode === "byok" && byokKey.trim()) {
         const label = `${providerLabel(byokProvider)} — ${createdAgent?.label || "agent"}`;
-        const credRes = await fetch("/api/credentials/vault", {
+        const credRes = await fleetAuthorizedFetch("/api/credentials/vault", {
           method: "POST",
           credentials: "include",
           headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -338,11 +386,11 @@ export function FleetCreateAgentWizard({
         });
         if (!credRes.ok) {
           const cd = await credRes.json().catch(() => ({}));
-          throw new Error(cd?.detail || cd?.error || `HTTP ${credRes.status}`);
+          throw new Error(getErrorMessage(cd, `HTTP ${credRes.status}`));
         }
         const credentialId = (await credRes.json())?.id;
 
-        const profileRes = await fetch("/api/providers/profiles", {
+        const profileRes = await fleetAuthorizedFetch("/api/providers/profiles", {
           method: "POST",
           credentials: "include",
           headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -356,7 +404,7 @@ export function FleetCreateAgentWizard({
         });
         if (!profileRes.ok) {
           const pd = await profileRes.json().catch(() => ({}));
-          throw new Error(pd?.detail || pd?.error || `HTTP ${profileRes.status}`);
+          throw new Error(getErrorMessage(pd, `HTTP ${profileRes.status}`));
         }
       }
       if (providerMode === "byok") {
@@ -416,18 +464,20 @@ export function FleetCreateAgentWizard({
   function finish() {
     if (!agentId) return;
     onCreated(agentId);
-    // Placement always resolves a real project (explicit pick, or "General"
-    // — see the doc comment above), so projSeg should never actually be
-    // blank here. But .../projects/{projSeg}/agents/{id}/overview 404s (via
-    // the global not-found page) if it ever is — the empty segment collapses
-    // the path so "agents" gets consumed as the [projectId] value, stranding
-    // the real agent id — so guard it anyway: land on the flat, always-valid
-    // agents list rather than a link known to be broken.
+    // Placement always resolves a real project (an explicit pick, the
+    // caller's own, or a new one named after the agent — see the doc
+    // comment above), so projSeg should never actually be blank here. But
+    // .../projects/{projSeg}/agents/{id}/chat 404s (via the global
+    // not-found page) if it ever is — the empty segment collapses the path
+    // so "agents" gets consumed as the [projectId] value, stranding the
+    // real agent id — so guard it anyway: land on the flat, always-valid
+    // agents list rather than a link known to be broken. Straight into
+    // Chat, same front door every other path into an agent now uses.
     const projSeg = resolvedProjectId || initialProjectId || "";
     const base = `/w/${encodeURIComponent(workspaceId)}`;
     router.push(
       projSeg
-        ? `${base}/projects/${encodeURIComponent(projSeg)}/agents/${encodeURIComponent(agentId)}/overview`
+        ? `${base}/projects/${encodeURIComponent(projSeg)}/agents/${encodeURIComponent(agentId)}/chat`
         : `${base}/agents`,
     );
   }
@@ -455,7 +505,32 @@ export function FleetCreateAgentWizard({
         <div className="fleet-wizard-body">
           {step === 1 && (
             <div className="fleet-wizard-panel">
-              <div className="fleet-detail-section-title">What's it for?</div>
+              <div className="fleet-detail-section-title">What's it called?</div>
+              <input
+                className="fleet-wizard-input"
+                value={agentName}
+                onChange={(e) => setAgentName(e.currentTarget.value)}
+                placeholder="Naming…"
+                aria-label="Agent name"
+              />
+
+              <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>Which project?</div>
+              <select
+                className="fleet-wizard-input"
+                value={projectChoice || NEW_PROJECT}
+                onChange={(e) => setProjectChoice(e.currentTarget.value)}
+                aria-label="Project"
+              >
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+                <option value={NEW_PROJECT}>+ New project</option>
+              </select>
+              {(!projectChoice || projectChoice === NEW_PROJECT) && (
+                <p className="fleet-wizard-hint">Creates a new project named after this agent — rename either anytime.</p>
+              )}
+
+              <div className="fleet-detail-section-title" style={{ marginTop: 20 }}>What's it for?</div>
               <div className="fleet-wizard-options">
                 {PURPOSE_PRESETS.map((p) => (
                   <button

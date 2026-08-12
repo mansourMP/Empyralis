@@ -27,7 +27,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   // (nullable column, never backfilled) — resolveAgentProjectId falls back
   // to the workspace default so the card still opens instead of silently
   // doing nothing.
-  const goToAgentTab = (agentId: string, tab = "overview") => {
+  const goToAgentTab = (agentId: string, tab = "chat") => {
     const a = agents.find((x) => x.agent_id === agentId);
     const pid = resolveAgentProjectId(a?.project_id, projects);
     if (!pid) return;
@@ -92,7 +92,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
                 key={a.id}
                 agent={a}
                 gateways={gateways}
-                onSelect={(id) => goToAgentTab(id, "overview")}
+                onSelect={(id) => goToAgentTab(id, "chat")}
                 onChat={openSageConsole}
               />
             ))}

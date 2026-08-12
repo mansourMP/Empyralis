@@ -19,21 +19,21 @@ export default function AgentDetailPage() {
   const agentId = String(params?.agentId || "");
   // `[tab]` is a required segment of this exact route, so a genuinely
   // missing tab never lands here — that's .../agents/[agentId]/page.tsx's
-  // job, which redirects to /overview before this component ever mounts.
-  // A falsy params.tab here only ever means the client router hasn't
-  // resolved this navigation's params yet (mid-transition on a slow
-  // connection, or clicking a second tab while the first is still
-  // loading). Coercing that transient gap to the STRING "overview" used to
-  // be exactly what stomped a just-clicked tab back to Overview downstream
-  // in FleetAgentDetail, which treats any non-empty initialTab as a real
-  // instruction — so leave it `undefined` instead and let FleetAgentDetail
-  // keep showing whatever tab it last knew about until params catch up.
-  // Only an actually-present-but-unrecognized tab string (a bad/typo'd
-  // URL) defaults to "overview".
+  // job, which redirects to /chat (the agent's front door) before this
+  // component ever mounts. A falsy params.tab here only ever means the
+  // client router hasn't resolved this navigation's params yet
+  // (mid-transition on a slow connection, or clicking a second tab while
+  // the first is still loading). Coercing that transient gap to the STRING
+  // "chat" used to be exactly what stomped a just-clicked tab back
+  // downstream in FleetAgentDetail, which treats any non-empty initialTab
+  // as a real instruction — so leave it `undefined` instead and let
+  // FleetAgentDetail keep showing whatever tab it last knew about until
+  // params catch up. Only an actually-present-but-unrecognized tab string
+  // (a bad/typo'd URL) defaults to "chat".
   const rawTab = params?.tab;
   const tab: Tab | undefined =
     typeof rawTab === "string"
-      ? ((VALID_TABS as readonly string[]).includes(rawTab) ? (rawTab as Tab) : "overview")
+      ? ((VALID_TABS as readonly string[]).includes(rawTab) ? (rawTab as Tab) : "chat")
       : undefined;
 
   const base = `/w/${encodeURIComponent(workspaceId)}`;

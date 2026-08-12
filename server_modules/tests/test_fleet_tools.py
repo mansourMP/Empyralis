@@ -1166,6 +1166,77 @@ class FleetConfigureAgentRenameCollisionTests(unittest.TestCase):
         )
 
 
+class SuggestAgentNameTests(unittest.TestCase):
+    """suggest_agent_name is the function the create-agent wizard's new
+    Placement Name field calls (via routes_fleet's suggested-name GET) to
+    pre-fill a real, non-blank name before the agent exists — and the exact
+    function fleet_create_agent itself now falls back to when no explicit
+    name is given, so both paths agree by construction rather than by two
+    copies of the pool logic staying in sync."""
+
+    def test_suggests_a_pool_name_not_already_taken(self):
+        with patch(
+            "server_modules.agent_registry_repository.list_workspace_agent_installs",
+            new=AsyncMock(return_value=[{"id": "agent-x", "label": "Atlas"}]),
+        ):
+            name = _run(
+                fleet_tools.suggest_agent_name(tenant_id="system", workspace_id="ws-1")
+            )
+        self.assertNotEqual(name, "Atlas")
+        self.assertTrue(name)
+
+    def test_create_agent_with_no_explicit_name_uses_the_suggested_pool_name(self):
+        # fleet_create_agent's own auto-naming fallback must go through the
+        # SAME suggest_agent_name — asserted here by patching that one
+        # function directly (call-count, not just a non-crash) rather than
+        # its lower-level repo call, so this breaks if a future edit
+        # reintroduces a second, divergent naming path inside
+        # fleet_create_agent. ensure_workspace_agent_registry_seeded is
+        # forced to fail right after naming — fleet_create_agent's own
+        # outer except turns that into an {"ok": False} result rather than
+        # propagating, so the failure is asserted on the RETURN value, not
+        # a raised exception.
+        suggest_mock = AsyncMock(return_value="Suggested-Name")
+        with (
+            patch("server_modules.fleet_tools.suggest_agent_name", new=suggest_mock),
+            patch(
+                "server_modules.agent_registry_repository.ensure_workspace_agent_registry_seeded",
+                new=AsyncMock(side_effect=RuntimeError("stop after naming — rest of create is out of scope here")),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_create_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    tenant_id="system",
+                    name="",
+                )
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("stop after naming", result["error"])
+        suggest_mock.assert_called_once_with(tenant_id="system", workspace_id="ws-1")
+
+    def test_create_agent_with_an_explicit_name_never_calls_suggest_agent_name(self):
+        exploding_suggest = AsyncMock(side_effect=AssertionError("must not suggest a name when one was given"))
+        with (
+            patch("server_modules.fleet_tools.suggest_agent_name", new=exploding_suggest),
+            patch(
+                "server_modules.agent_registry_repository.ensure_workspace_agent_registry_seeded",
+                new=AsyncMock(side_effect=RuntimeError("stop after naming — rest of create is out of scope here")),
+            ),
+        ):
+            result = _run(
+                fleet_tools.fleet_create_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    tenant_id="system",
+                    name="Explicit Name",
+                )
+            )
+        self.assertFalse(result["ok"])
+        exploding_suggest.assert_not_called()
+
+
 class FleetListAgentsHardwareStatusIntegrationTests(unittest.TestCase):
     """fleet_list_agents end-to-end: hardware_status/hardware_status_reason
     for a cloud agent must reflect its REAL model_config, not always read

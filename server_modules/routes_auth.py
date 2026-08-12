@@ -28,6 +28,7 @@ from server_modules.auth import (
     provision_user_account,
     register_user,
     refresh_authenticated_session,
+    RefreshTokenSupersededError,
     require_admin_access,
     revoke_authenticated_user_device,
     set_auth_cookies,
@@ -431,6 +432,15 @@ async def refresh_session(body: AuthRefreshRequest, request: Request, response: 
             workspace_id=body.workspace_id,
             session_ttl_seconds=body.session_ttl_seconds,
         )
+    except RefreshTokenSupersededError as exc:
+        # This exact request lost a race against a concurrent, legitimate
+        # refresh on the same session — do NOT clear cookies: the browser's
+        # current ones may already be the fresh pair the winner just set.
+        # Fail only this one request; the caller's next request (or the
+        # winner's own response, already in flight) carries the good
+        # session forward.
+        response.status_code = 401
+        return {"detail": str(exc)}
     except HTTPException as exc:
         if browser_session_request and exc.status_code in {401, 403}:
             clear_auth_cookies(response, request=request)
