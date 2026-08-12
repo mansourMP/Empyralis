@@ -244,6 +244,51 @@ tool bundles, and channel routing have all repeatedly surprised us. An audit
 that reads a function and concludes the feature works is worth little; trace
 from the real entry point to the real call site.
 
+**A `next.config` redirect runs BEFORE the router, so it can make a real page
+unreachable and no React code will ever say so.** Found 2026-08-13 by signing
+up as a new customer and looking at the screen. Every fresh account landed on
+a bare "Agents · 0" list instead of the workspace — the product's own front
+door was unreachable, on every visit, for months. THREE independent layers
+each got it wrong, and fixing any two changed nothing:
+
+```
+create_local_password_account   hardcoded default_route = /w/{id}/sage
+app/page.tsx                    hardcoded /sage, ignoring the workspace's
+                                  own stored default_route entirely
+next.config LEGACY_REDIRECTS    { '/w/:workspaceId' → '/w/:id/agents' }
+                                  ← a Phase-7A rule written BEFORE FleetHome
+                                    existed, still firing after it shipped
+```
+
+The redirect is the one worth remembering: `app/(account)/w/[workspaceId]/
+page.tsx` renders `FleetHome` and says so in its own comment, `Breadcrumbs.tsx`
+says the same — and neither ever ran, because Next's `redirects()` resolves
+ahead of the router. Grep `LEGACY_REDIRECTS` before concluding a route is
+broken in React; a page that is never reached looks exactly like a page that
+renders nothing. `frontend/next.config.test.ts` now asserts the bare
+workspace route is never a redirect source again.
+
+Corollary on copy: the signup hero promised "fresh accounts land straight in
+your Agents list" and led with "Ask AI, Build, Discover" — three surface
+names that no longer exist. **Copy that names a SCREEN goes stale when the
+screen moves; copy that names the WORK does not.** Rewritten to lead with
+projects/documents/tasks per the positioning entry above.
+
+**A migration can ship without the code that fills it, and the schema will
+sit there for weeks looking done.** `migrations/add_task_sequence_numbers.sql`
+built the whole Linear-style `GEN-12` identifier schema — `projects.task_key`,
+`projects.task_seq`, `project_tasks.number` — with long comments describing
+exactly how `create_task` and `create_project` should allocate them. The
+Python was never written. So every task in every project displayed a random
+hex fragment of its own uuid (`69D656`), and `task-status.tsx`'s own comment
+confessed it ("the honest version... until the backend has a real per-project
+sequence number"). Landed 2026-08-13: atomic `UPDATE projects SET task_seq =
+task_seq + 1 RETURNING task_seq`, `task_key` allocated with dedup at project
+creation, and the display key resolved by JOIN rather than denormalised per
+row. **"Built, tested, and never wired" has a schema-shaped variant** — when
+you find a migration, grep for the code that writes the columns before
+assuming the feature exists.
+
 **A capability branch is a live-path branch, and the OWNER can be the one
 locked out.** The sharpest instance so far, 2026-08-12. `DocumentDetailView`
 rendered `canWrite ? <textarea> : <MarkdownLite>` — so a document's own
