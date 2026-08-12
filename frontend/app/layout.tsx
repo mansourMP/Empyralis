@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import localFont from 'next/font/local';
+import { headers } from 'next/headers';
 import type { ReactNode } from 'react';
 
 import './globals.css';
@@ -8,6 +9,7 @@ import '../lib/ui/chrome.css';
 import { AccountShellProvider } from '@/lib/shell/account-shell-context';
 import { ACCOUNT_SHELL_STORAGE_KEY } from '@/lib/shell/account-shell-storage';
 import { loadAccountShellSessionSafely } from '@/lib/server/load-account-shell-session';
+import { CSP_NONCE_REQUEST_HEADER } from '@/lib/security/content-security-policy';
 
 // Declared through the Metadata `icons` object rather than Next's app/icon.*
 // file convention, because the file convention emits ONE asset for every size
@@ -109,6 +111,12 @@ function buildThemeBootstrapScript(storageKey: string): string {
 export default async function RootLayout({ children }: { children: ReactNode }) {
   const initialSession = await loadAccountShellSessionSafely();
   const themeBootstrapScript = buildThemeBootstrapScript(ACCOUNT_SHELL_STORAGE_KEY);
+  // Next.js auto-nonces scripts/styles IT generates (framework runtime, page
+  // bundles) — see the CSP module's own header comment — but this inline
+  // <script> is hand-written JSX, not framework-generated, so it needs the
+  // nonce set explicitly or the strict script-src in proxy.ts blocks it.
+  // The header is set on every matched request by proxy.ts's `proxy()`.
+  const nonce = (await headers()).get(CSP_NONCE_REQUEST_HEADER) ?? undefined;
 
   return (
     <html
@@ -119,6 +127,7 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
     >
       <body data-theme="light" suppressHydrationWarning>
         <script
+          nonce={nonce}
           // Keep document theme in sync with persisted preference before hydration.
           dangerouslySetInnerHTML={{ __html: themeBootstrapScript }}
         />
