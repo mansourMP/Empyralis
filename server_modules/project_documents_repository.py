@@ -43,14 +43,50 @@ project_tasks added one-level sub-tasks onto an already-shipped flat table
 (migrations/add_task_parent.sql) rather than paying for a tree model
 upfront.
 
-REVISIONS ARE NOT BUILT HERE. `id` is stable and never reused or recreated
-by an edit (update_document is a plain in-place UPDATE, never a
-delete+reinsert), which is exactly the seam a later
-`project_document_revisions(document_id REFERENCES project_documents(id)
-...)` table needs to hang snapshots or patches off of. The founder's stated
-future direction is diff/patch-native edits for agents, not whole-blob
-replace -- this pass does not attempt that; it only avoids doing anything
-that would make it harder to retrofit.
+REVISIONS + PATCH-NATIVE EDITS (feat/document-mcp-tools-and-revisions): built
+on the seam this module's own history predicted -- `id` is stable and never
+reused or recreated by an edit (update_document is a plain in-place UPDATE,
+never a delete+reinsert), so `project_document_revisions(document_id
+REFERENCES project_documents(id) ...)` hangs a snapshot off every write
+without touching the live row's identity. The founder's own words for the
+edit shape this implements: "to upgrade one line or one word or one
+sentence of this specific document, agent must not rewrite the entire
+document... just like git -- write a line and push it." Two things follow:
+
+  1. ``edit_document_by_replace`` (backing ``empyralis_edit_document``) is
+     the PRIMARY way to change a document: an old_string/new_string patch
+     that must match the current body EXACTLY ONCE -- zero matches and
+     multiple matches both fail loudly with NO mutation, the identical
+     contract skills_service.py's document__edit already gives platform
+     agents (see that function's own docstring for why "exactly once" is
+     the whole guarantee). ``update_document`` (whole title/body replace)
+     stays available for a genuine full rewrite, but is the FALLBACK, not
+     the default path a caller reaches for.
+
+  2. Every write records a snapshot AND a human-readable unified diff
+     (`difflib.unified_diff`, computed server-side against the row's PRE-
+     write state) in the SAME revision row -- "this line changed", not
+     "here is the whole document again" (the founder's own framing).
+     Snapshots are kept alongside the diff, not diff-only: reconstructing
+     revision N by replaying N sequential patches is O(N) per read and one
+     corrupt/missing patch breaks every later reconstruction, while these
+     documents are small markdown text (this module's own "not on disk,
+     not a binary asset" framing) -- one extra blob per edit is cheap, and
+     every revision stays independently readable even if the diff column
+     is ever wrong. The diff is the primary, human-scannable artifact;
+     the snapshot is the safety net under it, not the point.
+
+`create_document` and `update_document` each append one revision (via the
+private `_record_document_revision`) after their own write lands --
+git-log style: a revision is the document AS IT BECAME after that edit, so
+"list this document's revisions" reads top-to-bottom the same way a commit
+log does, and the live row is always identical to its own latest revision.
+`changed_by_type` reuses the EXACT vocabulary `project_tasks_service.
+add_task_comment`'s `author_type` already established (human / agent /
+external_agent / system) -- not a second vocabulary for the same concept.
+See migrations/add_project_document_revisions.sql for the full schema
+rationale, including the fail-open write posture (a revisions-table outage
+must never corrupt or block the document write that already landed).
 
 RLS. `project_documents` is RLS-FORCEd on (tenant_id, workspace_id) from
 the migration that creates it (migrations/add_project_documents.sql +
@@ -68,6 +104,7 @@ Projects and project_memberships).
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -121,6 +158,197 @@ def _coerce_metadata(value: Any) -> Dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+_REVISION_COLUMNS = (
+    "id, tenant_id, workspace_id, document_id, project_id, title, body, diff, "
+    "changed_by_type, changed_by_id, changed_by_display_name, revision_number, created_at"
+)
+
+# The diff is the primary, human-scannable artifact a revision carries (see
+# this module's own docstring: "this line changed", not "here is the whole
+# document again") -- so it rides on every revision read, summary or full,
+# unlike `body` which is genuinely heavy and omitted by default.
+_REVISION_SUMMARY_COLUMNS = (
+    "id, tenant_id, workspace_id, document_id, project_id, title, diff, "
+    "changed_by_type, changed_by_id, changed_by_display_name, revision_number, created_at"
+)
+
+
+def _row_to_revision(row: Any, *, include_body: bool = True) -> Optional[Dict[str, Any]]:
+    if row is None:
+        return None
+    r = dict(row)
+    revision: Dict[str, Any] = {
+        "id": str(r.get("id") or "").strip(),
+        "document_id": str(r.get("document_id") or "").strip(),
+        "project_id": str(r.get("project_id") or "").strip() or None,
+        "title": str(r.get("title") or "").strip(),
+        "diff": (str(r.get("diff")) if r.get("diff") is not None else None),
+        "changed_by_type": str(r.get("changed_by_type") or "").strip() or "unknown",
+        "changed_by_id": str(r.get("changed_by_id") or "").strip() or None,
+        "changed_by_display_name": str(r.get("changed_by_display_name") or "").strip() or None,
+        "revision_number": int(r.get("revision_number") or 0),
+        "created_at": str(r.get("created_at") or "") or None,
+    }
+    if include_body:
+        revision["body"] = str(r.get("body") or "")
+    return revision
+
+
+def _compute_document_diff(
+    *, previous_title: Optional[str], previous_body: Optional[str], title: str, body: str,
+) -> Optional[str]:
+    """A human-readable unified diff between the row's PRE-write state and
+    the state it just became -- "this line changed", the founder's own
+    framing for what a revision should read like, computed once here so
+    every write path (create, whole-body update, targeted patch) produces
+    the identical diff shape. `previous_*` is None for a brand-new document
+    (create_document has no "before"): the diff then shows every body line
+    as added, the same way git renders an initial commit -- still a real,
+    readable diff, not a special-cased absence. Returns None only when
+    NOTHING changed (title and body both identical to before), which
+    should not happen for a genuine write but is handled rather than
+    asserted against."""
+    resolved_previous_title = str(previous_title or "")
+    resolved_previous_body = str(previous_body or "")
+    parts: list[str] = []
+    if resolved_previous_title != title:
+        parts.append(f"- title: {resolved_previous_title}\n+ title: {title}")
+    if resolved_previous_body != body:
+        body_diff = "".join(
+            difflib.unified_diff(
+                resolved_previous_body.splitlines(keepends=True),
+                body.splitlines(keepends=True),
+                fromfile="before",
+                tofile="after",
+                lineterm="",
+            )
+        )
+        if body_diff:
+            parts.append(body_diff)
+    return "\n".join(parts) if parts else None
+
+
+async def _record_document_revision(
+    pool: Any,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    document_id: str,
+    project_id: str,
+    title: str,
+    body: str,
+    diff: Optional[str],
+    changed_by_type: str,
+    changed_by_id: Optional[str],
+    changed_by_display_name: str = "",
+) -> None:
+    """Append one snapshot to project_document_revisions -- the write half of
+    "I want history" (see this module's own docstring). Git-log style: the
+    snapshot is the document AS IT BECAME after the write that just landed
+    (title/body already reflect the new state by the time callers reach
+    here), not the state before it. `diff` is the pre-computed
+    human-readable unified diff against the PRE-write state (see
+    _compute_document_diff) -- carried alongside the snapshot, not instead
+    of it (see this module's own docstring for why a snapshot is still
+    kept: independent, cheap-to-read reconstruction of any past version).
+
+    `revision_number` is computed server-side in the SAME INSERT (a
+    COALESCE(MAX(...), 0) + 1 subquery, single statement -- no separate
+    read-then-write round trip for a caller to race against), the same
+    "server computes it, not the application" posture add_task_comment's
+    own jsonb_set UPDATE takes. Two truly concurrent writers to the SAME
+    document could still compute the same number before either commits;
+    the table's UNIQUE (document_id, revision_number) constraint turns that
+    into a loud INSERT failure rather than a silently ambiguous number --
+    which is exactly what this function's callers are built to tolerate
+    (see create_document/update_document's own comments on the fail-open
+    posture: a revision-write failure is reported, never allowed to corrupt
+    or block the document write that already landed).
+
+    This function itself does not swallow anything -- it inserts the row or
+    raises. Failure isolation is the CALLER's job (create_document /
+    update_document), on purpose: only the caller knows whether its own
+    primary write already succeeded, i.e. whether there is a document to
+    protect.
+    """
+    rev_id = f"docrev_{uuid.uuid4().hex[:16]}"
+    resolved_changed_by_type = str(changed_by_type or "").strip().lower() or "unknown"
+    resolved_changed_by_id = str(changed_by_id or "").strip() or None
+    resolved_display_name = str(changed_by_display_name or "").strip()[:120] or None
+    await control_plane_repository.rls_execute(
+        pool,
+        """
+        INSERT INTO project_document_revisions (
+            id, tenant_id, workspace_id, document_id, project_id, title, body, diff,
+            changed_by_type, changed_by_id, changed_by_display_name, revision_number
+        )
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+               COALESCE(MAX(revision_number), 0) + 1
+        FROM project_document_revisions
+        WHERE tenant_id = $2 AND workspace_id = $3 AND document_id = $4
+        """,
+        rev_id,
+        tenant_id,
+        workspace_id,
+        document_id,
+        project_id,
+        title,
+        body,
+        diff,
+        resolved_changed_by_type,
+        resolved_changed_by_id,
+        resolved_display_name,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+
+
+async def list_document_revisions(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    document_id: str,
+    include_body: bool = False,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """List a document's revision history, NEWEST first -- a commit-log read.
+    `include_body=False` by default, same reasoning list_documents gives for
+    its own default: a history read is normally "who touched this and when,
+    and what changed" (an activity feed), not a bulk content dump -- the
+    `diff` field (a human-readable unified diff against the previous
+    revision) rides on EVERY read regardless of include_body, since that is
+    the actual point of a revision entry; pass include_body=True only when
+    you need a specific past version's full text. Read-only by design --
+    there is no restore/rollback function here (CLAUDE.md: "a surface must
+    earn its place"; the founder asked for tracked history, not a rollback
+    UI)."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return []
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_document_id = str(document_id or "").strip()
+    resolved_limit = max(1, min(int(limit or 50), 200))
+    columns = _REVISION_COLUMNS if include_body else _REVISION_SUMMARY_COLUMNS
+    rows = await control_plane_repository.rls_fetch(
+        pool,
+        f"""
+        SELECT {columns}
+        FROM project_document_revisions
+        WHERE tenant_id = $1 AND workspace_id = $2 AND document_id = $3
+        ORDER BY revision_number DESC
+        LIMIT $4
+        """,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_document_id,
+        resolved_limit,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
+    )
+    return [rev for rev in (_row_to_revision(r, include_body=include_body) for r in rows) if rev]
 
 
 def _row_to_document(row: Any, *, include_body: bool = True) -> Optional[Dict[str, Any]]:
@@ -275,7 +503,18 @@ async def create_document(
     slug: Optional[str] = None,
     document_id: Optional[str] = None,
     created_by: Optional[str] = None,
+    changed_by_type: str = "",
+    changed_by_display_name: str = "",
 ) -> Dict[str, Any]:
+    """``changed_by_type``/``changed_by_display_name`` feed the revision-1
+    snapshot recorded after the INSERT below lands (see _record_document_
+    revision) -- reusing add_task_comment's own author_type vocabulary
+    (human / agent / external_agent / system), not a new one. Both are
+    optional and default to "unknown"/absent so every pre-existing caller
+    that does not pass them keeps working unchanged; callers that know who
+    is acting (routes_fleet.py: "human", skills_service.py's document__write:
+    "agent", mcp_server.py's empyralis_create_document: "external_agent")
+    should pass it."""
     tenant_id = str(tenant_id or "").strip()
     workspace_id = str(workspace_id or "").strip()
     project_id = str(project_id or "").strip()
@@ -318,6 +557,40 @@ async def create_document(
     document = _row_to_document(row)
     if document is None:
         raise RuntimeError("Document insert did not return a row.")
+    # Fail-open, deliberately: the document row above already committed --
+    # a revisions-table outage must never look like a failed create (the
+    # caller was about to be told "created", and undoing that after the
+    # fact by raising here would corrupt a write that genuinely succeeded).
+    # "Say so, don't corrupt" (this pass's brief): report the outcome on the
+    # returned dict rather than silently dropping it -- these two keys are
+    # additive, the same way get_task already enriches its row with
+    # subtask_count/labels beyond its own raw columns.
+    document["revision_recorded"] = True
+    try:
+        # previous_title/previous_body=None -- a create has no "before"; the
+        # diff renders as an all-added body, the same way git shows an
+        # initial commit (see _compute_document_diff's own docstring).
+        creation_diff = _compute_document_diff(
+            previous_title=None, previous_body=None,
+            title=document["title"], body=document.get("body", ""),
+        )
+        await _record_document_revision(
+            pool,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            document_id=document["id"],
+            project_id=project_id,
+            title=document["title"],
+            body=document.get("body", ""),
+            diff=creation_diff,
+            changed_by_type=changed_by_type,
+            changed_by_id=created_by,
+            changed_by_display_name=changed_by_display_name,
+        )
+    except Exception as exc:  # noqa: BLE001 -- never let history recording undo a real create
+        LOGGER.error("Failed to record creation revision for document %s", document["id"], exc_info=True)
+        document["revision_recorded"] = False
+        document["revision_error"] = str(exc)
     return document
 
 
@@ -329,32 +602,57 @@ async def update_document(
     title: Optional[str] = None,
     body: Optional[str] = None,
     updated_by: Optional[str] = None,
+    changed_by_type: str = "",
+    changed_by_display_name: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Edit a document's title and/or body. Both fields are optional and
     independently patchable -- omitting one leaves it untouched (COALESCE),
     the same partial-update posture projects_repository.rename_project
     takes for name/description. `slug` is intentionally NOT editable here:
-    it is the document's stable address (a later revisions table, and any
-    external link/deep-link into a project's documents, should be able to
-    rely on it not moving under a rename) -- renaming the visible `title`
-    never reslugs the row. Returns None when the document does not resolve
-    in this tenant/workspace (not found, or belongs to someone else)."""
+    it is the document's stable address (project_document_revisions hangs
+    off `document_id`, not `slug`, so a rename can never orphan history) --
+    renaming the visible `title` never reslugs the row. Returns None when
+    the document does not resolve in this tenant/workspace (not found, or
+    belongs to someone else) -- and in that case NOTHING is written, to
+    project_documents or to project_document_revisions.
+
+    THE SEAM this module's docstring names: every caller of this function --
+    the human PATCH route, the agent's document__edit tool, and MCP's
+    empyralis_update_document -- gets a revision recorded for free, in one
+    place, rather than three callers each having to remember to call a
+    second function. ``changed_by_type``/``changed_by_display_name`` are the
+    same optional pair create_document takes, for the same reason (see that
+    function's own docstring)."""
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return None
     resolved_tenant_id = str(tenant_id or "").strip()
     resolved_workspace_id = str(workspace_id or "").strip()
     resolved_updated_by = str(updated_by or "").strip() or None
+    # The `previous` CTE captures the PRE-write title/body in the SAME
+    # statement as the UPDATE (a well-known single-statement pattern:
+    # Postgres evaluates every CTE in a data-modifying query against the
+    # snapshot at the START of the statement, before the UPDATE's own
+    # writes are visible) -- one round trip, no separate SELECT-then-UPDATE
+    # for a concurrent writer to race between. This is what lets the diff
+    # below be computed against the row's real prior state rather than
+    # nothing.
     row = await control_plane_repository.rls_fetchrow(
         pool,
         f"""
+        WITH previous AS (
+            SELECT title, body FROM project_documents
+            WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
+        )
         UPDATE project_documents
         SET title = COALESCE(NULLIF($4, ''), title),
             body = COALESCE($5, body),
             updated_by = COALESCE($6, updated_by),
             updated_at = NOW()
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
-        RETURNING {_DOCUMENT_COLUMNS}
+        RETURNING {_DOCUMENT_COLUMNS},
+            (SELECT title FROM previous) AS _previous_title,
+            (SELECT body FROM previous) AS _previous_body
         """,
         resolved_tenant_id,
         resolved_workspace_id,
@@ -365,7 +663,136 @@ async def update_document(
         tenant_id=resolved_tenant_id,
         workspace_id=resolved_workspace_id,
     )
-    return _row_to_document(row)
+    raw_row = dict(row) if row is not None else None
+    # Absent (rather than None) on a fake/stub row that doesn't carry these
+    # synthetic RETURNING columns (e.g. test fixtures) -- .get() makes that
+    # the same as "no previous state known", which _compute_document_diff
+    # already treats as a from-nothing diff, never a crash.
+    previous_title = raw_row.get("_previous_title") if raw_row else None
+    previous_body = raw_row.get("_previous_body") if raw_row else None
+    document = _row_to_document(row)
+    if document is None:
+        # Nothing to protect -- the UPDATE matched zero rows (not found, or
+        # a different tenant/workspace's document), so there is no new
+        # state to snapshot. Recording a revision here would fabricate
+        # history for an edit that never happened.
+        return None
+    # Same fail-open posture as create_document (see that function's own
+    # comment): the document row above already committed, so a revisions
+    # write failure is reported on the return value, never allowed to
+    # unwind or corrupt the edit the caller was just told succeeded.
+    document["revision_recorded"] = True
+    try:
+        edit_diff = _compute_document_diff(
+            previous_title=previous_title, previous_body=previous_body,
+            title=document["title"], body=document.get("body", ""),
+        )
+        await _record_document_revision(
+            pool,
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+            document_id=document["id"],
+            project_id=document.get("project_id") or "",
+            title=document["title"],
+            body=document.get("body", ""),
+            diff=edit_diff,
+            changed_by_type=changed_by_type,
+            changed_by_id=updated_by,
+            changed_by_display_name=changed_by_display_name,
+        )
+    except Exception as exc:  # noqa: BLE001 -- never let history recording undo a real edit
+        LOGGER.error("Failed to record revision for document %s", document["id"], exc_info=True)
+        document["revision_recorded"] = False
+        document["revision_error"] = str(exc)
+    return document
+
+
+def apply_unique_text_replacement(
+    *, current_body: str, old_string: str, new_string: str, subject: str = "the document",
+) -> str:
+    """Pure helper (no I/O): replace `old_string` with `new_string` in
+    `current_body`, requiring an EXACT, UNIQUE match. The founder's own
+    words for the edit shape this exists to enforce: "to upgrade one line
+    or one word or one sentence of this specific document, agent must not
+    rewrite the entire document... just like git -- write a line and push
+    it." Zero matches and multiple matches both FAIL LOUDLY (RuntimeError)
+    with NO mutation -- never guess which occurrence was meant, never
+    silently no-op, never silently fall back to a whole-body rewrite. This
+    is the identical contract skills_service.py's own document__edit tool
+    already gives platform agents (same three branches, same "no changes
+    were made" framing) -- kept as a shared, independently-testable pure
+    function so a future caller reaches for THIS rather than writing a
+    fourth copy of the same three branches."""
+    if not isinstance(old_string, str) or old_string == "":
+        raise ValueError("old_string must be a non-empty string.")
+    if not isinstance(new_string, str):
+        raise ValueError("new_string is required.")
+    if old_string == new_string:
+        raise ValueError("old_string and new_string must differ — there is nothing to change.")
+    occurrences = current_body.count(old_string)
+    if occurrences == 0:
+        raise RuntimeError(
+            f"old_string not found in {subject}. No changes were made. Re-read the current content — the text may "
+            "not match exactly, or may have changed since you last saw it."
+        )
+    if occurrences > 1:
+        raise RuntimeError(
+            f"old_string appears {occurrences} times in {subject} — it must match exactly once. No changes were "
+            "made. Include more surrounding context (e.g. a nearby heading or line) so the match is unique."
+        )
+    return current_body.replace(old_string, new_string, 1)
+
+
+async def edit_document_by_replace(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    document_id: str,
+    old_string: str,
+    new_string: str,
+    updated_by: Optional[str] = None,
+    changed_by_type: str = "",
+    changed_by_display_name: str = "",
+) -> Optional[Dict[str, Any]]:
+    """The PRIMARY way to change a document (see this module's own
+    docstring): a targeted, line/sentence-level patch, never a whole-body
+    rewrite. Reads the current body, applies apply_unique_text_replacement
+    (fail loudly on a zero-match or ambiguous-match old_string, no
+    mutation), then goes through update_document -- the SAME seam every
+    other document write goes through, so the resulting edit is revisioned
+    (snapshot + diff) exactly like a whole-body update.
+
+    Returns None if document_id does not resolve in this tenant/workspace
+    (not found) -- same "return None, don't raise" convention get_document/
+    update_document already use for that case. Raises (via
+    apply_unique_text_replacement) for the 0-match/multi-match cases: those
+    ARE exceptional -- the document exists, the instruction just cannot be
+    applied unambiguously, and fails loudly rather than guessing.
+
+    There is a narrow, accepted race between the read here and the write
+    inside update_document (a concurrent edit could land in between) --
+    the identical race skills_service.py's document__edit tool already
+    carries; re-reading after a failure is the existing mitigation, not a
+    new gap this function introduces."""
+    document = await get_document(tenant_id=tenant_id, workspace_id=workspace_id, document_id=document_id)
+    if document is None:
+        return None
+    current_body = str(document.get("body") or "")
+    new_body = apply_unique_text_replacement(
+        current_body=current_body,
+        old_string=old_string,
+        new_string=new_string,
+        subject=f"document '{document.get('title') or document_id}'",
+    )
+    return await update_document(
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+        document_id=document_id,
+        body=new_body,
+        updated_by=updated_by,
+        changed_by_type=changed_by_type,
+        changed_by_display_name=changed_by_display_name,
+    )
 
 
 async def delete_document(

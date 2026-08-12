@@ -868,9 +868,8 @@ CREATE INDEX IF NOT EXISTS idx_task_notifications_recipient_unread
 -- HERE (Postgres), not on disk -- the database of record, RLS-scoped,
 -- durable across a machine change, unlike agent_memory.py's local-disk
 -- files or the uploaded files under the workspace knowledge dir. `id` is
--- stable and never
--- reused, deliberately, so a later revisions table can hang off it -- this
--- pass does not build revisions. RLS from day one (see migrations/
+-- stable and never reused, deliberately -- project_document_revisions
+-- (below) hangs off it. RLS from day one (see migrations/
 -- enable_rls.sql), same posture as task_notifications above: every query
 -- goes through rls_fetch/rls_fetchrow/rls_execute, no legacy call site to
 -- sequence around. See migrations/add_project_documents.sql for the full
@@ -893,6 +892,34 @@ CREATE TABLE IF NOT EXISTS project_documents (
 
 CREATE INDEX IF NOT EXISTS idx_project_documents_project
     ON project_documents(tenant_id, workspace_id, project_id, title);
+
+-- Project document revisions (feat/document-mcp-tools-and-revisions): the
+-- durable-history table project_documents' own comment above predicted --
+-- see migrations/add_project_document_revisions.sql for the full
+-- rationale (git-log-style full snapshots PLUS a human-readable diff per
+-- revision -- "write a line and push it," per the founder -- fail-open
+-- write posture, changed_by_type reusing add_task_comment's author_type
+-- vocabulary). RLS from day one (migrations/enable_rls.sql), same posture
+-- as project_documents.
+CREATE TABLE IF NOT EXISTS project_document_revisions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    document_id TEXT NOT NULL REFERENCES project_documents(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    diff TEXT NULL,
+    changed_by_type TEXT NOT NULL DEFAULT 'unknown',
+    changed_by_id TEXT NULL,
+    changed_by_display_name TEXT NULL,
+    revision_number INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (document_id, revision_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_document_revisions_document
+    ON project_document_revisions(tenant_id, workspace_id, document_id, revision_number DESC);
 
 -- Bug reports (MAN-106): a small, honest "report an issue" entry point
 -- reachable from anywhere in the product via a rail icon button (see

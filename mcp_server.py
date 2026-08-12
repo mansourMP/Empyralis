@@ -59,21 +59,59 @@ a per-WORKSPACE vocabulary: an external agent can list it and attach/detach
 its entries, but deliberately cannot CREATE labels — that stays a human
 decision, so a guessed word cannot fill the vocabulary with near-duplicates.
 
-Write-gate decision (task tools): NOT behind ``EMPYRALIS_MCP_WRITE_ENABLED``.
-The 8 gated tools below are workspace-wide configuration mutations (create/
-reconfigure an agent, take over a channel, start an OAuth grant) — exactly
-what a read-only key must never be able to do by accident. Task status/
-comments are bounded to tasks already visible through this same key
-(``empyralis_list_my_tasks``/``empyralis_get_task``) and are the founder's
-core loop itself ("check Empyralis → pull task → work → comment back").
-Gating them would force operators to grant the SAME ``writes_enabled=true``
-that also unlocks channel takeover and agent creation just to let an agent
-report its own progress — there is no granular per-tool scope today, so that
-coupling is a worse privilege trade than leaving them ungated. It's also
-consistent with the existing precedent: ``empyralis_chat`` already runs a
-full AI turn (with whatever side effects Sage's own tools cause) without
-being writes_enabled-gated; task status/comments are a narrower, more
-bounded mutation than that, not a broader one.
+Documents (always live, feat/document-mcp-tools-and-revisions — same
+write-gate reasoning as tasks, see below): a teammate's own Claude/ChatGPT
+is the intended caller here — MCP is for the FOUNDER'S USERS, not for
+Empyralis's own agents (those already have document__* native tools, see
+skills_service.py). "Edit this document" / "update this document" said to an
+external AI client should just work.
+  - ``empyralis_create_document`` → project_documents_repository.create_document
+  - ``empyralis_edit_document`` → project_documents_repository.
+    edit_document_by_replace — the PRIMARY way to change a document: a
+    targeted old_string/new_string patch, matched EXACTLY ONCE in the
+    current body, never a whole-document rewrite. The founder's own words
+    for this shape: "to upgrade one line or one word or one sentence...
+    just like git — write a line and push it." A zero-match or
+    multi-match old_string fails loudly with NO mutation.
+  - ``empyralis_update_document`` → project_documents_repository.update_document
+    — the FALLBACK for a genuine full rewrite (title and/or body, whole
+    values). Reach for empyralis_edit_document first for anything smaller
+    than "replace most of the document."
+  - ``empyralis_list_documents`` → project_documents_repository.list_documents
+    (one project at a time — project_id is REQUIRED and resolved server-side
+    against the caller's own workspace, exactly like empyralis_create_task's
+    own project_id, never trusted to widen scope past it)
+  - ``empyralis_get_document`` → project_documents_repository.get_document
+  - ``empyralis_list_document_revisions`` → project_documents_repository.
+    list_document_revisions — read-only history (no restore/rollback tool;
+    CLAUDE.md: "a surface must earn its place"). Every write above already
+    records one revision automatically — a full snapshot AND a
+    human-readable diff against the prior state ("this line changed", not
+    "here is the whole document again") — nothing else to call to get
+    tracked history, including with no hardware connected: `document`
+    writes go straight to Postgres, in-process — skills_service.py's own
+    hardware-required connector check
+    (``connector_id not in {"hardware", "file", "shell", "screenshot",
+    "computer"}``) deliberately excludes ``document``, so this whole
+    surface needs no paired hardware, unlike a channel or shell tool.
+
+Write-gate decision (task AND document tools): NOT behind
+``EMPYRALIS_MCP_WRITE_ENABLED``. The 8 gated tools below are workspace-wide
+configuration mutations (create/reconfigure an agent, take over a channel,
+start an OAuth grant) — exactly what a read-only key must never be able to
+do by accident. Task status/comments/documents are bounded to a project
+already visible through this same key (``empyralis_list_projects`` and,
+for tasks, ``empyralis_list_my_tasks``/``empyralis_get_task``) and are the
+founder's core loop itself ("check Empyralis → pull task → work → comment
+back", now extended to "tell your agent to edit the doc"). Gating them
+would force operators to grant the SAME ``writes_enabled=true`` that also
+unlocks channel takeover and agent creation just to let a teammate's own AI
+client edit a project document — there is no granular per-tool scope today,
+so that coupling is a worse privilege trade than leaving them ungated. It's
+also consistent with the existing precedent: ``empyralis_chat`` already runs
+a full AI turn (with whatever side effects Sage's own tools cause) without
+being writes_enabled-gated; document writes are a narrower, more bounded
+mutation than that, not a broader one.
 
 Write (gated behind ``EMPYRALIS_MCP_WRITE_ENABLED=true`` + per-key writes_enabled):
   - ``empyralis_create_project`` → projects_repository.create_project
@@ -149,6 +187,13 @@ EMPYRALIST_MCP_TOOLS = [
     "empyralis_list_labels",
     "empyralis_add_task_label",
     "empyralis_remove_task_label",
+    # Documents (always live, same bound as tasks — see the module docstring)
+    "empyralis_create_document",
+    "empyralis_edit_document",
+    "empyralis_update_document",
+    "empyralis_list_documents",
+    "empyralis_get_document",
+    "empyralis_list_document_revisions",
     # Write (gated behind EMPYRALIS_MCP_WRITE_ENABLED + per-key writes_enabled)
     "empyralis_create_project",
     "empyralis_create_agent",
@@ -1048,6 +1093,280 @@ if empyralist_mcp is not None:
             return {"ok": False, "error": str(exc), "task_id": task_id}
         await _ledger_mcp_call(r, "empyralis_remove_task_label", True, task_id=task_id, label=label)
         return {"ok": True, "task_id": task_id, "labels": remaining}
+
+    # ── Document tools (always live — see the module docstring's write-gate
+    # decision: bounded to a project already visible through this key, not a
+    # workspace-wide configuration mutation, so not behind
+    # EMPYRALIS_MCP_WRITE_ENABLED). MCP is for the FOUNDER'S USERS — a
+    # teammate's own Claude/ChatGPT saying "edit this document" — not for
+    # Empyralis's own platform agents, which already have document__* native
+    # tools (skills_service.py). Needs no hardware: `document` writes go
+    # straight to Postgres in-process, same as the task tools above. ──────
+
+    @empyralist_mcp.tool(
+        title="Create Document",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_create_document(
+        project_id: str, title: str, body: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Create a markdown document inside one of your workspace's projects
+        -- a project's shared knowledge, the same set a human sees in the
+        Projects view and any platform agent in that project reads via its
+        own document__* tools. Title + markdown body only -- no file path,
+        no attachments; there is no upload endpoint here (project documents
+        are text by construction).
+
+        project_id must be a project in YOUR workspace -- resolved and
+        VERIFIED server-side (never trusted from the argument alone to widen
+        scope) before anything is written, the same posture
+        skills_service.py's document__* dispatch already enforces for
+        platform agents (there the project is derived from the calling
+        agent's own identity instead, since a platform agent has no
+        project_id argument to trust).
+
+        Every create is automatically recorded as revision 1 in this
+        document's history — see empyralis_list_document_revisions. Nothing
+        else to call to get tracked history, including with no hardware
+        connected."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import projects_repository as _p
+
+        project = await _p.get_project(tenant_id=tenant, workspace_id=ws, project_id=project_id)
+        if project is None:
+            await _ledger_mcp_call(r, "empyralis_create_document", False, project_id=project_id)
+            return {
+                "ok": False,
+                "error": (
+                    f"Project '{project_id}' was not found in your workspace. "
+                    "Call empyralis_list_projects to see the project_id values you can use."
+                ),
+                "project_id": project_id,
+            }
+        author_id = r.get("external_agent_id") or "external_mcp_client"
+        author_name = str(r.get("external_agent_display_name") or "").strip()
+        from server_modules import project_documents_repository as documents
+        try:
+            document = await documents.create_document(
+                tenant_id=tenant, workspace_id=ws, project_id=project_id,
+                title=title, body=body,
+                created_by=author_id,
+                changed_by_type="external_agent",
+                changed_by_display_name=author_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(r, "empyralis_create_document", False, project_id=project_id, error=str(exc))
+            return {"ok": False, "error": str(exc), "project_id": project_id}
+        await _ledger_mcp_call(
+            r, "empyralis_create_document", True, project_id=project_id, document_id=document.get("id"),
+        )
+        return {"ok": True, "document": document}
+
+    @empyralist_mcp.tool(
+        title="Edit Document",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_edit_document(
+        document_id: str, old_string: str, new_string: str, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """THE PREFERRED WAY to change a document -- a targeted,
+        line/sentence-level patch, never a whole-document rewrite. Use this
+        for "fix this typo" / "update this sentence" / "change this line" —
+        the normal case for "edit this document" / "update this document."
+
+        `old_string` must match the document's CURRENT body EXACTLY ONCE:
+        zero matches and multiple matches both FAIL LOUDLY with NO changes
+        made (never guessed, never silently applied, never silently
+        widened into a whole-body rewrite). If it fails, call
+        empyralis_get_document to re-read the current content and narrow
+        old_string (include a nearby heading or line) so the match is
+        unique.
+
+        Reach for empyralis_update_document only when you are replacing
+        most or all of a document (a genuine full rewrite) -- that tool
+        takes the whole new body at once and is the fallback, not the
+        default.
+
+        Workspace-scoped like empyralis_get_task -- any document in any
+        project in your workspace, not only ones you created.
+
+        Every successful edit is automatically recorded in this document's
+        revision history AS A DIFF ("this line changed") — see
+        empyralis_list_document_revisions."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        author_id = r.get("external_agent_id") or "external_mcp_client"
+        author_name = str(r.get("external_agent_display_name") or "").strip()
+        from server_modules import project_documents_repository as documents
+        try:
+            document = await documents.edit_document_by_replace(
+                tenant_id=tenant, workspace_id=ws, document_id=document_id,
+                old_string=old_string, new_string=new_string,
+                updated_by=author_id,
+                changed_by_type="external_agent",
+                changed_by_display_name=author_name,
+            )
+        except Exception as exc:  # noqa: BLE001 -- includes the "must match exactly once" failure
+            await _ledger_mcp_call(r, "empyralis_edit_document", False, document_id=document_id)
+            return {"ok": False, "error": str(exc), "document_id": document_id}
+        if document is None:
+            await _ledger_mcp_call(r, "empyralis_edit_document", False, document_id=document_id)
+            return {
+                "ok": False,
+                "error": f"Document '{document_id}' not found in your workspace.",
+                "document_id": document_id,
+            }
+        await _ledger_mcp_call(r, "empyralis_edit_document", True, document_id=document_id)
+        return {"ok": True, "document": document}
+
+    @empyralist_mcp.tool(
+        title="Update Document",
+        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False),
+    )
+    async def empyralis_update_document(
+        document_id: str, title: str = "", body: str = "", ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """Replace a document's title and/or WHOLE body -- the FALLBACK
+        path for a genuine full rewrite. Prefer empyralis_edit_document for
+        anything smaller than "replace most of the document" (a typo, a
+        sentence, a line): sending a full new body here for a one-line
+        change is exactly the whole-blob-rewrite behavior the founder asked
+        this surface to avoid.
+
+        Partial update: omit whichever field you are NOT changing (an empty
+        title/body means "leave it as is", the same "" -> omitted convention
+        empyralis_set_task_parent's own parent_task_id already uses in this
+        file). At least one of title/body must be given.
+
+        Workspace-scoped like empyralis_get_task -- any document in any
+        project in your workspace, not only ones you created.
+
+        Every update is automatically recorded in this document's revision
+        history — see empyralis_list_document_revisions."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        clean_title = str(title or "").strip()
+        clean_body = body if body else ""
+        if not clean_title and not clean_body:
+            await _ledger_mcp_call(r, "empyralis_update_document", False, document_id=document_id)
+            return {
+                "ok": False,
+                "error": "Provide title and/or body to change — both were empty, nothing to update.",
+                "document_id": document_id,
+            }
+        author_id = r.get("external_agent_id") or "external_mcp_client"
+        author_name = str(r.get("external_agent_display_name") or "").strip()
+        from server_modules import project_documents_repository as documents
+        try:
+            document = await documents.update_document(
+                tenant_id=tenant, workspace_id=ws, document_id=document_id,
+                title=clean_title or None, body=clean_body or None,
+                updated_by=author_id,
+                changed_by_type="external_agent",
+                changed_by_display_name=author_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await _ledger_mcp_call(r, "empyralis_update_document", False, document_id=document_id)
+            return {"ok": False, "error": str(exc), "document_id": document_id}
+        if document is None:
+            await _ledger_mcp_call(r, "empyralis_update_document", False, document_id=document_id)
+            return {
+                "ok": False,
+                "error": f"Document '{document_id}' not found in your workspace.",
+                "document_id": document_id,
+            }
+        await _ledger_mcp_call(r, "empyralis_update_document", True, document_id=document_id)
+        return {"ok": True, "document": document}
+
+    @empyralist_mcp.tool(
+        title="List Documents",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    async def empyralis_list_documents(project_id: str, ctx: Context = None) -> Dict[str, Any]:
+        """List a project's documents, alphabetically by title -- a
+        table-of-contents read, not a content dump (bodies are omitted;
+        fetch one via empyralis_get_document). project_id must be a project
+        in YOUR workspace -- resolved and VERIFIED server-side before
+        anything is read, same as empyralis_create_document."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import projects_repository as _p
+
+        project = await _p.get_project(tenant_id=tenant, workspace_id=ws, project_id=project_id)
+        if project is None:
+            await _ledger_mcp_call(r, "empyralis_list_documents", False, project_id=project_id)
+            return {
+                "ok": False,
+                "error": (
+                    f"Project '{project_id}' was not found in your workspace. "
+                    "Call empyralis_list_projects to see the project_id values you can use."
+                ),
+                "project_id": project_id,
+                "documents": [],
+            }
+        from server_modules import project_documents_repository as documents
+        rows = await documents.list_documents(tenant_id=tenant, workspace_id=ws, project_id=project_id)
+        await _ledger_mcp_call(r, "empyralis_list_documents", True, project_id=project_id, document_count=len(rows))
+        return {"ok": True, "project_id": project_id, "documents": rows}
+
+    @empyralist_mcp.tool(
+        title="Get Document",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    async def empyralis_get_document(document_id: str, ctx: Context = None) -> Dict[str, Any]:
+        """Get one document by id, including its full markdown body.
+        Workspace-scoped like empyralis_get_task -- any document in any
+        project in your workspace, not only ones you created."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import project_documents_repository as documents
+        document = await documents.get_document(tenant_id=tenant, workspace_id=ws, document_id=document_id)
+        await _ledger_mcp_call(r, "empyralis_get_document", document is not None, document_id=document_id)
+        if document is None:
+            return {
+                "ok": False,
+                "error": f"Document '{document_id}' not found in your workspace.",
+                "document_id": document_id,
+            }
+        return {"ok": True, "document": document}
+
+    @empyralist_mcp.tool(
+        title="List Document Revisions",
+        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+    )
+    async def empyralis_list_document_revisions(
+        document_id: str, include_body: bool = False, ctx: Context = None,
+    ) -> Dict[str, Any]:
+        """List a document's revision history, newest first -- who changed
+        it and when, distinguishing a human dashboard edit from a platform
+        agent's own document__edit tool from an external MCP caller like
+        this one (`changed_by_type`: human / agent / external_agent).
+        Read-only: there is no restore/rollback tool. Pass
+        include_body=True to read a specific past version's full markdown;
+        omitted by default (a history read is normally "who touched this
+        and when," not a content dump).
+
+        Every empyralis_create_document / empyralis_update_document call
+        (and every human/agent edit) already records one revision
+        automatically — this is how you see it, including with no
+        hardware connected.
+
+        Workspace-scoped like empyralis_get_task -- any document in any
+        project in your workspace."""
+        r = await _resolve(ctx); ws = _ws(r); tenant = await _tenant(ws)
+        from server_modules import project_documents_repository as documents
+        document = await documents.get_document(tenant_id=tenant, workspace_id=ws, document_id=document_id)
+        if document is None:
+            await _ledger_mcp_call(r, "empyralis_list_document_revisions", False, document_id=document_id)
+            return {
+                "ok": False,
+                "error": f"Document '{document_id}' not found in your workspace.",
+                "document_id": document_id,
+                "revisions": [],
+            }
+        revisions = await documents.list_document_revisions(
+            tenant_id=tenant, workspace_id=ws, document_id=document_id, include_body=include_body,
+        )
+        await _ledger_mcp_call(
+            r, "empyralis_list_document_revisions", True, document_id=document_id, revision_count=len(revisions),
+        )
+        return {"ok": True, "document_id": document_id, "revisions": revisions}
 
     # ── Write tools (gated per-key + global off-switch) ──────────────
 
