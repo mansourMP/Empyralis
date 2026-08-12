@@ -244,6 +244,51 @@ tool bundles, and channel routing have all repeatedly surprised us. An audit
 that reads a function and concludes the feature works is worth little; trace
 from the real entry point to the real call site.
 
+**A capability branch is a live-path branch, and the OWNER can be the one
+locked out.** The sharpest instance so far, 2026-08-12. `DocumentDetailView`
+rendered `canWrite ? <textarea> : <MarkdownLite>` — so a document's own
+AUTHOR never once saw it rendered. Write access bought you raw markdown
+source (`# Heading`, `**bold**`, `| pipe | tables |`) forever; only a
+read-only viewer got headings, tables and images.
+
+```
+BEFORE                                  AFTER
+  canWrite ? <textarea>   ← the owner     rendered MarkdownLite, everyone
+           : <MarkdownLite> ← a viewer    click a region ─▶ edit it
+  two code paths, and the                 one default. editing is entered,
+  product's own user was on the           never the state you land in.
+  one that shows source
+```
+
+The whole `markdown-lite.tsx` feature pass (tables, images, nested lists,
+URL sanitizing) had just shipped into the branch the document's author
+cannot reach — "built, tested, and never wired", one level up from the code:
+wired, to the wrong half of an `if`. The founder reported it twice ("this is
+documents I'm telling this again... yet it renders differently") and two
+agents investigating the document surface both missed it, because a
+capability flag reads as an authorization detail rather than as the switch
+deciding what the page IS.
+
+Three rules follow. **When a ternary on a permission flag picks between two
+RENDERINGS rather than between a control and its absence, the page has two
+designs and only one of them was reviewed** — check which one the person the
+feature exists for actually lands on. **"No mode toggle" must never become
+"one role is permanently in edit mode"**: the direct-editing rework that
+produced this was right to delete the Edit/Preview button and wrong to
+resolve it toward the raw control; click-to-edit per region (TaskDetailView's
+own `editingTitle`/`editingDescription` + `skipBlurCommit` idiom, now reused
+here) satisfies both. And **a click inside a rendered body means "edit this"
+only when it was not already a click on something else** — MarkdownLite
+emits `target="_blank"` links, so an unguarded handler both opened a tab and
+flipped the document behind it to source, and a drag-select to quote a
+paragraph was discarded by the textarea swapping in.
+
+Documents deviate from TaskDetailView on ONE point, deliberately: **Escape
+flushes, it does not revert.** A task's title is a single-shot commit, so
+discarding on Escape loses nothing; a document autosaves while open, so
+reverting would throw away keystrokes typed inside the debounce window that
+the person has no reason to believe are at risk.
+
 **A compiled artifact is a live-path risk `grep` can't see.** `empyralis-runtime-kernel`
 is a Rust binary invoked over subprocess (`rust_runtime_kernel_client.py`) —
 it is never re-read from source, so a correct, merged, tested `.rs` fix
