@@ -10,6 +10,7 @@ import {
 } from 'react';
 
 import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
+import { refresh as refreshBrowserAuthSession } from '@/lib/auth/auth-client';
 import type { WorkspaceBootstrapPayload } from '@/lib/workspace/workspace-bootstrap';
 import {
   createWorkstationClient,
@@ -412,23 +413,33 @@ class WorkspaceTransportAdapter {
     });
   }
 
+  // Delegates to auth-client's `refresh()` rather than issuing its own
+  // fetch — that function single-flights across every caller (this one's
+  // reactive per-401 trigger AND SessionRefreshTimer's proactive tick), so
+  // several requests 401ing at once (routine here — this adapter serves
+  // every workspace fetch) share ONE refresh call instead of each racing
+  // its own against the backend's single-use refresh token. A second,
+  // independent fetch here would have defeated that single-flighting for
+  // exactly the concurrent-401 case this method exists to handle.
   private async refreshBrowserSession(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.apiBaseUrl}/api/auth/refresh`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: buildCookieAuthHeaders('POST', {
-          accept: 'application/json',
-          'content-type': 'application/json',
-        }),
-        body: JSON.stringify({ channel: 'web' }),
-      });
-      return response.ok;
+      await refreshBrowserAuthSession();
+      return true;
     } catch {
       return false;
     }
   }
 
+  // Only reached once a real refresh attempt has already failed (see
+  // request() below) — by this point the session is genuinely gone, not
+  // merely racing another refresh (that case no longer reaches here; see
+  // refreshBrowserSession's doc comment). A silent hard navigation here
+  // used to be the whole story: in-progress state (e.g. the create-agent
+  // wizard, which keeps its steps in plain React state with no autosave)
+  // vanished with no explanation, and the login page had no way to say
+  // why it was showing. `error` is the login page's existing query-param
+  // banner (already used for OAuth provider failures — see login/page.tsx's
+  // providerError), reused here rather than inventing a second channel.
   private redirectToLogin(): void {
     if (typeof window === 'undefined' || this.authRedirectInFlight) {
       return;
@@ -439,7 +450,8 @@ class WorkspaceTransportAdapter {
     }
     this.authRedirectInFlight = true;
     const next = encodeURIComponent(currentPath || '/');
-    window.location.assign(`/login?next=${next}`);
+    const reason = encodeURIComponent('Your session expired. Sign in again to continue.');
+    window.location.assign(`/login?next=${next}&error=${reason}`);
   }
 
   private async performRequest(

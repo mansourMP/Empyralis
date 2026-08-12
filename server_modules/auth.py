@@ -5989,6 +5989,21 @@ def login_user(
     )
 
 
+class RefreshTokenSupersededError(Exception):
+    """A refresh token whose hash no longer matches the stored value, on a
+    session that is otherwise still active — the exact shape a legitimate
+    CONCURRENT refresh leaves behind, not necessarily a forged/dead
+    credential. `_upsert_auth_session_refresh_token_locked` rotates the
+    stored token in place on every successful refresh (single-use), so two
+    refresh calls racing on the same session end with a winner (whose
+    response already carries fresh cookies) and a loser whose presented
+    token now mismatches. routes_auth.refresh_session must fail the
+    loser's request but must NOT clear cookies for it — those may already
+    be the winner's fresh ones. Distinguished from a genuinely-invalid
+    token (session gone, revoked, expired) so only the latter still clears
+    cookies."""
+
+
 def refresh_authenticated_session(
     refresh_token: str,
     *,
@@ -6015,6 +6030,17 @@ def refresh_authenticated_session(
     if not refresh_record:
         raise HTTPException(status_code=401, detail="Refresh token is invalid.")
     if str(refresh_record.get("token_hash") or "").strip() != expected_hash:
+        # See RefreshTokenSupersededError's own doc comment: a hash mismatch
+        # on a session that is otherwise still active is what a losing
+        # concurrent refresh looks like, not necessarily a dead/forged
+        # credential — only raise the cookie-clearing flavor of "invalid"
+        # when the session itself is also gone.
+        _session_for_classification = get_auth_session(clean_session_id)
+        if (
+            _session_for_classification
+            and str(_session_for_classification.get("status") or "").strip().lower() == "active"
+        ):
+            raise RefreshTokenSupersededError("Refresh token was already used by a concurrent request.")
         raise HTTPException(status_code=401, detail="Refresh token is invalid.")
     if refresh_record.get("revoked_at") is not None:
         raise HTTPException(status_code=401, detail="Refresh token is no longer active.")

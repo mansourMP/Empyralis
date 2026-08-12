@@ -8,6 +8,7 @@ import { Bot, Loader2, X } from "lucide-react";
 import { useFleetAgents, useFleetProjects, useFleetWorkspace, type FleetProject } from "@/lib/workspace/fleet/fleet-data";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import { breadcrumbCount, deriveStatus, findSageAgent, formatNumber, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
 // deriveStatus is used below (statsByProject) to classify each agent's tone
 // before summarizeStatus() rolls the counts up into one line.
@@ -454,7 +455,7 @@ function NewProjectDialog({
         body: JSON.stringify({ name: clean, description: description.trim() }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || data?.detail || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       onCreated();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create the project.");

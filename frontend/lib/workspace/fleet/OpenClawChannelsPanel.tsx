@@ -73,6 +73,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import {
   remediationFor,
   type OpenClawChannelCatalogEntry,
@@ -205,7 +206,7 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
         );
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
-          setError(String(body?.detail || `Setup failed (${res.status}).`));
+          setError(getErrorMessage(body, `Setup failed (${res.status}).`));
         } else {
           const refusal = body?.openclaw_provisioning?.refusal;
           setError(refusal ? `${refusal.code}: ${refusal.detail}` : null);
@@ -369,7 +370,7 @@ export function CredentialForm({
       );
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(String(body?.detail || `Save failed (${res.status}).`));
+        setError(getErrorMessage(body, `Save failed (${res.status}).`));
         return;
       }
       const refusal = body?.openclaw_channel_setup?.refusal;

@@ -391,9 +391,38 @@ export async function listAuthProviders(): Promise<AuthProviderOptions> {
   });
 }
 
+// Refresh happens from two independent triggers — SessionRefreshTimer's
+// proactive 20-minute tick, and WorkspaceTransportAdapter's reactive
+// per-request 401 handler (workspace-services.tsx's refreshBrowserSession,
+// which calls this same function rather than maintaining its own duplicate
+// POST) — and it's normal for a browser tab to have several requests in
+// flight that all 401 at once the moment the access token expires. The
+// backend's refresh token is single-use (rotated in place per session row
+// on every successful call — see auth.py's
+// _upsert_auth_session_refresh_token_locked), so two concurrent refresh
+// calls race: the loser's cookie is already stale by the time its request
+// lands, and — before this — the backend's failure response cleared EVERY
+// auth cookie, including the ones the winner had just set moments earlier.
+// That is what "every in-flight request then 401s simultaneously, with no
+// warning" traced back to. Single-flighting here (same pattern
+// awaitBrowserAuthReady already uses just above, for the identical reason)
+// means only ONE refresh ever crosses the wire at a time per tab; every
+// concurrent caller awaits and shares that one result instead of racing a
+// second one. (The backend also stopped treating a losing race as a dead
+// credential — see RefreshTokenSupersededError in auth.py — for the
+// narrower case of two separate tabs racing, which this alone can't cover.)
+let refreshInFlight: Promise<Record<string, unknown> | null> | null = null;
+
 export async function refresh(): Promise<Record<string, unknown> | null> {
-  return requestAuth<Record<string, unknown> | null>('/api/auth/refresh', {
+  if (refreshInFlight) return refreshInFlight;
+  const run = requestAuth<Record<string, unknown> | null>('/api/auth/refresh', {
     method: 'POST',
     body: { channel: 'web' },
   });
+  refreshInFlight = run;
+  try {
+    return await run;
+  } finally {
+    if (refreshInFlight === run) refreshInFlight = null;
+  }
 }

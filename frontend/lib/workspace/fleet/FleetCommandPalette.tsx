@@ -51,8 +51,10 @@ type Action = {
 const AGENT_DETAIL_RE = /^\/w\/[^/]+\/projects\/([^/]+)\/agents\/([^/]+)\/([^/]+)$/;
 
 // The tabs an agent detail page renders (see FleetAgentDetail.tsx's TABS),
-// minus Hardware — these are the "switch tab" actions offered here.
+// minus Hardware — these are the "switch tab" actions offered here. Chat
+// leads, matching FleetAgentDetail's own ordering (the agent's front door).
 const AGENT_TABS: { id: string; label: string; icon: LucideIcon }[] = [
+  { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "overview", label: "Overview", icon: LayoutGrid },
   { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
@@ -65,7 +67,7 @@ const AGENT_TABS: { id: string; label: string; icon: LucideIcon }[] = [
 /**
  * Cmd/Ctrl+K command palette — the fastest path to any agent. Fast substring
  * filter, keyboard-navigable (Arrow/Enter), no library dependency. Sections:
- * This agent (tab switch + chat, only on an agent-detail route) → Agents →
+ * This agent (tab switch, chat included, only on an agent-detail route) → Agents →
  * Projects → Go to → Actions → Commands.
  */
 export function FleetCommandPalette({
@@ -160,21 +162,12 @@ export function FleetCommandPalette({
       const agentBase = `${base}/projects/${encodeURIComponent(agentDetail.projectId)}/agents/${encodeURIComponent(agentDetail.agentId)}`;
       const tabActions: Action[] = AGENT_TABS.filter((t) => t.id !== agentDetail.tab).map((t) => ({
         id: `tab-${t.id}`,
-        label: t.label,
+        label: t.id === "chat" ? "Chat with this agent" : t.label,
         group: "This agent",
         icon: t.icon,
         run: () => replaceTab(`${agentBase}/${t.id}`),
       }));
-      const chatAction: Action[] = agentDetail.tab === "chat" ? [] : [
-        {
-          id: "tab-chat",
-          label: "Chat with this agent",
-          group: "This agent",
-          icon: MessageSquare,
-          run: () => replaceTab(`${agentBase}/chat`),
-        },
-      ];
-      thisAgentActions = [...tabActions, ...chatAction];
+      thisAgentActions = tabActions;
     }
 
     // Sage is the operator, not a listed worker — never a jump target here
@@ -187,7 +180,7 @@ export function FleetCommandPalette({
         hint: "open",
         group: "Agents",
         icon: Bot,
-        run: () => go(`${base}/projects/${encodeURIComponent(resolveAgentProjectId(a.project_id, projects))}/agents/${encodeURIComponent(a.agent_id)}/overview`),
+        run: () => go(`${base}/projects/${encodeURIComponent(resolveAgentProjectId(a.project_id, projects))}/agents/${encodeURIComponent(a.agent_id)}/chat`),
       }));
 
     const projectActions: Action[] = projects.map((p) => ({

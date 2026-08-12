@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import { Play, Square, Trash2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 
 import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } from "./fleet-data";
 import { timeAgo } from "./fleet-presentation";
@@ -193,7 +194,7 @@ async function deleteFleetAgentInline(
     );
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data?.ok === false) {
-      return { ok: false, error: String(data?.error || data?.detail || `HTTP ${res.status}`) };
+      return { ok: false, error: getErrorMessage(data, `HTTP ${res.status}`) };
     }
     return { ok: true };
   } catch (e) {

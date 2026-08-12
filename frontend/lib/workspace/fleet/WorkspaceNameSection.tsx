@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import { useFleetWorkspace } from "@/lib/workspace/fleet/fleet-data";
 
 /** Workspace display name — PATCH /api/workspaces/{id} already accepted
@@ -45,7 +46,7 @@ export function WorkspaceNameSection({ workspaceId }: { workspaceId: string }) {
         body: JSON.stringify({ name: trimmed }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || `Could not rename workspace (HTTP ${res.status})`);
+      if (!res.ok) throw new Error(getErrorMessage(data, `Could not rename workspace (HTTP ${res.status})`));
       setSaved(true);
       await refresh();
       // The rail's own workspace-name source is a separate server-rendered

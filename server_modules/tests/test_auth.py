@@ -993,6 +993,50 @@ def test_web_refresh_session_survives_expired_access_ttl(monkeypatch: pytest.Mon
     assert int(refreshed_payload["exp"]) - int(refreshed_payload["iat"]) == 60
 
 
+def test_reusing_a_rotated_refresh_token_raises_superseded_not_plain_invalid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+):
+    """`_upsert_auth_session_refresh_token_locked` rotates the stored
+    refresh token in place on every successful refresh (single-use) — two
+    refresh calls racing the SAME session end with a winner (this test's
+    first call) and a loser presenting the now-superseded token (the
+    second call, reusing the original). The loser must raise
+    RefreshTokenSupersededError, not a plain HTTPException, so
+    routes_auth.refresh_session knows not to clear cookies a concurrent
+    winner may have just set — see that class's own doc comment."""
+    auth, _, _ = _reload_auth(monkeypatch, tmp_path)
+    created = auth.register_user(
+        "web.race@example.com",
+        "password-123",
+        name="Web Race",
+        channel="web",
+        workspace_id="default",
+    )
+    original_refresh_token = created["session_recovery"]["refresh_token"]
+    workspace_id = created["workspace_access"][0]["workspace_id"]
+
+    # The "winner" — rotates the stored token, session stays active.
+    auth.refresh_authenticated_session(original_refresh_token, workspace_id=workspace_id)
+
+    # The "loser" — same original token, now stale relative to the DB row.
+    with pytest.raises(auth.RefreshTokenSupersededError):
+        auth.refresh_authenticated_session(original_refresh_token, workspace_id=workspace_id)
+
+
+def test_refresh_with_an_unknown_token_still_raises_plain_invalid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+):
+    """A token that never existed (forged, or from a session that's really
+    gone) is genuinely invalid, not merely superseded — contrast with the
+    test above. This must stay a plain HTTPException so
+    routes_auth.refresh_session still clears cookies for it."""
+    auth, _, _ = _reload_auth(monkeypatch, tmp_path)
+    with pytest.raises(HTTPException) as excinfo:
+        auth.refresh_authenticated_session("esr_does-not-exist.bogus-secret")
+    assert excinfo.value.status_code == 401
+    assert not isinstance(excinfo.value, auth.RefreshTokenSupersededError)
+
+
 def test_stale_mobile_bearer_can_be_recovered_with_refresh(monkeypatch: pytest.MonkeyPatch, tmp_path):
     auth, _, _ = _reload_auth(monkeypatch, tmp_path)
     created = auth.register_user(

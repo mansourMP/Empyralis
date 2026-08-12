@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import { CONNECTOR_ICONS } from "./fleet-icons";
 import {
   useFleetAgentConnectors,
@@ -160,7 +161,7 @@ export function ConnectorPicker({
         }
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       await refreshAll();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not switch connector.");
@@ -187,7 +188,7 @@ export function ConnectorPicker({
         }
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       await refreshAll();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not disconnect.");
@@ -208,7 +209,7 @@ export function ConnectorPicker({
         body: JSON.stringify({ workspace_id: workspaceId, surface: "apps", metadata: { agent_install_id: agentId } }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || data?.error || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       if (data?.authorization_url) {
         window.location.href = data.authorization_url;
         return;
@@ -250,7 +251,7 @@ export function ConnectorPicker({
         }
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
       setManualFieldsFor(null);
       await refreshAll();
     } catch (e) {

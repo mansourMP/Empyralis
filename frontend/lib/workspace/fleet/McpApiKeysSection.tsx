@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Check, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import { getErrorMessage } from "@/lib/ui/api-error";
 import { formatDate } from "@/lib/workspace/fleet/fleet-presentation";
 
 type McpKey = {
@@ -60,7 +61,7 @@ export function McpApiKeysSection({ workspaceId }: { workspaceId: string }) {
         body: JSON.stringify({ workspace_id: workspaceId, label: newLabel.trim(), writes_enabled: newWrites }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data?.ok) throw new Error(data?.detail || data?.error || `Could not create key (HTTP ${res.status})`);
+      if (!res.ok || !data?.ok) throw new Error(getErrorMessage(data, `Could not create key (HTTP ${res.status})`));
       setFreshKey(String(data.key || ""));
       setNewLabel("");
       setNewWrites(false);

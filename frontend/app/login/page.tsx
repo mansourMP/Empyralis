@@ -38,6 +38,18 @@ function authErrorCopy(error: string): string {
   if (normalized.includes('google_rate_limited')) {
     return 'Too many Google sign-in attempts. Wait a minute, then try again.';
   }
+  // WorkspaceTransportAdapter.redirectToLogin (workspace-services.tsx) lands
+  // here after a 401 survives a real refresh attempt — the session is
+  // genuinely gone, not merely mid-race with a concurrent refresh (see
+  // auth.py's RefreshTokenSupersededError for that case, which never
+  // reaches this redirect). Naming it explicitly, rather than letting it
+  // fall through to the generic "could not finish" copy below, is the
+  // difference between "reload and try again" (implies OUR bug) and "sign
+  // in again" (tells the owner what actually happened and what to do) —
+  // the dead-end a 401 used to be before this branch existed.
+  if (normalized.includes('session expired') || normalized.includes('refresh token has expired')) {
+    return 'Your session expired. Sign in again to continue.';
+  }
   if (normalized.includes('google_state_invalid') || normalized.includes('google_auth_failed')) {
     return 'Google sign-in could not finish. Try again or use email.';
   }
