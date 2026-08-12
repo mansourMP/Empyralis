@@ -1240,6 +1240,57 @@ async def fleet_get_document(
         return {"ok": False, "error": str(exc)}
 
 
+@router.get("/api/w/{workspace_id}/fleet/documents/{document_id}/revisions")
+async def fleet_list_document_revisions(
+    request: Request,
+    workspace_id: str,
+    document_id: str,
+    limit: int = Query(50, ge=1, le=200, description="Max revisions to return, newest first."),
+    current_user: Dict[str, Any] = Depends(auth_module.get_current_user),
+) -> Dict[str, Any]:
+    """List a document's revision history, newest first -- the human-facing
+    counterpart of mcp_server.py's empyralis_list_document_revisions, which
+    was the ONLY caller of project_documents_repository.list_document_
+    revisions until now (CLAUDE.md: "built, tested, and never wired" -- an
+    agent editing a project document could already see who changed it and
+    when; a human looking at the same document over the same table could
+    not). `viewer` -- same tier fleet_get_document requires, and gated on
+    the document's own project via _enforce_document_project_access, same
+    as that route: reading who touched a document and when is not a more
+    privileged act than reading its current body.
+
+    Read-only. There is no restore/rollback route here on purpose --
+    CLAUDE.md's "a surface must earn its place," and list_document_
+    revisions's own docstring already makes this same call for the
+    repository layer it wraps. `include_body` is never set to True: the
+    `diff` column (a unified diff against the immediately-prior revision)
+    is what a history read is for, and a past revision's full body is not
+    exposed over HTTP anywhere today -- consistent with there being no
+    restore action that would need it."""
+    resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
+    await _enforce_document_project_access(
+        current_user, resolved_workspace_id, tenant_id, document_id, minimum_role="viewer",
+    )
+    from server_modules import project_documents_repository as documents
+
+    try:
+        document = await documents.get_document(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id, document_id=document_id,
+        )
+        if document is None:
+            return {"ok": False, "error": "Document not found."}
+        revisions = await documents.list_document_revisions(
+            tenant_id=tenant_id,
+            workspace_id=resolved_workspace_id,
+            document_id=document_id,
+            limit=limit,
+        )
+        return {"ok": True, "revisions": revisions}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 class FleetCreateDocumentRequest(BaseModel):
     project_id: str = Field(min_length=1)
     title: str = Field(min_length=1)

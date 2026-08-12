@@ -233,3 +233,107 @@ h6.fleet-doc-heading { font-size: 14px; }
   outline: 2px solid var(--accent-ring);
   outline-offset: 1px;
 }
+
+/* ── History (DocumentHistory.tsx) ───────────────────────────────────────
+   Reuses .fleet-task-page-section/-section-title wholesale (fleet-theme.css)
+   for the section shell -- same "Activity" treatment a task's own page
+   uses, so "who touched this and when" reads as one convention across
+   tasks and documents rather than two. Nothing here defines an empty
+   state: DocumentHistory.tsx returns null outright for <= 1 revision (see
+   that file's own header), so there is never a heading with nothing under
+   it to style. */
+.fleet-doc-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.fleet-doc-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fleet-doc-history-head {
+  display: flex;
+  align-items: center;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* Same actor-mark treatment TaskActorBadge/CommentAuthorLine already give a
+   revision's author elsewhere on this board -- an agent's edit and a
+   person's edit must read as two different kinds of thing at a glance,
+   never the same grey text with a different name. */
+.fleet-doc-history-actor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--weight-medium, 500);
+  color: var(--text-primary);
+}
+.fleet-doc-history-actor--muted {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.fleet-doc-history-time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.fleet-doc-history-empty-diff {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* The diff itself -- same code-block treatment .fleet-doc-code already
+   gives a markdown fence (inset surface, monospace, horizontal scroll for
+   a long line) rather than a third code-block style on this page. Capped
+   height with its own scroll: a large edit's diff must not push every
+   older revision below it off screen. */
+.fleet-doc-history-diff {
+  margin: 0;
+  padding: 10px 12px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  font-family: var(--app-font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.fleet-doc-diff-line {
+  white-space: pre;
+  color: var(--text-secondary);
+}
+
+/* `+++`/`---` file headers and `@@` hunk markers -- context, not content,
+   so they stay muted rather than competing with the actual add/remove
+   lines they introduce. */
+.fleet-doc-diff-line--meta,
+.fleet-doc-diff-line--hunk {
+  color: var(--text-muted);
+}
+
+/* Reuses the SAME status vocabulary the rest of this app already spends on
+   "added"/"good" (--online-text) and "removed"/"destructive" (--app-danger)
+   -- e.g. a channel's online dot, a danger button's label -- rather than
+   introducing a second green/red pair. This is the one place on the whole
+   document surface those two tokens are used as a text color instead of a
+   dot or a button, and it is a deliberate, narrow exception: a diff without
+   add/remove color is not readable as a diff. */
+.fleet-doc-diff-line--add {
+  color: var(--online-text);
+  background: color-mix(in srgb, var(--online-text) 10%, transparent);
+}
+.fleet-doc-diff-line--remove {
+  color: var(--app-danger);
+  background: color-mix(in srgb, var(--app-danger) 10%, transparent);
+}
