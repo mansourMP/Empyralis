@@ -261,9 +261,20 @@ export function ConnectorPicker({
   }, [workspaceId, agentId, manualFieldsFor, fieldValues, refreshAll]);
 
   if (agentLoading || projectLoading) {
+    // Reuses .fleet-connector-picker's real 2-col grid (fleet-theme.css) so
+    // the placeholder is the same shape as the suggested-connector cards
+    // that replace it — a single 8px bar here previously stood in for what
+    // is actually a multi-card grid with title/description/button per card.
     return (
-      <div className="fleet-activity-skeleton" aria-label="Loading connectors">
-        <div className="fleet-skeleton-bar" style={{ width: "70%" }} />
+      <div className="fleet-connector-picker" aria-busy="true" aria-label="Loading connectors">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="fleet-connector-picker-item">
+            <div className="fleet-skeleton-bar" style={{ width: "40%", height: 13 }} />
+            <div className="fleet-skeleton-bar" style={{ width: "90%", height: 10, opacity: 0.7 }} />
+            <div className="fleet-skeleton-bar" style={{ width: "60%", height: 10, opacity: 0.7 }} />
+            <div className="fleet-skeleton-bar" style={{ width: 76, height: 26, marginTop: 4 }} />
+          </div>
+        ))}
       </div>
     );
   }

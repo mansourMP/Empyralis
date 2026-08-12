@@ -82,6 +82,7 @@ import { ConnectorPicker } from "./ConnectorPicker";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { RUNTIME_LABELS } from "./gateway-box-picker";
 import { resolveAgentModelSummary, platformCreditsTierLabel } from "./fleet-model-config";
+import { FleetRowsSkeleton, FleetCardGridSkeleton } from "./fleet-states";
 
 import "./agent-configure-sheet.css";
 
@@ -1123,17 +1124,7 @@ function OverviewTab({
 
       <div className="fleet-detail-section-title">Recent activity</div>
       {loading ? (
-        <div className="fleet-activity-skeleton" aria-label="Loading activity">
-          {[68, 52, 60].map((w, i) => (
-            <div key={i} className="fleet-skeleton-row">
-              <div className="fleet-skeleton-bar" style={{ width: 8 }} />
-              <div style={{ flex: 1 }}>
-                <div className="fleet-skeleton-bar" style={{ width: `${w}%`, marginBottom: 6 }} />
-                <div className="fleet-skeleton-bar" style={{ width: `${w - 24}%`, opacity: 0.6 }} />
-              </div>
-            </div>
-          ))}
-        </div>
+        <FleetRowsSkeleton rows={3} label="Loading activity" />
       ) : events.length === 0 ? (
         <EmptyState
           icon={Inbox}
@@ -1491,7 +1482,7 @@ function ScheduleSection({ workspaceId, agentId }: { workspaceId: string; agentI
       )}
 
       {loading ? (
-        <div className="fleet-activity-skeleton" aria-label="Loading schedule"><div className="fleet-skeleton-bar" style={{ width: "50%" }} /></div>
+        <FleetRowsSkeleton rows={2} label="Loading schedule" />
       ) : schedule.length === 0 ? (
         <p className="fleet-subtitle" style={{ marginTop: 0 }}>
           No scheduled wake-ups. This agent only acts when messaged.
@@ -2309,7 +2300,7 @@ export function ChannelsTab({
   // "Saved"/"Connected" confirmation, an open banner) with this skeleton on
   // every single action.
   if (loading && channels.length === 0) {
-    return <div className="fleet-activity-skeleton" aria-label="Loading channels"><div className="fleet-skeleton-bar" style={{ width: "80%" }} /></div>;
+    return <FleetCardGridSkeleton cards={8} label="Loading channels" />;
   }
 
   // Slack's channel.connected from the backend means "OAuth app installed",
@@ -3263,7 +3254,7 @@ function ConnectorsTab({
     return (
       <div>
         {subtitle}
-        <div className="fleet-activity-skeleton" aria-label="Loading connectors"><div className="fleet-skeleton-bar" style={{ width: "70%" }} /></div>
+        <FleetCardGridSkeleton cards={6} label="Loading connectors" />
       </div>
     );
   }
@@ -3417,7 +3408,7 @@ function ToolsTab({
   }
 
   if (loading || connectorsLoading) {
-    return <div className="fleet-activity-skeleton" aria-label="Loading tools"><div className="fleet-skeleton-bar" style={{ width: "60%" }} /></div>;
+    return <FleetRowsSkeleton rows={6} label="Loading tools" />;
   }
 
   const connectorById = new Map(toolConnectors.map((c) => [c.id, c]));
@@ -4008,7 +3999,7 @@ function CapabilitiesTab({
   }
 
   if (loading) {
-    return <div className="fleet-activity-skeleton" aria-label="Loading capabilities"><div className="fleet-skeleton-bar" style={{ width: "60%" }} /></div>;
+    return <FleetRowsSkeleton rows={5} label="Loading capabilities" />;
   }
 
   if (isMaster) {

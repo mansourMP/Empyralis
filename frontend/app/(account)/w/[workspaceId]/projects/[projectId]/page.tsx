@@ -45,7 +45,7 @@ import {
 import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/lib/workspace/fleet/FleetRightPanel";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
-import { FleetListSkeleton } from "@/lib/workspace/fleet/fleet-states";
+import { FleetListSkeleton, FleetBoardSkeleton } from "@/lib/workspace/fleet/fleet-states";
 import { ListChecks, FileText } from "lucide-react";
 
 const money = (n: number | undefined) => `$${(n ?? 0).toFixed(4)}`;
@@ -603,10 +603,18 @@ export default function ProjectDetailPage() {
 
           {view === "tasks" ? (
             tasksLoading && tasks.length === 0 ? (
-              // rowHeight matches .fleet-task-row's real min-height (52px) —
-              // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton
-              // row snaps taller the moment TasksList swaps in.
-              <FleetListSkeleton rows={4} rowHeight={52} />
+              // The board layout renders multi-column kanban cards, not flat
+              // list rows — using FleetListSkeleton here regardless of
+              // `viewOptions.layout` reflowed the page the instant the fetch
+              // landed (rows -> columns), the exact "loading state doesn't
+              // match the shape of the real content" bug. rowHeight on the
+              // list branch still matches .fleet-task-row's real min-height
+              // (52px) — see FleetListSkeleton's MAN-113 note.
+              viewOptions.layout === "board" ? (
+                <FleetBoardSkeleton label="Loading task board" />
+              ) : (
+                <FleetListSkeleton rows={4} rowHeight={52} />
+              )
             ) : tasks.length === 0 ? (
               <div className="fleet-empty">
                 <div className="fleet-empty-icon">

@@ -10,6 +10,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ChatMessage, type WorkstationChatMessageRecord } from "@/lib/workspace/chat-message";
 import { ContextUsageRail, type ContextUsagePayload } from "./ContextUsageRail";
 import type { FleetAgent } from "./fleet-data";
+import { FleetRowsSkeleton } from "./fleet-states";
 import {
   resolveAgentModelSummary,
   formatModelOnlyLabel,
@@ -1243,14 +1244,7 @@ export function AgentChat({
     <div className="fleet-sage-chat">
       <div className="fleet-sage-chat-list" ref={listRef}>
         {loading ? (
-          <div className="fleet-activity-skeleton" aria-label="Loading conversation">
-            {[60, 42, 70].map((w, i) => (
-              <div key={i} className="fleet-skeleton-row">
-                <div className="fleet-skeleton-bar" style={{ width: 8 }} />
-                <div className="fleet-skeleton-bar" style={{ width: `${w}%` }} />
-              </div>
-            ))}
-          </div>
+          <FleetRowsSkeleton rows={3} label="Loading conversation" />
         ) : showEmptyState ? (
           <div className="fleet-sage-chat-empty">
             <span className="fleet-empty-icon"><EmptyIcon size={20} strokeWidth={1.75} /></span>
