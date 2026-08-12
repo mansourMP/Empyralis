@@ -112,6 +112,67 @@ h6.fleet-doc-heading { font-size: 14px; }
 }
 .fleet-doc-list li { margin: 4px 0; }
 
+/* Nested list (any depth): a <ul>/<ol> that is itself inside an <li> — no
+   bottom margin of its own (the parent li's 4px already spaces it), and a
+   touch less left padding than the top-level list so depth reads as a
+   gentle stair-step rather than a widening indent. */
+.fleet-doc-list .fleet-doc-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+/* ── Tables ───────────────────────────────────────────────────────────────
+   Linear-style: hairline borders, comfortable row height, header slightly
+   stronger than body text. The wrapper — not the table itself — owns
+   overflow-x, so a wide table scrolls in its own lane and the PAGE never
+   scrolls horizontally (see .fleet-doc-code's identical pattern above). */
+.fleet-doc-table-wrap {
+  margin: 0 0 14px;
+  overflow-x: auto;
+}
+
+.fleet-doc-table {
+  width: 100%;
+  min-width: max-content;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.fleet-doc-table th,
+.fleet-doc-table td {
+  padding: 7px 12px;
+  text-align: left;
+  border: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.fleet-doc-table th {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold, 600);
+  background: var(--bg-inset);
+  white-space: nowrap;
+}
+
+.fleet-doc-table td {
+  color: var(--text-secondary);
+}
+
+.fleet-doc-table tbody tr:nth-child(even) td {
+  background: var(--bg-inset);
+}
+
+/* ── Images ───────────────────────────────────────────────────────────────
+   Constrained to the reading column — never wider than the body text, and
+   never taller than proportionate (height:auto keeps aspect ratio). */
+.fleet-doc-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 4px 0 14px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--border);
+}
+
 .fleet-doc-hr {
   margin: 24px 0;
   border: none;
