@@ -415,6 +415,74 @@ class EntitlementsServiceTests(unittest.TestCase):
         self.assertTrue(policy["virtual_computer_runtime_enabled"])
         self.assertTrue(policy["enterprise_admin_controls_enabled"])
 
+    # ── MAN-132: plan-aware Agent Computer (VPS) slot cap ──────────────────
+
+    def test_enforce_agent_computer_slot_access_rejects_free_workspace_at_plan_cap(self) -> None:
+        with self.assertRaises(entitlements_service.EntitlementQuotaExceededError) as ctx:
+            entitlements_service.enforce_agent_computer_slot_access(
+                workspace={"metadata": {"billing": {"plan": "free"}}},
+                current_agent_computer_count=2,
+            )
+
+        self.assertEqual(ctx.exception.reason, "agent_computer_limit_exceeded")
+
+    def test_enforce_agent_computer_slot_access_allows_free_workspace_below_plan_cap(self) -> None:
+        payload = entitlements_service.enforce_agent_computer_slot_access(
+            workspace={"metadata": {"billing": {"plan": "free"}}},
+            current_agent_computer_count=1,
+        )
+
+        self.assertEqual(payload["plan_id"], "free")
+
+    def test_enforce_agent_computer_slot_access_pro_plan_allows_more_than_free_default(self) -> None:
+        # Free's cap (2) matches today's flat DEFAULT_VPS_MAX_ACTIVE_PER_
+        # WORKSPACE; pro must allow strictly more so the plan differentiates
+        # once an operator raises the flat cap (see
+        # vps_provisioning_service.enforce_platform_vps_plan_capacity).
+        payload = entitlements_service.enforce_agent_computer_slot_access(
+            workspace={"metadata": {"billing": {"plan": "pro"}}},
+            current_agent_computer_count=2,
+        )
+
+        self.assertEqual(payload["plan_id"], "pro")
+
+        with self.assertRaises(entitlements_service.EntitlementQuotaExceededError):
+            entitlements_service.enforce_agent_computer_slot_access(
+                workspace={"metadata": {"billing": {"plan": "pro"}}},
+                current_agent_computer_count=3,
+            )
+
+    def test_enforce_agent_computer_slot_access_honors_per_workspace_override(self) -> None:
+        payload = entitlements_service.enforce_agent_computer_slot_access(
+            workspace={
+                "metadata": {
+                    "billing": {"plan": "free", "overrides": {"max_agent_computers": 5}},
+                }
+            },
+            current_agent_computer_count=4,
+        )
+
+        self.assertEqual(payload["plan_id"], "free")
+
+    def test_unlimited_credit_workspace_bypass_active_disabled_by_default(self) -> None:
+        with patch.dict("os.environ", {}, clear=False):
+            entitlements_service.os.environ.pop("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", None)
+            self.assertFalse(
+                entitlements_service.unlimited_credit_workspace_bypass_active("ws-1")
+            )
+
+    def test_unlimited_credit_workspace_bypass_active_matches_allowlisted_workspace(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS": "ws-founder, ws-demo"},
+        ):
+            self.assertTrue(
+                entitlements_service.unlimited_credit_workspace_bypass_active("WS-Founder")
+            )
+            self.assertFalse(
+                entitlements_service.unlimited_credit_workspace_bypass_active("ws-other")
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

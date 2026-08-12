@@ -1558,6 +1558,170 @@ async def test_provision_hardware_vps_route_returns_before_provision_vps_runs():
     assert response["vps_id"].startswith("vps_")
 
 
+# ── MAN-132: the route-level refusal/proceed contract, with call-count ─────
+# proof on the actual provider-create seam (provision_vps) — a money path,
+# so "a check happened" is not enough; 0 calls when refused, exactly 1 when
+# allowed. All three exercise the REAL enforce_platform_vps_* functions
+# (only their DB/billing dependencies are mocked), not a mock of the gate
+# itself, so this also proves the route wiring, not just the gate's own logic.
+
+
+def _platform_provisioning_body(**overrides):
+    defaults = dict(
+        workspace_id="ws-1",
+        provider="digitalocean",
+        credentials={"api_token": "do_secret"},
+        region="nyc3",
+        size=None,
+        runtime_access_mode="full_access",
+        autonomous_agent_setup_warning_acknowledged=True,
+    )
+    defaults.update(overrides)
+    return routes_gateway.HardwareVPSProvisionRequest(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_provision_hardware_vps_route_refuses_over_capacity_and_never_calls_provider(monkeypatch):
+    monkeypatch.setenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, "platform-do-token")
+    monkeypatch.delenv(vps.VPS_MAX_ACTIVE_PER_WORKSPACE_ENV, raising=False)  # default cap == 2
+
+    async def fake_count(*, workspace_id, tenant_id):
+        return 2  # already at the flat cap
+
+    monkeypatch.setattr(vps, "count_active_workspace_vps", fake_count)
+
+    body = _platform_provisioning_body()
+    current_user = {"user_id": "user-1"}
+
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(routes_gateway.vps_provisioning_service, "provision_vps") as provision_mock,
+        patch.object(
+            routes_gateway.gateway_pairing_service, "create_gateway_pairing_intent"
+        ) as pairing_mock,
+    ):
+        with pytest.raises(routes_gateway.HTTPException) as excinfo:
+            await routes_gateway.provision_hardware_vps(body, current_user=current_user)
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "vps_capacity_cap_reached"
+    assert "limit" in excinfo.value.detail["message"].lower()
+    # Refused before a pairing intent (i.e. before any user-visible setup
+    # step) or the provider create call ever happens.
+    assert pairing_mock.call_count == 0
+    assert provision_mock.call_count == 0
+    assert len(routes_gateway._VPS_PROVISION_BACKGROUND_TASKS) == 0
+
+
+@pytest.mark.asyncio
+async def test_provision_hardware_vps_route_refuses_zero_credit_balance_and_never_calls_provider(monkeypatch):
+    monkeypatch.setenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, "platform-do-token")
+    monkeypatch.delenv(vps.VPS_MAX_ACTIVE_PER_WORKSPACE_ENV, raising=False)
+    monkeypatch.delenv("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", raising=False)
+
+    async def fake_count(*, workspace_id, tenant_id):
+        return 0  # well within both the flat and the plan cap
+
+    async def fake_get_workspace(workspace_id):
+        return {"metadata": {"billing": {"plan": "pro"}}}
+
+    monkeypatch.setattr(vps, "count_active_workspace_vps", fake_count)
+    monkeypatch.setattr(vps.control_plane_repository, "get_workspace_by_id", fake_get_workspace)
+    monkeypatch.setattr(
+        vps.billing_service,
+        "credit_balance_for_workspace",
+        lambda workspace_id: {"ok": True, "workspace_id": workspace_id, "credit_balance_usd": 0.0},
+    )
+
+    body = _platform_provisioning_body()
+    current_user = {"user_id": "user-1"}
+
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(routes_gateway.vps_provisioning_service, "provision_vps") as provision_mock,
+        patch.object(
+            routes_gateway.gateway_pairing_service, "create_gateway_pairing_intent"
+        ) as pairing_mock,
+    ):
+        with pytest.raises(routes_gateway.HTTPException) as excinfo:
+            await routes_gateway.provision_hardware_vps(body, current_user=current_user)
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "vps_credit_balance_exhausted"
+    # A distinguishable, balance-shaped message — never "over your machine
+    # limit" or a generic "something went wrong".
+    assert "credit" in excinfo.value.detail["message"].lower()
+    assert "limit" not in excinfo.value.detail["message"].lower()
+    assert pairing_mock.call_count == 0
+    assert provision_mock.call_count == 0
+    assert len(routes_gateway._VPS_PROVISION_BACKGROUND_TASKS) == 0
+
+
+@pytest.mark.asyncio
+async def test_provision_hardware_vps_route_allows_when_funded_and_within_cap(monkeypatch):
+    monkeypatch.setenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, "platform-do-token")
+    monkeypatch.delenv(vps.VPS_MAX_ACTIVE_PER_WORKSPACE_ENV, raising=False)
+    monkeypatch.delenv("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", raising=False)
+    monkeypatch.setattr(vps, "VPS_CONNECT_POLL_INTERVAL_SECONDS", 0)
+
+    async def fake_count(*, workspace_id, tenant_id):
+        return 0
+
+    async def fake_get_workspace(workspace_id):
+        return {"metadata": {"billing": {"plan": "pro"}}}
+
+    monkeypatch.setattr(vps, "count_active_workspace_vps", fake_count)
+    monkeypatch.setattr(vps.control_plane_repository, "get_workspace_by_id", fake_get_workspace)
+    monkeypatch.setattr(
+        vps.billing_service,
+        "credit_balance_for_workspace",
+        lambda workspace_id: {"ok": True, "workspace_id": workspace_id, "credit_balance_usd": 5.0},
+    )
+
+    result = vps.VPSResult(
+        provider_resource_id="droplet-funded-1",
+        public_ip="203.0.113.40",
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        provider="digitalocean",
+    )
+    body = _platform_provisioning_body()
+    current_user = {"user_id": "user-1"}
+
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        patch.object(
+            routes_gateway.gateway_pairing_service,
+            "create_gateway_pairing_intent",
+            return_value={"pairing_token": "pair_do", "pairing_id": "pairing-1"},
+        ),
+        patch.object(routes_gateway.vps_provisioning_service, "provision_vps", return_value=result) as provision_mock,
+        patch.object(routes_gateway.vps_provisioning_service, "record_vps_provision"),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "get_vps_provision_status",
+            return_value={"status": "connected"},
+        ),
+    ):
+        response = await routes_gateway.provision_hardware_vps(body, current_user=current_user)
+
+        assert provision_mock.call_count == 0  # not yet — still the sync pre-flight
+        background_tasks = [
+            task for task in routes_gateway._VPS_PROVISION_BACKGROUND_TASKS if not task.done()
+        ]
+        assert len(background_tasks) == 1
+        await background_tasks[0]
+
+        assert provision_mock.call_count == 1
+
+    assert response["status"] == "provisioning"
+    assert response["vps_id"].startswith("vps_")
+
+
 @pytest.mark.asyncio
 async def test_run_vps_provisioning_lifecycle_persists_result_then_waits_for_connected(tmp_path, monkeypatch):
     # Full lifecycle, success path: the background task should (1) call
@@ -4390,6 +4554,107 @@ async def test_enforce_platform_vps_capacity_allows_below_the_cap(monkeypatch):
     monkeypatch.delenv(vps.VPS_MAX_ACTIVE_PER_WORKSPACE_ENV, raising=False)
 
     await vps.enforce_platform_vps_capacity(workspace_id="ws-1", tenant_id="t-1")
+
+
+# ── MAN-132: plan-aware cap (enforce_platform_vps_plan_capacity) ───────────
+
+
+@pytest.mark.asyncio
+async def test_enforce_platform_vps_plan_capacity_blocks_at_the_plan_cap(monkeypatch):
+    async def fake_get_workspace(workspace_id):
+        return {"metadata": {"billing": {"plan": "free"}}}  # free plan cap == 2
+
+    async def fake_count(*, workspace_id, tenant_id):
+        return 2
+
+    monkeypatch.setattr(vps.control_plane_repository, "get_workspace_by_id", fake_get_workspace)
+    monkeypatch.setattr(vps, "count_active_workspace_vps", fake_count)
+
+    with pytest.raises(vps.VPSProvisioningError, match="Agent Computer limit") as excinfo:
+        await vps.enforce_platform_vps_plan_capacity(workspace_id="ws-1", tenant_id="t-1")
+
+    assert excinfo.value.reason == "vps_capacity_cap_reached"
+
+
+@pytest.mark.asyncio
+async def test_enforce_platform_vps_plan_capacity_allows_pro_plan_above_free_default(monkeypatch):
+    # 3 active machines would trip the FREE plan's cap (2) but not pro's (3
+    # requires >=3 to trip) — proves the check is genuinely plan-aware and
+    # not just re-reading the flat env cap under a new name.
+    async def fake_get_workspace(workspace_id):
+        return {"metadata": {"billing": {"plan": "pro"}}}
+
+    async def fake_count(*, workspace_id, tenant_id):
+        return 2
+
+    monkeypatch.setattr(vps.control_plane_repository, "get_workspace_by_id", fake_get_workspace)
+    monkeypatch.setattr(vps, "count_active_workspace_vps", fake_count)
+
+    await vps.enforce_platform_vps_plan_capacity(workspace_id="ws-1", tenant_id="t-1")
+
+
+# ── MAN-132: positive credit-balance gate (enforce_platform_vps_credit_balance) ──
+
+
+@pytest.mark.asyncio
+async def test_enforce_platform_vps_credit_balance_blocks_zero_balance(monkeypatch):
+    monkeypatch.delenv("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", raising=False)
+    monkeypatch.setattr(
+        vps.billing_service,
+        "credit_balance_for_workspace",
+        lambda workspace_id: {"ok": True, "workspace_id": workspace_id, "credit_balance_usd": 0.0},
+    )
+
+    with pytest.raises(vps.VPSProvisioningError, match="no available credit balance") as excinfo:
+        await vps.enforce_platform_vps_credit_balance(workspace_id="ws-1", tenant_id="t-1")
+
+    assert excinfo.value.reason == "vps_credit_balance_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_enforce_platform_vps_credit_balance_allows_positive_balance(monkeypatch):
+    monkeypatch.delenv("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", raising=False)
+    monkeypatch.setattr(
+        vps.billing_service,
+        "credit_balance_for_workspace",
+        lambda workspace_id: {"ok": True, "workspace_id": workspace_id, "credit_balance_usd": 1.0},
+    )
+
+    await vps.enforce_platform_vps_credit_balance(workspace_id="ws-1", tenant_id="t-1")
+
+
+@pytest.mark.asyncio
+async def test_enforce_platform_vps_credit_balance_fails_closed_when_balance_unreadable(monkeypatch):
+    # An unreadable balance is NOT permission to spend real money — this is
+    # the opposite posture of the invite-email verification gate, which
+    # fails open because it only withholds a reversible email.
+    monkeypatch.delenv("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", raising=False)
+
+    def _boom(workspace_id):
+        raise RuntimeError("control plane unreachable")
+
+    monkeypatch.setattr(vps.billing_service, "credit_balance_for_workspace", _boom)
+
+    with pytest.raises(vps.VPSProvisioningError, match="Could not verify") as excinfo:
+        await vps.enforce_platform_vps_credit_balance(workspace_id="ws-1", tenant_id="t-1")
+
+    assert excinfo.value.reason == "vps_credit_balance_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_enforce_platform_vps_credit_balance_bypasses_for_unlimited_credit_workspace(monkeypatch):
+    monkeypatch.setenv("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", "ws-founder")
+    called = []
+    monkeypatch.setattr(
+        vps.billing_service,
+        "credit_balance_for_workspace",
+        lambda workspace_id: called.append(workspace_id) or {"ok": True, "credit_balance_usd": 0.0},
+    )
+
+    await vps.enforce_platform_vps_credit_balance(workspace_id="ws-founder", tenant_id="t-1")
+
+    # The bypass short-circuits before even reading the balance.
+    assert called == []
 
 
 def test_cloud_init_script_does_not_set_blanket_package_update():
