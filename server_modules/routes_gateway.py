@@ -4295,8 +4295,17 @@ async def export_session_diagnostics_endpoint(
         raise HTTPException(status_code=400, detail="session_id_required")
     if payload.get("error") == "session_not_found":
         raise HTTPException(status_code=404, detail="session_not_found")
+    # export_session_trace resolves ANY session_id on the platform (no
+    # tenant/workspace predicate of its own -- session_service.get_session
+    # is `WHERE session_id = $1`), so this comparison is the only boundary
+    # between "my own session" and "any tenant's session". It must fail
+    # CLOSED: a session row with no workspace_id recorded is not proof it is
+    # the caller's own, and skipping the check on that basis handed the
+    # full diagnostics payload (channel, actor identity, timestamps,
+    # metadata) to any authenticated caller who could name/guess a
+    # session_id belonging to another tenant.
     session_workspace_id = str((payload.get("session") or {}).get("workspace_id") or "").strip()
-    if session_workspace_id and session_workspace_id != resolved_workspace_id:
+    if session_workspace_id != resolved_workspace_id:
         raise HTTPException(status_code=403, detail="Session is not in the requested workspace.")
     return payload
 

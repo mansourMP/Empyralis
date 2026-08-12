@@ -4,7 +4,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
-from server_modules.auth import enforce_workspace_access
+from server_modules.auth import current_user_has_auth_admin_access, enforce_workspace_access
 from server_modules import client_identity_service, provider_catalog_service, request_window_quota_adapter
 from server_modules import channel_lane_contract_service, connection_oauth_service
 from server_modules.runtime_common import require_admin_api_key, require_api_key
@@ -12,9 +12,12 @@ from server_modules.runtime_models import (
     ConnectorPatchRequest,
     CredentialUpsertRequest,
     ProviderProfileUpsertRequest,
+    TelegramAutopilotTestRequest,
+    TelegramSendRequest,
     ToolContractUpdateRequest,
     VaultExportRequest,
     VaultImportRequest,
+    VaultRotateKeyRequest,
 )
 from server_modules import connectors_core as core
 from server_modules import connectors_actions as actions
@@ -257,9 +260,121 @@ async def update_tool_contract(
     body: ToolContractUpdateRequest,
     current_user=Depends(require_admin_api_key),
 ):
+    # TOOL_STATE is one process-wide dict with no per-workspace/tenant axis
+    # (connectors_core.update_tool_contract_state -> runtime_policy.set_tool_enabled),
+    # so `require_admin_api_key` (any owner of any tenant, a role check and
+    # not a tenancy check) let any customer disable/enable a tool platform-wide.
+    # There is no workspace to scope this to -- the correct gate is a real
+    # platform operator, matching has_platform_fleet_operator_access's own
+    # "any signed-in owner is not an operator" rule.
+    if not current_user_has_auth_admin_access(current_user):
+        raise HTTPException(status_code=403, detail="Operator access required to change platform tool availability.")
     if body is None:
         raise HTTPException(status_code=422, detail="Tool contract payload is required.")
     return await core.update_tool_contract_state(tool_id, body.enabled)
+
+
+async def rotate_vault_key_route(body: VaultRotateKeyRequest, current_user=Depends(require_admin_api_key)):
+    # core.rotate_vault_key re-encrypts and rotates the passphrase for EVERY
+    # credential row across every tenant -- a platform-wide action that
+    # `require_admin_api_key` alone (any owner of any tenant) does not
+    # actually authorize. Same fix as update_tool_contract above.
+    if not current_user_has_auth_admin_access(current_user):
+        raise HTTPException(status_code=403, detail="Operator access required to rotate the vault key.")
+    return await core.rotate_vault_key(body)
+
+
+async def telegram_send_message_route(body: TelegramSendRequest, current_user=Depends(require_api_key)):
+    # actions.telegram_send_message took no current_user at all: workspace_id
+    # was a bare caller-supplied field consumed by TelegramTerminalService.
+    # _select_connector -> vault_helpers.workspace_visible, which is a pure
+    # string-equality filter with no session awareness of its own (it exists
+    # to filter an ALREADY-authorized scope, not to authorize one). Any
+    # authenticated user of any tenant could name another workspace's
+    # workspace_id and have Empyralis send an arbitrary message through that
+    # workspace's own Telegram bot token to a chat_id of the caller's choosing.
+    # CONFIRMED live against a seeded two-tenant stack, 2026-08-13.
+    body.workspace_id = enforce_workspace_access(current_user, body.workspace_id, minimum_role="member")
+    return await actions.telegram_send_message(body)
+
+
+async def telegram_autopilot_test_message_route(body: TelegramAutopilotTestRequest, current_user=Depends(require_api_key)):
+    # Same root cause as telegram_send_message_route above -- same
+    # TelegramTerminalService.handle_autopilot_test_message -> _select_connector
+    # path, same missing authorization.
+    body.workspace_id = enforce_workspace_access(current_user, body.workspace_id, minimum_role="member")
+    return await actions.telegram_autopilot_test_message(body)
+
+
+def _authorize_provider_scope(
+    current_user: Optional[dict],
+    *,
+    workspace_id: Optional[str],
+    profile_id: Optional[str],
+) -> str:
+    """Resolve the workspace a provider probe/model-list call is allowed to
+    read secrets for, and always return the ENFORCED value -- never the raw
+    caller-supplied one -- so a downstream `resolve_vault_credential`/
+    `PROVIDER_PROFILES` lookup can only ever see the caller's own workspace.
+
+    `provider_probe`/`get_provider_models` (connectors_core.py) took a bare
+    caller-supplied `workspace_id`/`profile_id` with no `current_user` at
+    all: `profile_id` alone resolves a profile from ANY workspace (fetch by
+    id, no ownership check), and a caller-supplied `workspace_id` was never
+    checked against the caller's own memberships before being handed to
+    `resolve_vault_credential`, whose own `workspace_visible` check treats a
+    missing/omitted `workspace_id` as "visible from everywhere". Either path
+    let any signed-in owner decrypt and make a live provider call with
+    another tenant's stored API credential.
+    """
+    if profile_id:
+        owning_workspace_id = core.get_provider_profile_workspace_id(profile_id)
+        return enforce_workspace_access(current_user, owning_workspace_id, minimum_role="owner")
+    return enforce_workspace_access(current_user, workspace_id, minimum_role="owner")
+
+
+async def probe_provider_route(
+    provider: str,
+    credential_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    current_user=Depends(require_admin_api_key),
+):
+    resolved_workspace_id = _authorize_provider_scope(current_user, workspace_id=workspace_id, profile_id=profile_id)
+    return await core.probe_provider(provider, credential_id=credential_id, workspace_id=resolved_workspace_id, profile_id=profile_id)
+
+
+async def get_provider_models_route(
+    provider: str,
+    credential_id: Optional[str] = None,
+    workspace_id: Optional[str] = None,
+    profile_id: Optional[str] = None,
+    current_user=Depends(require_admin_api_key),
+):
+    resolved_workspace_id = _authorize_provider_scope(current_user, workspace_id=workspace_id, profile_id=profile_id)
+    return await core.get_provider_models(provider, credential_id=credential_id, workspace_id=resolved_workspace_id, profile_id=profile_id)
+
+
+async def enable_provider_profile_route(profile_id: str, current_user=Depends(require_admin_api_key)):
+    # PROVIDER_PROFILES.get(profile_id) is a global fetch-by-id with no
+    # ownership check at all -- any owner-role caller could enable/disable/
+    # delete another tenant's failover profile. Resolve the profile's real
+    # owning workspace and authorize against THAT before mutating it.
+    owning_workspace_id = core.get_provider_profile_workspace_id(profile_id)
+    enforce_workspace_access(current_user, owning_workspace_id, minimum_role="owner")
+    return await core.enable_provider_profile(profile_id)
+
+
+async def disable_provider_profile_route(profile_id: str, current_user=Depends(require_admin_api_key)):
+    owning_workspace_id = core.get_provider_profile_workspace_id(profile_id)
+    enforce_workspace_access(current_user, owning_workspace_id, minimum_role="owner")
+    return await core.disable_provider_profile(profile_id)
+
+
+async def delete_provider_profile_route(profile_id: str, current_user=Depends(require_admin_api_key)):
+    owning_workspace_id = core.get_provider_profile_workspace_id(profile_id)
+    enforce_workspace_access(current_user, owning_workspace_id, minimum_role="owner")
+    return await core.delete_provider_profile(profile_id)
 
 
 async def list_credentials_vault(
@@ -541,9 +656,9 @@ async def complete_app_oauth_for_mcp(
 
 router.add_api_route("/apps/{provider}/oauth/complete", complete_app_oauth_for_mcp, methods=['POST'])
 router.add_api_route("/providers/profiles", provider_profiles, methods=['GET', 'POST'])
-router.add_api_route("/providers/profiles/{profile_id}/enable", core.enable_provider_profile, methods=['POST'], dependencies=admin_deps)
-router.add_api_route("/providers/profiles/{profile_id}/disable", core.disable_provider_profile, methods=['POST'], dependencies=admin_deps)
-router.add_api_route("/providers/profiles/{profile_id}", core.delete_provider_profile, methods=['DELETE'], dependencies=admin_deps)
+router.add_api_route("/providers/profiles/{profile_id}/enable", enable_provider_profile_route, methods=['POST'])
+router.add_api_route("/providers/profiles/{profile_id}/disable", disable_provider_profile_route, methods=['POST'])
+router.add_api_route("/providers/profiles/{profile_id}", delete_provider_profile_route, methods=['DELETE'])
 router.add_api_route("/providers/profiles/health", provider_profiles_health, methods=['GET'])
 router.add_api_route("/tools/contracts", core.get_tool_contracts, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/tools/contracts/{tool_id}", update_tool_contract, methods=['PUT'], dependencies=admin_deps)
@@ -556,8 +671,8 @@ router.add_api_route("/providers/gemini/local-cli/status", core.get_gemini_local
 router.add_api_route("/providers/test", core.test_provider_credentials, methods=['POST'], dependencies=admin_deps)
 router.add_api_route("/providers/health-check", providers_health_check, methods=['GET'], dependencies=admin_deps)
 router.add_api_route("/providers/model-aliases", core.get_model_alias_catalog, methods=['GET'], dependencies=[Depends(require_api_key)])
-router.add_api_route("/providers/{provider}/probe", core.probe_provider, methods=['POST'], dependencies=admin_deps)
-router.add_api_route("/providers/{provider}/models", core.get_provider_models, methods=['GET'], dependencies=admin_deps)
+router.add_api_route("/providers/{provider}/probe", probe_provider_route, methods=['POST'])
+router.add_api_route("/providers/{provider}/models", get_provider_models_route, methods=['GET'])
 router.add_api_route("/credentials/vault", list_credentials_vault, methods=['GET'])
 router.add_api_route("/connectors", core.list_connectors, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/connectors/vault", list_connectors_vault, methods=['GET'])
@@ -575,8 +690,8 @@ router.add_api_route("/channels/telegram/autopilot/status", actions.telegram_aut
 router.add_api_route("/channels/whatsapp/autopilot/status", actions.whatsapp_autopilot_status, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/channels/discord/bot-runtime/status", discord_bot_runtime_status, methods=['GET'], dependencies=[Depends(require_api_key)])
 router.add_api_route("/channels/autopilot/profiles", actions.list_autopilot_profiles, methods=['GET'], dependencies=[Depends(require_api_key)])
-router.add_api_route("/channels/telegram/send", actions.telegram_send_message, methods=['POST'], dependencies=[Depends(require_api_key)])
-router.add_api_route("/channels/telegram/autopilot/test-message", actions.telegram_autopilot_test_message, methods=['POST'], dependencies=[Depends(require_api_key)])
+router.add_api_route("/channels/telegram/send", telegram_send_message_route, methods=['POST'])
+router.add_api_route("/channels/telegram/autopilot/test-message", telegram_autopilot_test_message_route, methods=['POST'])
 router.add_api_route("/connectors/slack/oauth/callback", slack_oauth_callback, methods=['POST'])
 router.add_api_route("/connectors/vault", create_connector_vault, methods=['POST'])
 router.add_api_route("/connectors/vault/{credential_id}", update_connector_vault, methods=['PATCH'])
@@ -585,6 +700,6 @@ router.add_api_route("/connectors/vault/{credential_id}", delete_connector_vault
 router.add_api_route("/credentials/vault", create_vault_credential, methods=['POST'])
 router.add_api_route("/credentials/vault/{credential_id}", delete_vault_credential, methods=['DELETE'])
 router.add_api_route("/credentials/vault/{credential_id}/test", test_vault_credential, methods=['POST'])
-router.add_api_route("/credentials/vault/rotate-key", core.rotate_vault_key, methods=['POST'], dependencies=admin_deps)
+router.add_api_route("/credentials/vault/rotate-key", rotate_vault_key_route, methods=['POST'])
 router.add_api_route("/credentials/vault/export", export_vault_credentials, methods=['POST'])
 router.add_api_route("/credentials/vault/import", import_vault_credentials, methods=['POST'])

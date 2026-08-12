@@ -3,6 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import threading
 
+from fastapi import HTTPException
+
+from server_modules.auth import current_user_has_auth_admin_access
 from server_modules.schemas import (
     AppCaptainBridgeRequest,
     AppRuntimeBridgeRequest,
@@ -164,7 +167,18 @@ def register_app_registry_routes(app) -> None:
         return {"item": app_item}
 
     @app.post("/apps/install", dependencies=[Depends(require_api_key)])
-    async def install_app(body: WorkflowCreate):
+    async def install_app(body: WorkflowCreate, current_user=Depends(require_api_key)):
+        # ORION_APP_REGISTRY_FILE (_load_app_registry/_save_app_registry) is
+        # ONE process-wide store with no workspace_id/tenant_id axis at all
+        # -- WorkflowCreate/Update/Delete carry no such field either -- so a
+        # bare `require_api_key` (any authenticated user of any tenant) let
+        # any customer install/uninstall/update an app for the ENTIRE
+        # platform, visible to every other tenant's /apps/installed. There
+        # is no per-tenant scope to enforce here, so (matching
+        # update_tool_contract/rotate_vault_key_route's fix for the same
+        # shape) the gate is real platform-operator access, not "logged in".
+        if not current_user_has_auth_admin_access(current_user):
+            raise HTTPException(status_code=403, detail="Operator access required to install an app.")
         payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
         app_id = str(payload.get("app_id") or "").strip()
         if not app_id:
@@ -181,7 +195,9 @@ def register_app_registry_routes(app) -> None:
         return {"status": "ok", "app": app_item}
 
     @app.post("/apps/uninstall", dependencies=[Depends(require_api_key)])
-    async def uninstall_app(body: WorkflowDelete):
+    async def uninstall_app(body: WorkflowDelete, current_user=Depends(require_api_key)):
+        if not current_user_has_auth_admin_access(current_user):
+            raise HTTPException(status_code=403, detail="Operator access required to uninstall an app.")
         payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
         app_id = str(payload.get("app_id") or "").strip()
         if not app_id:
@@ -196,7 +212,9 @@ def register_app_registry_routes(app) -> None:
         return {"status": "ok", "app": app_item}
 
     @app.post("/apps/update", dependencies=[Depends(require_api_key)])
-    async def update_app(body: WorkflowUpdate):
+    async def update_app(body: WorkflowUpdate, current_user=Depends(require_api_key)):
+        if not current_user_has_auth_admin_access(current_user):
+            raise HTTPException(status_code=403, detail="Operator access required to update an app.")
         payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
         app_id = str(payload.get("app_id") or "").strip()
         if not app_id:
