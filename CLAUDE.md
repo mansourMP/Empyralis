@@ -2500,3 +2500,107 @@ fixed: `browse_google_connector_drive`/`create_google_connector_document`'s
 minor policy-check inconsistency, and the shared Discord/Telegram/WhatsApp
 autopilot bot status routes (appear to be single shared platform-level bot
 state, not per-tenant secrets, but not proven either way).
+
+**A real `script-src`/`style-src` CSP now ships — nonce-based, owned by
+`frontend/proxy.ts`, never by nginx.** `sec/content-security-policy`,
+2026-08-13. nginx's `frame-ancestors 'none'` (2026-08-12) is GONE from
+`deploy/nginx-empyralis.conf` — a nonce has to match what Next.js actually
+rendered for THIS request, which nginx cannot know, and two layers each
+emitting `Content-Security-Policy` would INTERSECT rather than override, a
+confusing failure mode. One owner: `frontend/lib/security/
+content-security-policy.ts` builds the policy (data-first —
+`buildContentSecurityPolicyDirectives` returns a `Record<string,string[]>`
+so a structural test can assert per-directive rather than regex-parsing a
+joined string), `frontend/proxy.ts` mints a fresh nonce every request via
+`generateNonce()` and sets `Content-Security-Policy` on both the outgoing
+request headers (so Next's renderer can extract the nonce and apply it to
+its own framework-generated scripts/styles) and the response headers (so
+the browser enforces it) — every return path in `proxy()` goes through one
+`withCsp`/`nextWithCsp` helper so a future branch can't forget it, the same
+"guard the narrow waist" shape as `_guard_sage_visible_reply` above.
+
+```
+script-src 'self' 'nonce-<per-request>' 'strict-dynamic'
+style-src  'self' 'nonce-<per-request>'
+img-src    'self' data: blob: https:      <- 3 documented widenings, see below
+connect-src 'self'                        <- grepped: no browser-side WebSocket exists
+frame-src  https:                         <- hosted mini-app iframes only, see below
+object-src 'none' | base-uri 'self' | form-action 'self' | frame-ancestors 'none'
+```
+
+`'unsafe-eval'`/`'unsafe-inline'` appear ONLY when `isDev` (`NODE_ENV ===
+'development'`) — Next's own docs: React's dev-mode error-stack
+reconstruction needs `eval`, production needs neither. Verified against a
+REAL `next build && next start` run (not `next dev`, which would have
+masked this): zero console violations across ~30 authenticated screens, so
+`'unsafe-eval'` is confirmed NOT required in production by anything in this
+app. `app/layout.tsx`'s hand-written inline theme-bootstrap `<script>` (the
+pre-hydration dark/light flash guard) gets the nonce explicitly via
+`(await headers()).get('x-nonce')` — it is NOT framework-generated, so
+Next's automatic nonce application does not reach it, and this was the one
+spot in the whole app that needed a manual fix.
+
+**Nonces require dynamic rendering on every page, and this app already has
+that, for free, everywhere.** `RootLayout` calls `loadAccountShellSessionSafely()`
+-> `headers()` on every request, and that one call — sitting in the ROOT
+layout — opts literally every route in the app into dynamic rendering.
+`next build`'s own route table confirms it: every page is `ƒ` (dynamic);
+the only `○` (static) entry is `/healthz`, a `route.ts` JSON endpoint with
+no HTML and nothing to nonce. So the nonce-based CSP required no
+`await connection()` calls, no route-by-route audit, and does not risk a
+silently-broken static page — a rare case where a pre-existing auth
+architecture accidentally already paid for a security requirement.
+
+Three directives are DELIBERATE, NARROW widenings past `'self'`, each with
+a written reason, never loosened further:
+- **`img-src` carries `https:`** because `lib/workspace/fleet/markdown-lite.tsx`'s
+  `safeDocumentImageSrc` allows any http(s) URL BY DESIGN — pasting an
+  external image link into a document is the product, not a bug to route
+  around. `data:` is the WhatsApp pairing QR code (`qrcode`'s `toDataURL`,
+  client-side). `blob:` is local file previews before upload
+  (`DocumentDetailView.tsx`'s `URL.createObjectURL`). Verified live: an
+  `https://upload.wikimedia.org/...png` pasted into a real document
+  rendered with zero console violations.
+- **`frame-src` carries `https:`**, and nothing narrower is possible.
+  `lib/workspace/hosted-mini-app-surface.tsx` embeds a PUBLISHER-CONTROLLED
+  iframe (`manifest.hosted_app.hosted_url`) that this app cannot enumerate
+  in advance — that is the hosted-mini-app feature. The embed already
+  carries its own defenses this policy doesn't duplicate: a `sandbox`
+  attribute and an `allow` allowlist from the manifest, plus
+  origin-checked `postMessage` (`allowedOrigins.has(event.origin)`) and a
+  launch-token bridge contract enforced server-side. NOT verified live —
+  no hosted mini-app was configured in the throwaway test workspace this
+  pass seeded, so this is a code-reading verification, not an observed one.
+- **`connect-src` stays exactly `'self'`**, no `wss:`/`ws:`. Grepped the
+  whole frontend for `new WebSocket(`: zero results. Every realtime surface
+  (trace/notifications/channel-events/turn streams) uses `EventSource`, and
+  `resolveWorkspaceApiBaseUrl()` always resolves to `window.location.origin`
+  in the browser — there is no direct-from-browser call to any other
+  origin, including the gateway/hardware pages (their WebSocket traffic is
+  box<->cloud, never browser<->box). Do not add `wss:` speculatively; if a
+  future feature opens a browser-side socket, that PR adds the source with
+  its own written reason, same as the three above.
+
+**Verification was end-to-end in a real production build, not `next dev`.**
+Seeded a throwaway account+workspace via `frontend/scripts/start-e2e-backend.sh`
+(disposable Postgres db, never the founder's), ran `next build && next
+start` (NODE_ENV=production, so the dev-only CSP relaxations are absent),
+and walked signup, login, email verification, the agent-create wizard (all
+4 steps), agent Chat (a real message send through the SSE turn stream)
+/Overview/Work/Memory, every Configure sub-panel (Model, Capabilities,
+Skills, Channels — the full card grid of 20 brand icons plus a card's
+detail panel, Connectors — 69 icons, Tools, Hardware), Projects
+list/detail, Tasks (composer, list, detail, inline title edit, board),
+Documents (composer, detail, raw-markdown editing with autosave, the "⋯"
+menu, revision history, a live external image render), Settings/Workspace
+(members, invite form), Settings/Connections (hardware provider cards),
+Billing/Usage, Inbox, Conversations, ⌘K, and a hard reload in both light
+and dark theme — zero `Content-Security-Policy`/`Refused` console entries
+anywhere. The structural test
+(`frontend/lib/security/content-security-policy.test.ts`, wired into
+`npm run test:unit`) asserts the directive SHAPE (nonce present, no
+`unsafe-inline`/`unsafe-eval` in prod, `object-src 'none'`, `frame-ancestors
+'none'` survives the move from nginx) rather than behavior, per this
+repo's own established pattern — proven to actually catch a regression by
+running the same assertions against the OLD `frame-ancestors`-only nginx
+string and watching them fail.

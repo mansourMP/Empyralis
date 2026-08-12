@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+import {
+  CSP_NONCE_REQUEST_HEADER,
+  CSP_RESPONSE_HEADER,
+  buildContentSecurityPolicy,
+  generateNonce,
+} from '@/lib/security/content-security-policy';
+
 const AUTH_ACCESS_COOKIE_NAME = 'empyralis_access_token';
 const AUTH_REFRESH_COOKIE_NAME = 'empyralis_refresh_token';
 const AUTH_CSRF_COOKIE_NAME = 'empyralis_csrf_token';
@@ -134,20 +141,56 @@ function shouldHandlePath(pathname: string): boolean {
   return true;
 }
 
+/**
+ * CSP + nonce wiring lives here (rather than in a second proxy/middleware
+ * file) because Next.js only runs ONE proxy per request, and this one
+ * already touches every request's headers for the auth-refresh race fix
+ * above. `deploy/nginx-empyralis.conf` deliberately no longer emits a
+ * Content-Security-Policy header at all — two CSP headers on one response
+ * INTERSECT rather than override, which is a confusing failure mode to
+ * debug, and only this layer knows the nonce a given render will use.
+ *
+ * The nonce/CSP header is set on BOTH the outgoing request headers (so
+ * Next.js's own renderer can read the CSP header off the request and
+ * extract+apply the nonce to its framework-generated scripts/styles, per
+ * https://nextjs.org/docs/app/guides/content-security-policy) and the
+ * response headers (so the browser enforces it). Every return path below
+ * goes through `withCsp` so a future added branch can't forget it.
+ */
+function cspRequestHeaders(request: NextRequest, nonce: string, csp: string): Headers {
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set(CSP_NONCE_REQUEST_HEADER, nonce);
+  requestHeaders.set(CSP_RESPONSE_HEADER, csp);
+  return requestHeaders;
+}
+
 export async function proxy(request: NextRequest) {
+  const nonce = generateNonce();
+  const csp = buildContentSecurityPolicy({ nonce, isDev: process.env.NODE_ENV === 'development' });
+  const withCsp = (response: NextResponse): NextResponse => {
+    response.headers.set(CSP_RESPONSE_HEADER, csp);
+    return response;
+  };
+  const nextWithCsp = (extraRequestHeaders?: Headers): NextResponse =>
+    withCsp(
+      NextResponse.next({
+        request: { headers: extraRequestHeaders ?? cspRequestHeaders(request, nonce, csp) },
+      }),
+    );
+
   if (request.method !== 'GET' || !shouldHandlePath(request.nextUrl.pathname)) {
-    return NextResponse.next();
+    return nextWithCsp();
   }
 
   const refreshToken = request.cookies.get(AUTH_REFRESH_COOKIE_NAME)?.value;
   if (!refreshToken || !shouldRefreshAccessToken(request.cookies.get(AUTH_ACCESS_COOKIE_NAME)?.value)) {
-    return NextResponse.next();
+    return nextWithCsp();
   }
 
   const csrfToken = request.cookies.get(AUTH_CSRF_COOKIE_NAME)?.value;
   const upstreamBaseUrl = controlPlaneBaseUrl();
   if (!csrfToken || !upstreamBaseUrl) {
-    return NextResponse.next();
+    return nextWithCsp();
   }
 
   try {
@@ -166,15 +209,15 @@ export async function proxy(request: NextRequest) {
     });
 
     if (!refreshResponse.ok) {
-      return NextResponse.next();
+      return nextWithCsp();
     }
 
     const setCookieHeaders = readSetCookieHeaders(refreshResponse.headers);
     if (setCookieHeaders.length === 0) {
-      return NextResponse.next();
+      return nextWithCsp();
     }
 
-    const requestHeaders = new Headers(request.headers);
+    const requestHeaders = cspRequestHeaders(request, nonce, csp);
     let cookieHeader = requestHeaders.get('cookie') || '';
     for (const cookie of setCookieHeaders) {
       const parsedCookie = setCookieNameValue(cookie);
@@ -184,17 +227,19 @@ export async function proxy(request: NextRequest) {
     }
     requestHeaders.set('cookie', cookieHeader);
 
-    const nextResponse = NextResponse.next({
-      request: {
-        headers: requestHeaders,
-      },
-    });
+    const nextResponse = withCsp(
+      NextResponse.next({
+        request: {
+          headers: requestHeaders,
+        },
+      }),
+    );
     for (const cookie of setCookieHeaders) {
       nextResponse.headers.append('set-cookie', cookie);
     }
     return nextResponse;
   } catch {
-    return NextResponse.next();
+    return nextWithCsp();
   }
 }
 
