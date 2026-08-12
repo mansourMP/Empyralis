@@ -162,7 +162,11 @@ class ProjectTasksCrudTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_create_task_inserts_and_returns_row(self):
-        pool = _QueuedFakePool(fetchrow_results=[_task_row()])
+        # Two sequential fetchrow calls: the atomic task_seq allocation,
+        # then the INSERT itself -- see
+        # test_create_task_allocates_a_sequential_number below for the
+        # allocation's own dedicated coverage.
+        pool = _QueuedFakePool(fetchrow_results=[{"task_seq": 1}, _task_row(number=1)])
         with patch(
             "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
             new=AsyncMock(return_value=pool),
@@ -179,11 +183,66 @@ class ProjectTasksCrudTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task["id"], "task-1")
         self.assertEqual(task["status"], "todo")
         self.assertEqual(task["assignee_agent_id"], None)
-        self.assertEqual(len(pool.fetchrow_calls), 1)
-        query, args = pool.fetchrow_calls[0]
+        self.assertEqual(len(pool.fetchrow_calls), 2)
+        query, args = pool.fetchrow_calls[1]
         self.assertIn("INSERT INTO project_tasks", query)
         self.assertEqual(args[3], "proj-1")
         self.assertEqual(args[4], "Ship the widget")
+
+    async def test_create_task_allocates_a_sequential_number(self):
+        """migrations/add_task_sequence_numbers.sql built the schema (task_
+        key/task_seq on projects, number on project_tasks) and described
+        exactly this allocation in its own comments, but nothing ever wrote
+        the Python to do it -- every task in the product rendered a random
+        hex slice of its own id (taskShortId's "honest ... until the
+        backend has a real per-project sequence number") forever. This
+        proves create_task actually allocates one: an atomic
+        UPDATE ... RETURNING task_seq against the owning project, scoped by
+        id (not by tenant/workspace column names that would collide with
+        project_tasks' own in a join), whose result becomes the `number`
+        bound into the INSERT -- and that the row handed back to the
+        caller carries it."""
+        pool = _QueuedFakePool(fetchrow_results=[{"task_seq": 7}, _task_row(number=7)])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.create_task(
+                tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1", title="Ship the widget",
+            )
+
+        self.assertEqual(len(pool.fetchrow_calls), 2)
+        allocate_query, allocate_args = pool.fetchrow_calls[0]
+        self.assertIn("UPDATE projects SET task_seq = task_seq + 1", allocate_query)
+        self.assertIn("RETURNING task_seq", allocate_query)
+        self.assertEqual(allocate_args, ("proj-1",))
+
+        insert_query, insert_args = pool.fetchrow_calls[1]
+        self.assertIn("INSERT INTO project_tasks", insert_query)
+        self.assertIn("number", insert_query)
+        # The allocated task_seq (7) is what got bound as `number` -- not
+        # recomputed, not defaulted.
+        self.assertEqual(insert_args[-1], 7)
+        self.assertEqual(task["number"], 7)
+
+    async def test_create_task_number_is_none_when_allocation_returns_nothing(self):
+        """A project row that vanished between the allocation UPDATE and
+        this call (or a database predating the migration, where the UPDATE
+        itself would fail loudly rather than return nothing) must not raise
+        trying to allocate a number -- the task still gets created, just
+        without one, same deploy-before-migrate posture every sibling
+        column on this row already takes."""
+        pool = _QueuedFakePool(fetchrow_results=[None, _task_row(number=None)])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.create_task(
+                tenant_id="tenant-1", workspace_id="ws-1", project_id="proj-1", title="Ship the widget",
+            )
+        self.assertIsNone(task["number"])
+        _query, insert_args = pool.fetchrow_calls[1]
+        self.assertIsNone(insert_args[-1])
 
     async def test_get_task_scopes_by_tenant_and_workspace(self):
         pool = _QueuedFakePool(fetchrow_results=[_task_row()])
@@ -359,7 +418,7 @@ class TaskPriorityTests(unittest.IsolatedAsyncioTestCase):
         that 0 is written explicitly rather than left to the column
         default -- so the value is the same whether or not the database has
         had the migration's DEFAULT applied."""
-        pool = _QueuedFakePool(fetchrow_results=[_task_row()])
+        pool = _QueuedFakePool(fetchrow_results=[{"task_seq": 1}, _task_row(number=1)])
         with patch(
             "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
             new=AsyncMock(return_value=pool),
@@ -369,13 +428,13 @@ class TaskPriorityTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(task["priority"], 0)
         self.assertEqual(task["priority_label"], "none")
-        _query, args = pool.fetchrow_calls[0]
+        _query, args = pool.fetchrow_calls[1]
         self.assertEqual(args[8], 0)
 
     async def test_create_task_accepts_every_valid_priority(self):
         for priority in project_tasks_service.TASK_PRIORITY_ORDER:
             with self.subTest(priority=priority):
-                pool = _QueuedFakePool(fetchrow_results=[_task_row(priority=priority)])
+                pool = _QueuedFakePool(fetchrow_results=[{"task_seq": 1}, _task_row(priority=priority, number=1)])
                 with patch(
                     "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
                     new=AsyncMock(return_value=pool),
@@ -385,7 +444,7 @@ class TaskPriorityTests(unittest.IsolatedAsyncioTestCase):
                         title="Ship the widget", priority=priority,
                     )
                 self.assertEqual(task["priority"], priority)
-                _query, args = pool.fetchrow_calls[0]
+                _query, args = pool.fetchrow_calls[1]
                 self.assertEqual(args[8], priority)
 
     async def test_update_task_accepts_every_valid_priority(self):

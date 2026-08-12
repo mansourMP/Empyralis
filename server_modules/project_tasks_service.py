@@ -212,7 +212,7 @@ _TASK_COLUMNS = (
     "id, tenant_id, workspace_id, project_id, title, description, status, priority, "
     "parent_task_id, assignee_agent_id, assignee_user_id, created_by, "
     "completed_by_user_id, completed_by_agent_id, completed_at, due_at, plan, "
-    "metadata, created_at, updated_at"
+    "metadata, created_at, updated_at, number"
 )
 
 # The rollup, computed IN THE SAME QUERY as the task itself -- never a
@@ -256,7 +256,13 @@ _TASK_ROLLUP_COLUMNS = (
     "COALESCE(rollup.subtask_done_count, 0) AS subtask_done_count, "
     "COALESCE(lbl.labels, '[]'::jsonb) AS labels, "
     "wake.wake_due_at AS pending_wake_due_at, "
-    "wake.delay_reason AS pending_wake_delay_reason"
+    "wake.delay_reason AS pending_wake_delay_reason, "
+    # The owning project's task_key (migrations/add_task_sequence_numbers.
+    # sql), denormalized onto every task row rather than threaded through as
+    # a separate prop down every list/board/detail component -- the same
+    # "one query, not N+1, and the reader never re-derives it" reasoning as
+    # every sibling rollup value on this row.
+    "proj.task_key AS project_task_key"
 )
 
 _TASK_ROLLUP_JOINS = """
@@ -300,6 +306,13 @@ _TASK_ROLLUP_JOINS = """
             ORDER BY w.created_at DESC
             LIMIT 1
         ) wake ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT proj.task_key
+            FROM projects proj
+            WHERE proj.id = project_tasks.project_id
+              AND proj.tenant_id = project_tasks.tenant_id
+              AND proj.workspace_id = project_tasks.workspace_id
+        ) proj ON TRUE
 """
 
 # The same rollup values for an INSERT/UPDATE ... RETURNING, where a LATERAL
@@ -345,7 +358,11 @@ _TASK_ROLLUP_RETURNING = """
                       AND w.trigger_kind IN ('task_assigned', 'task_commented')
                       AND w.status IN ('pending', 'claimed', 'retry_scheduled')
                     ORDER BY w.created_at DESC
-                    LIMIT 1) AS pending_wake_delay_reason
+                    LIMIT 1) AS pending_wake_delay_reason,
+                  (SELECT proj.task_key FROM projects proj
+                    WHERE proj.id = project_tasks.project_id
+                      AND proj.tenant_id = project_tasks.tenant_id
+                      AND proj.workspace_id = project_tasks.workspace_id) AS project_task_key
 """
 
 # The full RETURNING tail, assembled once. Appended by plain concatenation
@@ -610,6 +627,14 @@ def _row_to_task(row: Any) -> Optional[Dict[str, Any]]:
         "metadata": _coerce_metadata(r.get("metadata")),
         "created_at": str(r.get("created_at") or "") or None,
         "updated_at": str(r.get("updated_at") or "") or None,
+        # Per-project human-readable identifier (migrations/
+        # add_task_sequence_numbers.sql, e.g. combined with the owning
+        # project's task_key this renders as "GEN-12"). None on a task
+        # created before create_task started allocating one, or on a
+        # database predating the migration -- same deploy-before-migrate,
+        # no-key-means-absent posture every sibling column here takes.
+        "number": int(r["number"]) if r.get("number") is not None else None,
+        "project_task_key": str(r.get("project_task_key") or "").strip() or None,
     }
 
 
@@ -921,11 +946,27 @@ async def create_task(
         if resolved_created_by_display_name
         else None
     )
+    # Per-project sequence number (migrations/add_task_sequence_numbers.sql).
+    # Atomic UPDATE...RETURNING on the owning project's row -- Postgres
+    # serializes concurrent UPDATEs to the same row, so two tasks created in
+    # the same project at the same instant (agents do this) still get
+    # distinct numbers. Not wrapped in one explicit transaction with the
+    # INSERT below (see that migration's own allocation note): a failed
+    # INSERT after this succeeds would leave a gap, never a collision, and a
+    # gap in a sequence is cosmetic where a collision would not be.
+    allocated_number = await control_plane_repository.rls_fetchrow(
+        pool,
+        "UPDATE projects SET task_seq = task_seq + 1 WHERE id = $1 RETURNING task_seq",
+        project_id,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    resolved_number = int(allocated_number["task_seq"]) if allocated_number else None
     row = await control_plane_repository.rls_fetchrow(
         pool,
         """
-        INSERT INTO project_tasks (id, tenant_id, workspace_id, project_id, title, description, created_by, due_at, priority, parent_task_id, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, COALESCE($11::jsonb, '{}'::jsonb))
+        INSERT INTO project_tasks (id, tenant_id, workspace_id, project_id, title, description, created_by, due_at, priority, parent_task_id, metadata, number)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, COALESCE($11::jsonb, '{}'::jsonb), $12)
         RETURNING
         """ + _TASK_RETURNING_SQL,
         tid,
@@ -939,6 +980,7 @@ async def create_task(
         resolved_priority,
         resolved_parent_id,
         initial_metadata,
+        resolved_number,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
     )

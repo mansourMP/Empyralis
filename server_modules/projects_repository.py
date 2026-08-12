@@ -113,7 +113,39 @@ def _row_to_project(row: Any) -> Optional[Dict[str, Any]]:
         "default_gateway_id": str(metadata.get("default_gateway_id") or "").strip() or None,
         "created_at": str(r.get("created_at") or "") or None,
         "updated_at": str(r.get("updated_at") or "") or None,
+        # Per-project task identifier prefix (migrations/
+        # add_task_sequence_numbers.sql), e.g. "GEN" -- combined with a
+        # task's own `number` this renders as "GEN-12". None on a project
+        # created before create_project started allocating one, or on a
+        # database predating the migration.
+        "task_key": str(r.get("task_key") or "").strip() or None,
     }
+
+
+async def _unique_task_key(pool: Any, tenant_id: str, workspace_id: str, slug: str) -> str:
+    """Return a task_key unique within (tenant, workspace) -- Linear's `GEN`
+    shape, derived from the project's own slug. Same derivation and same
+    numeric-suffix dedup as migrations/add_task_sequence_numbers.sql's own
+    backfill loop, so a project made before vs. after this function existed
+    gets an identically-shaped key.
+    """
+    cleaned = re.sub(r"[^a-zA-Z0-9]", "", str(slug or "")).upper()
+    base_key = cleaned[:3] or "TSK"
+    rows = await control_plane_repository.rls_fetch(
+        pool,
+        "SELECT task_key FROM projects WHERE tenant_id = $1 AND workspace_id = $2",
+        tenant_id,
+        workspace_id,
+        tenant_id=tenant_id,
+        workspace_id=workspace_id,
+    )
+    existing = {str(r["task_key"] or "").strip() for r in (rows or [])}
+    if base_key not in existing:
+        return base_key
+    n = 2
+    while f"{base_key}{n}" in existing:
+        n += 1
+    return f"{base_key}{n}"
 
 
 async def _unique_slug(pool: Any, tenant_id: str, workspace_id: str, base: str) -> str:
@@ -150,7 +182,7 @@ async def list_projects(
         pool,
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
-               is_default, archived, metadata, created_at, updated_at
+               is_default, archived, metadata, created_at, updated_at, task_key
         FROM projects
         WHERE tenant_id = $1
           AND workspace_id = $2
@@ -181,7 +213,7 @@ async def get_project(
         pool,
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
-               is_default, archived, metadata, created_at, updated_at
+               is_default, archived, metadata, created_at, updated_at, task_key
         FROM projects
         WHERE tenant_id = $1 AND workspace_id = $2 AND id = $3
         """,
@@ -219,6 +251,7 @@ async def create_project(
         )
     base_slug = _slugify(slug or name, fallback="project")
     final_slug = await _unique_slug(pool, tenant_id, workspace_id, base_slug)
+    task_key = await _unique_task_key(pool, tenant_id, workspace_id, final_slug)
     pid = str(project_id or "").strip() or _new_project_id()
     # Icon + tint assigned once, here, from the new id — never recomputed
     # once stored (a rename must not visually reshuffle the project).
@@ -230,10 +263,10 @@ async def create_project(
     row = await control_plane_repository.rls_fetchrow(
         pool,
         """
-        INSERT INTO projects (id, tenant_id, workspace_id, name, slug, description, is_default, metadata)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+        INSERT INTO projects (id, tenant_id, workspace_id, name, slug, description, is_default, metadata, task_key)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
         RETURNING id, tenant_id, workspace_id, name, slug, description,
-                  is_default, archived, metadata, created_at, updated_at
+                  is_default, archived, metadata, created_at, updated_at, task_key
         """,
         pid,
         tenant_id,
@@ -243,6 +276,7 @@ async def create_project(
         str(description or "").strip(),
         bool(is_default),
         json.dumps(identity),
+        task_key,
         tenant_id=tenant_id,
         workspace_id=workspace_id,
     )
@@ -313,7 +347,7 @@ async def ensure_default_project(
         pool,
         """
         SELECT id, tenant_id, workspace_id, name, slug, description,
-               is_default, archived, metadata, created_at, updated_at
+               is_default, archived, metadata, created_at, updated_at, task_key
         FROM projects
         WHERE tenant_id = $1 AND workspace_id = $2 AND is_default = TRUE
         ORDER BY created_at ASC

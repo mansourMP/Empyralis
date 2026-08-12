@@ -191,14 +191,18 @@ def _call(tool_name: str, arguments: dict, *, pool: _QueuedFakePool, agent_id: s
 class ProjectTaskNativeToolTests(unittest.TestCase):
     def test_create_scopes_to_callers_own_project(self):
         pool = _QueuedFakePool(
-            fetchrow_results=[{"project_id": "proj-1"}, _task_row()],
+            # agent_project_id's lookup, create_task's own task_seq
+            # allocation (migrations/add_task_sequence_numbers.sql), then
+            # the INSERT itself.
+            fetchrow_results=[{"project_id": "proj-1"}, {"task_seq": 1}, _task_row()],
         )
         result = _call("project_task__create", {"title": "Draft the summary"}, pool=pool)
         self.assertTrue(result["ok"])
         self.assertEqual(result["task"]["project_id"], "proj-1")
         # agent_project_id's lookup ran before create_task's INSERT.
         self.assertIn("workspace_agent_installs", pool.fetchrow_calls[0][0])
-        self.assertIn("INSERT INTO project_tasks", pool.fetchrow_calls[1][0])
+        self.assertIn("UPDATE projects SET task_seq", pool.fetchrow_calls[1][0])
+        self.assertIn("INSERT INTO project_tasks", pool.fetchrow_calls[2][0])
 
     def test_create_requires_title(self):
         pool = _QueuedFakePool(fetchrow_results=[{"project_id": "proj-1"}])
@@ -428,7 +432,7 @@ class ProjectTaskPriorityReachabilityTests(unittest.TestCase):
 
     def test_agent_can_create_a_task_at_urgent(self):
         pool = _QueuedFakePool(
-            fetchrow_results=[{"project_id": "proj-1"}, _task_row(priority=1)],
+            fetchrow_results=[{"project_id": "proj-1"}, {"task_seq": 1}, _task_row(priority=1)],
         )
         result = _call(
             "project_task__create", {"title": "Prod is down", "priority": 1}, pool=pool,

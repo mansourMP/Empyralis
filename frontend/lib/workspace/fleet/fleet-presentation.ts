@@ -117,6 +117,11 @@ export type AgentSummary = {
   // detail page does, not just hardwareAccess/preferredGatewayId.
   modelConfig: Record<string, any> | null;
   lastActivity: string | null;
+  /** Short verb ("Configured", "Created", ...) describing lastActivity —
+   *  the same event fleet_tools' activity feed names. Card face pairs it
+   *  with a relative time (timeAgo(lastActivity)) rather than rendering
+   *  either alone. */
+  activityPreview: string;
   tint: TintKey;
   stopped?: StoppedState;
 };
@@ -184,6 +189,7 @@ export function toAgentSummary(agent: FleetAgent, index: number): AgentSummary {
     preferredGatewayId: agent.preferred_gateway_id || "",
     modelConfig: agent.model_config || null,
     lastActivity: agent.last_activity || null,
+    activityPreview: agent.activity_preview || "",
     tint: tintForAgent(agent, index),
     stopped: agent.stopped,
   };

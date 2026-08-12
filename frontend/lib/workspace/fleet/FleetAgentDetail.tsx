@@ -919,7 +919,15 @@ function NowStrip({ agent, status }: { agent: FleetAgent | null; status: { tone:
     if (status.tone === "offline") {
       return agent.last_heartbeat ? `Offline · last heartbeat ${timeAgo(agent.last_heartbeat)}` : "Offline · never heartbeat";
     }
-    return status.label; // Error, Not deployed
+    if (status.tone === "error") {
+      // fleet_tools' hardware placement resolution always sets a reason
+      // alongside the "error" status (e.g. "No cloud provider is
+      // configured for this agent.") -- show it. A bare "Error" dot with
+      // no sentence is a dead end: the owner has no way to know what to
+      // fix short of reading server logs.
+      return agent.hardware_status_reason ? `Error · ${agent.hardware_status_reason}` : status.label;
+    }
+    return status.label; // Not deployed
   })();
   return (
     <div className="fleet-now-strip" aria-label="Current status">

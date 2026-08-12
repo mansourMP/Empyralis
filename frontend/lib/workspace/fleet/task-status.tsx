@@ -33,15 +33,32 @@ import { formatTime } from "./fleet-presentation";
 // ── Identity ────────────────────────────────────────────────────────────────
 
 /** A short, stable, human-quotable handle for a task, derived from its real
- *  id (`task_<16 hex>`) — NOT a new identifier and never persisted. Linear's
- *  board leads every card with one; this is the honest version of that until
- *  the backend has a real per-project sequence number.
+ *  id (`task_<16 hex>`) — NOT a new identifier and never persisted. Was the
+ *  only option before the backend allocated a real per-project sequence
+ *  number; kept as taskDisplayId's fallback for a task/project predating
+ *  that (migrations/add_task_sequence_numbers.sql) rather than deleted.
  *
  *  Lives here (not in TasksBoard, where it started) so the tab strip and the
  *  routed task page can name a task without importing the whole board. */
 export function taskShortId(id: string): string {
   const suffix = String(id || "").replace(/^task_/, "");
   return (suffix.slice(0, 6) || "------").toUpperCase();
+}
+
+/** Linear's `GEN-12` shape: the owning project's task_key + this task's own
+ *  sequence number, both denormalized onto the task row by
+ *  project_tasks_service._row_to_task. Falls back to the honest hex-slice
+ *  handle (taskShortId) when either half is missing -- a task created
+ *  before the backend started allocating numbers, or a project created
+ *  before create_project started assigning keys. Prefer this over
+ *  taskShortId directly at every call site; taskShortId itself stays
+ *  exported only as this function's fallback and for the "task not found"
+ *  screen, which has no task object to read a number off of. */
+export function taskDisplayId(task: Pick<FleetTask, "id" | "number" | "project_task_key">): string {
+  if (task.number != null && task.project_task_key) {
+    return `${task.project_task_key}-${task.number}`;
+  }
+  return taskShortId(task.id);
 }
 
 // ── Status ──────────────────────────────────────────────────────────────────

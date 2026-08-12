@@ -73,7 +73,7 @@ import {
   TaskWakeDeferralIcon,
   taskStatusLabel,
   taskPriority,
-  taskShortId,
+  taskDisplayId,
   TASK_PRIORITY_LABELS,
 } from "./task-status";
 import {
@@ -477,7 +477,7 @@ function GroupedRow({
         </span>
       ) : null}
 
-      {display.id ? <span className="fleet-glist-cell-id">{taskShortId(task.id)}</span> : null}
+      {display.id ? <span className="fleet-glist-cell-id">{taskDisplayId(task)}</span> : null}
 
       {/* The status ring is the same transparent-native-<select>-over-a-glyph
           control the board card uses, reusing its CSS verbatim: HTML5 drag has

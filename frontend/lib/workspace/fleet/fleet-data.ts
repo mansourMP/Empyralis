@@ -45,7 +45,12 @@ export type FleetAgent = {
   status: string;
   enabled: boolean;
   runtime_target: string;
-  hardware_status: "online" | "offline" | "unknown";
+  hardware_status: "online" | "offline" | "unknown" | "error";
+  /** Set whenever hardware_status is "error" (fleet_tools' hardware
+   *  placement resolution) -- e.g. "No cloud provider is configured for
+   *  this agent." Never guess at this from the bare status; a customer
+   *  reading "Error" with no sentence has no way to know what to fix. */
+  hardware_status_reason?: string | null;
   last_heartbeat: string | null;
   /** Run in progress on this agent's paired gateway/VPS worker, if any.
    * Only ever set for gateway/self-hosted agents with an active worker —
@@ -1113,6 +1118,17 @@ export type FleetTask = {
   title: string;
   description?: string;
   status: FleetTaskStatus;
+  /** Per-project sequence number (migrations/add_task_sequence_numbers.sql,
+   *  project_tasks_service.create_task) -- combined with project_task_key
+   *  below this renders as "GEN-12", Linear's shape. Optional: null/absent
+   *  on a task created before the backend started allocating one, or on a
+   *  server predating the migration -- see task-status.taskDisplayId. */
+  number?: number | null;
+  /** The owning project's task_key (projects_repository.create_project),
+   *  denormalized onto every task row so a list/board component never has
+   *  to be handed the whole project object just to label its own cards.
+   *  Same optionality as `number` above. */
+  project_task_key?: string | null;
   /** Linear's integer convention, adopted verbatim by the backend:
    *  0 none · 1 urgent · 2 high · 3 medium · 4 low (1 is the MOST urgent).
    *  OPTIONAL ON PURPOSE — the column is landing separately, so every

@@ -95,6 +95,7 @@ import {
   taskStatusLabel,
   taskPriority,
   taskShortId,
+  taskDisplayId,
   TASK_PRIORITY_LABELS,
 } from "./task-status";
 import { FLEET_TASK_STATUSES, countTasksByStatus, type FleetAgent, type FleetTask, type FleetTaskStatus } from "./fleet-data";
@@ -527,7 +528,7 @@ function TaskCard({
           </span>
         ) : null}
 
-        {display.id ? <span className="fleet-board-card-id">{taskShortId(task.id)}</span> : null}
+        {display.id ? <span className="fleet-board-card-id">{taskDisplayId(task)}</span> : null}
 
         {/* "1/3" + a donut, on the tasks that actually have sub-tasks. The
             counts ride along on the row the board already fetched, so this

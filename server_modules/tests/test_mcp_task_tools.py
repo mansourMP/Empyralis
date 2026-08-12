@@ -348,7 +348,14 @@ class _InsertingFakePool:
     """A pool that answers an INSERT ... RETURNING with a canned row --
     _WorkspaceScopedFakePool above only simulates lookups against
     pre-seeded rows, which a brand-new task (create_task's whole point)
-    can never be."""
+    can never be.
+
+    create_task also allocates a per-project sequence number first (an
+    atomic UPDATE ... RETURNING task_seq against the owning project --
+    migrations/add_task_sequence_numbers.sql), a SEPARATE fetchrow call
+    ahead of the INSERT -- dispatch on the query text so that call gets a
+    task_seq row rather than the canned task row (which has no "task_seq"
+    key and would KeyError)."""
 
     def __init__(self, inserted_row):
         self._inserted_row = dict(inserted_row)
@@ -356,6 +363,8 @@ class _InsertingFakePool:
 
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
+        if "UPDATE projects SET task_seq" in query:
+            return {"task_seq": 1}
         return dict(self._inserted_row)
 
     def acquire(self):
@@ -498,7 +507,9 @@ class TaskPriorityTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(result["ok"])
         self.assertEqual(result["task"]["priority"], 0)
-        _query, args = pool.fetchrow_calls[0]
+        # Last call: the task_seq allocation (migrations/
+        # add_task_sequence_numbers.sql) runs first now, ahead of the INSERT.
+        _query, args = pool.fetchrow_calls[-1]
         self.assertEqual(args[8], 0)
 
     async def test_external_agent_can_create_a_task_at_urgent(self):
@@ -510,7 +521,9 @@ class TaskPriorityTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(result["ok"])
         self.assertEqual(result["task"]["priority"], 1)
-        _query, args = pool.fetchrow_calls[0]
+        # Last call: the task_seq allocation runs first now, ahead of the
+        # INSERT -- see test_create_task_defaults_to_no_priority above.
+        _query, args = pool.fetchrow_calls[-1]
         self.assertEqual(args[8], 1)
 
     async def test_create_task_rejects_an_out_of_range_priority(self):
