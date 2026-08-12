@@ -26,6 +26,7 @@ workspace_member_invites table) never touches the `projects` table itself.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -227,6 +228,80 @@ async def test_invite_status_is_scoped_to_its_own_project_not_the_whole_workspac
     response_b = await _list_project_invite_status(app, owner["current_user"], owner["workspace_id"], project_b)
     items_b = response_b.json()["items"]
     assert [item["email"] for item in items_b] == ["for-b@example.com"]
+
+
+@pytest.mark.anyio
+async def test_member_without_project_access_cannot_see_that_projects_invites(
+    monkeypatch: pytest.MonkeyPatch, second_real_user_in_workspace, _fake_projects_resolve_to_real,
+):
+    """Security review 2026-08-13 (sec/cross-tenant-authz): this route only
+    checked workspace-viewer access, unlike its sibling
+    routes_fleet.fleet_list_project_members which gates the identical
+    "one project's roster" read through enforce_project_access. A workspace
+    member with no project_memberships row for project_b could read
+    project_b's invited emails/roles/invited-by ids just by knowing its
+    project_id -- confirmed live (2026-08-12) against a real two-project
+    seeded workspace: the request reached the same repository call an
+    authorized project member would, with no 403/404 in between.
+
+    is_project_member is monkeypatched the same way get_project already is
+    in this file (Postgres-only project_memberships table, SQLite-backed
+    test env) -- the caller here is deliberately never added to it.
+    """
+    from server_modules import projects_repository
+
+    monkeypatch.setattr(
+        projects_repository, "is_project_member",
+        AsyncMock(return_value=False),
+    )
+
+    app = _build_app()
+    owner = _register_owner()
+    project_id = _register_fake_project(_fake_projects_resolve_to_real, owner["workspace_id"])
+
+    await _create_invite(
+        app, owner["current_user"], owner["workspace_id"],
+        email="secret-invite@example.com", role="member", project_id=project_id,
+    )
+
+    outsider = second_real_user_in_workspace(owner["workspace_id"], role="member")
+
+    response = await _list_project_invite_status(app, outsider["current_user"], owner["workspace_id"], project_id)
+    # enforce_project_access's own contract: 404, not 403 and never a 200
+    # carrying the other project's invite list.
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_member_with_project_access_can_still_see_that_projects_invites(
+    monkeypatch: pytest.MonkeyPatch, second_real_user_in_workspace, _fake_projects_resolve_to_real,
+):
+    """The other half of the boundary: a real project member (not just an
+    owner) can still use this panel -- the fix is a real gate, not a
+    lockout."""
+    from server_modules import projects_repository
+
+    monkeypatch.setattr(
+        projects_repository, "is_project_member",
+        __import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock(return_value=True),
+    )
+
+    app = _build_app()
+    owner = _register_owner()
+    project_id = _register_fake_project(_fake_projects_resolve_to_real, owner["workspace_id"])
+
+    create_response = await _create_invite(
+        app, owner["current_user"], owner["workspace_id"],
+        email="visible-invite@example.com", role="member", project_id=project_id,
+    )
+    invite_id = create_response.json()["invite"]["id"]
+
+    teammate = second_real_user_in_workspace(owner["workspace_id"], role="member")
+
+    response = await _list_project_invite_status(app, teammate["current_user"], owner["workspace_id"], project_id)
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [item["id"] for item in items] == [invite_id]
 
 
 @pytest.mark.asyncio

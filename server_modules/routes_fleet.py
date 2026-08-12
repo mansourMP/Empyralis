@@ -229,16 +229,33 @@ async def fleet_usage(
     """Phase 5A: normalized usage rollup — per-agent / per-project / per-workspace,
     bucketed by day/week/month, with usd_cost totals."""
     resolved_workspace_id = auth_module.enforce_workspace_access(current_user, workspace_id, minimum_role="viewer")
+    tenant_id = await _resolve_tenant(resolved_workspace_id)
     # MAN-115: scope=project leaks a project's own cost/token totals to
     # whoever knows its id unless gated the same as every other
     # project-scoped read below.
     if scope == "project" and id:
         await auth_module.enforce_project_access(current_user, resolved_workspace_id, id, minimum_role="viewer")
+    # MAN-115 (closed the same day it was found missing here, 2026-08-13):
+    # scope=agent had no equivalent check -- usage_events_repository.
+    # summarize_usage filters purely by tenant_id+workspace_id+
+    # agent_install_id, with no project predicate at all, so a workspace
+    # member with project_memberships access to Project A only could read
+    # Project B's agent's full cost/token rollup (model name, tokens,
+    # usd_cost) by id alone. Every other agent-scoped read in this file
+    # (fleet_agent_activity, fleet_agent_memory, fleet_agent_channels,
+    # fleet_agent_connectors, fleet_agent_tools, fleet_agent_capabilities)
+    # already calls _enforce_agent_project_access first -- this route did it
+    # for scope=project two lines up and not for scope=agent, inconsistently,
+    # in the same function. Confirmed live: a project-A-only member reading
+    # scope=agent&id=<agent-in-project-B> got the full usd_cost/token
+    # breakdown while the equivalent scope=project request correctly 404'd.
+    if scope == "agent" and id:
+        await _enforce_agent_project_access(current_user, resolved_workspace_id, tenant_id, id, minimum_role="viewer")
     from server_modules import usage_events_repository as usage_repo
 
     try:
         return await usage_repo.summarize_usage(
-            tenant_id=await _resolve_tenant(resolved_workspace_id),
+            tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
             scope=scope,
             scope_id=id,
@@ -2799,6 +2816,23 @@ async def fleet_assign_agent_slack(
         return {"ok": False, "error": "slack_channel_id is required."}
 
     tenant_id = await _resolve_tenant(resolved_workspace_id)
+
+    # MAN-206: agent_install_id is caller-supplied and must be confirmed to
+    # belong to THIS (tenant_id, workspace_id) before anything is written --
+    # see agent_bindings_repository.agent_install_in_scope for why RLS alone
+    # does not catch a cross-tenant id here (a fresh INSERT's WITH CHECK only
+    # verifies the new row's OWN tenant_id/workspace_id match the caller's
+    # session scope, never that agent_install_id itself belongs to that
+    # scope). Every sibling channel-bind route (Telegram/Discord/WeChat/SMS)
+    # already has this guard; this route was the one gap, confirmed live: a
+    # caller who knows another tenant's agent_install_id could plant a Slack
+    # binding against it AND permanently block that tenant's own legitimate
+    # bind (the ON CONFLICT UPDATE afterwards hits a row RLS makes invisible
+    # to them, raising rather than silently updating).
+    if not await bindings.agent_install_in_scope(
+        agent_id, tenant_id=tenant_id, workspace_id=resolved_workspace_id,
+    ):
+        return {"ok": False, "error": "This agent does not belong to your workspace."}
 
     conflict = await bindings.find_inbound_owner_conflict(
         tenant_id=tenant_id, workspace_id=resolved_workspace_id,

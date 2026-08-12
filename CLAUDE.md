@@ -2278,3 +2278,31 @@ copy. `fleet-authorized-fetch.ts` wraps the wizard's own fetch calls (which
 don't go through `WorkspaceTransportAdapter` at all) with a refresh-and-retry-
 once on 401 — the other ~33 raw `fetch()` call sites in `fleet-data.ts` and
 elsewhere do NOT have this yet; same gap, separate cleanup.
+
+**Testing RLS locally means a non-superuser role, and `REASSIGN OWNED BY`
+run once affects every database in the cluster, not just the one you're
+connected to.** Discovered 2026-08-13 during the cross-tenant-authz security
+review: this local Postgres's `mansur` role is a superuser
+(`rolbypassrls: f` but `rolsuper: t`), and superusers bypass FORCE ROW LEVEL
+SECURITY unconditionally — so exploiting an RLS-scoped table
+(`agent_channel_bindings`, `agent_connector_bindings`, etc.) against a
+superuser connection proves nothing; the write that should be blocked by
+`empyralis_rls_scope_match` will always silently succeed. Creating a
+`NOSUPERUSER NOBYPASSRLS` `empyralis_app` role and pointing `DATABASE_URL`
+at it (matching how this repo's own `fix_rls_function_ownership.sql`
+migration expects production to run) is the only way to actually exercise
+the policy locally. The footgun: `REASSIGN OWNED BY mansur TO empyralis_app`,
+run while connected to one throwaway test database, does not scope to that
+database — `pg_database`/`pg_tablespace` are shared cluster catalogs, so it
+silently reassigned ownership of every database `mansur` owned, including
+the founder's own default `mansur` db and unrelated projects
+(`auto_parts_db`, `faraday_prod`). Caught immediately because a later
+`DROP ROLE empyralis_app` refused ("owner of database mansur...") rather
+than succeeding silently; fixed with an explicit `ALTER DATABASE <name>
+OWNER TO mansur` per affected database, verified against the exact list
+`pg_get_userbyid(datdba) = 'empyralis_app'` returned. Reassign ownership of
+individual TABLES inside the throwaway database instead
+(`ALTER TABLE <t> OWNER TO empyralis_app`, or `GRANT ALL ... TO
+empyralis_app` for privilege alone without an ownership transfer) —
+never `REASSIGN OWNED BY` against a role that owns anything outside the
+database you intend to scope it to.
