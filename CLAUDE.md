@@ -2685,3 +2685,53 @@ keeps getting bitten by). Hiding was applied ONLY where the brief's own
 words support it ("aggregating one thing is just that thing" reads as
 zero-content, not single-content) — a narrower cut than the rail could have
 taken, on purpose.
+
+**The platform-owned DigitalOcean token now resolves through the secrets
+broker, never a bare `os.getenv` — MAN-131, 2026-08-13.**
+`vps_provisioning_service._platform_digitalocean_token()` was exactly the
+discipline gap the Twilio/Resend keys are still in (`sms_twilio_
+provisioning_service.py` still reads `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_
+TOKEN` off bare `os.getenv` — not touched by this pass, same gap, separate
+cleanup): a synchronous env read, no audit trail, no managed-bundle path.
+Now goes through `secrets_broker.resolve_hosted_provider_secret
+(provider_id="digitalocean", ...)`, registered in `_HOSTED_PROVIDER_ENV_
+CANDIDATES` with the LIVE production env var
+(`EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN`) listed FIRST — it has to keep
+winning over the two new aliases (`ORION_HOSTED_DIGITALOCEAN_TOKEN`,
+`DIGITALOCEAN_ACCESS_TOKEN`) or registration would silently orphan whatever
+is already configured on a live box. `preflight._check_platform_
+digitalocean_token()` mirrors `_check_platform_credit_keys` exactly:
+advisory, never boot-blocking, a live `GET /v2/account` probe (CRITICAL log
+on a dead/rejected token, never appended to the errors list), its own skip
+flag (`EMPYRALIS_SKIP_PLATFORM_DIGITALOCEAN_CHECK`). Structural test
+(`test_platform_digitalocean_token_never_reads_os_environ_directly`, AST-
+based) bans the direct read from being reintroduced beside the broker call —
+a behavioural test cannot catch that, since a bare `os.getenv` there would
+type-check and behave identically to the broker's own env fallback.
+
+**The live token is still Full Access, and cutting it to a scoped one is an
+operator action nobody has done yet — DigitalOcean token minting is
+console-only, an agent cannot do it.** Ticket's own target scope:
+droplet:create/read/delete + image:read + sshkey:read, kept separate from
+the CI token. Exact steps (DigitalOcean control panel → API → Tokens/Keys →
+Generate New Token, fine-grained scope picker):
+1. Name it distinctly from the CI token, e.g. `empyralis-platform-runtime`.
+2. Grant exactly: Droplet → Create, Read, Delete. Image → Read. SSH Key →
+   Read. Nothing else (no Domains/Databases/Kubernetes/Spaces/Billing). If
+   the account's console only offers the old binary Read/Write toggle
+   instead of per-resource scopes, that account cannot express this scope
+   set yet — flag it rather than falling back to Full Access silently.
+3. Copy the token value once (DigitalOcean shows it only at creation).
+4. Set it as `EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN` in production's env
+   (per `docs/DEPLOY-RUNBOOK.md`) — reusing the existing name means no code
+   or deploy-config change is needed, just a value swap and a restart.
+5. Verify BEFORE revoking the old token: `curl -H "Authorization: Bearer
+   <new_token>" https://api.digitalocean.com/v2/account` should return 200
+   with an `account` object; then restart the backend and confirm the
+   preflight log line reads "platform DigitalOcean token is healthy", not
+   "PLATFORM DIGITALOCEAN TOKEN DEAD". Then provision one real droplet
+   through the product — Read-only scopes can pass the `/v2/account` and
+   list checks while still rejecting Create, so the account check alone
+   does not prove the scope set works end-to-end.
+6. Only once step 5 is fully green, revoke the old Full Access token in the
+   DigitalOcean console.

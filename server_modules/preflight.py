@@ -951,6 +951,96 @@ async def _check_platform_credit_keys() -> None:
     )
 
 
+def _platform_digitalocean_check_skipped() -> bool:
+    return str(os.getenv("EMPYRALIS_SKIP_PLATFORM_DIGITALOCEAN_CHECK") or "").strip().lower() in {"1", "true", "yes"}
+
+
+async def _check_platform_digitalocean_token() -> None:
+    """MAN-131: best-effort health check of the platform-owned DigitalOcean
+    token (``vps_provisioning_service._platform_digitalocean_token``) —
+    never blocks startup, only warns loudly. A dead, expired, or revoked
+    token here silently breaks the direct baked-image provisioning path
+    (MAN-133): platform-account droplet creation either falls back to the
+    slower customer-account path or fails outright, and nothing else in the
+    product says "the platform's own DigitalOcean token is the reason".
+    Advisory only, same reasoning and same shape as
+    ``_check_platform_credit_keys`` above — a DigitalOcean outage or an
+    expired token is a DigitalOcean-account problem, not a reason this
+    process should refuse to boot.
+    """
+    if _platform_digitalocean_check_skipped():
+        LOGGER.info(
+            "preflight: platform DigitalOcean token check skipped "
+            "(EMPYRALIS_SKIP_PLATFORM_DIGITALOCEAN_CHECK set)."
+        )
+        return
+
+    try:
+        from server_modules import secrets_broker
+        from server_modules.runtime_common import http_json_request
+    except Exception as exc:
+        LOGGER.warning(
+            "preflight: could not import dependencies for platform DigitalOcean token check: %s", exc
+        )
+        return
+
+    try:
+        resolution = secrets_broker.resolve_hosted_provider_secret(
+            tenant_id=None,
+            workspace_id=None,
+            provider_id="digitalocean",
+            field="api_key",
+            tool_name="preflight",
+            purpose="platform_digitalocean_token_health_check",
+        )
+        token = str(resolution.value or "").strip()
+    except Exception as exc:
+        LOGGER.warning("preflight: could not resolve the platform DigitalOcean token: %s", exc)
+        return
+
+    if not token:
+        LOGGER.info(
+            "preflight: no platform DigitalOcean token configured — skipping account check "
+            "(platform-account provisioning stays off; customer-account provisioning is unaffected)."
+        )
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            http_json_request,
+            "https://api.digitalocean.com/v2/account",
+            method="GET",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+    except Exception as exc:
+        LOGGER.warning("preflight: DigitalOcean account check errored (network/transport): %s", exc)
+        return
+
+    status = int(result.get("status") or 0)
+    body = result.get("json") if isinstance(result.get("json"), dict) else {}
+    account = body.get("account") if isinstance(body.get("account"), dict) else {}
+    if status == 200 and account:
+        LOGGER.info("preflight: platform DigitalOcean token is healthy (account reachable).")
+        return
+
+    LOGGER.critical(
+        "PLATFORM DIGITALOCEAN TOKEN DEAD — the platform-owned DigitalOcean "
+        "account is unreachable or the token was rejected (status=%s, "
+        "response=%s). Platform-account droplet provisioning (MAN-133's "
+        "direct baked-image path) will fall back to the slower "
+        "customer-account installer path, or fail outright, until this is "
+        "fixed. Customer-account provisioning (a customer's own pasted "
+        "token) is unaffected. This is an ops action — rotate or restore "
+        "the token behind EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN; no code "
+        "change fixes a revoked or expired upstream token. Set "
+        "EMPYRALIS_SKIP_PLATFORM_DIGITALOCEAN_CHECK=true to silence this "
+        "check.",
+        status,
+        body,
+    )
+
+
 async def _check_redis() -> Optional[str]:
     """Return ``None`` if Redis is reachable, or an error string."""
     if _redis_check_skipped():
@@ -1029,6 +1119,11 @@ async def run_preflight_checks() -> List[str]:
     #    Never appended to errors: a dead upstream balance degrades one
     #    feature (agents on platform credits), not the whole platform.
     await _check_platform_credit_keys()
+
+    # 7. Platform-owned DigitalOcean token (MAN-131) — advisory only, same
+    #    reasoning as step 6: a dead/expired token degrades one feature
+    #    (platform-account droplet provisioning), not the whole platform.
+    await _check_platform_digitalocean_token()
 
     if errors:
         LOGGER.error("PREFLIGHT FAILED — %d check(s) did not pass.", len(errors))

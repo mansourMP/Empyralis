@@ -20,7 +20,7 @@ from urllib import request as urlrequest
 from starlette.concurrency import run_in_threadpool
 
 from server_modules import agent_computers_repository, gateway_state_repository, vault_store
-from server_modules import billing_service, control_plane_repository, entitlements_service
+from server_modules import billing_service, control_plane_repository, entitlements_service, secrets_broker
 from server_modules import db as runtime_db
 from server_modules.runtime_config import EMPYRALIS_STATE_HOME
 
@@ -1567,8 +1567,27 @@ def _is_digitalocean_image_unavailable(exc: Exception) -> bool:
 def _platform_digitalocean_token() -> Optional[str]:
     """Empyralis's own DigitalOcean PAT, or None. Presence of this token is
     what switches DigitalOcean provisioning into our account (see
-    provision_vps) — the baked snapshot is only bootable there."""
-    token = (os.getenv(PLATFORM_DIGITALOCEAN_TOKEN_ENV) or "").strip()
+    provision_vps) — the baked snapshot is only bootable there.
+
+    Resolved through the secrets broker (MAN-131) — never a bare
+    ``os.getenv`` — so this platform-owned credential gets the same audit
+    trail every other hosted-provider secret gets
+    (``secrets_broker._HOSTED_PROVIDER_ENV_CANDIDATES["digitalocean"]``,
+    ``ownership="platform_hosted"``, every resolution logged). Not scoped
+    to any one workspace: this token decides which DigitalOcean ACCOUNT a
+    droplet is created in, a decision made before a workspace/tenant is
+    even relevant to it, so tenant_id/workspace_id are both None here —
+    the same shape preflight's own platform-credit check uses.
+    """
+    resolution = secrets_broker.resolve_hosted_provider_secret(
+        tenant_id=None,
+        workspace_id=None,
+        provider_id="digitalocean",
+        field="api_key",
+        tool_name="vps_provisioning_service",
+        purpose="platform_digitalocean_token_resolution",
+    )
+    token = str(resolution.value or "").strip()
     return token or None
 
 

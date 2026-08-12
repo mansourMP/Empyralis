@@ -259,17 +259,120 @@ class PlatformCreditKeyCheckTests(unittest.TestCase):
         self.assertTrue([line for line in logs if "skipped" in line])
 
 
+class PlatformDigitalOceanTokenCheckTests(unittest.TestCase):
+    """MAN-131: preflight.py's advisory DigitalOcean ``/v2/account`` health
+    check for the platform-owned token that decides which DO account
+    vps_provisioning_service.provision_vps creates a droplet in. Same shape
+    as PlatformCreditKeyCheckTests above, and for the same reason: this is
+    the one preflight step that makes a real outbound HTTPS request, so it
+    needs the HTTP response mocked rather than left to run for real."""
+
+    def _run_check(self, *, token="dop_v1_platform_test", http_return=None, http_side_effect=None, env=None):
+        import asyncio
+
+        resolution = MagicMock()
+        resolution.value = token
+        http = MagicMock(return_value=http_return, side_effect=http_side_effect)
+        with patch.dict(os.environ, env or {}, clear=True), \
+             patch(
+                 "server_modules.secrets_broker.resolve_hosted_provider_secret",
+                 return_value=resolution,
+             ) as broker, \
+             patch("server_modules.runtime_common.http_json_request", new=http):
+            with self.assertLogs(preflight.LOGGER, level="INFO") as captured:
+                asyncio.run(preflight._check_platform_digitalocean_token())
+        return http, broker, captured.output
+
+    def test_healthy_token_makes_one_account_request_and_does_not_shout(self):
+        http, broker, logs = self._run_check(
+            http_return={"status": 200, "json": {"account": {"uuid": "acct-1", "status": "active"}}},
+        )
+        self.assertEqual(http.call_count, 1)
+        self.assertEqual(http.call_args.args[0], "https://api.digitalocean.com/v2/account")
+        self.assertEqual(http.call_args.kwargs["method"], "GET")
+        self.assertIn("Bearer dop_v1_platform_test", http.call_args.kwargs["headers"]["Authorization"])
+        self.assertEqual(broker.call_args.kwargs.get("provider_id"), "digitalocean")
+        self.assertFalse([line for line in logs if line.startswith("CRITICAL")])
+        self.assertTrue([line for line in logs if "healthy" in line])
+
+    def test_unauthorized_token_is_reported_as_dead(self):
+        _http, _broker, logs = self._run_check(
+            http_return={"status": 401, "json": {"id": "Unauthorized", "message": "Unable to authenticate you."}},
+        )
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM DIGITALOCEAN TOKEN DEAD", critical[0])
+
+    def test_malformed_200_with_no_account_body_is_reported_as_dead(self):
+        _http, _broker, logs = self._run_check(
+            http_return={"status": 200, "json": {}},
+        )
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM DIGITALOCEAN TOKEN DEAD", critical[0])
+
+    def test_transport_failure_warns_but_never_claims_the_token_is_dead(self):
+        """A network problem on OUR side (or DigitalOcean having a bad
+        morning) is not evidence the token itself is bad — mislabelling it
+        would send an operator chasing a credential problem that doesn't
+        exist, and CLAUDE.md is explicit that a boot must never depend on a
+        cloud provider's uptime."""
+        _http, _broker, logs = self._run_check(
+            http_side_effect=OSError("connection reset"),
+        )
+        self.assertFalse([line for line in logs if line.startswith("CRITICAL")])
+        self.assertTrue([line for line in logs if "network/transport" in line])
+
+    def test_no_configured_token_makes_no_request_at_all(self):
+        http, _broker, logs = self._run_check(token="")
+        self.assertEqual(http.call_count, 0)
+        self.assertTrue([line for line in logs if "no platform DigitalOcean token" in line])
+
+    def test_skip_flag_makes_no_request_and_does_not_resolve_a_secret(self):
+        http, broker, logs = self._run_check(
+            env={"EMPYRALIS_SKIP_PLATFORM_DIGITALOCEAN_CHECK": "true"},
+        )
+        self.assertEqual(http.call_count, 0)
+        self.assertEqual(broker.call_count, 0)
+        self.assertTrue([line for line in logs if "skipped" in line])
+
+    def test_never_boot_blocking_even_when_dead(self):
+        """The whole point of this check: a dead token must never surface in
+        the errors list run_preflight_checks() returns, only in the logs."""
+        import asyncio
+
+        resolution = MagicMock()
+        resolution.value = "dop_v1_platform_test"
+        http = MagicMock(return_value={"status": 401, "json": {"id": "Unauthorized"}})
+        with patch(
+            "server_modules.secrets_broker.resolve_hosted_provider_secret",
+            return_value=resolution,
+        ), patch("server_modules.runtime_common.http_json_request", new=http):
+            result = asyncio.run(preflight._check_platform_digitalocean_token())
+        self.assertIsNone(result)  # advisory: nothing to append to errors[]
+
+
 class PreflightRunnerTests(unittest.TestCase):
     """run_preflight_checks() composition. Step 6 (the advisory DeepSeek
-    balance check) is mocked out in every test here because it is not the
+    balance check) and step 7 (the advisory platform DigitalOcean token
+    check) are mocked out in every test here because neither is the
     subject: these assert which checks run and how their errors are
-    collected. Left unmocked it reached api.deepseek.com for real —
-    see PlatformCreditKeyCheckTests above for its own coverage."""
+    collected. Left unmocked, step 6 reached api.deepseek.com for real and
+    step 7 would reach api.digitalocean.com for real — see
+    PlatformCreditKeyCheckTests / PlatformDigitalOceanTokenCheckTests above
+    for their own coverage."""
 
     @staticmethod
     def _no_platform_credit_call():
         return patch(
             "server_modules.preflight._check_platform_credit_keys",
+            new=AsyncMock(return_value=None),
+        )
+
+    @staticmethod
+    def _no_platform_digitalocean_call():
+        return patch(
+            "server_modules.preflight._check_platform_digitalocean_token",
             new=AsyncMock(return_value=None),
         )
 
@@ -281,7 +384,8 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
                  patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
-                 self._no_platform_credit_call():
+                 self._no_platform_credit_call(), \
+                 self._no_platform_digitalocean_call():
                 return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
@@ -295,7 +399,8 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_kernel", return_value="no kernel"), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value="no pg")), \
                  patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
-                 self._no_platform_credit_call():
+                 self._no_platform_credit_call(), \
+                 self._no_platform_digitalocean_call():
                 return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
@@ -310,12 +415,38 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
-                 self._no_platform_credit_call():
+                 self._no_platform_credit_call(), \
+                 self._no_platform_digitalocean_call():
                 with patch.dict(os.environ, {"EMPYRALIS_SKIP_REDIS_CHECK": "true"}):
                     return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
         self.assertEqual(len(errors), 0)
+
+    def test_a_dead_platform_digitalocean_token_never_appears_in_errors(self):
+        """The whole point of step 7 being advisory: run_preflight_checks()
+        must still return an empty list even when the DigitalOcean account
+        check itself would report CRITICAL, because that check is never
+        appended to errors — only logged. This drives the REAL
+        _check_platform_digitalocean_token (mocking only its HTTP call and
+        secret resolution), unlike the other tests in this class."""
+        resolution = MagicMock()
+        resolution.value = "dop_v1_platform_test"
+        http = MagicMock(return_value={"status": 401, "json": {"id": "Unauthorized"}})
+        async def _run():
+            with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
+                 patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
+                 patch("server_modules.preflight._check_kernel", return_value=None), \
+                 patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
+                 patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
+                 self._no_platform_credit_call(), \
+                 patch("server_modules.secrets_broker.resolve_hosted_provider_secret", return_value=resolution), \
+                 patch("server_modules.runtime_common.http_json_request", new=http):
+                return await preflight.run_preflight_checks()
+        import asyncio
+        errors = asyncio.run(_run())
+        self.assertEqual(errors, [])
+        self.assertEqual(http.call_count, 1)
 
 
 class FailOnPreflightErrorsTests(unittest.TestCase):

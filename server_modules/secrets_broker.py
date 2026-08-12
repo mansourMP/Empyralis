@@ -51,6 +51,20 @@ _HOSTED_PROVIDER_ENV_CANDIDATES: Dict[str, List[str]] = {
     "qwen": ["ORION_HOSTED_QWEN_API_KEY", "ORION_LOCAL_WORKER_QWEN_API_KEY", "QWEN_API_KEY", "DASHSCOPE_API_KEY"],
     "deepseek": ["ORION_HOSTED_DEEPSEEK_API_KEY", "ORION_LOCAL_WORKER_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"],
     "mistral": ["ORION_HOSTED_MISTRAL_API_KEY", "ORION_LOCAL_WORKER_MISTRAL_API_KEY", "MISTRAL_API_KEY"],
+    # MAN-131: the platform-owned DigitalOcean PAT that decides which DO
+    # account vps_provisioning_service.provision_vps creates a droplet in
+    # (see _platform_digitalocean_token). EMPYRALIS_PLATFORM_DIGITALOCEAN_
+    # TOKEN is listed FIRST and must stay first — it is the actual env var
+    # name that module has read since MAN-133 shipped, so it has to keep
+    # winning over the two aliases added here for free (the managed-bundle
+    # path and the ops-familiar DIGITALOCEAN_ACCESS_TOKEN name DO's own CLI/
+    # Terraform provider uses) or this registration would silently orphan
+    # whatever is already configured in production.
+    "digitalocean": [
+        "EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN",
+        "ORION_HOSTED_DIGITALOCEAN_TOKEN",
+        "DIGITALOCEAN_ACCESS_TOKEN",
+    ],
 }
 _HOSTED_OPENAI_BEARER_KEYS = [
     ("env_codex_oauth_token", "codex_oauth_token"),
