@@ -5067,6 +5067,31 @@ async def apply_deployed_agent_recovery_action(
     return dict(project_deployed_agent(updated, include_internal=True) or {})
 
 
+async def _terminate_session_if_owned_by_workspace(session_id: str, resolved_workspace_id: str) -> None:
+    """Terminate a runtime session by id, but ONLY if it actually belongs to
+    `resolved_workspace_id`. session_service.get_session/terminate_session
+    are global lookups keyed purely on session_id (no tenant/workspace
+    predicate of their own) -- a caller-supplied session_id reaching either
+    one unguarded lets an owner of ANY deployed agent name another tenant's
+    session and have it torn down. workspace_id is a required column on
+    every row (session_service.create_session takes it positionally), so an
+    empty value is never "no scope recorded" and is treated as a mismatch.
+    Silently no-ops on a mismatch or a session that no longer exists --
+    matching terminate_session's own idempotent "already gone" semantics --
+    rather than raising, since this is called from a best-effort cleanup
+    loop over caller-supplied ids, not a single primary resource lookup."""
+    token = str(session_id or "").strip()
+    if not token:
+        return
+    record = await session_service.get_session(token)
+    if not isinstance(record, dict):
+        return
+    owner_workspace_id = str(record.get("workspace_id") or "").strip()
+    if owner_workspace_id != resolved_workspace_id:
+        return
+    await session_service.terminate_session(token)
+
+
 async def kill_deployed_agent_runtime_session(
     *,
     deployed_agent_id: str,
@@ -5092,7 +5117,26 @@ async def kill_deployed_agent_runtime_session(
     token = _normalize_text(session_id)
     if not token:
         raise _http_bad_request("Runtime session id is required.")
+    # session_service.get_session/terminate_session are global lookups keyed
+    # ONLY on session_id (`WHERE session_id = $1`, no tenant/workspace
+    # predicate) -- deployed_agent_id above IS scope-checked, but session_id
+    # is an independent caller-supplied value that was never compared to it.
+    # A caller who owns ANY deployed agent in their own workspace could name
+    # another tenant's session_id here and have it torn down: the runtime
+    # (cloud/self-hosted) AND the durable session row, unconditionally.
+    # Fetch-then-equality, same pattern already used correctly elsewhere in
+    # this codebase (routes_gateway.py's `_load_google_setup_session`) --
+    # treat a scope mismatch as "not found", never proceed past it.
     session_record = await session_service.get_session(token)
+    if isinstance(session_record, dict):
+        # workspace_id is a required, non-optional column on every row
+        # (session_service.create_session takes it as a positional arg), so
+        # an empty value here is never "no scope recorded" -- it can only
+        # mean the session predates that guarantee or was never this
+        # workspace's own, and must be treated the same as a mismatch.
+        session_owner_workspace_id = _normalize_text(session_record.get("workspace_id"))
+        if session_owner_workspace_id != resolved_workspace_id:
+            raise HTTPException(status_code=404, detail="Runtime session not found.")
     session_metadata = _coerce_dict((session_record or {}).get("metadata"))
     runtime_session_binding = _normalize_text(session_metadata.get("runtime_session_binding")).lower()
     decision = _enforce_deployed_agent_service_decision(
@@ -5758,7 +5802,7 @@ async def delete_deployed_agent_external_user_data(
         if token
     }
     for token in terminated_session_ids:
-        await session_service.terminate_session(token)
+        await _terminate_session_if_owned_by_workspace(token, resolved_workspace_id)
     return {
         "deployed_agent_id": _normalize_text(deployed_agent.get("id")),
         "channel": resolved_channel_key,

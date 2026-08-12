@@ -2650,6 +2650,10 @@ class DeployedAgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             patch(
+                "server_modules.deployed_agent_service.session_service.get_session",
+                new=AsyncMock(return_value={"workspace_id": "ws-1"}),
+            ),
+            patch(
                 "server_modules.deployed_agent_service.session_service.terminate_session",
                 new=AsyncMock(),
             ) as terminate_session,
@@ -3345,7 +3349,7 @@ class DeployedAgentServiceTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "server_modules.deployed_agent_service.session_service.get_session",
-                new=AsyncMock(return_value={"metadata": {"runtime_session_binding": "cloud_computer_agent"}}),
+                new=AsyncMock(return_value={"workspace_id": "ws-1", "metadata": {"runtime_session_binding": "cloud_computer_agent"}}),
             ),
             patch(
                 "server_modules.deployed_agent_service.deployed_agent_virtual_runtime_service.terminate_bound_cloud_runtime_session",
@@ -3404,7 +3408,7 @@ class DeployedAgentServiceTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "server_modules.deployed_agent_service.session_service.get_session",
-                new=AsyncMock(return_value={"metadata": {"runtime_session_binding": "self_hosted_agent"}}),
+                new=AsyncMock(return_value={"workspace_id": "ws-1", "metadata": {"runtime_session_binding": "self_hosted_agent"}}),
             ),
             patch(
                 "server_modules.deployed_agent_service.deployed_agent_virtual_runtime_service.terminate_bound_cloud_runtime_session",
@@ -3439,6 +3443,147 @@ class DeployedAgentServiceTests(unittest.IsolatedAsyncioTestCase):
             workspace_id="ws-1",
         )
         terminate_mock.assert_awaited_once_with("sess-1")
+
+    # ── Cross-tenant authorization sweep, 2026-08-13 ──────────────────────
+    #
+    # session_service.get_session/terminate_session are global lookups keyed
+    # ONLY on session_id (no tenant/workspace predicate). deployed_agent_id
+    # was already scope-checked against the caller's own workspace, but
+    # session_id -- an independent caller-supplied value -- was handed
+    # straight to session_service with no comparison at all: an owner of
+    # ANY deployed agent in their own workspace could name another tenant's
+    # session_id and have it torn down (cloud/self-hosted runtime AND the
+    # durable session row).
+
+    async def test_kill_deployed_agent_runtime_session_refuses_a_session_owned_by_another_workspace(self) -> None:
+        with (
+            patch(
+                "server_modules.deployed_agent_service.control_plane_repository.get_workspace_by_id",
+                new=AsyncMock(return_value=_workspace_record()),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.control_plane_repository.get_deployed_agent_by_id",
+                new=AsyncMock(return_value=_deployed_agent_row()),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.session_service.get_session",
+                # This session_id is real, but belongs to a DIFFERENT
+                # workspace than the caller's own ws-1.
+                new=AsyncMock(return_value={"workspace_id": "ws-victim", "metadata": {}}),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.deployed_agent_virtual_runtime_service.terminate_bound_cloud_runtime_session",
+                new=AsyncMock(),
+            ) as terminate_runtime_mock,
+            patch(
+                "server_modules.deployed_agent_service.deployed_agent_virtual_runtime_service.terminate_bound_self_hosted_runtime_session",
+                new=AsyncMock(),
+            ) as terminate_self_hosted_runtime_mock,
+            patch(
+                "server_modules.deployed_agent_service.session_service.terminate_session",
+                new=AsyncMock(),
+            ) as terminate_mock,
+        ):
+            with self.assertRaises(HTTPException) as exc_info:
+                await deployed_agent_service.kill_deployed_agent_runtime_session(
+                    deployed_agent_id="dagent_1",
+                    session_id="sess-victim",
+                    current_user=_owner_user(),
+                    owner_workspace_id="ws-1",
+                )
+
+        self.assertEqual(exc_info.exception.status_code, 404)
+        terminate_runtime_mock.assert_not_awaited()
+        terminate_self_hosted_runtime_mock.assert_not_awaited()
+        terminate_mock.assert_not_awaited()
+
+    async def test_kill_deployed_agent_runtime_session_refuses_a_session_with_no_recorded_workspace(self) -> None:
+        # workspace_id is a required column on every runtime_sessions row;
+        # an empty value must be treated as a mismatch, never as "no scope
+        # recorded, allow it" (the exact fail-open shape this fix closes).
+        with (
+            patch(
+                "server_modules.deployed_agent_service.control_plane_repository.get_workspace_by_id",
+                new=AsyncMock(return_value=_workspace_record()),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.control_plane_repository.get_deployed_agent_by_id",
+                new=AsyncMock(return_value=_deployed_agent_row()),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.session_service.get_session",
+                new=AsyncMock(return_value={"workspace_id": "", "metadata": {}}),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.session_service.terminate_session",
+                new=AsyncMock(),
+            ) as terminate_mock,
+        ):
+            with self.assertRaises(HTTPException) as exc_info:
+                await deployed_agent_service.kill_deployed_agent_runtime_session(
+                    deployed_agent_id="dagent_1",
+                    session_id="sess-no-scope",
+                    current_user=_owner_user(),
+                    owner_workspace_id="ws-1",
+                )
+
+        self.assertEqual(exc_info.exception.status_code, 404)
+        terminate_mock.assert_not_awaited()
+
+    async def test_delete_deployed_agent_external_user_data_does_not_terminate_a_session_owned_by_another_workspace(self) -> None:
+        with (
+            patch(
+                "server_modules.deployed_agent_service.control_plane_repository.get_workspace_by_id",
+                new=AsyncMock(return_value=_workspace_record()),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.control_plane_repository.get_deployed_agent_by_id",
+                new=AsyncMock(return_value=_deployed_agent_row()),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.external_user_privacy_service.get_external_user_privacy_service",
+            ) as privacy_service_mock,
+            patch.object(
+                deployed_agent_service.rust_runtime_kernel_client,
+                "run_runtime_kernel_enforced",
+                side_effect=lambda command, payload, **_kwargs: (
+                    {"next_action": "delete_deployed_agent_external_user_data"}
+                    if command == "deployed-agent-service-decision"
+                    else {"next_action": "purge_deployed_agent_external_user_data"}
+                ),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.session_service.get_session",
+                # The body-supplied session_id names a session that is real
+                # but belongs to a different workspace than the caller's own.
+                new=AsyncMock(return_value={"workspace_id": "ws-victim"}),
+            ),
+            patch(
+                "server_modules.deployed_agent_service.session_service.terminate_session",
+                new=AsyncMock(),
+            ) as terminate_session,
+        ):
+            privacy_service_mock.return_value.purge_deployed_agent_external_user_data = AsyncMock(
+                return_value={
+                    "request": {"id": "privreq_1", "status": "completed", "session_key": "sess-victim"},
+                    "audit": {"id": "privaudit_1"},
+                    "deleted_counts": {},
+                }
+            )
+            payload = await deployed_agent_service.delete_deployed_agent_external_user_data(
+                deployed_agent_id="dagent_1",
+                external_user_id="customer-1",
+                channel_key="telegram",
+                current_user=_owner_user(),
+                owner_workspace_id="ws-1",
+                session_id="sess-victim",
+            )
+
+        # The privacy-data purge itself is correctly scoped elsewhere and
+        # still succeeds; only the cross-tenant session termination is
+        # refused.
+        self.assertEqual(payload["deployed_agent_id"], "dagent_1")
+        terminate_session.assert_not_awaited()
 
     async def test_emergency_stop_workspace_suspends_agents(self) -> None:
         live_row = _deployed_agent_row(deployment_state="live")

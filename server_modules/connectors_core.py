@@ -259,6 +259,22 @@ async def delete_provider_profile(profile_id: str):
     _persist_provider_profiles()
     return {"status": "ok"}
 
+def get_provider_profile_workspace_id(profile_id: str) -> str:
+    """Return the workspace_id that owns `profile_id`, or raise 404.
+
+    Used by the route layer to authorize enable/disable/delete/probe against
+    the resource's REAL owning workspace before mutating or reading it -
+    `PROVIDER_PROFILES` has no tenancy check of its own (fetch-by-id only),
+    so a caller who only proved they are *an* owner of *some* workspace
+    (`require_admin_api_key`) must never reach these without this check.
+    """
+    with PROFILES_LOCK:
+        profile = PROVIDER_PROFILES.get(profile_id)
+    if not isinstance(profile, dict):
+        raise HTTPException(status_code=404, detail="Profile not found.")
+    return str(profile.get("workspace_id") or "default").strip() or "default"
+
+
 async def provider_profiles_health(workspace_id: Optional[str] = None):
     requested_ws = _normalize_workspace_id(workspace_id) or "default"
     projection = provider_profiles_service.build_provider_runtime_truth(requested_ws)

@@ -49,7 +49,10 @@ def register_workflow_routes(app: APIRouter) -> None:
         workspaceId: Optional[str] = Query(default=None),
         current_user=Depends(require_api_key),
     ):
-        workspace_id = enforce_workspace_access(current_user, workspaceId)
+        # enforce_workspace_access defaults minimum_role to "viewer" -- this
+        # is a write, so it must be named explicitly or a read-only member
+        # can create workflows in a workspace they can only view.
+        workspace_id = enforce_workspace_access(current_user, workspaceId, minimum_role="member")
         tenant_id = workspace_tenant_id(current_user, workspace_id)
         return await workflow_service.create_workflow(
             tenant_id=tenant_id,
@@ -73,7 +76,7 @@ def register_workflow_routes(app: APIRouter) -> None:
         existing = await workflow_service.get_workflow(workflow_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Workflow not found.")
-        workspace_id = enforce_workspace_access(current_user, str(existing.get("workspaceId") or ""))
+        workspace_id = enforce_workspace_access(current_user, str(existing.get("workspaceId") or ""), minimum_role="member")
         tenant_id = workspace_tenant_id(current_user, workspace_id)
         updated = await workflow_service.update_workflow(
             workflow_id,
@@ -102,7 +105,7 @@ def register_workflow_routes(app: APIRouter) -> None:
         existing = await workflow_service.get_workflow(workflow_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Workflow not found.")
-        workspace_id = enforce_workspace_access(current_user, str(existing.get("workspaceId") or ""))
+        workspace_id = enforce_workspace_access(current_user, str(existing.get("workspaceId") or ""), minimum_role="member")
         tenant_id = workspace_tenant_id(current_user, workspace_id)
         deleted = await workflow_service.delete_workflow(
             workflow_id,
@@ -118,7 +121,7 @@ def register_workflow_routes(app: APIRouter) -> None:
         existing = await workflow_service.get_workflow(workflow_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Workflow not found.")
-        workspace_id = enforce_workspace_access(current_user, str(existing.get("workspaceId") or ""))
+        workspace_id = enforce_workspace_access(current_user, str(existing.get("workspaceId") or ""), minimum_role="member")
         tenant_id = workspace_tenant_id(current_user, workspace_id)
         published = await workflow_service.publish_workflow(
             workflow_id,

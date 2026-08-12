@@ -2360,3 +2360,98 @@ individual TABLES inside the throwaway database instead
 empyralis_app` for privilege alone without an ownership transfer) —
 never `REASSIGN OWNED BY` against a role that owns anything outside the
 database you intend to scope it to.
+
+**A "visible" filter is not an authorization check — it is a filter, and
+answers a different question.** Second half of the 2026-08-13 cross-tenant
+sweep, covering the routes the first half explicitly didn't
+(`routes_workflows.py`'s sub-modules, `routes_connectors.py`,
+`routes_gateway.py`, `routes_deployed_agents.py`, `app_registry_api.py`,
+`workflow_api.py`). `vault_helpers.workspace_visible(entry_ws, requested_ws)`
+is a pure string-equality function — `if req_ws is None: return True; return
+entry_ws == req_ws` — built to filter a scope the CALLER already resolved
+and was checked against. `TelegramTerminalService._select_connector` and
+`resolve_vault_credential` both call it, and their callers
+(`routes_connectors.py`'s `telegram_send_message`/`telegram_autopilot_test_
+message`, `connectors_core.probe_provider`/`get_provider_models`) took no
+`current_user` at all — `workspace_id` was a bare caller-supplied field
+handed straight to the filter with nothing upstream of it. CONFIRMED live
+against a seeded two-tenant stack: an authenticated owner of workspace B
+could name workspace A's `workspace_id` and have Empyralis decrypt and use
+workspace A's Telegram bot token (sending to a chat_id of B's own choosing)
+or AI-provider credential. `PROVIDER_PROFILES.get(profile_id)` has the same
+shape one level up — a global fetch-by-id dict with no ownership field
+checked at all, so any owner-role caller could silently disable/delete
+another tenant's provider failover profile.
+
+```
+BEFORE                                    AFTER
+  caller-supplied workspace_id                caller-supplied workspace_id
+        │                                            │
+        ▼                                    enforce_workspace_access(
+  workspace_visible(entry_ws, ws)              current_user, ws, role)  ← NEW
+        │  (a pure equality check,                    │
+        │   satisfied by ANY value                    ▼
+        │   the caller chooses to send)      workspace_visible(entry_ws, ws)
+        ▼                                            │
+  tenant A's secret, used                    tenant A's secret unreachable
+```
+
+Same root fix, five call sites: `routes_connectors.py` now wraps
+`telegram_send_message`/`telegram_autopilot_test_message`/`probe_provider`/
+`get_provider_models`/`enable_provider_profile`/`disable_provider_profile`/
+`delete_provider_profile` with `enforce_workspace_access` (or, for
+`profile_id`-shaped calls, `connectors_core.get_provider_profile_workspace_id`
+resolves the PROFILE's real owning workspace first — never the raw
+caller-supplied one, which is what let a valid own-workspace value launder
+access to someone else's profile). `PUT /tools/contracts/{tool_id}` and
+`POST /credentials/vault/rotate-key` mutate genuinely global, non-tenant-
+scoped state (`TOOL_STATE`, the whole vault passphrase) and had the same
+`require_admin_api_key`-only gate (any owner of any tenant, a role check
+not a tenancy check) — fixed to require
+`current_user_has_auth_admin_access` instead, same shape as `/apps/install`
+`/uninstall`/`/update` against the equally-global `ORION_APP_REGISTRY_FILE`.
+
+Two more, different shape, same sweep. `GET /diagnostics/sessions/{id}/export`
+(`routes_gateway.py`) read `if session_workspace_id and session_workspace_id
+!= resolved: raise 403` — fails OPEN on any session row with an empty
+`workspace_id`, and `session_service.get_session`/`terminate_session` are
+GLOBAL lookups keyed only on `session_id`, no tenant/workspace predicate of
+their own. Deployed-agent runtime-session kill and external-user-delete
+(`deployed_agent_service.py`) had the identical gap one level down:
+`deployed_agent_id` was scope-checked, but the `session_id` sitting right
+next to it in the same request was handed straight to `session_service`
+unchecked — an owner of ANY deployed agent could name another tenant's
+`session_id` and have it torn down. `workspace_id` is a required,
+non-optional column on every `runtime_sessions` row
+(`session_service.create_session` takes it positionally), so both fixes
+fail CLOSED on empty, not open. And `workflow_api.py`'s four write routes
+called `enforce_workspace_access` with no `minimum_role`, silently
+defaulting to `"viewer"` — a role escalation within a tenant the caller
+legitimately belongs to, not cross-tenant, but the same "the default is the
+weakest role" mistake.
+
+Every fix has a red-before/green-after test, proven by swapping the
+pre-fix file in, confirming the new test fails, then restoring — this
+repo's own established verification discipline, applied because `git
+stash` is unsafe with other agents running. The Telegram cross-tenant
+credential use was fired live end-to-end (real HTTP, real seeded Postgres
+row, real session cookies) with outbound HTTP sandboxed to loopback
+(`HTTP_PROXY`/`HTTPS_PROXY` pointed at an unreachable local port) so the
+exploit never actually contacted Telegram's API — proof without touching a
+third party.
+
+Not covered by this pass: `sage_chat_api.py`, `sage_memory_api.py`,
+`sage_heartbeat_api.py`, `sage_context_files_api.py`, `sage_profile_api.py`,
+`sage_skills_api.py`, `sage_services_api.py`, `routes_connections.py`,
+`routes_billing.py`, `routes_studio.py`, `routes_pilot.py`,
+`routes_builder.py`, `routes_wechat_official.py`, and the remainder of
+`routes_deployed_agents.py`/`routes_gateway.py` — audited by parallel
+static-analysis passes and found correctly scoped (every write gated by
+`enforce_workspace_access` with an explicit `minimum_role`, every
+path-scoped id re-verified against the resolved caller scope before use),
+but not independently re-verified line-by-line by the fixing pass itself.
+A handful of lower-severity/lower-confidence items were flagged but not
+fixed: `browse_google_connector_drive`/`create_google_connector_document`'s
+minor policy-check inconsistency, and the shared Discord/Telegram/WhatsApp
+autopilot bot status routes (appear to be single shared platform-level bot
+state, not per-tenant secrets, but not proven either way).

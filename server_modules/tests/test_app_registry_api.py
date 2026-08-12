@@ -165,5 +165,119 @@ class AppRegistryApiRouteTests(unittest.TestCase):
                     sys.modules["server"] = previous_server
 
 
+class AppRegistryInstallMutationAuthorizationTests(unittest.TestCase):
+    """Security review, 2026-08-13: /apps/install, /apps/uninstall, and
+    /apps/update mutate ORION_APP_REGISTRY_FILE, ONE process-wide store with
+    no workspace_id/tenant_id column at all (confirmed: WorkflowCreate/
+    Update/Delete carry no such field). They were gated by a bare
+    `require_api_key` -- any authenticated user of ANY tenant -- so any
+    signed-up customer could install/uninstall/update an app for the whole
+    platform, visible in every other tenant's own /apps/installed. Fixed to
+    require real platform-operator access
+    (auth.current_user_has_auth_admin_access), matching the same-shaped fix
+    applied to update_tool_contract/rotate_vault_key_route in
+    routes_connectors.py."""
+
+    def setUp(self) -> None:
+        self._tempdir_ctx = tempfile.TemporaryDirectory()
+        tempdir = self._tempdir_ctx.__enter__()
+        self.addCleanup(self._tempdir_ctx.__exit__, None, None, None)
+        registry_path = Path(tempdir) / "apps.json"
+        seeded = {
+            "apps": [{"id": "study", "status": "available", "latest_version": "1.1"}],
+            "updated_at": "2026-04-10T00:00:00Z",
+        }
+        registry_path.write_text(__import__("json").dumps(seeded), encoding="utf-8")
+
+        fake_server = types.ModuleType("server")
+        fake_server.Depends = lambda dependency: dependency
+        fake_server.require_api_key = object()
+        fake_server.HTTPException = HTTPException
+        fake_server.ORION_APP_REGISTRY_FILE = registry_path
+        fake_server._safe_read_json = lambda path, fallback: __import__("json").loads(path.read_text(encoding="utf-8")) if path.exists() else fallback
+        fake_server._safe_write_json = lambda path, value: path.write_text(__import__("json").dumps(value), encoding="utf-8")
+        fake_server._utc_now_iso = lambda: "2026-04-10T00:00:00Z"
+
+        self._previous_server = sys.modules.get("server")
+        sys.modules["server"] = fake_server
+        self.addCleanup(self._restore_server)
+
+        self.app = _FakeApp()
+        app_registry_api.register_app_registry_routes(self.app)
+        # register_app_registry_routes only copies names from the fake
+        # `server` module into app_registry_api's OWN globals the FIRST
+        # time (`if key not in module_globals`), so a later test's fresh
+        # tempdir would otherwise be shadowed by whichever path the first
+        # test in this process happened to register. Set it directly so
+        # each test's own registry file is the one actually read/written.
+        app_registry_api.ORION_APP_REGISTRY_FILE = registry_path
+        app_registry_api._safe_read_json = fake_server._safe_read_json
+        app_registry_api._safe_write_json = fake_server._safe_write_json
+
+    def _restore_server(self) -> None:
+        if self._previous_server is None:
+            sys.modules.pop("server", None)
+        else:
+            sys.modules["server"] = self._previous_server
+
+    @staticmethod
+    def _ordinary_customer() -> dict:
+        # An ordinary signed-in owner of their OWN workspace -- exactly what
+        # `require_api_key` alone let through -- must not be an operator.
+        return {"auth_type": "bearer", "role": "owner", "auth_admin": False, "user_id": "customer-1", "email": "customer@example.com"}
+
+    @staticmethod
+    def _operator() -> dict:
+        return {"auth_type": "bearer", "role": "owner", "auth_admin": True, "user_id": "operator-1", "email": "operator@example.com"}
+
+    def test_ordinary_customer_cannot_install_an_app_for_the_whole_platform(self) -> None:
+        from server_modules.schemas import WorkflowCreate
+
+        with self.assertRaises(HTTPException) as exc_info:
+            asyncio.run(
+                self.app.routes[("POST", "/apps/install")](
+                    WorkflowCreate(app_id="study"),
+                    current_user=self._ordinary_customer(),
+                )
+            )
+        self.assertEqual(exc_info.exception.status_code, 403)
+
+    def test_ordinary_customer_cannot_uninstall_an_app_for_the_whole_platform(self) -> None:
+        from server_modules.schemas import WorkflowDelete
+
+        with self.assertRaises(HTTPException) as exc_info:
+            asyncio.run(
+                self.app.routes[("POST", "/apps/uninstall")](
+                    WorkflowDelete(app_id="study"),
+                    current_user=self._ordinary_customer(),
+                )
+            )
+        self.assertEqual(exc_info.exception.status_code, 403)
+
+    def test_ordinary_customer_cannot_update_an_app_for_the_whole_platform(self) -> None:
+        from server_modules.schemas import WorkflowUpdate
+
+        with self.assertRaises(HTTPException) as exc_info:
+            asyncio.run(
+                self.app.routes[("POST", "/apps/update")](
+                    WorkflowUpdate(app_id="study"),
+                    current_user=self._ordinary_customer(),
+                )
+            )
+        self.assertEqual(exc_info.exception.status_code, 403)
+
+    def test_operator_can_still_install_an_app(self) -> None:
+        from server_modules.schemas import WorkflowCreate
+
+        result = asyncio.run(
+            self.app.routes[("POST", "/apps/install")](
+                WorkflowCreate(app_id="study"),
+                current_user=self._operator(),
+            )
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["app"]["status"], "installed")
+
+
 if __name__ == "__main__":
     unittest.main()
