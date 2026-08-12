@@ -7,7 +7,7 @@ import { BarChart3 } from "lucide-react";
 import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
 import { formatNumber, tintKeyForIndex, TINTS, usagePayerLabel, type UsageMatrixRow } from "@/lib/workspace/fleet/fleet-presentation";
 import { MultiSeriesChart, type ChartSeries } from "@/lib/workspace/fleet/fleet-sparkline";
-import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
+import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { CreditsPanel } from "@/lib/workspace/fleet/CreditsPanel";
 
@@ -40,6 +40,57 @@ const PERIODS = [
 type PeriodDays = (typeof PERIODS)[number]["value"];
 
 const money = (n: number) => `$${n.toFixed(4)}`;
+
+/**
+ * Reuses the real `.fleet-stat-grid`/`.fleet-stat-card`,
+ * `.fleet-usage-chart-block`/`.fleet-usage-chart-title`, and
+ * `.fleet-usage-legend`/`.fleet-usage-legend-header`/`.fleet-usage-legend-row`
+ * classNames verbatim (fleet-theme.css) so the three stat cards, three chart
+ * blocks and the legend table all occupy the exact spot and size the real
+ * usage dashboard below CreditsPanel does — was previously
+ * `FleetListSkeleton rows={5}`, a flat row list standing in for a stat-card
+ * row + three 160px charts + a table, the same "different shape entirely"
+ * bug the document page had.
+ */
+function UsageSkeleton() {
+  return (
+    <div aria-busy="true" aria-label="Loading usage">
+      <div className="fleet-stat-grid">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="fleet-stat-card">
+            <div className="fleet-skeleton-bar" style={{ width: "45%", height: 18 }} />
+            <div className="fleet-skeleton-bar" style={{ width: "70%", height: 11, marginTop: 6, opacity: 0.7 }} />
+          </div>
+        ))}
+      </div>
+      {["Cost", "Tokens", "LLM calls"].map((title) => (
+        <div key={title} className="fleet-usage-chart-block">
+          <div className="fleet-usage-chart-title">{title}</div>
+          <div className="fleet-skeleton-bar" style={{ width: "100%", height: 160 }} />
+        </div>
+      ))}
+      <div className="fleet-usage-legend">
+        <div className="fleet-usage-legend-header" aria-hidden>
+          <span>Agent</span>
+          <span className="is-right">Cost</span>
+          <span className="is-right">Tokens</span>
+          <span className="is-right">Calls</span>
+        </div>
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="fleet-usage-legend-row">
+            <span className="fleet-usage-legend-name">
+              <span className="fleet-skeleton-bar" style={{ width: 8, height: 8, borderRadius: 999 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 90, height: 11 }} />
+            </span>
+            <span className="fleet-agent-cell-right"><div className="fleet-skeleton-bar" style={{ width: 50, height: 11, marginLeft: "auto" }} /></span>
+            <span className="fleet-agent-cell-right"><div className="fleet-skeleton-bar" style={{ width: 50, height: 11, marginLeft: "auto" }} /></span>
+            <span className="fleet-agent-cell-right"><div className="fleet-skeleton-bar" style={{ width: 40, height: 11, marginLeft: "auto" }} /></span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function dateKey(iso: string): string {
   return (iso || "").slice(0, 10);
@@ -217,7 +268,7 @@ export default function UsagePage() {
 
       <CreditsPanel workspaceId={workspaceId} />
 
-      {loading && <FleetListSkeleton rows={5} />}
+      {loading && <UsageSkeleton />}
       {!loading && error && <FleetSurfaceError title="Couldn’t load usage" message={error} />}
 
       {!loading && !error && (

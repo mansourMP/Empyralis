@@ -489,8 +489,26 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
         </p>
       )}
 
+      {/* Reuses the real collapsed-row markup (chevron + icon + title/desc +
+          status meta, no expanded body) — a real group row is collapsed by
+          default (expandedKey starts null), so this is the shape every
+          group row actually opens in. */}
       {loading ? (
-        <div className="fleet-list"><div className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div></div>
+        <div className="fleet-list" aria-busy="true" aria-label="Loading">
+          {[0, 1].map((i) => (
+            <div key={i} className="fleet-list-row" style={{ flexDirection: "column", alignItems: "stretch", cursor: "default" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, width: "100%" }}>
+                <div className="fleet-skeleton-bar" style={{ width: 13, height: 13 }} />
+                <span className="fleet-list-row-icon"><Server size={16} strokeWidth={1.75} style={{ opacity: 0.4 }} /></span>
+                <span className="fleet-list-row-main">
+                  <span className="fleet-skeleton-bar" style={{ width: `${45 + i * 15}%`, height: 12 }} />
+                  <span className="fleet-skeleton-bar" style={{ width: 120, height: 10, opacity: 0.7 }} />
+                </span>
+                <div className="fleet-skeleton-bar" style={{ width: 50, height: 11 }} />
+              </div>
+            </div>
+          ))}
+        </div>
       ) : groups.length === 0 ? (
         <div className="fleet-empty">
           <div className="fleet-empty-icon">

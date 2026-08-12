@@ -14,7 +14,7 @@ import { breadcrumbCount, deriveStatus, findSageAgent, formatNumber, timeAgo, ty
 // before summarizeStatus() rolls the counts up into one line.
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
-import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
+import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { FleetRightPanel, PanelSection, PanelRow } from "@/lib/workspace/fleet/FleetRightPanel";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
@@ -281,10 +281,31 @@ export default function ProjectsPage() {
       <div className="fleet-content-with-panel">
         <div className="fleet-content-main">
           {loading && projects.length === 0 ? (
-            // rowHeight matches .fleet-project-row's real min-height (52px) —
-            // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton row
-            // snaps taller the moment the projects list swaps in.
-            <FleetListSkeleton rows={4} rowHeight={52} />
+            // Reuses `.fleet-projects-list`/`.fleet-projects-list-header`/
+            // `.fleet-project-row`'s real 6-column grid so the column-title
+            // row (never reserved by the old bare `FleetListSkeleton`) and
+            // each row's per-column x-offsets land in the same place the
+            // real list renders into, not just the same row height.
+            <div className="fleet-projects-list" aria-busy="true" aria-label="Loading">
+              <div className="fleet-projects-list-header" aria-hidden>
+                <span>Project</span>
+                <span className="is-right fleet-col-agents-count">Agents</span>
+                <span className="is-right">Cost this month</span>
+                <span className="is-right fleet-col-tokens">Tokens</span>
+                <span className="is-right fleet-col-last-active">Last active</span>
+                <span className="is-right">Status</span>
+              </div>
+              {[0, 1, 2, 3].map((i) => (
+                <div key={i} className="fleet-project-row" style={{ cursor: "default" }}>
+                  <span className="fleet-skeleton-bar" style={{ width: `${45 + (i % 3) * 12}%`, height: 13 }} />
+                  <span className="fleet-skeleton-bar" style={{ width: 24, height: 12, marginLeft: "auto" }} />
+                  <span className="fleet-skeleton-bar" style={{ width: 48, height: 12, marginLeft: "auto" }} />
+                  <span className="fleet-skeleton-bar" style={{ width: 48, height: 12, marginLeft: "auto" }} />
+                  <span className="fleet-skeleton-bar" style={{ width: 60, height: 12, marginLeft: "auto" }} />
+                  <span className="fleet-skeleton-bar" style={{ width: 64, height: 18, marginLeft: "auto", borderRadius: 999 }} />
+                </div>
+              ))}
+            </div>
           ) : error && projects.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load projects" message={error} onRetry={refresh} />
           ) : projects.length === 0 && showArchived ? (

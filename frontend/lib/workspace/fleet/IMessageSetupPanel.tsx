@@ -169,7 +169,30 @@ export function IMessageSetupPanel({ gatewayId }: { gatewayId: string | null }) 
   }
 
   if (loading && !item) {
-    return <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />;
+    // A bare 14px spinner reserved almost no height for what resolves into
+    // a hint line plus a 4-row `.imsg-stage-list` — hundreds of px taller.
+    // Reuses the real `.imsg-stage-list`/`.imsg-stage-row`/
+    // `.imsg-stage-row-head`/`.imsg-stage-row-title` markup for the
+    // collapsed shape every stage row renders in before it's known to have
+    // failed (the only state common to all four, since a failure's own
+    // expanded body is data-dependent and unknowable ahead of the fetch).
+    return (
+      <div className="imsg-setup-panel" aria-busy="true" aria-label="Loading">
+        <p className="fleet-channel-expand-hint">
+          <span className="fleet-skeleton-bar" style={{ width: "75%", height: 13 }} />
+        </p>
+        <div className="imsg-stage-list">
+          {["imsg installed", "Full Disk Access granted", "Messages database readable", "Bridge running"].map((title) => (
+            <div key={title} className="imsg-stage-row">
+              <div className="imsg-stage-row-head">
+                <div className="fleet-skeleton-bar" style={{ width: 14, height: 14, borderRadius: 999 }} />
+                <span className="imsg-stage-row-title">{title}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   }
 
   const checkedAtLabel = relativeTime(probe?.checkedAt);

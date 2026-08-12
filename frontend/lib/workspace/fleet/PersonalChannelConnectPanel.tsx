@@ -132,9 +132,31 @@ export function PersonalChannelConnectPanel({
   }
 
   if ((!scoped && gatewaysLoading) || !gatewayId || statusLoading) {
-    return (
-      <div className="pc-connect-panel pc-connect-panel--loading">
-        <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} />
+    // `.pc-connect-panel--loading` reserved ~64px (a centered 16px spinner
+    // in 24px padding) — WhatsApp's real first step is a 220px QR box, over
+    // 3x taller, so the panel visibly jumped the moment the fetch resolved.
+    // `channelKey` is known before that resolves, so the shape doesn't have
+    // to be guessed: Telegram's own entry step is a phone-number form
+    // (`.pc-connect-step`), every other personal channel here opens on the
+    // QR step (`.pc-connect-qr`) — reusing both real classNames.
+    return channelKey === "telegram_personal" ? (
+      <div className="pc-connect-panel" aria-busy="true" aria-label="Loading">
+        <div className="pc-connect-step">
+          <div className="fleet-skeleton-bar" style={{ width: "70%", height: 13 }} />
+          <div className="fleet-skeleton-bar" style={{ width: "100%", height: 32, borderRadius: 6 }} />
+          <div className="pc-connect-step__footer">
+            <div className="fleet-skeleton-bar" style={{ width: 90, height: 30, borderRadius: 6 }} />
+          </div>
+        </div>
+      </div>
+    ) : (
+      <div className="pc-connect-panel" aria-busy="true" aria-label="Loading">
+        <div className="pc-connect-step">
+          <div className="fleet-skeleton-bar" style={{ width: "60%", height: 13 }} />
+          <div className="pc-connect-qr pc-connect-qr--pending">
+            <div className="fleet-skeleton-bar" style={{ width: "100%", height: "100%" }} />
+          </div>
+        </div>
       </div>
     );
   }

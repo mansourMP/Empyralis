@@ -572,7 +572,23 @@ export function FleetCreateAgentWizard({
               {placement === "vps" && (
                 <div className="fleet-channel-expand">
                   {nodesLoading ? (
-                    <p className="fleet-channel-expand-hint">Loading your cloud servers…</p>
+                    // Reuses the real `.fleet-wizard-label`/`.fleet-wizard-
+                    // options`/`.fleet-wizard-option` markup so the
+                    // placeholder is a stack of option cards — the shape
+                    // this resolves into whenever there's at least one node
+                    // — rather than a single line of hint text that jumps
+                    // to a multi-card list the instant the fetch resolves.
+                    <div aria-busy="true" aria-label="Loading">
+                      <div className="fleet-skeleton-bar" style={{ width: 100, height: 12, marginBottom: 8 }} />
+                      <div className="fleet-wizard-options">
+                        {[0, 1].map((i) => (
+                          <div key={i} className="fleet-wizard-option" style={{ cursor: "default" }}>
+                            <span className="fleet-skeleton-bar" style={{ width: "50%", height: 13 }} />
+                            <span className="fleet-skeleton-bar" style={{ width: "30%", height: 11, opacity: 0.7 }} />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   ) : vpsNodes.length > 0 ? (
                     <>
                       <label className="fleet-wizard-label">Which server?</label>
@@ -603,7 +619,18 @@ export function FleetCreateAgentWizard({
               {placement === "gateway" && (
                 <div className="fleet-channel-expand">
                   {nodesLoading ? (
-                    <p className="fleet-channel-expand-hint">Loading your paired computers…</p>
+                    // Same reasoning as the VPS branch above.
+                    <div aria-busy="true" aria-label="Loading">
+                      <div className="fleet-skeleton-bar" style={{ width: 110, height: 12, marginBottom: 8 }} />
+                      <div className="fleet-wizard-options">
+                        {[0, 1].map((i) => (
+                          <div key={i} className="fleet-wizard-option" style={{ cursor: "default" }}>
+                            <span className="fleet-skeleton-bar" style={{ width: "50%", height: 13 }} />
+                            <span className="fleet-skeleton-bar" style={{ width: "30%", height: 11, opacity: 0.7 }} />
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   ) : gatewayNodes.length > 0 ? (
                     <>
                       <label className="fleet-wizard-label">Which computer?</label>

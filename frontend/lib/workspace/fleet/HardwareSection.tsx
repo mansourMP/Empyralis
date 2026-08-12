@@ -696,10 +696,25 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
           ) : null}
 
           {loading ? (
-            <div className="fleet-list" style={{ marginTop: "var(--space-4)" }}>
-              <div className="fleet-list-row">
-                <div className="fleet-skeleton-bar" style={{ width: "35%", height: 12 }} />
-              </div>
+            // Reuses `.fleet-list-row--hw` — the same dense 3-line row shape
+            // (title / type / location) a real machine row renders, plus a
+            // right-hand cluster placeholder standing in for the
+            // StatusChip/version/share-toggle/"⋯" group — instead of one
+            // bare bar standing in for this multi-column, multi-line row.
+            <div className="fleet-list" style={{ marginTop: "var(--space-4)" }} aria-busy="true" aria-label="Loading">
+              {[0, 1].map((i) => (
+                <div key={i} className="fleet-list-row fleet-list-row--hw">
+                  <div className="fleet-skeleton-bar" style={{ width: 32, height: 32, borderRadius: 8 }} />
+                  <span className="fleet-list-row-main">
+                    <span className="fleet-skeleton-bar" style={{ width: `${40 + i * 15}%`, height: 12 }} />
+                    <span className="fleet-skeleton-bar" style={{ width: 90, height: 10, opacity: 0.7 }} />
+                    <span className="fleet-skeleton-bar" style={{ width: 130, height: 10, opacity: 0.5 }} />
+                  </span>
+                  <span className="fleet-list-row-meta" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                    <div className="fleet-skeleton-bar" style={{ width: 60, height: 18, borderRadius: 999 }} />
+                  </span>
+                </div>
+              ))}
             </div>
           ) : error ? (
             <FleetSurfaceError

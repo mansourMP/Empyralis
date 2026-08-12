@@ -326,11 +326,22 @@ export function ChannelPairingSection({ workspaceId }: { workspaceId: string }) 
         </div>
       ) : null}
 
+      {/* Reuses the real row markup (title/desc + provider badge + Revoke
+          button) so each placeholder row carries the two text lines, the
+          badge and the button real rows reserve space for, and renders
+          more than one row. */}
       {loading ? (
-        <div className="fleet-list">
-          <div className="fleet-list-row">
-            <div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} />
-          </div>
+        <div className="fleet-list" aria-busy="true" aria-label="Loading">
+          {[0, 1].map((i) => (
+            <div key={i} className="fleet-list-row" style={{ cursor: "default" }}>
+              <span className="fleet-list-row-main">
+                <span className="fleet-skeleton-bar" style={{ width: `${40 + i * 15}%`, height: 12 }} />
+                <span className="fleet-skeleton-bar" style={{ width: 110, height: 10, opacity: 0.7 }} />
+              </span>
+              <span className="fleet-skeleton-bar" style={{ width: 60, height: 18, borderRadius: 999 }} />
+              <span className="fleet-skeleton-bar" style={{ width: 70, height: 24, borderRadius: 6 }} />
+            </div>
+          ))}
         </div>
       ) : activeLinks.length === 0 ? (
         <div className="fleet-empty">

@@ -231,7 +231,13 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
               </div>
             ))}
           </div>
-          <div className="fleet-work-transcript-pane" />
+          {/* A blank pane reserved zero shape for what resolves into chat
+              bubbles the instant a thread auto-selects — reuse the same
+              chat-bubble skeleton the detail-loading branch below already
+              uses for exactly this pane. */}
+          <div className="fleet-work-transcript-pane">
+            <FleetChatSkeleton label="Loading conversation" />
+          </div>
         </div>
       </main>
     );

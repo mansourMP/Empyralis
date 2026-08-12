@@ -83,7 +83,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
 import { RUNTIME_LABELS } from "./gateway-box-picker";
 import { resolveAgentModelSummary, platformCreditsTierLabel } from "./fleet-model-config";
-import { FleetRowsSkeleton, FleetCardGridSkeleton } from "./fleet-states";
+import { FleetRowsSkeleton, FleetToggleRowsSkeleton, FleetCardGridSkeleton } from "./fleet-states";
 
 import "./agent-configure-sheet.css";
 
@@ -1487,7 +1487,7 @@ function ScheduleSection({ workspaceId, agentId }: { workspaceId: string; agentI
       )}
 
       {loading ? (
-        <FleetRowsSkeleton rows={2} label="Loading schedule" />
+        <FleetToggleRowsSkeleton rows={2} trailing="button" label="Loading schedule" />
       ) : schedule.length === 0 ? (
         <p className="fleet-subtitle" style={{ marginTop: 0 }}>
           No scheduled wake-ups. This agent only acts when messaged.
@@ -1876,7 +1876,13 @@ function LocalBridgeChannelStatus({
     );
   }
   if (loading) {
-    return <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />;
+    // A bare 14px spinner reserved no height, so the panel visibly grew the
+    // instant the fetch resolved into either `.fleet-channel-expand-success`
+    // (icon+1 line) or up to three stacked `.fleet-channel-expand-hint`
+    // lines — which of those it resolves to isn't knowable ahead of time, so
+    // this reserves ONE hint-shaped line, the minimum either real state
+    // renders (the success state is also one line tall).
+    return <p className="fleet-channel-expand-hint"><span className="fleet-skeleton-bar" style={{ width: "70%", height: 13 }} /></p>;
   }
 
   const item = items.find((i) => i.channel_key === channelKey) || null;
@@ -3256,10 +3262,26 @@ function ConnectorsTab({
   const subtitle = <p className="fleet-tab-subtitle">Apps this agent can use</p>;
 
   if (!agent) {
+    // Matches ConnectorPicker's OWN loading shape below it (`.fleet-
+    // connector-picker`'s real 2-col grid of title/description/button
+    // cards) rather than `FleetCardGridSkeleton`'s 4-col square-icon-card
+    // grid (`.fleet-channel-grid`) — this tab never renders that grid, only
+    // ConnectorPicker's wide picker-item cards, so the two placeholders
+    // shown in sequence (this one, then ConnectorPicker's own once `agent`
+    // resolves) used to visibly change shape mid-load.
     return (
       <div>
         {subtitle}
-        <FleetCardGridSkeleton cards={6} label="Loading connectors" />
+        <div className="fleet-connector-picker" aria-busy="true" aria-label="Loading connectors">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="fleet-connector-picker-item">
+              <div className="fleet-skeleton-bar" style={{ width: "40%", height: 13 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "90%", height: 10, opacity: 0.7 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "60%", height: 10, opacity: 0.7 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 76, height: 26, marginTop: 4 }} />
+            </div>
+          ))}
+        </div>
       </div>
     );
   }
@@ -3413,7 +3435,7 @@ function ToolsTab({
   }
 
   if (loading || connectorsLoading) {
-    return <FleetRowsSkeleton rows={6} label="Loading tools" />;
+    return <FleetToggleRowsSkeleton rows={6} trailing="switch" label="Loading tools" />;
   }
 
   const connectorById = new Map(toolConnectors.map((c) => [c.id, c]));
@@ -3683,7 +3705,17 @@ function SkillsTab({
         </div>
       )}
 
-      {skills.length === 0 && editingId === null ? (
+      {!agent ? (
+        // `agent` is `null` both while `useFleetAgents` is still loading AND
+        // when the agent genuinely doesn't exist — the same ambiguity
+        // ConnectorsTab/ChannelsTab already treat as "still loading" (see
+        // their own `!agent` branches above). This tab used to skip that
+        // check and compute `skills = agent?.skills || []` straight into
+        // the empty state, so a fresh page load showed "No skills yet"
+        // before the fetch that would say whether that's true had
+        // necessarily finished.
+        <FleetToggleRowsSkeleton rows={3} trailing="button" label="Loading skills" />
+      ) : skills.length === 0 && editingId === null ? (
         <EmptyState
           icon={BookOpen}
           title="No skills yet"
@@ -4004,7 +4036,7 @@ function CapabilitiesTab({
   }
 
   if (loading) {
-    return <FleetRowsSkeleton rows={5} label="Loading capabilities" />;
+    return <FleetToggleRowsSkeleton rows={5} trailing="switch" label="Loading capabilities" />;
   }
 
   if (isMaster) {

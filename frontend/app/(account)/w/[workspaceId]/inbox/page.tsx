@@ -7,7 +7,7 @@ import { AlertTriangle, ChevronLeft, Inbox as InboxIcon } from "lucide-react";
 import { fetchActivityTrace, markInboxSeenNow, useFleetAgents, useWorkspaceActivity, type WorkspaceActivityEvent } from "@/lib/workspace/fleet/fleet-data";
 import { timeAgo } from "@/lib/workspace/fleet/fleet-presentation";
 import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
-import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
+import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 
 // review_required is an explicit backend flag — a stronger signal than the
 // string heuristic below, which stays as a fallback for event shapes that
@@ -90,18 +90,47 @@ export default function InboxPage() {
   // the selected row itself so its summary isn't repeated a second time.
   const traceSubEvents = selected ? trace.filter((t) => t.id && t.id !== selected.id) : [];
 
-  const isEmptyState = (loading && events.length === 0) || (error && events.length === 0) || (events.length === 0 && freshWorkspace);
+  // Genuinely loading (not yet resolved either way) is its OWN branch, not
+  // folded into "empty" — the real content once resolved is the SPLIT
+  // layout (list + detail pane), so the loading placeholder must render
+  // inside that same two-column shell too, or the page visibly goes from
+  // one full-width column to two the instant the fetch resolves.
+  const stillLoading = loading && events.length === 0;
+  const isEmptyState = !stillLoading && ((error && events.length === 0) || (events.length === 0 && freshWorkspace));
 
   const splitClassName = `fleet-content fleet-content--split${mobileDetailOpen ? " fleet-inbox--detail-open" : ""}`;
 
   return (
     <main className={isEmptyState ? "fleet-content" : splitClassName}>
-      {loading && events.length === 0 ? (
-        // rowHeight matches .fleet-inbox-row's real height (12px top/bottom
-        // padding + a 13px title line + the 1px divider = ~44px) — see
-        // FleetListSkeleton's MAN-113 note; an un-pinned skeleton row snaps
-        // taller the moment the real inbox list swaps in.
-        <FleetListSkeleton rows={6} rowHeight={44} />
+      {stillLoading ? (
+        <>
+          {/* rowHeight matches .fleet-inbox-row's real height (12px top/bottom
+              padding + a 13px title line + the 1px divider = ~44px) — see
+              FleetListSkeleton's MAN-113 note; an un-pinned skeleton row snaps
+              taller the moment the real inbox list swaps in. Rendered inside
+              the real `.fleet-inbox-list`/`.fleet-inbox-detail` split shell
+              (not a full-width standalone list) since that's the shape this
+              page always resolves into once data arrives — a reader "lands
+              on the top item" (see the effect above), so the detail pane
+              gets its own placeholder too, not a blank void. */}
+          <div className="fleet-inbox-list" aria-busy="true" aria-label="Loading inbox">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="fleet-inbox-row" style={{ cursor: "default" }}>
+                <span className="fleet-skeleton-bar" style={{ width: 7, height: 7, borderRadius: 999 }} />
+                <span className="fleet-skeleton-bar" style={{ width: `${45 + (i % 3) * 15}%`, height: 12 }} />
+                <span className="fleet-skeleton-bar" style={{ width: 30, height: 11, marginLeft: "auto" }} />
+              </div>
+            ))}
+          </div>
+          <div className="fleet-inbox-detail">
+            <div className="fleet-skeleton-bar" style={{ width: "50%", height: 18, marginBottom: 6 }} />
+            <div className="fleet-skeleton-bar" style={{ width: 160, height: 13, marginBottom: 24, opacity: 0.7 }} />
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="fleet-skeleton-bar" style={{ width: "92%", height: 14 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "70%", height: 14 }} />
+            </div>
+          </div>
+        </>
       ) : error && events.length === 0 ? (
         <FleetSurfaceError title="Couldn’t load your inbox" message={error} />
       ) : events.length === 0 && freshWorkspace ? (

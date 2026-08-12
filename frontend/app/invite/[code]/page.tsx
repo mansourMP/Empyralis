@@ -40,11 +40,33 @@ export default function InviteLandingPage() {
   }, [code]);
 
   if (status === 'loading') {
+    // `.invite-landing` re-centers its child (`min-height:100vh`,
+    // `align-items/justify-content: center`), so a small spinner-only card
+    // growing into the full "you're invited" card (icon + heading +
+    // subtitle + a details block + two actions) visibly resized AND
+    // re-centered the instant the fetch resolved. Reuses the real
+    // `invite-landing__card--valid` shape's classNames so the placeholder
+    // occupies the same footprint as the state it most often resolves into.
     return (
       <div className="invite-landing">
-        <div className="invite-landing__card">
+        <div className="invite-landing__card invite-landing__card--valid" aria-busy="true" aria-label="Checking your invite">
           <Loader2 className="invite-landing__spinner" size={32} aria-hidden="true" />
-          <p>Checking your invite…</p>
+          <h1>Checking your invite…</h1>
+          <p className="invite-landing__subtitle">This only takes a moment.</p>
+          <div className="invite-landing__details">
+            <div className="invite-landing__detail">
+              <span className="invite-landing__detail-label">Plan</span>
+              <span className="invite-landing__detail-value">&nbsp;</span>
+            </div>
+            <div className="invite-landing__detail">
+              <span className="invite-landing__detail-label">Role</span>
+              <span className="invite-landing__detail-value">&nbsp;</span>
+            </div>
+          </div>
+          <div className="invite-landing__actions">
+            <AppButton tone="primary" disabled>Create account</AppButton>
+            <AppButton tone="ghost" disabled>Already have an account? Log in</AppButton>
+          </div>
         </div>
       </div>
     );

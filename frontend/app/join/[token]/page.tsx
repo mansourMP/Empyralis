@@ -106,11 +106,20 @@ export default function JoinWorkspaceInvitePage() {
   const nextParam = `?next=${encodeURIComponent(`/join/${token}`)}`;
 
   if (status === 'checking-session' || status === 'accepting') {
+    // `.invite-landing` re-centers its child, so a small spinner-only card
+    // growing into any of the three real resolved cards (signed-out /
+    // accepted / invalid — each a heading + subtitle + one-or-two actions)
+    // visibly resized and re-centered. Matches the signed-out shape (no
+    // icon) as the more neutral of the two non-error outcomes.
     return (
       <div className="invite-landing">
-        <div className="invite-landing__card">
+        <div className="invite-landing__card" aria-busy="true" aria-label={status === 'accepting' ? 'Joining the workspace' : 'Checking your invite'}>
           <Loader2 className="invite-landing__spinner" size={32} aria-hidden="true" />
-          <p>{status === 'accepting' ? 'Joining the workspace…' : 'Checking your invite…'}</p>
+          <h1>{status === 'accepting' ? 'Joining the workspace…' : 'Checking your invite…'}</h1>
+          <p className="invite-landing__subtitle">This only takes a moment.</p>
+          <div className="invite-landing__actions">
+            <AppButton tone="primary" disabled>Continue</AppButton>
+          </div>
         </div>
       </div>
     );

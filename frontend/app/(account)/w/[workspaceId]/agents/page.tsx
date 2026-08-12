@@ -41,6 +41,74 @@ const SORT_OPTIONS = [
 
 type FilterState = { project: string; status: string; channel: string; sort: SortMode };
 
+/**
+ * Board-shaped skeleton reusing AgentsBoard's OWN real classNames
+ * (`.fleet-agent-board`/`.fleet-agent-board-column*`/`.fleet-agent-board-card`,
+ * fleet-theme.css) — a saved "board" view option persists across visits
+ * (readAgentViewOptions), so the very FIRST paint on a fresh load can already
+ * be in board mode. Rendering `FleetListSkeleton`'s flat 52px rows in that
+ * case meant the page opened as a table and then, the instant the fetch
+ * resolved, reflowed into multi-column kanban cards — the exact "loading
+ * shape doesn't match the saved layout" bug this pass exists to close.
+ */
+function AgentsBoardSkeleton() {
+  const columns = [3, 2, 4];
+  return (
+    <div className="fleet-agent-board" aria-busy="true" aria-label="Loading">
+      {columns.map((count, ci) => (
+        <section key={ci} className="fleet-agent-board-column">
+          <header className="fleet-agent-board-column-header">
+            <div className="fleet-skeleton-bar" style={{ width: 60, height: 11 }} />
+            <div className="fleet-skeleton-bar" style={{ width: 16, height: 11 }} />
+          </header>
+          <div className="fleet-agent-board-column-body">
+            {Array.from({ length: count }).map((_, i) => (
+              <article key={i} className="fleet-agent-board-card" style={{ cursor: "default" }}>
+                <div className="fleet-agent-board-card-head">
+                  <div className="fleet-skeleton-bar" style={{ width: 20, height: 20, borderRadius: 999 }} />
+                  <div className="fleet-skeleton-bar" style={{ width: "60%", height: 12 }} />
+                </div>
+                <div className="fleet-skeleton-bar" style={{ width: "80%", height: 11, marginTop: 8, opacity: 0.7 }} />
+              </article>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Grouped-list-shaped skeleton reusing AgentsGroupedList's real classNames
+ * (`.fleet-agent-glist*`) — same "saved layout can already be non-default on
+ * first paint" reasoning as AgentsBoardSkeleton above.
+ */
+function AgentsGroupedSkeleton() {
+  return (
+    <div className="fleet-agent-glist" aria-busy="true" aria-label="Loading">
+      {[3, 2].map((rows, si) => (
+        <section key={si} className="fleet-agent-glist-section">
+          <header className="fleet-agent-glist-header">
+            <div className="fleet-agent-glist-header-btn" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div className="fleet-skeleton-bar" style={{ width: 13, height: 13 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 100, height: 12 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 18, height: 11 }} />
+            </div>
+          </header>
+          <div className="fleet-agent-glist-rows">
+            {Array.from({ length: rows }).map((_, i) => (
+              <div key={i} className="fleet-agent-glist-row" style={{ display: "flex", alignItems: "center", gap: 10, minHeight: 52, cursor: "default" }}>
+                <div className="fleet-skeleton-bar" style={{ width: 20, height: 20, borderRadius: 999 }} />
+                <div className="fleet-skeleton-bar" style={{ width: "35%", height: 12 }} />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 // View state lives in the URL, not just useState — so leaving for an agent's
 // detail and coming back (including the Esc-to-return browser-back path)
 // restores the exact same filtered/sorted view instead of resetting it.
@@ -295,10 +363,20 @@ export default function AgentsPage() {
       <div className="fleet-content-with-panel">
         <div className={`fleet-content-main${surface === "board" ? " fleet-content-main--agent-board" : ""}`}>
           {loading && agents.length === 0 ? (
-            // rowHeight matches .fleet-agent-row's real min-height (52px) —
-            // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton row
-            // snaps taller the moment AgentsList swaps in.
-            <FleetListSkeleton rows={6} rowHeight={52} />
+            // Which skeleton to show is decided by the SAME `surface` the
+            // real branches below switch on — a saved board/grouped view
+            // option can already be active on first paint (see the two
+            // skeletons' own doc comments), so a flat list here would be
+            // wrong for those. rowHeight on the list-surface fallback
+            // matches .fleet-agent-row's real min-height (52px) — see
+            // FleetListSkeleton's MAN-113 note.
+            surface === "board" ? (
+              <AgentsBoardSkeleton />
+            ) : surface === "grouped" ? (
+              <AgentsGroupedSkeleton />
+            ) : (
+              <FleetListSkeleton rows={6} rowHeight={52} />
+            )
           ) : error && agents.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load agents" message={error} onRetry={refresh} />
           ) : agents.length === 0 ? (
