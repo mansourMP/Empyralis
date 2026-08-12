@@ -2228,16 +2228,41 @@ async def provision_hardware_vps(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Platform-account provisioning (our DigitalOcean account, our bill) is
-    # hard-capped per workspace. Enforced HERE, before a pairing intent or a
-    # placeholder record exists, so an over-cap request costs nothing and the
-    # user hears why immediately instead of via a background failure.
+    # hard-capped per workspace AND requires a positive credit balance (MAN-
+    # 132 — a workspace with zero credits must not be able to open a droplet
+    # on Empyralis's own card; see enforce_platform_vps_credit_balance's
+    # docstring for why that check fails CLOSED). Enforced HERE, before a
+    # pairing intent or a placeholder record exists, so a refused request
+    # costs nothing and the user hears why immediately instead of via a
+    # background failure. Customer-account provisioning (any other branch)
+    # bills the customer directly and is deliberately untouched by all three
+    # of these gates.
     if resolved["provider"] == "digitalocean" and vps_provisioning_service._platform_digitalocean_token():
         try:
             await vps_provisioning_service.enforce_platform_vps_capacity(
                 workspace_id=workspace_id, tenant_id=tenant_id
             )
+            await vps_provisioning_service.enforce_platform_vps_plan_capacity(
+                workspace_id=workspace_id, tenant_id=tenant_id
+            )
+            await vps_provisioning_service.enforce_platform_vps_credit_balance(
+                workspace_id=workspace_id, tenant_id=tenant_id
+            )
         except vps_provisioning_service.VPSProvisioningError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            # A dict `detail` renders as a plain string `detail` field in the
+            # response body either way (error_response_service.
+            # http_exception_response -> build_http_error_envelope always
+            # coerces to a string), so frontend code using getErrorMessage
+            # keeps working unchanged; the `code` also lands in the response
+            # body's structured `error.code` for anything that wants to
+            # branch on the reason rather than match its prose (CLAUDE.md:
+            # "stale string matching"). exc.reason is "" for the rare case a
+            # future raise site in this module doesn't set one — falls back
+            # to a generic conflict code rather than an empty string.
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.reason or "vps_provisioning_refused", "message": str(exc)},
+            ) from exc
 
     vps_id = f"vps_{uuid.uuid4().hex}"
     try:

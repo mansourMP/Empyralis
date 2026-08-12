@@ -83,6 +83,15 @@ PLAN_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "whatsapp_channel_enabled": True,
         "hosted_sage_ai_policy": "enabled_with_cap",
         "hosted_sage_ai_monthly_cap_usd": DEFAULT_HOSTED_SAGE_AI_MONTHLY_CAP_USD,
+        # MAN-132: per-plan ceiling on platform-account Agent Computers
+        # (droplets provisioned on EMPYRALIS's own cloud card — see
+        # vps_provisioning_service.enforce_platform_vps_capacity's docstring;
+        # customer-account provisioning is untouched by this entitlement).
+        # 2 matches DEFAULT_VPS_MAX_ACTIVE_PER_WORKSPACE, the flat env-var
+        # cap every workspace is already held to today — free stays exactly
+        # where it is; this is scaffolding for later tuning, not a new
+        # restriction. See enforce_agent_computer_slot_access.
+        "max_agent_computers": 2,
     },
     "pilot": {
         "label": "Pilot",
@@ -122,6 +131,10 @@ PLAN_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "whatsapp_channel_enabled": True,
         "hosted_sage_ai_policy": "enabled_with_cap",
         "hosted_sage_ai_monthly_cap_usd": 50.0,
+        # See "free" plan's max_agent_computers comment above. 10 mirrors
+        # max_deployed_agents for this plan — pilot is the hand-selected
+        # internal/beta tier and is deliberately the most generous.
+        "max_agent_computers": 10,
     },
     "pro": {
         "label": "Pro",
@@ -159,6 +172,10 @@ PLAN_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "mini_apps_unlimited": True,
         "telegram_channel_enabled": True,
         "whatsapp_channel_enabled": True,
+        # See "free" plan's max_agent_computers comment above. 3 mirrors
+        # max_deployed_agents for this plan — above the free-tier ceiling,
+        # below pilot's, never below what the flat cap already allows today.
+        "max_agent_computers": 3,
     },
 }
 
@@ -341,6 +358,19 @@ def _unlimited_credit_workspace_ids() -> frozenset[str]:
         for token in raw.split(",")
         if token.strip()
     )
+
+
+def unlimited_credit_workspace_bypass_active(workspace_id: str) -> bool:
+    """Public wrapper over ``_unlimited_credit_workspace_ids`` for callers
+    outside this module (MAN-132's VPS credit-balance gate — see
+    ``vps_provisioning_service.enforce_platform_vps_credit_balance``) that
+    need the SAME founder/demo allowlist ``hosted_sage_ai_access_state``
+    already honors, rather than re-parsing
+    EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS a second time in a different
+    module — "a channel list copied into a third place" is a documented
+    failure mode here even for a three-line env-var split.
+    """
+    return str(workspace_id or "").strip().lower() in _unlimited_credit_workspace_ids()
 
 
 def _mobile_beta_override_enabled(*, workspace: Optional[Dict[str, Any]], install: Optional[Dict[str, Any]]) -> bool:
@@ -995,6 +1025,50 @@ def enforce_specialist_slot_access(
             message=(
                 "This workspace has reached its draft agent limit for the current plan. "
                 "Archive an unused draft or upgrade before creating another agent."
+            ),
+            entitlement_state=workspace_entitlement_payload(state=state),
+            retry_after_seconds=3600,
+        )
+    return workspace_entitlement_payload(state=state)
+
+
+def enforce_agent_computer_slot_access(
+    *,
+    workspace: Optional[Dict[str, Any]],
+    install: Optional[Dict[str, Any]] = None,
+    current_agent_computer_count: int,
+) -> Dict[str, Any]:
+    """MAN-132: per-plan ceiling on platform-account Agent Computers (droplets
+    provisioned on EMPYRALIS's own cloud card). Same count-then-403 shape as
+    ``enforce_specialist_slot_access`` above and ``_enforce_phase8_quota_controls``
+    in ``deployed_agent_service.py``.
+
+    Callers are expected to count with
+    ``vps_provisioning_service.count_active_workspace_vps`` — see
+    ``vps_provisioning_service.enforce_platform_vps_plan_capacity``, the thin
+    fetch-and-translate wrapper that calls this from the provisioning route.
+    This function itself takes no dependency on vps_provisioning_service (the
+    same "entitlements never fetches its own data" shape
+    ``enforce_specialist_slot_access`` already uses) so it stays a pure,
+    unit-testable policy decision over a caller-supplied workspace + count.
+
+    Deliberately layered ALONGSIDE ``vps_provisioning_service.
+    enforce_platform_vps_capacity`` (the flat, env-var-tuned cap), not a
+    replacement for it: every PLAN_DEFINITIONS default here is chosen to be
+    >= DEFAULT_VPS_MAX_ACTIVE_PER_WORKSPACE, so wiring this in changes
+    nothing for any workspace already within today's flat cap — the flat cap
+    keeps binding until an operator deliberately raises
+    EMPYRALIS_VPS_MAX_ACTIVE_PER_WORKSPACE, at which point this becomes the
+    real, differentiated ceiling per plan without another code change.
+    """
+    state = resolve_workspace_entitlement_state(workspace=workspace, install=install)
+    max_agent_computers = max(1, _coerce_int(state.entitlements.get("max_agent_computers"), 1))
+    if int(current_agent_computer_count or 0) >= max_agent_computers:
+        raise EntitlementQuotaExceededError(
+            reason="agent_computer_limit_exceeded",
+            message=(
+                f"This workspace has reached its Agent Computer limit for the current plan "
+                f"({max_agent_computers}). Delete one you no longer need, or upgrade, then try again."
             ),
             entitlement_state=workspace_entitlement_payload(state=state),
             retry_after_seconds=3600,

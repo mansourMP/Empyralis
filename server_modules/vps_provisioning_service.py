@@ -17,7 +17,10 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
+from starlette.concurrency import run_in_threadpool
+
 from server_modules import agent_computers_repository, gateway_state_repository, vault_store
+from server_modules import billing_service, control_plane_repository, entitlements_service
 from server_modules import db as runtime_db
 from server_modules.runtime_config import EMPYRALIS_STATE_HOME
 
@@ -305,7 +308,7 @@ class VPSPlan:
 
 
 class VPSProvisioningError(RuntimeError):
-    def __init__(self, message: str, *, workspace_id: str = "", return_to: str = ""):
+    def __init__(self, message: str, *, workspace_id: str = "", return_to: str = "", reason: str = ""):
         super().__init__(message)
         # Best-effort context for callers that need to redirect the user
         # somewhere on failure (e.g. the OAuth callback routes in
@@ -320,6 +323,20 @@ class VPSProvisioningError(RuntimeError):
         # it has already been popped by the time they run. Empty means "no
         # recorded origin" — callers fall back to the Hardware page.
         self.return_to = normalize_oauth_return_path(return_to)
+        # MAN-132: a machine-readable code distinguishing WHY provisioning
+        # was refused — "over your machine limit" and "you have no credit"
+        # are two different facts with two different fixes, and CLAUDE.md's
+        # own "stale string matching" entry forbids a caller telling them
+        # apart by parsing this exception's message. Optional and empty for
+        # every pre-existing raise site (OAuth/provider-API failures etc.,
+        # none of which need a reason code today) — only the platform
+        # provisioning-refusal gates in this module set it. Routes that care
+        # forward it as the structured error's `code`
+        # (see routes_gateway.provision_hardware_vps and
+        # error_response_service._http_error_code, which reads
+        # detail["code"] when detail is a dict) while the plain message
+        # stays the human-readable `detail` string either way.
+        self.reason = str(reason or "").strip()
 
 
 class VPSStateCorruptError(RuntimeError):
@@ -1578,7 +1595,114 @@ async def enforce_platform_vps_capacity(*, workspace_id: str, tenant_id: str) ->
     if active >= limit:
         raise VPSProvisioningError(
             f"This workspace already has {active} active agent computer(s) — the current limit is "
-            f"{limit}. Delete one you no longer need, then try again."
+            f"{limit}. Delete one you no longer need, then try again.",
+            workspace_id=workspace_id,
+            reason="vps_capacity_cap_reached",
+        )
+
+
+async def enforce_platform_vps_plan_capacity(*, workspace_id: str, tenant_id: str) -> None:
+    """MAN-132: the PLAN-AWARE sibling of ``enforce_platform_vps_capacity``
+    above. That function is a single flat number for every workspace
+    (``EMPYRALIS_VPS_MAX_ACTIVE_PER_WORKSPACE`` / ``DEFAULT_VPS_MAX_ACTIVE_
+    PER_WORKSPACE``); this one asks ``entitlements_service.
+    enforce_agent_computer_slot_access`` for the caller's actual plan
+    entitlement (``PLAN_DEFINITIONS[...]["max_agent_computers"]``, with a
+    per-workspace ``metadata.entitlements.overrides`` escape hatch — see
+    that module) and translates its ``EntitlementQuotaExceededError`` into
+    the ``VPSProvisioningError`` this module's callers already handle.
+
+    Both gates run — see routes_gateway.provision_hardware_vps. Every plan
+    default is chosen to be >= the flat cap's default, so today this is a
+    no-op everywhere (the flat cap trips first, at the same count, for
+    every plan): wiring it now is what makes it a live, tested, reachable
+    path rather than a "built and never wired" scaffold — see CLAUDE.md's
+    entry on that recurring defect here. It becomes the REAL, differentiated
+    ceiling per plan the moment an operator raises or removes
+    EMPYRALIS_VPS_MAX_ACTIVE_PER_WORKSPACE, with no further code change.
+
+    Only called on the platform path, same as enforce_platform_vps_capacity
+    — customer-account provisioning bills the customer directly and a plan
+    entitlement has no business throttling spend Empyralis does not carry.
+    """
+    workspace = await control_plane_repository.get_workspace_by_id(workspace_id)
+    active = await count_active_workspace_vps(workspace_id=workspace_id, tenant_id=tenant_id)
+    try:
+        entitlements_service.enforce_agent_computer_slot_access(
+            workspace=workspace,
+            current_agent_computer_count=active,
+        )
+    except entitlements_service.EntitlementQuotaExceededError as exc:
+        raise VPSProvisioningError(
+            exc.message,
+            workspace_id=workspace_id,
+            reason="vps_capacity_cap_reached",
+        ) from exc
+
+
+async def enforce_platform_vps_credit_balance(*, workspace_id: str, tenant_id: str) -> None:
+    """MAN-132: a workspace with zero credits must not be able to open a
+    droplet on EMPYRALIS's own DigitalOcean account — that is unbounded
+    COGS from an account that has paid nothing. Only called on the platform
+    path, same as enforce_platform_vps_capacity above; customer-account
+    provisioning bills the customer directly and is untouched.
+
+    Reads the SAME raw ``credit_balance_usd`` workspace-metadata field the
+    billing page shows (``billing_service.credit_balance_for_workspace`` —
+    the same helper GET /billing/credits/balance calls), not
+    ``entitlements_service.hosted_sage_ai_access_state``. That function was
+    the ticket's own suggested source of truth and IS live (many real
+    callers — not the "built, tested, zero callers" trap this codebase has
+    hit before), but its ``total_available_usd`` blends the raw balance
+    with the workspace's MONTHLY FREE hosted-AI chat allowance
+    (``monthly_remaining_usd`` — every plan's own
+    ``hosted_sage_ai_monthly_cap_usd``, $5 by default, refreshed monthly).
+    That allowance is meant to cover a starter's worth of AI CHAT turns; it
+    has nothing to do with paying for a droplet, and a workspace that has
+    never spent a cent of it would read as "funds available" and be allowed
+    to provision hardware anyway — the exact hole this gate exists to
+    close. The raw balance is the correct, narrower question: has this
+    workspace ever put real money (or the one-time signup grant — see
+    ``billing_credit_config.NEW_ACCOUNT_SIGNUP_CREDIT_USD``, applied at
+    workspace creation, so a brand-new workspace is not zero) behind its
+    account, at all.
+
+    FAILS CLOSED: an unreadable balance (workspace lookup raises, DB
+    unreachable, a malformed record) refuses provisioning rather than
+    allowing it. This is the OPPOSITE of the invite-email verification
+    gate's deliberate fail-OPEN (see CLAUDE.md) — that gate withholds one
+    email on a blip, a fully reversible non-event; this one would let an
+    account with no ability to pay open a real, metered cloud instance on
+    Empyralis's own card, which is not reversible by waiting for the next
+    request to succeed. When in doubt, spending real money requires
+    affirmative proof of a positive balance, not merely the absence of
+    proof it's exhausted.
+
+    Honors the same founder/demo unlimited-credit workspace allowlist
+    (EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS) hosted_sage_ai_access_state
+    already does, via entitlements_service.
+    unlimited_credit_workspace_bypass_active — so the same opt-in,
+    env-only, no-workspace-hardcoded bypass that lets the founder dogfood
+    AI chat without hitting the credit wall also covers dogfooding VPS
+    provisioning, rather than a second bypass being invented (or, worse,
+    the founder's own workspace getting newly blocked by this ticket).
+    """
+    if entitlements_service.unlimited_credit_workspace_bypass_active(workspace_id):
+        return
+    try:
+        credit_state = await run_in_threadpool(billing_service.credit_balance_for_workspace, workspace_id)
+        balance_usd = float((credit_state or {}).get("credit_balance_usd") or 0.0)
+    except Exception as exc:
+        raise VPSProvisioningError(
+            "Could not verify this workspace's credit balance — try again in a moment.",
+            workspace_id=workspace_id,
+            reason="vps_credit_balance_unavailable",
+        ) from exc
+    if balance_usd <= 0:
+        raise VPSProvisioningError(
+            "This workspace has no available credit balance. Add credits, then try again.",
+            workspace_id=workspace_id,
+            reason="vps_credit_balance_exhausted",
         )
 
 
