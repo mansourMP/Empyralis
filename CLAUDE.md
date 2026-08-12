@@ -2175,6 +2175,28 @@ tab, read the console.
   terminates TLS directly. Its ~100s idle timeout — not nginx's 86400s — is
   the real ceiling on any long request. A silent SSE stream gets cut at
   ~125s; keepalive comments prevent it.
+- **Renaming a table that carries `tenant_id`/`workspace_id` is a TWO-PART
+  change, and doing it in one part takes production down.**
+  `preflight._RLS_COVERAGE_EXCEPTIONS` is keyed by table NAME, so a renamed
+  scoped table is a brand-new unknown table to `_check_rls_coverage`, which
+  fails closed and refuses to boot. Order is: add the new key, deploy, THEN
+  rename in the database. Keep the OLD key too, so the revert path also
+  boots. Learned the hard way on 2026-08-13 — ~3 minutes of 502 on a
+  cosmetic rename of a dead table. The check was right; the sequence was
+  wrong. The same coupling applies to anything else keyed by table name
+  (`migrations/enable_rls.sql`, the `_NOT_POSTGRES`/`_NO_LIVE_READ` verdicts),
+  so grep the name before renaming anything scoped.
+- **The dead Postgres `gateway_registrations` is now
+  `zzz_dead_gateway_registrations_see_man307`** (2026-08-13, MAN-307). The
+  live store is SQLite via `gateway_state_repository` (`sqlite3.connect`);
+  the Postgres copy stopped being written 2026-06-24, holds one stale row,
+  and no Python reads it — but it looked exactly like every other
+  control-plane table and was used as primary evidence in two investigations,
+  giving a wrong answer both times ("only one gateway exists", "no
+  capabilities are advertised"). Renamed rather than dropped so the row
+  survives; it carries a `COMMENT ON TABLE` saying all of this. Four sibling
+  gateway tables are marked `_NOT_POSTGRES` in preflight and do not exist in
+  Postgres at all, so they were never a trap.
 - **Production served ZERO security headers until 2026-08-12**, and neither
   the live nginx config nor `deploy/nginx-empyralis.conf` contained a single
   `add_header`. Found by reading the WIRE (`curl -sI https://empyralis.ai/`
