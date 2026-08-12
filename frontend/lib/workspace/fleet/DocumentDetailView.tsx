@@ -553,7 +553,24 @@ export function DocumentDetailView({
               role="button"
               tabIndex={0}
               aria-label={draftBody.trim() ? "Edit document body" : "Add document content"}
-              onClick={enterBodyEdit}
+              onClick={(e) => {
+                // A click inside the RENDERED body means "edit this" only
+                // when it wasn't already a click on something. Two cases the
+                // bare handler got wrong, both of which cost the person the
+                // thing they were actually doing:
+                //
+                //  - A LINK. MarkdownLite renders `target="_blank"`, so the
+                //    click both opened a tab and (bubbling to here) flipped
+                //    the document behind it into a raw textarea. Come back
+                //    from the new tab and your document is source again.
+                //  - A TEXT SELECTION. Drag-selecting a paragraph to copy it
+                //    ends in a click; swapping in the textarea discards the
+                //    selection, so the document could not be quoted from
+                //    without being edited first.
+                if ((e.target as HTMLElement).closest("a")) return;
+                if (!window.getSelection()?.isCollapsed) return;
+                enterBodyEdit();
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
