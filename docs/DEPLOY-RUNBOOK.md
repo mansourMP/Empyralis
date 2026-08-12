@@ -55,6 +55,37 @@ Third-party OAuth connector client_id/secret pairs (`GOOGLE_WORKSPACE_OAUTH_CLIE
 
 ### Agent Computer provisioning (required for the "Connect a cloud server" flow)
 
+**Which providers are actually reachable, and why two of them 500 today.** All
+three provider code paths (DigitalOcean, Google Cloud, AWS) are complete,
+unit-tested and wired from UI click to the real cloud API — `provision_vps()`
+in `vps_provisioning_service.py` dispatches to `_provision_digitalocean` /
+`_provision_google` / `_provision_aws`, and `cloud_init_script()` is
+provider-agnostic (one `#cloud-config` wrapping `install-agent-computer.sh`,
+no per-provider branches). What was missing until this section existed is
+purely OPERATOR configuration, and because it was never written down, two
+finished providers sat unusable and invisible for weeks. That is the same
+"built, tested, and never wired" shape CLAUDE.md names, one level up from the
+code: the code was wired, the deploy checklist was not.
+
+Verified on the live box 2026-08-12: DigitalOcean set, Google Cloud and AWS
+entirely unset. Both unset providers fail LOUDLY (HTTP 500 from
+`create_google_oauth_start` / `empyralis_aws_account_id()` raising), never
+silently, so no customer money is at risk — but the feature is dead end to end.
+
+| Var | Provider | Why |
+|---|---|---|
+| `GOOGLE_CLOUD_CLIENT_ID` / `GOOGLE_CLOUD_CLIENT_SECRET` | Google Cloud | A SECOND OAuth app, deliberately NOT the sign-in one. It requests `cloud-platform`, which Google classifies **sensitive** — putting it on the sign-in consent screen would drag Google Sign-In back under verification and re-impose the 100-user cap that was removed on 2026-08-12 by stripping `calendar`/`gmail.modify`. Keep the two consent screens separate, permanently. |
+| `GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL` / `GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN` | Google Cloud | Empyralis's OWN long-lived GCP identity. Every customer's bootstrap grants THIS identity `roles/iam.serviceAccountTokenCreator` on the `empyralis-provisioner` service account created inside the customer's own project; every later call impersonates that SA via `iamcredentials:generateAccessToken`, and the customer's OAuth token is discarded immediately after bootstrap. **Minting the refresh token requires a human to run a one-time OAuth consent as Empyralis itself** — it cannot be generated from a key file or by any automation here. |
+| `EMPYRALIS_AWS_ACCOUNT_ID` | AWS | The 12-digit id of Empyralis's own AWS account. Not a secret — it is published INTO every customer's IAM trust policy so `sts:AssumeRole` works. See CLAUDE.md: AWS is deliberately deferred until the founder can create this account on hardware and a phone he owns, because losing it later breaks every customer at once. |
+| `EMPYRALIS_AWS_CFN_TEMPLATE_URL` | AWS | A publicly fetchable copy of `deploy/aws/empyralis-vps-role.yaml` (e.g. S3). Customers run it as a CloudFormation stack to create the `EmpyralisVPSProvisioner` role. There is **no publish pipeline** for this file — unlike the DigitalOcean baked image, nothing uploads it, so it is a manual step and will silently go stale if the YAML changes. |
+| `DIGITALOCEAN_CLIENT_ID` / `DIGITALOCEAN_CLIENT_SECRET` | DigitalOcean | Already set. Only powers the OAuth *button*; the paste-a-token path works without them. |
+
+Baked images (Packer) are **DigitalOcean-only** — `deploy/packer/agent-computer.pkr.hcl`
+declares a single `source "digitalocean"`. Google and AWS always take the full
+boot-time install, which is slower but functionally identical and uses the same
+failure-beacon plumbing.
+
+
 | Var | Value | Why |
 |---|---|---|
 | `EMPYRALIS_REPO_TOKEN` | a GitHub personal access token with **read** access to `mansourMP/Empyralis` | The Empyralis repo is private and no build-artifact publish pipeline exists yet, so `install-agent-computer.sh` clones the repo directly on a freshly provisioned box instead of downloading a prebuilt tarball. `vps_provisioning_service.py`'s `cloud_init_script()` reads this once from the backend's own environment (`os.getenv`, same pattern as `DIGITALOCEAN_CLIENT_SECRET`) and threads it into the cloud-init command every newly created Hetzner/Vultr/DigitalOcean box runs at first boot. **Without it, a freshly provisioned box can't clone the repo, can't build the gateway, and never pairs** — provisioning fails silently at the box's first-boot step, not at backend boot, so it won't show up in this box's own logs; check the new box's `cloud-init-output.log` instead. Generate at github.com → Settings → Developer settings → Personal access tokens (read-only; scope to just this repo if using a fine-grained token). Interim measure while the repo is private and unpublished — see `vps_provisioning_service.py`'s own comment on `_installer_repo_token()` for the longer-term options (a public gateway mirror, or a real CI publish pipeline). |
