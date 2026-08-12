@@ -975,6 +975,15 @@ async def test_google_workspace_connection_setup_starts_oauth_not_fake_session(m
     _install_auth(monkeypatch)
     monkeypatch.setenv("GOOGLE_WORKSPACE_OAUTH_CLIENT_ID", "google-client-id")
     monkeypatch.setenv("GOOGLE_WORKSPACE_OAUTH_CLIENT_SECRET", "google-client-secret")
+    for name in (
+        "GOOGLE_WORKSPACE_OAUTH_SCOPES",
+        "GOOGLE_OAUTH_SCOPES",
+        "GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES",
+        "GOOGLE_OAUTH_ENABLED_SCOPES",
+        "GOOGLE_WORKSPACE_ENABLE_DRIVE_SCOPE",
+        "GOOGLE_OAUTH_ENABLE_DRIVE_SCOPE",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     async def fail_create_setup_session(*_args, **_kwargs):
         raise AssertionError("generic setup session should not be used for launchable app connectors")
@@ -1000,9 +1009,14 @@ async def test_google_workspace_connection_setup_starts_oauth_not_fake_session(m
     assert payload["authorization_url"].startswith("https://accounts.google.com/o/oauth2/v2/auth?")
     query = urlparse.parse_qs(urlparse.urlparse(payload["authorization_url"]).query)
     scopes = query["scope"][0].split()
-    assert "https://www.googleapis.com/auth/gmail.modify" in scopes
-    assert "https://www.googleapis.com/auth/calendar" in scopes
-    assert "https://www.googleapis.com/auth/drive.file" not in scopes
+    # As of 2026-08-12 the live consent screen for this deployment's Google
+    # OAuth app declares only identity + Drive -- gmail.modify/calendar were
+    # removed and come back behind a separate, verified app (see
+    # connection_oauth_service.google_workspace_enabled_capabilities and
+    # fix/google-connectors-honest-when-scopes-unavailable).
+    assert "https://www.googleapis.com/auth/drive.file" in scopes
+    assert "https://www.googleapis.com/auth/gmail.modify" not in scopes
+    assert "https://www.googleapis.com/auth/calendar" not in scopes
 
 
 @pytest.mark.anyio

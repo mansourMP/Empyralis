@@ -7,9 +7,14 @@ from server_modules import direct_tool_config_service, runs_execution, skills_se
 
 class GoogleWorkspaceFetchEmailsDirectToolTests(unittest.TestCase):
     def test_google_workspace_verification_exposes_fetch_emails_as_read_tool_action(self) -> None:
+        # Gmail is gated on the connector's own test result (gmail_access),
+        # matching calendar_access/files_access below -- it must be granted
+        # explicitly here rather than assumed, exactly like the sibling
+        # test right below already does for Calendar/Drive. See
+        # fix/google-connectors-honest-when-scopes-unavailable.
         verification = tool_availability_truth.capability_verification_from_test_result(
             "google_workspace",
-            {"ok": True},
+            {"ok": True, "gmail_access": True},
         )
 
         self.assertIn("gmail_threads.read", verification["read_actions"])

@@ -8,7 +8,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 import logging
@@ -85,6 +85,126 @@ class OAuthProviderConfig:
     dynamic_registration_token_auth_method: str = "client_secret_post"
 
 
+# ── Google Workspace scope availability: the ONE source of truth ──────────
+# The OAuth consent screen for this deployment's Google Cloud project
+# (empyralis-gws-cli) is config we do NOT control from this codebase -- it
+# lives in Google's own console. As of 2026-08-12 it declares ONLY the
+# non-sensitive scopes below (identity + Drive); the sensitive `calendar`
+# scope and the restricted `gmail.modify` scope were deliberately REMOVED so
+# Google Sign-In + Drive stay unverified-clean (no 100-user cap, no
+# "unverified app" warning). Gmail and Calendar come back later behind a
+# SEPARATE OAuth app that goes through Google's verification review.
+#
+# google_workspace_enabled_capabilities() below is the ONE place that
+# decides which of them this deployment may currently request -- never
+# hand-maintain a second "gmail is off" list anywhere else.
+# _effective_scopes() (the OAuth authorize URL), APP_MCP_SERVER_MAP's
+# per-entry "capability" key (which MCP server rows get registered after
+# connect), and every test that asserts availability all read this one
+# function, so flipping GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES is the one
+# edit that brings Gmail/Calendar back once the second app is verified.
+GOOGLE_WORKSPACE_SCOPE_DRIVE = "drive"
+GOOGLE_WORKSPACE_SCOPE_GMAIL = "gmail"
+GOOGLE_WORKSPACE_SCOPE_CALENDAR = "calendar"
+
+# capability key -> the literal OAuth scope it requests. Identity (openid/
+# email/profile) is NOT in this map -- it is the unconditional baseline on
+# OAUTH_PROVIDER_CONFIGS["google_workspace"].scopes below and is never
+# gated, matching Google Sign-In staying "fully working" no matter what.
+GOOGLE_WORKSPACE_CAPABILITY_SCOPES: Dict[str, str] = {
+    GOOGLE_WORKSPACE_SCOPE_DRIVE: "https://www.googleapis.com/auth/drive.file",
+    GOOGLE_WORKSPACE_SCOPE_GMAIL: "https://www.googleapis.com/auth/gmail.modify",
+    GOOGLE_WORKSPACE_SCOPE_CALENDAR: "https://www.googleapis.com/auth/calendar",
+}
+
+# The live consent screen today: identity + Drive. Gmail/Calendar require a
+# deliberate opt-in once they are declared on a verified app again.
+_GOOGLE_WORKSPACE_DEFAULT_ENABLED_CAPABILITIES = (GOOGLE_WORKSPACE_SCOPE_DRIVE,)
+
+
+def _env_tri_state(*names: str) -> Optional[bool]:
+    """True/False if any of `names` is set to a recognized boolean token,
+    None if none of them is set at all -- lets a caller distinguish "not
+    configured" from "explicitly turned off", which a bare _env_flag_enabled
+    (defaults False either way) cannot."""
+    raw = _env_first(*names).strip().lower()
+    if not raw:
+        return None
+    return raw in {"1", "true", "yes", "on", "enabled"}
+
+
+def google_workspace_enabled_capabilities() -> frozenset[str]:
+    """The Google Workspace capability keys ('drive'/'gmail'/'calendar')
+    this deployment may currently request OAuth scopes for. See the module
+    comment above GOOGLE_WORKSPACE_CAPABILITY_SCOPES -- this is the single
+    source of truth; nothing else in this codebase should hand-maintain a
+    second list of which Google scopes are currently available.
+
+    GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES (comma/space-separated capability
+    keys) is authoritative when set at all -- e.g. once Gmail/Calendar are
+    declared on a verified app again, set it to "drive gmail calendar".
+    When unset, the default is Drive only (today's live consent screen),
+    except that an operator who explicitly set the legacy
+    GOOGLE_WORKSPACE_ENABLE_DRIVE_SCOPE/GOOGLE_OAUTH_ENABLE_DRIVE_SCOPE flag
+    (either direction) is still honored for that one capability -- so an
+    environment that deliberately opted OUT of Drive before this fix keeps
+    doing so, and one that opted in keeps doing so too.
+    """
+    raw = _env_first("GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES", "GOOGLE_OAUTH_ENABLED_SCOPES")
+    if raw:
+        tokens = {token.strip().lower() for token in raw.replace(",", " ").split() if token.strip()}
+        unknown = tokens - set(GOOGLE_WORKSPACE_CAPABILITY_SCOPES)
+        if unknown:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "google_workspace_scope_config_invalid: unknown capability keys "
+                    f"{sorted(unknown)} in GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES; valid keys are "
+                    f"{sorted(GOOGLE_WORKSPACE_CAPABILITY_SCOPES)}."
+                ),
+            )
+        return frozenset(tokens)
+
+    enabled = set(_GOOGLE_WORKSPACE_DEFAULT_ENABLED_CAPABILITIES)
+    legacy_drive = _env_tri_state("GOOGLE_WORKSPACE_ENABLE_DRIVE_SCOPE", "GOOGLE_OAUTH_ENABLE_DRIVE_SCOPE")
+    if legacy_drive is True:
+        enabled.add(GOOGLE_WORKSPACE_SCOPE_DRIVE)
+    elif legacy_drive is False:
+        enabled.discard(GOOGLE_WORKSPACE_SCOPE_DRIVE)
+    return frozenset(enabled)
+
+
+def google_workspace_capability_available(capability: str) -> bool:
+    """Whether a single Google Workspace capability ('drive'/'gmail'/
+    'calendar') is currently requestable for this deployment. Callers
+    outside this module (MCP registration, the connectors UI, direct-chat
+    tool gating) should use this rather than re-deriving availability."""
+    return str(capability or "").strip().lower() in google_workspace_enabled_capabilities()
+
+
+def _assert_google_workspace_scopes_available(scopes: tuple[str, ...]) -> None:
+    """Defense in depth for _effective_scopes(): even though the default
+    (non-override) path only ever assembles scopes google_workspace_enabled_
+    capabilities() actually allows, this still checks the FINAL scope list --
+    including the raw GOOGLE_WORKSPACE_OAUTH_SCOPES/GOOGLE_OAUTH_SCOPES
+    override -- so a misconfigured deployment fails with a clear, coded
+    error before ever building a Google authorize URL, instead of Google
+    showing the visitor its own raw "Error 400: invalid_scope" page (which
+    happens entirely outside our redirect flow -- there is nothing on our
+    side that could otherwise catch it)."""
+    enabled = google_workspace_enabled_capabilities()
+    for capability, scope in GOOGLE_WORKSPACE_CAPABILITY_SCOPES.items():
+        if scope in scopes and capability not in enabled:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"google_workspace_scope_unavailable: '{capability}' is not enabled for this "
+                    "deployment's connected Google OAuth app. Set GOOGLE_WORKSPACE_OAUTH_ENABLED_SCOPES "
+                    f"to include '{capability}' once it is declared on that app's consent screen."
+                ),
+            )
+
+
 OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
     # Google Workspace: checked live 2026-07-19 for DCR as part of the wider
     # connector sweep. All 3 MCP hosts (gmailmcp/calendarmcp/drivemcp.
@@ -95,16 +215,18 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
     # field at all -- Google has no public self-registration API; an OAuth
     # client must be created in Google Cloud Console. Stays classic-only, no
     # config changes.
-    # NOTE: this base `scopes` tuple is the UNVERIFIED-app default (gmail.modify
-    # + calendar only) -- it must never include the Drive scope directly. Drive
-    # is opt-in only, added by _effective_scopes() when GOOGLE_WORKSPACE_ENABLE_
-    # DRIVE_SCOPE/GOOGLE_OAUTH_ENABLE_DRIVE_SCOPE is set (see that function and
-    # test_google_oauth_verification_readiness.py). Baking drive.file in here
-    # made that opt-in gate a no-op -- every Google Workspace OAuth start
-    # (Gmail/Calendar included) silently requested Drive too, which is exactly
-    # the kind of scope creep Google's app-verification review blocks an
-    # unverified app on, so it could stall the *entire* Google authorize step,
-    # not just Drive's.
+    # NOTE: this base `scopes` tuple is ONLY the identity baseline (openid/
+    # email/profile) -- it must never hardcode gmail.modify/calendar/
+    # drive.file directly. Each of those is capability-gated by
+    # google_workspace_enabled_capabilities() (see the module comment above
+    # GOOGLE_WORKSPACE_CAPABILITY_SCOPES, a few hundred lines up) and added
+    # by _effective_scopes() only when currently available. Baking a scope
+    # in here would bypass that gate -- every Google Workspace OAuth start
+    # would silently request it too, which is exactly how the 2026-08-12
+    # regression happened: gmail.modify/calendar were hardcoded here
+    # unconditionally, the live consent screen stopped declaring them, and
+    # every "Connect Google Workspace" click failed with Google's own raw
+    # invalid_scope error before ever reaching our code.
     "google_workspace": OAuthProviderConfig(
         label="Google Workspace",
         env_vars={
@@ -115,8 +237,6 @@ OAUTH_PROVIDER_CONFIGS: Dict[str, OAuthProviderConfig] = {
             "openid",
             "email",
             "profile",
-            "https://www.googleapis.com/auth/gmail.modify",
-            "https://www.googleapis.com/auth/calendar",
         ),
         auth_url="https://accounts.google.com/o/oauth2/v2/auth",
         token_url="https://oauth2.googleapis.com/token",
@@ -2610,13 +2730,25 @@ def _effective_scopes(provider: str, config: OAuthProviderConfig) -> tuple[str, 
         _env_first("GOOGLE_WORKSPACE_OAUTH_SCOPES", "GOOGLE_OAUTH_SCOPES")
     )
     if explicit_scopes:
-        return explicit_scopes
+        scopes = explicit_scopes
+    else:
+        # config.scopes is the identity baseline (openid/email/profile),
+        # never gated. Everything else comes from google_workspace_enabled_
+        # capabilities() -- the single source of truth for which of
+        # drive/gmail/calendar this deployment's connected Google OAuth app
+        # currently declares -- so there is exactly one place to flip when
+        # Gmail/Calendar are declared on a verified app again.
+        scopes = list(config.scopes)
+        for capability, scope in GOOGLE_WORKSPACE_CAPABILITY_SCOPES.items():
+            if capability in google_workspace_enabled_capabilities() and scope not in scopes:
+                scopes.append(scope)
+        scopes = tuple(scopes)
 
-    scopes = list(config.scopes)
-    if _env_flag_enabled("GOOGLE_WORKSPACE_ENABLE_DRIVE_SCOPE", "GOOGLE_OAUTH_ENABLE_DRIVE_SCOPE"):
-        drive_scope = "https://www.googleapis.com/auth/drive.file"
-        if drive_scope not in scopes:
-            scopes.append(drive_scope)
+    # Checked on BOTH paths, including the explicit override: an operator
+    # who sets GOOGLE_WORKSPACE_OAUTH_SCOPES to a scope Google's console
+    # doesn't currently declare would otherwise hit the exact "raw Google
+    # invalid_scope error" this fix exists to eliminate.
+    _assert_google_workspace_scopes_available(tuple(scopes))
     return tuple(scopes)
 
 
@@ -3088,22 +3220,33 @@ def _exchange_discord(code: str, redirect_uri: str) -> Dict[str, Any]:
 # Each provider can map to one or more MCP server registrations.
 # Each entry has: server_id (unique per workspace), label, endpoint (URL or None).
 # When endpoint is None, that server is skipped — credential stored but no tools available.
+# An entry may also carry "capability" — one of GOOGLE_WORKSPACE_CAPABILITY_
+# SCOPES's keys — and _register_mcp_servers_for_provider() skips it the same
+# way (credential stored but no tools available) when google_workspace_
+# capability_available() says that scope isn't currently requestable. This
+# is the SAME "no dead controls" rule endpoint=None already encodes here,
+# just keyed on scope availability instead of endpoint existence: a Gmail/
+# Calendar MCP row is never created for a credential that structurally
+# cannot use it, rather than being created and then failing every call.
 APP_MCP_SERVER_MAP: Dict[str, List[Dict[str, Optional[str]]]] = {
     "google_workspace": [
         {
             "server_id": "google-gmail",
             "label": "Google Gmail (MCP)",
             "endpoint": "https://gmailmcp.googleapis.com/mcp/v1",
+            "capability": GOOGLE_WORKSPACE_SCOPE_GMAIL,
         },
         {
             "server_id": "google-calendar",
             "label": "Google Calendar (MCP)",
             "endpoint": "https://calendarmcp.googleapis.com/mcp/v1",
+            "capability": GOOGLE_WORKSPACE_SCOPE_CALENDAR,
         },
         {
             "server_id": "google-drive",
             "label": "Google Drive (MCP)",
             "endpoint": "https://drivemcp.googleapis.com/mcp/v1",
+            "capability": GOOGLE_WORKSPACE_SCOPE_DRIVE,
         },
     ],
     # GitHub: official remote MCP server. Requires GitHub Copilot or Copilot Enterprise seat.
@@ -4074,20 +4217,34 @@ async def _register_mcp_servers_for_provider(
     connect itself still succeeds: the credential + binding belong to the
     connecting agent and are unaffected; only the MCP tool registration for
     that specific server_id is withheld.
+
+    An entry carrying a "capability" key (see the comment above
+    APP_MCP_SERVER_MAP) is skipped the same way an endpoint=None entry
+    already is when google_workspace_capability_available() says that scope
+    isn't currently requestable -- reported under "skipped", never as a
+    failure: this isn't an error, it's deployment config saying, on
+    purpose, that this control cannot work right now. No row means no MCP
+    server that would 401/403 on every call, matching CLAUDE.md's "a
+    control that cannot be used in the current state is not rendered."
     """
     from server_modules import mcp_registry_service
 
     server_entries = APP_MCP_SERVER_MAP.get(normalized_provider)
     if not server_entries:
-        return {"registered": 0, "servers": [], "collisions": [], "failures": []}
+        return {"registered": 0, "servers": [], "collisions": [], "failures": [], "skipped": []}
 
     registered: list[Dict[str, Any]] = []
     collisions: list[Dict[str, Any]] = []
     failures: list[Dict[str, Any]] = []
+    skipped: list[Dict[str, Any]] = []
     for entry in server_entries:
         server_id = str(entry.get("server_id") or "").strip()
         endpoint = entry.get("endpoint")
         if not server_id or endpoint is None:
+            continue
+        capability = str(entry.get("capability") or "").strip()
+        if capability and not google_workspace_capability_available(capability):
+            skipped.append({"server_id": server_id, "reason": "scope_unavailable"})
             continue
         try:
             server = await mcp_registry_service.upsert_workspace_mcp_server_async(
@@ -4131,6 +4288,7 @@ async def _register_mcp_servers_for_provider(
         "servers": registered,
         "collisions": collisions,
         "failures": failures,
+        "skipped": skipped,
     }
     if failures:
         # A single human-readable sentence the UI can show verbatim, so a

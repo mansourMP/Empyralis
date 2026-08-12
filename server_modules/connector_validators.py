@@ -669,10 +669,48 @@ def validate_google_workspace_connector(credentials: Dict[str, Any], http_json_r
         raise RuntimeError("Google Workspace access_token is required.")
 
     headers = {"Authorization": f"Bearer {access_token}"}
-    profile_res = http_json_request("https://gmail.googleapis.com/gmail/v1/users/me/profile", headers=headers)
-    if profile_res.get("status") != 200:
-        raise RuntimeError("Google Workspace token is invalid for Gmail.")
-    profile = profile_res.get("json") if isinstance(profile_res.get("json"), dict) else {}
+
+    # Identity (openid/email/profile) is the ONE scope every Google
+    # Workspace credential always carries (connection_oauth_service's
+    # google_workspace_enabled_capabilities() never gates it) -- so this is
+    # the one call whose failure means the token itself is dead. Gmail,
+    # like Calendar and Drive below it, is independently opt-in and may be
+    # unavailable for this deployment (see that module's scope-availability
+    # comment), so it degrades to a warning instead of a hard failure --
+    # the same graceful pattern Microsoft 365's validator already uses
+    # (microsoft_365_probe_capabilities never hard-requires Mail either).
+    # Before this fix Gmail WAS the hard-required call, so a credential
+    # that only had identity+Drive scopes (exactly what this deployment's
+    # consent screen grants today) was reported entirely invalid -- Drive
+    # included, even though Drive worked fine.
+    identity_res = http_json_request("https://www.googleapis.com/oauth2/v3/userinfo", headers=headers)
+    if identity_res.get("status") != 200:
+        raise RuntimeError("Google Workspace token is invalid.")
+    identity = identity_res.get("json") if isinstance(identity_res.get("json"), dict) else {}
+    identity_email = str(identity.get("email") or "").strip()
+
+    gmail_json: Dict[str, Any] = {}
+    gmail_access = False
+    gmail_warning: str | None = None
+    try:
+        profile_res = http_json_request("https://gmail.googleapis.com/gmail/v1/users/me/profile", headers=headers)
+        gmail_json = profile_res.get("json") if isinstance(profile_res.get("json"), dict) else {}
+        gmail_access = int(profile_res.get("status") or 0) == 200
+    except Exception as exc:
+        gmail_access = False
+        detail = str(exc).strip()
+        if len(detail) > 220:
+            detail = detail[:220] + "..."
+        gmail_warning = (
+            "Gmail scope is missing; sign-in and any granted Calendar/Drive actions still work, "
+            "Gmail actions are disabled until you grant https://www.googleapis.com/auth/gmail.modify."
+            + (f" ({detail})" if detail else "")
+        )
+    if not gmail_access and not gmail_warning:
+        gmail_warning = (
+            "Gmail scope is missing; sign-in and any granted Calendar/Drive actions still work, "
+            "Gmail actions are disabled until you grant https://www.googleapis.com/auth/gmail.modify."
+        )
 
     calendars_json: Dict[str, Any] = {}
     calendar_access = False
@@ -693,14 +731,14 @@ def validate_google_workspace_connector(credentials: Dict[str, Any], http_json_r
         if len(detail) > 220:
             detail = detail[:220] + "..."
         calendar_warning = (
-            "Calendar scope is missing; Gmail actions work, Calendar actions are disabled until you "
-            "grant https://www.googleapis.com/auth/calendar."
+            "Calendar scope is missing; other granted Google Workspace actions still work, Calendar "
+            "actions are disabled until you grant https://www.googleapis.com/auth/calendar."
             + (f" ({detail})" if detail else "")
         )
     if not calendar_access and not calendar_warning:
         calendar_warning = (
-            "Calendar scope is missing; Gmail actions work, Calendar actions are disabled until you "
-            "grant https://www.googleapis.com/auth/calendar."
+            "Calendar scope is missing; other granted Google Workspace actions still work, Calendar "
+            "actions are disabled until you grant https://www.googleapis.com/auth/calendar."
         )
 
     drive_access = False
@@ -718,14 +756,14 @@ def validate_google_workspace_connector(credentials: Dict[str, Any], http_json_r
         if len(detail) > 220:
             detail = detail[:220] + "..."
         drive_warning = (
-            "Drive scope is missing; Gmail actions work, Drive and Google file actions are disabled until you "
-            "grant a Google Drive scope."
+            "Drive scope is missing; other granted Google Workspace actions still work, Drive and "
+            "Google file actions are disabled until you grant a Google Drive scope."
             + (f" ({detail})" if detail else "")
         )
     if not drive_access and not drive_warning:
         drive_warning = (
-            "Drive scope is missing; Gmail actions work, Drive and Google file actions are disabled until you "
-            "grant a Google Drive scope."
+            "Drive scope is missing; other granted Google Workspace actions still work, Drive and "
+            "Google file actions are disabled until you grant a Google Drive scope."
         )
 
     calendars_preview: List[Dict[str, Any]] = []
@@ -743,21 +781,22 @@ def validate_google_workspace_connector(credentials: Dict[str, Any], http_json_r
             if len(calendars_preview) >= 10:
                 break
 
-    warnings = [warning for warning in (calendar_warning, drive_warning) if warning]
+    warnings = [warning for warning in (gmail_warning, calendar_warning, drive_warning) if warning]
 
     return {
         "ok": True,
         "status": 200,
         "message": (
             "Google Workspace connector is valid."
-            if calendar_access and drive_access
+            if gmail_access and calendar_access and drive_access
             else "Google Workspace connector is valid, but some Google Workspace scopes are still missing."
         ),
         "profile": {
-            "emailAddress": profile.get("emailAddress"),
-            "messagesTotal": profile.get("messagesTotal"),
-            "threadsTotal": profile.get("threadsTotal"),
+            "emailAddress": identity_email or gmail_json.get("emailAddress"),
+            "messagesTotal": gmail_json.get("messagesTotal"),
+            "threadsTotal": gmail_json.get("threadsTotal"),
         },
+        "gmail_access": gmail_access,
         "calendar_access": calendar_access,
         "files_access": drive_access,
         "warning": " ".join(warnings) if warnings else None,

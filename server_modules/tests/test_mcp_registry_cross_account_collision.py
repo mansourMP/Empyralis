@@ -155,7 +155,26 @@ class RegisterMcpServersForProviderCollisionReportingTests(unittest.IsolatedAsyn
     swallow a collision into the same generic warning-and-continue as any
     other failure -- it must surface it distinctly so a human can see it
     (the OAuth connect itself still succeeds; only MCP tool registration for
-    that server_id is withheld)."""
+    that server_id is withheld).
+
+    This class's own concern is collision reporting, not Google scope
+    availability -- google_workspace's gmail/calendar/drive MCP entries are
+    each capability-gated (connection_oauth_service.google_workspace_
+    capability_available, see fix/google-connectors-honest-when-scopes-
+    unavailable) and only "drive" is enabled by default, so every test here
+    forces all three capabilities available to keep exercising exactly the
+    three entries these tests were written against."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.capability_patcher = patch.object(
+            connection_oauth_service, "google_workspace_capability_available", return_value=True,
+        )
+        self.capability_patcher.start()
+
+    def tearDown(self) -> None:
+        self.capability_patcher.stop()
+        super().tearDown()
 
     async def test_collision_is_reported_not_silently_swallowed(self) -> None:
         with patch.object(
