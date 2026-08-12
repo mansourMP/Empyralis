@@ -6029,7 +6029,20 @@ def refresh_authenticated_session(
     refresh_record = get_auth_session_recovery(clean_session_id)
     if not refresh_record:
         raise HTTPException(status_code=401, detail="Refresh token is invalid.")
-    if str(refresh_record.get("token_hash") or "").strip() != expected_hash:
+    # Constant-time: this compares a caller-derived digest against the
+    # stored one, the same shape every other secret comparison in this file
+    # uses secrets.compare_digest for (see _decode_token_payload,
+    # _verify_password, get_current_user's ORION_API_KEY check). A plain
+    # `!=` here leaks byte-by-byte match/mismatch timing on the stored hash.
+    # Encoded to bytes for the same reason as _validate_platform_invite_code:
+    # compare_digest's str form is ASCII-only and raises TypeError otherwise.
+    # Both sides are hex digests today so str would work, but the stored value
+    # comes back out of a database row and nothing in the type forces it to
+    # stay hex — a 500 on the refresh path would log every session out.
+    if not secrets.compare_digest(
+        str(refresh_record.get("token_hash") or "").strip().encode("utf-8"),
+        str(expected_hash or "").encode("utf-8"),
+    ):
         # See RefreshTokenSupersededError's own doc comment: a hash mismatch
         # on a session that is otherwise still active is what a losing
         # concurrent refresh looks like, not necessarily a dead/forged
