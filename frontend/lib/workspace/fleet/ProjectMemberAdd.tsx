@@ -54,8 +54,28 @@ import {
   type WorkspaceMember,
   type WorkspaceRole,
 } from "@/lib/workspace/fleet/members-data";
-import { addProjectMember, type ProjectMember } from "@/lib/workspace/fleet/project-members-data";
+import {
+  addProjectMember,
+  useProjectInviteStatus,
+  type ProjectMember,
+  type ProjectInviteStatusItem,
+} from "@/lib/workspace/fleet/project-members-data";
 import { MemberAvatar } from "@/lib/workspace/fleet/MemberAvatarStack";
+
+/** pending / accepted / declined / revoked / a failed send -- five distinct
+ *  facts, never collapsed into one "Sent" light (CLAUDE.md: "pending /
+ *  accepted / failed-to-send are different facts and collapsing them is the
+ *  bug"). email_delivery_status only matters while still pending -- once
+ *  accepted/declined/revoked the delivery outcome is moot. */
+function inviteStatusLabel(item: ProjectInviteStatusItem): { text: string; className: string } {
+  if (item.status === "accepted") return { text: "Accepted", className: "fleet-badge--accepted" };
+  if (item.status === "declined") return { text: "Declined", className: "fleet-badge--muted" };
+  if (item.status === "revoked") return { text: "Revoked", className: "fleet-badge--muted" };
+  if (item.email_delivery_status === "failed" || item.email_delivery_status === "not_configured") {
+    return { text: "Didn't send", className: "fleet-badge--invite-warning" };
+  }
+  return { text: "Pending", className: "" };
+}
 
 function roleLabel(role: WorkspaceRole): string {
   if (role === "owner") return "Owner";
@@ -131,6 +151,11 @@ export function ProjectMemberAdd({
     };
   }, [open]);
 
+  // Owner-visible invite status (MAN-C): "an owner cannot tell whether an
+  // invite was accepted, is still pending, or failed" — only fetched while
+  // this popover is actually open (see the hook's own doc comment).
+  const inviteStatus = useProjectInviteStatus(workspaceId, projectId, open);
+
   // Server-enforced floor on both routes this popover calls (owner-only) —
   // rendering nothing at all for anyone else, not a disabled "+", is the
   // CLAUDE.md "no dead controls" rule applied to the trigger itself.
@@ -172,6 +197,7 @@ export function ProjectMemberAdd({
       setFreshLink(buildWorkspaceInviteJoinUrl(created.token));
       setDelivery(inviteEmailDelivery(created));
       setEmail("");
+      await inviteStatus.refresh();
     } catch (e2) {
       setInviteError(e2 instanceof Error ? e2.message : "Could not create this invite.");
     } finally {
@@ -279,6 +305,28 @@ export function ProjectMemberAdd({
               </>
             ) : null}
           </div>
+
+          {inviteStatus.items.length > 0 ? (
+            <>
+              <div className="fleet-member-invite-divider" />
+              <div className="fleet-member-invite-section">
+                <h2 className="fleet-member-invite-heading">Invite status</h2>
+                {inviteStatus.items.map((item) => {
+                  const badge = inviteStatusLabel(item);
+                  return (
+                    <div key={item.id} className="fleet-member-invite-row">
+                      <span className="fleet-member-invite-row-main">
+                        <span className="fleet-member-invite-row-name">{item.email}</span>
+                      </span>
+                      <span className={`fleet-badge ${badge.className}`.trim()} style={{ marginLeft: 0 }}>
+                        {badge.text}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          ) : null}
         </div>
       )}
     </div>

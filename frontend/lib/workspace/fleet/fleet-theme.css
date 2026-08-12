@@ -6255,6 +6255,14 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-badge--action:hover:not(:disabled) { border-color: var(--border-strong); }
 .fleet-badge--action:disabled { cursor: not-allowed; opacity: 0.6; }
 .fleet-badge--muted { opacity: 0.55; }
+/* Invite status pill (ProjectMemberAdd.tsx) -- pending / accepted / declined
+   / revoked / a failed send are five distinct facts, never collapsed to a
+   single "sent" light. Reuses the same semantic-status-color pattern as
+   .fleet-work-status-pill--working/--waiting above rather than introducing
+   a second accent -- these are informational text/border colors on a
+   neutral pill, not a filled primary-action button. */
+.fleet-badge--accepted { color: var(--online-text); border-color: color-mix(in oklch, var(--online-text) 40%, transparent); }
+.fleet-badge--invite-warning { color: var(--warning-text); border-color: color-mix(in oklch, var(--warning-text) 40%, transparent); }
 
 /* WORK split view */
 /* flex:1;min-width:0 -- inert (a no-op) in WorkTab's own usage, where the

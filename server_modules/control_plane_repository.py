@@ -4725,6 +4725,15 @@ async def ensure_workspace_membership(
     if not normalized_email or not resolved_tenant_id or not resolved_workspace_id:
         return None
     display_label = str(display_name or "").strip()
+    # MAN: a workspace's `name` must never be seeded from its own machine id
+    # (was `ws_b5c1fa225ae6` on screen) -- derive a human name the same way
+    # create_local_password_account() already does. Only takes effect when
+    # THIS call creates the workspace row (see the `workspace_row is None`
+    # Postgres branch and the SQLite COALESCE fallback below); an existing
+    # workspace's stored name is never overwritten as a side effect of a
+    # membership update.
+    email_prefix = normalized_email.split("@", 1)[0]
+    workspace_name = f"{display_label or email_prefix}'s Workspace".strip()
     _enforce_control_plane_service_decision(
         operation="membership_update",
         tenant_id=resolved_tenant_id,
@@ -4771,7 +4780,7 @@ async def ensure_workspace_membership(
                             resolved_workspace_id,
                             resolved_tenant_id,
                             resolved_workspace_id,
-                            resolved_workspace_id,
+                            workspace_name,
                             resolved_workspace_id,
                             resolved_workspace_id,
                             _to_json(_new_workspace_billing_metadata(), default={}),
@@ -4852,7 +4861,7 @@ async def ensure_workspace_membership(
                 resolved_tenant_id,
                 resolved_workspace_id,
                 _slugify(resolved_workspace_id, resolved_workspace_id),
-                resolved_workspace_id,
+                workspace_name,
                 resolved_user_id,
                 _to_json(_new_workspace_billing_metadata(), default={}),
                 created_at,
@@ -5889,6 +5898,164 @@ async def list_pending_workspace_invites_for_email(email: str) -> List[Dict[str,
     return result
 
 
+async def list_workspace_invites_for_project(
+    workspace_id: str,
+    project_id: str,
+    *,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Owner-visible invite status for the panel where members are managed
+    (ProjectMemberAdd.tsx): pending / accepted / declined / revoked are kept
+    apart, never collapsed to a single state -- an owner asking "did this
+    invite land" deserves the real answer, the same "three states, never
+    two" doctrine as workspace_invite_email_service's own sent/not_configured
+    /failed split (each returned invite also carries email_delivery_status,
+    stamped by record_workspace_invite_email_delivery at send time, so a
+    delivery failure is visible here too, not just in the toast that showed
+    once when the invite was created).
+
+    Unlike list_pending_workspace_invites (workspace-wide, pending only),
+    this scopes to ONE project and every status -- so it fetches this
+    workspace's recent invites and filters by metadata.project_id in Python
+    rather than in SQL. Every other reader of this table's `metadata` column
+    (list_pending_workspace_invites_for_email, get_workspace_member_invite)
+    already decodes JSON in Python rather than querying into it; matching
+    that avoids introducing a net-new json_extract/->>'...' dependency
+    neither backend path in this file currently relies on, and this table's
+    per-workspace volume is small enough that a bounded fetch-then-filter is
+    simpler than adding one.
+    """
+    clean_workspace_id = str(workspace_id or "").strip()
+    clean_project_id = str(project_id or "").strip()
+    clean_limit = max(int(limit or 20), 1)
+    if not clean_workspace_id or not clean_project_id:
+        return []
+    # Over-fetch before filtering by project_id -- most invites on a
+    # workspace will not carry this specific project_id.
+    fetch_limit = clean_limit * 10
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    rows = fallback.execute(
+                        """
+                        SELECT
+                            id, tenant_id, workspace_id, email, role, status,
+                            invited_by_user_id, accepted_by_user_id, metadata_json,
+                            created_at, updated_at, accepted_at, revoked_at
+                        FROM workspace_member_invites
+                        WHERE workspace_id = ?
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT ?
+                        """,
+                        (clean_workspace_id, fetch_limit),
+                    ).fetchall()
+            records = [item for item in (_workspace_invite_record_from_row(row) for row in rows) if item]
+        else:
+            rows = await connection.fetch(
+                """
+                SELECT
+                    id, tenant_id, workspace_id, email, role, status,
+                    invited_by_user_id, accepted_by_user_id, metadata,
+                    created_at, updated_at, accepted_at, revoked_at
+                FROM workspace_member_invites
+                WHERE workspace_id = $1
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+                """,
+                clean_workspace_id,
+                fetch_limit,
+            )
+            records = [item for item in (_workspace_invite_record_from_row(row) for row in rows) if item]
+
+    matched = [
+        item for item in records
+        if str((item.get("metadata") or {}).get("project_id") or "").strip() == clean_project_id
+    ]
+    result: List[Dict[str, Any]] = []
+    for item in matched[:clean_limit]:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        result.append(
+            {
+                "id": item.get("id"),
+                "workspace_id": item.get("workspace_id"),
+                "email": item.get("email"),
+                "role": item.get("role"),
+                "status": item.get("status"),
+                "email_delivery_status": str(metadata.get("email_delivery_status") or "").strip() or None,
+                "invited_by_user_id": item.get("invited_by_user_id"),
+                "created_at": item.get("created_at"),
+            }
+        )
+    return result
+
+
+async def record_workspace_invite_email_delivery(
+    *,
+    invite_id: str,
+    delivery_status: str,
+) -> Optional[Dict[str, Any]]:
+    """Persists the email_delivery outcome (sent/not_configured/failed, see
+    workspace_invite_email_service.DELIVERY_*) onto the invite's own metadata
+    -- without this, the delivery status create_workspace_invite_route
+    returns was visible only in the one-time toast shown at creation, and
+    'failed to send' became indistinguishable from 'pending' the moment that
+    toast was dismissed. Does NOT touch `status`/`accepted_at`/`revoked_at`
+    -- this call records a fact about the SEND, never a fact about the
+    invite's own lifecycle state, which is exactly why it is a separate
+    function from accept_workspace_invite/decline_workspace_invite rather
+    than another metadata_patch caller of one of those.
+    """
+    clean_invite_id = str(invite_id or "").strip()
+    clean_status = str(delivery_status or "").strip().lower()
+    if not clean_invite_id or not clean_status:
+        return None
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            now_ts = int(time.time())
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    existing_row = fallback.execute(
+                        "SELECT metadata_json FROM workspace_member_invites WHERE id = ? LIMIT 1",
+                        (clean_invite_id,),
+                    ).fetchone()
+                    existing_metadata = _decode_json_object(
+                        existing_row["metadata_json"] if existing_row is not None else None
+                    )
+                    existing_metadata["email_delivery_status"] = clean_status
+                    fallback.execute(
+                        """
+                        UPDATE workspace_member_invites
+                        SET metadata_json = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (_to_json(existing_metadata, default={}), now_ts, clean_invite_id),
+                    )
+                    row = fallback.execute(
+                        "SELECT * FROM workspace_member_invites WHERE id = ? LIMIT 1",
+                        (clean_invite_id,),
+                    ).fetchone()
+                    fallback.commit()
+            return _workspace_invite_record_from_row(row)
+        await connection.execute(
+            """
+            UPDATE workspace_member_invites
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+                updated_at = $3::timestamptz
+            WHERE id = $1
+            """,
+            clean_invite_id,
+            _to_json({"email_delivery_status": clean_status}, default={}),
+            _utc_now_ts(),
+        )
+        row = await connection.fetchrow(
+            "SELECT * FROM workspace_member_invites WHERE id = $1 LIMIT 1",
+            clean_invite_id,
+        )
+    return _workspace_invite_record_from_row(row)
+
+
 async def accept_workspace_invite(
     *,
     invite_id: str,
@@ -6009,6 +6176,77 @@ async def accept_workspace_invite(
                 clean_user_id,
                 _utc_now_ts(),
             )
+        row = await connection.fetchrow(
+            "SELECT * FROM workspace_member_invites WHERE id = $1 LIMIT 1",
+            clean_invite_id,
+        )
+    return dict(row) if row is not None else None
+
+
+async def decline_workspace_invite(
+    *,
+    invite_id: str,
+    declined_by_user_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Marks an invite 'declined' -- the invitee's own choice, distinct from
+    an owner revoking it ('revoked') and from it simply going unanswered
+    ('pending'). Three states, never collapsed to two, per this repo's
+    standing rule on invite status (see workspace_invite_email_service's
+    sent/not_configured/failed split for the same doctrine applied to
+    delivery). A decline is idempotent: calling it again on an
+    already-declined invite just refreshes the timestamp, it does not error
+    -- same idempotency posture as accept_workspace_invite above. Reuses the
+    `revoked_at` column as the "when did this pending invite stop being
+    live" timestamp (no schema change needed); `status` is what
+    distinguishes a decline from a revoke, never the timestamp column.
+    """
+    clean_invite_id = str(invite_id or "").strip()
+    clean_user_id = str(declined_by_user_id or "").strip()
+    if not clean_invite_id or not clean_user_id:
+        return None
+    _enforce_control_plane_service_decision(
+        operation="invite_accept",
+        tenant_id="invite",
+        workspace_id="invite",
+        actor_id=clean_user_id,
+        actor_role="member",
+        target_actor_id=clean_user_id,
+        record_type="workspace_member_invite",
+        idempotency_key=clean_invite_id,
+        source="workspace_invite",
+    )
+    async with _scoped_connection(bypass_rls=True) as connection:
+        if connection is None:
+            now_ts = int(time.time())
+            with _LOCAL_IDENTITY_LOCK:
+                with _connect_local_identity_db() as fallback:
+                    fallback.execute(
+                        """
+                        UPDATE workspace_member_invites
+                        SET status = 'declined',
+                            revoked_at = ?,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (now_ts, now_ts, clean_invite_id),
+                    )
+                    row = fallback.execute(
+                        "SELECT * FROM workspace_member_invites WHERE id = ? LIMIT 1",
+                        (clean_invite_id,),
+                    ).fetchone()
+                    fallback.commit()
+            return _workspace_invite_record_from_row(row)
+        await connection.execute(
+            """
+            UPDATE workspace_member_invites
+            SET status = 'declined',
+                revoked_at = $2::timestamptz,
+                updated_at = $2::timestamptz
+            WHERE id = $1
+            """,
+            clean_invite_id,
+            _utc_now_ts(),
+        )
         row = await connection.fetchrow(
             "SELECT * FROM workspace_member_invites WHERE id = $1 LIMIT 1",
             clean_invite_id,
