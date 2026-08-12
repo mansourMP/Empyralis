@@ -13,10 +13,14 @@ import type {
 export type WorkspaceSetupFormValues = CreateWorkspaceInput;
 export type WorkspaceRouteMode = 'absolute' | 'relative';
 
+// '' normalizes to the bare workspace route (FleetHome) -- the workspace
+// itself is the landing, never the Agents tab. '/sage' is a redirect into
+// '/agents' now, not a page of its own; using it here would land every new
+// workspace on an empty "No agents yet" screen.
 export const DEFAULT_ROUTE_BY_PROFILE: Record<WorkspaceShellProfileId, string> = {
-  personal_shell: '/sage',
-  document_workstation_shell: '/sage',
-  operations_admin_shell: '/sage',
+  personal_shell: '',
+  document_workstation_shell: '',
+  operations_admin_shell: '',
 };
 
 const WORKSPACE_TYPE_OPTIONS: Array<{ value: WorkspaceSetupType; label: string }> = [
@@ -32,8 +36,8 @@ const SHELL_PROFILE_OPTIONS: Array<{ value: WorkspaceShellProfileId; label: stri
 ];
 
 const DEFAULT_ROUTE_OPTIONS = [
-  { value: '/sage', label: 'Ask AI' },
-  { value: '/agents', label: 'Build' },
+  { value: '', label: 'Workspace' },
+  { value: '/agents', label: 'Agents' },
   { value: '/settings', label: 'Settings' },
 ];
 
@@ -42,9 +46,11 @@ function normalizeWorkspaceRoute(
   relativeRoute: string,
   routeMode: WorkspaceRouteMode,
 ): string {
-  const cleanRoute = relativeRoute.startsWith('/') ? relativeRoute : `/${relativeRoute}`;
+  // '' means "the bare workspace route" (FleetHome) -- no suffix to append.
+  const cleanRoute =
+    relativeRoute === '' || relativeRoute.startsWith('/') ? relativeRoute : `/${relativeRoute}`;
   if (routeMode === 'relative') {
-    return cleanRoute;
+    return cleanRoute || '/';
   }
   return `/w/${encodeURIComponent(workspaceId)}${cleanRoute}`;
 }

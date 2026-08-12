@@ -6,6 +6,7 @@ import { MessageSquare, Settings2 } from "lucide-react";
 import {
   type AgentSummary,
   deriveStatus,
+  timeAgo,
 } from "./fleet-presentation";
 import { StatusChip } from "./fleet-indicators";
 import { resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
@@ -91,7 +92,11 @@ export function FleetCard({
       <div className="fleet-card-meta">{placement.label}</div>
 
       <div className="fleet-card-activity">
-        {agent.lastActivity ?? "No activity yet"}
+        {agent.lastActivity
+          ? agent.activityPreview
+            ? `${agent.activityPreview} · ${timeAgo(agent.lastActivity)}`
+            : timeAgo(agent.lastActivity)
+          : "No activity yet"}
       </div>
     </div>
   );

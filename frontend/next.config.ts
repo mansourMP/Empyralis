@@ -8,7 +8,14 @@ import type { NextConfig } from 'next';
 // so they can be corrected per-route rather than silently collapsed.
 const W = '/w/:workspaceId';
 const LEGACY_REDIRECTS: { from: string; to: string }[] = [
-  { from: W, to: `${W}/agents` },                     // workspace landing → fleet grid
+  // The bare workspace route (no section segment) is NOT a legacy redirect
+  // target -- frontend/app/(account)/w/[workspaceId]/page.tsx renders
+  // FleetHome there on purpose ("workspace landing = Fleet Home, not a
+  // redirect"; see also Breadcrumbs.tsx's own comment on the same route).
+  // This rule used to send that route to /agents in Phase 7A, before
+  // FleetHome existed, and kept firing after -- Next's redirects() runs
+  // ahead of the router, so it silently made the real landing page
+  // unreachable for every visit, including every fresh signup.
   { from: `${W}/fleet`, to: `${W}/agents` },
   { from: `${W}/chat`, to: `${W}/agents` },
   // Sage now has a real workspace-level route (/sage) — no redirect.

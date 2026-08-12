@@ -119,7 +119,7 @@ import { AgentSigil } from "./fleet-indicators";
 import {
   TaskStatusIcon,
   TaskPriorityIcon,
-  taskShortId,
+  taskDisplayId,
   taskStatusLabel,
   taskPriority,
   taskWakeDeferral,
@@ -904,7 +904,7 @@ export function TaskDetailView({
         <div className="fleet-task-page-scroll">
           <div className="fleet-task-page-body">
             <div className="fleet-task-detail-topbar">
-              <div className="fleet-task-page-eyebrow">{taskShortId(task.id)}</div>
+              <div className="fleet-task-page-eyebrow">{taskDisplayId(task)}</div>
               {showTaskNav ? (
                 <div className="fleet-task-detail-nav" aria-label="Task navigation">
                   <span className="fleet-task-detail-nav-count">
@@ -1102,7 +1102,7 @@ export function TaskDetailView({
                         >
                           <TaskStatusIcon status={st.status} size={13} />
                           <span className="fleet-task-detail-subtask-title">{st.title || "Untitled task"}</span>
-                          <span className="fleet-task-detail-subtask-id">{taskShortId(st.id)}</span>
+                          <span className="fleet-task-detail-subtask-id">{taskDisplayId(st)}</span>
                         </a>
                       </li>
                     ))}
@@ -1467,7 +1467,7 @@ export function TaskDetailView({
                   <option value="">None</option>
                   {availableParents.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.title || "Untitled task"} · {taskShortId(p.id)}
+                      {p.title || "Untitled task"} · {taskDisplayId(p)}
                     </option>
                   ))}
                 </select>

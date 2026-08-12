@@ -3369,7 +3369,11 @@ def _extract_workspace_id_from_route(route: Any) -> Optional[str]:
 def _normalize_workspace_default_route(workspace_id: str, route: Any) -> str:
     clean_workspace_id = str(workspace_id or "").strip()
     clean_route = str(route or "").strip()
-    fallback_route = f"/w/{clean_workspace_id}/chat" if clean_workspace_id else "/chat"
+    # The bare workspace route renders FleetHome (see
+    # frontend/app/(account)/w/[workspaceId]/page.tsx) -- there is no
+    # top-level or workspace-scoped "/chat" route, so a fallback pointing at
+    # one would 404 the moment it fired.
+    fallback_route = f"/w/{clean_workspace_id}" if clean_workspace_id else "/"
     if not clean_workspace_id:
         return fallback_route
     if not clean_route or not clean_route.startswith("/") or clean_route.startswith("//"):
@@ -4598,7 +4602,13 @@ async def create_local_password_account(
     workspace_metadata = _workspace_shell_metadata(
         _new_workspace_billing_metadata(),
         preferred_shell_profile="personal_shell",
-        default_route=f"/w/{resolved_workspace_id}/sage",
+        # The bare workspace route renders FleetHome (see
+        # frontend/app/(account)/w/[workspaceId]/page.tsx) -- the workspace
+        # itself is the landing, never the Agents tab. `/sage` used to be
+        # correct when it was a full-page chat route; it is now a redirect
+        # into `/agents`, so a fresh signup landed on an empty "No agents
+        # yet" screen as its first-ever view of the product.
+        default_route=f"/w/{resolved_workspace_id}",
         setup_completed=True,
     )
 
