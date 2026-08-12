@@ -48,6 +48,21 @@ import { MarkdownLite } from "./markdown-lite";
 import { timeAgo } from "./fleet-presentation";
 import "./document-detail.css";
 
+/** Grow the editor to fit its content so the PAGE scrolls, never a box
+ *  inside the page. The old fixed-height textarea scrolled internally, which
+ *  is the clearest "this is a form field, not a document" signal there is —
+ *  every document editor people actually use (Linear, Notion, Google Docs)
+ *  grows downward and lets the page take the scroll.
+ *
+ *  Height is reset to "auto" before measuring: scrollHeight can only ever be
+ *  read as >= the element's current height, so without the reset the editor
+ *  would grow as you type and never shrink back when you delete. */
+function autosizeEditor(el: HTMLTextAreaElement | null): void {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+}
+
 // Long enough that a normal typing cadence never fires a save mid-word,
 // short enough that stopping to think for a beat is enough to persist.
 const AUTOSAVE_DEBOUNCE_MS = 900;
@@ -77,6 +92,7 @@ export function DocumentDetailView({
 }) {
   const router = useRouter();
   const headingRef = useRef<HTMLHeadingElement | null>(null);
+  const editorRef = useRef<HTMLTextAreaElement | null>(null);
 
   // The draft is the source of truth for the title/body controls while this
   // document is open. It is reseeded from `document` ONLY when a genuinely
@@ -136,6 +152,15 @@ export function DocumentDetailView({
   useEffect(() => {
     if (!canWrite) headingRef.current?.focus();
   }, [document.id, canWrite]);
+
+  // Size the editor to the document it just loaded. Without this an existing
+  // document opens at min-height with its own scrollbar — the exact box this
+  // view was rebuilt to stop being — and only corrects itself once the person
+  // types. Re-runs on document.id (a different document) and on draftBody so
+  // a reseed from the server resizes too, not just local typing.
+  useEffect(() => {
+    if (canWrite) autosizeEditor(editorRef.current);
+  }, [document.id, canWrite, draftBody]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -275,6 +300,7 @@ export function DocumentDetailView({
 
           {canWrite ? (
             <textarea
+              ref={editorRef}
               className="fleet-doc-editor"
               value={draftBody}
               placeholder="Write in markdown…"
@@ -282,6 +308,7 @@ export function DocumentDetailView({
               aria-label="Document body"
               onChange={(e) => {
                 setDraftBody(e.currentTarget.value);
+                autosizeEditor(e.currentTarget);
                 scheduleSave();
               }}
               onBlur={flushSave}

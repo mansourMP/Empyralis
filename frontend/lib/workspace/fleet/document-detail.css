@@ -214,22 +214,47 @@ h6.fleet-doc-heading { font-size: 14px; }
   border-bottom-color: var(--accent);
 }
 
+/* The editor IS the page, not a field on it.
+ *
+ * This used to carry a border, a --bg-inset fill, a card radius, a 13px
+ * MONOSPACE face, a fixed 360px height that scrolled inside itself, and a
+ * `resize: vertical` grip in the corner. Every one of those is a textarea
+ * tell, and together they made an owner's own document read as a config
+ * form. The read-only view below (.fleet-doc-body) never had any of it —
+ * so the document looked correct to a VIEWER and wrong to the person who
+ * owns it, which is exactly backwards.
+ *
+ * Prose face and prose measure now, matching .fleet-doc-body's reading
+ * copy rather than introducing a second scale: the same words must not
+ * jump font, size or colour when the page flips between editing and
+ * reading. Height is driven by content (see autosizeEditor in the .tsx) so
+ * the PAGE scrolls, never a box inside it. */
 .fleet-doc-editor {
   display: block;
   width: 100%;
-  min-height: 360px;
   margin-top: 20px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-inset);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-primary);
-  font-family: var(--app-font-mono, ui-monospace, monospace);
-  font-size: 13px;
-  line-height: 1.6;
-  resize: vertical;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.7;
+  /* No resize grip: a document does not get dragged to a new size, and the
+     grip was the single most form-like thing on the page. */
+  resize: none;
+  overflow: hidden;
+  min-height: 60vh;
 }
+.fleet-doc-editor::placeholder {
+  color: var(--text-muted);
+}
+/* A focus ring around a full-page editor would draw a box back around the
+   document — the exact thing removed above. The caret is the focus
+   affordance here, as it is in every document editor. Keyboard users lose
+   nothing: this is a textarea, not a button, and reaching it means it is
+   already focused and accepting input. */
 .fleet-doc-editor:focus-visible {
-  outline: 2px solid var(--accent-ring);
-  outline-offset: 1px;
+  outline: none;
 }
