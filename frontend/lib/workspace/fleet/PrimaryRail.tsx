@@ -22,9 +22,10 @@ import {
 
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
-import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
+import { planAgentCountShape } from "./agent-count-shape";
 import { FleetHelpButton } from "./FleetHelpButton";
 import { SageLauncher } from "./SageLauncher";
 import { CreditBalanceChip } from "./CreditBalanceChip";
@@ -35,7 +36,25 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { RAIL_WIDTH, useResizableWidth } from "./fleet-preferences";
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
-type RailNavItem = { key: string; label: string; segment: string; icon: LucideIcon; chord: string };
+type RailNavItem = {
+  key: string;
+  label: string;
+  segment: string;
+  icon: LucideIcon;
+  chord: string;
+  /** MAN-317: true for a surface that exists to aggregate AGENTS — Inbox
+   *  (agent/gateway activity), Conversations (agent channel conversations)
+   *  and Agents itself (the fleet table). With zero real agents there is
+   *  nothing for any of the three to aggregate — every event class the
+   *  activity ledger knows about (sage_activity, gateway_channel,
+   *  fleet_control, …) is agent- or gateway-driven, confirmed against
+   *  activity_ledger_service.EVENT_CLASSES — so all three hide from the
+   *  rail at agent-count-shape.ts's "none" mode. Projects is deliberately
+   *  NOT tagged: it is the workspace's own data (CLAUDE.md positioning —
+   *  "the WORKSPACE is the product"), not a view OF the fleet, so it never
+   *  hides for having zero agents. */
+  aggregatesAgents?: boolean;
+};
 
 // Rail vocabulary. `chord` is the second key of Linear-style "g then <key>".
 //
@@ -48,10 +67,10 @@ type RailNavItem = { key: string; label: string; segment: string; icon: LucideIc
 // live, so every link, bookmark and redirect that pointed at it still
 // resolves; it just isn't a standing destination any more.
 const RAIL_ITEMS: RailNavItem[] = [
-  { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i" },
-  { key: "conversations", label: "Conversations", segment: "conversations", icon: MessagesSquare, chord: "c" },
+  { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i", aggregatesAgents: true },
+  { key: "conversations", label: "Conversations", segment: "conversations", icon: MessagesSquare, chord: "c", aggregatesAgents: true },
   { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
-  { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a" },
+  { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a", aggregatesAgents: true },
 ];
 
 const RAIL_ICON = 16;
@@ -251,6 +270,41 @@ export function PrimaryRail({
     [allAgents, sageAgent],
   );
 
+  // MAN-317 — the count decides the rail's shape, never a tier check. See
+  // agent-count-shape.ts. "none": hide every surface that aggregates agents
+  // (nothing to aggregate). "solo": the Agents row routes straight to the
+  // one real agent instead of the fleet table (planDoors' "direct" mode,
+  // same instinct — a table of one is worse than no table). "fleet":
+  // unchanged, today's behaviour.
+  const agentCountMode = useMemo(() => planAgentCountShape(agents.length), [agents.length]);
+  const soloAgent = agentCountMode === "solo" ? agents[0] : null;
+  const soloAgentProjectId = useMemo(
+    () => (soloAgent ? resolveAgentProjectId(soloAgent.project_id, projects) : null),
+    [soloAgent, projects],
+  );
+  const soloAgentHref = useMemo(() => {
+    if (!soloAgent || !soloAgentProjectId) return null;
+    return `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(soloAgentProjectId)}/agents/${encodeURIComponent(soloAgent.agent_id)}/chat`;
+  }, [soloAgent, soloAgentProjectId, workspaceId]);
+
+  // Reversible for free: this is recomputed from the live agent count on
+  // every render, so the moment a second real agent exists,
+  // `agentCountMode` stops being "none"/"solo" and the full rail reappears
+  // on its own — no setting anywhere to flip.
+  const visibleRailItems = useMemo(
+    () => (agentCountMode === "none" ? RAIL_ITEMS.filter((item) => !item.aggregatesAgents) : RAIL_ITEMS),
+    [agentCountMode],
+  );
+  // Only the Agents row's destination ever changes (solo mode) — every
+  // other row's href is its ordinary segment. Falls back to the fleet
+  // table's own href if a single agent's project can't resolve for some
+  // reason (should not happen — see resolveAgentProjectId's own fallback),
+  // rather than ever producing a dead link.
+  const railHrefFor = useCallback(
+    (item: RailNavItem) => (item.key === "agents" && soloAgentHref ? soloAgentHref : `/w/${encodeURIComponent(workspaceId)}/${item.segment}`),
+    [soloAgentHref, workspaceId],
+  );
+
   const projectsExpanded = sections?.projects ?? true;
 
   // "/w/{ws}/projects/{id}[/...]" → {id}, so the matching rail row highlights
@@ -306,10 +360,13 @@ export function PrimaryRail({
 
       if (gPendingRef.current) {
         gPendingRef.current = false;
-        const item = RAIL_ITEMS.find((i) => i.chord === key);
+        // Only a currently-VISIBLE row's chord fires — "g i" is a dead
+        // shortcut at agent-count-shape.ts's "none" mode, the same as the
+        // row itself not being on screen to click.
+        const item = visibleRailItems.find((i) => i.chord === key);
         if (item) {
           e.preventDefault();
-          router.push(hrefFor(item.segment));
+          router.push(railHrefFor(item));
         }
         return;
       }
@@ -321,19 +378,19 @@ export function PrimaryRail({
       }
       if (key === "j") {
         e.preventDefault();
-        setFocusIdx((i) => Math.min(RAIL_ITEMS.length - 1, i + 1));
+        setFocusIdx((i) => Math.min(visibleRailItems.length - 1, i + 1));
       } else if (key === "k") {
         e.preventDefault();
-        setFocusIdx((i) => (i < 0 ? RAIL_ITEMS.length - 1 : Math.max(0, i - 1)));
+        setFocusIdx((i) => (i < 0 ? visibleRailItems.length - 1 : Math.max(0, i - 1)));
       } else if (key === "enter" && focusIdx >= 0) {
         e.preventDefault();
-        router.push(hrefFor(RAIL_ITEMS[focusIdx].segment));
+        router.push(railHrefFor(visibleRailItems[focusIdx]));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusIdx, router, workspaceId]);
+  }, [focusIdx, router, workspaceId, visibleRailItems, railHrefFor]);
 
   // Same custom-event mechanism as fleet:open-sage (FleetShell.tsx) — no
   // prop-drilling a setter from FleetCommandPalette back down into the rail.
@@ -401,7 +458,7 @@ export function PrimaryRail({
       </div>
 
       <nav className="fleet-rail-nav">
-        {RAIL_ITEMS.map((item, idx) => {
+        {visibleRailItems.map((item, idx) => {
           const Icon = item.icon;
           const active = segment === item.segment;
           const focused = focusIdx === idx;
@@ -426,7 +483,7 @@ export function PrimaryRail({
                     behaviour" — see FleetTabs.tsx's resolveHref) — there is
                     nothing here for it to conflict with. */}
                 <Link
-                  href={hrefFor(item.segment)}
+                  href={railHrefFor(item)}
                   title={effectiveCollapsed ? item.label : undefined}
                   aria-label={item.label}
                   aria-current={active ? "page" : undefined}

@@ -2604,3 +2604,84 @@ anywhere. The structural test
 repo's own established pattern — proven to actually catch a regression by
 running the same assertions against the OLD `frame-ancestors`-only nginx
 string and watching them fail.
+**The fleet UI collapses to what actually exists — the agent COUNT decides
+the shape, never a tier check.** MAN-317, 2026-08-13. `agent-count-shape.ts`'s
+`planAgentCountShape(realAgentCount)` is the whole rule, same shape as
+`channel-doors.ts`'s `planDoors`: `0 → "none"`, `1 → "solo"`, `2+ → "fleet"`
+(unchanged today's behaviour). "Real" excludes Sage/the Operator — every
+`fleet_list_agents` response carries the workspace's Operator install from
+the moment the workspace exists (`include_master=True`), confirmed
+empirically against a fresh signup, so the RAW length is never zero. Two
+call sites had been reading the raw count and were silently broken because
+of it: `FleetHome.tsx`'s header/grid gate (a brand-new account's fleet grid
+rendered as a blank void instead of the "start your first agent" teaching
+state) and `InboxPage.tsx`'s `freshWorkspace` gate (a fresh account's Inbox
+showed the generic "You're all caught up" instead of its onboarding empty
+state) — both fixed alongside the new mode.
+
+```
+count  rail (Inbox/Conversations/Agents)     FleetHome root          /agents
+0      hidden (nothing to aggregate)          "Get started" + teaching  unchanged (FirstAgentEmpty)
+                                               empty state + a peek at
+                                               real projects if any exist
+1      shown; Agents ROW routes straight      redirects (router.replace) redirects the same way
+       to the one agent, not the table        to that agent's own chat
+2+     unchanged, today's rail                unchanged, today's grid   unchanged, today's table
+```
+
+Projects is deliberately NEVER hidden by count — it is the workspace's own
+data (CLAUDE.md positioning: "the WORKSPACE is the product"), not a view OF
+the fleet. Reversibility is structural, not a flag: every value above is
+recomputed from the live agent count on each render, so the moment a second
+agent exists the redirect stops firing and the ordinary fleet chrome
+reappears with nothing to reset.
+
+**THE WORKSPACE HOME DOES NOT REDIRECT AT ONE AGENT, and this overrides
+MAN-317's own suggested direction.** The ticket proposed that at one agent
+"the agent's own conversation is the landing surface". That was written
+before the positioning correction above and it loses to it: `/w/{id}` IS the
+workspace home, and redirecting it would mean the single-agent customer —
+the exact case the ticket is about — could never reach their own projects,
+documents and tasks from the front door. It would also undo the same-day fix
+that stopped fresh signups being dropped into an agent surface instead of
+their workspace.
+
+Read the complaint literally instead of its proposed remedy: "the Agents
+list is a fleet-management TABLE... showing exactly one row. A table of one
+is worse than no table." That table is `/agents`, and the solo redirect
+lives THERE and only there. The workspace home renders a card grid, which
+holds one card perfectly well — so solo changes only the framing on that
+page: "Your fleet · N agents · M online" is a sentence for comparing agents
+against each other, and at one there is nothing to compare (and the plural
+is wrong). **When a ticket proposes a direction and states a complaint, fix
+the complaint** — the direction is a guess made earlier with less
+information, and this one had been overtaken by a positioning decision.
+
+The `/agents` solo redirect falls back to rendering the ordinary surface if
+`resolveAgentProjectId` can't resolve a project (should not happen — dead
+screen avoided anyway), and `/agents?new=1` (the ⌘K "New agent" command's
+target) explicitly suppresses the `/agents` redirect via a one-shot
+mount-time flag, or the command would bounce a one-agent workspace into the
+existing agent's chat instead of opening the create-agent wizard.
+
+Found and fixed in passing: `agents/page.tsx`'s `HeaderAction` "New agent"
+button was unconditionally `--accent-fill`, which put it and
+`FirstAgentEmpty`'s own filled "Create your first agent" on screen
+simultaneously on every brand-new workspace — CLAUDE.md, "two accent-filled
+buttons in one view is a bug." The project detail page had already solved
+this exact problem (`fleet-btn${list.length === 0 ? " fleet-btn--accent" :
+" fleet-btn--accent-fill"}`); the workspace-level Agents page had simply
+never been updated to match. Same fix applied here.
+
+Deliberately NOT done: Inbox/Conversations get no solo-specific redirect or
+merge — a one-agent workspace still shows both, unchanged, because there is
+genuinely something to show (that one agent's real activity/conversations)
+and no verified-safe equivalent surface to redirect into instead
+(`ConversationsView.tsx`'s own header comment notes the per-agent Work tab's
+conversation list reads from `/api/threads`, which it calls "dead under
+SQLite-fallback prod" — assuming equivalence there without verifying it
+first would have been exactly the kind of silent regression this codebase
+keeps getting bitten by). Hiding was applied ONLY where the brief's own
+words support it ("aggregating one thing is just that thing" reads as
+zero-content, not single-content) — a narrower cut than the rail could have
+taken, on purpose.
