@@ -161,8 +161,15 @@ export function MemoryTab({
     setMode("preview");
   }, [agentId]);
 
-  const loadTree = useCallback(async () => {
-    setLoading(true);
+  // `silent` skips the loading flag — used by save()/del() below to refresh
+  // the tree AFTER a mutation. Without this, `setLoading(true)` unmounted
+  // the whole two-pane file list + editor (replaced by the loading
+  // skeleton) on every routine Save or Delete click, discarding whatever
+  // was on screen — including the content just saved — for the length of
+  // the refetch, then snapping back. The initial mount load (the effect
+  // below) is the only caller that still wants the skeleton.
+  const loadTree = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await fetch(`${apiBase}/tree`, { credentials: "include" });
       const d = await res.json().catch(() => ({}));
@@ -225,7 +232,7 @@ export function MemoryTab({
       // The owner just wrote this content, so it's real regardless of what
       // it happens to say — never re-flag as the seeded scaffold.
       setIsDefault(false);
-      loadTree();
+      loadTree(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Save failed.");
     } finally {
@@ -254,7 +261,7 @@ export function MemoryTab({
       setContent("");
       setOriginal("");
       setIsDefault(false);
-      loadTree();
+      loadTree(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Delete failed.");
     }
@@ -283,6 +290,16 @@ export function MemoryTab({
         <div className="fleet-memory-editor">
           <div className="fleet-memory-editor-header">
             <div className="fleet-skeleton-bar" style={{ width: 140, height: 11 }} />
+            {/* The real header is `justify-content: space-between`: a
+                filename on the left, a Preview/Edit segmented control plus
+                Delete/Save buttons on the right — taller than the single
+                thin bar this used to be alone, so the header grew the
+                instant those controls appeared. */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="fleet-skeleton-bar" style={{ width: 90, height: 24, borderRadius: 6 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 26, height: 24, borderRadius: 6 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 54, height: 24, borderRadius: 6 }} />
+            </div>
           </div>
           <div className="fleet-memory-preview-scroll">
             {[92, 84, 96, 40, 88, 70].map((w, i) => (

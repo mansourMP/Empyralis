@@ -36,7 +36,7 @@ import { TaskDetailView } from "@/lib/workspace/fleet/TaskDetailView";
 import { useBreadcrumbLabel, useBreadcrumbIcon } from "@/lib/workspace/fleet/Breadcrumbs";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { TaskStatusIcon, taskShortId } from "@/lib/workspace/fleet/task-status";
-import { FleetListSkeleton } from "@/lib/workspace/fleet/fleet-states";
+import { FleetTaskDetailSkeleton } from "@/lib/workspace/fleet/fleet-states";
 
 export default function TaskDetailPage() {
   const params = useParams();
@@ -189,9 +189,7 @@ export default function TaskDetailPage() {
   if (loading && !task) {
     return (
       <main className="fleet-content fleet-content--chat">
-        <div style={{ padding: "28px 32px" }}>
-          <FleetListSkeleton rows={3} rowHeight={52} />
-        </div>
+        <FleetTaskDetailSkeleton />
       </main>
     );
   }

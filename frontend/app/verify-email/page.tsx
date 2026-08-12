@@ -139,11 +139,29 @@ function VerifyEmailForm() {
   const deliveryNotice = verificationDeliveryNotice(delivery);
 
   if (checkingStatus) {
+    // `.app-auth-shell` (no `--centered` modifier) is a two-column grid
+    // (`1fr minmax(360px,520px)`) — a single card as its only child sat in
+    // the LEFT track instead of being centered, and was one line tall
+    // against the real hero+form pair's full height, so the page visibly
+    // both re-laid-out and grew the instant the check resolved. Reuses both
+    // real sections' classNames instead of one lone card.
     return (
       <main className="app-auth-page">
         <div className="app-auth-shell">
-          <section className="app-auth-card app-auth-card--elevated app-auth-form" aria-busy="true">
-            <p className="app-auth-subtitle">Checking your account…</p>
+          <section className="app-auth-hero" aria-hidden="true">
+            <div className="app-auth-hero__badge">Empyralis</div>
+            <div className="app-auth-hero__copy">
+              <div className="fleet-skeleton-bar" style={{ width: "70%", height: 28 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "90%", height: 14, marginTop: 12 }} />
+            </div>
+          </section>
+          <section className="app-auth-card app-auth-card--elevated app-auth-form" aria-busy="true" aria-label="Checking your account">
+            <div className="app-auth-header">
+              <span className="app-auth-kicker">Verify email</span>
+              <div className="fleet-skeleton-bar" style={{ width: "60%", height: 20, marginTop: 6 }} />
+              <p className="app-auth-subtitle">Checking your account…</p>
+            </div>
+            <div className="fleet-skeleton-bar" style={{ width: "100%", height: 40, borderRadius: 8, marginTop: 12 }} />
           </section>
         </div>
       </main>

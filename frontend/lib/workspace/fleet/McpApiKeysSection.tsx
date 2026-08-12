@@ -136,9 +136,23 @@ export function McpApiKeysSection({ workspaceId }: { workspaceId: string }) {
         </button>
       </div>
 
-      {/* Key list */}
+      {/* Key list — reuses the real `.fleet-list`/`.fleet-list-row`/
+          `.fleet-list-row-main` markup with a title bar + desc bar so each
+          placeholder row is the same two-line shape and height a real key
+          row is, and renders more than one row (a real key list is almost
+          never exactly one row). */}
       {loading ? (
-        <div className="fleet-list"><div className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "30%", height: 12 }} /></div></div>
+        <div className="fleet-list" aria-busy="true" aria-label="Loading">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="fleet-list-row" style={{ cursor: "default" }}>
+              <span className="fleet-list-row-main">
+                <span className="fleet-skeleton-bar" style={{ width: `${40 + i * 10}%`, height: 12 }} />
+                <span className="fleet-skeleton-bar" style={{ width: 110, height: 10, opacity: 0.7 }} />
+              </span>
+              <span className="fleet-skeleton-bar" style={{ width: 70, height: 24, borderRadius: 6 }} />
+            </div>
+          ))}
+        </div>
       ) : keys.length === 0 ? (
         <div className="fleet-empty">
           <div className="fleet-empty-icon">

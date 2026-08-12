@@ -65,15 +65,26 @@ export function FleetListSkeleton({
 export function FleetRowsSkeleton({ rows = 4, label = "Loading" }: { rows?: number; label?: string }) {
   const widths = [68, 52, 60, 74, 46, 64];
   return (
-    <div className="fleet-activity-skeleton" aria-busy="true" aria-label={label}>
+    // Reuses `.fleet-activity`/`.fleet-activity-item`/`.fleet-activity-dot`
+    // verbatim — its documented origin, OverviewTab's Recent Activity — so
+    // each row's 12px/20px padding and dot-plus-two-lines geometry come
+    // straight from the real row's own CSS instead of the old hand-tuned
+    // `.fleet-activity-skeleton`/`.fleet-skeleton-row` pair, which had
+    // drifted noticeably shorter than a real `.fleet-activity-item` (no
+    // 12px/20px padding, no margin under the title line). Other callers on
+    // this surface whose real content is NOT an activity-style icon+2-line
+    // row (a toggle row with a switch/button, a chat bubble) have their own
+    // dedicated skeletons now — see FleetToggleRowsSkeleton/
+    // FleetAgentChatSkeleton below — rather than reaching for this one.
+    <div className="fleet-activity" aria-busy="true" aria-label={label}>
       {Array.from({ length: rows }).map((_, i) => {
         const w = widths[i % widths.length];
         return (
-          <div key={i} className="fleet-skeleton-row">
-            <div className="fleet-skeleton-bar" style={{ width: 8 }} />
-            <div style={{ flex: 1 }}>
-              <div className="fleet-skeleton-bar" style={{ width: `${w}%`, marginBottom: 6 }} />
-              <div className="fleet-skeleton-bar" style={{ width: `${Math.max(w - 24, 20)}%`, opacity: 0.6 }} />
+          <div key={i} className="fleet-activity-item">
+            <div className="fleet-activity-dot" style={{ background: "var(--border-strong)" }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="fleet-skeleton-bar" style={{ width: `${w}%`, height: 13, marginBottom: 6 }} />
+              <div className="fleet-skeleton-bar" style={{ width: `${Math.max(w - 24, 20)}%`, height: 11, opacity: 0.6 }} />
             </div>
           </div>
         );
@@ -140,6 +151,48 @@ export function FleetBoardSkeleton({ label = "Loading" }: { label?: string }) {
 }
 
 /**
+ * Toggle-row skeleton matching `.fleet-config`/`.fleet-toggle-row` — the
+ * label+description-on-the-left, switch-or-button-on-the-right row every
+ * per-item settings list on an agent's detail page actually renders
+ * (ScheduleSection, ToolsTab, CapabilitiesTab). These three previously fell
+ * back to `FleetRowsSkeleton`, an icon+2-line ACTIVITY-feed row shape (no
+ * left icon exists on a toggle row, and a toggle row's real trailing
+ * content — a switch or a Cancel button — was never reserved), which is
+ * FleetRowsSkeleton's own documented ORIGINAL shape drifting into callers
+ * it was never built for (see that component's doc comment). `trailing`
+ * matches the two real shapes on this surface: `"switch"` (ToolsTab/
+ * CapabilitiesTab's `.fleet-toggle`) and `"button"` (ScheduleSection's
+ * Cancel button).
+ */
+export function FleetToggleRowsSkeleton({
+  rows = 4,
+  trailing = "switch",
+  label = "Loading",
+}: {
+  rows?: number;
+  trailing?: "switch" | "button";
+  label?: string;
+}) {
+  return (
+    <div className="fleet-config" style={{ padding: 0 }} aria-busy="true" aria-label={label}>
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="fleet-toggle-row">
+          <div style={{ minWidth: 0 }}>
+            <div className="fleet-skeleton-bar" style={{ width: 120 + (i % 3) * 30, height: 13 }} />
+            <div className="fleet-skeleton-bar" style={{ width: 90, height: 11, marginTop: 6, opacity: 0.7 }} />
+          </div>
+          {trailing === "switch" ? (
+            <div className="fleet-skeleton-bar" style={{ width: 34, height: 20, borderRadius: 999, flexShrink: 0 }} />
+          ) : (
+            <div className="fleet-skeleton-bar" style={{ width: 76, height: 28, borderRadius: 6, flexShrink: 0 }} />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
  * Chat-transcript skeleton matching `.fleet-work-msg` bubbles (WorkTab's and
  * ConversationsView's shared transcript-pane markup) — alternating
  * user/agent alignment so the placeholder reads as a conversation, not a
@@ -162,6 +215,133 @@ export function FleetChatSkeleton({ bubbles = 4, label = "Loading" }: { bubbles?
             <div className="fleet-skeleton-bar" style={{ width: "90%", height: 10, marginBottom: 6 }} />
             <div className="fleet-skeleton-bar" style={{ width: "55%", height: 10, opacity: 0.6 }} />
           </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Document-detail skeleton matching DocumentDetailView's real element tree
+ * (`.fleet-task-page.fleet-doc-detail-page` > `.fleet-task-page-main` >
+ * `.fleet-task-page-body` > `.fleet-doc-header-row` / `.fleet-doc-meta` /
+ * prose). Reuses those exact classNames so the 720px-capped, centered
+ * column (document-detail.css's `.fleet-doc-detail-page
+ * .fleet-task-page-body { margin: auto }`) and the page's own padding come
+ * from CSS, not a hand-guessed width — the same "structurally the same
+ * element tree" discipline FleetBoardSkeleton/FleetCardGridSkeleton already
+ * use. Was previously `FleetListSkeleton rows={3} rowHeight={52}` — three
+ * flat 52px table rows standing in for a full-page prose document, the
+ * founder's own screenshotted complaint. A document's real body length is
+ * unknowable before the fetch resolves, same as FleetBoardSkeleton's column
+ * contents; this reserves a plausible paragraph run rather than trying to
+ * predict the real one.
+ */
+export function FleetDocumentSkeleton({ label = "Loading" }: { label?: string }) {
+  const paragraphWidths = [96, 88, 92, 60, 80, 94, 70, 85, 55];
+  return (
+    <div className="fleet-task-page fleet-doc-detail-page" aria-busy="true" aria-label={label}>
+      <div className="fleet-task-page-main">
+        <div className="fleet-task-page-body">
+          <div className="fleet-doc-header-row">
+            {/* Matches .fleet-doc-title-input's 24px/1.25 line box. */}
+            <div className="fleet-skeleton-bar" style={{ width: "55%", height: 30, marginTop: 6 }} />
+          </div>
+          {/* .fleet-doc-meta: 12px byline/autosave-status line. */}
+          <div className="fleet-skeleton-bar" style={{ width: 130, height: 11, marginTop: 10, opacity: 0.75 }} />
+          {/* .fleet-doc-body/.fleet-doc-editor: 15px/1.7 prose. */}
+          <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 13 }}>
+            {paragraphWidths.map((w, i) => (
+              <div key={i} className="fleet-skeleton-bar" style={{ width: `${w}%`, height: 15 }} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Task-detail skeleton matching TaskDetailView's real element tree
+ * (`.fleet-task-page.fleet-task-detail-page` > `.fleet-task-page-main` >
+ * `.fleet-task-page-scroll` > `.fleet-task-page-body`, PLUS the sibling
+ * `.fleet-task-page-side` Properties column) — reusing the exact classNames
+ * task-detail.css already styles, so the 720px reading column, the 300px
+ * side rail and both panes' padding come from CSS rather than a guess.
+ * Was previously the same flat `FleetListSkeleton rows={3} rowHeight={52}`
+ * table-row skeleton the document page had — same bug, same fix: a task
+ * page is a title + description + sections beside a Properties sidebar,
+ * never a list.
+ */
+export function FleetTaskDetailSkeleton({ label = "Loading" }: { label?: string }) {
+  return (
+    <div className="fleet-task-page fleet-task-detail-page" aria-busy="true" aria-label={label}>
+      <div className="fleet-task-page-main">
+        <div className="fleet-task-page-scroll">
+          <div className="fleet-task-page-body">
+            {/* .fleet-task-page-eyebrow: the short "TASK-123" id line. */}
+            <div className="fleet-skeleton-bar" style={{ width: 64, height: 11 }} />
+            {/* .fleet-task-page-title: 24px/1.25. */}
+            <div className="fleet-skeleton-bar" style={{ width: "58%", height: 24, marginTop: 8 }} />
+            {/* .fleet-task-page-desc: 13px/1.65 body copy. */}
+            <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="fleet-skeleton-bar" style={{ width: "94%", height: 13 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "80%", height: 13 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "62%", height: 13 }} />
+            </div>
+          </div>
+        </div>
+      </div>
+      <aside className="fleet-task-page-side" aria-hidden="true">
+        <div className="fleet-task-page-side-inner">
+          <div className="fleet-skeleton-bar" style={{ width: 70, height: 11, marginBottom: 14 }} />
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="fleet-panel-row">
+              <span className="fleet-panel-row-label">
+                <span className="fleet-skeleton-bar" style={{ width: 15, height: 15, borderRadius: 4 }} />
+                <span className="fleet-skeleton-bar" style={{ width: 46 + (i % 2) * 10, height: 11 }} />
+              </span>
+              <span className="fleet-skeleton-bar" style={{ width: 60, height: 11 }} />
+            </div>
+          ))}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+/**
+ * AgentChat transcript skeleton — a sibling to FleetChatSkeleton but built
+ * against AgentChat's OWN real markup (`.fleet-sage-chat-list` of
+ * `article.app-chat-message[data-chat-role]` from lib/workspace/chat-message.tsx),
+ * which is a different element tree than WorkTab/ConversationsView's
+ * `.fleet-work-transcript`/`.fleet-work-msg` — FleetChatSkeleton's classes
+ * don't exist on this surface, so reusing it here would style nothing and
+ * silently fall back to unstyled divs. `data-chat-role` is a real HTML data
+ * attribute, so setting it directly on the skeleton bubbles picks up
+ * `.app-chat-message[data-chat-role='user'/'assistant']`'s own
+ * width/alignment/bubble rules from chrome.css — no separate geometry to
+ * keep in sync by hand. Replaces `FleetRowsSkeleton`, an icon+2-line
+ * activity-row shape with no relation to a chat bubble's alignment or
+ * width.
+ */
+export function FleetAgentChatSkeleton({ bubbles = 4, label = "Loading conversation" }: { bubbles?: number; label?: string }) {
+  const shapes: { role: "user" | "assistant"; width: number }[] = [
+    { role: "assistant", width: 70 },
+    { role: "user", width: 45 },
+    { role: "assistant", width: 55 },
+    { role: "user", width: 30 },
+  ];
+  return (
+    <div aria-busy="true" aria-label={label}>
+      {Array.from({ length: bubbles }).map((_, i) => {
+        const shape = shapes[i % shapes.length];
+        return (
+          <article key={i} className="app-chat-message" data-chat-role={shape.role}>
+            <div className="app-chat-message__content" style={shape.role === "user" ? { width: `${shape.width}%` } : undefined}>
+              <div className="fleet-skeleton-bar" style={{ width: shape.role === "user" ? "100%" : `${shape.width}%`, height: 13 }} />
+            </div>
+          </article>
         );
       })}
     </div>

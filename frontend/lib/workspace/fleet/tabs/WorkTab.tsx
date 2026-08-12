@@ -907,6 +907,13 @@ export function WorkTab({
       <div className="fleet-work-root">
         <div className="fleet-work-split">
           <div className="fleet-work-list" aria-label="Loading conversations">
+            {/* The real list ALWAYS renders `.fleet-work-stream-header`
+                above its rows (a sticky "Work stream · N" caption) — this
+                was missing here, so every row shifted down the instant the
+                fetch resolved and the header appeared for the first time. */}
+            <div className="fleet-work-stream-header">
+              <div className="fleet-skeleton-bar" style={{ width: 90, height: 12 }} />
+            </div>
             {[0, 1, 2, 3].map((i) => (
               <div key={i} className="fleet-work-item">
                 <div className="fleet-skeleton-bar" style={{ width: "70%", height: 12 }} />
@@ -914,7 +921,28 @@ export function WorkTab({
               </div>
             ))}
           </div>
-          <div className="fleet-work-transcript-pane" />
+          {/* A blank `.fleet-work-transcript-pane` reserved zero internal
+              shape — the real pane, once a thread auto-selects, renders a
+              detail header (channel icon + title + status pill) followed by
+              an Activity timeline, never chat bubbles (that's
+              ConversationsView's shape, not this one). Reusing the real
+              `.fleet-work-detail-header`/`.fleet-work-detail-title-row`/
+              `.fleet-work-activity-label` classNames here instead of an
+              empty div. */}
+          <div className="fleet-work-transcript-pane" aria-busy="true" aria-label="Loading">
+            <div className="fleet-work-detail-header">
+              <div className="fleet-work-detail-title-row">
+                <div className="fleet-skeleton-bar" style={{ width: 16, height: 16, borderRadius: 4 }} />
+                <div className="fleet-skeleton-bar" style={{ width: "40%", height: 14 }} />
+              </div>
+            </div>
+            <div className="fleet-work-activity-label">Activity</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+              <div className="fleet-skeleton-bar" style={{ width: "80%", height: 12 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "65%", height: 12 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "70%", height: 12 }} />
+            </div>
+          </div>
         </div>
       </div>
     );

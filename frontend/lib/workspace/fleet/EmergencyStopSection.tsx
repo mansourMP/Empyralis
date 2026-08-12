@@ -56,7 +56,15 @@ export function EmergencyStopSection({ workspaceId }: { workspaceId: string }) {
       {error ? <div className="fleet-page-state-body" role="alert" style={{ color: "var(--offline-text)" }}>{error}</div> : null}
 
       {loading ? (
-        <div className="fleet-list"><div className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div></div>
+        // Neither of this section's own states is a `.fleet-list-row` — it's
+        // always either a bare button (the common case, not stopped) or a
+        // bordered `.fleet-card`. Which one it resolves to can't be known
+        // before the fetch returns (same ambiguity FleetBoardSkeleton's own
+        // doc comment accepts for a board's real column contents), so this
+        // matches the BUTTON shape — the default, far more common state —
+        // rather than a container type (`.fleet-list-row`) neither state
+        // actually uses.
+        <div className="fleet-skeleton-bar" style={{ width: 150, height: 32, borderRadius: "var(--radius-control, 6px)" }} aria-busy="true" aria-label="Loading" />
       ) : stopped?.active ? (
         <div className="fleet-card" style={{ borderColor: "var(--accent)", padding: "var(--space-3)" }}>
           <div className="fleet-stop-chip" style={{ marginBottom: 8 }}>

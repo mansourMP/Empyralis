@@ -184,8 +184,24 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
         </div>
       ) : null}
 
+      {/* Reuses the real row markup (avatar + title/desc + role badge) so
+          each placeholder row is shaped like a real member row, and renders
+          more than one row — a real member list is almost never exactly
+          one row (the workspace owner alone is already one, and this page
+          exists because there's usually more than one). */}
       {loading ? (
-        <div className="fleet-list"><div className="fleet-list-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div></div>
+        <div className="fleet-list" aria-busy="true" aria-label="Loading">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="fleet-list-row" style={{ cursor: "default" }}>
+              <div className="fleet-skeleton-bar" style={{ width: 28, height: 28, borderRadius: 999 }} />
+              <span className="fleet-list-row-main">
+                <span className="fleet-skeleton-bar" style={{ width: `${40 + i * 12}%`, height: 12 }} />
+                <span className="fleet-skeleton-bar" style={{ width: 140, height: 10, opacity: 0.7 }} />
+              </span>
+              <div className="fleet-skeleton-bar" style={{ width: 46, height: 18, borderRadius: 999 }} />
+            </div>
+          ))}
+        </div>
       ) : members.length === 0 ? (
         <div className="fleet-empty">
           <div className="fleet-empty-icon">

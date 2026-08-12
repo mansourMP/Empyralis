@@ -1656,12 +1656,67 @@ export default function GatewayDetailPage() {
   );
 
   if (loading) {
+    // Reuses the real dashboard's own classNames (.fleet-hw-dash-header/
+    // -identity/-gauges/-band/-panel, fleet-theme.css) so the identity
+    // block, the resource-gauge row and both two-panel bands land at the
+    // exact spot the real gateway dashboard renders into — was previously
+    // one bare 12px bar inside a single `.fleet-list-row`, standing in for
+    // this whole multi-section dashboard.
     return (
-      <main className="fleet-hw-dashboard">
+      <main className="fleet-hw-dashboard" aria-busy="true" aria-label="Loading">
         {backLink}
-        <div className="fleet-list" style={{ marginTop: 16 }}>
-          <div className="fleet-list-row">
-            <div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} />
+        <header className="fleet-hw-dash-header">
+          <div className="fleet-hw-dash-identity">
+            <div className="fleet-skeleton-bar" style={{ width: 40, height: 40, borderRadius: 8 }} />
+            <div className="fleet-hw-dash-identity-text">
+              <div className="fleet-skeleton-bar" style={{ width: 150, height: 15 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 100, height: 11, opacity: 0.7 }} />
+            </div>
+          </div>
+          <div className="fleet-skeleton-bar" style={{ width: 74, height: 20, borderRadius: 999 }} />
+        </header>
+
+        <div className="fleet-hw-dash-gauges">
+          {[0, 1, 2].map((i) => (
+            <div className="fleet-hw-dash-gauge" key={i}>
+              <div className="fleet-skeleton-bar" style={{ width: "55%", height: 11 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "35%", height: 18, marginTop: 4 }} />
+              <div className="fleet-skeleton-bar" style={{ width: "100%", height: 6, marginTop: 8 }} />
+            </div>
+          ))}
+        </div>
+
+        <div className="fleet-hw-dash-band">
+          <div className="fleet-hw-dash-panel">
+            <div className="fleet-skeleton-bar" style={{ width: 170, height: 12, marginBottom: 14 }} />
+            <div className="fleet-hw-card">
+              <div className="fleet-hw-row"><div className="fleet-skeleton-bar" style={{ width: "55%", height: 12 }} /></div>
+              <div className="fleet-hw-row"><div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} /></div>
+            </div>
+          </div>
+          <div className="fleet-hw-dash-panel">
+            <div className="fleet-skeleton-bar" style={{ width: 80, height: 12, marginBottom: 14 }} />
+            <div className="fleet-hw-card">
+              <div className="fleet-hw-row"><div className="fleet-skeleton-bar" style={{ width: "65%", height: 12 }} /></div>
+              <div className="fleet-hw-row"><div className="fleet-skeleton-bar" style={{ width: "48%", height: 12 }} /></div>
+            </div>
+          </div>
+        </div>
+
+        <div className="fleet-hw-dash-band">
+          <div className="fleet-hw-dash-panel">
+            <div className="fleet-skeleton-bar" style={{ width: 190, height: 12, marginBottom: 14 }} />
+            <div className="fleet-hw-card">
+              <div className="fleet-hw-row"><div className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} /></div>
+            </div>
+          </div>
+          <div className="fleet-hw-dash-panel">
+            <div className="fleet-skeleton-bar" style={{ width: 110, height: 12, marginBottom: 14 }} />
+            <div className="fleet-hw-card">
+              <div className="fleet-hw-row"><div className="fleet-skeleton-bar" style={{ width: "60%", height: 12 }} /></div>
+              <div className="fleet-hw-row"><div className="fleet-skeleton-bar" style={{ width: "45%", height: 12 }} /></div>
+              <div className="fleet-hw-row"><div className="fleet-skeleton-bar" style={{ width: "52%", height: 12 }} /></div>
+            </div>
           </div>
         </div>
       </main>

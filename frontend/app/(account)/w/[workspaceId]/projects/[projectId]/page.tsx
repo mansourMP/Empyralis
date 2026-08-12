@@ -45,10 +45,134 @@ import {
 import { FleetRightPanel, PanelSection, PanelRow, PanelRowsSkeleton } from "@/lib/workspace/fleet/FleetRightPanel";
 import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWizard";
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
-import { FleetListSkeleton, FleetBoardSkeleton } from "@/lib/workspace/fleet/fleet-states";
+import { FleetBoardSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { ListChecks, FileText } from "lucide-react";
 
 const money = (n: number | undefined) => `$${(n ?? 0).toFixed(4)}`;
+
+/**
+ * Flat-list skeleton reusing `.fleet-tasks-list`/`.fleet-tasks-list-header`/
+ * `.fleet-task-row`'s real 5-column grid — was previously `FleetListSkeleton
+ * rows={4} rowHeight={52}`, which pinned the right row HEIGHT but never
+ * reserved the column-title row real TasksList/DocumentsList/AgentsList
+ * always render above their rows, and used a generic 2-bar flex row instead
+ * of the real per-column grid. Column headers approximate the DEFAULT
+ * display columns (Assignee/Due/Updated/Status) — TasksList's own column
+ * set is itself display-option-dependent, so this can't be exact for every
+ * saved view, only for the common one.
+ */
+function TasksListSkeleton() {
+  return (
+    <div className="fleet-tasks-list" aria-busy="true" aria-label="Loading">
+      <div className="fleet-tasks-list-header" role="row">
+        <span>Task</span>
+        <span>Assignee</span>
+        <span className="is-right">Due</span>
+        <span className="is-right">Updated</span>
+        <span>Status</span>
+      </div>
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="fleet-task-row" style={{ cursor: "default" }}>
+          <span className="fleet-skeleton-bar" style={{ width: `${45 + (i % 3) * 12}%`, height: 13 }} />
+          <span className="fleet-skeleton-bar" style={{ width: "60%", height: 12 }} />
+          <span className="fleet-skeleton-bar" style={{ width: 40, height: 12, marginLeft: "auto" }} />
+          <span className="fleet-skeleton-bar" style={{ width: 40, height: 12, marginLeft: "auto" }} />
+          <span className="fleet-skeleton-bar" style={{ width: 64, height: 18, borderRadius: 999 }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Grouped-task skeleton reusing TasksGroupedList's real `.fleet-glist*`
+ * classNames (tab strip + N titled/collapsible sections) — a saved grouping
+ * preference (by assignee/status/etc, `viewOptions.grouping`) is known
+ * before the fetch resolves, same as `viewOptions.layout`'s existing board
+ * check just above this file's tasks branch, so the flat-list skeleton
+ * above was wrong for any reader whose saved view groups tasks: it opened
+ * as 4 flat rows, then reflowed into a tab strip plus multiple titled
+ * sections the instant the fetch landed.
+ */
+function TasksGroupedSkeleton() {
+  return (
+    <div className="fleet-glist" aria-busy="true" aria-label="Loading">
+      <div className="fleet-glist-tabs" role="tablist" aria-label="Task filter">
+        {["Active", "Backlog", "All"].map((t) => (
+          <span key={t} className="fleet-skeleton-bar" style={{ width: 56, height: 20, borderRadius: 999 }} />
+        ))}
+      </div>
+      {[3, 2].map((rows, si) => (
+        <section key={si} className="fleet-glist-section">
+          <header className="fleet-glist-header">
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="fleet-skeleton-bar" style={{ width: 13, height: 13 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 90, height: 12 }} />
+              <div className="fleet-skeleton-bar" style={{ width: 18, height: 11 }} />
+            </div>
+          </header>
+          <div className="fleet-glist-rows">
+            {Array.from({ length: rows }).map((_, i) => (
+              <div key={i} className="fleet-glist-row" style={{ minHeight: 40, display: "flex", alignItems: "center", gap: 10, cursor: "default" }}>
+                <div className="fleet-skeleton-bar" style={{ width: "40%", height: 12 }} />
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Documents-list skeleton — DocumentsList.tsx reuses `.fleet-tasks-list`/
+ * `.fleet-task-row` wholesale (a different header, no per-task columns), so
+ * this needs its own header rather than TasksListSkeleton's.
+ */
+function DocumentsListSkeleton() {
+  return (
+    <div className="fleet-tasks-list" aria-busy="true" aria-label="Loading">
+      <div className="fleet-tasks-list-header" role="row">
+        <span>Document</span>
+        <span>Updated</span>
+      </div>
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="fleet-task-row" style={{ gridTemplateColumns: "minmax(260px, 1fr) 160px", cursor: "default" }}>
+          <span className="fleet-skeleton-bar" style={{ width: `${40 + (i % 3) * 15}%`, height: 13 }} />
+          <span className="fleet-skeleton-bar" style={{ width: 90, height: 12 }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Agents-list skeleton reusing `.fleet-agents-list`/`.fleet-agents-list-header`/`.fleet-agent-row`'s real 7-column grid. */
+function ProjectAgentsListSkeleton() {
+  return (
+    <div className="fleet-agents-list" aria-busy="true" aria-label="Loading">
+      <div className="fleet-agents-list-header" aria-hidden>
+        <span>Agent</span>
+        <span className="fleet-col-brain">Brain</span>
+        <span className="fleet-col-placement">Placement</span>
+        <span className="fleet-col-channels">Channels</span>
+        <span className="is-right fleet-col-last-active">Last active</span>
+        <span className="is-right">Cost</span>
+        <span className="is-right">Status</span>
+      </div>
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="fleet-agent-row" style={{ cursor: "default" }}>
+          <span className="fleet-skeleton-bar" style={{ width: `${45 + (i % 3) * 12}%`, height: 13 }} />
+          <span className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} />
+          <span className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} />
+          <span className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} />
+          <span className="fleet-skeleton-bar" style={{ width: 44, height: 12, marginLeft: "auto" }} />
+          <span className="fleet-skeleton-bar" style={{ width: 44, height: 12, marginLeft: "auto" }} />
+          <span className="fleet-skeleton-bar" style={{ width: 60, height: 18, marginLeft: "auto", borderRadius: 999 }} />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 type SortMode = "last_active" | "status" | "cost" | "name";
 const STATUS_RANK: Record<string, number> = { online: 0, unknown: 1, offline: 2 };
@@ -84,7 +208,7 @@ export default function ProjectDetailPage() {
   const projectId = String(params?.projectId || "");
   const base = `/w/${encodeURIComponent(workspaceId)}`;
 
-  const { agents, loading, refresh } = useFleetAgents(workspaceId);
+  const { agents, loading, error: agentsError, refresh } = useFleetAgents(workspaceId);
   // MAN-64/MAN-70: the pool of valid HUMAN assignees -- the same list
   // MemberAvatarStack renders for this page's own roster stack, passed down
   // as a prop rather than fetched a second time there (GET
@@ -214,11 +338,11 @@ export default function ProjectDetailPage() {
   // wake so the agent actually starts, and a silent wake failure would read
   // as "assigned, working" when nothing is running.
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
-  const { tasks, loading: tasksLoading, refresh: refreshTasks } = useFleetTasks(workspaceId, projectId);
+  const { tasks, loading: tasksLoading, error: tasksError, refresh: refreshTasks } = useFleetTasks(workspaceId, projectId);
   // The Documents view (fourth top-level tab, founder's own call — see the
   // `view` const above). Only fetched with a real project_id: useFleetDocuments
   // itself no-ops without one, same guard useFleetTasks's own fetcher uses.
-  const { documents, loading: documentsLoading, refresh: refreshDocuments } = useFleetDocuments(workspaceId, projectId);
+  const { documents, loading: documentsLoading, error: documentsError, refresh: refreshDocuments } = useFleetDocuments(workspaceId, projectId);
   const [documentComposerOpen, setDocumentComposerOpen] = useState(false);
   // Write gate: create/edit/delete controls for a document render only when
   // this resolves `true` — `null` (still loading) and `false` (a viewer, or
@@ -603,18 +727,22 @@ export default function ProjectDetailPage() {
 
           {view === "tasks" ? (
             tasksLoading && tasks.length === 0 ? (
-              // The board layout renders multi-column kanban cards, not flat
-              // list rows — using FleetListSkeleton here regardless of
-              // `viewOptions.layout` reflowed the page the instant the fetch
-              // landed (rows -> columns), the exact "loading state doesn't
-              // match the shape of the real content" bug. rowHeight on the
-              // list branch still matches .fleet-task-row's real min-height
-              // (52px) — see FleetListSkeleton's MAN-113 note.
+              // Which skeleton to show is decided by the SAME `viewOptions`
+              // the real branches below switch on — board renders columns,
+              // grouped renders a tab strip plus titled sections, flat
+              // renders a plain table. A saved preference for either
+              // non-default shape can already be active on first paint, so
+              // picking only between "board" and "flat list" (as this used
+              // to) was still wrong for a grouped view.
               viewOptions.layout === "board" ? (
                 <FleetBoardSkeleton label="Loading task board" />
+              ) : viewOptions.grouping !== "none" ? (
+                <TasksGroupedSkeleton />
               ) : (
-                <FleetListSkeleton rows={4} rowHeight={52} />
+                <TasksListSkeleton />
               )
+            ) : tasksError && tasks.length === 0 ? (
+              <FleetSurfaceError title="Couldn’t load tasks" message={tasksError} onRetry={refreshTasks} />
             ) : tasks.length === 0 ? (
               <div className="fleet-empty">
                 <div className="fleet-empty-icon">
@@ -673,10 +801,9 @@ export default function ProjectDetailPage() {
             )
           ) : view === "documents" ? (
             documentsLoading && documents.length === 0 ? (
-              // rowHeight matches .fleet-task-row's real min-height (52px) —
-              // DocumentsList reuses that exact row, so this skeleton pins
-              // the same height (see FleetListSkeleton's MAN-113 note).
-              <FleetListSkeleton rows={4} rowHeight={52} />
+              <DocumentsListSkeleton />
+            ) : documentsError && documents.length === 0 ? (
+              <FleetSurfaceError title="Couldn’t load documents" message={documentsError} onRetry={refreshDocuments} />
             ) : documents.length === 0 ? (
               <div className="fleet-empty">
                 <div className="fleet-empty-icon">
@@ -699,10 +826,9 @@ export default function ProjectDetailPage() {
               <DocumentsList documents={documents} hrefFor={documentHref} />
             )
           ) : loading && inProject.length === 0 ? (
-            // rowHeight matches .fleet-agent-row's real min-height (52px) —
-            // see FleetListSkeleton's MAN-113 note; an un-pinned skeleton row
-            // snaps taller the moment AgentsList swaps in.
-            <FleetListSkeleton rows={4} rowHeight={52} />
+            <ProjectAgentsListSkeleton />
+          ) : agentsError && inProject.length === 0 ? (
+            <FleetSurfaceError title="Couldn’t load agents" message={agentsError} onRetry={refresh} />
           ) : inProject.length === 0 ? (
             <FirstAgentEmpty
               title="No agents in this project"
