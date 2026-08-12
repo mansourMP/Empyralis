@@ -35,6 +35,7 @@ import { TaskLabelChips } from "./task-labels";
 import {
   assigneeOptionValue,
   parseAssigneeOptionValue,
+  FLEET_TASK_STATUSES,
   type FleetAgent,
   type FleetTask,
   type FleetTaskStatus,
@@ -79,6 +80,7 @@ export function TasksList({
   hrefFor,
   onAssign,
   onSelect,
+  onStatusChange,
 }: {
   tasks: FleetTask[];
   /** Agents in this project — valid AGENT assignees. */
@@ -96,6 +98,15 @@ export function TasksList({
   hrefFor: (taskId: string) => string;
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
+  /** Optional: makes the Status cell a real control instead of a read-only
+   *  chip — same native-<select>-over-glyph technique TasksBoard's card and
+   *  TasksGroupedList's row already use (`.fleet-board-card-statuspick`,
+   *  reused verbatim here). Board and Grouped List have carried this since
+   *  they were built; the flat list never did, which meant the one Task view
+   *  with no grouping applied was also the one view where changing a status
+   *  required opening the task first — an inconsistency across three renders
+   *  of the identical data, not a deliberate omission. */
+  onStatusChange?: (taskId: string, status: FleetTaskStatus) => void;
 }) {
   const columns = COLUMN_TRACKS.filter((c) => display[c.key]);
   const grid = ["minmax(260px, 1fr)", ...columns.map((c) => c.track)].join(" ");
@@ -121,6 +132,7 @@ export function TasksList({
           href={hrefFor(task.id)}
           onAssign={onAssign}
           onSelect={onSelect}
+          onStatusChange={onStatusChange}
         />
       ))}
     </div>
@@ -136,6 +148,7 @@ function TaskRow({
   href,
   onAssign,
   onSelect,
+  onStatusChange,
 }: {
   task: FleetTask;
   agents: FleetAgent[];
@@ -145,6 +158,7 @@ function TaskRow({
   href: string;
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
+  onStatusChange?: (taskId: string, status: FleetTaskStatus) => void;
 }) {
   const [assigning, setAssigning] = useState(false);
   const priority = taskPriority(task);
@@ -306,7 +320,40 @@ function TaskRow({
       ) : null}
       {display.status ? (
         <span className="fleet-task-cell-status">
-          <TaskStatusChip status={task.status} />
+          {onStatusChange ? (
+            // Same transparent-native-<select>-over-glyph technique as the
+            // board card and the grouped list row (`.fleet-board-card-
+            // statuspick`, reused verbatim — it positions the select over
+            // whatever it wraps, chip included) — this is the one cell on
+            // this row that was a read-only glyph everywhere else on the
+            // page already had a working control for.
+            <span className="fleet-board-card-statuspick">
+              <TaskStatusChip status={task.status} />
+              <select
+                className="fleet-board-card-status"
+                value={task.status}
+                aria-label={`Status of ${task.title || "Untitled task"}`}
+                title={taskStatusLabel(task.status)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+                onChange={(e) => {
+                  const next = e.currentTarget.value as FleetTaskStatus;
+                  if (next !== task.status) onStatusChange(task.id, next);
+                }}
+              >
+                {FLEET_TASK_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {taskStatusLabel(s)}
+                  </option>
+                ))}
+              </select>
+            </span>
+          ) : (
+            <TaskStatusChip status={task.status} />
+          )}
           {/* MAN-294: "In progress" above is the real status, unchanged —
               this is the compact qualifier for "but not actually started
               yet", same icon/colour/title as the board card's. Renders

@@ -338,6 +338,30 @@ export default function ProjectDetailPage() {
   // wake so the agent actually starts, and a silent wake failure would read
   // as "assigned, working" when nothing is running.
   const [taskNotice, setTaskNotice] = useState<string | null>(null);
+
+  // "C" opens the composer — Linear's own signature shortcut for "create new
+  // issue". The composer itself is keyboard-first once open (Enter/Esc/
+  // ⌘+Enter, see TaskComposer.tsx's own header), but reaching it required a
+  // mouse click on "+ New task" with nothing else on this page offering a
+  // way in. Scoped to the Tasks view only (not a global app-wide binding —
+  // Agents/Documents have no "c" affordance of their own) and ignored
+  // whenever a field already has focus or ANY dialog is open (composer
+  // itself, the agent wizard, the document composer), so it can never fire
+  // while someone is typing "c" into a title, a comment, or a search box.
+  useEffect(() => {
+    if (view !== "tasks") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "c" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      if (document.querySelector("[role='dialog']")) return;
+      event.preventDefault();
+      setComposer({});
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [view]);
   const { tasks, loading: tasksLoading, error: tasksError, refresh: refreshTasks } = useFleetTasks(workspaceId, projectId);
   // The Documents view (fourth top-level tab, founder's own call — see the
   // `view` const above). Only fetched with a real project_id: useFleetDocuments
@@ -797,6 +821,7 @@ export default function ProjectDetailPage() {
                 hrefFor={taskHref}
                 onAssign={handleAssign}
                 onSelect={openTask}
+                onStatusChange={handleStatusChange}
               />
             )
           ) : view === "documents" ? (

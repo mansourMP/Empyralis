@@ -70,19 +70,37 @@ export default function TaskDetailPage() {
   const [pendingStatus, setPendingStatus] = useState<FleetTaskStatus | null>(null);
   const [pendingPriority, setPendingPriority] = useState<number | null>(null);
   const [pendingDue, setPendingDue] = useState<string | null>(null);
+  // Title/description follow the identical optimistic-overlay shape as
+  // status/priority/due above — both write through the same PATCH the others
+  // already do (fleet_patch_task accepts all five on one request; see
+  // TaskDetailView's onTitleChange/onDescriptionChange doc comment for why
+  // this pair had no writer at all until now). `null` means "no pending edit"
+  // for both, matching the others' convention.
+  const [pendingTitle, setPendingTitle] = useState<string | null>(null);
+  const [pendingDescription, setPendingDescription] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const task = useMemo(() => {
     const found = tasks.find((t) => t.id === taskId);
     if (!found) return null;
-    if (pendingStatus === null && pendingPriority === null && pendingDue === null) return found;
+    if (
+      pendingStatus === null &&
+      pendingPriority === null &&
+      pendingDue === null &&
+      pendingTitle === null &&
+      pendingDescription === null
+    ) {
+      return found;
+    }
     return {
       ...found,
       ...(pendingStatus !== null ? { status: pendingStatus } : {}),
       ...(pendingPriority !== null ? { priority: pendingPriority } : {}),
       ...(pendingDue !== null ? { due_at: pendingDue } : {}),
+      ...(pendingTitle !== null ? { title: pendingTitle } : {}),
+      ...(pendingDescription !== null ? { description: pendingDescription } : {}),
     };
-  }, [tasks, taskId, pendingStatus, pendingPriority, pendingDue]);
+  }, [tasks, taskId, pendingStatus, pendingPriority, pendingDue, pendingTitle, pendingDescription]);
 
   // Breadcrumb: Projects › {project} › {task}. The task crumb carries its
   // status ring, so the chain shows the same state the board column does.
@@ -169,6 +187,32 @@ export default function TaskDetailPage() {
     }
   }, [workspaceId, refresh]);
 
+  const handleTitleChange = useCallback(async (id: string, title: string) => {
+    setNotice(null);
+    setPendingTitle(title);
+    try {
+      await patchFleetTask(workspaceId, id, { title });
+      await refresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Could not rename this task.");
+    } finally {
+      setPendingTitle(null);
+    }
+  }, [workspaceId, refresh]);
+
+  const handleDescriptionChange = useCallback(async (id: string, description: string) => {
+    setNotice(null);
+    setPendingDescription(description);
+    try {
+      await patchFleetTask(workspaceId, id, { description });
+      await refresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : "Could not update this task's description.");
+    } finally {
+      setPendingDescription(null);
+    }
+  }, [workspaceId, refresh]);
+
   const handleSetParent = useCallback(async (id: string, parentTaskId: string | null) => {
     setNotice(null);
     try {
@@ -231,6 +275,8 @@ export default function TaskDetailPage() {
         onStatusChange={handleStatusChange}
         onPriorityChange={handlePriorityChange}
         onDueChange={handleDueChange}
+        onTitleChange={handleTitleChange}
+        onDescriptionChange={handleDescriptionChange}
         onAssign={handleAssign}
         onSetParent={handleSetParent}
         onSubTaskCreated={handleSubTaskCreated}

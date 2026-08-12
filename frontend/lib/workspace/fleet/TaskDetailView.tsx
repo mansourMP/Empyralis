@@ -107,6 +107,7 @@ import {
   FolderKanban,
   Loader2,
   MessageSquare,
+  Pencil,
   Plus,
   SignalHigh,
   User,
@@ -261,6 +262,36 @@ const STATUS_LABELS: Record<string, string> = {
 const PRIORITY_LABELS: Record<number, string> = {
   0: "None", 1: "Urgent", 2: "High", 3: "Medium", 4: "Low",
 };
+
+/** Same "real identity, never a raw id" rule the file header's ATTRIBUTION
+ *  note states for Created by/Completed by — the structured Activity events
+ *  (status/priority/title/description changes) were the one place on this
+ *  page that broke it: `_record_task_activity` stamps `actor_id` on every
+ *  event but only a HUMAN comment's author gets a resolved display name
+ *  upstream, so `e.actor_name || e.actor_id` was rendering a bare UUID for
+ *  "changed status from Todo to In Progress" and "created this task" —
+ *  confirmed live, 2026-08-12: the Activity feed named a task's own creator
+ *  by their `user_id` while the comment two lines below it, from the same
+ *  person, correctly said "E2E Owner". Resolved the same way created_by/
+ *  completed_by already are (resolveEitherActor against this project's
+ *  agents/members); `actor_name` is trusted as a fallback ONLY when it is
+ *  not simply a copy of `actor_id` — observed on the wire, not hypothetical. */
+function activityActorLabel(
+  event: TaskActivityEvent,
+  agents: FleetAgent[],
+  members?: WorkspaceMember[],
+): string {
+  const resolved = resolveEitherActor(event.actor_id, agents, members || []);
+  if (resolved) {
+    return resolved.kind === "agent"
+      ? resolved.agent.label || "Unnamed agent"
+      : resolved.member.display_name || resolved.member.email;
+  }
+  const name = String(event.actor_name || "").trim();
+  const id = String(event.actor_id || "").trim();
+  if (name && name !== id) return name;
+  return "Someone";
+}
 
 function describeActivity(event: TaskActivityEvent): string {
   const label = ACTIVITY_LABELS[event.type] || event.type;
@@ -444,6 +475,8 @@ export function TaskDetailView({
   onStatusChange,
   onPriorityChange,
   onDueChange,
+  onTitleChange,
+  onDescriptionChange,
   onAssign,
   onSetParent,
   onSubTaskCreated,
@@ -478,6 +511,15 @@ export function TaskDetailView({
   /** Due-date edit (MAN-145): the route page patches the task and optimistically
    *  overlays the new value, same shape as onPriorityChange. */
   onDueChange?: (taskId: string, dueAt: string | null) => void;
+  /** Title/description edit — the backend has always accepted both on the
+   *  same PATCH route onStatusChange/onPriorityChange/onDueChange already use
+   *  (project_tasks_service.update_task already stamps title_edited/
+   *  description_edited activity events on a change); this page simply never
+   *  rendered anything that could call it. Optional, same "no dead controls"
+   *  gating as the rest of this column — a read-only view omits the edit
+   *  affordance instead of rendering one that does nothing. */
+  onTitleChange?: (taskId: string, title: string) => void;
+  onDescriptionChange?: (taskId: string, description: string) => void;
   /** Assignee is agent-or-human (MAN-64/MAN-70) — the caller dispatches to
    *  assignFleetTask or assignFleetTaskToUser based on `selection.kind`. */
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
@@ -664,6 +706,87 @@ export function TaskDetailView({
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   }, []);
 
+  // ── Title inline edit ─────────────────────────────────────────────────────
+  // Same skipBlurCommit ref pattern as AgentTitle (FleetAgentDetail.tsx) and
+  // the due-date edit below: Escape sets the ref so the blur handler doesn't
+  // re-commit the stale draft.
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(task.title || "");
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const skipTitleBlur = useRef(false);
+
+  // A poll tick can swap `task` out from under an open edit (assignment,
+  // status, a comment landing) — only resync the draft while NOT editing, the
+  // same guard PersonaEditor documents for exactly this reason, so an
+  // in-progress rename is never clobbered by its own refetch.
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(task.title || "");
+  }, [task.title, editingTitle]);
+
+  const enterTitleEdit = useCallback(() => {
+    if (!onTitleChange) return;
+    setTitleDraft(task.title || "");
+    setEditingTitle(true);
+    requestAnimationFrame(() => {
+      titleInputRef.current?.focus();
+      titleInputRef.current?.select();
+    });
+  }, [onTitleChange, task.title]);
+
+  const commitTitle = useCallback(() => {
+    if (!onTitleChange) return;
+    const next = titleDraft.trim();
+    // Empty commits nowhere — the backend's own COALESCE(NULLIF($,''), title)
+    // already treats a blank title as "leave it alone", so mirror that here
+    // rather than sending a write that provably no-ops.
+    if (!next || next === (task.title || "")) {
+      setTitleDraft(task.title || "");
+      setEditingTitle(false);
+      return;
+    }
+    setEditingTitle(false);
+    onTitleChange(task.id, next);
+  }, [onTitleChange, task.id, task.title, titleDraft]);
+
+  // ── Description inline edit ───────────────────────────────────────────────
+  const [editingDescription, setEditingDescription] = useState(false);
+  const [descriptionDraft, setDescriptionDraft] = useState(task.description || "");
+  const descriptionInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const skipDescriptionBlur = useRef(false);
+
+  useEffect(() => {
+    if (!editingDescription) setDescriptionDraft(task.description || "");
+  }, [task.description, editingDescription]);
+
+  const autosizeDescription = useCallback((el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, []);
+
+  const enterDescriptionEdit = useCallback(() => {
+    if (!onDescriptionChange) return;
+    setDescriptionDraft(task.description || "");
+    setEditingDescription(true);
+    requestAnimationFrame(() => {
+      autosizeDescription(descriptionInputRef.current);
+      descriptionInputRef.current?.focus();
+    });
+  }, [onDescriptionChange, task.description, autosizeDescription]);
+
+  const commitDescription = useCallback(() => {
+    if (!onDescriptionChange) return;
+    const next = descriptionDraft.trim();
+    const current = (task.description || "").trim();
+    if (next === current) {
+      setDescriptionDraft(task.description || "");
+      setEditingDescription(false);
+      return;
+    }
+    setEditingDescription(false);
+    onDescriptionChange(task.id, next);
+  }, [onDescriptionChange, task.id, task.description, descriptionDraft]);
+
   // ── Due-date inline edit ──────────────────────────────────────────────────
   // Same skipBlurCommit ref pattern as AgentTitle (FleetAgentDetail.tsx):
   // Escape sets the ref so the blur handler doesn't re-commit the stale draft.
@@ -839,12 +962,104 @@ export function TaskDetailView({
                 <h1> (MAN-145 title-dedup). Rendering the task title as an h1
                 here too gave task pages two visible h1s — the same triplication
                 that pass existed to remove. Visual size is unchanged; only the
-                tag differs. */}
-            <h2 className="fleet-task-page-title" tabIndex={-1} ref={headingRef}>
-              {task.title || "Untitled task"}
+                tag differs.
+                Click-to-edit (same convention as AgentTitle in
+                FleetAgentDetail.tsx): the backend has taken title/description
+                on this same PATCH route since project_tasks_service.update_task
+                was written — see the onTitleChange/onDescriptionChange doc
+                comment above — this page simply never rendered anything that
+                could call it. A <button> nested inside the <h2> keeps real
+                heading semantics (CLAUDE.md: real heading structure) while
+                giving keyboard/AT users a genuine control, not just a mouse
+                affordance. Gated on onTitleChange like every other optional
+                writer prop on this page — a read-only view gets a plain
+                heading, never a click target that does nothing. */}
+            <h2 className="fleet-task-page-title" tabIndex={editingTitle ? undefined : -1} ref={headingRef}>
+              {editingTitle ? (
+                <input
+                  ref={titleInputRef}
+                  className="fleet-task-page-title-input"
+                  value={titleDraft}
+                  maxLength={400}
+                  aria-label="Task title"
+                  onChange={(e) => setTitleDraft(e.currentTarget.value)}
+                  onBlur={() => {
+                    if (skipTitleBlur.current) {
+                      skipTitleBlur.current = false;
+                      return;
+                    }
+                    commitTitle();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      e.currentTarget.blur();
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      skipTitleBlur.current = true;
+                      setTitleDraft(task.title || "");
+                      setEditingTitle(false);
+                    }
+                  }}
+                />
+              ) : onTitleChange ? (
+                <button type="button" className="fleet-task-page-title-edit" onClick={enterTitleEdit}>
+                  {task.title || "Untitled task"}
+                  <Pencil size={14} strokeWidth={1.75} className="fleet-task-page-title-pencil" />
+                </button>
+              ) : (
+                task.title || "Untitled task"
+              )}
             </h2>
 
-            {task.description ? (
+            {editingDescription ? (
+              <textarea
+                ref={descriptionInputRef}
+                className="fleet-task-page-desc-input"
+                value={descriptionDraft}
+                maxLength={20000}
+                placeholder="Add a description…"
+                aria-label="Task description"
+                onChange={(e) => {
+                  setDescriptionDraft(e.currentTarget.value);
+                  autosizeDescription(e.currentTarget);
+                }}
+                onBlur={() => {
+                  if (skipDescriptionBlur.current) {
+                    skipDescriptionBlur.current = false;
+                    return;
+                  }
+                  commitDescription();
+                }}
+                onKeyDown={(e) => {
+                  // No Enter-submits here (unlike the title) — a description
+                  // is the one multi-line field on this page, so Enter has to
+                  // stay a newline. Only Escape has a special meaning.
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    skipDescriptionBlur.current = true;
+                    setDescriptionDraft(task.description || "");
+                    setEditingDescription(false);
+                  }
+                }}
+              />
+            ) : onDescriptionChange ? (
+              <div
+                className={`fleet-task-page-desc fleet-task-page-desc--editable${task.description ? "" : " fleet-cell-muted"}`}
+                role="button"
+                tabIndex={0}
+                aria-label={task.description ? "Edit description" : "Add a description"}
+                onClick={enterDescriptionEdit}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    enterDescriptionEdit();
+                  }
+                }}
+              >
+                {task.description ? <MarkdownLiteText text={task.description} /> : "Add a description…"}
+              </div>
+            ) : task.description ? (
               <div className="fleet-task-page-desc">
                 <MarkdownLiteText text={task.description} />
               </div>
@@ -975,7 +1190,7 @@ export function TaskDetailView({
                       const ts = e.timestamp || "";
                       return (
                         <li key={`evt-${i}`} className="fleet-task-page-activity-event">
-                          <span className="fleet-activity-actor">{e.actor_name || e.actor_id || "Someone"}</span>
+                          <span className="fleet-activity-actor">{activityActorLabel(e, agents, members)}</span>
                           {" "}
                           <span className="fleet-activity-action">{describeActivity(e)}</span>
                           {ts ? (
