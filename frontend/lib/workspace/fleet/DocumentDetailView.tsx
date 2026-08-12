@@ -46,6 +46,9 @@ import { MoreHorizontal } from "lucide-react";
 import type { FleetDocument } from "./documents-data";
 import { MarkdownLite } from "./markdown-lite";
 import { timeAgo } from "./fleet-presentation";
+import { DocumentHistory } from "./DocumentHistory";
+import type { FleetAgent } from "./fleet-data";
+import type { WorkspaceMember } from "./members-data";
 import "./document-detail.css";
 
 /** Grow the editor to fit its content so the PAGE scrolls, never a box
@@ -77,6 +80,9 @@ export function DocumentDetailView({
   document,
   projectHref,
   canWrite,
+  workspaceId,
+  agents,
+  members,
   onSave,
   onDelete,
 }: {
@@ -87,6 +93,12 @@ export function DocumentDetailView({
    *  markdown, and the "⋯" menu stays unrendered, until this settles (see
    *  file header). */
   canWrite: boolean | null;
+  /** Threaded down to DocumentHistory (see that file's own header) purely
+   *  for its own fetch + actor resolution — this view never reads them
+   *  itself. */
+  workspaceId: string;
+  agents: FleetAgent[];
+  members: WorkspaceMember[];
   onSave: (patch: { title: string; body: string }) => Promise<void>;
   onDelete: () => Promise<void>;
 }) {
@@ -320,6 +332,14 @@ export function DocumentDetailView({
           ) : (
             <p className="fleet-doc-empty-body">This document is empty.</p>
           )}
+
+          <DocumentHistory
+            workspaceId={workspaceId}
+            documentId={document.id}
+            updatedAt={document.updated_at}
+            agents={agents}
+            members={members}
+          />
         </div>
       </div>
     </div>

@@ -3,11 +3,20 @@
 // Project documents (MAN-115 follow-up) — a project's own flat markdown
 // knowledge base. Backend contract (server_modules/routes_fleet.py, verified
 // file:line at the time this was written):
-//   GET    /api/w/{workspace_id}/fleet/documents?project_id=...   fleet_list_documents   :1071
-//   GET    /api/w/{workspace_id}/fleet/documents/{document_id}    fleet_get_document     :1104
-//   POST   /api/w/{workspace_id}/fleet/documents                  fleet_create_document  :1137
-//   PATCH  /api/w/{workspace_id}/fleet/documents/{document_id}    fleet_patch_document   :1180
-//   DELETE /api/w/{workspace_id}/fleet/documents/{document_id}    fleet_delete_document  :1217
+//   GET    /api/w/{workspace_id}/fleet/documents?project_id=...          fleet_list_documents            :1071
+//   GET    /api/w/{workspace_id}/fleet/documents/{document_id}           fleet_get_document              :1104
+//   GET    /api/w/{workspace_id}/fleet/documents/{document_id}/revisions fleet_list_document_revisions   :1243
+//   POST   /api/w/{workspace_id}/fleet/documents                         fleet_create_document           :1137
+//   PATCH  /api/w/{workspace_id}/fleet/documents/{document_id}           fleet_patch_document             :1180
+//   DELETE /api/w/{workspace_id}/fleet/documents/{document_id}           fleet_delete_document            :1217
+//
+// The revisions route closes a "built, tested, and never wired" gap
+// (CLAUDE.md): project_document_revisions (patch-native diffs,
+// changed_by_type human/agent/external_agent/system) shipped with its only
+// caller being mcp_server.py's empyralis_list_document_revisions -- an
+// AGENT-only tool. A human editing a document had no way to see what
+// changed, who changed it, or when, until this route + useFleetDocument
+// Revisions below existed.
 //
 // Response shape: {"ok": true, "document"/"documents": ...} on success,
 // {"ok": false, "error": "..."} on a caught business-logic failure — never a
@@ -178,4 +187,91 @@ export async function patchFleetDocument(
 export async function deleteFleetDocument(workspaceId: string, documentId: string): Promise<boolean> {
   const data = await documentsRequest(workspaceId, "DELETE", `/${encodeURIComponent(documentId)}`);
   return Boolean(data?.ok);
+}
+
+/** One entry in a document's history -- the same shape
+ *  project_documents_repository._row_to_revision returns, `body` omitted
+ *  (the revisions route never requests include_body=True; see
+ *  fleet_list_document_revisions' own docstring for why there is no
+ *  restore surface to feed). `diff` is a human-readable unified diff
+ *  against the immediately-prior revision -- "this line changed," the
+ *  founder's own framing -- and is null only for the rare case where
+ *  nothing textual changed (see _compute_document_diff's own docstring).
+ *  `changed_by_type` reuses project_tasks_service.add_task_comment's exact
+ *  author_type vocabulary (human / agent / external_agent / system) --
+ *  DocumentHistory.tsx resolves it the same way TaskDetailView.tsx already
+ *  resolves a comment's author. */
+export type FleetDocumentRevision = {
+  id: string;
+  document_id: string;
+  project_id: string | null;
+  title: string;
+  diff: string | null;
+  changed_by_type: string;
+  changed_by_id: string | null;
+  changed_by_display_name: string | null;
+  revision_number: number;
+  created_at: string | null;
+};
+
+function normalizeDocumentRevision(raw: any): FleetDocumentRevision {
+  return {
+    id: String(raw?.id || ""),
+    document_id: String(raw?.document_id || ""),
+    project_id: raw?.project_id ? String(raw.project_id) : null,
+    title: String(raw?.title || ""),
+    diff: typeof raw?.diff === "string" ? raw.diff : null,
+    changed_by_type: String(raw?.changed_by_type || "unknown"),
+    changed_by_id: raw?.changed_by_id ? String(raw.changed_by_id) : null,
+    changed_by_display_name: raw?.changed_by_display_name ? String(raw.changed_by_display_name) : null,
+    revision_number: Number.isFinite(Number(raw?.revision_number)) ? Number(raw.revision_number) : 0,
+    created_at: raw?.created_at ?? null,
+  };
+}
+
+/** A document's history, newest first. NOT polled (same reasoning
+ *  useFleetDocuments gives for its own plain fetch: a document's history
+ *  changes only when someone on THIS page saves). `refreshKey` -- pass
+ *  something that changes when a save lands (DocumentHistory.tsx passes
+ *  the document's own `updated_at`) and this hook re-fetches, the same way
+ *  documents/[documentId]/page.tsx already folds a save's response
+ *  straight into `document` for the body/title above. Without this, a
+ *  document opened once and edited three times in the same sitting would
+ *  show a History list stuck at whatever existed the moment the page
+ *  loaded -- correct after a reload, stale until one. Loading starts
+ *  `true` and only ever the caller decides what to render while it's in
+ *  flight or empty -- DocumentHistory.tsx renders nothing at all for a
+ *  document with one or zero revisions (CLAUDE.md: no dead controls), so
+ *  this hook does not try to guess that itself. */
+export function useFleetDocumentRevisions(workspaceId: string, documentId: string, refreshKey?: string | null) {
+  const [revisions, setRevisions] = useState<FleetDocumentRevision[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!workspaceId || !documentId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await documentsRequest(workspaceId, "GET", `/${encodeURIComponent(documentId)}/revisions`);
+      const items = Array.isArray(data?.revisions) ? data.revisions.map(normalizeDocumentRevision) : [];
+      setRevisions(items);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load this document's history.");
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId, documentId]);
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshKey is
+    // intentionally an EXTRA trigger alongside `refresh`'s own identity
+    // (workspaceId/documentId), not a value this effect reads.
+  }, [refresh, refreshKey]);
+
+  return { revisions, loading, error, refresh };
 }

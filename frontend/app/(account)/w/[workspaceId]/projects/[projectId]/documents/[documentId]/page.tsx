@@ -21,8 +21,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { useFleetProjects } from "@/lib/workspace/fleet/fleet-data";
+import { useFleetProjects, useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
 import { useCanWriteProject } from "@/lib/workspace/fleet/project-members-data";
+import { useWorkspaceMembers } from "@/lib/workspace/fleet/members-data";
 import {
   fetchFleetDocument,
   patchFleetDocument,
@@ -47,6 +48,14 @@ export default function DocumentDetailPage() {
   const { projects } = useFleetProjects(workspaceId);
   const project = projects.find((p) => p.id === projectId);
   const canWrite = useCanWriteProject(workspaceId, projectId);
+  // Both feed DocumentHistory's own actor resolution (who changed this
+  // document -- see that file's own header) -- the identical pair
+  // TaskDetailView already threads down for the same reason on a task's
+  // Activity feed. useWorkspaceMembers, not useProjectMembers: a workspace
+  // owner (the single most common human editor) has no project_memberships
+  // row to resolve against (see DocumentHistory's own prop doc).
+  const { agents } = useFleetAgents(workspaceId);
+  const { members: workspaceMembers } = useWorkspaceMembers(workspaceId);
 
   const [document, setDocument] = useState<FleetDocument | null>(null);
   const [loading, setLoading] = useState(true);
@@ -141,6 +150,9 @@ export default function DocumentDetailPage() {
         document={document}
         projectHref={documentsHref}
         canWrite={canWrite}
+        workspaceId={workspaceId}
+        agents={agents}
+        members={workspaceMembers}
         onSave={handleSave}
         onDelete={handleDelete}
       />
