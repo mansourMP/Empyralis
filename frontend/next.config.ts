@@ -35,6 +35,11 @@ const LEGACY_REDIRECTS: { from: string; to: string }[] = [
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   distDir: process.env.NEXT_DIST_DIR || '.next',
+  // Was announcing `x-powered-by: Next.js` on every response, verified on the
+  // live wire. It tells an attacker which framework's advisories to try and
+  // buys us nothing. Turned off here rather than stripped in nginx so it is
+  // also absent in dev and in any other deployment of this app.
+  poweredByHeader: false,
   typescript: { ignoreBuildErrors: true },
   // Next.js 16 dropped the `eslint` config key (and `next lint`) entirely —
   // there's no replacement key to migrate to, and this project has no
