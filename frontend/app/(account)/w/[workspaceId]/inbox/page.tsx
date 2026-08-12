@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import { AlertTriangle, ChevronLeft, Inbox as InboxIcon } from "lucide-react";
 
 import { fetchActivityTrace, markInboxSeenNow, useFleetAgents, useWorkspaceActivity, type WorkspaceActivityEvent } from "@/lib/workspace/fleet/fleet-data";
-import { timeAgo } from "@/lib/workspace/fleet/fleet-presentation";
+import { findSageAgent, timeAgo } from "@/lib/workspace/fleet/fleet-presentation";
 import { CreateFirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 
@@ -22,8 +22,24 @@ export default function InboxPage() {
   const params = useParams();
   const workspaceId = String(params?.workspaceId || "");
   const { events, loading, error } = useWorkspaceActivity(workspaceId, 50);
+  // Keeps Sage/the Operator in `agents` itself — an Inbox event CAN be
+  // attributed to Sage's own install_id (sage_activity is a real event
+  // class), and agentNameByInstall below must still resolve its name rather
+  // than falling back to "Unnamed agent". Only the "is this workspace
+  // actually fresh" check needs the REAL (Sage-excluded) count: every
+  // fleet_list_agents response carries the workspace's Operator install
+  // from the moment the workspace exists, so the raw length is NEVER zero
+  // for a real workspace — freshWorkspace used to read that raw length, so
+  // the onboarding empty state below could never fire for a brand-new
+  // account. Confirmed empirically 2026-08-13: a fresh account's Inbox
+  // showed the generic "You're all caught up" panel instead.
   const { agents, loading: agentsLoading, refresh: refreshAgents } = useFleetAgents(workspaceId);
-  const freshWorkspace = !agentsLoading && agents.length === 0;
+  const sageAgent = useMemo(() => findSageAgent(agents), [agents]);
+  const realAgentCount = useMemo(
+    () => agents.filter((a) => a.agent_id !== sageAgent?.agent_id).length,
+    [agents, sageAgent],
+  );
+  const freshWorkspace = !agentsLoading && realAgentCount === 0;
 
   // The rail's Inbox count is "unseen since last visit" (see fleet-data.ts) —
   // stamp on mount and again on every poll while this page is actually on

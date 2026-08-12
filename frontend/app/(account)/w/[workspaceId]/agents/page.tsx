@@ -27,6 +27,7 @@ import { FleetCreateAgentWizard } from "@/lib/workspace/fleet/FleetCreateAgentWi
 import { FirstAgentEmpty } from "@/lib/workspace/fleet/first-agent-empty";
 import { FleetListSkeleton, FleetSurfaceError } from "@/lib/workspace/fleet/fleet-states";
 import { HeaderAction, useBreadcrumbBadge } from "@/lib/workspace/fleet/Breadcrumbs";
+import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
 
 type SortMode = "last_active" | "status" | "cost" | "name" | "group";
 
@@ -150,6 +151,38 @@ export default function AgentsPage() {
       [agents.length],
     ),
   );
+
+  // MAN-317 — "the fleet table has one row. Decide what replaces it": with
+  // exactly one real agent, THIS surface (the fleet table itself) redirects
+  // straight to that agent's own chat page, same as the workspace root does
+  // in FleetHome.tsx — a table of one is worse than no table, whether a
+  // reader lands here via the rail, a bookmark, or a direct URL. Reversible
+  // for free: recomputed from the live count on every render, so a second
+  // real agent appearing simply stops the redirect and the table below
+  // takes over. Guarded on `!loading` so the transient agents.length===0
+  // during the initial fetch never fires a bogus redirect.
+  const agentCountMode = useMemo(() => planAgentCountShape(agents.length), [agents.length]);
+  const soloAgent = agentCountMode === "solo" ? agents[0] : null;
+  const soloHref = useMemo(() => {
+    if (!soloAgent) return null;
+    const pid = resolveAgentProjectId(soloAgent.project_id, projects);
+    return pid ? `${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(soloAgent.agent_id)}/chat` : null;
+  }, [soloAgent, projects, base]);
+  // ?new=1 is the command palette's "New agent" target (`go(base + "/agents?
+  // new=1")`) — it must still open the wizard on a workspace that already
+  // has exactly one agent, not bounce away from it before the wizard effect
+  // below ever gets to open. Read once, synchronously, at mount (matching
+  // consumedNew's own one-shot style further down): the query is stripped
+  // from the URL within the same render pass the wizard opens in, so
+  // re-deriving this from the live URL on every render would start
+  // redirecting again the instant the param is gone — before the reader
+  // has done anything with the wizard that just opened.
+  const [suppressSoloRedirect] = useState<boolean>(
+    () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
+  );
+  useEffect(() => {
+    if (!loading && soloHref && !suppressSoloRedirect) router.replace(soloHref);
+  }, [loading, soloHref, suppressSoloRedirect, router]);
   const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
   const { project: projectFilter, status: statusFilter, channel: channelFilter, sort } = filterState;
 
@@ -300,6 +333,21 @@ export default function AgentsPage() {
   let spendToday = 0;
   for (const v of cost.values()) spendToday += Number(v || 0);
 
+  // A resolvable solo agent redirects immediately (see the effect above) —
+  // this branch is only ever on screen for the one paint before that
+  // commits, so it stays quiet instead of flashing the toolbar/table chrome
+  // first. If the project can't resolve, soloHref stays null and this falls
+  // through to the ordinary table render below rather than a dead screen.
+  // Suppressed by ?new=1 (see suppressSoloRedirect above) so the wizard can
+  // still open on a one-agent workspace.
+  if (!loading && soloHref && !suppressSoloRedirect) {
+    return (
+      <main className="fleet-page-state">
+        <div className="fleet-page-state-body">Opening {soloAgent?.label || "your agent"}…</div>
+      </main>
+    );
+  }
+
   return (
     <main className="fleet-content fleet-content--with-panel">
       {/* MAN-145 title-dedup follow-up: this used to render "Agents" three
@@ -317,14 +365,23 @@ export default function AgentsPage() {
           was wrong. FleetToolbar always renders here (even with 0 agents)
           so the Properties toggle stays reachable; filters/sort still hide
           themselves when there's nothing to filter/sort. */}
-      {/* FILLED, 2026-08-01 — same change and same reasoning as the project
-          page's header action: this is the view's PERSISTENT primary action,
-          so it should not have looked secondary forever just to avoid a
-          clash with the empty state, which is a first-run condition. See
-          fleet-theme.css's .fleet-btn--accent-fill comment, which already
-          named "New agent" as part of the curated set that earns the fill. */}
+      {/* FILLED, 2026-08-01, EXCEPT WHEN THE LIST IS EMPTY (2026-08-13) — this
+          was unconditionally filled, which meant a brand-new workspace
+          rendered this header button AND FirstAgentEmpty's own centred
+          "Create your first agent" filled at the same time: CLAUDE.md,
+          "Two accent-filled buttons in one view is a bug." Same fix,
+          same reasoning, as the project detail page's own header action
+          (see that page's HeaderAction block) — the centred empty-state CTA
+          wins the fill while the list is empty (a first-run empty state is
+          the one moment its own big button IS the primary action); this
+          button earns it back the moment the table holds a row, since it's
+          the PERSISTENT primary action used every day past that point. */}
       <HeaderAction>
-        <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
+        <button
+          type="button"
+          className={`fleet-btn${agents.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
+          onClick={() => setWizardOpen(true)}
+        >
           <span className="fleet-btn-plus">+</span>
           New agent
         </button>

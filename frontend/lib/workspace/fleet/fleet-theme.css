@@ -5011,6 +5011,47 @@ a.fleet-breadcrumb:hover {
   margin-top: 32px;
 }
 
+/* ── Workspace projects peek (FleetHome, zero-agent mode only) — a quiet
+   list of real project links, not another empty state. Dense inside the
+   group (4px gaps between rows), airy above it (matches .fleet-home-
+   activity's own 32px separation from whatever sits above). Narrower than
+   the full-width grid below it — a link list reads better as a column than
+   stretched edge-to-edge. ─────────────────────────────────────────────── */
+.fleet-home-projects {
+  margin-top: 32px;
+  max-width: 420px;
+  margin-inline: auto;
+}
+
+.fleet-home-projects-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fleet-home-project-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  text-decoration: none;
+  transition: background var(--dur-1) var(--ease-out);
+}
+
+.fleet-home-project-row:hover {
+  background: var(--bg-surface-2);
+}
+
+.fleet-home-project-row-label {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Create-agent wizard ──────────────────────────────────────────────────── */
 
 .fleet-wizard {
