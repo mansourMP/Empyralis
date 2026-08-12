@@ -327,10 +327,25 @@ async def _register_telegram_native_commands() -> None:
         return
     try:
         from server_modules.command_registry import list_for_scope
+        # setMyCommands with no scope is the DEFAULT menu — the autocomplete
+        # every stranger who DMs this bot sees. Owner-only commands
+        # (/bash, /config, /mcp, /plugins, /debug) were being advertised
+        # there. Execution was never at risk: command_registry.dispatch
+        # independently refuses `access == "owner"` for a non-owner. But
+        # offering a stranger a shell command and then refusing it is a
+        # dead control in Telegram's own UI, and advertising /bash at all
+        # is not something to launch with.
+        #
+        # The owner loses nothing they had: an owner-only command still
+        # WORKS when typed, it simply is not suggested in a menu shared with
+        # everyone. Telegram scopes a per-chat menu by chat_id, so a future
+        # owner-scoped menu is additive — but it needs a paired owner chat
+        # id, which does not exist yet at startup when this runs.
         commands = [
             {"command": cmd.name, "description": cmd.description[:100]}
             for cmd in list_for_scope("both")
             if not cmd.aliases  # only primary names
+            and cmd.access != "owner"
         ]
         if not commands:
             return
