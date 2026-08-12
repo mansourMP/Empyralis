@@ -60,6 +60,7 @@ _TRUSTED_DSML_SOURCES = {
 # though the model didn't reproduce the underscore.
 _KNOWN_TOOL_IDENTIFIERS = {
     "memory_write", "memory_read", "memory_search", "memory_get", "memory_list",
+    "memory_write_private", "memory_get_private",
     "find_workspace_memory_entry", "memory_context",
     "shell__exec", "file__read", "file__write", "file__delete",
     "http_request", "web__search", "web__fetch",

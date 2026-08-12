@@ -437,4 +437,38 @@ CREATE POLICY empyralis_project_document_revisions_scope ON project_document_rev
     USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
     WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
 
+-- agent_private_memory_notes / agent_private_memory_note_revisions are
+-- BRAND NEW tables (migrations/add_agent_private_memory.sql -- the
+-- per-person half of the shared-vs-private memory split, see that file's
+-- own header for the full rationale). Same posture as project_documents/
+-- agent_goals just above: every call site
+-- (agent_private_memory_repository.py's get_private_note/upsert_private_
+-- note/list_private_note_revisions) was written against the scoped
+-- rls_fetch/rls_fetchrow/rls_execute helpers from the start, so there is
+-- no ordering hazard and RLS ships in the same change that creates the
+-- table. This policy is the tenant/workspace BACKSTOP only -- same
+-- two-column empyralis_rls_scope_match every other table here uses; the
+-- finer per-person boundary (one user's row is never readable by another)
+-- is enforced in application code, where user_id is a required keyword
+-- with no default on every repository function. See that file's own
+-- module docstring for why: there is no third-column variant of
+-- empyralis_rls_scope_match, and inventing a per-user session GUC for one
+-- table would be a second, divergent RLS mechanism rather than reuse of
+-- the one this codebase already has.
+ALTER TABLE agent_private_memory_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_private_memory_notes FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_agent_private_memory_notes_scope ON agent_private_memory_notes;
+CREATE POLICY empyralis_agent_private_memory_notes_scope ON agent_private_memory_notes
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
+ALTER TABLE agent_private_memory_note_revisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_private_memory_note_revisions FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS empyralis_agent_private_memory_note_revisions_scope ON agent_private_memory_note_revisions;
+CREATE POLICY empyralis_agent_private_memory_note_revisions_scope ON agent_private_memory_note_revisions
+    FOR ALL
+    USING (public.empyralis_rls_scope_match(tenant_id, workspace_id))
+    WITH CHECK (public.empyralis_rls_scope_match(tenant_id, workspace_id));
+
 COMMIT;

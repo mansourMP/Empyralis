@@ -18,6 +18,27 @@ project shares the same document set -- CLAUDE.md's "Projects hold members
 directly," the same collaboration boundary project_tasks_service.py and
 projects_repository.py already enforce for tasks and membership.
 
+THIS IS THE RECOMMENDED HOME FOR "COMPANY CONTEXT" (feat/agent-memory-
+shared-vs-private, 2026-08-12). When the shared memory pool
+(memory_service.py/agent_memory.py) needs a durable write-up of how the
+COMPANY/PROJECT operates -- as opposed to a running index of small facts --
+a project document (e.g. one titled "Company Context" or "How We Operate")
+is the right surface, not a new memory table. It is already project-scoped,
+already has real revision history (project_document_revisions, above), and
+is already reachable by every agent through the document__* tools
+(skills_service.py) any project member's turn can call -- the exact
+"every project member benefits" property CLAUDE.md's sharing model asks
+for. Deliberately not folded into memory_service.py's MEMORY.md/topic-file
+system: that system is index-first and line-per-entry by design (see
+memory_service.py's own "Index-first discipline" section), suited to an
+agent's own accumulated facts, not a curated prose document a human is
+meant to read and edit. No code change was needed to make this true --
+this note exists so the next person building a "company context" feature
+finds this table first instead of inventing a parallel store. See
+agent_private_memory_repository.py for the OTHER half of the split (the
+per-person private layer), which is a genuinely new concept and could not
+reuse this table -- see that module's own docstring for why.
+
 STORAGE: the markdown body lives IN POSTGRES (the `body` column), not on
 disk. Two existing on-disk patterns were weighed and rejected for this
 table specifically:

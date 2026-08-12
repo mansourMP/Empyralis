@@ -921,6 +921,49 @@ CREATE TABLE IF NOT EXISTS project_document_revisions (
 CREATE INDEX IF NOT EXISTS idx_project_document_revisions_document
     ON project_document_revisions(tenant_id, workspace_id, document_id, revision_number DESC);
 
+-- Agent private memory (feat/agent-memory-shared-vs-private): the PER-PERSON
+-- half of the shared-vs-private memory split, see migrations/
+-- add_agent_private_memory.sql for the full rationale. One row per
+-- (tenant, workspace, agent_install, user) -- "how THIS person likes to be
+-- worked with," never visible to or shaped by any other project member.
+-- The SHARED pool (memory_service.py / agent_memory.py) is unchanged and
+-- stays the correct home for facts about the work/company. RLS from day
+-- one (migrations/enable_rls.sql), two-column (tenant_id, workspace_id)
+-- scope_match same as every other table here -- the finer per-person
+-- boundary is enforced in agent_private_memory_repository.py, which takes
+-- user_id as a required keyword with no default on every function.
+CREATE TABLE IF NOT EXISTS agent_private_memory_notes (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    agent_install_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, workspace_id, agent_install_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_private_memory_notes_lookup
+    ON agent_private_memory_notes(tenant_id, workspace_id, agent_install_id, user_id);
+
+CREATE TABLE IF NOT EXISTS agent_private_memory_note_revisions (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    note_id TEXT NOT NULL REFERENCES agent_private_memory_notes(id) ON DELETE CASCADE,
+    agent_install_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    reason TEXT NULL,
+    revision_number INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (note_id, revision_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_private_memory_note_revisions_note
+    ON agent_private_memory_note_revisions(tenant_id, workspace_id, note_id, revision_number DESC);
+
 -- Bug reports (MAN-106): a small, honest "report an issue" entry point
 -- reachable from anywhere in the product via a rail icon button (see
 -- frontend/lib/workspace/fleet/BugReportButton.tsx). Deliberately NOT a

@@ -248,6 +248,10 @@ def parse_tool_name(tool_name: str) -> tuple[str, str]:
         return "memory", "read"
     if token == "memory_write":
         return "memory", "write"
+    if token == "memory_write_private":
+        return "memory", "write_private"
+    if token == "memory_get_private":
+        return "memory", "get_private"
     if token == "memory_get":
         return "memory", "get"
     if token == "memory_update":
