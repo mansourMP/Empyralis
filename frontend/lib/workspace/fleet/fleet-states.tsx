@@ -244,13 +244,23 @@ export function FleetDocumentSkeleton({ label = "Loading" }: { label?: string })
       <div className="fleet-task-page-main">
         <div className="fleet-task-page-body">
           <div className="fleet-doc-header-row">
-            {/* Matches .fleet-doc-title-input's 24px/1.25 line box. */}
+            {/* Matches .fleet-task-page-title's 24px/1.25 line box — the
+                title now RENDERS by default (2026-08-12), reusing the same
+                shared class TaskDetailView's own title does, so this bar's
+                dimensions are unchanged from when it stood in for the old
+                always-live .fleet-doc-title-input (same 24px/1.25 box). */}
             <div className="fleet-skeleton-bar" style={{ width: "55%", height: 30, marginTop: 6 }} />
           </div>
           {/* .fleet-doc-meta: 12px byline/autosave-status line. */}
           <div className="fleet-skeleton-bar" style={{ width: 130, height: 11, marginTop: 10, opacity: 0.75 }} />
-          {/* .fleet-doc-body/.fleet-doc-editor: 15px/1.7 prose. */}
-          <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 13 }}>
+          {/* .fleet-doc-body: 15px/1.6 prose, .fleet-doc-paragraph's 16px
+              rhythm (both re-decided 2026-08-12 for a page whose default
+              state is the rendered body, not the editor — see
+              document-detail.css's own comment on .fleet-doc-body). gap:16
+              matches .fleet-doc-paragraph's margin-bottom directly, so a
+              bounding-box diff against the loaded page's real paragraph
+              spacing is exact, not eyeballed. */}
+          <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
             {paragraphWidths.map((w, i) => (
               <div key={i} className="fleet-skeleton-bar" style={{ width: `${w}%`, height: 15 }} />
             ))}
