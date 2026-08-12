@@ -2095,6 +2095,45 @@ tab, read the console.
   terminates TLS directly. Its ~100s idle timeout — not nginx's 86400s — is
   the real ceiling on any long request. A silent SSE stream gets cut at
   ~125s; keepalive comments prevent it.
+- **Production served ZERO security headers until 2026-08-12**, and neither
+  the live nginx config nor `deploy/nginx-empyralis.conf` contained a single
+  `add_header`. Found by reading the WIRE (`curl -sI https://empyralis.ai/`
+  returned `server: cloudflare` and `x-powered-by: Next.js`, nothing else),
+  not by reading the config — Cloudflare sits in front, so what the origin
+  declares and what a browser receives are different questions and only the
+  second one matters. Now set at the origin server block: HSTS (no
+  `preload` — that is a founder decision, not a side effect),
+  `X-Frame-Options: DENY` + CSP `frame-ancestors 'none'`, `nosniff`,
+  `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy`
+  denying camera/mic/geo/payment/usb (all grepped as unused). Every one
+  carries `always`, or nginx omits it on 4xx/5xx — and an error page is
+  served from the same origin and is exactly as frameable as a 200.
+
+  Three things worth not re-deriving. **`add_header` does not inherit into a
+  block that declares its own**: put one `add_header` in any `location` and
+  every header from the server block silently stops applying THERE, with the
+  app still working perfectly — so there is deliberately none in any location
+  block. **`Referrer-Policy` stopped being theoretical the day documents
+  began rendering external links** (`target="_blank"`, agent-authorable):
+  without it the full URL — workspace id, project id, document id — travels
+  in `Referer` to whatever site the link names. And **`nosniff` is the other
+  half of the SVG refusal** in `upload_content_policy` — attachments come
+  back through `FileResponse` on the workspace's own origin, so blocking the
+  declared type is worthless if the browser is free to sniff past it.
+
+  A real `script-src` CSP is NOT shipped and must not be faked. Next.js needs
+  per-request nonces threaded through its own inline bootstrap; a policy
+  carrying `'unsafe-inline' 'unsafe-eval'` looks like a CSP in a header dump
+  and stops nothing. It is its own job.
+- **`nginx.conf` includes `sites-enabled/*` — extension and all.** A file
+  named `empyralis.pre-releases.bak` sat in `sites-enabled/` and was being
+  LOADED, declaring a second `server_name empyralis.ai` alongside the real
+  config's. The real one won only because nginx takes the first match and
+  `empyralis` sorts before `empyralis.pre-releases.bak` — luck, not design,
+  and any config fix applied to one file silently did not apply to the other.
+  Moved out 2026-08-12. Never leave a backup in `sites-enabled/`; the real
+  entries there are symlinks into `sites-available/`, so anything that is a
+  plain file is a mistake.
 - Agent worktrees accumulate and nothing prunes them. 177 of them (plus an
   11GB `.git`) filled the disk to 100% mid-session on 2026-08-07 and killed
   several running agents. Prune merged ones periodically; never force-remove
