@@ -490,6 +490,22 @@ _RLS_COVERAGE_EXCEPTIONS: Dict[str, str] = {
     "deployed_agent_upgrade_click_events": _NO_LIVE_READ,
     # ── audited: not a Postgres table on the live path ────────────────
     "gateway_registrations": _NOT_POSTGRES,
+    # MAN-307: the Postgres copy of gateway_registrations is dead (last
+    # written 2026-06-24; the live store is SQLite via
+    # gateway_state_repository) and had already been used as primary evidence
+    # in two investigations, giving a wrong answer both times. It is renamed
+    # in the database so it cannot be mistaken for truth again.
+    #
+    # BOTH NAMES ARE LISTED ON PURPOSE. This exception map is keyed by table
+    # NAME, so renaming a table that carries tenant_id/workspace_id makes it
+    # a brand-new unknown scoped table to `_check_rls_coverage` — which fails
+    # closed and REFUSES TO BOOT. That is the check behaving exactly as
+    # designed, and it took production down for ~3 minutes on 2026-08-13 when
+    # the rename was applied before this entry existed. Renaming a scoped
+    # table is therefore a TWO-part change that must ship in this order:
+    # add the new key here and deploy, THEN rename in the database. Keeping
+    # the old key costs nothing and means the revert path also boots.
+    "zzz_dead_gateway_registrations_see_man307": _NOT_POSTGRES,
     "gateway_sessions": _NOT_POSTGRES,
     "gateway_pairing_intents": _NOT_POSTGRES,
     "gateway_action_approvals": _NOT_POSTGRES,
