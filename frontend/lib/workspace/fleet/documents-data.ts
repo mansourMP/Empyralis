@@ -189,6 +189,30 @@ export async function deleteFleetDocument(workspaceId: string, documentId: strin
   return Boolean(data?.ok);
 }
 
+/** "My Notes" -> "My Notes (copy)" for the "⋯" menu's Duplicate action
+ *  (DocumentDetailView.tsx) -- pure so it can be unit-tested without a DOM
+ *  (see documents-data.test.ts). Falls back to a fixed label for a blank
+ *  title so a duplicated document is never left with an empty one; there is
+ *  no independent default on the create_document call site for this,
+ *  unlike a document created from the list view's own "New document" flow. */
+export function duplicateDocumentTitle(title: string): string {
+  const trimmed = (title || "").trim() || "Untitled document";
+  return `${trimmed} (copy)`;
+}
+
+/** Filesystem-safe `.md` filename for the "⋯" menu's Export action -- there
+ *  is no server round-trip to validate this, so whatever this returns goes
+ *  straight onto the browser's `<a download>` attribute. Strips the
+ *  characters invalid on Windows/macOS/Linux path segments (a title is free
+ *  text and commonly contains `/` or `:`), collapses whitespace, and falls
+ *  back to the document's slug and then a fixed name so an untitled
+ *  document still downloads something sane instead of a bare ".md". */
+export function documentExportFilename(title: string, slug: string): string {
+  const base = (title || "").trim() || (slug || "").trim() || "document";
+  const safe = base.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+  return `${safe || "document"}.md`;
+}
+
 /** One entry in a document's history -- the same shape
  *  project_documents_repository._row_to_revision returns, `body` omitted
  *  (the revisions route never requests include_body=True; see

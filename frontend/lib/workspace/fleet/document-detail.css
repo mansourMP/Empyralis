@@ -23,6 +23,12 @@
  * .fleet-list-row-menu* primitive HardwareSection.tsx's row menu already
  * defined in fleet-theme.css — nothing new to style for the menu itself,
  * only the inline delete-confirm swap inside it (bottom of this file).
+ *
+ * THE "⋯" MENU ITSELF now lives in the breadcrumb topbar (HeaderAction),
+ * not on this page — see DocumentDetailView.tsx's file header for why. The
+ * page-level centering rule below is what actually fixed the founder's "this
+ * doesn't look like a documents page" complaint at wide viewports; the menu
+ * relocation fixed the separate "menu is stranded mid-page" complaint.
  */
 
 /* ── Markdown body (read mode) ───────────────────────────────────────────
@@ -130,24 +136,38 @@ h6.fleet-doc-heading { font-size: 14px; }
 }
 
 /* ── Header row ───────────────────────────────────────────────────────────
-   Title (input for a writer, <h2> for a viewer) on the left, the "⋯" menu
-   trigger pinned to the right end, aligned with the title's own baseline —
-   the founder's own placement call for the overflow menu that replaced the
-   standing red Delete button. flex-start (not center) so a long title that
-   wraps to two lines doesn't drag the trigger down with it. */
+   Just the title now (input for a writer, <h2> for a viewer) — the "⋯" menu
+   that used to share this row moved to the breadcrumb topbar (see this
+   file's own header and DocumentDetailView.tsx's). Kept as its own wrapper
+   rather than dropping straight to the title element: a title-only row is
+   still a distinct block from .fleet-doc-meta below it, and a future
+   addition to this row (a byline, a status chip) has a place to land
+   without another restructure. */
 .fleet-doc-header-row {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
 }
 
-/* The "⋯" trigger sits one row above the title's own text baseline
-   (.fleet-doc-title-input/.fleet-task-page-title both carry their own
-   top spacing) — nudge it down to align optically rather than mechanically. */
-.fleet-doc-header-row > .fleet-list-row-menu-wrap {
-  flex: none;
-  margin-top: 4px;
+/* ── Page shell: a document has no Properties column ────────────────────
+   .fleet-task-page-body (fleet-theme.css: max-width 720px) is left-aligned
+   there because a TASK page's .fleet-task-page-main sits beside a real flex
+   sibling — .fleet-task-page-side, 300px of Properties — that fills the
+   rest of a wide row; left-aligning the reading column next to it is
+   correct, it's what Linear does. A document has no such sibling: on a
+   ~1730px screen the identical left-aligned column just left a lopsided
+   blank strip down the right two-thirds of the page — the founder's "this
+   doesn't look like a documents page." Centering is scoped to THIS page
+   (.fleet-doc-detail-page, the sibling class DocumentDetailView's root div
+   carries alongside .fleet-task-page, matching task-detail.css's own
+   `.fleet-task-page.fleet-task-detail-page` override convention) so a task
+   page's left alignment — correct there — is untouched. Below the page's
+   own 1000px breakpoint fleet-theme.css already drops the 720px cap to
+   `none` (`.fleet-task-page-body { padding: 24px 20px 24px; max-width:
+   none; }`), so `margin: auto` centers a full-width box there — a no-op by
+   construction, not a second media query fighting the first. */
+.fleet-doc-detail-page .fleet-task-page-body {
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .fleet-doc-meta {

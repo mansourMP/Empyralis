@@ -10,7 +10,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "smoke:api-wall": "node scripts/api-wall-network-smoke.mjs",
-    "test:unit": "tsx lib/workspace/platform-brand.test.ts && tsx lib/workspace/fleet/fleet-data.test.ts && tsx lib/workspace/fleet/openclaw-channel-copy.test.ts",
+    "test:unit": "tsx lib/workspace/platform-brand.test.ts && tsx lib/workspace/fleet/fleet-data.test.ts && tsx lib/workspace/fleet/openclaw-channel-copy.test.ts && tsx lib/workspace/fleet/documents-data.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:deployed-agents": "playwright test tests/e2e/deployed-agents.spec.ts tests/e2e/non-scaffold-surface-sweep.spec.ts",
     "test:e2e:install": "playwright install chromium"
