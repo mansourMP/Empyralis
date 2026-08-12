@@ -6,6 +6,7 @@ import { AlertCircle, MessagesSquare } from "lucide-react";
 import { useFleetAgents } from "./fleet-data";
 import { findSageAgent, timeAgo } from "./fleet-presentation";
 import { MarkdownLiteText } from "@/lib/workspace/markdown-lite";
+import { FleetChatSkeleton } from "./fleet-states";
 
 /**
  * CONVERSATIONS — the workspace-level view WorkTab.tsx never had: every
@@ -308,10 +309,11 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
               </span>
             </div>
           )}
+          {detailLoading && selectedTurns.length === 0 ? (
+            <FleetChatSkeleton label="Loading conversation" />
+          ) : (
           <div className="fleet-work-transcript">
-            {detailLoading && selectedTurns.length === 0 ? (
-              <div className="fleet-page-state-body">Loading…</div>
-            ) : detailError && selectedTurns.length === 0 ? (
+            {detailError && selectedTurns.length === 0 ? (
               <div className="fleet-page-state-body">{detailError}</div>
             ) : selectedTurns.length === 0 ? (
               <div className="fleet-page-state-body">Select a conversation to read it.</div>
@@ -328,6 +330,7 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
               ))
             )}
           </div>
+          )}
         </div>
       </div>
     </main>

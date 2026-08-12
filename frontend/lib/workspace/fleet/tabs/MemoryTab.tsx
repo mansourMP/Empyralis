@@ -264,7 +264,34 @@ export function MemoryTab({
   const topicCount = Math.max(0, files.length - 1);
 
   if (loading) {
-    return <div className="fleet-detail-pad"><div className="fleet-page-state-body">Loading memory…</div></div>;
+    // Was a bare "Loading memory…" line alone in what .fleet-memory-browser's
+    // CSS reserves as a full-height two-pane split (file list + editor) —
+    // the tiny-text-in-a-big-area shape the loading-state audit flagged.
+    // Reuses the real two-pane classes so the placeholder is the same shape
+    // as what replaces it, never a separate width/layout to keep in sync.
+    return (
+      <div className="fleet-memory-browser" aria-busy="true" aria-label="Loading memory">
+        <div className="fleet-memory-file-list">
+          <div className="fleet-memory-file-list-title">Memory files</div>
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="fleet-memory-file-item" style={{ cursor: "default" }}>
+              <div className="fleet-skeleton-bar" style={{ width: 13, height: 13 }} />
+              <div className="fleet-skeleton-bar" style={{ width: `${60 - i * 8}%`, height: 11 }} />
+            </div>
+          ))}
+        </div>
+        <div className="fleet-memory-editor">
+          <div className="fleet-memory-editor-header">
+            <div className="fleet-skeleton-bar" style={{ width: 140, height: 11 }} />
+          </div>
+          <div className="fleet-memory-preview-scroll">
+            {[92, 84, 96, 40, 88, 70].map((w, i) => (
+              <div key={i} className="fleet-skeleton-bar" style={{ width: `${w}%`, height: 11, marginBottom: 10 }} />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -339,7 +366,11 @@ export function MemoryTab({
               </div>
             </div>
             {fileLoading ? (
-              <div className="fleet-page-state-body">Loading…</div>
+              <div className="fleet-memory-preview-scroll" aria-busy="true" aria-label="Loading file">
+                {[92, 84, 96, 40, 88, 70].map((w, i) => (
+                  <div key={i} className="fleet-skeleton-bar" style={{ width: `${w}%`, height: 11, marginBottom: 10 }} />
+                ))}
+              </div>
             ) : (
               <>
                 {isDefault && (
