@@ -27,6 +27,15 @@ import { useCallback, useEffect, useState } from "react";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { useOwnAccountId, useOwnWorkspaceRole, WORKSPACE_ROLE_ORDER } from "./members-data";
 
+async function getJson(path: string): Promise<any> {
+  const res = await fetch(path, { credentials: "include" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`);
+  }
+  return data;
+}
+
 export type ProjectMember = {
   id: string;
   project_id: string;
@@ -203,4 +212,85 @@ export function useCanWriteProject(
   const myUserId = useOwnAccountId();
   const { members: projectMembers, loading: projectMembersLoading } = useProjectMembers(workspaceId, projectId);
   return deriveCanWriteProject(ownRole, myUserId, projectMembers, projectMembersLoading);
+}
+
+/** pending / accepted / declined / revoked — never collapsed to one state.
+ *  See control_plane_repository.list_workspace_invites_for_project's
+ *  docstring: an owner asking "did this invite land" deserves the real
+ *  answer, the same three-states-never-two doctrine as
+ *  inviteEmailDelivery/inviteDeliveryHint in members-data.ts. */
+export type ProjectInviteStatus = "pending" | "accepted" | "declined" | "revoked";
+
+export type ProjectInviteStatusItem = {
+  id: string;
+  workspace_id: string;
+  email: string;
+  role: string;
+  status: ProjectInviteStatus;
+  /** Persisted at send time (record_workspace_invite_email_delivery) — null
+   *  only for an invite created before that wiring existed. */
+  email_delivery_status: "sent" | "not_configured" | "failed" | null;
+  invited_by_user_id: string | null;
+  created_at: number | string | null;
+};
+
+function normalizeProjectInviteStatus(raw: any): ProjectInviteStatusItem {
+  const status = String(raw?.status || "pending").toLowerCase();
+  return {
+    id: String(raw?.id || ""),
+    workspace_id: String(raw?.workspace_id || ""),
+    email: String(raw?.email || ""),
+    role: String(raw?.role || "member"),
+    status: (["pending", "accepted", "declined", "revoked"].includes(status) ? status : "pending") as ProjectInviteStatus,
+    email_delivery_status: raw?.email_delivery_status ? String(raw.email_delivery_status) as any : null,
+    invited_by_user_id: raw?.invited_by_user_id ?? null,
+    created_at: raw?.created_at ?? null,
+  };
+}
+
+/** The owner-visible counterpart to ProjectMemberAdd's own "Send invite"
+ *  form: what happened to the invites already sent for THIS project. Server
+ *  route: GET /workspaces/{workspace_id}/projects/{project_id}/invites
+ *  (routes_workspaces.list_project_invite_status_route) — deliberately a
+ *  separate endpoint from useWorkspacePendingInvites (workspace-wide,
+ *  pending-only, members-data.ts), because this one is project-scoped and
+ *  reports every status, not just pending.
+ *
+ *  `enabled` defaults true but ProjectMemberAdd.tsx passes its own popover
+ *  `open` state — this data is only ever shown inside that popover, so
+ *  fetching it on every project-page mount (this component renders on every
+ *  such page, popover open or not) would be a fetch nobody asked for on
+ *  every page load. Mirrors the "a card opens with what is already known,
+ *  it does not fetch on click" doctrine in reverse: don't fetch what isn't
+ *  being shown, either. */
+export function useProjectInviteStatus(workspaceId: string, projectId: string, enabled: boolean = true) {
+  const [items, setItems] = useState<ProjectInviteStatusItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!workspaceId || !projectId || !enabled) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getJson(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(projectId)}/invites`,
+      );
+      const parsed = Array.isArray(data?.items) ? data.items.map(normalizeProjectInviteStatus) : [];
+      setItems(parsed);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load invite status.");
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId, projectId, enabled]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { items, loading, error, refresh };
 }

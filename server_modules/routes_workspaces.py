@@ -1015,6 +1015,23 @@ async def create_workspace_invite_route(
         token=str(invite.get("token") or ""),
         expires_at_epoch=invite.get("expires_at"),
     )
+    # Persist the outcome onto the invite itself -- otherwise "failed to
+    # send" is visible only in this response's one-time toast, and becomes
+    # indistinguishable from "pending" the moment it's dismissed. See
+    # list_project_invite_status_route / list_workspace_invites_for_project,
+    # which is what reads this back for the owner. Never at the cost of the
+    # invite or this response -- same "a read failing here costs nothing the
+    # caller already has" posture as the workspace-name lookup above.
+    try:
+        await control_plane_repository.record_workspace_invite_email_delivery(
+            invite_id=str(invite.get("id") or ""),
+            delivery_status=str((email_delivery or {}).get("status") or ""),
+        )
+    except Exception:  # noqa: BLE001
+        LOGGER.exception(
+            "Failed to record email_delivery status for invite_id=%s",
+            invite.get("id"),
+        )
 
     return {
         "invite": {
@@ -1060,6 +1077,48 @@ async def list_workspace_pending_invites_route(
     }
 
 
+@router.get("/workspaces/{workspace_id}/projects/{project_id}/invites")
+async def list_project_invite_status_route(
+    workspace_id: str,
+    project_id: str,
+    current_user=Depends(get_current_user),
+):
+    """Owner-visible invite status for the panel where members are managed
+    (ProjectMemberAdd.tsx) -- unlike GET /workspaces/{id}/invites above
+    (workspace-wide, pending only), this is scoped to ONE project and
+    reports every status: pending / accepted / declined / revoked, each
+    carrying email_delivery_status so a failed send stays visible after the
+    one-time creation toast is gone. See
+    control_plane_repository.list_workspace_invites_for_project's docstring
+    for why these are kept apart rather than collapsed to one state.
+    """
+    resolved_workspace_id = auth_module.enforce_workspace_access(
+        current_user,
+        workspace_id,
+        minimum_role="viewer",
+    )
+    items = await control_plane_repository.list_workspace_invites_for_project(
+        resolved_workspace_id,
+        str(project_id or "").strip(),
+    )
+    return {
+        "items": [
+            {
+                "id": item.get("id"),
+                "workspace_id": item.get("workspace_id"),
+                "email": item.get("email"),
+                "role": item.get("role"),
+                "status": item.get("status"),
+                "email_delivery_status": item.get("email_delivery_status"),
+                "invited_by_user_id": item.get("invited_by_user_id"),
+                "created_at": item.get("created_at"),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
+    }
+
+
 @router.get("/workspaces/{workspace_id}/members")
 async def list_workspace_members_route(
     workspace_id: str,
@@ -1083,6 +1142,57 @@ async def list_workspace_members_route(
             for item in items
             if isinstance(item, dict)
         ]
+    }
+
+
+async def _finalize_workspace_invite_acceptance(invite: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+    """Shared tail of every invite-acceptance path (the signed /join/{token}
+    link below, and the in-app Join button at /workspaces/invites/{id}/join):
+    grant workspace membership, grant the invite's project (if any), and mark
+    the invite row accepted. A single call site is the only place this
+    sequence can regress -- see this file's docstrings elsewhere on guards
+    living on a narrow waist rather than being copied per branch.
+    """
+    invite_id = str(invite.get("id") or "").strip()
+    invite_workspace_id = str(invite.get("workspace_id") or "").strip()
+    invite_metadata = invite.get("metadata") if isinstance(invite.get("metadata"), dict) else {}
+    invite_role = auth_module.normalize_rbac_role(invite.get("role"), default="viewer")
+    auth_module.upsert_workspace_membership(user_id, invite_workspace_id, invite_role)
+
+    # MAN-70/MAN-114 follow-up: grant the project this invite carries, if
+    # any -- see projects_repository.grant_invite_project_access's docstring
+    # for why this call is shared with auth.accept_workspace_invites_for_user
+    # rather than duplicated. Uses the invite's own tenant_id (falling back
+    # to workspace_id, matching _control_plane_tenant_id's convention) --
+    # never the accepting caller's -- so this always resolves to the project
+    # in the workspace the invite actually belongs to.
+    invite_tenant_id = str(invite.get("tenant_id") or "").strip() or invite_workspace_id
+    from server_modules import projects_repository
+
+    try:
+        await projects_repository.grant_invite_project_access(
+            tenant_id=invite_tenant_id,
+            workspace_id=invite_workspace_id,
+            user_id=user_id,
+            metadata=invite_metadata,
+            added_by=str(invite.get("invited_by_user_id") or "").strip() or None,
+        )
+    except Exception:
+        LOGGER.exception(
+            "Failed to grant invite project access for invite_id=%s user_id=%s",
+            invite_id,
+            user_id,
+        )
+
+    accepted = await control_plane_repository.accept_workspace_invite(
+        invite_id=invite_id,
+        accepted_by_user_id=user_id,
+        metadata_patch={"auto_accepted_at_login": False},
+    )
+    return {
+        "workspace_id": invite_workspace_id,
+        "role": invite_role,
+        "status": str((accepted or {}).get("status") or "accepted"),
     }
 
 
@@ -1149,42 +1259,116 @@ async def accept_workspace_invite_route(
     if invite_email != user_email:
         raise HTTPException(status_code=403, detail="This invite was issued to a different email address.")
 
-    invite_role = auth_module.normalize_rbac_role(invite.get("role"), default="viewer")
-    auth_module.upsert_workspace_membership(user_id, invite_workspace_id, invite_role)
+    return await _finalize_workspace_invite_acceptance(invite, user_id)
 
-    # MAN-70/MAN-114 follow-up: grant the project this invite carries, if
-    # any -- see projects_repository.grant_invite_project_access's docstring
-    # for why this call is shared with auth.accept_workspace_invites_for_user
-    # rather than duplicated. Uses the invite's own tenant_id (falling back
-    # to workspace_id, matching _control_plane_tenant_id's convention) --
-    # never the accepting caller's -- so this always resolves to the project
-    # in the workspace the invite actually belongs to.
-    invite_tenant_id = str(invite.get("tenant_id") or "").strip() or invite_workspace_id
-    from server_modules import projects_repository
 
-    try:
-        await projects_repository.grant_invite_project_access(
-            tenant_id=invite_tenant_id,
-            workspace_id=invite_workspace_id,
-            user_id=user_id,
-            metadata=invite_metadata,
-            added_by=str(invite.get("invited_by_user_id") or "").strip() or None,
+@router.get("/workspaces/invites/pending")
+async def list_my_pending_workspace_invites_route(
+    current_user=Depends(get_current_user),
+):
+    """The invitee-facing counterpart to GET /workspaces/{id}/invites (which
+    only an existing member of the target workspace can call, and therefore
+    can never be how the person being invited learns about it). A signed-in
+    user with a pending invite to their own email gets nothing anywhere else
+    -- this is that signal, enriched with the inviting workspace's name so
+    the UI never has to show a bare workspace_id.
+    """
+    user = auth_module.get_authenticated_user_record(current_user)
+    user_email = str(user.get("email") or "").strip().lower()
+    if not user_email:
+        return {"items": []}
+
+    invites = await control_plane_repository.list_pending_workspace_invites_for_email(user_email)
+    items: list[Dict[str, Any]] = []
+    for invite in invites:
+        if not isinstance(invite, dict):
+            continue
+        invite_workspace_id = str(invite.get("workspace_id") or "").strip()
+        # A workspace-name lookup failure must not hide a real pending invite
+        # -- same "the read failing costs nothing the caller already has"
+        # posture as create_workspace_invite_route's own workspace-name
+        # lookup above.
+        try:
+            workspace_record = await control_plane_repository.get_workspace_by_id(invite_workspace_id)
+        except Exception:  # noqa: BLE001
+            workspace_record = None
+        workspace_name = str((workspace_record or {}).get("name") or "").strip() or invite_workspace_id
+        items.append(
+            {
+                "id": invite.get("id"),
+                "workspace_id": invite_workspace_id,
+                "workspace_name": workspace_name,
+                "role": invite.get("role"),
+                "invited_by_user_id": invite.get("invited_by_user_id"),
+                "created_at": invite.get("created_at"),
+            }
         )
-    except Exception:
-        LOGGER.exception(
-            "Failed to grant invite project access for invite_id=%s user_id=%s",
-            invite_id,
-            user_id,
-        )
+    return {"items": items}
 
-    accepted = await control_plane_repository.accept_workspace_invite(
+
+def _require_own_pending_invite(invite: Optional[Dict[str, Any]], user_email: str) -> Dict[str, Any]:
+    if not isinstance(invite, dict):
+        raise HTTPException(status_code=404, detail="Invite is no longer valid.")
+    if str(invite.get("status") or "").strip() != "pending":
+        raise HTTPException(status_code=404, detail="Invite is no longer valid.")
+    invite_email = str(invite.get("email") or "").strip().lower()
+    if invite_email != user_email:
+        raise HTTPException(status_code=403, detail="This invite was issued to a different email address.")
+    return invite
+
+
+@router.post("/workspaces/invites/{invite_id}/join")
+async def join_pending_workspace_invite_route(
+    invite_id: str,
+    request: Request,
+    current_user=Depends(get_current_user),
+):
+    """The in-app counterpart to POST /workspaces/invites/accept: no signed
+    token, because there is no email link here -- the caller reached this
+    invite through their own authenticated session (the pending-invites list
+    above), so the same email-match check that guards the token path is the
+    whole authorization story, matching auth.accept_workspace_invites_for_user's
+    (login-triggered auto-accept) security model exactly.
+    """
+    auth_module.validate_csrf(request)
+    user = auth_module.get_authenticated_user_record(current_user)
+    user_id = str(user.get("id") or "").strip()
+    user_email = str(user.get("email") or "").strip().lower()
+    if not user_id or not user_email:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    invite = await control_plane_repository.get_workspace_member_invite(invite_id)
+    invite = _require_own_pending_invite(invite, user_email)
+    return await _finalize_workspace_invite_acceptance(invite, user_id)
+
+
+@router.post("/workspaces/invites/{invite_id}/decline")
+async def decline_pending_workspace_invite_route(
+    invite_id: str,
+    request: Request,
+    current_user=Depends(get_current_user),
+):
+    """Decline is a real, recorded state -- not a silent dismissal off a
+    list. See control_plane_repository.decline_workspace_invite's docstring
+    for why 'declined' is kept distinct from 'revoked' (owner-initiated) and
+    'pending' (unanswered).
+    """
+    auth_module.validate_csrf(request)
+    user = auth_module.get_authenticated_user_record(current_user)
+    user_id = str(user.get("id") or "").strip()
+    user_email = str(user.get("email") or "").strip().lower()
+    if not user_id or not user_email:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    invite = await control_plane_repository.get_workspace_member_invite(invite_id)
+    invite = _require_own_pending_invite(invite, user_email)
+
+    declined = await control_plane_repository.decline_workspace_invite(
         invite_id=invite_id,
-        accepted_by_user_id=user_id,
-        metadata_patch={"auto_accepted_at_login": False},
+        declined_by_user_id=user_id,
     )
     return {
-        "workspace_id": invite_workspace_id,
-        "role": invite_role,
-        "status": str((accepted or {}).get("status") or "accepted"),
+        "workspace_id": invite.get("workspace_id"),
+        "status": str((declined or {}).get("status") or "declined"),
     }
 

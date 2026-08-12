@@ -218,6 +218,89 @@ export function useWorkspacePendingInvites(workspaceId: string) {
   return { invites, loading, error, refresh };
 }
 
+export type MyPendingWorkspaceInvite = {
+  id: string;
+  workspace_id: string;
+  workspace_name: string;
+  role: WorkspaceRole;
+  invited_by_user_id: string | null;
+  created_at: number | string | null;
+};
+
+function normalizeMyPendingInvite(raw: any): MyPendingWorkspaceInvite {
+  return {
+    id: String(raw?.id || ""),
+    workspace_id: String(raw?.workspace_id || ""),
+    workspace_name: String(raw?.workspace_name || raw?.workspace_id || ""),
+    role: (String(raw?.role || "viewer").toLowerCase() as WorkspaceRole),
+    invited_by_user_id: raw?.invited_by_user_id ?? null,
+    created_at: raw?.created_at ?? null,
+  };
+}
+
+/** The INVITEE's own side of an invite — "someone invited me and I have no
+ *  signal anywhere" (MAN). Counterpart to useWorkspacePendingInvites above,
+ *  which only an existing member of the target workspace can call and is
+ *  therefore useless to the person being invited. Server route:
+ *  GET /workspaces/invites/pending (routes_workspaces.
+ *  list_my_pending_workspace_invites_route), scoped to the caller's own
+ *  authenticated email — no workspace_id in the path, because the caller
+ *  isn't a member of the target workspace(s) yet. */
+export function useMyPendingWorkspaceInvites() {
+  const [invites, setInvites] = useState<MyPendingWorkspaceInvite[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getJson("/api/workspaces/invites/pending");
+      const items = Array.isArray(data?.items) ? data.items.map(normalizeMyPendingInvite) : [];
+      setInvites(items);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load your pending invites.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return { invites, loading, error, refresh };
+}
+
+/** Accept an invite from the in-app pending-invites list — no signed token
+ *  involved (there's no email link here), so the server's whole
+ *  authorization story is the caller's authenticated email matching the
+ *  invite's own email, exactly like acceptWorkspaceInvite below. */
+export async function joinPendingWorkspaceInvite(inviteId: string): Promise<AcceptInviteResult> {
+  try {
+    const data = await mutateJson(`/api/workspaces/invites/${encodeURIComponent(inviteId)}/join`, "POST");
+    return {
+      ok: true,
+      workspace_id: String(data?.workspace_id || ""),
+      role: (String(data?.role || "viewer").toLowerCase() as WorkspaceRole),
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Could not join this workspace." };
+  }
+}
+
+/** Decline is a REAL, recorded state (server: status becomes 'declined'),
+ *  never a silent client-side dismissal off the list — CLAUDE.md's own rule
+ *  against collapsing distinct facts into one. */
+export async function declinePendingWorkspaceInvite(inviteId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await mutateJson(`/api/workspaces/invites/${encodeURIComponent(inviteId)}/decline`, "POST");
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Could not decline this invite." };
+  }
+}
+
 /** The three states create_workspace_invite_route reports back, mirroring
  *  workspace_invite_email_service's own DELIVERY_* constants exactly. They
  *  are kept apart on purpose: "the provider isn't set up" and "the send
