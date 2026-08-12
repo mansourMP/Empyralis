@@ -8,11 +8,17 @@
  * custom-property override for a column count TasksList's own CSS wasn't
  * built for) rather than inventing a second list shape.
  *
- * REAL LINKS, unlike TaskRow (which is an onClick div — see that file):
- * CLAUDE.md requires cmd-click/middle-click to work for primary navigation,
- * so each row is a real Next <Link> to the document's own URL
+ * REAL LINKS — CLAUDE.md requires cmd-click/middle-click to work for primary
+ * navigation, so each row is a real Next <Link> to the document's own URL
  * (`${projectHref}/documents/{id}`, the same pattern taskHref uses one
- * segment over).
+ * segment over). TaskRow (TasksList.tsx) used to be the deviant onClick-div
+ * this comment warned about; fixed 2026-08-12 to a real `<a href>` (the same
+ * pattern TaskDetailView.tsx's subtask links already used) rather than a
+ * <Link>, because its row and TasksBoard's card/TasksGroupedList's row all
+ * nest an interactive status <select> that has to preventDefault to stop the
+ * anchor navigating — Link's built-in modifier-key handling doesn't cover
+ * that case, so a plain anchor with an explicit click guard was the more
+ * direct copy of an already-proven pattern.
  */
 
 import type { CSSProperties } from "react";

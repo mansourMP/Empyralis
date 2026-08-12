@@ -427,24 +427,41 @@ export default function ProjectDetailPage() {
           agents) so the Properties toggle stays reachable; filters/sort
           still hide themselves when there's nothing to filter/sort (each is
           independently optional). */}
-      {/* FILLED, 2026-08-01. This used to be the quiet hairline, on the theory
-          that the centre empty-state button ("Create your first agent") was
-          the real CTA and two fills would shout at once. Wrong trade: the
-          empty state is a first-run condition, while this button is the
-          view's PERSISTENT primary action — so the hairline meant the action
-          a customer uses every day looked secondary forever to avoid a clash
-          that only exists on an empty project. fleet-theme.css's own
-          .fleet-btn--accent-fill comment already named "New agent" / "New
-          task" / "New project" as exactly the curated set that earns the
-          fill; this call site simply never matched it. See the note in that
-          stylesheet about the empty-state overlap that remains. */}
+      {/* FILLED, 2026-08-01, EXCEPT WHEN THE LIST IS EMPTY (2026-08-12). This
+          used to be the quiet hairline unconditionally, on the theory that
+          the centre empty-state button ("Create your first agent") was the
+          real CTA and two fills would shout at once. That was the wrong
+          trade for a POPULATED view: this button is the PERSISTENT primary
+          action, used every day, so a permanent hairline made the everyday
+          action look secondary forever just to dodge a clash that only
+          exists on an empty project.
+          But filling it unconditionally reintroduced exactly that clash:
+          CLAUDE.md — "Two accent-filled buttons in one view is a bug" — and
+          a brand-new project (list.length === 0) rendered this header button
+          AND the centred empty-state CTA filled at the same time, every
+          time. fleet-theme.css's own .fleet-btn--accent-fill comment used to
+          flag this as a known, undecided overlap; it is decided now: the
+          centred CTA wins on an empty list — a first-run empty state is the
+          one moment its own oversized button genuinely IS the thing a reader
+          is looking at — so the header action drops back to the quiet
+          hairline exactly then, and only then. It stays reachable the whole
+          time (no dead controls); it only earns the fill once the list holds
+          something and this is genuinely the button used every day. */}
       <HeaderAction>
         {view === "agents" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
+          <button
+            type="button"
+            className={`fleet-btn${inProject.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
+            onClick={() => setWizardOpen(true)}
+          >
             <span className="fleet-btn-plus">+</span> New agent
           </button>
         ) : view === "tasks" ? (
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setComposer({})}>
+          <button
+            type="button"
+            className={`fleet-btn${tasks.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
+            onClick={() => setComposer({})}
+          >
             <span className="fleet-btn-plus">+</span> New task
           </button>
         ) : view === "documents" && canWriteProject ? (
@@ -454,7 +471,11 @@ export default function ProjectDetailPage() {
           // floor). No dead controls (CLAUDE.md): the button simply isn't
           // in the DOM for a reader who can't use it, `null` (still
           // resolving) included.
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setDocumentComposerOpen(true)}>
+          <button
+            type="button"
+            className={`fleet-btn${documents.length === 0 ? " fleet-btn--accent" : " fleet-btn--accent-fill"}`}
+            onClick={() => setDocumentComposerOpen(true)}
+          >
             <span className="fleet-btn-plus">+</span> New document
           </button>
         ) : null}
@@ -613,6 +634,7 @@ export default function ProjectDetailPage() {
                 agents={inProject}
                 members={members}
                 display={viewOptions.display}
+                hrefFor={taskHref}
                 onSelect={openTask}
                 onStatusChange={handleStatusChange}
                 onCreateTask={(status) => setComposer({ status })}
@@ -625,6 +647,7 @@ export default function ProjectDetailPage() {
                 members={members}
                 grouping={viewOptions.grouping}
                 display={viewOptions.display}
+                hrefFor={taskHref}
                 onSelect={openTask}
                 onStatusChange={handleStatusChange}
                 onCreateTask={(status) => setComposer({ status })}
@@ -635,6 +658,7 @@ export default function ProjectDetailPage() {
                 agents={inProject}
                 members={members}
                 display={viewOptions.display}
+                hrefFor={taskHref}
                 onAssign={handleAssign}
                 onSelect={openTask}
               />

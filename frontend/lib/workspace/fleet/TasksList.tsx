@@ -76,6 +76,7 @@ export function TasksList({
   agents,
   members,
   display = DEFAULT_TASK_VIEW_OPTIONS.display,
+  hrefFor,
   onAssign,
   onSelect,
 }: {
@@ -88,6 +89,11 @@ export function TasksList({
   /** View-options "Display properties". Defaults to everything on, which is
    *  the table this file drew before the popover existed. */
   display?: TaskDisplayState;
+  /** The task's own route (`{projectHref}/tasks/{id}`) — same prop name and
+   *  shape as DocumentsList's `hrefFor`. Makes the row a real `<a href>`
+   *  instead of an onClick div, per CLAUDE.md: "Primary navigation is real
+   *  links, so cmd-click and middle-click work." */
+  hrefFor: (taskId: string) => string;
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
 }) {
@@ -112,6 +118,7 @@ export function TasksList({
           members={members}
           index={index}
           display={display}
+          href={hrefFor(task.id)}
           onAssign={onAssign}
           onSelect={onSelect}
         />
@@ -126,6 +133,7 @@ function TaskRow({
   members,
   index,
   display,
+  href,
   onAssign,
   onSelect,
 }: {
@@ -134,6 +142,7 @@ function TaskRow({
   members?: WorkspaceMember[];
   index: number;
   display: TaskDisplayState;
+  href: string;
   onAssign: (taskId: string, selection: TaskAssigneeSelection) => void;
   onSelect?: (taskId: string) => void;
 }) {
@@ -171,7 +180,14 @@ function TaskRow({
         setAssigning(false);
         if (next && assigneeOptionValue(next) !== currentAssigneeValue) onAssign(task.id, next);
       }}
-      onClick={(e) => e.stopPropagation()}
+      // The row is a real <a> now (see TaskRow below): stopPropagation alone
+      // no longer stops the click from following the link, since link-
+      // following is resolved from the nearest <a> ancestor independent of
+      // JS bubbling. preventDefault is what actually cancels it.
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
       style={{ height: 28, padding: "0 6px", fontSize: 12 }}
     >
       <option value="">Unassigned</option>
@@ -199,6 +215,9 @@ function TaskRow({
       type="button"
       className="fleet-task-assignee-btn"
       onClick={(e) => {
+        // Same reasoning as the <select>'s onClick above: preventDefault is
+        // what stops the enclosing <a> from navigating, not stopPropagation.
+        e.preventDefault();
         e.stopPropagation();
         setAssigning(true);
       }}
@@ -227,15 +246,27 @@ function TaskRow({
   );
 
   return (
-    <div
+    // A real link, same pattern DocumentsList already uses for this exact
+    // class (see that file's header) — cmd-click/middle-click/hover-URL/
+    // open-in-new-tab all worked there and were dead here, on the div/
+    // role="button" version this used to be. `onSelect` is optional on this
+    // component; when the caller doesn't pass one, a plain click still works
+    // via the browser's own navigation to `href` rather than doing nothing.
+    <a
+      href={href}
       className="fleet-task-row"
       role="row"
-      tabIndex={0}
-      onClick={() => onSelect?.(task.id)}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+        if (!onSelect) return;
+        e.preventDefault();
+        onSelect(task.id);
+      }}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
+          if (!onSelect) return;
           e.preventDefault();
-          onSelect?.(task.id);
+          onSelect(task.id);
         }
       }}
     >
@@ -318,6 +349,6 @@ function TaskRow({
             .join(" · ")}
         </div>
       </div>
-    </div>
+    </a>
   );
 }
