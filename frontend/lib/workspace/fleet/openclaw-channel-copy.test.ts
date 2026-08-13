@@ -55,7 +55,10 @@ import { join } from "node:path";
 import {
   channelCardPill,
   formatChannelList,
+  openclawObservedErrorBanner,
   remediationFor,
+  OPENCLAW_CAPABILITY_MISSING_BANNER_TEXT,
+  OPENCLAW_UNREACHABLE_BANNER_TEXT,
   type OpenClawChannelCatalogEntry,
   type OpenClawObservedChannel,
 } from "./openclaw-channel-copy";
@@ -1066,6 +1069,78 @@ for (const [text, what] of [
     `${what} must not name mechanism, got ${JSON.stringify(text)}`,
   );
   assert(text.trim().length > 0, `${what} is a real sentence`);
+}
+
+// --- openclawObservedErrorBanner: the 2026-08-13 audit's #2/#2b fix.
+//     "the box could not be reached" and "the box answered fine but never
+//     had the transport installed" are different facts, and must not share
+//     copy OR a retry control. Driven off the STRUCTURED reason code, never
+//     a text-match — a raw backend token must never leak through here
+//     either. ---------------------------------------------------------
+
+assert(
+  openclawObservedErrorBanner(null, null) === null,
+  "no observed_error at all means no banner, regardless of any stray code",
+);
+assert(
+  openclawObservedErrorBanner("", "gateway_capability_missing") === null,
+  "an empty observed_error string is not an error — falsy wins over any code",
+);
+
+{
+  const capabilityMissing = openclawObservedErrorBanner(
+    "gateway_capability_missing",
+    "gateway_capability_missing",
+  );
+  assert(capabilityMissing !== null, "gateway_capability_missing produces a banner");
+  assert(
+    capabilityMissing!.text === OPENCLAW_CAPABILITY_MISSING_BANNER_TEXT,
+    `capability-missing banner must be the dedicated sentence, got ${JSON.stringify(capabilityMissing!.text)}`,
+  );
+  assert(
+    capabilityMissing!.retryable === false,
+    "capability-missing must not be retryable — no button can install a transport that isn't there",
+  );
+  assertNoOpenClaw(capabilityMissing!.text, "capability-missing banner text");
+  assert(
+    !/\bplugin(s)?\b|\bnpm\b|\bpackage\b|\bbinary\b|\binstall\b/i.test(capabilityMissing!.text),
+    `capability-missing banner must not name mechanism, got ${JSON.stringify(capabilityMissing!.text)}`,
+  );
+  // The raw backend token must never leak through this function either —
+  // same standing rule as the rest of this file, applied to the new seam.
+  assert(
+    !/gateway_capability_missing/.test(capabilityMissing!.text),
+    "the raw reason token must not appear in the banner text",
+  );
+}
+
+for (const [code, label] of [
+  ["gateway_offline", "gateway_offline"],
+  ["gateway_heartbeat_stale", "gateway_heartbeat_stale"],
+  ["gateway_unhealthy", "gateway_unhealthy"],
+  ["gateway_capability_not_ready", "gateway_capability_not_ready (transient — retry is honest)"],
+  [null, "no code at all (older response shape, or an unclassified failure)"],
+  ["some_future_token_this_module_has_not_seen", "an unrecognized future token"],
+] as const) {
+  const banner = openclawObservedErrorBanner("some human error text from the backend", code);
+  assert(banner !== null, `${label} still produces a banner when observed_error is truthy`);
+  assert(
+    banner!.text === OPENCLAW_UNREACHABLE_BANNER_TEXT,
+    `${label} must fall back to the generic "could not be reached" copy, got ${JSON.stringify(banner!.text)}`,
+  );
+  assert(banner!.retryable === true, `${label} must stay retryable — re-checking is a legitimate action here`);
+}
+
+// The two banners must never collapse onto the same sentence or the same
+// retryability — that collapse IS the bug this function exists to fix.
+{
+  const capabilityMissing = openclawObservedErrorBanner("x", "gateway_capability_missing")!;
+  const offline = openclawObservedErrorBanner("x", "gateway_offline")!;
+  assert(capabilityMissing.text !== offline.text, "capability-missing and offline must not share banner copy");
+  assert(
+    capabilityMissing.retryable !== offline.retryable,
+    "capability-missing and offline must not share retryability",
+  );
 }
 
 // --- Summary ---
