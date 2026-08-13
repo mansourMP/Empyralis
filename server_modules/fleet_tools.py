@@ -382,18 +382,25 @@ def seed_operator_metadata() -> Dict[str, Any]:
 def seed_specialist_metadata() -> Dict[str, Any]:
     """Return the install_metadata for a new specialist.
 
-    model is explicit here (not left for the runtime's own deepseek-chat
+    model is explicit here (not left for the runtime's own deepseek default
     fallback in resolve_requested_model()) specifically so that changing the
     default only affects NEW agents — an agent created before this default
     changed keeps an empty model_config and keeps falling through to
     whatever the runtime fallback was at the time, untouched. Deny-a-
-    successful-tool rate empirically measured this session: deepseek-chat
-    5/5, deepseek-reasoner 1/5 (guard stays on regardless either way).
+    successful-tool rate empirically measured in the original session:
+    deepseek-chat 5/5, deepseek-reasoner 1/5 (guard stays on regardless
+    either way) — "deepseek-reasoner" was DeepSeek's own pre-v4 reasoning
+    model and is retired (2026-07-24); "deepseek-v4-pro" is its real
+    current successor and is what this now seeds, never the dead id
+    (provider_profiles.model_is_known_for_provider would reject a NEW save
+    of "deepseek-reasoner" through fleet_tools.configure_agent, but this
+    function builds the metadata dict directly rather than going through
+    that validated patch path, so it needed its own fix).
     """
     return {
         "role": SPECIALIST_ROLE,
         "subagents_enabled": False,
-        "model_config": {"mode": "platform_credits", "model": "deepseek-reasoner"},
+        "model_config": {"mode": "platform_credits", "model": "deepseek-v4-pro"},
     }
 
 

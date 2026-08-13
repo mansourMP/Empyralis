@@ -1077,6 +1077,48 @@ def resolve_requested_provider(context: Dict[str, Any], metadata: Dict[str, Any]
     return raw_provider
 
 
+def _deepseek_default_model() -> str:
+    """The one place this file decides "what DeepSeek model, if nobody
+    asked for a specific one" — provider_profiles.py's own "deepseek"
+    catalog entry (default_model) is the single source of truth, never a
+    second hardcoded copy. Three separate copies of this fallback existed
+    here before this fix, ALL still returning DeepSeek's retired
+    "deepseek-chat" id (retired 2026-07-24) — discovered by a full-path
+    integration test that ran the real resolution chain rather than
+    mocking it (test_default_engine_credit_debit.py's
+    FullPathRealDefaultEngineIntegrationTest). "deepseek-v4-flash" is the
+    final fallback only if the catalog lookup itself fails (should not
+    happen — defensive, not a second source of truth)."""
+    try:
+        from server_modules import provider_profiles as _provider_profiles
+
+        catalog_default = str(
+            _provider_profiles.provider_catalog_entry("deepseek").get("default_model") or ""
+        ).strip()
+    except Exception:
+        catalog_default = ""
+    return (
+        os.getenv("ORION_LOCAL_WORKER_DEEPSEEK_MODEL") or catalog_default or "deepseek-v4-flash"
+    ).strip() or "deepseek-v4-flash"
+
+
+def _deepseek_model_is_known(model: str) -> bool:
+    """Is `model` one of DeepSeek's real, current, selectable model ids?
+    Delegates to provider_profiles.model_is_known_for_provider — the SAME
+    save-time gate fleet_tools.configure_agent uses — rather than a second,
+    hand-kept name set. Also see that function's own docstring on why it
+    deliberately does NOT resolve "deepseek-chat"/"deepseek-reasoner"
+    forward: recognizing the retired names here as still-valid would put
+    them right back into circulation the moment any caller checked
+    membership before choosing whether to send a model string as-is."""
+    try:
+        from server_modules import provider_profiles as _provider_profiles
+
+        return _provider_profiles.model_is_known_for_provider("deepseek", model)
+    except Exception:
+        return False
+
+
 def resolve_requested_model(context: Dict[str, Any], metadata: Dict[str, Any], provider: str = "") -> str:
     requested = str(
         context.get("model")
@@ -1108,7 +1150,7 @@ def resolve_requested_model(context: Dict[str, Any], metadata: Dict[str, Any], p
     if pid == "qwen":
         return (os.getenv("ORION_LOCAL_WORKER_QWEN_MODEL") or "qwen-turbo").strip() or "qwen-turbo"
     if pid == "deepseek":
-        return (os.getenv("ORION_LOCAL_WORKER_DEEPSEEK_MODEL") or "deepseek-chat").strip() or "deepseek-chat"
+        return _deepseek_default_model()
     if pid == "mistral":
         return (os.getenv("ORION_LOCAL_WORKER_MISTRAL_MODEL") or "mistral-small-latest").strip() or "mistral-small-latest"
     return ""
@@ -1139,7 +1181,16 @@ def coerce_requested_model_for_provider(requested_model: Any, provider: str) -> 
     if pid == "anthropic":
         return normalize_anthropic_model(model)
     if pid == "deepseek":
-        return model if model in {"deepseek-chat", "deepseek-reasoner"} else default_openai_compatible_model("deepseek")
+        # BEFORE this fix: backwards. The old whitelist was exactly the
+        # two RETIRED names ({"deepseek-chat", "deepseek-reasoner"}), so a
+        # caller explicitly requesting a real current id ("deepseek-v4-
+        # flash"/"deepseek-v4-pro") had it silently DISCARDED and replaced
+        # with the default, while a caller carrying the dead name had it
+        # preserved untouched. _deepseek_model_is_known checks against the
+        # real, current catalog (provider_profiles.py), so a valid
+        # explicit choice now survives and a retired one is coerced to the
+        # real default instead of being passed through.
+        return model if _deepseek_model_is_known(model) else default_openai_compatible_model("deepseek")
     if pid == "ollama_cloud":
         return model or ((os.getenv("ORION_LOCAL_WORKER_OLLAMA_CLOUD_MODEL") or "gpt-oss:120b").strip() or "gpt-oss:120b")
     return model
@@ -1743,7 +1794,12 @@ def default_openai_compatible_model(provider: str) -> str:
     if pid == "qwen":
         return (os.getenv("ORION_LOCAL_WORKER_QWEN_MODEL") or "qwen-turbo").strip() or "qwen-turbo"
     if pid == "deepseek":
-        return (os.getenv("ORION_LOCAL_WORKER_DEEPSEEK_MODEL") or "deepseek-chat").strip() or "deepseek-chat"
+        # This is the resolver openai_compatible_model_from_request (and
+        # therefore iter_openai_compatible_chat_events — the function that
+        # actually sends a request to DeepSeek's wire) falls back to when
+        # nobody supplied an explicit model. See _deepseek_default_model's
+        # own docstring for why this used to be "deepseek-chat".
+        return _deepseek_default_model()
     if pid == "mistral":
         return (os.getenv("ORION_LOCAL_WORKER_MISTRAL_MODEL") or "mistral-small-latest").strip() or "mistral-small-latest"
     if pid == "groq":

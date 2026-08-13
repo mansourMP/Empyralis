@@ -40,6 +40,25 @@ class FleetToolRoleTests(unittest.TestCase):
         self.assertFalse(meta["subagents_enabled"])
         self.assertEqual(meta["model_config"]["mode"], "platform_credits")
 
+    def test_seed_specialist_model_is_a_real_current_deepseek_id(self):
+        """Programmatic guard, not a hand check: seed_specialist_metadata
+        builds its model_config dict directly rather than through fleet_
+        tools.configure_agent's validated patch path, so it needed its OWN
+        fix when DeepSeek retired "deepseek-reasoner" (2026-07-24) — it
+        was seeding every NEW specialist agent with a dead model id. Checked
+        against the live provider catalog (provider_profiles.
+        model_is_known_for_provider), not a hardcoded string, so this
+        cannot go stale silently the same way again."""
+        from server_modules import provider_profiles
+
+        meta = fleet_tools.seed_specialist_metadata()
+        model_config = meta["model_config"]
+        self.assertTrue(
+            provider_profiles.model_is_known_for_provider(
+                model_config.get("provider") or "deepseek", model_config["model"],
+            )
+        )
+
     def test_operator_role_resolves_correctly(self):
         """role=operator in install_metadata resolves to operator."""
         install = {"install_metadata": {"role": "operator"}}

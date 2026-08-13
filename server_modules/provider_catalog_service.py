@@ -26,11 +26,16 @@ BYOK_FIRST_PROVIDERS = {
 }
 LOCAL_OR_SUBSCRIPTION_PROVIDERS = {"ollama", "openai-codex", "claude_code_cli"}
 PLATFORM_CREDIT_MODEL_ALLOWLIST = {
-    ("deepseek", "deepseek-chat"),
+    # "deepseek-chat"/"deepseek-reasoner" (DeepSeek's own retired pre-v4
+    # ids, 2026-07-24) removed — see provider_profiles.py's "deepseek"
+    # catalog entry and empyralis_model_tier_contract.py's "light" tier
+    # fix. This allowlist gates assert_model_route_policy's
+    # payer=="platform_credits" branch (deployed_agent_service.py), so
+    # leaving the retired ids here while the tier contract moved on would
+    # have meant a deployed agent on the "light" tier gets REJECTED the
+    # moment the tier resolves to the current id.
+    ("deepseek", "deepseek-v4-flash"),
     ("deepseek", "deepseek-v4-pro"),
-    # Default platform-credits model for new fleet specialists as of this
-    # session (deny-a-successful-tool rate: deepseek-chat 5/5, reasoner 1/5).
-    ("deepseek", "deepseek-reasoner"),
 }
 
 
@@ -252,8 +257,7 @@ def assert_model_route_policy(
                 raise ValueError(f"{provider_id} is BYOK/workspace-key only and cannot use Empyralis credits.")
             if (provider_id, model_id) not in PLATFORM_CREDIT_MODEL_ALLOWLIST:
                 raise ValueError(
-                    "Empyralis credits only support Light (DeepSeek Chat), Pro (DeepSeek V4 Pro), "
-                    "and DeepSeek Reasoner."
+                    "Empyralis credits only support Light (DeepSeek V4 Flash) and Pro (DeepSeek V4 Pro)."
                 )
             if not policy.get("platform_paid_allowed"):
                 raise ValueError(f"Model '{provider_id}:{model_id}' is not approved for Empyralis credits.")
