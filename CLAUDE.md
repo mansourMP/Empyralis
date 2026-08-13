@@ -2849,6 +2849,61 @@ anywhere. The structural test
 repo's own established pattern — proven to actually catch a regression by
 running the same assertions against the OLD `frame-ancestors`-only nginx
 string and watching them fail.
+
+**CORRECTION, 2026-08-13 — the "zero console violations anywhere" claim
+two paragraphs up does NOT hold, and should not be trusted.** Found while
+auditing the context layer: a real `next build && next start` (the exact
+same production-build discipline the original verification pass used) on
+an ordinary document detail page produced 10+ distinct `style-src` CSP
+violations in the console, each a different `sha256-...` hash, i.e. many
+different elements. The structural test itself is not wrong — it correctly
+asserts the CODE builds a nonce-only `style-src` with no `unsafe-inline` in
+prod, and that shape is real. What the original verification pass missed is
+a CSP/React interaction the structural test cannot see (it never runs a
+browser) and the manual walkthrough apparently didn't trigger or didn't
+notice on the pages it happened to click: **CSP's `style-src` governs the
+literal `style=""` HTML ATTRIBUTE, and a nonce source, per spec, NEVER
+covers that attribute — only `'unsafe-inline'` (disabled the instant a
+nonce is present in the same directive, which it always is here) or
+`'unsafe-hashes'` (a hash per exact string, impractical for a value that
+changes every render) can permit it.** React's `style={{...}}` prop is
+CSP-SAFE on the client (React sets it via `domNode.style[key] = value`, a
+JS property assignment CSP does not restrict) — but react-dom/server has no
+live DOM to call that on, so SERVER-rendered HTML serializes every
+`style={{...}}` prop into a literal `style="..."` string attribute, and
+THAT is what the browser's initial HTML parse blocks. Confirmed the
+distinction directly: `PrimaryRail`'s own `--rail-w` (via
+`fleet-preferences.ts`'s `useResizableWidth`) applies through
+`element.style.setProperty(...)`, a JS-property call, and was never blocked
+in the same walkthrough that hit 10+ violations elsewhere — proving the
+mechanism is specifically "SSR-serialized attribute" vs. "client-side JS
+property," not "any inline style anywhere." Every route here is dynamically
+rendered (this file's own CSP section already documents why: `RootLayout`'s
+`headers()` call), so this is not a corner case — `grep -rc "style={{"
+frontend/lib frontend/app` counts 666 occurrences across 57+ files, and any
+of them present in a component's initial server-rendered output is a
+candidate. Practical effect observed: the STYLE ATTRIBUTE is blocked on
+first paint and stays blocked until something causes React to re-run that
+element's style assignment via a client-side re-render (state change) —
+until then the element silently renders without its dynamic style (a
+color, a fill fraction, a computed width) with no error the product
+surfaces to anyone. This was not fixed in this pass — it is a real,
+non-trivial gap (potentially dozens of call sites, none enumerated or
+triaged individually) and the assigning brief was explicit that the policy
+itself must not be silently weakened to make it disappear. What an actual
+fix needs, so the next person doesn't have to re-derive it: either (a) an
+inventory of which `style={{...}}` call sites are genuinely SSR-reachable
+(mounted unconditionally, not behind client-only interaction) and a
+migration of each to a CSS custom property set via a class name or a
+nonced `<style>` block instead of an inline attribute — large, cross-
+cutting, not a one-file change; or (b) a deliberate, founder-approved
+posture change dropping the nonce from `style-src` specifically (keeping
+`'unsafe-inline'` there) while leaving `script-src`'s nonce+`strict-dynamic`
+untouched — a common real-world split, since CSS-only injection is a much
+narrower attack surface than script injection, but still a security-posture
+decision, not a call to make silently in a drive-by fix. Until one of those
+lands, do not cite "zero console violations" as current, verified state.
+
 **The fleet UI collapses to what actually exists — the agent COUNT decides
 the shape, never a tier check.** MAN-317, 2026-08-13. `agent-count-shape.ts`'s
 `planAgentCountShape(realAgentCount)` is the whole rule, same shape as
