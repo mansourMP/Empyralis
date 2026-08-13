@@ -5426,6 +5426,24 @@ a.fleet-breadcrumb:hover {
   gap: 2px;
 }
 
+/* Memory now also renders inside the Configure sheet (agent-configure-
+   sheet.css caps it at 80vw/1040px, so its content pane nets out to
+   roughly 500px once GroupedRail + padding are subtracted) — a container
+   far narrower than the full-page width the shared 320px min-width above
+   was sized for. Left at 320px, the file list alone claimed almost all of
+   that room and pushed the editor header's Preview/Edit/Delete/Save
+   controls past the sheet's own right edge — clipped there (the sheet is
+   overflow:hidden), not just tight, at any Configure-sheet viewport
+   narrower than the 768px full-page mobile breakpoint below (900px
+   viewport included, which is one of this app's own named breakpoints).
+   A container query would be the general fix; this scoped override is the
+   narrow, safe one — it touches only Memory-inside-Configure and leaves
+   the full-page Inbox/Work/Memory tabs' shared rule untouched. */
+.agent-configure-content .fleet-memory-file-list {
+  flex: 0 0 180px;
+  min-width: 180px;
+}
+
 .fleet-memory-file-list-title {
   display: flex;
   align-items: center;
@@ -5531,7 +5549,17 @@ a.fleet-breadcrumb:hover {
   font-weight: 500;
   color: var(--text-secondary);
 }
+/* flex:1/min-width:0 — this pane got real narrow now that Memory lives
+   inside the Configure sheet (agent-configure-sheet.css caps it at 720px,
+   shared with GroupedRail and the file list, versus the full page width it
+   had as a top-level tab). Without a shrink budget the filename held its
+   own width and pushed .fleet-memory-editor-actions (Preview/Edit/Delete/
+   Save, flex-shrink:0 below) straight past the sheet's own edge — clipped
+   there since the sheet is overflow:hidden, not merely tight. The filename
+   already ellipsizes; it's the one side of this row that should give. */
 .fleet-memory-editor-filename {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
