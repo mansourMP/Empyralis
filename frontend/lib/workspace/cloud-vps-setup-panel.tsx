@@ -439,6 +439,15 @@ export function CloudVpsSetupPanel({
 }: CloudVpsSetupPanelProps) {
   const [step, setStep] = useState<VpsStep>('provider');
   const [connections, setConnections] = useState<Partial<Record<VpsProviderId, VpsConnection>>>({});
+  // Which provider cards can actually be completed today — DERIVED
+  // server-side from whether that provider's operator credentials resolve
+  // (vps_provisioning_service.provider_availability), never a hardcoded
+  // frontend list of "the providers that work". null means "not fetched
+  // yet"; every provider renders as available while null so a slow/failed
+  // fetch degrades to today's behavior rather than disabling everything.
+  const [providerAvailability, setProviderAvailability] = useState<Partial<Record<VpsProviderId, boolean>> | null>(
+    null,
+  );
   const [selectedProvider, setSelectedProvider] = useState<VpsProviderId | null>(null);
   const [apiToken, setApiToken] = useState('');
   const [tokenId, setTokenId] = useState('');
@@ -540,6 +549,32 @@ export function CloudVpsSetupPanel({
   const onConnectedRef = useRef(onConnected);
   onConnectedRef.current = onConnected;
   const connectedHandledRef = useRef<string | null>(null);
+  // Re-fetched every time the panel opens rather than cached across opens —
+  // an operator credential can be fixed or go dead between one open and the
+  // next, and this is a single cheap GET (no live provider network call on
+  // the backend, just an env-var presence check), never a hardcoded list on
+  // either side.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const payload = await requestJson<{ providers?: Partial<Record<VpsProviderId, boolean>> }>(
+          '/api/hardware/vps/provider-availability',
+        );
+        if (!cancelled) setProviderAvailability(payload?.providers ?? null);
+      } catch {
+        // Fails open (null == "not fetched yet", every provider renders
+        // available) — a failed availability check must never be the
+        // reason a working provider looks broken.
+        if (!cancelled) setProviderAvailability(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
   const watchStage = watch?.stage;
   const watchVpsId = watch?.vpsId;
   useEffect(() => {
@@ -1355,9 +1390,25 @@ export function CloudVpsSetupPanel({
             {PROVIDER_IDS.map((providerId) => {
               const item = PROVIDERS[providerId];
               const connection = connections[providerId];
+              // Unknown (fetch not back yet) reads as available — see the
+              // providerAvailability effect's own comment on failing open.
+              // An existing connection is never blocked by this: it already
+              // proved the operator side worked at least once, and a
+              // customer managing/disconnecting a prior connection is a
+              // different action than starting a new one that would hit
+              // the same missing credential.
+              const available = connection || providerAvailability?.[providerId] !== false;
               return (
                 <article key={providerId} className="cloud-vps-provider-row">
-                  <button className="cloud-vps-provider-row__button" type="button" onClick={() => void selectProvider(providerId)}>
+                  <button
+                    className={`cloud-vps-provider-row__button${available ? '' : ' cloud-vps-provider-row__button--unavailable'}`}
+                    type="button"
+                    disabled={!available}
+                    aria-disabled={!available}
+                    onClick={() => {
+                      if (available) void selectProvider(providerId);
+                    }}
+                  >
                     <span className="cloud-vps-provider-row__logo" aria-hidden="true">
                       <img src={item.logoSrc} alt="" />
                     </span>
@@ -1378,7 +1429,10 @@ export function CloudVpsSetupPanel({
                     </span>
                     <span className="cloud-vps-provider-row__side">
                       <strong>{item.accountMethod}</strong>
-                      <span>{connection ? 'Add server →' : 'Connect →'}</span>
+                      {/* Never "Connect →" for a provider that would only fail after the
+                          click — a control that cannot be used in the current state must
+                          say so rather than look identical to a working one. */}
+                      <span>{!available ? 'Not available yet' : connection ? 'Add server →' : 'Connect →'}</span>
                     </span>
                   </button>
                   {connection ? (

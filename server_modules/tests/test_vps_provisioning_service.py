@@ -1352,6 +1352,31 @@ async def test_hardware_vps_regions_route_unaffected_for_non_vultr_without_token
 
 
 @pytest.mark.asyncio
+async def test_hardware_vps_provider_availability_route_reflects_configured_credentials(monkeypatch):
+    """2026-08-13 launch-readiness audit, task 2: the provider picker must
+    read a DERIVED fact, never a hardcoded list — this drives the route
+    with real env state rather than mocking provider_availability() itself,
+    so the test would also catch a regression in the derivation."""
+    monkeypatch.delenv(vps.GOOGLE_CLOUD_CLIENT_ID_ENV, raising=False)
+    monkeypatch.delenv(vps.GOOGLE_CLOUD_CLIENT_SECRET_ENV, raising=False)
+    monkeypatch.delenv(vps.GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV, raising=False)
+    monkeypatch.delenv(vps.GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV, raising=False)
+    monkeypatch.delenv(vps.EMPYRALIS_AWS_ACCOUNT_ID_ENV, raising=False)
+    monkeypatch.delenv(vps.EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV, raising=False)
+
+    response = await routes_gateway.get_hardware_vps_provider_availability(current_user={"user_id": "user-1"})
+    assert response == {"providers": {"digitalocean": True, "google": False, "aws": False}}
+
+    monkeypatch.setenv(vps.GOOGLE_CLOUD_CLIENT_ID_ENV, "client-id")
+    monkeypatch.setenv(vps.GOOGLE_CLOUD_CLIENT_SECRET_ENV, "client-secret")
+    monkeypatch.setenv(vps.GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV, "operator@example.iam.gserviceaccount.com")
+    monkeypatch.setenv(vps.GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV, "1//refresh-token")
+
+    response = await routes_gateway.get_hardware_vps_provider_availability(current_user={"user_id": "user-1"})
+    assert response == {"providers": {"digitalocean": True, "google": True, "aws": False}}
+
+
+@pytest.mark.asyncio
 async def test_provision_hardware_vps_route_creates_pairing_then_records_vps():
     result = vps.VPSResult(
         provider_resource_id="droplet-1",
@@ -4719,6 +4744,74 @@ def test_provision_vps_never_uses_platform_account_when_customer_token_id_is_sup
     # The record must never carry a credential the caller did not supply —
     # that field is what a delete call later authenticates with.
     assert result.record_credentials is None
+
+
+# ── 2026-08-13 launch-readiness audit, task 2: provider-availability
+# derivation. DigitalOcean has no operator dependency (a customer's own
+# connected account always works via provision_vps's token_id-first
+# branch); Google and AWS both structurally require Empyralis's own
+# operator identity for the whole flow. These functions are the ONE place
+# that fact is computed — preflight.py and the provider-availability route
+# both read them rather than each re-deriving "is this provider
+# configured". ------------------------------------------------------------
+
+_GOOGLE_OPERATOR_ENV_KEYS = (
+    "GOOGLE_CLOUD_CLIENT_ID_ENV",
+    "GOOGLE_CLOUD_CLIENT_SECRET_ENV",
+    "GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV",
+    "GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV",
+)
+_AWS_OPERATOR_ENV_KEYS = ("EMPYRALIS_AWS_ACCOUNT_ID_ENV", "EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV")
+
+
+def _clear_provider_operator_env(monkeypatch):
+    for attr in _GOOGLE_OPERATOR_ENV_KEYS + _AWS_OPERATOR_ENV_KEYS:
+        monkeypatch.delenv(getattr(vps, attr), raising=False)
+
+
+def test_digitalocean_is_always_available(monkeypatch):
+    _clear_provider_operator_env(monkeypatch)
+    assert vps.provider_availability()["digitalocean"] is True
+
+
+def test_google_unavailable_with_any_one_of_four_missing(monkeypatch):
+    _clear_provider_operator_env(monkeypatch)
+    for attr in _GOOGLE_OPERATOR_ENV_KEYS:
+        monkeypatch.setenv(getattr(vps, attr), "set-for-this-test")
+    assert vps.google_cloud_operator_missing_env_vars() == []
+    assert vps.google_cloud_operator_credentials_configured() is True
+    assert vps.provider_availability()["google"] is True
+
+    for missing_attr in _GOOGLE_OPERATOR_ENV_KEYS:
+        monkeypatch.delenv(getattr(vps, missing_attr), raising=False)
+        assert vps.google_cloud_operator_missing_env_vars() == [getattr(vps, missing_attr)]
+        assert vps.google_cloud_operator_credentials_configured() is False
+        assert vps.provider_availability()["google"] is False
+        monkeypatch.setenv(getattr(vps, missing_attr), "set-for-this-test")  # restore for the next iteration
+
+
+def test_aws_unavailable_with_either_of_two_missing(monkeypatch):
+    _clear_provider_operator_env(monkeypatch)
+    for attr in _AWS_OPERATOR_ENV_KEYS:
+        monkeypatch.setenv(getattr(vps, attr), "set-for-this-test")
+    assert vps.aws_operator_identity_missing_env_vars() == []
+    assert vps.aws_operator_identity_configured() is True
+    assert vps.provider_availability()["aws"] is True
+
+    for missing_attr in _AWS_OPERATOR_ENV_KEYS:
+        monkeypatch.delenv(getattr(vps, missing_attr), raising=False)
+        assert vps.aws_operator_identity_missing_env_vars() == [getattr(vps, missing_attr)]
+        assert vps.aws_operator_identity_configured() is False
+        assert vps.provider_availability()["aws"] is False
+        monkeypatch.setenv(getattr(vps, missing_attr), "set-for-this-test")  # restore for the next iteration
+
+
+def test_provider_availability_is_a_flat_bool_per_provider(monkeypatch):
+    _clear_provider_operator_env(monkeypatch)
+    result = vps.provider_availability()
+    assert set(result) == {"digitalocean", "google", "aws"}
+    for value in result.values():
+        assert isinstance(value, bool)
 
 
 # ── MAN-131: the platform DigitalOcean token resolves through the secrets

@@ -2431,6 +2431,33 @@ async def get_hardware_vps_regions(
     return vps_provisioning_service.fetch_public_provider_regions(provider_id)
 
 
+@router.get("/hardware/vps/provider-availability")
+async def get_hardware_vps_provider_availability(
+    current_user=Depends(require_api_key),
+):
+    """Whether each cloud provider's setup-panel card can actually be
+    completed today — a platform-wide fact (not per-workspace), so this is
+    the one thing require_api_key alone is the right gate for, same as the
+    static-catalog half of the routes above it.
+
+    2026-08-13 launch-readiness audit: Google Cloud and AWS both rendered
+    identically to DigitalOcean in the provider picker while requiring
+    operator-side secrets that may not exist, with no signal anywhere that
+    they weren't ready — "a control that cannot be used in the current
+    state is not rendered" was being violated by both. DigitalOcean has no
+    operator dependency (a customer's own connected account always works);
+    Google and AWS do (see vps_provisioning_service.provider_availability's
+    own docstring). AWS being unwired is the founder's own standing
+    decision pending a trip — this route does not change that, it only
+    lets the picker say so honestly instead of failing after the click.
+
+    DERIVED, not a hardcoded list: the day either operator credential set
+    is configured, this starts returning true for it with no code change
+    here — the frontend already re-fetches on every panel open.
+    """
+    return {"providers": vps_provisioning_service.provider_availability()}
+
+
 @router.get("/hardware/vps/{vps_id}/status")
 async def get_hardware_vps_status(
     vps_id: str,

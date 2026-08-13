@@ -13,7 +13,7 @@ import uuid
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
@@ -3806,6 +3806,35 @@ def _google_setup_session_access_token(
     return token
 
 
+# --- Operator-credential presence, DERIVED — never a hand-typed provider
+# list. Every ongoing Google Cloud call (bootstrap, connect, provision,
+# delete) goes through impersonation below, which needs all four of these —
+# unlike DigitalOcean, where the platform token is a pure optimization and a
+# customer's own connected account works with none of it (see provision_vps's
+# "whose account gets billed follows whose account was connected" comment).
+# So Google Cloud, unlike DigitalOcean, is genuinely UNAVAILABLE — not just
+# slower — with any one of these four missing. This is the one place that
+# fact is computed; preflight.py's advisory boot check and the
+# /hardware/vps/provider-availability route the frontend's provider picker
+# reads both call this rather than re-deriving it, so there is exactly one
+# definition of "is Google Cloud configured" to go stale.
+def google_cloud_operator_missing_env_vars() -> List[str]:
+    return [
+        name
+        for name in (
+            GOOGLE_CLOUD_CLIENT_ID_ENV,
+            GOOGLE_CLOUD_CLIENT_SECRET_ENV,
+            GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL_ENV,
+            GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN_ENV,
+        )
+        if not (os.getenv(name) or "").strip()
+    ]
+
+
+def google_cloud_operator_credentials_configured() -> bool:
+    return not google_cloud_operator_missing_env_vars()
+
+
 # --- Impersonation: the ONLY path ongoing (post-bootstrap) Google Cloud
 # calls use. Authenticates as Empyralis's own operator identity (never the
 # end user's token, which is already gone by this point) to mint a
@@ -4479,6 +4508,46 @@ def _normalize_google_plans(
 #      call sts:GetCallerIdentity on the assumed session and check its
 #      Account matches what the customer typed — defense against a stale or
 #      mistyped account id resolving somewhere unexpected.
+
+
+# DERIVED, same reasoning as google_cloud_operator_missing_env_vars above:
+# AWS provisioning is unavailable — not merely slower — with either of these
+# unset, since EMPYRALIS_AWS_ACCOUNT_ID is the identity baked into every
+# customer's IAM trust policy and EMPYRALIS_AWS_CFN_TEMPLATE_URL is what
+# create_aws_connect_intent hands the customer to run. AWS being unwired
+# pending the founder's own trip (see CLAUDE.md) is a deliberate, standing
+# decision — this function does not change that; it only lets the frontend
+# and preflight both answer "is it configured" from one place instead of
+# each discovering it via a 500 from empyralis_aws_account_id() or silence.
+def aws_operator_identity_missing_env_vars() -> List[str]:
+    return [
+        name
+        for name in (EMPYRALIS_AWS_ACCOUNT_ID_ENV, EMPYRALIS_AWS_CFN_TEMPLATE_URL_ENV)
+        if not (os.getenv(name) or "").strip()
+    ]
+
+
+def aws_operator_identity_configured() -> bool:
+    return not aws_operator_identity_missing_env_vars()
+
+
+def provider_availability() -> Dict[str, bool]:
+    """Whether a customer picking this provider in the setup panel can
+    actually complete the flow — the ONE derivation the frontend's provider
+    picker and any other caller should read, rather than hard-coding which
+    providers are "the ones that work today". DigitalOcean has no operator
+    dependency at all: a customer's own connected account works via the
+    boot-time cloud-init path regardless of whether the platform token or
+    baked image are configured (provision_vps's own token_id-first branch
+    guarantees this). Google and AWS both structurally require Empyralis's
+    own operator identity for the whole flow, not just an optimization —
+    see the two *_missing_env_vars functions above for why each is genuinely
+    unavailable, not just slower, without it."""
+    return {
+        "digitalocean": True,
+        "google": google_cloud_operator_credentials_configured(),
+        "aws": aws_operator_identity_configured(),
+    }
 
 
 def empyralis_aws_account_id() -> str:
