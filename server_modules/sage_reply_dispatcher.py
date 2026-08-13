@@ -77,6 +77,26 @@ async def _with_channel_turn_lock(
     return _CHANNEL_TURN_LOCKS[lock_key]
 
 
+async def acquire_channel_turn_lock(workspace_id: str, thread_id: str) -> asyncio.Lock:
+    """Public entry point onto the SAME lock dict dispatch_sage_reply already
+    uses — not a second mechanism.
+
+    Added so personal_channel_sage_bridge_service.py's
+    _execute_channel_turn_with_envelope (the single chokepoint every
+    personal-channel reply — WhatsApp, Telegram-personal, Discord DMs, and
+    the whole local-bridge/OpenClaw family via build_personal_channel_reply_
+    async — funnels through before calling execute_sage_turn) can serialize
+    per-thread the identical way hosted-bot/WeChat-official channels already
+    do through dispatch_sage_reply. Personal channels have no explicit
+    thread_id of their own; callers pass a derived one
+    (f"personal:{surface_channel}:{remote_jid}" — see that module), which
+    lands in the same _CHANNEL_TURN_LOCKS dict under its own namespaced key,
+    so it can never collide with a hosted-bot thread_id (typically
+    "sage-main") for the same workspace.
+    """
+    return await _with_channel_turn_lock(workspace_id, thread_id)
+
+
 def split_long_message(text: str, max_len: int) -> list[str]:
     """Split a message at paragraph/sentence/space boundaries.
 
