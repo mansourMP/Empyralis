@@ -300,7 +300,7 @@ class ProjectTaskNativeToolTests(unittest.TestCase):
                 _task_row(project_id="proj-1"),  # ownership check on the task
                 {"project_id": "proj-1"},        # target agent's project (same)
                 _task_row(project_id="proj-1"),  # assign_task's own get_task
-                {"id": "agent-2"},               # assign_task's _agent_install_exists
+                {"project_id": "proj-1"},         # assign_task's own agent_project_id (same project)
                 _task_row(project_id="proj-1", assignee_agent_id="agent-2", status="in_progress"),
             ],
         )

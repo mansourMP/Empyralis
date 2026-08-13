@@ -599,6 +599,16 @@ export function TaskDetailView({
     ? (members || []).find((m) => m.user_id === task.assignee_user_id) || null
     : null;
   const assignedMemberIndex = assignedMember ? (members || []).indexOf(assignedMember) : 0;
+  // `agents` here is already filtered to THIS project (the page's own
+  // inProject filter, matching CLAUDE.md's "an agent belongs to its
+  // project" law) — so `task.assignee_agent_id` set but not resolving into
+  // `assignee` means the row's real assignee lives outside this project.
+  // project_tasks_service.assign_task refuses to create that state going
+  // forward, but it must still be rendered HONESTLY if it is ever reached
+  // any other way (stale data, a direct DB write, a future bug) — showing
+  // "Unassigned" here would be the exact silent-misattribution failure this
+  // fix exists to close, just moved one layer up into the UI.
+  const unresolvedAgentAssigneeId = !assignee && task.assignee_agent_id ? task.assignee_agent_id : null;
   const currentAssigneeValue = assignee
     ? assigneeOptionValue({ kind: "agent", id: assignee.agent_id })
     : assignedMember
@@ -1392,6 +1402,10 @@ export function TaskDetailView({
                   size="xs"
                   tintIndex={assignedMemberIndex}
                 />
+              ) : unresolvedAgentAssigneeId ? (
+                <span className="fleet-agent-avatar" title="Assigned to an agent outside this project">
+                  <AgentSigil seed={unresolvedAgentAssigneeId} size={14} />
+                </span>
               ) : null}
               <select
                 className="fleet-task-detail-select"
@@ -1403,6 +1417,15 @@ export function TaskDetailView({
                 }}
               >
                 <option value="">Unassigned</option>
+                {unresolvedAgentAssigneeId ? (
+                  // Not a real choice -- there is no valid "reselect this"
+                  // action, only reassign-away-from-it -- so it is the sole
+                  // entry in its own group and stays selected until the
+                  // owner picks something else from Agents/People below.
+                  <option value={assigneeOptionValue({ kind: "agent", id: unresolvedAgentAssigneeId })}>
+                    Assigned to an agent outside this project
+                  </option>
+                ) : null}
                 {agents.length > 0 ? (
                   <optgroup label="Agents">
                     {agents.map((a) => (

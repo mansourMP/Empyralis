@@ -1787,26 +1787,6 @@ async def set_task_plan(
     return _row_to_task(row)
 
 
-async def _agent_install_exists(
-    *, tenant_id: str, workspace_id: str, agent_id: str,
-) -> bool:
-    pool = await control_plane_repository.ensure_control_plane_schema()
-    if pool is None:
-        return False
-    resolved_tenant_id = str(tenant_id or "").strip()
-    resolved_workspace_id = str(workspace_id or "").strip()
-    row = await control_plane_repository.rls_fetchrow(
-        pool,
-        "SELECT id FROM workspace_agent_installs WHERE id = $1 AND tenant_id = $2 AND workspace_id = $3",
-        str(agent_id or "").strip(),
-        resolved_tenant_id,
-        resolved_workspace_id,
-        tenant_id=resolved_tenant_id,
-        workspace_id=resolved_workspace_id,
-    )
-    return row is not None
-
-
 async def agent_project_id(
     *, tenant_id: str, workspace_id: str, agent_id: str,
 ) -> Optional[str]:
@@ -1881,8 +1861,30 @@ async def assign_task(
     task = await get_task(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, task_id=resolved_task_id)
     if task is None:
         raise ValueError(f"Task {resolved_task_id} not found in this workspace.")
-    if not await _agent_install_exists(tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, agent_id=resolved_agent_id):
+    # CLAUDE.md, in capitals: "AN AGENT BELONGS TO ITS PROJECT AND WORKS
+    # ONLY THERE." agent_project_id resolves BOTH existence and home project
+    # in one call -- reusing the exact same project-scoped resolution
+    # _enforce_agent_project_access (routes_fleet.py) already uses to gate a
+    # CALLER's access to an agent, rather than inventing a second bespoke
+    # existence check here. A mismatch is a data-integrity refusal, not a
+    # permission one, which is why it belongs in the service function
+    # itself: fleet_assign_task (HTTP) and any future tool/mention-resolver
+    # caller must be refused identically, not just the one route someone
+    # remembered to gate. Found and closed 2026-08-13 -- a cross-project
+    # assignment silently succeeded, fired a real wakeup, and the task's own
+    # detail page then showed "Unassigned" because it only ever looks up an
+    # assignee within the task's own project's agent list.
+    agent_home_project_id = await agent_project_id(
+        tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, agent_id=resolved_agent_id,
+    )
+    if agent_home_project_id is None:
         raise ValueError(f"Agent {resolved_agent_id} not found in this workspace.")
+    task_project_id = str(task.get("project_id") or "").strip()
+    if agent_home_project_id != task_project_id:
+        raise ValueError(
+            f"Agent {resolved_agent_id} belongs to a different project than task {resolved_task_id} — "
+            "an agent can only be assigned tasks in its own project."
+        )
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         raise control_plane_repository.runtime_db.DurableRuntimeConfigurationError(
@@ -1941,12 +1943,14 @@ async def assign_task(
 async def _workspace_user_exists(
     *, tenant_id: str, workspace_id: str, user_id: str,
 ) -> bool:
-    """The human counterpart of _agent_install_exists just above -- is this
-    user an ACTIVE member of this workspace, not merely a row in `users`
-    somewhere. Mirrors that function's shape exactly (same tenant/workspace
-    scoping, same "row exists" return) so assign_task_to_user's validation
-    reads as the same kind of check assign_task already makes, just against
-    workspace_memberships instead of workspace_agent_installs."""
+    """The human counterpart of agent_project_id's existence check in
+    assign_task above -- is this user an ACTIVE member of this workspace,
+    not merely a row in `users` somewhere. Note this checks WORKSPACE
+    membership only, not project membership -- assign_task's own
+    project-match check (2026-08-13) is agent-specific, since an agent
+    belongs to exactly one project by construction while a human can
+    legitimately belong to several; a human assignee's own project access
+    is enforced separately, by the caller, via enforce_project_access."""
     pool = await control_plane_repository.ensure_control_plane_schema()
     if pool is None:
         return False
