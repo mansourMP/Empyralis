@@ -193,7 +193,21 @@ def test_cloud_init_script_runs_agent_computer_installer():
     script = vps.cloud_init_script("pair_test", api_url="https://api.example.com/api")
 
     assert script.startswith("#cloud-config")
-    assert "INSTALLER_URL='https://empyralis.ai/install/agent-computer.sh'" in script
+    # The installer URL now carries a content-hash cache buster (?v=<sha12>).
+    # Asserted as base + buster rather than a fixed literal, because the hash
+    # legitimately changes every time the installer script is edited — pinning
+    # the full string would turn every installer edit into a failing test.
+    #
+    # This is a STRONGER assertion than the old exact-match, not a weaker one:
+    # it additionally requires the buster to be present. It exists because
+    # Cloudflare was serving a stale cached copy of that bare URL on
+    # production — 28,278 bytes with no Docker and no OpenClaw, against the
+    # origin's correct 46,153 — so every Agent Computer ever provisioned ran
+    # the wrong installer. See agent_installer_url()'s own docstring.
+    assert "INSTALLER_URL='https://empyralis.ai/install/agent-computer.sh?v=" in script
+    installer_line = next(line for line in script.splitlines() if "INSTALLER_URL='" in line)
+    buster = installer_line.split("?v=", 1)[1].rstrip("'").strip()
+    assert len(buster) == 12 and all(c in "0123456789abcdef" for c in buster), installer_line
     assert "PAIRING_TOKEN='pair_test'" in script
     assert "API_URL='https://api.example.com/api'" in script
     # MUST be bash, not sh/sudo -E: /bin/sh is dash on Ubuntu, which aborts

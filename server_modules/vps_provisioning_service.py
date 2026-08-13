@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -49,6 +50,11 @@ except Exception:  # pragma: no cover - optional dependency at runtime
     class _NoCredentialsError(Exception):
         pass
 
+
+# Repo root, for reading the installer this cloud actually serves — see
+# agent_installer_url(). Resolved once at import so a later cwd change
+# cannot make the hash silently unreadable.
+_REPO_ROOT_FOR_INSTALLER = Path(__file__).resolve().parents[1]
 
 AGENT_INSTALLER_URL_ENV = "EMPYRALIS_AGENT_INSTALLER_URL"
 LEGACY_AGENT_INSTALLER_URL_ENV = "EMPYRALIS_AGENT_COMPUTER_INSTALL_URL"
@@ -1803,12 +1809,60 @@ def _digitalocean_baked_image_id(region: str) -> Optional[str]:
     return image_id
 
 
+def _agent_installer_cache_buster() -> str:
+    """Short content hash of the installer this cloud is actually serving.
+
+    Empty string if the script cannot be read — a missing buster must never
+    stop a provision, it just means the URL is as cacheable as it was before.
+    """
+    try:
+        source = _REPO_ROOT_FOR_INSTALLER / "scripts" / "install-agent-computer.sh"
+        return hashlib.sha256(source.read_bytes()).hexdigest()[:12]
+    except Exception:  # noqa: BLE001 -- see docstring; never load-bearing
+        return ""
+
+
 def agent_installer_url() -> str:
-    return (
-        os.getenv(AGENT_INSTALLER_URL_ENV)
-        or os.getenv(LEGACY_AGENT_INSTALLER_URL_ENV)
-        or DEFAULT_AGENT_INSTALLER_URL
+    """The URL a brand-new box curls to install itself.
+
+    CACHE-BUSTED BY CONTENT HASH, and that is not premature optimisation --
+    it is a live incident fix (2026-08-13). Measured on production, the same
+    URL returned two different scripts:
+
+        origin  127.0.0.1:3000   46,153 bytes   docker ✓  openclaw ✓
+        public  empyralis.ai     28,278 bytes   docker ✗  openclaw ✗
+
+    Cloudflare fronts this domain and was serving a stale cached copy of
+    `/install/agent-computer.sh` -- ignoring the route's own
+    `cache-control: no-store`, which a "Cache Everything" edge rule does by
+    design. The consequence was not cosmetic: EVERY Agent Computer this
+    product has provisioned ran an installer with no Docker and no OpenClaw
+    in it, so no real box has tool sandboxing or channels. The origin was
+    correct the whole time and nothing anywhere reported a difference,
+    because the cloud never reads back what the box downloaded.
+
+    Appending `?v=<sha256[:12]>` fixes it independently of any CDN setting:
+    Cloudflare caches per FULL URL including query string, so a changed
+    script is a changed URL is a guaranteed cache miss. It also makes the
+    staleness self-healing forever rather than one purge that works until
+    the next edit.
+
+    An explicitly configured EMPYRALIS_AGENT_INSTALLER_URL is passed through
+    UNTOUCHED -- an operator pointing at their own artifact host has their
+    own cache story, and appending a query string to someone else's URL is
+    not ours to do. Only the default gets the buster.
+    """
+    configured = (
+        os.getenv(AGENT_INSTALLER_URL_ENV) or os.getenv(LEGACY_AGENT_INSTALLER_URL_ENV) or ""
     ).strip()
+    if configured:
+        return configured
+
+    base = DEFAULT_AGENT_INSTALLER_URL.strip()
+    version = _agent_installer_cache_buster()
+    if not version:
+        return base
+    return f"{base}{'&' if '?' in base else '?'}v={version}"
 
 
 def provision_vps(
