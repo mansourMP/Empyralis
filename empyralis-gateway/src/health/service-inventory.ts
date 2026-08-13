@@ -21,6 +21,7 @@ import {
 } from "../runtime/desktop-permissions";
 import { execFileWithTimeout } from "../shell/exec-file-with-timeout";
 import { resolveCommandPath } from "../shell/user-install-dirs";
+import { checkOpenClawVersion, OPENCLAW_PINNED_VERSION } from "../openclaw/provisioning/openclaw-version";
 
 export type PassiveServiceStatus = "ready" | "degraded" | "offline" | "missing" | "unknown" | "blocked";
 
@@ -101,6 +102,21 @@ export interface PassiveInventoryCollectorOptions {
    *  the CLIs, this can't change mid-process, so it's safe to copy straight
    *  onto every snapshot, cached or fresh, without affecting cache validity. */
   shellFullAccessLocallyEnabled?: boolean;
+  /** The channel transport's own `--profile <name>` (config.ts's
+   *  openclawProfile — every box defaults to "empyralis", never blank in
+   *  production). Passed through rather than probed here because
+   *  openclaw-cli.ts's own contract is that a blank profile throws (an
+   *  unprofiled invocation would target the OPERATOR's real `~/.openclaw`
+   *  instance, not the customer's isolated one) — so an empty/omitted value
+   *  means "do not probe OpenClaw at all" rather than "probe with no
+   *  profile". Never part of the cache key, for the same reason
+   *  shellFullAccessLocallyEnabled isn't: a per-process config value that
+   *  cannot change mid-process. */
+  openclawProfile?: string;
+  /** config.ts's openclawBinaryPath (EMPYRALIS_OPENCLAW_BINARY) — checked
+   *  before the bare "openclaw" PATH lookup, same precedence every other CLI
+   *  probe in this file gives its own *_CLI_PATH override. */
+  openclawBinaryPath?: string;
   deps?: PassiveInventoryCollectorDeps;
 }
 
@@ -118,6 +134,23 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 1_500;
 // connected" and had no way to reach the real cause. A capability gate is
 // not latency-sensitive; being slow here is fine, being wrong is not.
 const DOCKER_COMMAND_TIMEOUT_MS = 10_000;
+// openclaw --version is a cold-started Node CLI, same family as the
+// codex/claude/grok/cursor probes below, but on a MISSING install this is the
+// probe that has to distinguish "not on PATH" (instant) from "on PATH but the
+// transport's own bundled Node is slow to boot" (a few seconds) — a shorter
+// budget here would misreport a slow-but-real boot as "unreadable version",
+// which openclaw-version.ts's checkOpenClawVersion() treats as a genuine
+// installed-but-degraded state rather than "probe inconclusive". Bounded
+// like every timeout in this file, and off the heartbeat's own critical path
+// (see refreshPassiveInventorySnapshot in cloud/ws-client.ts) so this never
+// slows an actual heartbeat send.
+const OPENCLAW_VERSION_TIMEOUT_MS = 6_000;
+// `channels list --all --json` alone (no `config get`) — the same read
+// openclaw-channel-setup.ts's readChannelList() makes, at a smaller budget
+// than that capability's own 30s: this passive probe only needs the
+// installed-plugin COUNT, never blocks a customer action, and is one of
+// several probes firing concurrently every cache cycle.
+const OPENCLAW_CHANNELS_LIST_TIMEOUT_MS = 15_000;
 const PASSIVE_INVENTORY_CACHE_TTL_MS = 60_000;
 const OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags";
 const MACOS_SYSTEM_PROFILER = "/usr/sbin/system_profiler";
@@ -880,6 +913,232 @@ async function probeGpu(
   }, checkedAt);
 }
 
+// ── OpenClaw / channel transport ─────────────────────────────────────────
+//
+// Both probes below follow the SAME commandExists/runCommand DI every other
+// probe in this file uses, deliberately NOT the OpenClawCli class
+// (openclaw/provisioning/openclaw-cli.ts) — that class owns its own exec
+// path and does not accept this file's deps.commandExists/deps.runCommand
+// seam, so reusing it here would make this file's probes bypass test
+// mocking and spawn a real child process during unit tests. checkOpenClawVersion
+// / parseOpenClawVersion (openclaw-version.ts) ARE reused: they are pure,
+// input -> output functions with no process access, so there is one place
+// that decides "does this observed string satisfy the pin", not two.
+//
+// This is the observed-not-declared half of the box report the incident
+// (empyralis.ai/install/agent-computer.sh silently serving a stale,
+// zero-Docker, zero-OpenClaw installer to every real customer box) exists
+// to close: the cloud never asked the box what it actually ended up with,
+// so a broken install and a healthy one looked identical from the product.
+
+interface OpenClawChannelListSummary {
+  installedCount: number;
+  totalCount: number;
+  installedChannelIds: string[];
+}
+
+/** Parses `channels list --all --json`'s `{"chat": {"<id>": {"installed":
+ *  bool, ...}, ...}}` shape (same shape openclaw-channel-setup.ts's
+ *  readChannelList() reads) into an installed/total count. Returns undefined
+ *  on anything that isn't that shape — a probe that CANNOT be read is
+ *  reported as "we could not ask", never coerced into "zero installed". */
+function parseOpenClawChannelListSummary(stdout: string): OpenClawChannelListSummary | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  const chat = (parsed as { chat?: unknown } | null)?.chat;
+  if (!chat || typeof chat !== "object") {
+    return undefined;
+  }
+  const entries = Object.entries(chat as Record<string, unknown>);
+  const installedChannelIds = entries
+    .filter(([, entry]) => Boolean(entry && typeof entry === "object" && (entry as { installed?: unknown }).installed === true))
+    .map(([id]) => id)
+    .sort();
+  return {
+    installedCount: installedChannelIds.length,
+    totalCount: entries.length,
+    installedChannelIds,
+  };
+}
+
+/** Resolves the openclaw binary the same way every other CLI probe in this
+ *  file resolves its own: an explicit override first (here, config.ts's
+ *  openclawBinaryPath, threaded in as options.openclawBinaryPath), then the
+ *  bare command on PATH. */
+function resolveOpenClawCommand(
+  openclawBinaryPath: string | undefined,
+  commandExists: (command: string) => string | null,
+): string | null {
+  const candidates = [String(openclawBinaryPath || "").trim(), "openclaw"].filter(Boolean);
+  return candidates.map(commandExists).find(Boolean) || null;
+}
+
+/** Installed + version-against-pin, as an observed service_inventory item —
+ *  the same passive family as probeDocker/probeClaudeCli above, so it goes
+ *  through the identical generic sanitizer/cache/heartbeat plumbing with no
+ *  backend change required (gateway_inventory_service.py's
+ *  sanitize_service_inventory has no id allowlist).
+ *
+ *  Undefined `openclawProfile` (no per-process config, or a caller that
+ *  never opted in) means "do not probe" rather than "probe with no
+ *  profile" — see the option's own doc comment for why an unprofiled
+ *  invocation is unsafe, not just untested. */
+async function probeOpenClaw(
+  checkedAt: string,
+  openclawProfile: string | undefined,
+  openclawBinaryPath: string | undefined,
+  commandExists: (command: string) => string | null,
+  runCommand: (command: string, args: string[], timeoutMs: number) => Promise<CommandResult>,
+): Promise<PassiveServiceInventoryItem | null> {
+  const profile = String(openclawProfile || "").trim();
+  if (!profile) {
+    return null;
+  }
+  const command = resolveOpenClawCommand(openclawBinaryPath, commandExists);
+  if (!command) {
+    const check = checkOpenClawVersion(undefined);
+    return makeItem({
+      id: "openclaw",
+      label: "Channel transport",
+      kind: "channel_transport",
+      status: "missing",
+      detected: false,
+      check: "openclaw --version",
+      summary: check.detail || "The channel transport is not installed on this computer.",
+      metadata: { installed: false, pinned_version: OPENCLAW_PINNED_VERSION, version_match: false, code: check.code },
+    }, checkedAt);
+  }
+  const result = await runCommand(command, ["--profile", profile, "--version"], OPENCLAW_VERSION_TIMEOUT_MS);
+  // Genuinely could not ask (the binary exists but the invocation itself
+  // failed to complete) — distinct from "asked, and the answer says it is
+  // not installed / not the pinned build". A wedged or timed-out probe must
+  // never present as "missing": that is the exact "cannot be probed is not
+  // the same as absent" collapse this report exists to avoid.
+  if (result.timedOut) {
+    return makeItem({
+      id: "openclaw",
+      label: "Channel transport",
+      kind: "channel_transport",
+      status: "unknown",
+      detected: true,
+      check: "openclaw --version",
+      summary: "Could not ask this computer whether the channel transport is ready in time.",
+      metadata: { installed: undefined, pinned_version: OPENCLAW_PINNED_VERSION, version_match: undefined, probe_timed_out: true },
+    }, checkedAt);
+  }
+  const rawOutput = result.exitCode === 0 ? `${result.stdout}\n${result.stderr}`.trim() : undefined;
+  const check = checkOpenClawVersion(rawOutput);
+  const status: PassiveServiceStatus = check.ok ? "ready" : (check.code === "openclaw_not_installed" ? "missing" : "degraded");
+  return makeItem({
+    id: "openclaw",
+    label: "Channel transport",
+    kind: "channel_transport",
+    status,
+    detected: status !== "missing",
+    check: "openclaw --version",
+    summary: check.ok
+      ? `Channel transport is installed at the required version (${check.observed}).`
+      : (check.detail || "Channel transport version could not be confirmed."),
+    metadata: {
+      installed: status !== "missing",
+      observed_version: check.observed,
+      pinned_version: OPENCLAW_PINNED_VERSION,
+      version_match: check.ok,
+      code: check.code,
+    },
+  }, checkedAt);
+}
+
+/** Which channel plugins are actually installed, as its own observed item —
+ *  separate from probeOpenClaw() above because "the transport itself is
+ *  absent" and "the transport is present with zero channel plugins" are
+ *  different facts with different remediation, and folding a count into the
+ *  other item's metadata would hide the second one behind the first. Only
+ *  meaningful once the transport is confirmed present: an absent transport
+ *  makes this a known "missing" fact (there is nothing to enumerate), not an
+ *  unknown one. */
+async function probeOpenClawChannelPlugins(
+  checkedAt: string,
+  openclawItem: PassiveServiceInventoryItem | null,
+  openclawProfile: string | undefined,
+  openclawBinaryPath: string | undefined,
+  commandExists: (command: string) => string | null,
+  runCommand: (command: string, args: string[], timeoutMs: number) => Promise<CommandResult>,
+): Promise<PassiveServiceInventoryItem | null> {
+  const profile = String(openclawProfile || "").trim();
+  if (!profile || !openclawItem) {
+    return null;
+  }
+  if (openclawItem.status === "missing") {
+    return makeItem({
+      id: "openclaw_channel_plugins",
+      label: "Channel plugins",
+      kind: "channel_transport",
+      status: "missing",
+      detected: false,
+      check: "openclaw channels list --all --json",
+      summary: "No channel plugins are installed: the channel transport itself is not installed.",
+      metadata: { installed_count: 0, total_count: 0 },
+    }, checkedAt);
+  }
+  const command = resolveOpenClawCommand(openclawBinaryPath, commandExists);
+  if (!command) {
+    // Transport reported ready/degraded a moment ago but the binary is gone
+    // now (race, or a deps mock that only wired the version call) — report
+    // what we can rather than assume.
+    return makeItem({
+      id: "openclaw_channel_plugins",
+      label: "Channel plugins",
+      kind: "channel_transport",
+      status: "unknown",
+      detected: false,
+      check: "openclaw channels list --all --json",
+      summary: "Could not ask this computer which channel plugins are installed.",
+      metadata: { installed_count: undefined, total_count: undefined },
+    }, checkedAt);
+  }
+  const result = await runCommand(
+    command,
+    ["--profile", profile, "channels", "list", "--all", "--json"],
+    OPENCLAW_CHANNELS_LIST_TIMEOUT_MS,
+  );
+  const summary = result.exitCode === 0 && !result.timedOut ? parseOpenClawChannelListSummary(result.stdout) : undefined;
+  if (!summary) {
+    return makeItem({
+      id: "openclaw_channel_plugins",
+      label: "Channel plugins",
+      kind: "channel_transport",
+      status: "unknown",
+      detected: false,
+      check: "openclaw channels list --all --json",
+      summary: result.timedOut
+        ? "Could not ask this computer which channel plugins are installed in time."
+        : truncate(result.stderr || result.stdout || `channels list exited with ${result.exitCode}.`),
+      metadata: { installed_count: undefined, total_count: undefined, timed_out: Boolean(result.timedOut) },
+    }, checkedAt);
+  }
+  return makeItem({
+    id: "openclaw_channel_plugins",
+    label: "Channel plugins",
+    kind: "channel_transport",
+    status: summary.installedCount > 0 ? "ready" : "degraded",
+    detected: summary.installedCount > 0,
+    check: "openclaw channels list --all --json",
+    summary: summary.installedCount > 0
+      ? `${summary.installedCount} of ${summary.totalCount} channel plugin(s) installed.`
+      : "The channel transport is installed but no channel plugins are installed yet.",
+    metadata: {
+      installed_count: summary.installedCount,
+      total_count: summary.totalCount,
+      installed_channel_ids: summary.installedChannelIds.slice(0, 20),
+    },
+  }, checkedAt);
+}
+
 export async function collectPassiveInventorySnapshot(
   options: PassiveInventoryCollectorOptions = {},
 ): Promise<PassiveInventorySnapshot> {
@@ -903,7 +1162,17 @@ export async function collectPassiveInventorySnapshot(
   const httpGetJson = deps.httpGetJson ?? defaultHttpGetJson;
   const nativeRuntime = buildNativeRuntimeSnapshot(deps);
 
-  const serviceInventory = await Promise.all([
+  const [
+    postgresItem,
+    dockerItemResult,
+    ollamaItemResult,
+    codexCliItemResult,
+    claudeCliItemResult,
+    grokCliItemResult,
+    cursorCliItemResult,
+    gpuItem,
+    openclawItem,
+  ] = await Promise.all([
     probePostgres(checkedAt, commandExists, runCommand),
     probeDocker(checkedAt, commandExists, runCommand),
     probeOllama(checkedAt, httpGetJson),
@@ -912,7 +1181,32 @@ export async function collectPassiveInventorySnapshot(
     probeGrokBuildCli(checkedAt, env, commandExists, runCommand),
     probeCursorCli(checkedAt, env, commandExists, runCommand),
     probeGpu(checkedAt, platform, commandExists, runCommand),
+    probeOpenClaw(checkedAt, options.openclawProfile, options.openclawBinaryPath, commandExists, runCommand),
   ]);
+  // Depends on openclawItem's just-computed result (absent transport short-
+  // circuits to a known "missing" fact rather than a second probe), so it
+  // cannot join the Promise.all above — still concurrent with nothing else,
+  // but that's fine: it's off the heartbeat's own critical path either way.
+  const openclawChannelPluginsItem = await probeOpenClawChannelPlugins(
+    checkedAt,
+    openclawItem,
+    options.openclawProfile,
+    options.openclawBinaryPath,
+    commandExists,
+    runCommand,
+  );
+  const serviceInventory: PassiveServiceInventoryItem[] = [
+    postgresItem,
+    dockerItemResult,
+    ollamaItemResult,
+    codexCliItemResult,
+    claudeCliItemResult,
+    grokCliItemResult,
+    cursorCliItemResult,
+    gpuItem,
+    ...(openclawItem ? [openclawItem] : []),
+    ...(openclawChannelPluginsItem ? [openclawChannelPluginsItem] : []),
+  ];
   // Feed the just-computed Docker probe result into the shell_sandbox
   // permission gate (runtime/desktop-permissions.ts) — same probe, no
   // separate check, no extra race between this and capability readiness.

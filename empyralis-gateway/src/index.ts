@@ -326,7 +326,10 @@ async function main(): Promise<void> {
   // after this process already started), mutates runtimeMetadata below IN
   // PLACE so the next heartbeat re-advertises it without a restart. See that
   // method's doc comment for the full mechanism.
-  await collectPassiveInventorySnapshot({});
+  await collectPassiveInventorySnapshot({
+    openclawProfile: config.openclawProfile,
+    openclawBinaryPath: config.openclawBinaryPath,
+  });
   // BYO-brain Phase 2: on-box LLM runtime. Its llm.generate capability is only
   // advertised when the llm_runtime permission reads granted — i.e. when the
   // Ollama probe in collectPassiveInventorySnapshot() above confirmed a local
