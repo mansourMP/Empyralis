@@ -964,14 +964,14 @@ async def create_workspace_invite_route(
     tenant_id = await _control_plane_tenant_id(current_user, resolved_workspace_id, user)
 
     clean_project_id = str(body.project_id or "").strip() or None
+    from server_modules import projects_repository
+
     if clean_project_id:
         # Validate up front, scoped to THIS workspace's own tenant_id -- an
         # owner can only tag an invite with a project that actually lives in
         # the workspace they're inviting into. get_project's WHERE clause is
         # tenant_id AND workspace_id AND id, so a cross-tenant/cross-workspace
         # project_id returns None here rather than silently getting stored.
-        from server_modules import projects_repository
-
         target_project = await projects_repository.get_project(
             tenant_id=tenant_id,
             workspace_id=resolved_workspace_id,
@@ -979,6 +979,34 @@ async def create_workspace_invite_route(
         )
         if target_project is None:
             raise HTTPException(status_code=400, detail="Project not found in this workspace.")
+    elif auth_module.RBAC_ROLE_ORDER[requested_role] < auth_module.RBAC_ROLE_ORDER["owner"]:
+        # MAN-335: a project-less invite for anyone below owner is not a
+        # smaller grant, it is NO grant — grant_invite_project_access no-ops
+        # without a project_id (see its own docstring), and
+        # _visible_project_ids strictly filters a non-owner to their
+        # explicit project_memberships rows, which start (and, before this
+        # fix, stayed) empty. An owner invite needs no project_id: owners
+        # bypass the per-project filter entirely (auth.enforce_project_
+        # access's 2026-07-28 ruling), so requiring one here would be
+        # friction with nothing behind it.
+        #
+        # ensure_default_project (create-if-absent), not a read-only lookup
+        # that refuses when none exists — this is a deliberate, active,
+        # owner-initiated action (unlike routes_fleet._visible_project_ids's
+        # own passive self-heal, which stays read-only because inventing a
+        # project as a side effect of someone merely loading their list
+        # would be surprising there). Creating one here matches the existing
+        # convention project deletion's own fallback already uses
+        # (projects_repository.delete_project's "reassign to the default,
+        # creating it if this was the last project" branch) — every real
+        # workspace ends up with a "General" project one way or another, so
+        # an owner inviting a teammate should never be blocked by "there
+        # happens to be no project yet." The field stays overridable by the
+        # caller (a project-scoped invite still names its own).
+        default_project = await projects_repository.ensure_default_project(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id,
+        )
+        clean_project_id = str((default_project or {}).get("id") or "").strip() or None
 
     try:
         invite = await control_plane_repository.create_workspace_invite(

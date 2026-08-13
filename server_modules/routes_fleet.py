@@ -123,6 +123,24 @@ async def _visible_project_ids(
     ids = await projects.list_member_project_ids(
         tenant_id=tenant_id, workspace_id=resolved_workspace_id, user_id=user_id,
     )
+    if not ids:
+        # MAN-335: a workspace invite accepted before this fix granted
+        # membership and NOTHING ELSE — this member's own project list has
+        # been permanently empty since the day they accepted, with no
+        # control anywhere that could fix it (nothing re-runs invite
+        # acceptance for someone already accepted). Self-heals here, the
+        # exact place the empty result is computed, on this member's own
+        # next request — see backfill_default_project_access_if_never_
+        # granted's docstring for why a durable per-member marker (not
+        # "currently zero") is what keeps this from ever undoing a
+        # deliberate later removal from every one of their projects.
+        healed = await projects.backfill_default_project_access_if_never_granted(
+            tenant_id=tenant_id, workspace_id=resolved_workspace_id, user_id=user_id,
+        )
+        if healed:
+            ids = await projects.list_member_project_ids(
+                tenant_id=tenant_id, workspace_id=resolved_workspace_id, user_id=user_id,
+            )
     return set(ids)
 
 
