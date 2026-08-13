@@ -1174,6 +1174,30 @@ def translate_sdk_message(
                 )
                 if query_event is not None:
                     events.append(query_event)
+            # browser.action: the SAME data direct_chat_generation_service.py
+            # (the legacy engine) already emits this event type FROM — both
+            # engines call the identical build_direct_tool_trace_metadata,
+            # which has computed a browser_action dict (action/target_summary/
+            # url) for every "browser"/"hardware" connector call all along.
+            # The SDK bridge simply never read it, so a browser/hardware tool
+            # call here rendered only as a generic "tool.started" row (no
+            # URL, no action-specific detail) — the richer WorkTab.tsx
+            # rendering (Globe icon, "Browser: <action>", the URL) existed
+            # and had no producer on this engine. Mirrors that emission
+            # shape exactly so the two engines render identically.
+            browser_action_meta = trace_meta.get("browser_action")
+            if isinstance(browser_action_meta, dict):
+                browser_event = _envelope(
+                    "browser.action",
+                    {
+                        "action": str(browser_action_meta.get("action") or action_id or "").strip(),
+                        "target_summary": str(browser_action_meta.get("target_summary") or "").strip(),
+                        "url": browser_action_meta.get("url"),
+                    },
+                    tool_call_id=tool_use_id,
+                )
+                if browser_event is not None:
+                    events.append(browser_event)
         return events
 
     if cls_name == "UserMessage":

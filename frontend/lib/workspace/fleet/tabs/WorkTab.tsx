@@ -286,7 +286,33 @@ type ActivityRow = {
   channelIconUrl?: string;
   spin?: boolean;
   pulseDot?: boolean;
+  /** Which machine actually ran this — direct_tool_execution_service.
+   *  _execution_environment_for_direct_tool's own coarse bucket, carried
+   *  on tool.started/tool.result (claude_agent_sdk_bridge.py) and rendered
+   *  here for the first time — it was computed server-side and simply
+   *  never reached a screen. Deliberately the coarse bucket only, never a
+   *  hostname or VPS id (a disclosure decision, not this pass's call). */
+  location?: string;
 };
+
+// Human labels for direct_tool_execution_service._execution_environment_
+// for_direct_tool's coarse buckets (hardware_runtime_target_resolver.
+// execution_environment_for_runtime_target's own return values) — never
+// the raw enum string, per this surface's own "a professional tool
+// labels" rule. "cloud_provider" (the generic default — a hosted-API tool
+// with no real machine underneath it, e.g. a web search) renders no tag
+// at all rather than a label that would say nothing useful.
+const EXECUTION_ENVIRONMENT_LABELS: Record<string, string> = {
+  local_gateway: "Your computer",
+  cloud_computer: "Cloud computer",
+  cloud_browser: "Cloud browser",
+  self_hosted: "Self-hosted server",
+};
+
+function executionEnvironmentLabel(value: unknown): string | undefined {
+  const token = String(value || "").trim();
+  return EXECUTION_ENVIRONMENT_LABELS[token];
+}
 
 // Internal-only plumbing event types never rendered as their own row —
 // trace.started/routed carry routing metadata, not user-facing activity;
@@ -369,7 +395,7 @@ function buildActivityRows(events: TraceEvent[]): ActivityRow[] {
       const detail = et === "search.query" ? String(data.query || "").slice(0, 120) : extractPreviewText(data.args_preview);
       const key = `tool:${e.tool_call_id || e.id}`;
       indexByKey.set(key, rows.length);
-      rows.push({ id: key, ts: e.ts || null, tone: "accent", icon, text: label, detail: detail || undefined });
+      rows.push({ id: key, ts: e.ts || null, tone: "accent", icon, text: label, detail: detail || undefined, location: executionEnvironmentLabel(data.execution_environment) });
       continue;
     }
     if (et === "tool.result" || et === "search.results") {
@@ -386,10 +412,45 @@ function buildActivityRows(events: TraceEvent[]): ActivityRow[] {
           ...rows[idx],
           tone: failed ? "danger" : rows[idx].tone,
           detail: (data.summary && String(data.summary).slice(0, 160)) || rows[idx].detail,
+          location: rows[idx].location || executionEnvironmentLabel(data.execution_environment),
         };
       } else {
         const { icon, label } = toolIconFor(String(data.tool_name || ""));
-        rows.push({ id: e.id, ts: e.ts || null, tone: failed ? "danger" : "accent", icon, text: label, detail: data.summary ? String(data.summary).slice(0, 160) : undefined });
+        rows.push({ id: e.id, ts: e.ts || null, tone: failed ? "danger" : "accent", icon, text: label, detail: data.summary ? String(data.summary).slice(0, 160) : undefined, location: executionEnvironmentLabel(data.execution_environment) });
+      }
+      continue;
+    }
+
+    if (et === "subagent.invoked" || et === "skill.invoked") {
+      // SDK-engine meta-tools (claude_agent_sdk_bridge._META_TOOL_EVENT_
+      // TYPES — the CLI's own deliberately-reopened Agent/Skill built-ins,
+      // never a registered Empyralis tool). Both halves ride under this
+      // SAME event_type, distinguished by data.phase — the identical shape
+      // AgentChat.tsx's live rendering already reads (see that file's own
+      // "subagent.invoked" || "skill.invoked" branch). Before this branch
+      // existed, this activity rendered live during the turn and then
+      // vanished on reload/history view — WorkTab had no case for it at
+      // all, unlike every other event type here.
+      const key = `tool:${e.tool_call_id || e.id}`;
+      const isSkill = et === "skill.invoked";
+      const label = isSkill ? "Running skill" : "Delegating to a subagent";
+      if (String(data.phase || "") === "result") {
+        const idx = indexByKey.get(key);
+        const failed = String(data.status || "").toLowerCase() === "failed";
+        if (idx !== undefined) {
+          rows[idx] = {
+            ...rows[idx],
+            tone: failed ? "danger" : rows[idx].tone,
+            detail: (data.summary && String(data.summary).slice(0, 160)) || rows[idx].detail,
+          };
+        } else {
+          rows.push({ id: e.id, ts: e.ts || null, tone: failed ? "danger" : "accent", icon: isSkill ? Wrench : Users, text: label, detail: data.summary ? String(data.summary).slice(0, 160) : undefined });
+        }
+      } else {
+        const argsPreview = (data.args_preview && typeof data.args_preview === "object" ? data.args_preview : {}) as Record<string, unknown>;
+        const detail = String(argsPreview.skill ?? argsPreview.name ?? argsPreview.subagent_type ?? "").trim();
+        indexByKey.set(key, rows.length);
+        rows.push({ id: key, ts: e.ts || null, tone: "accent", icon: isSkill ? Wrench : Users, text: label, detail: detail || undefined });
       }
       continue;
     }
@@ -628,6 +689,7 @@ function ActivityRowView({ row, delaySeconds }: { row: ActivityRow; delaySeconds
       <span className="fleet-work-activity-text">
         {row.text}
         {row.detail && <span className="fleet-work-activity-detail"> · `{row.detail}`</span>}
+        {row.location && <span className="fleet-work-activity-location"> · {row.location}</span>}
       </span>
     </div>
   );

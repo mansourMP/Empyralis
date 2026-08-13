@@ -679,6 +679,50 @@ class TranslateAssistantMessageTests(unittest.TestCase):
         self.assertEqual(state.tool_use_names["toolu_1"], "web__search")
         self.assertEqual(state.tool_use_inputs["toolu_1"], {"query": "empyralis"})
 
+    def test_browser_tool_use_emits_browser_action_event(self):
+        """The SDK bridge and the legacy engine call the SAME
+        build_direct_tool_trace_metadata, which has always computed a
+        browser_action dict (action/target_summary/url) for a "browser"
+        connector call — the bridge simply never read it before this fix,
+        so a browser tool call rendered as a generic tool.started row with
+        no URL and no browser-specific detail. This pins the SAME shape
+        direct_chat_generation_service.py's own browser.action emission
+        uses, so both engines render identically."""
+        state = claude_agent_sdk_bridge.TranslationState()
+        message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(
+                id="toolu_browser_1", name="browser__navigate", input={"url": "https://example.com"},
+            )],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        trace_events = [e for e in events if e.get("type") == "trace"]
+        event_types = [e["payload"]["event_type"] for e in trace_events]
+        self.assertIn("browser.action", event_types)
+        browser_event = next(e["payload"] for e in trace_events if e["payload"]["event_type"] == "browser.action")
+        self.assertEqual(browser_event["tool_call_id"], "toolu_browser_1")
+        self.assertEqual(browser_event["data"]["action"], "navigate")
+        self.assertEqual(browser_event["data"]["url"], "https://example.com")
+
+    def test_non_browser_tool_use_never_emits_browser_action_event(self):
+        """A tool call with no browser_action data (build_direct_tool_
+        trace_metadata only populates it for the "browser"/"hardware"
+        connectors) must never produce a browser.action event — regression
+        guard against a False-y dict (e.g. {}) being treated as present."""
+        state = claude_agent_sdk_bridge.TranslationState()
+        message = sdk_types.AssistantMessage(
+            content=[sdk_types.ToolUseBlock(id="toolu_mem_1", name="memory_search", input={"query": "x"})],
+            model="claude-sonnet-4-5",
+        )
+        events = claude_agent_sdk_bridge.translate_sdk_message(
+            message, state=state, trace_context=_trace_context(),
+        )
+        trace_events = [e for e in events if e.get("type") == "trace"]
+        event_types = [e["payload"]["event_type"] for e in trace_events]
+        self.assertNotIn("browser.action", event_types)
+
     def test_mcp_prefixed_tool_name_is_stripped_before_parsing(self):
         state = claude_agent_sdk_bridge.TranslationState()
         message = sdk_types.AssistantMessage(
