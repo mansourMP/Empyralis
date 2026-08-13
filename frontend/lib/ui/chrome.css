@@ -25586,6 +25586,25 @@ body[data-theme='dark'] .sage-integration-brand__image[src*='notion.svg'] {
   text-align: left;
 }
 
+/* Operator credentials for this provider don't resolve today (see
+   vps_provisioning_service.provider_availability) — the row stays visible
+   and legible, but reads as deliberately parked rather than clickable. No
+   hover state (the parent row's :hover rule would otherwise still light up
+   around a button that cannot be pressed). */
+.cloud-vps-provider-row__button--unavailable {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.cloud-vps-provider-row__button--unavailable:hover {
+  background: transparent;
+}
+
+.cloud-vps-provider-row:has(.cloud-vps-provider-row__button--unavailable):hover {
+  border-color: var(--app-border-subtle);
+  background: var(--app-bg-panel);
+}
+
 .cloud-vps-provider-row__logo {
   display: inline-flex;
   align-items: center;

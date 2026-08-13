@@ -472,15 +472,116 @@ class PlatformDigitalOceanTokenCheckTests(unittest.TestCase):
         self.assertIsNone(result)  # advisory: nothing to append to errors[]
 
 
+class PlatformGoogleOperatorCredentialCheckTests(unittest.TestCase):
+    """2026-08-13 launch-readiness audit: Google Cloud VPS provisioning had
+    NO preflight check at all — this closes that gap, mirroring
+    PlatformDigitalOceanTokenCheckTests above. Same reason that class mocks
+    the HTTP call rather than leaving it to run for real: this is the one
+    other preflight step that makes a genuine outbound HTTPS request."""
+
+    _ALL_FOUR_ENV = {
+        "GOOGLE_CLOUD_CLIENT_ID": "client-id-test",
+        "GOOGLE_CLOUD_CLIENT_SECRET": "client-secret-test",
+        "GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL": "operator@empyralis-provisioner.iam.gserviceaccount.com",
+        "GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN": "1//operator-refresh-token-test",
+    }
+
+    def _run_check(self, *, env_overrides=None, http_return=None, http_side_effect=None, skip=False):
+        import asyncio
+
+        env = dict(self._ALL_FOUR_ENV)
+        if env_overrides:
+            env.update(env_overrides)
+        if skip:
+            env["EMPYRALIS_SKIP_PLATFORM_GOOGLE_CHECK"] = "true"
+        http = MagicMock(return_value=http_return, side_effect=http_side_effect)
+        with patch.dict(os.environ, env, clear=True), \
+             patch("server_modules.runtime_common.http_json_request", new=http):
+            with self.assertLogs(preflight.LOGGER, level="INFO") as captured:
+                asyncio.run(preflight._check_platform_google_operator_credentials())
+        return http, captured.output
+
+    def test_healthy_refresh_makes_one_token_request_and_does_not_shout(self):
+        http, logs = self._run_check(
+            http_return={"status": 200, "json": {"access_token": "ya29.fake", "expires_in": 3599}},
+        )
+        self.assertEqual(http.call_count, 1)
+        self.assertEqual(http.call_args.args[0], "https://oauth2.googleapis.com/token")
+        self.assertEqual(http.call_args.kwargs["method"], "POST")
+        payload = http.call_args.kwargs["payload"]
+        self.assertEqual(payload["grant_type"], "refresh_token")
+        self.assertEqual(payload["client_id"], "client-id-test")
+        self.assertEqual(payload["client_secret"], "client-secret-test")
+        self.assertEqual(payload["refresh_token"], "1//operator-refresh-token-test")
+        self.assertFalse([line for line in logs if line.startswith("CRITICAL")])
+        self.assertTrue([line for line in logs if "healthy" in line])
+
+    def test_rejected_refresh_token_is_reported_as_dead(self):
+        _http, logs = self._run_check(
+            http_return={"status": 400, "json": {"error": "invalid_grant", "error_description": "Token has been expired or revoked."}},
+        )
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM GOOGLE CLOUD OPERATOR CREDENTIALS DEAD", critical[0])
+
+    def test_malformed_200_with_no_access_token_is_reported_as_dead(self):
+        _http, logs = self._run_check(
+            http_return={"status": 200, "json": {}},
+        )
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM GOOGLE CLOUD OPERATOR CREDENTIALS DEAD", critical[0])
+
+    def test_transport_failure_warns_but_never_claims_the_credential_is_dead(self):
+        """Same reasoning as the DigitalOcean check's identical test: a
+        network problem is not evidence the credential itself is bad."""
+        _http, logs = self._run_check(
+            http_side_effect=OSError("connection reset"),
+        )
+        self.assertFalse([line for line in logs if line.startswith("CRITICAL")])
+        self.assertTrue([line for line in logs if "network/transport" in line])
+
+    def test_any_one_missing_env_var_makes_no_request_at_all(self):
+        """All FOUR must be present before the live call is even attempted —
+        unlike DigitalOcean's single token, a partially-configured Google
+        setup (e.g. the OAuth app but not the operator identity) must not
+        silently attempt a call that can only ever fail."""
+        for missing_key in self._ALL_FOUR_ENV:
+            with self.subTest(missing=missing_key):
+                http, logs = self._run_check(env_overrides={missing_key: ""})
+                self.assertEqual(http.call_count, 0)
+                self.assertTrue([line for line in logs if "is not configured" in line])
+                self.assertTrue([line for line in logs if missing_key in line])
+
+    def test_skip_flag_makes_no_request_at_all(self):
+        http, logs = self._run_check(skip=True)
+        self.assertEqual(http.call_count, 0)
+        self.assertTrue([line for line in logs if "skipped" in line])
+
+    def test_never_boot_blocking_even_when_dead(self):
+        """The whole point of this check: a dead credential must never
+        surface in the errors list run_preflight_checks() returns, only in
+        the logs."""
+        import asyncio
+
+        http = MagicMock(return_value={"status": 400, "json": {"error": "invalid_grant"}})
+        with patch.dict(os.environ, self._ALL_FOUR_ENV, clear=True), \
+             patch("server_modules.runtime_common.http_json_request", new=http):
+            result = asyncio.run(preflight._check_platform_google_operator_credentials())
+        self.assertIsNone(result)  # advisory: nothing to append to errors[]
+
+
 class PreflightRunnerTests(unittest.TestCase):
     """run_preflight_checks() composition. Step 6 (the advisory DeepSeek
-    balance check) and step 7 (the advisory platform DigitalOcean token
-    check) are mocked out in every test here because neither is the
+    balance check), step 7 (the advisory platform DigitalOcean token
+    check), and step 8 (the advisory platform Google Cloud operator
+    credential check) are mocked out in every test here because none is the
     subject: these assert which checks run and how their errors are
-    collected. Left unmocked, step 6 reached api.deepseek.com for real and
-    step 7 would reach api.digitalocean.com for real — see
-    PlatformCreditKeyCheckTests / PlatformDigitalOceanTokenCheckTests above
-    for their own coverage."""
+    collected. Left unmocked, step 6 reached api.deepseek.com for real,
+    step 7 would reach api.digitalocean.com for real, and step 8 would
+    reach oauth2.googleapis.com for real — see PlatformCreditKeyCheckTests /
+    PlatformDigitalOceanTokenCheckTests / PlatformGoogleOperatorCredentialCheckTests
+    above for their own coverage."""
 
     @staticmethod
     def _no_platform_credit_call():
@@ -496,6 +597,13 @@ class PreflightRunnerTests(unittest.TestCase):
             new=AsyncMock(return_value=None),
         )
 
+    @staticmethod
+    def _no_platform_google_call():
+        return patch(
+            "server_modules.preflight._check_platform_google_operator_credentials",
+            new=AsyncMock(return_value=None),
+        )
+
     def test_all_passed_returns_empty_list(self):
         """When all checks pass, errors list is empty."""
         async def _run():
@@ -506,7 +614,8 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
                  patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
                  self._no_platform_credit_call(), \
-                 self._no_platform_digitalocean_call():
+                 self._no_platform_digitalocean_call(), \
+                 self._no_platform_google_call():
                 return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
@@ -522,7 +631,8 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value="no pg")), \
                  patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
                  self._no_platform_credit_call(), \
-                 self._no_platform_digitalocean_call():
+                 self._no_platform_digitalocean_call(), \
+                 self._no_platform_google_call():
                 return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
@@ -539,7 +649,8 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
                  self._no_platform_credit_call(), \
-                 self._no_platform_digitalocean_call():
+                 self._no_platform_digitalocean_call(), \
+                 self._no_platform_google_call():
                 with patch.dict(os.environ, {"EMPYRALIS_SKIP_REDIS_CHECK": "true"}):
                     return await preflight.run_preflight_checks()
         import asyncio
@@ -552,7 +663,11 @@ class PreflightRunnerTests(unittest.TestCase):
         check itself would report CRITICAL, because that check is never
         appended to errors — only logged. This drives the REAL
         _check_platform_digitalocean_token (mocking only its HTTP call and
-        secret resolution), unlike the other tests in this class."""
+        secret resolution), unlike the other tests in this class. Step 8
+        (Google) is left to run for real too — with all four of its env
+        vars absent it takes its own early "not configured" exit and makes
+        no HTTP call, which is exactly what http.call_count == 1 below
+        proves: the DigitalOcean call is the ONLY one made."""
         resolution = MagicMock()
         resolution.value = "dop_v1_platform_test"
         http = MagicMock(return_value={"status": 401, "json": {"id": "Unauthorized"}})
@@ -566,7 +681,20 @@ class PreflightRunnerTests(unittest.TestCase):
                  self._no_platform_credit_call(), \
                  patch("server_modules.secrets_broker.resolve_hosted_provider_secret", return_value=resolution), \
                  patch("server_modules.runtime_common.http_json_request", new=http):
-                return await preflight.run_preflight_checks()
+                # Determinism regardless of the developer's own shell — same
+                # reasoning as test_provision_vps_platform_path_off_without_token
+                # in test_vps_provisioning_service.py. patch.dict restores
+                # whatever these were (set or absent) on exit even though
+                # they're deleted, not just overwritten, inside the block.
+                with patch.dict(os.environ, {}, clear=False):
+                    for key in (
+                        "GOOGLE_CLOUD_CLIENT_ID",
+                        "GOOGLE_CLOUD_CLIENT_SECRET",
+                        "GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL",
+                        "GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN",
+                    ):
+                        os.environ.pop(key, None)
+                    return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
         self.assertEqual(errors, [])
