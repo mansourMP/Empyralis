@@ -20,6 +20,7 @@ tasks-to-agents-research.md Section 4.6, steps 1-3):
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from server_modules import agent_trace_service
@@ -344,6 +345,90 @@ class ProjectTasksCrudTests(unittest.IsolatedAsyncioTestCase):
         query, args = pool.fetchrow_calls[0]
         self.assertIn("SET plan = $4::jsonb", query)
         self.assertIn('"title": "Step 1"', args[-1])
+
+
+class UpdateTaskClearDueAtTests(unittest.IsolatedAsyncioTestCase):
+    """MAN-311: clearing a task's due date is only a real write when
+    clear_due_at=True is threaded through. update_task's own UPDATE
+    statement is
+    `due_at = CASE WHEN $7 THEN NULL WHEN $8::timestamptz IS NOT NULL
+    THEN $8::timestamptz ELSE due_at END`
+    (see this module's own docstring on update_task) -- a caller that sends
+    due_at=None with clear_due_at left at its False default hits the
+    `ELSE due_at` branch and the real column is left UNCHANGED. That is
+    exactly the bug the unmerged MAN-311 branch shipped in
+    TaskDetailPage.handleDueChange (frontend) before commit f09d84da5 added
+    `clear_due_at: dueAt === null` to that call -- the UI cleared
+    optimistically and then reverted to the old value on the next refetch,
+    which is the worst version of the bug because it looks like it worked.
+
+    These tests pin the SERVICE side of that contract against the fake
+    pool's recorded call args ($7/$8 are 0-indexed args[6]/args[7] in
+    update_task's own update_args tuple -- see
+    test_omitting_priority_leaves_it_untouched above for the same
+    args[N]-position convention this file already uses for priority's $9).
+    They do not execute real SQL (the fake pool returns a canned row, it
+    does not evaluate the CASE expression) -- that proof is the live-browser
+    set/clear/reload walkthrough MAN-311 also requires; this is the
+    structural proof that the SERVICE never forgets to ask for a clear."""
+
+    async def test_clear_due_at_true_nulls_regardless_of_a_stray_due_at(self):
+        # A stray due_at alongside clear_due_at=True should never happen from
+        # a real caller (page.tsx's handleDueChange always sends due_at:
+        # null together with clear_due_at: true), but clearing must win even
+        # if one arrived -- the resolved value passed to the query is None
+        # either way, never a coerced date.
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(due_at=None)])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                due_at="2026-08-15", clear_due_at=True,
+            )
+        query, args = pool.fetchrow_calls[0]
+        self.assertIn("due_at = CASE WHEN $7 THEN NULL", query)
+        self.assertTrue(args[6], "clear_due_at ($7) must be True when the caller asks to clear")
+        self.assertIsNone(args[7], "the coerced due_at ($8) must be None -- clear_due_at wins over any stray value")
+
+    async def test_clear_due_at_false_with_due_at_none_is_the_exact_shape_of_the_pre_fix_bug(self):
+        # This is the caller shape the unfixed frontend sent: due_at=None,
+        # clear_due_at never set (defaults False). update_task must NOT
+        # infer "clear it" from a bare due_at=None -- $7=False, $8=NULL is
+        # precisely what routes the SQL's own `ELSE due_at` branch, which is
+        # a no-op against the real column. If this test ever asserted
+        # args[6] were True here, it would be asserting the bug is fixed by
+        # inference rather than by the caller stating its intent -- which is
+        # not what commit f09d84da5 did, and not a contract this service
+        # should offer (a caller must say clear_due_at=True on purpose).
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(due_at="2026-08-01T00:00:00+00:00")])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                due_at=None, clear_due_at=False,
+            )
+        query, args = pool.fetchrow_calls[0]
+        self.assertFalse(args[6], "clear_due_at ($7) is False -- this caller shape never signals a clear")
+        self.assertIsNone(args[7], "due_at ($8) is NULL too -- together these hit the SQL's ELSE due_at branch, silently keeping the old value")
+
+    async def test_setting_a_new_due_date_stamps_midnight_utc_and_does_not_clear(self):
+        pool = _QueuedFakePool(fetchrow_results=[_task_row(due_at="2026-08-15T00:00:00+00:00")])
+        with patch(
+            "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+            new=AsyncMock(return_value=pool),
+        ):
+            task = await project_tasks_service.update_task(
+                tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1",
+                due_at="2026-08-15", clear_due_at=False,
+            )
+        query, args = pool.fetchrow_calls[0]
+        self.assertFalse(args[6])
+        self.assertEqual(args[7], datetime(2026, 8, 15, tzinfo=timezone.utc))
+        self.assertEqual(task["due_at"], "2026-08-15T00:00:00+00:00")
 
 
 class RowToTaskPendingWakeTests(unittest.TestCase):
