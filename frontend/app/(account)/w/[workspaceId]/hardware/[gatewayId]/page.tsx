@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
@@ -389,7 +391,7 @@ function createRunId(): string {
 }
 
 async function postCliAction(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await fetch(path, {
+  const res = await fleetAuthorizedFetch(path, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -779,7 +781,7 @@ function CliSetupControl({
       stopEventsPoll();
       eventsPollRef.current = window.setInterval(async () => {
         try {
-          const res = await fetch(
+          const res = await fleetAuthorizedFetch(
             `/api/gateway/registrations/${encodeURIComponent(gatewayId)}/cli/login/${encodeURIComponent(runId)}/events`,
             { credentials: "include" },
           );
@@ -1915,7 +1917,7 @@ export default function GatewayDetailPage() {
     setDestroying(true);
     setDestroyError(null);
     try {
-      const res = await fetch(`/api/hardware/vps/${encodeURIComponent(vpsId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/hardware/vps/${encodeURIComponent(vpsId)}`, {
         method: "DELETE",
         credentials: "include",
         headers: buildCookieAuthHeaders("DELETE", {}),

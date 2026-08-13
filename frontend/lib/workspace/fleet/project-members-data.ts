@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 // The real per-project ACL (MAN-115) — server_modules/routes_fleet.py:392-500,
 // project_memberships (migrations/add_project_memberships.sql). This is the
 // first frontend caller of these three routes:
@@ -28,7 +30,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { useOwnAccountId, useOwnWorkspaceRole, WORKSPACE_ROLE_ORDER } from "./members-data";
 
 async function getJson(path: string): Promise<any> {
-  const res = await fetch(path, { credentials: "include" });
+  const res = await fleetAuthorizedFetch(path, { credentials: "include" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`);
@@ -70,7 +72,7 @@ async function projectMembersRequest(
   suffix = "",
 ): Promise<any> {
   const path = `/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}/members${suffix}`;
-  const res = await fetch(path, {
+  const res = await fleetAuthorizedFetch(path, {
     method,
     credentials: "include",
     headers: buildCookieAuthHeaders(method, { "Content-Type": "application/json" }),

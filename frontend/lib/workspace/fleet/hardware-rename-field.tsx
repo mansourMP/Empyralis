@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useEffect, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
 
@@ -69,7 +71,7 @@ export function HardwareRenameField({
     }
     setSaving(true);
     try {
-      const res = await fetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/rename`, {
+      const res = await fleetAuthorizedFetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/rename`, {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),

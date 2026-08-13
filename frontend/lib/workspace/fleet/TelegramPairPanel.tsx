@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useState } from "react";
 import { Check, MessageCircle } from "lucide-react";
 
@@ -30,7 +32,7 @@ export function TelegramPairPanel({ workspaceId }: { workspaceId: string }) {
 
   const refresh = useCallback(async () => {
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/sage/telegram-hosted/pair/status?workspace_id=${encodeURIComponent(workspaceId)}`,
         { credentials: "include" },
       );
@@ -58,7 +60,7 @@ export function TelegramPairPanel({ workspaceId }: { workspaceId: string }) {
     setStarting(true);
     setError(null);
     try {
-      const res = await fetch("/api/sage/telegram-hosted/pair/start", {
+      const res = await fleetAuthorizedFetch("/api/sage/telegram-hosted/pair/start", {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),

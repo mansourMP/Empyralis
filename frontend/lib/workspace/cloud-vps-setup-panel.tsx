@@ -1,5 +1,7 @@
 'use client';
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Check, ExternalLink, X } from 'lucide-react';
 
@@ -26,7 +28,7 @@ import {
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = String(init.method || 'GET');
   const headers = buildCookieAuthHeaders(method, { accept: 'application/json', ...(init.headers as Record<string, string> | undefined) });
-  const response = await fetch(path, { ...init, headers, credentials: 'include' });
+  const response = await fleetAuthorizedFetch(path, { ...init, headers, credentials: 'include' });
   if (!response.ok) {
     // Surface the backend's own detail message when there is one (e.g. "This
     // AWS connection request expired.") instead of just the status code —

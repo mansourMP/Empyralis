@@ -1,5 +1,7 @@
 'use client';
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -99,7 +101,7 @@ type BridgeActivity = {
 };
 
 async function fetchManifest(workspaceId: string, appId: string): Promise<HostedMiniAppManifest> {
-  const response = await fetch(
+  const response = await fleetAuthorizedFetch(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/mini-apps/${encodeURIComponent(appId)}/hosted-manifest`,
     {
       credentials: 'include',
@@ -116,7 +118,7 @@ async function dispatchBridgeMessage(
   endpoint: string,
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(endpoint, {
+  const response = await fleetAuthorizedFetch(endpoint, {
     method: 'POST',
     credentials: 'include',
     headers: buildCookieAuthHeaders('POST', {

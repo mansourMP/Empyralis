@@ -1,5 +1,7 @@
 'use client';
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 // CLOUD-SERVER PROVISIONING — the one place that knows "a server is being
 // built right now", independent of whether the setup modal happens to be open.
 //
@@ -291,7 +293,7 @@ export function vpsProvisionStageLabel(watch: VpsProvisionWatch): string {
 
 async function fetchStatus(vpsId: string): Promise<VpsProvisionStatusPayload | 'gone' | null> {
   try {
-    const response = await fetch(`/api/hardware/vps/${encodeURIComponent(vpsId)}/status`, {
+    const response = await fleetAuthorizedFetch(`/api/hardware/vps/${encodeURIComponent(vpsId)}/status`, {
       headers: buildCookieAuthHeaders('GET', { accept: 'application/json' }),
       credentials: 'include',
     });

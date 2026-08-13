@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, Copy, Loader2 } from "lucide-react";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -80,7 +82,7 @@ function pairingCommand(token: string, displayName: string, workspaceId: string,
 
 async function fetchGatewayIds(workspaceId: string): Promise<Set<string>> {
   try {
-    const res = await fetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, {
+    const res = await fleetAuthorizedFetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, {
       credentials: "include",
     });
     if (!res.ok) return new Set();
@@ -93,7 +95,7 @@ async function fetchGatewayIds(workspaceId: string): Promise<Set<string>> {
 }
 
 async function fetchGateway(workspaceId: string, gatewayId: string): Promise<GatewayRegistrationRecord | null> {
-  const res = await fetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, {
+  const res = await fleetAuthorizedFetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, {
     credentials: "include",
   });
   if (!res.ok) return null;
@@ -182,7 +184,7 @@ export function GatewayPairPanel({
     setError(null);
     try {
       knownGatewayIds.current = await fetchGatewayIds(workspaceId);
-      const res = await fetch("/api/gateway/pairings/intents", {
+      const res = await fleetAuthorizedFetch("/api/gateway/pairings/intents", {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),

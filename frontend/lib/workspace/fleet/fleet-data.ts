@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
 /** The owner stop control's live state — set by POST .../stop, cleared by
  *  .../resume (agent-scoped) or .../stop-all, .../resume-all (workspace-
@@ -281,7 +282,7 @@ function useSharedPolledResource<T>(
 
 export function useFleetAgents(workspaceId: string) {
   const fetcher = useCallback(async (): Promise<FleetAgent[]> => {
-    const res = await fetch(`/api/w/${workspaceId}/fleet/agents`);
+    const res = await fleetAuthorizedFetch(`/api/w/${workspaceId}/fleet/agents`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return data.agents || [];
@@ -301,7 +302,7 @@ type StopMutationResult = { ok: boolean; error?: string; stopped?: StoppedState 
 
 async function postFleetStopControl(path: string, reason?: string): Promise<StopMutationResult> {
   try {
-    const res = await fetch(path, {
+    const res = await fleetAuthorizedFetch(path, {
       method: "POST",
       credentials: "include",
       headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -358,7 +359,7 @@ export function useFleetWorkspace(workspaceId: string) {
     if (!workspaceId) { setLoading(false); return; }
     setLoading(true);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/workspace`, { credentials: "include" });
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/workspace`, { credentials: "include" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       if (data?.workspace) setWorkspace(data.workspace);
@@ -385,7 +386,7 @@ export function useFleetWorkspace(workspaceId: string) {
 export function useFleetProjects(workspaceId: string, includeArchived = false) {
   const fetcher = useCallback(async (): Promise<FleetProject[]> => {
     const qs = includeArchived ? "?include_archived=true" : "";
-    const res = await fetch(`/api/w/${workspaceId}/fleet/projects${qs}`, { credentials: "include" });
+    const res = await fleetAuthorizedFetch(`/api/w/${workspaceId}/fleet/projects${qs}`, { credentials: "include" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     return Array.isArray(data.projects) ? data.projects : [];
@@ -418,7 +419,7 @@ export async function deleteFleetProject(
   workspaceId: string,
   projectId: string,
 ): Promise<DeletedProjectSummary> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     `/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}`,
     { method: "DELETE", credentials: "include", headers: buildCookieAuthHeaders("DELETE", {}) },
   );
@@ -441,7 +442,7 @@ export async function patchFleetProject(
   projectId: string,
   patch: { name?: string; description?: string; archived?: boolean; default_gateway_id?: string }
 ): Promise<FleetProject> {
-  const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}`, {
+  const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}`, {
     method: "PATCH",
     credentials: "include",
     headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -465,7 +466,7 @@ export function useFleetAgentActivity(workspaceId: string, agentId: string | nul
     }
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${workspaceId}/fleet/agent-activity?agent_id=${encodeURIComponent(agentId)}`
       );
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -583,7 +584,7 @@ export function useFleetAgentChannels(workspaceId: string, agentId: string | nul
     abortRef.current = controller;
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${workspaceId}/fleet/agent-channels?agent_id=${encodeURIComponent(agentId)}`,
         { signal: controller.signal },
       );
@@ -623,7 +624,7 @@ export function useFleetAgentConnectors(workspaceId: string, agentId: string | n
     abortRef.current = controller;
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${workspaceId}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}`,
         { signal: controller.signal },
       );
@@ -662,7 +663,7 @@ export function useFleetProjectConnectors(workspaceId: string, projectId: string
     if (!projectId) { setProjectConnectors([]); return; }
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/projects/${encodeURIComponent(projectId)}/connectors`,
         { credentials: "include" }
       );
@@ -697,7 +698,7 @@ export function useFleetAgentTools(workspaceId: string, agentId: string | null) 
     abortRef.current = controller;
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${workspaceId}/fleet/agent-tools?agent_id=${encodeURIComponent(agentId)}`,
         { signal: controller.signal },
       );
@@ -787,7 +788,7 @@ export function useFleetAgentCapabilities(workspaceId: string, agentId: string |
     abortRef.current = controller;
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${workspaceId}/fleet/agent-capabilities?agent_id=${encodeURIComponent(agentId)}`,
         { signal: controller.signal },
       );
@@ -829,7 +830,7 @@ export function useFleetAgentSchedule(workspaceId: string, agentId: string | nul
     if (!agentId) { setSchedule([]); return; }
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/schedule`,
         { credentials: "include" }
       );
@@ -851,7 +852,7 @@ export async function previewFleetAgentSchedule(
   workspaceId: string, agentId: string, when: string
 ): Promise<FleetScheduleMutationResult & { due_at?: string }> {
   try {
-    const res = await fetch(
+    const res = await fleetAuthorizedFetch(
       `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/schedule/preview`,
       {
         method: "POST",
@@ -872,7 +873,7 @@ export async function createFleetAgentSchedule(
   workspaceId: string, agentId: string, when: string, instruction: string
 ): Promise<FleetScheduleMutationResult> {
   try {
-    const res = await fetch(
+    const res = await fleetAuthorizedFetch(
       `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/schedule`,
       {
         method: "POST",
@@ -893,7 +894,7 @@ export async function deleteFleetAgentSchedule(
   workspaceId: string, agentId: string, wakeRequestId: string
 ): Promise<FleetScheduleMutationResult> {
   try {
-    const res = await fetch(
+    const res = await fleetAuthorizedFetch(
       `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}/schedule/${encodeURIComponent(wakeRequestId)}`,
       {
         method: "DELETE",
@@ -961,7 +962,7 @@ export function useWorkspaceActivity(workspaceId: string, limit = 8, sinceCreate
   const refresh = useCallback(async () => {
     try {
       const since = sinceCreatedAt ? `&since_created_at=${encodeURIComponent(sinceCreatedAt)}` : "";
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/activity/timeline?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}&exclude_event_class=${NOISE_EVENT_CLASSES.join(",")}${since}`,
         { credentials: "include" },
       );
@@ -994,7 +995,7 @@ export function useWorkspaceActivity(workspaceId: string, limit = 8, sinceCreate
 export async function fetchActivityTrace(workspaceId: string, traceId: string): Promise<WorkspaceActivityEvent[]> {
   if (!traceId) return [];
   try {
-    const res = await fetch(
+    const res = await fleetAuthorizedFetch(
       `/api/activity/timeline?workspace_id=${encodeURIComponent(workspaceId)}&trace_id=${encodeURIComponent(traceId)}&limit=50`,
       { credentials: "include" },
     );
@@ -1064,8 +1065,8 @@ export function useWorkspaceStatusStrip(workspaceId: string): WorkspaceStatusStr
         // served by fleet/connection-summary. Computers still come from live
         // gateway registrations.
         const [summaryRes, gatewaysRes] = await Promise.all([
-          fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/connection-summary`, { credentials: "include" }),
-          fetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" }),
+          fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/connection-summary`, { credentials: "include" }),
+          fleetAuthorizedFetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" }),
         ]);
         const summary = summaryRes.ok ? await summaryRes.json() : {};
         const gatewaysData = gatewaysRes.ok ? await gatewaysRes.json() : { items: [] };
@@ -1314,7 +1315,7 @@ function withNormalizedStatus(task: FleetTask): FleetTask {
 export function useFleetTasks(workspaceId: string, projectId: string | null) {
   const fetcher = useCallback(async (): Promise<FleetTask[]> => {
     if (!projectId) return [];
-    const res = await fetch(
+    const res = await fleetAuthorizedFetch(
       `/api/w/${workspaceId}/fleet/tasks?project_id=${encodeURIComponent(projectId)}`,
       { credentials: "include" }
     );
@@ -1357,7 +1358,7 @@ export async function createFleetTask(
     priority?: number;
   }
 ): Promise<FleetTask> {
-  const res = await fetch(`/api/w/${workspaceId}/fleet/tasks`, {
+  const res = await fleetAuthorizedFetch(`/api/w/${workspaceId}/fleet/tasks`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -1389,7 +1390,7 @@ export async function patchFleetTask(
     clear_due_at?: boolean;
   }
 ): Promise<FleetTask> {
-  const res = await fetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}`, {
+  const res = await fleetAuthorizedFetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}`, {
     method: "PATCH",
     credentials: "include",
     headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -1439,7 +1440,7 @@ export function useWorkspaceRoster(workspaceId: string) {
     if (!workspaceId) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/roster`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/roster`, {
         credentials: "include",
       });
       const data = await res.json().catch(() => ({}));
@@ -1504,7 +1505,7 @@ export function useFleetLabels(workspaceId: string, enabled = true) {
     if (!workspaceId) return;
     setLoading(true);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/labels`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/labels`, {
         credentials: "include",
       });
       const data = await res.json().catch(() => ({}));
@@ -1530,7 +1531,7 @@ export async function createFleetLabel(
   workspaceId: string,
   input: { name: string; color?: string },
 ): Promise<FleetLabel> {
-  const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/labels`, {
+  const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/labels`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -1553,7 +1554,7 @@ export async function patchFleetLabel(
   labelId: string,
   patch: { name?: string; color?: string },
 ): Promise<FleetLabel> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     `/api/w/${encodeURIComponent(workspaceId)}/fleet/labels/${encodeURIComponent(labelId)}`,
     {
       method: "PATCH",
@@ -1576,7 +1577,7 @@ export async function attachFleetTaskLabel(
   taskId: string,
   label: string,
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     `/api/w/${encodeURIComponent(workspaceId)}/fleet/tasks/${encodeURIComponent(taskId)}/labels`,
     {
       method: "POST",
@@ -1600,7 +1601,7 @@ export async function detachFleetTaskLabel(
   taskId: string,
   label: string,
 ): Promise<void> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     `/api/w/${encodeURIComponent(workspaceId)}/fleet/tasks/${encodeURIComponent(taskId)}/labels/${encodeURIComponent(label)}`,
     {
       method: "DELETE",
@@ -1624,7 +1625,7 @@ export async function assignFleetTask(
   taskId: string,
   agentId: string
 ): Promise<{ task: FleetTask; wakeError: string | null; woke: boolean }> {
-  const res = await fetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/assign`, {
+  const res = await fleetAuthorizedFetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/assign`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -1659,7 +1660,7 @@ export async function assignFleetTaskToUser(
   taskId: string,
   userId: string
 ): Promise<{ task: FleetTask }> {
-  const res = await fetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/assign`, {
+  const res = await fleetAuthorizedFetch(`/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/assign`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -1706,7 +1707,7 @@ export async function commentFleetTask(
   taskId: string,
   body: string
 ): Promise<{ task: FleetTask; wakeError: string | null; woke: boolean }> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     `/api/w/${workspaceId}/fleet/tasks/${encodeURIComponent(taskId)}/comments`,
     {
       method: "POST",
@@ -1741,7 +1742,7 @@ export async function setFleetTaskParent(
   taskId: string,
   parentTaskId: string | null,
 ): Promise<FleetTask> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     `/api/w/${encodeURIComponent(workspaceId)}/fleet/tasks/${encodeURIComponent(taskId)}/parent`,
     {
       method: "POST",

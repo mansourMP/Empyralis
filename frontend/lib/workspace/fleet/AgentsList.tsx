@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import type { KeyboardEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -184,7 +186,7 @@ async function deleteFleetAgentInline(
   agentId: string,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(
+    const res = await fleetAuthorizedFetch(
       `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`,
       {
         method: "DELETE",

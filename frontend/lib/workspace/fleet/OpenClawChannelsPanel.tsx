@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 /**
  * Data + shared UI for the OpenClaw-transported channels inside the ONE
  * unified channel list on the Channels tab (FleetAgentDetail.tsx's
@@ -171,7 +173,7 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
         const url = gatewayId
           ? `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/setup`
           : "/api/personal-channels/openclaw/catalog";
-        const res = await fetch(url, { credentials: "include" });
+        const res = await fleetAuthorizedFetch(url, { credentials: "include" });
         if (!res.ok) {
           setError(`Could not load channels (${res.status}).`);
           return null;
@@ -202,7 +204,7 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
       if (!gatewayId) return;
       setBusy(installChannels[0] ?? "__all__");
       try {
-        const res = await fetch(
+        const res = await fleetAuthorizedFetch(
           `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/provision?agent_id=${encodeURIComponent(agentId)}`,
           {
             method: "POST",
@@ -367,7 +369,7 @@ export function CredentialForm({
     }
     setSaving(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/channels/${encodeURIComponent(entry.channel_key)}/credential`,
         {
           method: "PUT",

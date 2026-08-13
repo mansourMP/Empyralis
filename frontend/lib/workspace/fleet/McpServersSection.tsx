@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 // "Connect an MCP app" — MCP Phase B UI.
 //
 // Backend contract (verified file:line, server_modules/agent_registry_api.py):
@@ -91,7 +93,7 @@ export type McpServerRecord = {
 //    see fleet-data.ts / credit-balance.ts / settings/page.tsx) ─────────────
 
 async function getJson(path: string): Promise<any> {
-  const res = await fetch(path, { credentials: "include" });
+  const res = await fleetAuthorizedFetch(path, { credentials: "include" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`);
@@ -100,7 +102,7 @@ async function getJson(path: string): Promise<any> {
 }
 
 async function mutateJson(path: string, method: string, body?: Record<string, unknown>): Promise<any> {
-  const res = await fetch(path, {
+  const res = await fleetAuthorizedFetch(path, {
     method,
     credentials: "include",
     headers: buildCookieAuthHeaders(method, { "Content-Type": "application/json" }),

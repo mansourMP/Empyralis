@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 
@@ -396,7 +398,7 @@ export function useWorkspaceGateways(workspaceId: string) {
       const requestId = ++requestIdRef.current;
       if (!opts?.silent) setLoading(true);
       try {
-        const res = await fetch(
+        const res = await fleetAuthorizedFetch(
           `/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`,
           { credentials: "include" },
         );

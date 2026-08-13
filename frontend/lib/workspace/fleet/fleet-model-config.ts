@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 /**
  * Shared "what is this agent's model, and how do we save a change to it"
  * logic — factored out of FleetAgentDetail.tsx so AgentChat.tsx's composer
@@ -267,7 +269,7 @@ export async function saveAgentModelConfig(
     if (canSaveReasoningEffort && reasoningEffort) {
       patch.reasoning_effort = reasoningEffort;
     }
-    const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+    const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
       method: "PATCH",
       credentials: "include",
       headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -291,7 +293,7 @@ export async function saveAgentModelConfig(
       // previously) is the unrelated third-party-app connector vault and
       // 400s "Unsupported connector" for every LLM provider.
       const label = `${providerLabel(provider)} — ${agentLabel || "agent"}`;
-      const credRes = await fetch("/api/credentials/vault", {
+      const credRes = await fleetAuthorizedFetch("/api/credentials/vault", {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -306,7 +308,7 @@ export async function saveAgentModelConfig(
       const credData = await credRes.json().catch(() => ({}));
       if (!credRes.ok) throw new Error(credData?.detail || credData?.error || `HTTP ${credRes.status}`);
 
-      const profileRes = await fetch("/api/providers/profiles", {
+      const profileRes = await fleetAuthorizedFetch("/api/providers/profiles", {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
