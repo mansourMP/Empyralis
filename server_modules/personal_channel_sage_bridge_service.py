@@ -313,6 +313,7 @@ async def _execute_channel_turn_with_envelope(
     """
     from server_modules.sage_agent_runtime_contract import SAGE_MODE
     from server_modules.sage_turn_adapter import execute_sage_turn
+    from server_modules.sage_reply_dispatcher import acquire_channel_turn_lock
 
     normalized_agent_id = str(agent_id or "").strip()
     specialist_context = None
@@ -328,21 +329,39 @@ async def _execute_channel_turn_with_envelope(
         except Exception:
             specialist_context = None  # fail safe to Sage — same contract as execute_sage_turn_for_channel
 
-    sage_result = await execute_sage_turn(
-        workspace_id=workspace_id,
-        tenant_id="",
-        message=message,
-        surface="chat",
-        mode=SAGE_MODE,
-        current_user=None,
-        channel_origin=str(surface_channel or "").strip(),
-        channel_sender_id=str(remote_jid or "").strip(),
-        channel_sender_name=str(push_name or "").strip(),
-        attachments=list(attachments) if attachments else None,
-        specialist_context=specialist_context,
-        channel_prior_messages=channel_prior_messages,
-        envelope=envelope,
-    )
+    # Serialize per (workspace, personal-channel thread) so only ONE turn
+    # executes at a time for a given DM/group — the SAME protection
+    # dispatch_sage_reply already gives hosted-bot/WeChat-official channels
+    # (sage_reply_dispatcher._CHANNEL_TURN_LOCKS), which personal channels
+    # never had: this is the sole chokepoint every personal-channel reply
+    # (WhatsApp, Telegram-personal, Discord DMs, local-bridge/OpenClaw)
+    # crosses before calling execute_sage_turn, so patching here closes it
+    # for the whole family at once. Without this, two messages arriving
+    # close together on one thread started two concurrent turns reading the
+    # same thread history — the torn-history bug. Personal channels have no
+    # explicit thread_id of their own; (surface_channel, remote_jid)
+    # together are what actually identify a conversation here, namespaced
+    # under "personal:" so this can never collide with a hosted-bot
+    # thread_id (typically the literal string "sage-main") in the same
+    # shared lock dict for the same workspace.
+    thread_lock_key = f"personal:{str(surface_channel or '').strip()}:{str(remote_jid or '').strip()}"
+    lock = await acquire_channel_turn_lock(workspace_id, thread_lock_key)
+    async with lock:
+        sage_result = await execute_sage_turn(
+            workspace_id=workspace_id,
+            tenant_id="",
+            message=message,
+            surface="chat",
+            mode=SAGE_MODE,
+            current_user=None,
+            channel_origin=str(surface_channel or "").strip(),
+            channel_sender_id=str(remote_jid or "").strip(),
+            channel_sender_name=str(push_name or "").strip(),
+            attachments=list(attachments) if attachments else None,
+            specialist_context=specialist_context,
+            channel_prior_messages=channel_prior_messages,
+            envelope=envelope,
+        )
     return sage_result.as_dict()
 
 

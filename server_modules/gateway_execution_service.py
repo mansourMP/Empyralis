@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import time
@@ -23,6 +24,54 @@ from server_modules import (
 )
 from server_modules import execution_mode_policy
 from server_modules.gateway_contracts import DEFAULT_TOOL_REQUEST_TIMEOUT_SECONDS
+
+# ── Per-gateway concurrent-execution cap ────────────────────────────────
+# Pure resource protection, NOT correctness: containers are already
+# per-call isolated (empyralis-gateway/src/shell/docker-sandbox.ts spawns
+# one ephemeral --rm container per invocation), so this is deliberately NOT
+# a serialization gate — see sage_reply_dispatcher._CHANNEL_TURN_LOCKS /
+# personal_channel_sage_bridge_service's acquire_channel_turn_lock for the
+# actual correctness fix (torn thread history), which is per-THREAD, not
+# per-box, and unrelated to this.
+#
+# MAN-318 measured 8 fully concurrent tool-executing turns (real DeepSeek
+# reasoning + a real Docker-sandboxed shell.execute) running cleanly on the
+# smallest supported box (s-1vcpu-1gb) — zero failures, load average never
+# crossing 1.0. Pushed to 16, the box showed the first clean stress signal
+# (load 2.55, latency roughly doubled). This cap is a generous backstop
+# well above the measured-safe number, not a throughput-tuning knob: a
+# genuine burst (a bug, a runaway retry loop, an abusive workspace) now
+# degrades by QUEUEING at this seam instead of thrashing a single vCPU and
+# every OTHER agent's turn on that same box along with it. Nothing near
+# ordinary traffic is expected to ever wait on it.
+GATEWAY_CONCURRENT_TOOL_EXECUTION_LIMIT = 32
+
+_GATEWAY_CONCURRENT_TOOL_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
+_GATEWAY_CONCURRENT_TOOL_SEMAPHORE_LAST_SEEN: dict[str, float] = {}
+_GATEWAY_CONCURRENT_TOOL_SEMAPHORE_MAX_KEYS = 500
+_GATEWAY_CONCURRENT_TOOL_SEMAPHORE_STALE_SECONDS = 600  # 10 minutes
+
+
+def _gateway_concurrent_tool_semaphore(gateway_id: str) -> asyncio.Semaphore:
+    """Return the per-gateway semaphore, creating it on first use. Same
+    bounded-dict-with-a-cleanup-sweep shape as sage_reply_dispatcher's
+    _CHANNEL_TURN_LOCKS, for the same reason: a long-lived process must
+    never grow this dict without bound."""
+    key = str(gateway_id or "").strip() or "default"
+    if key not in _GATEWAY_CONCURRENT_TOOL_SEMAPHORES:
+        if len(_GATEWAY_CONCURRENT_TOOL_SEMAPHORES) >= _GATEWAY_CONCURRENT_TOOL_SEMAPHORE_MAX_KEYS:
+            now = time.time()
+            stale = [
+                k
+                for k, ts in _GATEWAY_CONCURRENT_TOOL_SEMAPHORE_LAST_SEEN.items()
+                if now - ts > _GATEWAY_CONCURRENT_TOOL_SEMAPHORE_STALE_SECONDS
+            ]
+            for k in stale:
+                _GATEWAY_CONCURRENT_TOOL_SEMAPHORES.pop(k, None)
+                _GATEWAY_CONCURRENT_TOOL_SEMAPHORE_LAST_SEEN.pop(k, None)
+        _GATEWAY_CONCURRENT_TOOL_SEMAPHORES[key] = asyncio.Semaphore(GATEWAY_CONCURRENT_TOOL_EXECUTION_LIMIT)
+    _GATEWAY_CONCURRENT_TOOL_SEMAPHORE_LAST_SEEN[key] = time.time()
+    return _GATEWAY_CONCURRENT_TOOL_SEMAPHORES[key]
 
 
 SCREEN_REQUIRED_CAPABILITIES = {
@@ -641,60 +690,66 @@ async def execute_tool_via_gateway(
         capability_id=_cap,
     )
     dispatch_started = time.time()
-    try:
-        if durable:
-            response = await gateway_protocol_service.dispatch_tool_invoke_durable(
-                gateway_id=str(gateway_id or "").strip(),
-                capability_id=normalized_capability_id,
-                arguments=normalized_arguments,
-                run_id=str(run_id or "").strip(),
-                trace_id=str(trace_id or "").strip(),
-                workspace_id=_ws,
-                deadline_seconds=durable_deadline_seconds,
-                request_id=request_id,
-                runtime_access_mode=resolved_runtime_access_mode,
-                empyralis_approved=empyralis_approved,
-                agent_scope=resolved_agent_scope,
-                policy=policy_payload,
-                actor_id=_text(actor_id),
-                on_delta=on_delta,
+    # Resource-protection cap, not correctness — see
+    # _gateway_concurrent_tool_semaphore's own header comment. Held only
+    # around the actual wait-for-gateway-response window (including a
+    # durable dispatch's reconnect-riding wait), never around the
+    # result-processing/emission code below it.
+    async with _gateway_concurrent_tool_semaphore(_gw):
+        try:
+            if durable:
+                response = await gateway_protocol_service.dispatch_tool_invoke_durable(
+                    gateway_id=str(gateway_id or "").strip(),
+                    capability_id=normalized_capability_id,
+                    arguments=normalized_arguments,
+                    run_id=str(run_id or "").strip(),
+                    trace_id=str(trace_id or "").strip(),
+                    workspace_id=_ws,
+                    deadline_seconds=durable_deadline_seconds,
+                    request_id=request_id,
+                    runtime_access_mode=resolved_runtime_access_mode,
+                    empyralis_approved=empyralis_approved,
+                    agent_scope=resolved_agent_scope,
+                    policy=policy_payload,
+                    actor_id=_text(actor_id),
+                    on_delta=on_delta,
+                )
+            else:
+                response = await gateway_protocol_service.dispatch_tool_invoke(
+                    gateway_id=str(gateway_id or "").strip(),
+                    capability_id=normalized_capability_id,
+                    arguments=normalized_arguments,
+                    run_id=str(run_id or "").strip(),
+                    trace_id=str(trace_id or "").strip(),
+                    workspace_id=_ws,
+                    timeout_seconds=timeout_seconds,
+                    request_id=request_id,
+                    runtime_access_mode=resolved_runtime_access_mode,
+                    empyralis_approved=empyralis_approved,
+                    agent_scope=resolved_agent_scope,
+                    policy=policy_payload,
+                    actor_id=_text(actor_id),
+                )
+            result = _materialize_gateway_artifacts(
+                capability_id=_cap,
+                response=response,
+                registration=registration,
+                run_id=str(response.get("run_id") or run_id).strip(),
+                screenshot_retention=screenshot_retention,
             )
-        else:
-            response = await gateway_protocol_service.dispatch_tool_invoke(
-                gateway_id=str(gateway_id or "").strip(),
-                capability_id=normalized_capability_id,
-                arguments=normalized_arguments,
-                run_id=str(run_id or "").strip(),
-                trace_id=str(trace_id or "").strip(),
-                workspace_id=_ws,
-                timeout_seconds=timeout_seconds,
-                request_id=request_id,
-                runtime_access_mode=resolved_runtime_access_mode,
-                empyralis_approved=empyralis_approved,
-                agent_scope=resolved_agent_scope,
-                policy=policy_payload,
-                actor_id=_text(actor_id),
-            )
-        result = _materialize_gateway_artifacts(
-            capability_id=_cap,
-            response=response,
-            registration=registration,
-            run_id=str(response.get("run_id") or run_id).strip(),
-            screenshot_retention=screenshot_retention,
-        )
-    except Exception:
-        if emit_hardware_activity:
-            hardware_activity_event_service.emit_hardware_action_event(
-                workspace_id=_ws,
-                tenant_id=str(registration.get("tenant_id") or "default").strip() or "default",
-                gateway_id=_gw,
-                capability=_cap,
-                status="failed",
-                duration_ms=int(max(0, (time.time() - dispatch_started) * 1000)),
-                run_id=str(run_id or "").strip() or None,
-                trace_id=_tid or None,
-            )
-        raise
+        except Exception:
+            if emit_hardware_activity:
+                hardware_activity_event_service.emit_hardware_action_event(
+                    workspace_id=_ws,
+                    tenant_id=str(registration.get("tenant_id") or "default").strip() or "default",
+                    gateway_id=_gw,
+                    capability=_cap,
+                    status="failed",
+                    duration_ms=int(max(0, (time.time() - dispatch_started) * 1000)),
+                    run_id=str(run_id or "").strip() or None,
+                    trace_id=_tid or None,
+                )
+            raise
     # MAN-125: dispatch not raising only means the RPC envelope round-tripped
     # (gateway_protocol_service.dispatch_tool_invoke* raises only when the
     # envelope's own `ok` flag is false) — it says nothing about whether the

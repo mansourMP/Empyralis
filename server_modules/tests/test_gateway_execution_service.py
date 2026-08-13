@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import importlib
 import unittest
@@ -796,3 +797,173 @@ class GatewayExecutionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["images"][0]["artifact_retained"])
         self.assertNotIn("data_base64", result["images"][0])
         self.assertNotIn("artifacts", result)
+
+
+class GatewayConcurrentToolExecutionCapTests(unittest.IsolatedAsyncioTestCase):
+    """Resource-protection cap, NOT correctness — see
+    _gateway_concurrent_tool_semaphore's own header comment.
+    MAN-318 measured 8 fully concurrent tool-executing turns running
+    cleanly on the smallest supported box; this is a generous backstop
+    (GATEWAY_CONCURRENT_TOOL_EXECUTION_LIMIT, default 32) well above that,
+    so a genuine burst degrades by queueing instead of thrashing a single
+    vCPU. Patches the module constant down to 2 so the test proves the
+    QUEUEING BEHAVIOR itself without needing 33 real concurrent calls."""
+
+    def setUp(self) -> None:
+        global gateway_execution_service
+        gateway_execution_service = importlib.import_module("server_modules.gateway_execution_service")
+
+    @staticmethod
+    def _registration(gateway_id: str) -> dict:
+        return {
+            "gateway_id": gateway_id,
+            "device_id": "dev-1",
+            "workspace_id": "ws-1",
+            "status": "active",
+            "device_trust_state": "trusted",
+            "capabilities": ["shell.execute"],
+            "metadata": {"capability_readiness": {"ready": ["shell.execute"]}},
+        }
+
+    @staticmethod
+    def _rust_side_effect(command, payload):
+        if payload.get("operation") == "quota_check":
+            return {"ok": True, "decision": "allow", "next_action": "allow_gateway_service_operation"}
+        return {"ok": True, "decision": "allow", "next_action": "dispatch_gateway_operation"}
+
+    async def test_a_burst_beyond_the_cap_queues_instead_of_all_running_at_once(self) -> None:
+        gateway_id = "gw-cap-test-queue"
+        registration = self._registration(gateway_id)
+        in_flight = 0
+        max_observed_concurrency = 0
+
+        async def slow_dispatch(**kwargs):
+            nonlocal in_flight, max_observed_concurrency
+            in_flight += 1
+            max_observed_concurrency = max(max_observed_concurrency, in_flight)
+            await asyncio.sleep(0.05)
+            in_flight -= 1
+            return {
+                "request_id": kwargs.get("request_id"),
+                "capability_id": kwargs.get("capability_id"),
+                "run_id": kwargs.get("run_id"),
+                "result": {"exit_code": 0, "stdout": "ok"},
+            }
+
+        with (
+            patch("server_modules.gateway_execution_service.GATEWAY_CONCURRENT_TOOL_EXECUTION_LIMIT", 2),
+            patch("server_modules.gateway_execution_service.gateway_state_repository.get_gateway_registration", return_value=registration),
+            patch("server_modules.gateway_execution_service.gateway_protocol_service.gateway_connection_is_live", return_value=True),
+            patch(
+                "server_modules.gateway_execution_service.gateway_registry_service.gateway_registration_public_payload",
+                return_value={
+                    "connection_status": "online",
+                    "heartbeat_fresh": True,
+                    "reported_health_state": "online",
+                    "capability_readiness": {"ready": ["shell.execute"]},
+                },
+            ),
+            patch("server_modules.gateway_execution_service.gateway_protocol_service.dispatch_tool_invoke", new=AsyncMock(side_effect=slow_dispatch)),
+            patch("server_modules.gateway_execution_service.gateway_activity_service.append_gateway_activity", AsyncMock(return_value={"id": "activity-1"})),
+            patch(
+                "server_modules.gateway_execution_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                side_effect=self._rust_side_effect,
+            ),
+        ):
+            await asyncio.gather(
+                *[
+                    gateway_execution_service.execute_tool_via_gateway(
+                        gateway_id=gateway_id,
+                        capability_id="shell.execute",
+                        arguments={"command": f"echo {i}"},
+                        run_id=f"run-{i}",
+                        trace_id=f"trace-{i}",
+                        workspace_id="ws-1",
+                        request_id=f"req-{i}",
+                        emit_hardware_activity=False,
+                    )
+                    for i in range(5)
+                ]
+            )
+
+        self.assertEqual(
+            max_observed_concurrency, 2,
+            "the cap did not bound concurrent dispatches to this gateway to the patched limit",
+        )
+
+    async def test_two_different_gateways_are_not_serialized_against_each_other(self) -> None:
+        # The cap is per-BOX, not global — two different customers' boxes
+        # (or two boxes in the same workspace) must never wait on each
+        # other. Same limit=2 patch as above, but both calls target
+        # DIFFERENT gateway_ids, so both must run at once even though the
+        # per-gateway limit is 2.
+        registrations = {
+            "gw-cap-test-a": self._registration("gw-cap-test-a"),
+            "gw-cap-test-b": self._registration("gw-cap-test-b"),
+        }
+        in_flight = 0
+        max_observed_concurrency = 0
+
+        async def slow_dispatch(**kwargs):
+            nonlocal in_flight, max_observed_concurrency
+            in_flight += 1
+            max_observed_concurrency = max(max_observed_concurrency, in_flight)
+            await asyncio.sleep(0.05)
+            in_flight -= 1
+            return {
+                "request_id": kwargs.get("request_id"),
+                "capability_id": kwargs.get("capability_id"),
+                "run_id": kwargs.get("run_id"),
+                "result": {"exit_code": 0, "stdout": "ok"},
+            }
+
+        async def fake_get_registration(gateway_id):
+            return registrations[gateway_id]
+
+        with (
+            patch("server_modules.gateway_execution_service.GATEWAY_CONCURRENT_TOOL_EXECUTION_LIMIT", 2),
+            patch("server_modules.gateway_execution_service.gateway_state_repository.get_gateway_registration", side_effect=lambda gid: registrations[gid]),
+            patch("server_modules.gateway_execution_service.gateway_protocol_service.gateway_connection_is_live", return_value=True),
+            patch(
+                "server_modules.gateway_execution_service.gateway_registry_service.gateway_registration_public_payload",
+                return_value={
+                    "connection_status": "online",
+                    "heartbeat_fresh": True,
+                    "reported_health_state": "online",
+                    "capability_readiness": {"ready": ["shell.execute"]},
+                },
+            ),
+            patch("server_modules.gateway_execution_service.gateway_protocol_service.dispatch_tool_invoke", new=AsyncMock(side_effect=slow_dispatch)),
+            patch("server_modules.gateway_execution_service.gateway_activity_service.append_gateway_activity", AsyncMock(return_value={"id": "activity-1"})),
+            patch(
+                "server_modules.gateway_execution_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                side_effect=self._rust_side_effect,
+            ),
+        ):
+            await asyncio.gather(
+                gateway_execution_service.execute_tool_via_gateway(
+                    gateway_id="gw-cap-test-a",
+                    capability_id="shell.execute",
+                    arguments={"command": "echo a"},
+                    run_id="run-a",
+                    trace_id="trace-a",
+                    workspace_id="ws-1",
+                    request_id="req-a",
+                    emit_hardware_activity=False,
+                ),
+                gateway_execution_service.execute_tool_via_gateway(
+                    gateway_id="gw-cap-test-b",
+                    capability_id="shell.execute",
+                    arguments={"command": "echo b"},
+                    run_id="run-b",
+                    trace_id="trace-b",
+                    workspace_id="ws-1",
+                    request_id="req-b",
+                    emit_hardware_activity=False,
+                ),
+            )
+
+        self.assertEqual(
+            max_observed_concurrency, 2,
+            "two DIFFERENT gateways' dispatches were serialized against each other — the cap must be per-box",
+        )
