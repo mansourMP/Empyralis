@@ -154,6 +154,7 @@ export function TaskComposer({
   const [closing, setClosing] = useState(false);
 
   const titleRef = useRef<HTMLTextAreaElement | null>(null);
+  const descriptionRef = useRef<HTMLTextAreaElement | null>(null);
   const closeTimer = useRef<number | null>(null);
   const { labels, refresh: refreshLabels } = useFleetLabels(workspaceId);
 
@@ -282,6 +283,7 @@ export function TaskComposer({
         setCreatedCount((n) => n + 1);
         window.requestAnimationFrame(() => {
           autosize(titleRef.current);
+          autosize(descriptionRef.current);
           titleRef.current?.focus();
         });
       } else {
@@ -372,11 +374,18 @@ export function TaskComposer({
             }}
           />
           <textarea
+            ref={(el) => {
+              descriptionRef.current = el;
+              autosize(el);
+            }}
             className="fleet-composer-desc"
             value={description}
             rows={3}
             placeholder="Add description…"
-            onChange={(e) => setDescription(e.currentTarget.value)}
+            onChange={(e) => {
+              setDescription(e.currentTarget.value);
+              autosize(e.currentTarget);
+            }}
           />
           {description.trim() ? (
             <div className="fleet-composer-hint">Markdown supported — **bold**, *italic*, `code`, [links](url), lists</div>
