@@ -532,10 +532,29 @@ export function FleetAgentDetail({
   // not a <button> — same "primary navigation is real links" move as the
   // Configure sheet's GroupedRail items, so the ref target is an anchor.
   const activeTabRef = useRef<HTMLAnchorElement | null>(null);
-  useEffect(() => {
-    activeTabRef.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // DELIBERATELY NO focus() ON MOUNT (2026-08-13). This used to call
+  // activeTabRef.current?.focus() so SPA navigation had a sensible landing
+  // spot instead of <body>. The cost was invisible to whoever wrote it and
+  // very visible to the founder: PROGRAMMATIC focus still satisfies
+  // :focus-visible — the browser cannot tell it apart from keyboard focus —
+  // so globals.css's `:focus-visible { box-shadow: var(--app-shadow-focus) }`
+  // drew a 2px accent ring around the active tab pill on EVERY page load, for
+  // every mouse user, and it stayed there until they happened to click
+  // something else. His words: "I always have this purple thing on the ui."
+  //
+  // Removing it rather than suppressing the ring, because the ring is right:
+  // it is the only thing telling a keyboard user where they are, and killing
+  // the indicator to hide an unwanted trigger trades a visual annoyance for
+  // an accessibility regression.
+  //
+  // The SPA focus-management this was reaching for is genuinely worth having
+  // — but it belongs on the page's own HEADING, not on an interactive
+  // control, which is exactly what TaskDetailView and DocumentDetailView
+  // already do (`headingRef` on an `<h2 tabIndex={-1}>`). A heading focused
+  // programmatically announces the new page without rendering as a focused
+  // button. Breadcrumbs.tsx owns the <h1> here, so wiring that is its job,
+  // not a second heading invented in this file — see the MAN-145 title-dedup
+  // note further down for why a second one must not be added.
   // Whichever tab is active always scrolls fully into view within the
   // horizontal strip — not just on first mount. Without this, following a
   // direct link into a tab past the fold (e.g. Hardware) left the highlight
