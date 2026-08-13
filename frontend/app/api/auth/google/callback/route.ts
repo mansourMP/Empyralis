@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { AUTH_REQUEST_TIMEOUT_MS } from '@/lib/auth/auth-timeouts';
 import { controlPlaneBaseUrl } from '@/lib/server/control-plane-base-url';
+import { CSP_NONCE_REQUEST_HEADER } from '@/lib/security/content-security-policy';
 import {
   decodeGoogleOAuthState,
   GOOGLE_OAUTH_STATE_COOKIE,
@@ -163,10 +164,31 @@ export async function GET(request: NextRequest) {
       ? upstream.headers.getSetCookie()
       : splitCombinedSetCookieHeader(upstream.headers.get('set-cookie') || '');
 
+    // NONCE IS REQUIRED HERE, and its absence took Google sign-in down.
+    //
+    // The strict CSP (sec/content-security-policy, 2026-08-13) ships
+    // `script-src 'self' 'nonce-<per-request>' 'strict-dynamic'` with no
+    // 'unsafe-inline'. This inline script had no nonce, so the browser
+    // refused to run it — and this hand-off is the ONLY thing that moves the
+    // user from the callback to /auth/complete. The result was a blank white
+    // page on an otherwise SUCCESSFUL login: the token exchange worked, the
+    // backend returned 200, the auth cookies were set, and the browser simply
+    // never navigated. Retrying then reused a spent authorization code and
+    // produced a genuine "Bad Request" from Google, which made the failure
+    // look like an OAuth problem rather than a CSP one.
+    //
+    // `x-nonce` is set on the request by frontend/proxy.ts for exactly this.
+    // If it is ever missing, fall back to a <meta refresh>, which is not a
+    // script and therefore not subject to script-src — a working login
+    // matters more than the prettier redirect.
     const redirectUrl = completionUrl.toString();
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
+    const nonce = request.headers.get(CSP_NONCE_REQUEST_HEADER) || '';
+    const escapedUrl = redirectUrl.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const html = nonce
+      ? `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script nonce="${nonce}">
 window.location.href = ${JSON.stringify(redirectUrl)};
-</script></body></html>`;
+</script></body></html>`
+      : `<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${escapedUrl}"></head><body></body></html>`;
 
     const response = new NextResponse(html, {
       status: 200,
