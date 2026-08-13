@@ -8,20 +8,31 @@ mutating gateway action routed through gateway_execution_service.
 execute_tool_via_gateway() over the gateway's existing outbound WS/tool-invoke
 transport. No SSH, no separate control channel.
 
-HONESTY NOTE — read before wiring a publish pipeline to this: the actual
-gateway-tarball *publish* step (uploading a versioned build to
-https://empyralis.ai/releases/agent-computer/<version>/... and recording what
-"latest" is) does not exist anywhere in this repo today. scripts/install-
-agent-computer.sh:26-27 only *consumes* that URL shape (curl -fsSL ... | tar
--xzf); nothing in this codebase *produces* it — no CI workflow, no upload
-script, no manifest file, and deploy/nginx-empyralis.conf has no `/releases`
-location block (confirmed absent — verified via a research pass over the repo
-before writing this file). Until that publish step is built and wired up,
-`resolve_latest_gateway_version()` below is intentionally operator-configured
-via environment variables rather than auto-discovered from a manifest that
-doesn't exist yet: setting EMPYRALIS_GATEWAY_LATEST_VERSION to nothing (the
-default) makes "update available" read false everywhere rather than pointing
-at a URL that would 404.
+HONESTY NOTE, corrected 2026-08-13 (gateway-artifact-staleness incident) — a
+publish pipeline DOES now exist: .github/workflows/release-gateway-linux.yml
+builds the tarball and pushes it to Cloudflare R2 (bucket
+empyralis-agent-computer-releases), served back out at
+https://empyralis.ai/releases/agent-computer/<version>/ by a Cloudflare
+Worker route (not an nginx location block — Cloudflare fronts this domain
+and intercepts /releases/* before it ever reaches the origin; confirmed by
+curling the origin directly, which 404s on that path). It went unrun for 15
+days across the entire OpenClaw channel-transport build because it was
+workflow_dispatch-only — fixed by adding a `push` trigger on
+empyralis-gateway/** so a merge publishes itself; see that workflow's own
+comment for the incident.
+
+What's still true, and still means `resolve_latest_gateway_version()` below
+stays operator-configured rather than auto-discovered: nothing writes
+EMPYRALIS_GATEWAY_LATEST_VERSION anywhere (confirmed absent from production's
+env and systemd units, 2026-08-13), so the `gateway.self_update` capability
+this module drives is dormant in production today — every
+gateway_update_status() call reads update_available=False, unconditionally.
+The one-time boot-install path (scripts/install-agent-computer.sh) is the
+live consumer of the R2-published artifact, not this module. Wiring
+EMPYRALIS_GATEWAY_LATEST_VERSION to something real (e.g. read off the R2
+"latest" pointer this workflow now keeps current) is future work, not done
+here — setting it to nothing (the default) makes "update available" read
+false everywhere rather than pointing at a URL that would 404.
 """
 from __future__ import annotations
 

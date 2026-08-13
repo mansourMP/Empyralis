@@ -33,6 +33,24 @@ on:
           must ultimately be reachable at .../releases/agent-computer/latest/.
         required: true
         default: latest
+  # AUTOMATIC PUBLISH (2026-08-13, gateway artifact staleness incident): this
+  # job used to be workflow_dispatch-only, exactly the "a human must remember
+  # to run this" defect CLAUDE.md already documents for the Rust kernel
+  # binary. It went unrun for the entire OpenClaw channel-transport build
+  # (31 commits to empyralis-gateway/ between the last manual run on
+  # 2026-07-29 and 2026-08-13) — every provisioned Agent Computer downloaded
+  # a gateway with no `dist/openclaw/provisioning/` in it, so
+  # install_channel_transport failed with "this gateway build has no channel
+  # transport installer" on every real box, silently. A merge now publishes
+  # itself; nobody has to remember. `latest` is still the only version this
+  # writes to (matching the installer's own default target and every
+  # existing consumer), so a manual workflow_dispatch run remains available
+  # for a deliberate pinned-version release and behaves exactly as before.
+  push:
+    branches: [main]
+    paths:
+      - "empyralis-gateway/**"
+      - ".github/workflows/release-gateway-linux.yml"
 
 permissions:
   contents: read
@@ -47,6 +65,14 @@ jobs:
   gateway:
     name: Gateway ${{ matrix.arch }} tarball
     runs-on: ubuntu-latest
+    env:
+      # workflow_dispatch supplies `inputs.version`; a push event has no
+      # inputs at all (the `inputs` context reads empty, not the declared
+      # default), so this is the one place that decides what every step
+      # below publishes to. A push always means "latest" — the same target
+      # install-agent-computer.sh already defaults to and every droplet that
+      # doesn't pin EMPYRALIS_AGENT_COMPUTER_VERSION already requests.
+      RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || 'latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -144,7 +170,7 @@ jobs:
       - name: Upload gateway artifact
         uses: actions/upload-artifact@v4
         with:
-          name: empyralis-gateway-linux-${{ matrix.arch }}-${{ inputs.version }}
+          name: empyralis-gateway-linux-${{ matrix.arch }}-${{ env.RELEASE_VERSION }}
           path: ${{ runner.temp }}/out/*
           if-no-files-found: error
           retention-days: 30
@@ -163,7 +189,7 @@ jobs:
           set -euo pipefail
           ENDPOINT="https://76e485cbfb611ff8caa5c1d2afa71890.r2.cloudflarestorage.com"
           BUCKET="empyralis-agent-computer-releases"
-          DEST="s3://${BUCKET}/agent-computer/${{ inputs.version }}/"
+          DEST="s3://${BUCKET}/agent-computer/${RELEASE_VERSION}/"
           aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL" "$DEST" --endpoint-url "$ENDPOINT"
           aws s3 cp "$RUNNER_TEMP/out/$GATEWAY_TARBALL.sha256" "$DEST" --endpoint-url "$ENDPOINT"
 
@@ -191,7 +217,7 @@ jobs:
           set -euo pipefail
           ENDPOINT="https://76e485cbfb611ff8caa5c1d2afa71890.r2.cloudflarestorage.com"
           BUCKET="empyralis-agent-computer-releases"
-          DEST="s3://${BUCKET}/agent-computer/${{ inputs.version }}/install-agent-computer.sh"
+          DEST="s3://${BUCKET}/agent-computer/${RELEASE_VERSION}/install-agent-computer.sh"
           # Fail loudly rather than publishing an installer that cannot report
           # its own failures — that combination is exactly what hid the bug.
           grep -q 'provisioning-events' scripts/install-agent-computer.sh \
