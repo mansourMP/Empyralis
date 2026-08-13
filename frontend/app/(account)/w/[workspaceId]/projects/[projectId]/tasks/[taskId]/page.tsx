@@ -47,10 +47,17 @@ export default function TaskDetailPage() {
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   const projectHref = `${base}/projects/${encodeURIComponent(projectId)}`;
 
-  const { agents } = useFleetAgents(workspaceId);
+  const { agents, error: agentsError } = useFleetAgents(workspaceId);
   // MAN-64/MAN-70: the pool of valid HUMAN assignees, plus the lookup
   // TaskDetailView uses to render a human commenter's real name.
-  const { members } = useWorkspaceMembers(workspaceId);
+  const { members, error: membersError } = useWorkspaceMembers(workspaceId);
+  // 2026-08-13: both hooks above already exposed `error` — it just wasn't
+  // read here, so a failed fetch degraded silently into empty arrays and
+  // every actor lookup on this page (Created by, Completed by, the
+  // Activity feed) rendered as an anonymous "Someone" or vanished, exactly
+  // as if the lookup had succeeded and genuinely found nobody. Passed
+  // through so TaskDetailView can tell the two apart.
+  const identityLookupFailed = Boolean(agentsError || membersError);
   // MCP-connected external agents — the lookup that names an external
   // agent's comment instead of printing its opaque ext_agent_ id.
   const { externalAgents } = useWorkspaceRoster(workspaceId);
@@ -287,6 +294,7 @@ export default function TaskDetailPage() {
         // Comments are their own endpoint too (POST .../comments) — the
         // composer writes directly and asks for the same re-read.
         onCommentPosted={refresh}
+        identityLookupFailed={identityLookupFailed}
       />
     </main>
   );
