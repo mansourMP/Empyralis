@@ -224,14 +224,26 @@ export function FleetCommandPalette({
     ];
 
     const commandActions: Action[] = [
-      {
-        id: "chat-sage",
-        label: "Ask AI",
-        hint: "→ chat",
-        group: "Commands",
-        icon: MessageSquare,
-        run: () => { onOpenSage(); close(); },
-      },
+      // MAN-201: onOpenSage docks the console to this workspace's Sage/
+      // Operator install, which SageLauncher itself refuses to render
+      // without (`if (!sageAgent) return null`) — a teammate whose role
+      // isn't "owner" never has that install in their own agents list
+      // (audience: "owner" filters it server-side). Before this, the entry
+      // was always here and opened the console anyway, which meant nothing
+      // visible happened at all — same fix as FleetHome's empty-state
+      // button, same guard.
+      ...(sageAgent
+        ? [
+            {
+              id: "chat-sage",
+              label: "Ask AI",
+              hint: "→ chat",
+              group: "Commands",
+              icon: MessageSquare,
+              run: () => { onOpenSage(); close(); },
+            } satisfies Action,
+          ]
+        : []),
       {
         id: "toggle-theme",
         label: theme === "dark" ? "Switch to light" : "Switch to dark",

@@ -96,7 +96,7 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
               </button>
             </div>
             <TelegramPairPanel workspaceId={workspaceId} />
-            <EmptyFleet onChat={openSageConsole} />
+            <EmptyFleet onChat={sageAgent ? openSageConsole : null} />
           </>
         ) : (
           <>
@@ -264,21 +264,36 @@ function ActivityFeed({ workspaceId }: { workspaceId: string }) {
 
 // ── Empty state ────────────────────────────────────────────────────────────
 
-function EmptyFleet({ onChat }: { onChat: () => void }) {
+function EmptyFleet({ onChat }: { onChat: (() => void) | null }) {
+  // MAN-201: Ask AI opens the console docked to the workspace's Sage/
+  // Operator install (SageLauncher). A teammate whose workspace role isn't
+  // "owner" never has that install in their own GET /fleet/agents response
+  // (audience: "owner" filters it server-side — a deliberate scoping, not a
+  // bug), so SageLauncher itself already renders nothing for them
+  // (`if (!sageAgent) return null`). This button used to fire the same
+  // open event regardless, which looked like a click that did nothing at
+  // all — no panel, no navigation, no error. `onChat` is null exactly when
+  // SageLauncher would no-op, so the control is absent rather than dead.
+  // "+ New agent" in the header above is unaffected and stays the working
+  // path in either case.
   return (
     <div className="fleet-empty">
       <div className="fleet-empty-icon">
         <Bot size={20} strokeWidth={1.75} />
       </div>
       <div className="fleet-empty-title">Start your first agent</div>
-      <div className="fleet-empty-desc">
-        Ask AI what you need and it&apos;ll set one up for you.
-      </div>
-      <div className="fleet-empty-actions">
-        <button type="button" className="fleet-btn fleet-btn--accent" onClick={onChat}>
-          Ask AI
-        </button>
-      </div>
+      {onChat ? (
+        <>
+          <div className="fleet-empty-desc">
+            Ask AI what you need and it&apos;ll set one up for you.
+          </div>
+          <div className="fleet-empty-actions">
+            <button type="button" className="fleet-btn fleet-btn--accent" onClick={onChat}>
+              Ask AI
+            </button>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
