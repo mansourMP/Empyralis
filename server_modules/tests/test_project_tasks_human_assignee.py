@@ -312,7 +312,7 @@ class AssignTaskClearsHumanAssigneeTests(unittest.IsolatedAsyncioTestCase):
         pool = _QueuedFakePool(
             fetchrow_results=[
                 _task_row(status="todo", assignee_user_id="user-9"),  # get_task: was human-assigned
-                {"id": "agent-1"},  # _agent_install_exists
+                {"project_id": "proj-1"},  # agent_project_id -- same project as the task
                 _task_row(status="in_progress", assignee_agent_id="agent-1"),
             ]
         )

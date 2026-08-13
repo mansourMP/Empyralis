@@ -116,7 +116,7 @@ class MentionRosterRlsFixTests(_BridgeAsyncTestCase):
     """Throwaway non-superuser role, granted SELECT ONLY on the three tables
     the mention roster actually reads (`workspace_agent_installs`,
     `workspace_memberships`, `users`) -- the exact scope
-    `_agent_install_exists` / `_workspace_user_exists` already validate
+    `agent_project_id` / `_workspace_user_exists` already validate
     against, and the exact scope this module's own docstring commits to."""
 
     GRANT_TABLES = ("workspace_agent_installs", "workspace_memberships", "users")

@@ -301,8 +301,9 @@ async def list_unified_roster(
     mention-driven WAKING must only ever target an agent
     ``project_tasks_service.assign_task`` could also address, and
     ``assign_task`` validates only against ``workspace_agent_installs``
-    (``_agent_install_exists``) -- an external agent cannot be a task
-    assignee today. Routing mention resolution through this function would
+    (``agent_project_id``, which doubles as the existence + home-project
+    check) -- an external agent cannot be a task assignee today. Routing
+    mention resolution through this function would
     mean resolving an external agent's name only to then have no scheduler
     that can actually wake it. Extending mention support to external
     agents (chip rendering without waking) is legitimate future work and

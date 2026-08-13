@@ -1261,7 +1261,7 @@ class AssignTaskTests(unittest.IsolatedAsyncioTestCase):
         pool = _QueuedFakePool(
             fetchrow_results=[
                 _task_row(status="todo"),  # get_task
-                {"id": "agent-1"},  # _agent_install_exists
+                {"project_id": "proj-1"},  # agent_project_id -- same project as the task
                 _task_row(status="in_progress", assignee_agent_id="agent-1"),  # UPDATE ... RETURNING
             ]
         )
@@ -1310,7 +1310,7 @@ class AssignTaskTests(unittest.IsolatedAsyncioTestCase):
         pool = _QueuedFakePool(
             fetchrow_results=[
                 _task_row(status="todo"),
-                {"id": "agent-1"},
+                {"project_id": "proj-1"},  # agent_project_id -- same project as the task
                 _task_row(status="in_progress", assignee_agent_id="agent-1"),
             ]
         )
@@ -1331,6 +1331,41 @@ class AssignTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["task"]["assignee_agent_id"], "agent-1")
         self.assertIsNone(result["wake_request"])
         self.assertIn("scheduler unavailable", result["wake_error"])
+
+    async def test_assign_task_refuses_an_agent_from_a_different_project(self):
+        """2026-08-13: assign_task used to check only that the agent
+        EXISTED in the workspace, never that its home project matched the
+        task's own project -- CLAUDE.md's "AN AGENT BELONGS TO ITS PROJECT
+        AND WORKS ONLY THERE" law was enforceable for humans but not
+        agents. A cross-project assignment used to succeed, write
+        assignee_agent_id, and fire a real wakeup -- while the task's own
+        detail page rendered "Unassigned", because it only ever resolves an
+        assignee within the task's own project's agent roster. This proves
+        the write itself is now refused, never merely hidden better."""
+        pool = _QueuedFakePool(
+            fetchrow_results=[
+                _task_row(status="todo", project_id="proj-1"),  # get_task
+                {"project_id": "proj-OTHER"},  # agent_project_id -- a DIFFERENT project
+            ]
+        )
+        wake_mock = AsyncMock()
+        with (
+            patch(
+                "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
+                new=AsyncMock(return_value=pool),
+            ),
+            patch("server_modules.bounded_scheduler_service.schedule_task_assigned_wakeup", new=wake_mock),
+        ):
+            with self.assertRaises(ValueError) as ctx:
+                await project_tasks_service.assign_task(
+                    tenant_id="tenant-1", workspace_id="ws-1", task_id="task-1", agent_id="agent-1",
+                )
+
+        self.assertIn("different project", str(ctx.exception))
+        # No UPDATE was ever issued (only the two fetchrow reads above ran)
+        # and no wakeup was ever scheduled for a refused assignment.
+        self.assertEqual(len(pool.fetchrow_calls), 2)
+        wake_mock.assert_not_awaited()
 
 
 class ScheduleTaskAssignedWakeupTests(unittest.IsolatedAsyncioTestCase):
