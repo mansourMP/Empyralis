@@ -103,8 +103,28 @@ def _database_url_from_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     already present in the process (e.g. a developer who genuinely did
     export it and therefore already ate the collection-time cost above) is
     left as-is.
+
+    Presence, never truthiness -- `"DATABASE_URL" in os.environ`, not
+    `os.getenv("DATABASE_URL", "").strip()`. The whole codebase's own
+    established convention for "run this suite without a database" is an
+    EXPLICIT blank assignment (`DATABASE_URL= python3 -m pytest ...` --
+    see CLAUDE.md's own "environment moves the number" section), which
+    sets the variable to an empty string, not absence. The truthiness
+    check could not tell that apart from "never set at all" -- both read
+    as falsy -- so it treated an operator's explicit "no database this
+    run" identically to "nobody thought about it yet" and opportunistically
+    filled it in from .env either way. Concretely: this repo's own root
+    .env carries a real DATABASE_URL, so running this file with
+    DATABASE_URL= from the repo root silently connected to that real,
+    reachable Postgres instead of skipping -- exactly the class of bug
+    docs/AGENT-OPERATING-RULES.md's MAN-202 entry warns about (a test
+    silently inheriting/reviving a DATABASE_URL an operator specifically
+    tried to leave unset). _database_url_available() below (and every
+    test's own guard, which reads the same os.getenv) now sees the
+    operator's real intent instead of this fixture's own opportunistic
+    fill-in.
     """
-    if os.getenv("DATABASE_URL", "").strip():
+    if "DATABASE_URL" in os.environ:
         return
     try:
         from dotenv import dotenv_values, find_dotenv
