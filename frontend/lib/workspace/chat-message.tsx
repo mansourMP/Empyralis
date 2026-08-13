@@ -344,6 +344,14 @@ export const ChatMessage = memo(({
       || lowerText.includes('local-only')
       ? 'Choose the default AI route, connect a model account, or connect Agent Computer.'
       : text;
+    // safeExternalHref: action_href lives in a turn's persisted metadata --
+    // no producer sets it today (grepped server_modules/), but the render
+    // seam has no way to know that, and message.metadata is data this
+    // component never authored, same reasoning as the attachment chip's
+    // safeExternalHref(a.url) below. An unguarded Link reading the raw
+    // field would execute javascript:/data: the moment anything starts
+    // setting it -- see safe-render-url.test.ts's structural sweep.
+    const safeActionHref = safeExternalHref(actionHref);
     return (
       <article
         data-chat-role="system"
@@ -356,8 +364,8 @@ export const ChatMessage = memo(({
           <strong>AI route needs attention</strong>
           <span>{providerNoticeText}</span>
         </div>
-        {actionHref && actionLabel ? (
-          <Link href={actionHref} className="app-chat-transcript-error__link">
+        {safeActionHref && actionLabel ? (
+          <Link href={safeActionHref} className="app-chat-transcript-error__link">
             {actionLabel}
           </Link>
         ) : null}
