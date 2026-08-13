@@ -3408,6 +3408,17 @@ def _local_workspace_record_from_row(row: Any) -> Optional[Dict[str, Any]]:
         "status": "active",
         "created_by_user_id": None,
         "metadata": metadata,
+        # Always present, always {} — never an absent key a caller's own
+        # .get("identity_links") would otherwise have to distinguish from
+        # "real data exists but wasn't fetched". Honest, not a bug to
+        # paper over: update_workspace_identity_links's own SQLite-fallback
+        # branch (connection is None) is a documented no-op (`return
+        # False`), so there is no persisted identity_links data under this
+        # backend to read back, ever — the empty dict here is a true
+        # statement about SQLite, not a masked read gap the way the
+        # Postgres path's missing SELECT column used to be (see
+        # _workspace_record_from_row's own comment).
+        "identity_links": {},
         "created_at": int(row["created_at"]) if row["created_at"] is not None else None,
         "updated_at": int(row["updated_at"]) if row["updated_at"] is not None else None,
     }
@@ -3418,6 +3429,19 @@ def _workspace_record_from_row(row: Any) -> Optional[Dict[str, Any]]:
         return None
     payload = dict(row)
     payload["metadata"] = _decode_json_object(payload.get("metadata"))
+    # identity_links: a REAL, written-to column (update_workspace_identity_
+    # links's Postgres branch does `UPDATE workspaces SET identity_links =
+    # $2::jsonb ...`) that get_workspace_by_id's own SELECT never named —
+    # every caller of this record (command_registry._is_sender_owner,
+    # sage_agent_runtime_service.py's sender-class resolution,
+    # routes_workspaces.py's identity-links settings endpoints) read
+    # .get("identity_links"), always got None, and treated that identically
+    # to "no channel is linked". The data was real and persisted; only the
+    # read was broken. Decoded the same defensive way `metadata` already is
+    # (asyncpg may return a JSONB column already-parsed as dict, or as raw
+    # text depending on codec setup — _decode_json_object handles both)
+    # rather than trusting the SELECT to keep naming it correctly forever.
+    payload["identity_links"] = _decode_json_object(payload.get("identity_links"))
     return payload
 
 
@@ -7887,7 +7911,7 @@ async def get_workspace_by_id(workspace_id: str) -> Optional[Dict[str, Any]]:
             return payload
         row = await connection.fetchrow(
             """
-            SELECT id, tenant_id, workspace_id, slug, name, workspace_type, status, created_by_user_id, metadata, created_at, updated_at
+            SELECT id, tenant_id, workspace_id, slug, name, workspace_type, status, created_by_user_id, metadata, identity_links, created_at, updated_at
             FROM workspaces
             WHERE workspace_id = $1
             LIMIT 1
