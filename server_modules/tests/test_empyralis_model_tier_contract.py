@@ -45,7 +45,12 @@ def test_empyralis_hosted_tiers_use_deepseek_v4_with_distinct_runtime_contracts(
     }
 
     assert admin_items["light"]["internal_provider"] == "deepseek"
-    assert admin_items["light"]["internal_model"] == "deepseek-chat"
+    # "deepseek-chat" was retired by DeepSeek 2026-07-24 (see
+    # provider_profiles.py's "deepseek" catalog entry) and this test's own
+    # NAME already claimed "uses deepseek v4" while its assertion checked
+    # the dead pre-v4 name — nobody had noticed the two disagreed. Fixed to
+    # what the name always claimed to test.
+    assert admin_items["light"]["internal_model"] == "deepseek-v4-flash"
     assert admin_items["light"]["thinking_mode"] == "off"
     assert admin_items["light"]["agent_budget_tier"] == "standard"
 

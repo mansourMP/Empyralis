@@ -497,6 +497,185 @@ class FullPathRealDefaultEngineIntegrationTest(unittest.TestCase):
         self.assertEqual(run["meter_calls"][0]["tokens_out"], 60)
 
 
+def _sdk_events_with_model_usage(
+    *,
+    reply: str = "Here is your answer.",
+    input_tokens: int = 12000,
+    output_tokens: int = 800,
+    canonical_model: str | None,
+):
+    """Same shape as _sdk_events, plus a real ``model_usage`` entry carrying
+    ``canonicalModel`` — the SDK's own honest report of what actually
+    served the turn (claude_agent_sdk_bridge.translate_sdk_message's
+    ResultMessage branch copies this through unmodified). ``canonical_model
+    =None`` omits ``model_usage`` entirely (the "older CLI"/no-report case
+    the fallback-to-``usage`` branch in sage_agent_runtime_service handles)."""
+    payload: dict = {
+        "reply": reply,
+        "session_id": "sdk-session-1",
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+    }
+    if canonical_model is not None:
+        payload["model_usage"] = {
+            canonical_model: {
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "contextWindow": 128000,
+                "canonicalModel": canonical_model,
+            }
+        }
+    return [{"type": "final", "payload": payload}]
+
+
+class ServedVsRequestedModelBillingTests(unittest.TestCase):
+    """The #6 billing-honesty fix: a turn is billed for the model that
+    ACTUALLY served it (ResultMessage.model_usage[...].canonicalModel),
+    never for what the tier/config merely requested. The concrete case this
+    closes: DeepSeek is documented (provider_profiles.py's "deepseek"
+    catalog entry) to silently substitute a different model under a
+    retired/mismatched name rather than reject the call — so "trust the
+    request" would have charged a customer for a tier they never actually
+    received.
+    """
+
+    def setUp(self) -> None:
+        self.harness = _TurnHarness(self)
+
+    def _run_with_requested_and_served(self, *, requested_model: str, served_model: str | None, request_id: str):
+        with patch(
+            "server_modules.sage_agent_runtime_service.resolve_requested_model",
+            return_value=requested_model,
+        ):
+            return self.harness.run(
+                engine=claude_agent_sdk_bridge.ENGINE_ID,
+                sdk_events=_sdk_events_with_model_usage(canonical_model=served_model),
+                workspace_id="ws-billing-honesty",
+                message="hello",
+                request_id=request_id,
+            )
+
+    def test_downgrade_bills_the_cheaper_served_model_not_the_requested_one(self):
+        """requested "pro" (expensive), served "flash" (cheap, per the
+        SDK's own canonicalModel) — the customer must pay the flash price."
+        A pre-fix run bills the pro price here, which is the exact "charge
+        for what was not delivered" bug this closes."""
+        mismatched = self._run_with_requested_and_served(
+            requested_model="deepseek-v4-pro",
+            served_model="deepseek-v4-flash",
+            request_id="turn-downgrade",
+        )
+        honest_flash = self._run_with_requested_and_served(
+            requested_model="deepseek-v4-flash",
+            served_model=None,
+            request_id="turn-honest-flash",
+        )
+        honest_pro = self._run_with_requested_and_served(
+            requested_model="deepseek-v4-pro",
+            served_model=None,
+            request_id="turn-honest-pro",
+        )
+
+        mismatched_charge = mismatched["debit"].await_args.kwargs["credits_to_charge"]
+        flash_charge = honest_flash["debit"].await_args.kwargs["credits_to_charge"]
+        pro_charge = honest_pro["debit"].await_args.kwargs["credits_to_charge"]
+
+        # The mismatched (requested pro, served flash) turn must cost the
+        # SAME as an honest, un-substituted flash turn — never the pro
+        # price, and never something in between (a partial/blended charge
+        # would still be "billing the wrong thing").
+        self.assertEqual(mismatched_charge, flash_charge)
+        self.assertLess(mismatched_charge, pro_charge)
+
+        # Call counts — "a debit happened" is satisfied by a double charge
+        # just as happily as a correct one, so the count is asserted
+        # exactly, not just that it is truthy.
+        self.assertEqual(mismatched["debit"].await_count, 1)
+        self.assertEqual(len(mismatched["meter_calls"]), 1)
+        self.assertEqual(mismatched["meter_calls"][0]["model"], "deepseek-v4-flash")
+
+        # Surfaced to the customer — not just correctly priced. Same
+        # metadata reaches the persisted turn (thread_service.
+        # record_assistant_turn) via the identical dict.
+        self.assertEqual(mismatched["result"]["model"], "deepseek-v4-pro")
+        self.assertEqual(mismatched["result"]["effective_model"], "deepseek-v4-flash")
+        self.assertTrue(mismatched["result"]["model_overridden"])
+
+    def test_no_substitution_bills_the_requested_model_and_reports_no_override(self):
+        """The common case — SDK reports the SAME model that was
+        requested — must be byte-for-byte unaffected by this fix."""
+        run = self._run_with_requested_and_served(
+            requested_model="deepseek-v4-flash",
+            served_model="deepseek-v4-flash",
+            request_id="turn-no-mismatch",
+        )
+        self.assertEqual(run["meter_calls"][0]["model"], "deepseek-v4-flash")
+        self.assertEqual(run["debit"].await_count, 1)
+        self.assertEqual(run["result"]["effective_model"], "deepseek-v4-flash")
+        self.assertFalse(run["result"]["model_overridden"])
+
+    def test_no_model_usage_report_falls_back_to_requested_model_honestly(self):
+        """An older CLI / no per-model report at all: nothing here can
+        claim a substitution it has no evidence for, so it bills and
+        reports the requested model — never a fabricated "no override"
+        that looks more confident than the data supports, but also never
+        blocks the charge just because the richer signal is absent."""
+        run = self._run_with_requested_and_served(
+            requested_model="deepseek-v4-pro",
+            served_model=None,
+            request_id="turn-no-report",
+        )
+        self.assertEqual(run["meter_calls"][0]["model"], "deepseek-v4-pro")
+        self.assertEqual(run["debit"].await_count, 1)
+        self.assertEqual(run["result"]["effective_model"], "deepseek-v4-pro")
+        self.assertFalse(run["result"]["model_overridden"])
+
+
+class ResolveServedModelFromUsageTests(unittest.TestCase):
+    """Unit coverage for the pure resolver
+    sage_agent_runtime_service._resolve_served_model_from_usage — the
+    function _meter_and_debit_turn's caller uses to turn the SDK's raw
+    ``model_usage`` dict into a served-model answer (or an honest
+    "unknown")."""
+
+    def test_single_entry_returns_its_canonical_model(self):
+        self.assertEqual(
+            sage_agent_runtime_service._resolve_served_model_from_usage(
+                "deepseek-v4-pro", {"deepseek-v4-pro": {"canonicalModel": "deepseek-v4-flash"}},
+            ),
+            "deepseek-v4-flash",
+        )
+
+    def test_no_usage_data_returns_none(self):
+        self.assertIsNone(sage_agent_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", None))
+        self.assertIsNone(sage_agent_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", {}))
+
+    def test_agreeing_multi_entry_usage_returns_the_shared_model(self):
+        usage = {
+            "deepseek-v4-pro": {"canonicalModel": "deepseek-v4-flash"},
+            "deepseek-v4-pro-alt-key": {"canonicalModel": "deepseek-v4-flash"},
+        }
+        self.assertEqual(
+            sage_agent_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", usage),
+            "deepseek-v4-flash",
+        )
+
+    def test_disagreeing_multi_entry_usage_returns_none_rather_than_guessing(self):
+        usage = {
+            "a": {"canonicalModel": "deepseek-v4-flash"},
+            "b": {"canonicalModel": "deepseek-v4-pro"},
+        }
+        self.assertIsNone(sage_agent_runtime_service._resolve_served_model_from_usage("deepseek-v4-pro", usage))
+
+    def test_missing_canonical_model_field_returns_none(self):
+        self.assertIsNone(
+            sage_agent_runtime_service._resolve_served_model_from_usage(
+                "deepseek-v4-pro", {"deepseek-v4-pro": {"inputTokens": 100}},
+            ),
+        )
+
+
 class SingleDebitSeamStructureTests(unittest.TestCase):
     """Double-debit is prevented structurally, not by vigilance.
 

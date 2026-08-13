@@ -1529,6 +1529,33 @@ async def fleet_configure_agent(
                         + (f". Must be one of: {', '.join(sorted(_valid_efforts))}" if _valid_efforts else " — reasoning effort isn't available for this mode.")
                     ),
                 }
+        # Model identity — validate at SAVE TIME against the provider's own
+        # catalog (provider_profiles.model_is_known_for_provider), so a
+        # retired or mistyped model id fails loudly here instead of being
+        # forwarded as free text straight into a live ClaudeAgentOptions
+        # (model=...) call (claude_agent_sdk_bridge.py) or a legacy-engine
+        # provider call. CLAUDE.md's standing rule: stale model/provider
+        # config must fail loudly, never fall through to a default —
+        # unenforced for `model` until now. Only platform_credits/byok_api:
+        # those are the two modes whose `model` field is genuinely a
+        # provider model id; cli_subscription/local use a different
+        # vocabulary already validated above (see reasoning_effort's own
+        # mode branching).
+        model_value = str(mc.get("model") or "").strip()
+        model_provider_value = str(mc.get("provider") or "").strip().lower()
+        if model_value and model_provider_value and mode in ("platform_credits", "byok_api"):
+            from server_modules import provider_profiles
+
+            if not provider_profiles.model_is_known_for_provider(model_provider_value, model_value):
+                _known_models = provider_profiles._provider_model_identifier_list(model_provider_value)
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Invalid model_config model '{model_value}' for provider '{model_provider_value}'."
+                        + (f" Must be one of: {', '.join(_known_models)}." if _known_models else "")
+                    ),
+                }
+
         gateway_binding = mc.get("gateway_binding")
         if gateway_binding is not None and not isinstance(gateway_binding, str):
             return {

@@ -439,6 +439,23 @@ PROVIDER_MODEL_ALIASES: Dict[str, Dict[str, str]] = {
         "claude-3-7-sonnet-latest": "claude-3-7-sonnet-20250219",
         "claude-3-5-sonnet-20241022": "claude-3-7-sonnet-20250219",
     },
+    # DeepSeek retired "deepseek-chat"/"deepseek-reasoner" 2026-07-24 (see
+    # this module's "deepseek" PROVIDER_CATALOG entry) but its API still
+    # accepts the old names and silently substitutes v4-flash/v4-pro under
+    # them rather than rejecting the request — undocumented, unverifiable
+    # from our side per-call. Any caller still carrying the old string
+    # (an old stored per-agent model_config, a script, a future regression)
+    # gets normalized HERE to the real current id through
+    # normalize_provider_model_id, rather than sending the dead name and
+    # relying on DeepSeek's own tolerance. The retired names are
+    # deliberately NOT in "models" below any more (see that entry's own
+    # comment) so a NEW save is rejected outright by
+    # provider_profiles.model_is_known_for_provider — this alias table is
+    # for EXISTING traffic that predates that rejection, not a way back in.
+    "deepseek": {
+        "deepseek-chat": "deepseek-v4-flash",
+        "deepseek-reasoner": "deepseek-v4-pro",
+    },
 }
 
 LOCAL_CLI_AUTH_MODES = {
@@ -701,7 +718,16 @@ PROVIDER_CATALOG = {
         # other model here, no code change needed to support choosing it.
         "default_model": "deepseek-v4-flash",
         "base_url": "https://api.deepseek.com/v1",
-        "models": ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+        # "deepseek-chat"/"deepseek-reasoner" deliberately NOT listed — they
+        # are retired (see comment above) and this list is what
+        # provider_profiles.model_is_known_for_provider validates a NEW
+        # save against (fleet_tools.configure_agent). Listing them here
+        # would make a customer picking the dead name pass save-time
+        # validation and then rely on DeepSeek's own undocumented
+        # tolerance at every turn. A caller that still carries the old
+        # name gets forwarded to the real one via PROVIDER_MODEL_ALIASES
+        # above, never rejected outright for EXISTING config.
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "provider_scopes": ["sage_personal", "workspace_api", "studio_safe"],
         "note": "Direct DeepSeek API key using the OpenAI-compatible endpoint.",
     },
@@ -1792,6 +1818,59 @@ def normalize_provider_model_id(
     if token and supported_models and token not in supported_models and fallback_to_default:
         return str(provider_catalog_entry(provider_id).get("default_model") or "").strip()
     return token
+
+
+# Catalog "models" shapes that are NOT a closed, validate-able list — a
+# provider's own free-text model space (a self-hosted model name, an Azure
+# deployment name), not a menu Empyralis could ever enumerate. Never validate
+# a model id against these; doing so would reject a legitimate value nobody
+# could have typed into a fixed list in the first place.
+_OPEN_MODEL_CATALOG_PLACEHOLDER_LISTS = (["deployment-name"],)
+
+
+def model_is_known_for_provider(provider: Any, model_id: Any) -> bool:
+    """Is `model_id` a value `provider`'s own catalog actually recognizes?
+
+    Fixed-catalog providers (deepseek, anthropic, openai, ...): checked
+    against `_provider_model_identifier_list` (the same list the model
+    picker itself is built from), through the same alias table
+    `normalize_provider_model_id` already applies — a customer typing the
+    documented alias for a real model must not be rejected.
+
+    Open-catalog providers (a "local_only" provider_scope — Ollama's
+    locally-pulled models vary per machine; a placeholder-only "models"
+    list like azure_openai's ["deployment-name"]; or a provider whose
+    catalog entry declares no models at all): always True. There is no
+    fixed menu to validate against, so "unknown" cannot mean "wrong" here.
+
+    False is the ONE signal that means "reject this at save time" — see
+    fleet_tools.configure_agent's model_config validation. CLAUDE.md's
+    standing rule: stale/mistyped model config must fail loudly at save
+    time, never be forwarded as free text into a live provider call and
+    fail silently or unpredictably deep in a turn.
+    """
+    provider_id = normalize_provider_id(provider)
+    token = str(model_id or "").strip()
+    if not token:
+        return True  # nothing to validate — emptiness is a separate check
+    entry = provider_catalog_entry(provider_id)
+    scopes = entry.get("provider_scopes")
+    if isinstance(scopes, list) and "local_only" in scopes:
+        return True
+    explicit = [str(item).strip() for item in entry.get("models", []) if str(item).strip()]
+    if explicit in _OPEN_MODEL_CATALOG_PLACEHOLDER_LISTS:
+        return True
+    known = set(_provider_model_identifier_list(provider_id))
+    if not known:
+        return True  # no catalog to validate against — nothing to reject
+    # Deliberately NO alias resolution here (unlike normalize_provider_
+    # model_id, which callers use for EXISTING/runtime traffic). Aliasing
+    # "deepseek-chat" forward to "deepseek-v4-flash" before this check would
+    # make it pass — the exact "resolving to something plausible" this
+    # function exists to refuse instead of doing. The raw token is checked
+    # as-is; a caller wanting normalize-then-validate composes the two
+    # explicitly rather than getting it silently for free here.
+    return token in known
 
 
 def context_window_for_model(provider: str | None, model: str | None) -> int | None:
