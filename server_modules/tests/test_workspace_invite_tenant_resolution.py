@@ -267,9 +267,20 @@ async def test_invite_new_email_succeeds_despite_stale_users_tenant_id():
         assert persisted_tenant_id != stale_tenant_id
 
 
-# ── 2. An invite with no project_id (the common case) must also still
-#      succeed under the same stale-tenant-id condition -- proving the fix
-#      isn't scoped narrowly to the project-lookup branch alone.
+# ── 2. An invite with no EXPLICIT project_id (the common case -- what
+#      MembersSection.tsx actually sends) must also still succeed under the
+#      same stale-tenant-id condition -- proving the fix isn't scoped
+#      narrowly to the project-lookup branch alone.
+#
+#      MAN-335 superseded this test's original assertion
+#      (`project_id is None`) -- that was the exact bug: a project-less
+#      invite used to grant literally nothing, and an accepted teammate saw
+#      zero projects forever. It now defaults to the workspace's own
+#      default project (never "every project" -- see
+#      test_man335_workspace_invite_default_project_access.py for the full
+#      fix). This test's OWN subject -- tenant resolution staying correct
+#      under a stale users.tenant_id -- is unchanged; only the shape of
+#      "succeeds" is corrected here.
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -291,7 +302,13 @@ async def test_invite_new_email_with_no_project_succeeds_despite_stale_users_ten
         )
 
         assert response.status_code == 200, response.text
-        assert response.json()["invite"]["project_id"] is None
+        # MAN-335: defaults to the workspace's default project rather than
+        # granting nothing. The important thing for THIS test is that the
+        # lookup ensure_default_project needed (tenant_id + workspace_id)
+        # resolved correctly despite the stale users.tenant_id, proven by
+        # the invite succeeding at all and the persisted tenant_id check
+        # below -- not any particular project id.
+        assert response.json()["invite"]["project_id"] is not None
 
         persisted_tenant_id = await _invite_row_tenant_id(
             pool, workspace_id=owner["workspace_id"], email=brand_new_email

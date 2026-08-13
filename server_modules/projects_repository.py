@@ -1084,3 +1084,143 @@ async def list_member_project_ids(
         workspace_id=resolved_workspace_id,
     )
     return [str(r["project_id"]).strip() for r in (rows or []) if str(r["project_id"] or "").strip()]
+
+
+async def default_project_id_if_exists(*, tenant_id: str, workspace_id: str) -> Optional[str]:
+    """Read-only counterpart to ensure_default_project (above) — the id of
+    the workspace's default ('General') project if one already exists, or
+    None. Deliberately never CREATES one: this is called from a READ path
+    (see backfill_default_project_access_if_never_granted below), and
+    creating a project as a side effect of someone merely loading their own
+    project list would be a write nobody asked for."""
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return None
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    row = await control_plane_repository.rls_fetchrow(
+        pool,
+        """
+        SELECT id FROM projects
+        WHERE tenant_id = $1 AND workspace_id = $2 AND is_default = TRUE
+        ORDER BY created_at ASC
+        LIMIT 1
+        """,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
+    )
+    return str(row["id"]).strip() if row and row.get("id") else None
+
+
+_DEFAULT_PROJECT_BACKFILL_MARKER = "default_project_backfilled_at"
+
+
+async def backfill_default_project_access_if_never_granted(
+    *, tenant_id: str, workspace_id: str, user_id: str
+) -> bool:
+    """MAN-335: a workspace invite accepted before this fix granted
+    workspace membership and NOTHING ELSE (see grant_invite_project_access's
+    own docstring — a workspace-level invite carries no project_id, so its
+    metadata is `{}` and that function no-ops). Those members are stuck
+    seeing zero projects, zero tasks, zero documents, zero agents forever,
+    because nothing re-runs invite acceptance for someone who already
+    accepted.
+
+    This is the self-heal: called from _visible_project_ids
+    (routes_fleet.py) the next time an affected member's own project list
+    is computed. Grants the workspace's default project — never "every
+    project", matching the per-project-membership model — and ONLY the
+    first time for a given (tenant, workspace, user), enforced by a durable
+    marker in workspace_memberships.metadata rather than by "does this
+    member currently have zero project grants": the latter would silently
+    UNDO a deliberate later removal from every one of their projects,
+    re-granting access an owner explicitly took away. The marker makes this
+    a true one-shot per member — once stamped, never reconsidered again,
+    regardless of anything that happens to their project grants afterward.
+
+    Returns True if a grant just happened (caller should include the
+    project id in what it returns this request), False otherwise (already
+    backfilled, no default project exists yet, or nothing to do).
+    """
+    pool = await control_plane_repository.ensure_control_plane_schema()
+    if pool is None:
+        return False
+    resolved_tenant_id = str(tenant_id or "").strip()
+    resolved_workspace_id = str(workspace_id or "").strip()
+    resolved_user_id = str(user_id or "").strip()
+    if not resolved_tenant_id or not resolved_workspace_id or not resolved_user_id:
+        return False
+
+    membership_row = await control_plane_repository.rls_fetchrow(
+        pool,
+        """
+        SELECT metadata FROM workspace_memberships
+        WHERE tenant_id = $1 AND workspace_id = $2 AND user_id = $3
+        """,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_user_id,
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
+    )
+    if membership_row is None:
+        return False  # not actually a member of this workspace — nothing to heal
+    # Same decode control_plane_repository uses everywhere it reads a jsonb
+    # metadata column back out (asyncpg hands back a JSON string, not a
+    # dict, unless a codec is registered) — reused rather than
+    # re-implemented here.
+    existing_metadata = control_plane_repository._decode_json_object(membership_row.get("metadata"))
+    if existing_metadata.get(_DEFAULT_PROJECT_BACKFILL_MARKER):
+        return False  # already considered — never reconsidered again, see docstring
+
+    default_project_id = await default_project_id_if_exists(
+        tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id
+    )
+
+    # Stamp the marker REGARDLESS of whether a default project existed to
+    # grant — a workspace with no projects yet at the moment this member's
+    # list is first computed must not re-check on every subsequent request
+    # either; a project created later is reachable the normal way (an
+    # explicit per-project invite), which is the same path every OTHER
+    # project beyond the default already requires.
+    from datetime import datetime, timezone
+
+    stamped_metadata = {
+        **existing_metadata,
+        _DEFAULT_PROJECT_BACKFILL_MARKER: datetime.now(timezone.utc).isoformat(),
+    }
+    await control_plane_repository.rls_execute(
+        pool,
+        """
+        UPDATE workspace_memberships
+        SET metadata = $4::jsonb, updated_at = now()
+        WHERE tenant_id = $1 AND workspace_id = $2 AND user_id = $3
+        """,
+        resolved_tenant_id,
+        resolved_workspace_id,
+        resolved_user_id,
+        json.dumps(stamped_metadata),
+        tenant_id=resolved_tenant_id,
+        workspace_id=resolved_workspace_id,
+    )
+
+    if not default_project_id:
+        return False
+
+    try:
+        existing_grant = await list_member_project_ids(
+            tenant_id=resolved_tenant_id, workspace_id=resolved_workspace_id, user_id=resolved_user_id
+        )
+        if default_project_id in existing_grant:
+            return False  # already has it some other way (e.g. a per-project invite landed first)
+        await add_project_member(
+            tenant_id=resolved_tenant_id,
+            workspace_id=resolved_workspace_id,
+            project_id=default_project_id,
+            user_id=resolved_user_id,
+        )
+        return True
+    except Exception:
+        return False

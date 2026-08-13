@@ -473,14 +473,25 @@ async def test_invite_with_project_accepted_via_login_auto_accept_grants_visible
         assert project["id"] in visible
 
 
-# ── 4. No project_id on the invite: no project row, no error. This is the
-#      deliberate default (see routes_workspaces.py's docstring on
-#      create_workspace_invite_route) -- not a gap.
+# ── 4. No project_id on the invite: SUPERSEDED by MAN-335.
+#
+#      This test used to assert that a project-less invite grants no project
+#      access at all, calling it "the deliberate default... not a gap" —
+#      that was wrong. It was the exact MAN-335 bug: a real, invited,
+#      accepted teammate saw ZERO projects, because MembersSection.tsx's
+#      own invite form (the only UI surface for this exact request shape)
+#      never sends a project_id, and grant_invite_project_access no-ops on
+#      empty metadata. See
+#      test_man335_workspace_invite_default_project_access.py for the full
+#      fix and its test surface (forward default + the pre-fix-member
+#      self-heal + the revocation-safety property) — this one test is kept
+#      here, corrected, because section 4's own no-project_id request shape
+#      belongs with the rest of this file's creation-time coverage.
 # ──────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.anyio
-async def test_invite_with_no_project_id_grants_no_project_access():
+async def test_invite_with_no_project_id_defaults_to_the_workspace_default_project():
     if not _database_url_available():
         pytest.skip(_NO_PG_REASON)
     async with _pg_scope() as (pool, suffix, cleanup_workspace_ids):
@@ -488,6 +499,9 @@ async def test_invite_with_no_project_id_grants_no_project_access():
         owner = _register_owner()
         cleanup_workspace_ids.append(owner["workspace_id"])
         tenant_id = owner["tenant_id"]
+        default_project = await projects_repository.ensure_default_project(
+            tenant_id=tenant_id, workspace_id=owner["workspace_id"],
+        )
         invitee_email = f"no-project-invitee-{suffix}@example.com"
         invitee = _register_invitee(email=invitee_email)
 
@@ -495,7 +509,7 @@ async def test_invite_with_no_project_id_grants_no_project_access():
             app, owner["current_user"], owner["workspace_id"], email=invitee_email, role="member",
         )
         assert create_response.status_code == 200
-        assert create_response.json()["invite"]["project_id"] is None
+        assert create_response.json()["invite"]["project_id"] == default_project["id"]
         token = create_response.json()["token"]
 
         invitee_current_user = _member_current_user(
@@ -507,12 +521,12 @@ async def test_invite_with_no_project_id_grants_no_project_access():
         member_project_ids = await projects_repository.list_member_project_ids(
             tenant_id=tenant_id, workspace_id=owner["workspace_id"], user_id=invitee["user_id"],
         )
-        assert member_project_ids == []
+        assert member_project_ids == [default_project["id"]]
 
         visible = await routes_fleet._visible_project_ids(
             invitee_current_user, owner["workspace_id"], tenant_id,
         )
-        assert visible == set()
+        assert visible == {default_project["id"]}
 
 
 # ── 5. Idempotency: accepting/granting twice must not error or duplicate
