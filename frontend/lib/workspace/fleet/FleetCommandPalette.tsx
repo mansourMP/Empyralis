@@ -192,25 +192,17 @@ export function FleetCommandPalette({
       run: () => go(`${base}/projects/${encodeURIComponent(p.id)}`),
     }));
 
-    // Mirrors the rail's own destinations (primary-rail-nav's RAIL_ITEMS) —
-    // Inbox and Projects, in the same order — then the two setup surfaces
-    // that are deliberately NOT in the rail. Hardware left the rail in the
-    // 2026-07 repositioning and lives in Settings now; the palette is
-    // exactly where a once-in-a-while destination should still be one
-    // keystroke away, so it keeps its entry, hinted with where it actually
-    // lives.
-    //
-    // "go-conversations"/"go-agents" are GONE (project-as-spine nav,
-    // CLAUDE.md 2026-08-13) — both used to jump to a workspace-wide
-    // aggregation across every project's agents, the exact boundary an
-    // agent belonging to its project must not be reached past. Searching
-    // for a specific agent by name still works (agentActions above, one
-    // keystroke from here) and still opens straight into its chat; there is
-    // just no "browse everything" destination behind ⌘K any more, same as
-    // there is none in the rail.
+    // Mirrors the rail's own destinations (PrimaryRail's RAIL_ITEMS) — the
+    // same four, in the same order — then the two setup surfaces that are
+    // deliberately NOT in the rail. Hardware left the rail in the 2026-07
+    // repositioning and lives in Settings now; the palette is exactly where a
+    // once-in-a-while destination should still be one keystroke away, so it
+    // keeps its entry, hinted with where it actually lives.
     const goToActions: Action[] = [
       { id: "go-inbox", label: "Inbox", group: "Go to", icon: Inbox, run: () => go(`${base}/inbox`) },
+      { id: "go-conversations", label: "Conversations", group: "Go to", icon: MessagesSquare, run: () => go(`${base}/conversations`) },
       { id: "go-projects", label: "Projects", group: "Go to", icon: FolderKanban, run: () => go(`${base}/projects`) },
+      { id: "go-agents", label: "Agents", group: "Go to", icon: Bot, run: () => go(`${base}/agents`) },
       { id: "go-settings", label: "Settings", group: "Go to", icon: Settings, run: () => go(`${base}/settings`) },
       { id: "go-hardware", label: "Hardware", hint: "in settings", group: "Go to", icon: Cpu, run: () => go(`${base}/hardware`) },
     ];

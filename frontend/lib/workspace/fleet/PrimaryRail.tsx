@@ -5,23 +5,27 @@ import Link from "next/link";
 import { useRouter, usePathname, useSelectedLayoutSegment } from "next/navigation";
 import {
   BarChart3,
+  Bot,
   ChevronRight,
+  FolderKanban,
+  Inbox,
   LogOut,
+  MessagesSquare,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
   Settings,
   Sun,
+  type LucideIcon,
 } from "lucide-react";
 
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
-import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, resolveAgentProjectId, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
 import { planAgentCountShape } from "./agent-count-shape";
-import { visibleRailItems } from "./primary-rail-nav";
 import { FleetHelpButton } from "./FleetHelpButton";
 import { SageLauncher } from "./SageLauncher";
 import { CreditBalanceChip } from "./CreditBalanceChip";
@@ -32,18 +36,42 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { RAIL_WIDTH, useResizableWidth } from "./fleet-preferences";
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
-// Rail vocabulary lives in primary-rail-nav.ts now — a pure, dependency-light
-// module a plain test can import directly (see primary-rail-nav.test.ts).
-// Project-as-spine nav (CLAUDE.md, 2026-08-13): Conversations and Agents are
-// GONE from the rail, not reordered — both used to aggregate across every
-// project's agents, which is exactly the boundary an agent belonging to its
-// project must not be reached past. An agent now lives inside the project it
-// belongs to; see project-agents-rail-shape.ts for the compact rail that
-// replaces the old flat Agents table there. Hardware left the rail in the
-// 2026-07 repositioning for an unrelated reason (set-once config, not a
-// project-scoping one) and lives in Settings now — the /w/{ws}/hardware
-// route is still live, so every link/bookmark/redirect that pointed at it
-// still resolves.
+type RailNavItem = {
+  key: string;
+  label: string;
+  segment: string;
+  icon: LucideIcon;
+  chord: string;
+  /** MAN-317: true for a surface that exists to aggregate AGENTS — Inbox
+   *  (agent/gateway activity), Conversations (agent channel conversations)
+   *  and Agents itself (the fleet table). With zero real agents there is
+   *  nothing for any of the three to aggregate — every event class the
+   *  activity ledger knows about (sage_activity, gateway_channel,
+   *  fleet_control, …) is agent- or gateway-driven, confirmed against
+   *  activity_ledger_service.EVENT_CLASSES — so all three hide from the
+   *  rail at agent-count-shape.ts's "none" mode. Projects is deliberately
+   *  NOT tagged: it is the workspace's own data (CLAUDE.md positioning —
+   *  "the WORKSPACE is the product"), not a view OF the fleet, so it never
+   *  hides for having zero agents. */
+  aggregatesAgents?: boolean;
+};
+
+// Rail vocabulary. `chord` is the second key of Linear-style "g then <key>".
+//
+// Every entry here is WORK — the things a teammate touches daily. Hardware
+// used to sit at the bottom of this list and was removed in the 2026-07
+// repositioning: which box an agent runs on is decided once, at setup, and
+// then never thought about again, so it belongs in Settings (where it now
+// renders as a real section — see settings/page.tsx and HardwareSection.tsx)
+// rather than in the app's spine. The /w/{ws}/hardware route itself is still
+// live, so every link, bookmark and redirect that pointed at it still
+// resolves; it just isn't a standing destination any more.
+const RAIL_ITEMS: RailNavItem[] = [
+  { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i", aggregatesAgents: true },
+  { key: "conversations", label: "Conversations", segment: "conversations", icon: MessagesSquare, chord: "c", aggregatesAgents: true },
+  { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
+  { key: "agents", label: "Agents", segment: "agents", icon: Bot, chord: "a", aggregatesAgents: true },
+];
 
 const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
@@ -61,25 +89,23 @@ const CONTROL_ICON = 16;
 const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
 
 /**
- * Persistent primary rail — the app's spine, and PROJECTS is the spine of
- * the spine (CLAUDE.md, 2026-08-13 navigation decision). A populated
- * workspace header (U3-G) replaces the static product wordmark; Projects is
- * a real, collapsible sub-list of the workspace's own data (Linear's
- * "Teams" treatment — genuine containers you navigate into); a quiet footer
- * line reports the fleet's pulse above the account block. Billing lives in
- * the account menu instead — it's a look-up-occasionally screen, not a nav
+ * Persistent primary rail — the app's spine. A populated workspace header
+ * (U3-G) replaces the static product wordmark; Projects is a real,
+ * collapsible sub-list of the workspace's own data (Linear's "Teams"
+ * treatment — genuine containers you navigate into); a quiet footer line
+ * reports the fleet's pulse above the account block. Billing lives in the
+ * account menu instead — it's a look-up-occasionally screen, not a nav
  * destination. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then
- * a section key jumps directly (g i inbox, g p projects) — the Linear
- * muscle-memory model.
+ * a section key jumps directly (g i inbox, g c conversations, g p projects,
+ * g a agents) — the Linear muscle-memory model.
  *
- * Conversations and Agents are GONE from this rail (see primary-rail-nav.ts),
- * not merely folded into the Projects sub-list — both used to aggregate
- * across every project's agents, which is exactly the boundary "an agent
- * belongs to its project and works only there" says a nav surface must not
- * reach past. Agents are entities that live INSIDE the project that owns
- * them, reached by opening that project's own Agents section — see
- * project-agents-rail-shape.ts and ProjectAgentsRail.tsx for the compact
- * list that replaces the old flat, workspace-wide Agents table there.
+ * Agents is a plain nav link to the Agents page, not a sub-list (MAN-146).
+ * Agents are entities, not navigation destinations — the same reason Linear
+ * lists teams and projects in its sidebar but never lists every issue. A
+ * rail that rendered every agent flat under "Agents" (no cap, expanded by
+ * default) scaled linearly with fleet size: at 13 agents it pushed Inbox
+ * out of view entirely, and it only gets worse from there. The Agents page
+ * is where you browse agents; the rail is how you get there.
  */
 export function PrimaryRail({
   workspaceId,
@@ -246,22 +272,37 @@ export function PrimaryRail({
 
   // MAN-317 — the count decides the rail's shape, never a tier check. See
   // agent-count-shape.ts. "none": hide every surface that aggregates agents
-  // (nothing to aggregate) — today that's Inbox alone; Conversations and
-  // Agents no longer live here at all (project-as-spine nav), so there is no
-  // solo-agent redirect to compute for this rail any more either.
+  // (nothing to aggregate). "solo": the Agents row routes straight to the
+  // one real agent instead of the fleet table (planDoors' "direct" mode,
+  // same instinct — a table of one is worse than no table). "fleet":
+  // unchanged, today's behaviour.
   const agentCountMode = useMemo(() => planAgentCountShape(agents.length), [agents.length]);
+  const soloAgent = agentCountMode === "solo" ? agents[0] : null;
+  const soloAgentProjectId = useMemo(
+    () => (soloAgent ? resolveAgentProjectId(soloAgent.project_id, projects) : null),
+    [soloAgent, projects],
+  );
+  const soloAgentHref = useMemo(() => {
+    if (!soloAgent || !soloAgentProjectId) return null;
+    return `/w/${encodeURIComponent(workspaceId)}/projects/${encodeURIComponent(soloAgentProjectId)}/agents/${encodeURIComponent(soloAgent.agent_id)}/chat`;
+  }, [soloAgent, soloAgentProjectId, workspaceId]);
 
   // Reversible for free: this is recomputed from the live agent count on
   // every render, so the moment a second real agent exists,
-  // `agentCountMode` stops being "none" and the full rail reappears on its
-  // own — no setting anywhere to flip.
-  const railItems = useMemo(
-    () => visibleRailItems(agentCountMode === "none"),
+  // `agentCountMode` stops being "none"/"solo" and the full rail reappears
+  // on its own — no setting anywhere to flip.
+  const visibleRailItems = useMemo(
+    () => (agentCountMode === "none" ? RAIL_ITEMS.filter((item) => !item.aggregatesAgents) : RAIL_ITEMS),
     [agentCountMode],
   );
+  // Only the Agents row's destination ever changes (solo mode) — every
+  // other row's href is its ordinary segment. Falls back to the fleet
+  // table's own href if a single agent's project can't resolve for some
+  // reason (should not happen — see resolveAgentProjectId's own fallback),
+  // rather than ever producing a dead link.
   const railHrefFor = useCallback(
-    (item: { segment: string }) => `/w/${encodeURIComponent(workspaceId)}/${item.segment}`,
-    [workspaceId],
+    (item: RailNavItem) => (item.key === "agents" && soloAgentHref ? soloAgentHref : `/w/${encodeURIComponent(workspaceId)}/${item.segment}`),
+    [soloAgentHref, workspaceId],
   );
 
   const projectsExpanded = sections?.projects ?? true;
@@ -322,7 +363,7 @@ export function PrimaryRail({
         // Only a currently-VISIBLE row's chord fires — "g i" is a dead
         // shortcut at agent-count-shape.ts's "none" mode, the same as the
         // row itself not being on screen to click.
-        const item = railItems.find((i) => i.chord === key);
+        const item = visibleRailItems.find((i) => i.chord === key);
         if (item) {
           e.preventDefault();
           router.push(railHrefFor(item));
@@ -337,19 +378,19 @@ export function PrimaryRail({
       }
       if (key === "j") {
         e.preventDefault();
-        setFocusIdx((i) => Math.min(railItems.length - 1, i + 1));
+        setFocusIdx((i) => Math.min(visibleRailItems.length - 1, i + 1));
       } else if (key === "k") {
         e.preventDefault();
-        setFocusIdx((i) => (i < 0 ? railItems.length - 1 : Math.max(0, i - 1)));
+        setFocusIdx((i) => (i < 0 ? visibleRailItems.length - 1 : Math.max(0, i - 1)));
       } else if (key === "enter" && focusIdx >= 0) {
         e.preventDefault();
-        router.push(railHrefFor(railItems[focusIdx]));
+        router.push(railHrefFor(visibleRailItems[focusIdx]));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusIdx, router, workspaceId, railItems, railHrefFor]);
+  }, [focusIdx, router, workspaceId, visibleRailItems, railHrefFor]);
 
   // Same custom-event mechanism as fleet:open-sage (FleetShell.tsx) — no
   // prop-drilling a setter from FleetCommandPalette back down into the rail.
@@ -417,7 +458,7 @@ export function PrimaryRail({
       </div>
 
       <nav className="fleet-rail-nav">
-        {railItems.map((item, idx) => {
+        {visibleRailItems.map((item, idx) => {
           const Icon = item.icon;
           const active = segment === item.segment;
           const focused = focusIdx === idx;

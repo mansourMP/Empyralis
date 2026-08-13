@@ -12,6 +12,7 @@ import {
   assignFleetTask,
   assignFleetTaskToUser,
   patchFleetTask,
+  type FleetAgent,
   type FleetTaskStatus,
   type TaskAssigneeSelection,
 } from "@/lib/workspace/fleet/fleet-data";
@@ -31,8 +32,8 @@ import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction
 import { breadcrumbCount, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 import { UsageStat, bucketSeries, type UsageBucket } from "@/lib/workspace/fleet/fleet-sparkline";
-import { planAgentCountShape } from "@/lib/workspace/fleet/agent-count-shape";
-import { FleetToolbar } from "@/lib/workspace/fleet/FleetToolbar";
+import { AgentsList, rememberLastViewedAgent } from "@/lib/workspace/fleet/AgentsList";
+import { FleetToolbar, type ToolbarFilter } from "@/lib/workspace/fleet/FleetToolbar";
 import { TaskViewOptions } from "@/lib/workspace/fleet/TaskViewOptions";
 import {
   DEFAULT_TASK_VIEW_OPTIONS,
@@ -145,20 +146,63 @@ function DocumentsListSkeleton() {
   );
 }
 
-// The old flat 7-column agents table (and its own skeleton/filter/sort
-// machinery) is gone from this view — project-as-spine nav (CLAUDE.md,
-// 2026-08-13): a project's Agents section now browses through the compact
-// rail agents/layout.tsx renders beside this page (ProjectAgentsRail.tsx),
-// not a table here. See the `view === "agents"` branch below for what
-// replaced it: an empty state (0 agents, unchanged), a quiet redirect (1
-// agent — straight into its chat, no rail for a rail of one), or a plain
-// "select an agent" prompt (2+, the rail is doing the browsing).
+/** Agents-list skeleton reusing `.fleet-agents-list`/`.fleet-agents-list-header`/`.fleet-agent-row`'s real 7-column grid. */
+function ProjectAgentsListSkeleton() {
+  return (
+    <div className="fleet-agents-list" aria-busy="true" aria-label="Loading">
+      <div className="fleet-agents-list-header" aria-hidden>
+        <span>Agent</span>
+        <span className="fleet-col-brain">Brain</span>
+        <span className="fleet-col-placement">Placement</span>
+        <span className="fleet-col-channels">Channels</span>
+        <span className="is-right fleet-col-last-active">Last active</span>
+        <span className="is-right">Cost</span>
+        <span className="is-right">Status</span>
+      </div>
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="fleet-agent-row" style={{ cursor: "default" }}>
+          <span className="fleet-skeleton-bar" style={{ width: `${45 + (i % 3) * 12}%`, height: 13 }} />
+          <span className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} />
+          <span className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} />
+          <span className="fleet-skeleton-bar" style={{ width: "50%", height: 12 }} />
+          <span className="fleet-skeleton-bar" style={{ width: 44, height: 12, marginLeft: "auto" }} />
+          <span className="fleet-skeleton-bar" style={{ width: 44, height: 12, marginLeft: "auto" }} />
+          <span className="fleet-skeleton-bar" style={{ width: 60, height: 18, marginLeft: "auto", borderRadius: 999 }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type SortMode = "last_active" | "status" | "cost" | "name";
+const STATUS_RANK: Record<string, number> = { online: 0, unknown: 1, offline: 2 };
+const SORT_OPTIONS = [
+  { value: "last_active", label: "Last active" },
+  { value: "status", label: "Status" },
+  { value: "cost", label: "Cost" },
+  { value: "name", label: "Name" },
+];
+
+type FilterState = { status: string; channel: string; sort: SortMode };
+
+// Same URL-backed view state as the flat agents list (agents/page.tsx) — so
+// leaving for an agent's detail and returning (including Esc-to-return's
+// browser-back) restores this project's filtered/sorted view too.
+function readFiltersFromLocation(): FilterState {
+  if (typeof window === "undefined") return { status: "all", channel: "all", sort: "last_active" };
+  const sp = new URLSearchParams(window.location.search);
+  return {
+    status: sp.get("status") || "all",
+    channel: sp.get("channel") || "all",
+    sort: (sp.get("sort") as SortMode) || "last_active",
+  };
+}
 
 export default function ProjectDetailPage() {
   const params = useParams();
   const router = useRouter();
   // Drives the Agents/Tasks/Documents derivation below — see the `view`
-  // const near projectBase.
+  // const near updateFilters/projectBase.
   const pathname = usePathname() || "";
   const workspaceId = String(params?.workspaceId || "");
   const projectId = String(params?.projectId || "");
@@ -196,7 +240,28 @@ export default function ProjectDetailPage() {
     ),
   );
 
+  const [filterState, setFilterState] = useState<FilterState>(() => readFiltersFromLocation());
+  const { status: statusFilter, channel: channelFilter, sort } = filterState;
   const projectBase = `${base}/projects/${encodeURIComponent(projectId)}`;
+
+  const updateFilters = useCallback((patch: Partial<FilterState>) => {
+    setFilterState((prev) => {
+      const next = { ...prev, ...patch };
+      const sp = new URLSearchParams();
+      if (next.status !== "all") sp.set("status", next.status);
+      if (next.channel !== "all") sp.set("channel", next.channel);
+      if (next.sort !== "last_active") sp.set("sort", next.sort);
+      const qs = sp.toString();
+      // The CURRENT pathname, not a hardcoded route: these filters only
+      // ever apply to the Agents view (see the `filters`/sortOptions wiring
+      // below), which lives at `${projectBase}/agents` — a real route, not
+      // client state (see the `view` const below). Replacing with
+      // `projectBase` would silently bounce the reader onto the default
+      // (Tasks) view every time they touched a filter.
+      router.replace(`${pathname}${qs ? `?${qs}` : ""}`);
+      return next;
+    });
+  }, [router, pathname]);
 
   const [wizardOpen, setWizardOpen] = useState(false);
   // Properties drawer — closed by default, an overlay over the sheet.
@@ -380,6 +445,14 @@ export default function ProjectDetailPage() {
       [inProject.length, project?.name],
     ),
   );
+  const filtered = useMemo(() => inProject.filter((a) => {
+    if (statusFilter !== "all" && (a.hardware_status || "unknown") !== statusFilter) return false;
+    if (channelFilter === "connected" && !a.channel) return false;
+    if (channelFilter === "none" && a.channel) return false;
+    return true;
+  }), [inProject, statusFilter, channelFilter]);
+  const shown = useMemo(() => sortAgents(filtered, sort, cost), [filtered, sort, cost]);
+
   const costByAgent = useMemo(
     () => inProject
       .map((a) => ({ id: a.agent_id, label: a.label || "Unnamed agent", cost: cost.get(a.agent_id) || 0 }))
@@ -387,28 +460,35 @@ export default function ProjectDetailPage() {
     [inProject, cost],
   );
 
-  // Where an agent's own page lives — used below both to build the solo
-  // redirect and, at 2+ agents, to build the "select an agent" prompt's
-  // implicit destination (the rail itself, agents/layout.tsx, is what
-  // actually links there now — see ProjectAgentsRail.tsx).
+  const filters: ToolbarFilter[] = [
+    {
+      key: "status", label: "Status", value: statusFilter, onChange: (v) => updateFilters({ status: v }),
+      options: [
+        { value: "all", label: "All statuses" },
+        { value: "online", label: "Online" },
+        { value: "offline", label: "Offline" },
+        { value: "unknown", label: "Not deployed" },
+      ],
+    },
+    {
+      key: "channel", label: "Channel", value: channelFilter, onChange: (v) => updateFilters({ channel: v }),
+      options: [
+        { value: "all", label: "All channels" },
+        { value: "connected", label: "Connected" },
+        { value: "none", label: "No channel" },
+      ],
+    },
+  ];
+
+  // Where an agent row goes on a plain click, via `router.push` in
+  // goToAgent below — straight into Chat, the agent's front door.
   const agentHref = (agentId: string) =>
     `${projectBase}/agents/${encodeURIComponent(agentId)}/chat`;
 
-  // MAN-317, composed via project-agents-rail-shape.ts's identical rule —
-  // never a second one. "none": the empty state below, unchanged. "solo": a
-  // rail of one is worse than no rail (same call agent-count-shape.ts's own
-  // doc comment makes for a table of one), so this view redirects straight
-  // into that one agent's chat instead of showing anything here. "fleet":
-  // the compact rail (agents/layout.tsx) is doing the browsing now, so this
-  // pane just prompts a selection.
-  const agentCountMode = useMemo(() => planAgentCountShape(inProject.length), [inProject.length]);
-  const soloAgent = agentCountMode === "solo" ? inProject[0] : null;
-  useEffect(() => {
-    if (view === "agents" && !loading && soloAgent) {
-      router.replace(agentHref(soloAgent.agent_id));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, loading, soloAgent?.agent_id]);
+  const goToAgent = (agentId: string) => {
+    rememberLastViewedAgent(agentId);
+    router.push(agentHref(agentId));
+  };
 
   // MAN-64/MAN-70: assignee is agent-or-human -- dispatch to whichever of
   // assignFleetTask/assignFleetTaskToUser matches the picker's selection.
@@ -639,14 +719,13 @@ export default function ProjectDetailPage() {
         {view === "tasks" && tasks.length > 0 ? (
           <TaskViewOptions options={viewOptions} onChange={updateViewOptions} />
         ) : null}
-        {/* Filters/sort are gone — the compact rail beside this pane
-            (agents/layout.tsx) is the browse surface now, and a narrow
-            scan-and-pick list has nothing for a status/channel dropdown to
-            narrow. The panel toggle stays: it's the only entry point to
-            this project's cost/properties drawer (below), unrelated to how
-            agents are browsed. */}
         {view === "agents" ? (
           <FleetToolbar
+            filters={inProject.length > 0 ? filters : undefined}
+            sortOptions={inProject.length > 0 ? SORT_OPTIONS : undefined}
+            sortValue={sort}
+            sortDefault="last_active"
+            onSortChange={(v) => updateFilters({ sort: v as SortMode })}
             panelOpen={panelOpen}
             onTogglePanel={() => setPanelOpen((v) => !v)}
             usageWorkspaceId={workspaceId}
@@ -772,7 +851,7 @@ export default function ProjectDetailPage() {
               <DocumentsList documents={documents} hrefFor={documentHref} />
             )
           ) : loading && inProject.length === 0 ? (
-            <div className="fleet-project-agents-placeholder" aria-busy="true">Loading…</div>
+            <ProjectAgentsListSkeleton />
           ) : agentsError && inProject.length === 0 ? (
             <FleetSurfaceError title="Couldn’t load agents" message={agentsError} onRetry={refresh} />
           ) : inProject.length === 0 ? (
@@ -781,15 +860,10 @@ export default function ProjectDetailPage() {
               desc="Create one — it’ll be assigned here."
               onCreate={() => setWizardOpen(true)}
             />
-          ) : soloAgent ? (
-            // The redirect effect above is already firing — this is the one
-            // paint before it commits, same quiet-state convention the
-            // workspace-level Agents page uses for its own solo redirect.
-            <div className="fleet-page-state-body">Opening {soloAgent.label || "your agent"}…</div>
+          ) : shown.length === 0 ? (
+            <div className="fleet-page-state-body">No agents match these filters.</div>
           ) : (
-            // 2+ agents: the compact rail beside this pane (agents/layout.tsx)
-            // is the browse surface now — this pane just prompts a pick.
-            <div className="fleet-project-agents-placeholder">Select an agent to start chatting.</div>
+            <AgentsList workspaceId={workspaceId} agents={shown} costByAgent={cost} onSelect={goToAgent} onAgentStoppedChanged={refresh} />
           )}
         </div>
 
@@ -880,4 +954,22 @@ export default function ProjectDetailPage() {
       )}
     </main>
   );
+}
+
+function sortAgents(agents: FleetAgent[], sort: SortMode, cost: Map<string, number>): FleetAgent[] {
+  const list = [...agents];
+  if (sort === "name") {
+    list.sort((a, b) => (a.label || "").localeCompare(b.label || ""));
+  } else if (sort === "status") {
+    list.sort((a, b) => (STATUS_RANK[a.hardware_status] ?? 1) - (STATUS_RANK[b.hardware_status] ?? 1));
+  } else if (sort === "cost") {
+    list.sort((a, b) => (cost.get(b.agent_id) || 0) - (cost.get(a.agent_id) || 0));
+  } else {
+    list.sort((a, b) => {
+      const ta = a.last_activity ? new Date(a.last_activity).getTime() : 0;
+      const tb = b.last_activity ? new Date(b.last_activity).getTime() : 0;
+      return tb - ta;
+    });
+  }
+  return list;
 }
