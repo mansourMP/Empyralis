@@ -9,6 +9,10 @@ Checks
 1. **Local-stack DATABASE_URL** — a dev/test/local boot must have
    DATABASE_URL set explicitly; it is never allowed to boot on "whatever
    the environment happened to contain" (MAN-202/MAN-268).
+1a. **Local-stack live provider/channel secrets** — the same precondition
+   for any env var shaped like a third-party credential (`*_API_KEY`,
+   `*_TOKEN`): a dev/test/local boot refuses to start if one looks like a
+   real secret rather than a placeholder (2026-08-13 incident).
 2. **Rust runtime kernel** — binary must exist (built or env-var path).
 3. **PostgreSQL** — DATABASE_URL must be set, pool must be reachable,
    and ``workspace_agent_installs`` must have the stage_4b columns.
@@ -164,6 +168,135 @@ def _check_local_stack_database_url() -> Optional[str]:
         "  Or set EMPYRALIS_ALLOW_IMPLICIT_LOCAL_DATABASE_URL=true to run on the SQLite "
         "fallback with no Postgres at all (rarely what you want for the seeded-data UI "
         "testing workflow described in CLAUDE.md)."
+    )
+
+
+# ── local-stack live provider/channel secrets (2026-08-13 incident) ─────
+#
+# The DATABASE_URL check above closes ONE way an unscoped-looking local boot
+# inherits production-adjacent credentials. It is not the only way. On
+# 2026-08-13 an agent auditing the context layer brought up a throwaway
+# backend with an explicit, disposable DATABASE_URL (so the check above
+# passed cleanly) but launched `uvicorn` from the real repo root. server.py's
+# `load_dotenv(_env_path)` loaded that root's real .env, which — unlike
+# DATABASE_URL — nothing here ever inspected: ANTHROPIC_API_KEY,
+# DEEPSEEK_API_KEY, and EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN all came along
+# for free. For roughly ten minutes, before anyone noticed, the "throwaway"
+# process long-polled a REAL Telegram bot (~76 getUpdates calls), issued one
+# real `setMyCommands` mutation against it, and ran two real agent turns
+# billed to the real DeepSeek account. Nothing raised, nothing warned — the
+# process looked exactly as isolated as a correctly-scoped one.
+#
+# This is the DATABASE_URL guard's own precondition in a second costume:
+# a dev/test/local boot must hold ONLY credentials it was deliberately
+# given, never whatever the ambient environment happens to contain. The set
+# of affected variable NAMES is what must never be hand-written here — a
+# literal ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "EMPYRALIS_TELEGRAM_
+# HOSTED_BOT_TOKEN") list is exactly the shape of list this codebase keeps
+# getting bitten by (CLAUDE.md's "channels is ONE system, never hand-listed"
+# rule, and the channel-copy pinned-literal rule, are the same failure one
+# layer up). So this derives the affected set STRUCTURALLY, off the shape of
+# the variable's own NAME (any live process env var ending in `_API_KEY` —
+# any LLM/platform provider key, present or future — or `_TOKEN` — any
+# channel bot/access token, present or future) rather than off an enumerated
+# list of providers this repo happens to integrate with today.
+
+_LOCAL_STACK_CREDENTIAL_NAME_SUFFIXES = ("_API_KEY", "_TOKEN")
+
+# Markers that make a credential-shaped value read as a deliberate
+# placeholder rather than a real secret — reusing the same vocabulary
+# runtime_config.py's own `_assert_auth_secrets_safe_for_environment`
+# already treats as an obvious non-secret, extended with the shapes this
+# repo's own throwaway-stack tooling actually produces (e.g. this incident's
+# own remediation used "sk-throwaway-audit-blocked"). An empty value is
+# never "live" — nothing was inherited if nothing is set.
+_LOCAL_STACK_PLACEHOLDER_SECRET_MARKERS = (
+    "changeme", "change-me", "placeholder", "dummy", "throwaway", "fake",
+    "blocked", "example", "your-", "replace-with", "xxx", "sk-test",
+)
+
+
+def _local_stack_credential_shaped_env_names() -> List[str]:
+    """Every SET environment variable whose name structurally looks like a
+    third-party provider or channel credential. See the module comment
+    above for why this is name-shape-derived rather than an enumerated
+    provider list."""
+    return sorted(
+        name
+        for name in os.environ
+        if name.endswith(_LOCAL_STACK_CREDENTIAL_NAME_SUFFIXES)
+    )
+
+
+def _looks_like_live_local_stack_secret(value: str) -> bool:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    return not any(marker in lowered for marker in _LOCAL_STACK_PLACEHOLDER_SECRET_MARKERS)
+
+
+def _local_stack_live_secrets_check_skipped() -> bool:
+    """Deliberate, loud, BLANKET escape hatch (mirrors the DATABASE_URL and
+    Redis/RLS skips) — not a per-variable one. A per-variable override would
+    let this guard be chipped away one exception at a time until it covers
+    nothing; a single named flag keeps every bypass a conscious, visible
+    choice, logged at warning level on every boot."""
+    return os.getenv("EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS", "").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+def _check_local_stack_live_provider_secrets() -> Optional[str]:
+    """Return `None` if this isn't a dev/test/local boot, durable Postgres
+    is already required elsewhere (beta/staging/production), or nothing
+    credential-shaped currently set looks like a real secret.
+
+    Refuses to boot a dev/test/local process that holds what looks like a
+    genuine third-party provider or channel credential — see the module
+    comment above for the 2026-08-13 incident this exists to prevent."""
+    from server_modules.db import durable_runtime_required as _durable_required  # noqa: PLC0415
+
+    if _durable_required():
+        return None  # beta/staging/production are expected to hold real credentials
+
+    if _resolved_environment_for_local_stack_check() not in _LOCAL_STACK_ENV_TOKENS:
+        return None  # not a recognized local/dev/test boot — leave as-is
+
+    live_names = [
+        name
+        for name in _local_stack_credential_shaped_env_names()
+        if _looks_like_live_local_stack_secret(os.environ.get(name, ""))
+    ]
+    if not live_names:
+        return None
+
+    named = ", ".join(live_names)
+
+    if _local_stack_live_secrets_check_skipped():
+        LOGGER.warning(
+            "preflight: local-stack live-provider-secret requirement BYPASSED "
+            "(EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS set) — this process holds what "
+            "looks like a real credential for: %s. Any outbound call this process makes "
+            "using it is real, billed, and/or externally visible.",
+            named,
+        )
+        return None
+
+    return (
+        f"This dev/test/local boot holds what looks like a REAL credential for: {named}.\n"
+        "  Refusing to start rather than silently make live, billed, or externally-visible "
+        "calls from a 'throwaway' stack — this is the exact precondition behind the "
+        "2026-08-13 incident (see the comment above this check): a throwaway backend "
+        "launched from the real repo root inherited the real ANTHROPIC_API_KEY, "
+        "DEEPSEEK_API_KEY, and EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN from that root's .env, "
+        "long-polled and mutated a REAL Telegram bot for ~10 minutes, and ran two real "
+        "DeepSeek-billed agent turns before anyone noticed. Never weaken or remove this "
+        "check to make the message go away — fix the value it is naming instead.\n"
+        f"  Unset {named} (or export an obvious placeholder, e.g. "
+        "DEEPSEEK_API_KEY=sk-throwaway-blocked), or set "
+        "EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS=true if you have deliberately chosen to "
+        "run this dev/test/local boot against real provider/channel credentials."
     )
 
 
@@ -1086,6 +1219,13 @@ async def run_preflight_checks() -> List[str]:
     local_stack_db_err = _check_local_stack_database_url()
     if local_stack_db_err:
         errors.append(local_stack_db_err)
+
+    # 1a. Same precondition, second costume (2026-08-13): a dev/test/local
+    #     boot must not silently hold a real third-party provider or channel
+    #     credential either. See the check's own module comment above.
+    local_stack_secrets_err = _check_local_stack_live_provider_secrets()
+    if local_stack_secrets_err:
+        errors.append(local_stack_secrets_err)
 
     # 1b. Config for the removed embeddings/RAG knowledge pipeline must be
     #     gone, not silently ignored (CLAUDE.md: stale config fails loudly).

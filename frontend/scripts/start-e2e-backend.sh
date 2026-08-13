@@ -60,6 +60,40 @@ if [ -z "${DATABASE_URL:-}" ]; then
   exit 1
 fi
 
+# 2026-08-13 incident: DATABASE_URL being explicit (the check above) is not
+# enough on its own. An agent ran this exact shape of bootstrap with a
+# correctly-scoped DATABASE_URL and still inherited the real
+# ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, and EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN
+# from this repo root's .env — server_modules/preflight.py's boot-time guard
+# (_check_local_stack_live_provider_secrets) catches this once uvicorn's app
+# lifespan runs, but the inline Python bootstrap immediately below (which
+# calls register_user -> email_verification_service.start_verification,
+# a REAL outbound email send if EMAIL_PROVIDER_API_KEY is live) runs BEFORE
+# that guard ever executes — same shape as the DATABASE_URL block above.
+# Derived off the same NAME-SHAPE rule as the Python guard (any set env var
+# ending in _API_KEY or _TOKEN), never an enumerated provider list.
+for _cred_name in $(env | awk -F= '{print $1}' | grep -E '(_API_KEY|_TOKEN)$' || true); do
+  eval "_cred_value=\${$_cred_name:-}"
+  case "$(printf '%s' "$_cred_value" | tr '[:upper:]' '[:lower:]')" in
+    "") continue ;;
+    *changeme*|*change-me*|*placeholder*|*dummy*|*throwaway*|*fake*|*blocked*|*example*|*your-*|*replace-with*|*xxx*|*sk-test*) continue ;;
+  esac
+  if [ "${EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS:-}" = "true" ] || [ "${EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS:-}" = "1" ]; then
+    echo "WARNING: ${_cred_name} looks like a real credential and this boot is proceeding anyway (EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS set)." >&2
+    continue
+  fi
+  echo "${_cred_name} looks like a REAL credential, not a placeholder." >&2
+  echo "Refusing to start rather than repeat the 2026-08-13 incident: a" >&2
+  echo "throwaway stack launched this way long-polled and mutated a real" >&2
+  echo "Telegram bot for ~10 minutes and ran real DeepSeek-billed agent" >&2
+  echo "turns, using credentials nobody meant to give it." >&2
+  echo "" >&2
+  echo "Unset ${_cred_name} (or export an obvious placeholder), or set" >&2
+  echo "EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS=true if you have" >&2
+  echo "deliberately chosen to run this boot against real credentials." >&2
+  exit 1
+done
+
 E2E_STATE_HOME="${EMPYRALIS_E2E_STATE_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/empyralis-e2e-state.XXXXXX")}"
 E2E_BACKEND_PORT="${PLAYWRIGHT_BACKEND_PORT:-8001}"
 E2E_FRONTEND_PORT="${PLAYWRIGHT_FRONTEND_PORT:-3000}"

@@ -134,6 +134,126 @@ class LocalStackDatabaseUrlCheckTests(unittest.TestCase):
             self.assertIsNone(preflight._check_local_stack_database_url())
 
 
+class LocalStackLiveProviderSecretsCheckTests(unittest.TestCase):
+    """2026-08-13 incident: a throwaway backend launched from the real repo
+    root inherited the real ANTHROPIC_API_KEY/DEEPSEEK_API_KEY/
+    EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN from that root's .env (DATABASE_URL
+    was explicit, so LocalStackDatabaseUrlCheckTests above would have passed
+    cleanly) and made real, billed, externally-visible calls before anyone
+    noticed. This check closes that second hole."""
+
+    def test_live_looking_api_key_in_test_env_returns_error(self):
+        with patch.dict(
+            os.environ,
+            {"ORION_ENV": "test", "DEEPSEEK_API_KEY": "sk-live-abc123reallongrealkey"},
+            clear=True,
+        ):
+            error = preflight._check_local_stack_live_provider_secrets()
+        self.assertIsNotNone(error)
+        self.assertIn("DEEPSEEK_API_KEY", error)
+        self.assertIn("EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS", error)
+
+    def test_live_looking_bot_token_in_development_env_returns_error(self):
+        with patch.dict(
+            os.environ,
+            {"ORION_ENV": "development", "EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN": "8870032163:AAHXX7cY9VM4Oib4"},
+            clear=True,
+        ):
+            error = preflight._check_local_stack_live_provider_secrets()
+        self.assertIsNotNone(error)
+        self.assertIn("EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN", error)
+
+    def test_derives_the_variable_by_name_shape_not_a_hand_written_list(self):
+        """A brand-new provider this codebase has never heard of (no
+        ANTHROPIC/DEEPSEEK/TELEGRAM literal anywhere in the check) is still
+        caught, because the check matches on the NAME's shape (`*_API_KEY`),
+        never on an enumerated provider list."""
+        with patch.dict(
+            os.environ,
+            {"ORION_ENV": "test", "BRAND_NEW_PROVIDER_API_KEY": "totally-real-live-value"},
+            clear=True,
+        ):
+            error = preflight._check_local_stack_live_provider_secrets()
+        self.assertIsNotNone(error)
+        self.assertIn("BRAND_NEW_PROVIDER_API_KEY", error)
+
+    def test_empty_value_is_not_live(self):
+        with patch.dict(
+            os.environ,
+            {"ORION_ENV": "test", "DEEPSEEK_API_KEY": ""},
+            clear=True,
+        ):
+            self.assertIsNone(preflight._check_local_stack_live_provider_secrets())
+
+    def test_placeholder_shaped_value_is_not_live(self):
+        with patch.dict(
+            os.environ,
+            {"ORION_ENV": "test", "DEEPSEEK_API_KEY": "sk-throwaway-audit-blocked"},
+            clear=True,
+        ):
+            self.assertIsNone(preflight._check_local_stack_live_provider_secrets())
+
+    def test_non_credential_shaped_name_is_left_alone(self):
+        """DATABASE_URL, GOOGLE_OAUTH_CLIENT_ID etc. don't end in
+        _API_KEY/_TOKEN and are out of scope for this check (DATABASE_URL
+        has its own dedicated check above)."""
+        with patch.dict(
+            os.environ,
+            {"ORION_ENV": "test", "DATABASE_URL": "postgresql://x", "SOME_OTHER_VALUE": "real-looking-secret"},
+            clear=True,
+        ):
+            self.assertIsNone(preflight._check_local_stack_live_provider_secrets())
+
+    def test_unrecognized_env_token_is_left_alone(self):
+        with patch.dict(
+            os.environ,
+            {"DEEPSEEK_API_KEY": "sk-live-abc123reallongrealkey"},
+            clear=True,
+        ):
+            self.assertIsNone(preflight._check_local_stack_live_provider_secrets())
+
+    def test_durable_runtime_required_skips_this_check(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ORION_ENV": "test",
+                "ORION_REQUIRE_DURABLE_RUN_STATE": "1",
+                "DEEPSEEK_API_KEY": "sk-live-abc123reallongrealkey",
+            },
+            clear=True,
+        ):
+            self.assertIsNone(preflight._check_local_stack_live_provider_secrets())
+
+    def test_explicit_bypass_flag_skips_with_warning(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ORION_ENV": "test",
+                "DEEPSEEK_API_KEY": "sk-live-abc123reallongrealkey",
+                "EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS": "true",
+            },
+            clear=True,
+        ):
+            self.assertIsNone(preflight._check_local_stack_live_provider_secrets())
+
+    def test_multiple_live_credentials_all_named_in_one_error(self):
+        with patch.dict(
+            os.environ,
+            {
+                "ORION_ENV": "test",
+                "ANTHROPIC_API_KEY": "sk-ant-reallongrealkeyvalue",
+                "DEEPSEEK_API_KEY": "sk-live-abc123reallongrealkey",
+                "EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN": "8870032163:AAHXX7cY9VM4Oib4",
+            },
+            clear=True,
+        ):
+            error = preflight._check_local_stack_live_provider_secrets()
+        self.assertIsNotNone(error)
+        self.assertIn("ANTHROPIC_API_KEY", error)
+        self.assertIn("DEEPSEEK_API_KEY", error)
+        self.assertIn("EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN", error)
+
+
 class RemovedKnowledgeRagConfigCheckTests(unittest.TestCase):
     """The embeddings/RAG knowledge pipeline was removed 2026-08-08. Its env
     knobs have no reader left, so a boot that still sets one must FAIL rather
@@ -380,6 +500,7 @@ class PreflightRunnerTests(unittest.TestCase):
         """When all checks pass, errors list is empty."""
         async def _run():
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
+                 patch("server_modules.preflight._check_local_stack_live_provider_secrets", return_value=None), \
                  patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
@@ -395,6 +516,7 @@ class PreflightRunnerTests(unittest.TestCase):
         """All failed checks appear in the error list."""
         async def _run():
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
+                 patch("server_modules.preflight._check_local_stack_live_provider_secrets", return_value=None), \
                  patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value="no kernel"), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value="no pg")), \
@@ -412,6 +534,7 @@ class PreflightRunnerTests(unittest.TestCase):
         """When EMPYRALIS_SKIP_REDIS_CHECK is true, Redis is not checked."""
         async def _run():
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
+                 patch("server_modules.preflight._check_local_stack_live_provider_secrets", return_value=None), \
                  patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
@@ -435,6 +558,7 @@ class PreflightRunnerTests(unittest.TestCase):
         http = MagicMock(return_value={"status": 401, "json": {"id": "Unauthorized"}})
         async def _run():
             with patch("server_modules.preflight._check_local_stack_database_url", return_value=None), \
+                 patch("server_modules.preflight._check_local_stack_live_provider_secrets", return_value=None), \
                  patch("server_modules.preflight._check_removed_knowledge_rag_config", return_value=None), \
                  patch("server_modules.preflight._check_kernel", return_value=None), \
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
