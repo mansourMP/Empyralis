@@ -419,6 +419,19 @@ class NeverForwardAsAnthropicCredentialTests(unittest.TestCase):
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
         self.assertNotIn("codex-session-token-example", env.values())
 
+    def test_codex_cli_literal_never_reaches_anthropic_auth_token(self):
+        # "codex_cli" is a SEPARATE literal from "openai-codex" — it is not
+        # normalized by provider_profiles.LEGACY_PROVIDER_ALIASES (only
+        # "openai_codex" -> "openai-codex" is), so if a caller's raw
+        # model_config.provider ever stores "codex_cli" rather than
+        # "openai-codex" the same real credential must still be blocked.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "codex-session-token-example"},
+            provider="codex_cli",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertNotIn("codex-session-token-example", env.values())
+
     def test_xai_grok_cli_and_cursor_cli_never_reach_anthropic_auth_token(self):
         # Defensive: unlike claude_code_cli (aliased to "anthropic" by
         # provider_profiles.LEGACY_PROVIDER_ALIASES before it ever reaches

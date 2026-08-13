@@ -536,8 +536,22 @@ _CLOUD_ROUTED_PROVIDER_ENV_BUILDERS: Dict[str, Any] = {
 # wrong endpoint" shape is possible the moment any code path starts
 # persisting a portable secret for them the way it already does for
 # openai-codex.
+#
+# "codex_cli" is included alongside "openai-codex" because it is a SEPARATE
+# literal, not an alias resolved before this point: provider_profiles.
+# LEGACY_PROVIDER_ALIASES (consulted by normalize_provider_id, upstream of
+# this module) maps "openai_codex" -> "openai-codex" but has no "codex_cli"
+# entry at all — that string is normalized only inside provider_profiles.
+# PROVIDER_LIMIT_ALIASES (an unrelated table, for output-token/retry limits)
+# and inside direct_chat_provider_service.direct_chat_credentials's own
+# internal vault-lookup aliasing. Nothing normalizes it before a caller's
+# raw model_config.provider value reaches this function, so if "codex_cli"
+# is ever what gets stored (rather than "openai-codex"), the same real
+# credential would sail straight through the generic elif api_key: branch
+# unless this set also names it verbatim.
 _NEVER_FORWARD_AS_ANTHROPIC_CREDENTIAL_PROVIDER_IDS = frozenset({
     "openai-codex",
+    "codex_cli",
     "xai_grok_cli",
     "cursor_cli",
 })
