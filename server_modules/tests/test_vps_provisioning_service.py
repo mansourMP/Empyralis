@@ -1739,6 +1739,97 @@ async def test_provision_hardware_vps_route_allows_when_funded_and_within_cap(mo
 
 
 @pytest.mark.asyncio
+async def test_provision_hardware_vps_route_never_gates_a_customer_account_request_on_platform_capacity(
+    monkeypatch,
+):
+    """2026-08-13 launch-readiness audit, defect #1: the platform capacity/
+    plan/credit gates must key on whether THIS request will actually use the
+    platform account, decided before the gate runs — never on whether a
+    platform token merely happens to be configured. A customer who supplied
+    their own token_id must never be refused (or even asked to wait on) a
+    check about EMPYRALIS's own workspace cap or credit balance — those
+    facts have nothing to do with an account the customer is paying for
+    directly.
+
+    Structural, not just behavioural: asserts the three gate functions are
+    never even CALLED for this request, not merely that their outcome was
+    ignored — a workspace at 50x the cap with a zero balance must sail
+    through exactly as easily as one within it, because none of that is
+    evaluated for a customer-account request at all.
+    """
+    monkeypatch.setenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, "platform-do-token")
+    monkeypatch.delenv(vps.VPS_MAX_ACTIVE_PER_WORKSPACE_ENV, raising=False)
+    monkeypatch.delenv("EMPYRALIS_UNLIMITED_CREDIT_WORKSPACE_IDS", raising=False)
+    monkeypatch.setattr(vps, "VPS_CONNECT_POLL_INTERVAL_SECONDS", 0)
+
+    result = vps.VPSResult(
+        provider_resource_id="droplet-customer-1",
+        public_ip="203.0.113.41",
+        region="nyc3",
+        size="s-1vcpu-2gb",
+        status="provisioning",
+        provider="digitalocean",
+    )
+    body = _platform_provisioning_body(token_id="tok_customer_connected", credentials={})
+    current_user = {"user_id": "user-1"}
+
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1"),
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1"),
+        # Deliberately raise if reached — a workspace this far over its cap
+        # and this deep in the negative would 409 immediately if this gate
+        # were (wrongly) evaluated for a customer-account request.
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "enforce_platform_vps_capacity",
+            AsyncMock(side_effect=AssertionError("capacity gate must not run for a customer-account request")),
+        ) as capacity_mock,
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "enforce_platform_vps_plan_capacity",
+            AsyncMock(side_effect=AssertionError("plan-capacity gate must not run for a customer-account request")),
+        ) as plan_capacity_mock,
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "enforce_platform_vps_credit_balance",
+            AsyncMock(side_effect=AssertionError("credit gate must not run for a customer-account request")),
+        ) as credit_mock,
+        patch.object(
+            routes_gateway.gateway_pairing_service,
+            "create_gateway_pairing_intent",
+            return_value={"pairing_token": "pair_do", "pairing_id": "pairing-1"},
+        ),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "load_vps_provider_credentials",
+            return_value={"api_token": "customer_oauth_token"},
+        ) as load_credentials_mock,
+        patch.object(routes_gateway.vps_provisioning_service, "provision_vps", return_value=result) as provision_mock,
+        patch.object(routes_gateway.vps_provisioning_service, "record_vps_provision"),
+        patch.object(
+            routes_gateway.vps_provisioning_service,
+            "get_vps_provision_status",
+            return_value={"status": "connected"},
+        ),
+    ):
+        response = await routes_gateway.provision_hardware_vps(body, current_user=current_user)
+
+        background_tasks = [task for task in routes_gateway._VPS_PROVISION_BACKGROUND_TASKS if not task.done()]
+        assert len(background_tasks) == 1
+        await background_tasks[0]
+
+    assert capacity_mock.call_count == 0
+    assert plan_capacity_mock.call_count == 0
+    assert credit_mock.call_count == 0
+    assert load_credentials_mock.call_count == 1
+    assert load_credentials_mock.call_args.args[0] == "tok_customer_connected"
+    assert provision_mock.call_count == 1
+    assert provision_mock.call_args.kwargs["token_id"] == "tok_customer_connected"
+    assert response["status"] == "provisioning"
+    assert response["vps_id"].startswith("vps_")
+
+
+@pytest.mark.asyncio
 async def test_run_vps_provisioning_lifecycle_persists_result_then_waits_for_connected(tmp_path, monkeypatch):
     # Full lifecycle, success path: the background task should (1) call
     # provision_vps, (2) persist the REAL result over the placeholder
@@ -4505,7 +4596,18 @@ def test_provision_vps_uses_platform_account_for_baked_image(monkeypatch):
     """The direct path (MAN-133): platform token present + baked image
     published to the region -> the droplet is created with OUR token, from
     the snapshot, with the one-line configure cloud-init — and the result
-    carries the platform credential so delete talks to the right account."""
+    carries the platform credential so delete talks to the right account.
+
+    This scenario is specifically "no token_id" — i.e. nothing the caller
+    connected an account for, so there is nothing else to bill. See
+    test_provision_vps_never_uses_platform_account_when_customer_token_id_
+    is_supplied below for the sibling case this test's own credentials dict
+    (shaped like a real customer's) could be mistaken for: a real customer
+    request ALWAYS carries a token_id (routes_gateway.provision_hardware_vps
+    resolves one from body.token_id before calling this), and this test
+    never set one — CLAUDE.md's "a fixture that invents its own input
+    cannot notice the real input is shaped differently" is exactly how the
+    2026-08-13 audit's billing-attribution bug shipped without a red test."""
     monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
     monkeypatch.setenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, "dop_v1_platform_secret")
     monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
@@ -4557,6 +4659,65 @@ def test_provision_vps_platform_path_off_without_token(monkeypatch):
     result = vps.provision_vps("digitalocean", {"api_token": "customer_oauth_token"}, "nyc3", None, "pair_do")
 
     assert calls[0]["token"] == "customer_oauth_token"
+    assert result.record_credentials is None
+
+
+def test_provision_vps_never_uses_platform_account_when_customer_token_id_is_supplied(monkeypatch):
+    """2026-08-13 launch-readiness audit, defect #1: whose account gets
+    billed must follow whose account was connected, never an implicit
+    choice made by baked-image/platform-token availability. A real customer
+    request ALWAYS carries a token_id (routes_gateway.provision_hardware_vps
+    resolves one from body.token_id before calling provision_vps) — no
+    existing test before this one exercised the platform/baked-image branch
+    WITH a token_id present, which is exactly why the bug shipped.
+
+    Asserts the account, not just that A debit happened (CLAUDE.md's own
+    "a debit happened is satisfied by a wrong debit as happily as a right
+    one" rule, applied to a billing account instead of a credit ledger):
+    the create call must carry the CUSTOMER's token, never the platform
+    token, and must happen exactly ONCE — the baked image must not even be
+    attempted (a guaranteed-failing extra round trip, since a DO private
+    snapshot is scoped to the account that created it; see the sibling
+    fallback test above)."""
+    monkeypatch.setenv(vps.DIGITALOCEAN_BAKED_IMAGE_ENABLED_ENV, "1")
+    monkeypatch.setenv(vps.PLATFORM_DIGITALOCEAN_TOKEN_ENV, "dop_v1_platform_secret")
+    monkeypatch.setattr(vps.urlrequest, "urlopen", lambda request, timeout=30: _FakeUrlopenResponse(_BAKED_POINTER))
+
+    calls = []
+
+    def fake_http_json(method, url, *, token, payload, provider, **_kwargs):
+        calls.append({"token": token, "payload": payload, "url": url})
+        return {"droplet": {"id": 998, "networks": {"v4": [{"type": "public", "ip_address": "203.0.113.20"}]}}}
+
+    monkeypatch.setattr(vps, "_http_json", fake_http_json)
+
+    result = vps.provision_vps(
+        "digitalocean",
+        {"api_token": "customer_oauth_token"},
+        "nyc3",
+        None,
+        "pair_do",
+        token_id="vps_token_real_customer",
+    )
+
+    create_calls = [c for c in calls if c["url"] == "https://api.digitalocean.com/v2/droplets"]
+    assert len(create_calls) == 1, (
+        "a customer with a connected account must never see the platform account attempted at all — "
+        f"got {len(create_calls)} create call(s): {create_calls}"
+    )
+    create = create_calls[0]
+    assert create["token"] == "customer_oauth_token", (
+        f"the droplet must be created with the CUSTOMER's own token, got {create['token']!r}"
+    )
+    assert create["token"] != "dop_v1_platform_secret"
+    # The boot-time installer, never the baked snapshot — a token_id means
+    # there IS a customer account to bill, so the image this account cannot
+    # see must never be offered to it in the first place.
+    assert create["payload"]["image"] == "ubuntu-24-04-x64"
+    assert "INSTALLER_URL=" in create["payload"]["user_data"]
+    assert "empyralis-configure" not in create["payload"]["user_data"]
+    # The record must never carry a credential the caller did not supply —
+    # that field is what a delete call later authenticates with.
     assert result.record_credentials is None
 
 

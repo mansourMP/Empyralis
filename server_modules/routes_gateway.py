@@ -2226,6 +2226,16 @@ async def provision_hardware_vps(
         resolved = vps_provisioning_service.resolve_provider_options(body.provider, body.region, body.size)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Computed HERE (rather than only where credentials are loaded further
+    # down) because the platform-billing gate immediately below needs the
+    # exact same fact provision_vps itself gates on: a token_id means the
+    # caller connected an account of their own, which forces the
+    # customer-account path there — see vps_provisioning_service.
+    # provision_vps's own "whose account gets billed follows whose account
+    # was connected" comment. Both places must agree on what "no token_id"
+    # means, so both read it off this one normalization rather than each
+    # re-deriving it from body.token_id.
+    resolved_token_id = str(body.token_id or "").strip() or None
 
     # Platform-account provisioning (our DigitalOcean account, our bill) is
     # hard-capped per workspace AND requires a positive credit balance (MAN-
@@ -2234,10 +2244,21 @@ async def provision_hardware_vps(
     # docstring for why that check fails CLOSED). Enforced HERE, before a
     # pairing intent or a placeholder record exists, so a refused request
     # costs nothing and the user hears why immediately instead of via a
-    # background failure. Customer-account provisioning (any other branch)
-    # bills the customer directly and is deliberately untouched by all three
-    # of these gates.
-    if resolved["provider"] == "digitalocean" and vps_provisioning_service._platform_digitalocean_token():
+    # background failure. Customer-account provisioning bills the customer
+    # directly and is deliberately untouched by all three of these gates.
+    #
+    # `not resolved_token_id` is load-bearing, not decorative — a platform
+    # token being CONFIGURED does not mean THIS request will use it.
+    # provision_vps forces the customer-account path the instant a token_id
+    # is present, before it even looks at the baked image or the platform
+    # token (2026-08-13 launch-readiness audit, defect #1); this gate must
+    # key on the identical fact or it caps/refuses a customer's own paid
+    # request for a reason that has nothing to do with their account.
+    if (
+        resolved["provider"] == "digitalocean"
+        and not resolved_token_id
+        and vps_provisioning_service._platform_digitalocean_token()
+    ):
         try:
             await vps_provisioning_service.enforce_platform_vps_capacity(
                 workspace_id=workspace_id, tenant_id=tenant_id
@@ -2297,7 +2318,9 @@ async def provision_hardware_vps(
     if not pairing_token:
         raise HTTPException(status_code=500, detail="Gateway pairing token was not created.")
     pairing_id = str(pairing.get("pairing_id") or "").strip() or None
-    resolved_token_id = str(body.token_id or "").strip() or None
+    # resolved_token_id was already computed above, before the platform-
+    # billing gate — reused here rather than re-derived, so there is no
+    # second copy of "what counts as no token_id" to drift from the first.
     try:
         credentials = (
             vps_provisioning_service.load_vps_provider_credentials(

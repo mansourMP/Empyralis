@@ -1612,8 +1612,14 @@ async def enforce_platform_vps_capacity(*, workspace_id: str, tenant_id: str) ->
     Deliberately crude — a count, not a meter — until real credit metering
     lands (MAN-134/135). But it bounds the worst case: without it, nothing at
     all limits how many droplets a workspace can put on our card. Only called
-    on the platform path; customer-account provisioning bills the customer
-    and keeps its existing (uncapped) behaviour.
+    when routes_gateway.provision_hardware_vps has already established this
+    SPECIFIC request has no token_id — i.e. there is no customer-connected
+    account to bill instead of ours; see that route's own gate condition,
+    which must key on the identical fact provision_vps below does (2026-08-13
+    launch-readiness audit, defect #1 — a platform token merely being
+    CONFIGURED does not mean a given request will use it). Customer-account
+    provisioning bills the customer and keeps its existing (uncapped)
+    behaviour.
     """
     limit = _vps_max_active_per_workspace()
     active = await count_active_workspace_vps(workspace_id=workspace_id, tenant_id=tenant_id)
@@ -1646,9 +1652,10 @@ async def enforce_platform_vps_plan_capacity(*, workspace_id: str, tenant_id: st
     ceiling per plan the moment an operator raises or removes
     EMPYRALIS_VPS_MAX_ACTIVE_PER_WORKSPACE, with no further code change.
 
-    Only called on the platform path, same as enforce_platform_vps_capacity
-    — customer-account provisioning bills the customer directly and a plan
-    entitlement has no business throttling spend Empyralis does not carry.
+    Only called when this specific request has no token_id, same as
+    enforce_platform_vps_capacity above — customer-account provisioning
+    bills the customer directly and a plan entitlement has no business
+    throttling spend Empyralis does not carry.
     """
     workspace = await control_plane_repository.get_workspace_by_id(workspace_id)
     active = await count_active_workspace_vps(workspace_id=workspace_id, tenant_id=tenant_id)
@@ -1668,9 +1675,10 @@ async def enforce_platform_vps_plan_capacity(*, workspace_id: str, tenant_id: st
 async def enforce_platform_vps_credit_balance(*, workspace_id: str, tenant_id: str) -> None:
     """MAN-132: a workspace with zero credits must not be able to open a
     droplet on EMPYRALIS's own DigitalOcean account — that is unbounded
-    COGS from an account that has paid nothing. Only called on the platform
-    path, same as enforce_platform_vps_capacity above; customer-account
-    provisioning bills the customer directly and is untouched.
+    COGS from an account that has paid nothing. Only called when this
+    specific request has no token_id, same as enforce_platform_vps_capacity
+    above; customer-account provisioning bills the customer directly and is
+    untouched.
 
     Reads the SAME raw ``credit_balance_usd`` workspace-metadata field the
     billing page shows (``billing_service.credit_balance_for_workspace`` —
@@ -1933,6 +1941,36 @@ def provision_vps(
     resolved_region = _validate_region(config, region, live_region_ids=live_region_ids)
     if provider_id == "digitalocean":
         on_unauthorized = _digitalocean_reauth_callback(token_id, credentials) if token_id else None
+        # WHOSE ACCOUNT GETS BILLED FOLLOWS WHOSE ACCOUNT WAS CONNECTED —
+        # never an implicit choice made by baked-image/platform-token
+        # availability. This is not merely a preference: a DigitalOcean
+        # private snapshot is scoped to the ACCOUNT that created it (proven
+        # live, 2026-07-29 — see the comment ~30 lines below), so a
+        # customer's own OAuth-connected token literally cannot boot the
+        # image baked in Empyralis's own account by CI. Trying anyway is a
+        # guaranteed-failing extra round trip, not just a billing risk.
+        #
+        # `token_id` is the one signal that answers "did the caller connect
+        # an account of their own" — routes_gateway.provision_hardware_vps
+        # always resolves and passes one for a real customer request (see
+        # provision_vps's own docstring). Its presence therefore forces the
+        # boot-time cloud-init path in the CUSTOMER's own account, full
+        # stop, before the baked image or the platform token are even
+        # looked at: a token_id-bearing caller can never reach either.
+        # test_vps_provisioning_service.py's
+        # test_provision_vps_never_uses_platform_account_when_customer_
+        # token_id_is_supplied is the call-count-shaped regression test —
+        # "a debit happened" is satisfied by billing the wrong account just
+        # as happily as the right one, so it asserts WHICH token the create
+        # call carried, not merely that a droplet was created.
+        if token_id:
+            return _provision_digitalocean(
+                config, token, resolved_region, resolved_size, name, user_data, on_unauthorized=on_unauthorized
+            )
+        # Everything below is reachable ONLY with no token_id at all — i.e.
+        # nothing the caller connected an account for, so there is no
+        # customer account to bill instead of ours.
+        #
         # Decided HERE, not up top, because it depends on resolved_region: a
         # DO snapshot exists only in the regions it was published to, and
         # booting it anywhere else is rejected by the API. A miss (or the
