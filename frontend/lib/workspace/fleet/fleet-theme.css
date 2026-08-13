@@ -6825,6 +6825,10 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 }
 .fleet-work-activity-text { flex: 1; min-width: 0; font-size: var(--text-sm); color: var(--text-primary); line-height: 1.45; word-break: break-word; }
 .fleet-work-activity-detail { font-family: var(--app-font-mono, ui-monospace, monospace); font-size: 0.85em; color: var(--text-muted); }
+/* Which machine ran this (WorkTab.tsx's executionEnvironmentLabel) — plain
+   text, not monospace like .fleet-work-activity-detail (this is a place
+   name, not a value/log fragment). */
+.fleet-work-activity-location { font-size: 0.85em; color: var(--text-muted); }
 
 @media (max-width: 768px) {
   .fleet-work-controlbar { flex-wrap: wrap; }
