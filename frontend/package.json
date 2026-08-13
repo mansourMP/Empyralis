@@ -10,7 +10,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "smoke:api-wall": "node scripts/api-wall-network-smoke.mjs",
-    "test:unit": "tsx lib/workspace/platform-brand.test.ts && tsx lib/workspace/fleet/fleet-data.test.ts && tsx lib/workspace/fleet/openclaw-channel-copy.test.ts && tsx lib/workspace/fleet/markdown-lite.test.ts && tsx lib/workspace/fleet/documents-data.test.ts && tsx lib/workspace/fleet/task-status.test.ts && tsx lib/workspace/fleet/agent-count-shape.test.ts && tsx lib/workspace/fleet/box-capability-state.test.ts && tsx lib/workspace/fleet/fleet-presentation.test.ts && tsx lib/workspace/safe-render-url.test.ts && tsx lib/security/content-security-policy.test.ts && tsx next.config.test.ts",
+    "test:unit": "tsx lib/workspace/platform-brand.test.ts && tsx lib/workspace/fleet/fleet-data.test.ts && tsx lib/workspace/fleet/openclaw-channel-copy.test.ts && tsx lib/workspace/fleet/markdown-lite.test.ts && tsx lib/workspace/fleet/documents-data.test.ts && tsx lib/workspace/fleet/task-status.test.ts && tsx lib/workspace/fleet/agent-count-shape.test.ts && tsx lib/workspace/fleet/box-capability-state.test.ts && tsx lib/workspace/fleet/fleet-presentation.test.ts && tsx lib/workspace/safe-render-url.test.ts && tsx lib/security/content-security-policy.test.ts && tsx next.config.test.ts && tsx lib/workspace/fleet/primary-rail-nav.test.ts && tsx lib/workspace/fleet/project-agents-rail-shape.test.ts",
     "test:e2e": "playwright test",
     "test:e2e:deployed-agents": "playwright test tests/e2e/deployed-agents.spec.ts tests/e2e/non-scaffold-surface-sweep.spec.ts",
     "test:e2e:install": "playwright install chromium"

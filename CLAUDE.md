@@ -174,6 +174,39 @@ project is the spine; agents and the conversations with them are reached
 through the project they live in. Weigh any new top-level surface against
 that before adding it.
 
+**That navigation consequence is now built — `feat/project-as-spine-nav`,
+2026-08-13.** Conversations and Agents are gone from `PrimaryRail` and the
+command palette's "Go to" section (`primary-rail-nav.ts`'s `RAIL_ITEMS` is
+now just Inbox + Projects — a pure module a plain test imports directly, the
+same discipline `agent-count-shape.ts` already uses). The underlying
+`/agents` and `/conversations` routes are DELIBERATELY still live and
+unlinked, not deleted or redirected: several `next.config.ts`
+`LEGACY_REDIRECTS` entries point AT `/agents`, and turning it into a
+redirect target itself risks the exact "a redirect runs ahead of the router
+and makes a real page unreachable" trap this file already documents. Landing
+spots that used to funnel fresh arrivals at that now-unlinked page (post-invite
+accept, the legacy `/sage` bookmark) now land on the workspace root instead.
+
+Inside a project, the founder's own spec for Agents specifically: *"a left
+rail to press a specific agent and just go straight to its chatting...it
+could have been smaller, it could have been something compact"* — Telegram's
+mechanic, list stays put while the pane beside it swaps. `agents/layout.tsx`
+is a real Next.js layout wrapping every route under a project's `/agents`
+segment (the bare index AND every agent's own page beneath it), so
+`ProjectAgentsRail.tsx` persists across a navigation between agents instead
+of remounting — that's what makes the list never lose scroll position or
+re-fetch when you switch. Whether it renders composes
+`agent-count-shape.ts`'s `planAgentCountShape` via
+`project-agents-rail-shape.ts`'s `showsProjectAgentsRail`, never a second
+rule: 0 agents → the project's own `FirstAgentEmpty`, unchanged, full width;
+1 → no rail (a rail of one is worse than no rail, the same call already made
+for a table of one) and a quiet redirect straight into that agent's chat; 2+
+→ the rail. The project's own Agents/Tasks/Documents tab bar still renders
+only at the bare index (matching Tasks/Documents' own pattern); drilling into
+a specific agent drops it, exactly like task/document detail pages already
+do — the breadcrumb is how you get back, not a tab strip duplicated per
+level.
+
 **Non-owners never see personal or self-chat threads.** Conservative default,
 enforced without asking.
 
