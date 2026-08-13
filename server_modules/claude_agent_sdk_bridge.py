@@ -490,6 +490,72 @@ _CLOUD_ROUTED_PROVIDER_ENV_BUILDERS: Dict[str, Any] = {
     "bedrock": _bedrock_process_env,
 }
 
+# MAN-313 (follow-up, found auditing the same leak shape): provider ids whose
+# credential must NEVER be forwarded as ANTHROPIC_AUTH_TOKEN by the generic
+# `elif api_key:` fallback below, even though `creds.get("api_key")` can be
+# genuinely non-empty for them. These are not adapter-routed (see
+# openai_compat_adapter.ADAPTER_ROUTED_PROVIDER_IDS — that set is exactly the
+# 10 providers with a real OpenAI-shaped upstream this loopback adapter can
+# translate to) and not cloud-routed (_CLOUD_ROUTED_PROVIDER_ENV_BUILDERS —
+# that set is providers with a real CLAUDE_CODE_USE_* flag). Sending their
+# credential to api.anthropic.com is exactly the MAN-313 bug: a real
+# credential handed to a service that was never meant to see it.
+#
+# "openai-codex" is the confirmed instance, not a hypothetical: its
+# provider_profiles.py catalog entry carries `provider_scopes: ["sage_personal"]`
+# — unlike claude_code_cli/xai_grok_cli/cursor_cli, it has NEITHER "local_only"
+# nor "hidden" — and provider_profiles.py demonstrably persists a real,
+# portable OAuth/session token for it outside the Gateway rail (see
+# OPENAI_CODEX_OAUTH_SOURCES / "codex_token_vault" / `_default_vault_credential_
+# present("openai-codex", ...)`), so `direct_chat_credentials(workspace_id,
+# "openai-codex")` can return a real credential dict, and `sage_agent_runtime_
+# service._resolve_agent_cloud_provider`'s `mode == "byok_api"` branch has no
+# provider denylist — any provider string whose credentials pass
+# `supports_direct_message_native_chat` is accepted, and that function
+# returns True for openai-codex given ANY non-empty credentials dict (see its
+# own `{"openai-codex", "codex_cli"}` branch). Confirmed directly against
+# resolve_sdk_process_env: credentials={"api_key": "<a real codex token>"},
+# provider="openai-codex" set ANTHROPIC_AUTH_TOKEN to that same value with no
+# ANTHROPIC_BASE_URL override, i.e. a ChatGPT/Codex session token sent to
+# Anthropic's own API as a bearer token.
+#
+# This module's docstring says cli_subscription mode is "structurally
+# immune" because it dispatches via Gateway-WSS and never reaches this file
+# — that is true for mode=="cli_subscription", but says nothing about
+# mode=="byok_api" with provider="openai-codex", which DOES reach this file
+# with a real credential. The actual completion for a Codex session has no
+# meaning as an Anthropic-Messages call regardless of which mode carried it
+# here; there is no base_url this bridge could point at that would make
+# sending a Codex token to it correct, so the fix is exclusion, not
+# translation. "xai_grok_cli"/"cursor_cli" are included defensively: unlike
+# "claude_code_cli" (aliased to "anthropic" by provider_profiles.
+# LEGACY_PROVIDER_ALIASES before it ever reaches this module — its credential
+# genuinely IS meant for Anthropic), those two pass through provider_
+# profiles.normalize_provider_id UNCHANGED, and provider_profiles.py declares
+# no adapter/cloud routing for either, so the same "wrong credential to the
+# wrong endpoint" shape is possible the moment any code path starts
+# persisting a portable secret for them the way it already does for
+# openai-codex.
+#
+# "codex_cli" is included alongside "openai-codex" because it is a SEPARATE
+# literal, not an alias resolved before this point: provider_profiles.
+# LEGACY_PROVIDER_ALIASES (consulted by normalize_provider_id, upstream of
+# this module) maps "openai_codex" -> "openai-codex" but has no "codex_cli"
+# entry at all — that string is normalized only inside provider_profiles.
+# PROVIDER_LIMIT_ALIASES (an unrelated table, for output-token/retry limits)
+# and inside direct_chat_provider_service.direct_chat_credentials's own
+# internal vault-lookup aliasing. Nothing normalizes it before a caller's
+# raw model_config.provider value reaches this function, so if "codex_cli"
+# is ever what gets stored (rather than "openai-codex"), the same real
+# credential would sail straight through the generic elif api_key: branch
+# unless this set also names it verbatim.
+_NEVER_FORWARD_AS_ANTHROPIC_CREDENTIAL_PROVIDER_IDS = frozenset({
+    "openai-codex",
+    "codex_cli",
+    "xai_grok_cli",
+    "cursor_cli",
+})
+
 
 def resolve_sdk_process_env(
     *,
@@ -594,8 +660,14 @@ def resolve_sdk_process_env(
     # for its Anthropic-Messages-API-compatible endpoint (see this module's
     # docstring) also instructs ANTHROPIC_AUTH_TOKEN for exactly this
     # reason.
-    elif api_key:
+    elif api_key and str(provider or "").strip().lower() not in _NEVER_FORWARD_AS_ANTHROPIC_CREDENTIAL_PROVIDER_IDS:
         env["ANTHROPIC_AUTH_TOKEN"] = api_key
+    # See _NEVER_FORWARD_AS_ANTHROPIC_CREDENTIAL_PROVIDER_IDS's own docstring:
+    # openai-codex/xai_grok_cli/cursor_cli fall through here with ANTHROPIC_
+    # AUTH_TOKEN left blank ("" from the base dict above) rather than the raw
+    # credential — same fail-safe direction as every other credential-missing
+    # path in this function (a genuinely missing/unusable credential surfaces
+    # later as an ordinary auth error from the real upstream, never a leak).
     # Ollama specifically: provider_profiles.py's "ollama" entry has
     # auth=["none"] (no real secret ever exists for it), so api_key above is
     # always "" and this branch is the only thing that ever sets a token for

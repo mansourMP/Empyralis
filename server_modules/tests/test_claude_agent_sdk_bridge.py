@@ -389,6 +389,83 @@ class ResolveSdkProcessEnvCloudProviderTests(unittest.TestCase):
         # turn on for it.
 
 
+class NeverForwardAsAnthropicCredentialTests(unittest.TestCase):
+    """MAN-313 follow-up: the same leak shape the bedrock tests above pin,
+    found for a THIRD class of provider — not cloud-routed, not
+    adapter-routed, but capable of carrying a real, portable credential under
+    "api_key" that reaches this function outside the Gateway rail.
+
+    openai-codex is the confirmed instance: its provider_profiles.py catalog
+    entry has provider_scopes ["sage_personal"] only — no "local_only", no
+    "hidden", unlike claude_code_cli/xai_grok_cli/cursor_cli — and
+    provider_profiles.py persists a real OAuth/session token for it
+    (OPENAI_CODEX_OAUTH_SOURCES / "codex_token_vault" /
+    _default_vault_credential_present("openai-codex", ...)) that
+    sage_agent_runtime_service._resolve_agent_cloud_provider's mode=="byok_api"
+    branch will happily resolve and hand to this module — that branch has no
+    provider denylist, and direct_chat_provider_service.
+    supports_direct_message_native_chat("openai-codex", credentials) returns
+    True for ANY non-empty credentials dict. Before the fix, a ChatGPT/Codex
+    session token landed on ANTHROPIC_AUTH_TOKEN and was sent to
+    api.anthropic.com as a bearer token."""
+
+    def test_openai_codex_credential_never_reaches_anthropic_auth_token(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "codex-session-token-example"},
+            provider="openai-codex",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "")
+        self.assertEqual(env["ANTHROPIC_BASE_URL"], "")
+        self.assertNotIn("codex-session-token-example", env.values())
+
+    def test_codex_cli_literal_never_reaches_anthropic_auth_token(self):
+        # "codex_cli" is a SEPARATE literal from "openai-codex" — it is not
+        # normalized by provider_profiles.LEGACY_PROVIDER_ALIASES (only
+        # "openai_codex" -> "openai-codex" is), so if a caller's raw
+        # model_config.provider ever stores "codex_cli" rather than
+        # "openai-codex" the same real credential must still be blocked.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "codex-session-token-example"},
+            provider="codex_cli",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+        self.assertNotIn("codex-session-token-example", env.values())
+
+    def test_xai_grok_cli_and_cursor_cli_never_reach_anthropic_auth_token(self):
+        # Defensive: unlike claude_code_cli (aliased to "anthropic" by
+        # provider_profiles.LEGACY_PROVIDER_ALIASES before it ever reaches
+        # this module, so its credential genuinely IS meant for Anthropic),
+        # these two pass through provider_profiles.normalize_provider_id
+        # UNCHANGED and have no adapter/cloud routing of their own.
+        for provider in ("xai_grok_cli", "cursor_cli"):
+            env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+                credentials={"api_key": f"{provider}-secret-example"},
+                provider=provider,
+            )
+            self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "", provider)
+            self.assertNotIn(f"{provider}-secret-example", env.values())
+
+    def test_claude_code_cli_credential_still_reaches_anthropic_auth_token(self):
+        # The one alias that SHOULD keep flowing: claude_code_cli's own
+        # credential (when it carries a real api_key rather than being
+        # secretless) is an Anthropic credential, normalized to provider
+        # "anthropic" upstream of this module — never blocked by the
+        # exclusion set above, which only ever sees the post-alias id.
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "sk-ant-example"},
+            provider="anthropic",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "sk-ant-example")
+
+    def test_exclusion_set_is_case_and_whitespace_insensitive(self):
+        env = claude_agent_sdk_bridge.resolve_sdk_process_env(
+            credentials={"api_key": "codex-token"},
+            provider="  OpenAI-Codex  ",
+        )
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "")
+
+
 class ResolveOllamaAnthropicBaseUrlTests(unittest.TestCase):
     """Direct unit tests of the resolver itself, independent of the wiring
     inside resolve_sdk_process_env -- a realistic range of shapes a
