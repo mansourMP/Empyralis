@@ -278,5 +278,248 @@ class OwnerCheckReadsRealIdentityLinksTests(unittest.TestCase):
             self.assertFalse(_run(command_registry._is_sender_owner("some-stranger", "ws-1")))
 
 
+class _StatefulWorkspaceIdentityLinksStore:
+    """A REAL read-after-write round trip, not two independently-scripted
+    mocks — this is what proves the clobber is actually fixed. Stands in
+    for control_plane_repository.get_workspace_by_id /
+    update_workspace_identity_links: the second call's read reflects the
+    first call's write, exactly like a real database would (and exactly
+    what get_workspace_by_id's own missing SELECT column defeated —
+    before this fix, EVERY read from this store's real equivalent came
+    back empty regardless of what had actually been written)."""
+
+    def __init__(self) -> None:
+        self.identity_links: dict = {}
+
+    async def get_workspace_by_id(self, workspace_id):
+        return {"identity_links": dict(self.identity_links)}
+
+    async def update_workspace_identity_links(self, *, workspace_id, identity_links):
+        self.identity_links = dict(identity_links)
+        return True
+
+
+class SecondLinkDoesNotClobberTheFirstTests(unittest.IsolatedAsyncioTestCase):
+    """The bug found while fixing the read: routes_workspaces.
+    upsert_workspace_identity_link does an explicit read-modify-write
+    (current_links = dict(raw_links) if isinstance(raw_links, dict) else {};
+    current_links[name] = channel_ids; update_workspace_identity_links(...))
+    and update_workspace_identity_links's own Postgres SQL is a FULL
+    column replacement (`UPDATE workspaces SET identity_links = $2::jsonb`,
+    never a jsonb merge/jsonb_set) — so the write's correctness rests
+    entirely on the read seeing the real, current set first. Before the
+    SELECT fix, that read always came back empty, so every SECOND link
+    added silently discarded the first.
+
+    This drives the REAL route handler function (routes_workspaces.
+    upsert_workspace_identity_link), not a hand-rolled reimplementation of
+    its read-modify-write logic — a test that reimplements the logic under
+    test proves nothing about a regression in the logic itself.
+    """
+
+    async def test_linking_a_second_channel_identity_preserves_the_first(self) -> None:
+        from server_modules import routes_workspaces
+
+        store = _StatefulWorkspaceIdentityLinksStore()
+
+        with (
+            patch.object(
+                routes_workspaces.control_plane_repository, "get_workspace_by_id",
+                new=store.get_workspace_by_id,
+            ),
+            patch.object(
+                routes_workspaces.control_plane_repository, "update_workspace_identity_links",
+                new=store.update_workspace_identity_links,
+            ),
+            patch.object(
+                routes_workspaces.auth_module, "enforce_workspace_access",
+                return_value="ws-clobber-test",
+            ),
+        ):
+            first = await routes_workspaces.upsert_workspace_identity_link(
+                workspace_id="ws-clobber-test",
+                body=routes_workspaces.IdentityLinkEntry(name="telegram_personal", channel_ids=["tg-owner-123"]),
+                current_user={"id": "user-owner-1"},
+            )
+            self.assertEqual(first.identity_links, {"telegram_personal": ["tg-owner-123"]})
+
+            second = await routes_workspaces.upsert_workspace_identity_link(
+                workspace_id="ws-clobber-test",
+                body=routes_workspaces.IdentityLinkEntry(name="discord_personal", channel_ids=["dc-owner-456"]),
+                current_user={"id": "user-owner-1"},
+            )
+
+        # THE assertion: both links present after the second write — the
+        # first must survive, never be silently discarded by the second.
+        self.assertEqual(
+            second.identity_links,
+            {
+                "telegram_personal": ["tg-owner-123"],
+                "discord_personal": ["dc-owner-456"],
+            },
+        )
+        # And the persisted store itself — not just the response payload —
+        # actually holds both, proving the write itself (not just what the
+        # endpoint echoed back) preserved the first entry.
+        self.assertEqual(
+            store.identity_links,
+            {
+                "telegram_personal": ["tg-owner-123"],
+                "discord_personal": ["dc-owner-456"],
+            },
+        )
+
+    async def test_updating_an_existing_names_links_replaces_only_that_entry(self) -> None:
+        """A same-name upsert (re-linking the same canonical name to
+        different channel ids) must replace only ITS OWN entry, never the
+        others — the read-modify-write's job either way."""
+        from server_modules import routes_workspaces
+
+        store = _StatefulWorkspaceIdentityLinksStore()
+        store.identity_links = {
+            "telegram_personal": ["tg-old-id"],
+            "discord_personal": ["dc-owner-456"],
+        }
+
+        with (
+            patch.object(
+                routes_workspaces.control_plane_repository, "get_workspace_by_id",
+                new=store.get_workspace_by_id,
+            ),
+            patch.object(
+                routes_workspaces.control_plane_repository, "update_workspace_identity_links",
+                new=store.update_workspace_identity_links,
+            ),
+            patch.object(
+                routes_workspaces.auth_module, "enforce_workspace_access",
+                return_value="ws-clobber-test-2",
+            ),
+        ):
+            result = await routes_workspaces.upsert_workspace_identity_link(
+                workspace_id="ws-clobber-test-2",
+                body=routes_workspaces.IdentityLinkEntry(name="telegram_personal", channel_ids=["tg-new-id"]),
+                current_user={"id": "user-owner-1"},
+            )
+
+        self.assertEqual(
+            result.identity_links,
+            {
+                "telegram_personal": ["tg-new-id"],
+                "discord_personal": ["dc-owner-456"],
+            },
+        )
+
+
+class _StatefulFakePostgresIdentityLinksConnection:
+    """ONE fake connection instance simulating a single workspace row's
+    real identity_links column across multiple SELECT/UPDATE calls — the
+    SAME instance is yielded by every _scoped_connection() call in this
+    test, so state genuinely persists between the read inside
+    get_workspace_by_id and the write inside
+    update_workspace_identity_links, exactly like one real Postgres row
+    would. This is what proves the FULL real chain (the fixed SELECT +
+    the real UPDATE's full-column-replacement semantics) no longer
+    clobbers — not just that upsert_workspace_identity_link's own
+    read-modify-write logic is correct in isolation against a hand-rolled
+    double."""
+
+    def __init__(self, workspace_id: str) -> None:
+        self.workspace_id = workspace_id
+        self.identity_links: dict = {}
+
+    async def fetchrow(self, query, *args):
+        if "FROM workspaces" in query:
+            full_row = {
+                "id": self.workspace_id, "tenant_id": "t", "workspace_id": self.workspace_id,
+                "slug": "s", "name": "n", "workspace_type": "personal", "status": "active",
+                "created_by_user_id": None, "metadata": {},
+                "identity_links": dict(self.identity_links),
+                "created_at": 0, "updated_at": 0,
+            }
+            # A real Postgres connection returns EXACTLY the columns named
+            # in the SELECT's own column list — never a column the query
+            # text didn't ask for. Filtering here the same way is what
+            # makes this test a genuine regression guard for the missing-
+            # column bug: reverting get_workspace_by_id's SELECT to omit
+            # "identity_links" must make THIS fake stop returning it too,
+            # exactly like the real bug did, rather than the fake papering
+            # over the query's own bug by always including it regardless.
+            select_clause = query.split("FROM workspaces", 1)[0]
+            return {key: value for key, value in full_row.items() if key in select_clause}
+        return None
+
+    async def execute(self, query, *args):
+        if "UPDATE workspaces" in query and "identity_links" in query:
+            # update_workspace_identity_links's own positional args:
+            # (clean_workspace_id, _to_json(identity_links, default={})).
+            raw = args[1] if len(args) > 1 else "{}"
+            import json as _json
+            self.identity_links = _json.loads(raw) if isinstance(raw, str) else dict(raw)
+        return "UPDATE 1"
+
+
+class RealSelectAndUpdateChainDoesNotClobberTests(unittest.IsolatedAsyncioTestCase):
+    """The same proof as SecondLinkDoesNotClobberTheFirstTests above, but
+    driven through the REAL get_workspace_by_id (the function this whole
+    fix touched — its SELECT now names identity_links) and the REAL
+    update_workspace_identity_links, not a hand-rolled store standing in
+    for both. Only _scoped_connection is faked (the actual asyncpg
+    network boundary), and it yields ONE stateful connection so the
+    second call's SELECT genuinely reflects the first call's UPDATE."""
+
+    async def test_real_get_and_update_chain_preserves_the_first_link_when_a_second_is_added(self) -> None:
+        from server_modules import control_plane_repository, routes_workspaces
+
+        control_plane_repository._workspace_lookup_cache_drop("ws-real-chain-test")
+        fake_connection = _StatefulFakePostgresIdentityLinksConnection("ws-real-chain-test")
+
+        @asynccontextmanager
+        async def _scoped(*, tenant_id=None, workspace_id=None, bypass_rls=False):
+            yield fake_connection
+
+        with (
+            patch.object(control_plane_repository, "_scoped_connection", new=_scoped),
+            patch.object(routes_workspaces.auth_module, "enforce_workspace_access", return_value="ws-real-chain-test"),
+        ):
+            await routes_workspaces.upsert_workspace_identity_link(
+                workspace_id="ws-real-chain-test",
+                body=routes_workspaces.IdentityLinkEntry(name="telegram_personal", channel_ids=["tg-owner-123"]),
+                current_user={"id": "user-owner-1"},
+            )
+            second = await routes_workspaces.upsert_workspace_identity_link(
+                workspace_id="ws-real-chain-test",
+                body=routes_workspaces.IdentityLinkEntry(name="discord_personal", channel_ids=["dc-owner-456"]),
+                current_user={"id": "user-owner-1"},
+            )
+
+        self.assertEqual(
+            second.identity_links,
+            {
+                "telegram_personal": ["tg-owner-123"],
+                "discord_personal": ["dc-owner-456"],
+            },
+        )
+        # And a completely FRESH read (a third call, GET this time, going
+        # through get_workspace_by_id -> the real per-request cache too)
+        # confirms the persisted row itself — not just the second POST's
+        # own echoed response — really holds both.
+        control_plane_repository._workspace_lookup_cache_drop("ws-real-chain-test")
+        with (
+            patch.object(control_plane_repository, "_scoped_connection", new=_scoped),
+            patch.object(routes_workspaces.auth_module, "enforce_workspace_access", return_value="ws-real-chain-test"),
+        ):
+            fresh_read = await routes_workspaces.get_workspace_identity_links(
+                workspace_id="ws-real-chain-test",
+                current_user={"id": "user-owner-1"},
+            )
+        self.assertEqual(
+            fresh_read.identity_links,
+            {
+                "telegram_personal": ["tg-owner-123"],
+                "discord_personal": ["dc-owner-456"],
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
