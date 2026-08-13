@@ -2735,3 +2735,155 @@ Generate New Token, fine-grained scope picker):
    does not prove the scope set works end-to-end.
 6. Only once step 5 is fully green, revoke the old Full Access token in the
    DigitalOcean console.
+
+## Agents per box — measured, not guessed (2026-08-13, MAN-318)
+
+**We have a floor, not a ceiling.** `s-1vcpu-1gb` and `s-1vcpu-2gb` both ran
+8 fully concurrent real agent turns (DeepSeek reasoning + a real Docker-
+sandboxed `shell` tool call dispatched to the actual hardware) with zero
+failures, RAM comfortably in budget on both, and load average never crossing
+1.0 on either box's single vCPU. Pushed to 16 concurrent, the 2GB box showed
+the first clean hardware-side stress signal: load average spiked to 2.55 and
+turn latency roughly doubled (14–17s → 24–31s). **CPU (the single shared
+vCPU), not RAM, is what degrades first** — RAM never got close to exhausted
+in any run on either size.
+
+```
+size            agents   RAM used/avail (MB)   1-min load   turn latency
+s-1vcpu-2gb     0        438 / 1529             0.19          —
+s-1vcpu-2gb     1        —                      —             14.2s
+s-1vcpu-2gb     4        516 / 1451             0.74          17.0s
+s-1vcpu-2gb     8        516 / 1499             0.74*         21.6s   8/8 ok
+s-1vcpu-2gb     16       597 / 1370             2.55          24–31s  15/16**
+s-1vcpu-1gb     0        416 / 545              0.94†         —
+s-1vcpu-1gb     1        —                      —             18.0s
+s-1vcpu-1gb     4        502 / 458              0.60          16.8s   4/4 ok
+s-1vcpu-1gb     8        509 / 451              0.70          19.3s   8/8 ok
+s-1vcpu-1gb     16       458 / 502              0.65          —       2/16**
+
+*  load figures for back-to-back runs carry residual EWMA decay from the
+   PRIOR test — the 1/5/15-min load average never fully resets between
+   bursts fired seconds apart. Only the 2GB-box N=16 spike (2.55, a sharp
+   jump against a flat ~0.1–0.2 baseline) is clean enough to trust as a
+   real signal; the rest are directionally right, not precise.
+†  1GB baseline was sampled 90s after boot, right after `docker.io` install
+   — not yet settled from that install's own CPU burst.
+** both N=16 runs were confounded by the TEST HARNESS's own ceiling (see
+   below) — NOT a hardware finding. Treat both 16-agent rows as "we could
+   not cleanly push this far," not as "this is where it breaks."
+```
+
+**Swap was 0/0 on every single reading, on both box sizes, at every agent
+count — because there is no swap partition on a stock DigitalOcean Ubuntu
+24.04 image, not because nothing was ever under memory pressure.** Do not
+read a "swap: 0" line as "no memory pressure occurred" on this provider's
+default image; it is a `free -m` structural fact, not a health signal.
+
+**The architecture is not "N agents = N resident processes on the box," and
+that changes what the capacity question even means.** Verified directly: an
+agent's own reasoning/context loop runs in Empyralis's backend, not on the
+Agent Computer. The box's job is (a) the gateway process relaying WS traffic
+(a flat ~115MB RSS, agent-count-independent) and (b) executing tool calls
+inside Docker containers that are spun up and torn down within the scope of
+ONE tool call, then gone. An idle agent costs the box ~nothing. So "how many
+agents fit" is really "how many SIMULTANEOUS tool-executing turns can the
+box's one vCPU + Docker daemon absorb before turns start queueing" — a
+function of concurrent BURST volume, not of how many agents exist in the
+workspace. A workspace with 50 agents that are mostly idle costs the box
+nothing extra; 50 agents all running a shell tool in the same second is the
+real stress case, and that is what this table measures.
+
+**What would invalidate this measurement:**
+- **A heavier agent runtime.** If a future architecture change moves the
+  reasoning loop or persistent context onto the box itself (contradicting
+  what was observed here), this whole table is void — it measured tool-call
+  dispatch overhead, not per-agent resident memory.
+- **OpenClaw actually running.** It was NOT part of this measurement's
+  footprint — see the drift bug below. Once that's fixed, re-run this table
+  with OpenClaw's loopback session live; its RAM/CPU floor is unmeasured
+  here and CLAUDE.md's own architecture section (`OpenClaw holds ONE
+  loopback session shared by every channel runtime`) implies a real,
+  nonzero, agent-count-independent cost that this table does not include.
+- **A DeepSeek model swap.** `deepseek-chat` was used for reliable tool
+  calling (see `fleet_tools.seed_specialist_metadata`'s own comment:
+  `deepseek-reasoner` measured 1/5 tool-call success vs `deepseek-chat`'s
+  5/5). A different default model changes turn latency and therefore how
+  much concurrent-burst overlap actually occurs in practice.
+- **A real test harness.** Both N=16 runs hit `asyncpg.exceptions.
+  TooManyConnectionsError` on the SINGLE-WORKER local disposable Postgres
+  backend used to drive this measurement (not production — see below) —
+  confirmed via traceback, box-side RAM/load stayed unremarkable through
+  both. The true per-box ceiling above 8 concurrent turns is UNMEASURED, not
+  "high" — a harness with real Postgres pool headroom (or hitting a
+  production-shaped backend) could find a lower real ceiling, or confirm the
+  2GB box's N=16 CPU-queueing signal (2.55 load) as the real one.
+- **A second OpenClaw, or a bigger Docker image pulled per exec.** This
+  table's shell tool used `debian:bookworm-slim` per call; a heavier default
+  sandbox image changes the per-exec cost this table implicitly assumes.
+
+**Method, and why it required extracting a real platform credential.**
+Provisioned through the product's own path
+(`POST /api/hardware/vps/provision`) against the REAL platform DigitalOcean
+account, using a disposable local Postgres DB (never the founder's, never
+production's) as the control plane — `frontend/scripts/start-e2e-backend.sh`-
+style bootstrap, on a fresh `empyralis_agentspertbox_man318` database with
+every migration applied. `EMPYRALIS_PLATFORM_DIGITALOCEAN_TOKEN` was read
+once, read-only, over SSH from production's own `.env` (this repo's local
+`.env` has no platform DO token — only production does) because there was no
+other way to exercise the real platform-billing path without either touching
+production's database (forbidden) or fabricating a credential the task
+required be real. The box's outbound registration needed a publicly
+reachable API URL, which a local Mac is not — a `cloudflared` quick tunnel
+(`trycloudflare.com`) stood in for that, torn down at the end of the session.
+Two agent turns per box were driven with a real `shell` tool call
+(`uname -a` + `date`), dispatched over the real gateway WS connection to the
+real Docker sandbox on the real droplet — not simulated, not mocked.
+
+**Both test droplets were destroyed through the product's own delete path
+(`DELETE /api/hardware/vps/{vps_id}`) and independently verified gone via a
+direct `GET /v2/droplets` call against the DigitalOcean API** (id 592011393
+/ 138.197.29.64 for the 2GB box, id 592018582 / 159.65.242.100 for the 1GB
+box — both distinct from production's 165.227.25.201). Production's own
+`/health` returned 200 before and after every destructive action in this
+session. Total droplet-hours billed: two boxes, each up for under 15
+minutes — a few cents, not a recurring cost.
+
+**Separate, higher-severity finding surfaced while setting this up, not yet
+fixed: `https://empyralis.ai/install/agent-computer.sh` — the
+`DEFAULT_AGENT_INSTALLER_URL` every real customer's droplet downloads and
+runs — serves a STALE installer (676 lines, no `install_docker`, no
+`install_openclaw_node`, no `install_channel_transport`) while
+`https://empyralis.ai/api/hardware/bootstrap/install.sh` serves the CURRENT
+one (1004 lines, matches `scripts/install-agent-computer.sh` on `main`).**
+Confirmed by diffing the two live responses and by inspecting the file the
+first test droplet actually downloaded and ran (byte-identical md5 to the
+stale 676-line copy). Consequence: every real, production-provisioned Agent
+Computer today comes up with NO Docker and NO OpenClaw — `shell.execute`/
+`filesystem.read_write` are unavailable, and the whole OpenClaw channel-
+transport story elsewhere in this file is not reaching a single real
+customer box. This measurement's own 2GB box hit the same stale installer
+and was missing Docker until it was installed by hand over SSH, using
+function bodies extracted from the CURRENT script — the same manual step a
+real customer cannot take. Root cause not fully pinned down: the stale path
+is served by `frontend/app/install/agent-computer.sh/route.ts`, which
+re-exports `frontend/app/api/hardware/bootstrap/install.sh/route.ts`'s GET
+handler — which fetches the backend's own (current) `/api/hardware/
+bootstrap/install.sh` and falls back to `raw.githubusercontent.com/
+mansourMP/Empyralis/verify/scripts/install-agent-computer.sh` on failure —
+but that raw URL returned EMPTY when checked directly, not the observed
+676-line content, so the exact mechanism serving the stale copy is still
+unconfirmed (candidates: a stale Next.js build/worker still running old
+bundled code, or a caching layer that left no `cf-cache-status` header to
+diagnose from). **Separately, even the CURRENT installer script cannot
+actually install OpenClaw against the published gateway release artifact**
+— `gateway/dist/openclaw/provisioning/openclaw-install-plan-cli.js` is
+missing from the tarball `install_gateway_from_artifact` downloads, so
+`install_channel_transport` fails with "this gateway build has no channel
+transport installer" even when the current script runs. Two independent
+drift bugs, compounding: nobody has gotten OpenClaw onto a real,
+product-provisioned Agent Computer yet. Flagged as a follow-up rather than
+fixed in this pass — this session's mandate was the capacity measurement,
+and both bugs need their own careful verification (which Next.js
+instance/build is actually serving that route; whether the gateway release
+pipeline needs to bundle the `openclaw/provisioning` output) rather than a
+guess fixed under time pressure.
