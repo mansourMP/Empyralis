@@ -3054,42 +3054,144 @@ box — both distinct from production's 165.227.25.201). Production's own
 session. Total droplet-hours billed: two boxes, each up for under 15
 minutes — a few cents, not a recurring cost.
 
-**Separate, higher-severity finding surfaced while setting this up, not yet
-fixed: `https://empyralis.ai/install/agent-computer.sh` — the
-`DEFAULT_AGENT_INSTALLER_URL` every real customer's droplet downloads and
-runs — serves a STALE installer (676 lines, no `install_docker`, no
-`install_openclaw_node`, no `install_channel_transport`) while
-`https://empyralis.ai/api/hardware/bootstrap/install.sh` serves the CURRENT
-one (1004 lines, matches `scripts/install-agent-computer.sh` on `main`).**
-Confirmed by diffing the two live responses and by inspecting the file the
-first test droplet actually downloaded and ran (byte-identical md5 to the
-stale 676-line copy). Consequence: every real, production-provisioned Agent
-Computer today comes up with NO Docker and NO OpenClaw — `shell.execute`/
-`filesystem.read_write` are unavailable, and the whole OpenClaw channel-
-transport story elsewhere in this file is not reaching a single real
-customer box. This measurement's own 2GB box hit the same stale installer
-and was missing Docker until it was installed by hand over SSH, using
-function bodies extracted from the CURRENT script — the same manual step a
-real customer cannot take. Root cause not fully pinned down: the stale path
-is served by `frontend/app/install/agent-computer.sh/route.ts`, which
-re-exports `frontend/app/api/hardware/bootstrap/install.sh/route.ts`'s GET
-handler — which fetches the backend's own (current) `/api/hardware/
-bootstrap/install.sh` and falls back to `raw.githubusercontent.com/
-mansourMP/Empyralis/verify/scripts/install-agent-computer.sh` on failure —
-but that raw URL returned EMPTY when checked directly, not the observed
-676-line content, so the exact mechanism serving the stale copy is still
-unconfirmed (candidates: a stale Next.js build/worker still running old
-bundled code, or a caching layer that left no `cf-cache-status` header to
-diagnose from). **Separately, even the CURRENT installer script cannot
-actually install OpenClaw against the published gateway release artifact**
-— `gateway/dist/openclaw/provisioning/openclaw-install-plan-cli.js` is
-missing from the tarball `install_gateway_from_artifact` downloads, so
-`install_channel_transport` fails with "this gateway build has no channel
-transport installer" even when the current script runs. Two independent
-drift bugs, compounding: nobody has gotten OpenClaw onto a real,
-product-provisioned Agent Computer yet. Flagged as a follow-up rather than
-fixed in this pass — this session's mandate was the capacity measurement,
-and both bugs need their own careful verification (which Next.js
-instance/build is actually serving that route; whether the gateway release
-pipeline needs to bundle the `openclaw/provisioning` output) rather than a
-guess fixed under time pressure.
+**Two independent installer/artifact bugs were found during this session and
+BOTH are now fixed, same day — neither is open.** This passage originally
+recorded them as unresolved; both fixes landed hours after the passage was
+written (10:25) and before the docs commit that carried it (19:17), so the
+first version of this entry simply predated its own fixes. See the durable
+lesson at the end of this section for why that happened and the rule that
+follows from it.
+
+**Bug A — the published gateway artifact was 15 days stale, not a build
+defect.** `npm run build` (plain `tsc -p tsconfig.json`, no bundler, no
+tree-shaking, `include: ["src/**/*.ts"]`) has always compiled
+`empyralis-gateway/src/openclaw/provisioning/*.ts` cleanly, on every commit.
+The cause was `release-gateway-linux.yml` being `workflow_dispatch`-only:
+nobody ran it between 2026-07-29T19:12Z and 2026-08-13T06:30Z (`gh run list`
+confirms the exact gap), and the whole `openclaw/provisioning` source tree
+(12 files) was only added on 2026-08-09 — 11 days into that gap. So "latest"
+on the CDN was a pre-OpenClaw build the entire time: the compiled JS was
+never missing, the PUBLISH was stale — the same MAN-306 shape one level up
+(a compiled artifact whose staleness `grep` on source cannot see). Fixed at
+`9bdfe5126` / merge `945202bdb` (confirmed an ancestor of `HEAD`): the
+workflow now also triggers on `push: branches:[main]` for
+`empyralis-gateway/**`, so a merge publishes itself, and
+`install-agent-computer.sh` fetches the release's own `.sha256` sidecar and
+appends it as a `?v=` cache-buster so a stale Cloudflare-cached response at
+the fixed `latest` URL can't shadow a fresh publish either. Verified
+directly, both architectures: downloaded the live `x64` and `arm64`
+tarballs from `empyralis.ai/releases/agent-computer/latest/`, checksums
+matched their own `.sha256` sidecars, and both contain all 12
+`dist/openclaw/provisioning/*.js` files including
+`openclaw-install-plan-cli.js` (mtime `Aug 13 14:43`, matching the
+auto-publish `push` run `gh run list` shows fired at that merge).
+`release-gateway-linux.yml`'s own "Verify archive matches what the installer
+expects" step now enforces this going forward: it derives its required-file
+list from a grep of `scripts/install-agent-computer.sh`'s own literal
+`gateway/dist/**/*.js` paths — never a hand-copied list in the workflow,
+which would be exactly the "channel list copied into a third place" shape
+this file already flags as a defect once two same-language copies can
+drift — so a file the installer starts requiring tomorrow is covered
+automatically. A canary assertion fails the gate loudly if the grep itself
+stops matching, the same "a check that derives its own expectations from
+the thing it checks is blind" trap this file documents for
+`preflight._check_rls`, avoided here by reading the expected set from the
+installer's source and the actual set from the built tarball — two
+independent reads, not one file confirming itself.
+
+**Bug B — `https://empyralis.ai/install/agent-computer.sh` was ALSO stale,
+for a completely different reason: a Cloudflare edge cache, not a build or
+publish pipeline.** Measured on production at the time: origin
+(`127.0.0.1:3000`, i.e. the app itself) returned 46,153 bytes with
+`install_docker`/`install_openclaw_node`/`install_channel_transport` all
+present; the public `empyralis.ai` URL returned 28,278 bytes with none of
+them. Every real Agent Computer this product had ever provisioned installed
+itself with no Docker and no OpenClaw. All three application layers were
+already correct end to end, which is what made this confusing to first
+diagnose: `frontend/app/install/agent-computer.sh/route.ts` and its sibling
+`frontend/app/api/hardware/bootstrap/install.sh/route.ts` both fetch with
+`cache: 'no-store'` and set `cache-control: no-store` on the response, and
+`routes_gateway.py`'s `GET /hardware/bootstrap/install.sh` handler
+(line ~1757) reads the script fresh off disk on every single request with
+no caching of any kind. The actual cause was invisible to all three: a
+Cloudflare "Cache Everything" edge rule caches by full URL and does not
+honor an origin's `cache-control: no-store` — that is the documented
+behavior of that rule type, not a misconfiguration of any header this repo
+controls. Every droplet requested the same literal URL forever, so one
+cached edge response served every subsequent boot until purged. The
+`raw.githubusercontent.com` fallback branch in `route.ts` is STRUCTURALLY
+DEAD, not merely unused, and was never the source of the stale bytes: the
+repo is private (confirmed via `gh api repos/mansourMP/Empyralis` ->
+`"visibility": "private"`) and that fetch carries no GitHub credential, so
+an unauthenticated `raw.githubusercontent.com` request against a private
+repo can only 404 — a dead fallback that reads as a working safety net is
+worth naming precisely because it looks like coverage that isn't there.
+Fixed at `c2deca5c6b72eb1ba55e04de3b02ff3a13607822` (confirmed an ancestor
+of `HEAD`, merged 2026-08-13 10:33 +08:00 — hours before this passage was
+first written): `vps_provisioning_service.agent_installer_url()` now
+appends `?v=<sha256[:12]>` of the on-disk script to the default URL, the
+same content-hash-cache-buster shape as Bug A's fix, self-healing on every
+future edit rather than a one-time purge. An explicitly configured
+`EMPYRALIS_AGENT_INSTALLER_URL` passes through untouched. The baked-image
+provisioning path (`deploy/packer/`) does not fetch this URL at all — the
+installer's functions are baked into the image at build time — so it was
+never exposed to this bug and needs no fix.
+
+**What is still genuinely unknown, and must not be overstated as resolved:**
+- **Whether production has actually been deployed onto these two commits is
+  unverified.** Merged to `main` is not the same as running on the box —
+  per `docs/DEPLOY-RUNBOOK.md`, a Python change needs a merge plus an
+  explicit restart there, and neither this session nor the one that fixed
+  Bug B had production access to confirm the restart happened.
+- **Whether the Cloudflare "Cache Everything" edge rule still exists on the
+  zone is invisible from the wire.** A probe returning
+  `cf-cache-status: DYNAMIC` is consistent with the rule being removed,
+  changed, or simply not matching that particular request — it is not
+  proof the rule is gone.
+- **Cloudflare's cache is per-PoP.** A stale copy may still sit in
+  datacenters other than the one any single probe's anycast route happened
+  to reach, even after the rule is fixed and even after one probe comes
+  back clean.
+- **Whether any Agent Computer provisioned during the stale window
+  (2026-07-29 to 2026-08-13) is still running the broken tarball, the
+  broken installer, or both, is an open question — neither fix is
+  retroactive.** There is a cheap, code-grounded, non-SSH way to make
+  partial progress on this: `GET /gateway/registrations?workspace_id=<id>`
+  (existing endpoint, `routes_gateway.py`, `enforce_workspace_access(...,
+  minimum_role="viewer")`) returns each connected gateway's `capabilities`
+  array, which `gateway_protocol_service.py` refreshes from
+  `requested_capabilities` on EVERY WebSocket connect — not a stale
+  snapshot. A gateway still running the pre-2026-08-09 build cannot report
+  `openclaw.provision` or `openclaw.channel_setup` under any circumstances,
+  because `GatewayCapabilityRouter` in that build has no code path that
+  knows those capability names exist — so their PRESENCE in this list is a
+  hard positive proof the box is on a post-fix build. Their ABSENCE is not
+  proof of the reverse (a fresh build with the bridge secrets not yet
+  minted would also omit them, though `openclaw-local-secrets.ts` now mints
+  them automatically on boot). Two real limits on this check, found while
+  evaluating it: there is no fleet-wide, cross-tenant "list every gateway"
+  endpoint today (grepped `gateway_registry_service.py` /
+  `gateway_state_repository.py` / `routes_gateway.py` — none exists), so
+  this only works iterated per-workspace, not as one fleet query; and
+  `gateway.self_update` is dormant in production
+  (`EMPYRALIS_GATEWAY_LATEST_VERSION` unset), so a box that downloaded the
+  stale artifact will keep RUNNING it — and keep reporting the stale
+  capability set on every reconnect — until something manually restarts or
+  reprovisions it. Not run against production in this session; recorded as
+  a verified mechanism, not a verified result.
+
+**The durable lesson, and it is bigger than either bug: this file itself
+went stale within hours and caused two agents to be dispatched to
+re-diagnose bugs that were already fixed on `main`.** CLAUDE.md already
+documents this exact failure mode for Linear tickets — "a ticket's status
+can lag its own fix, and a dispatched work order will faithfully re-diagnose
+a bug that's already gone" — and it just happened to this file's own
+contents, the thing every agent is told to trust as present truth before
+starting work. The rule that follows: **before treating any passage in this
+file as present truth, grep the symptom it describes — or keywords from its
+own prose — against `git log --oneline --all`, and if a plausible fix
+commit turns up, confirm with `git merge-base --is-ancestor <sha> HEAD`
+before either trusting the passage or re-doing the diagnosis it describes.**
+A "known unfixed" note in this file is a claim with a timestamp, not a live
+state, and the check that would have caught both stale notices above is one
+command.
