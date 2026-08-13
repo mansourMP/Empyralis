@@ -8110,6 +8110,36 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   display: none;
 }
 
+/* Found 2026-08-13, reproduced live at 900px in both themes: the full
+   breadcrumb chain (Projects > {project} > Documents > {document title})
+   has nowhere to fit on one line once the viewport narrows toward ~900px,
+   and .fleet-shell-topbar's fixed 40px height gave the overflow nowhere to
+   go — it wrapped to 3 lines with the current-page title rendering on top
+   of it instead. This is a plain text-overflow problem an ordinary
+   mouse+keyboard user hits just by narrowing a desktop browser window —
+   nothing touch-specific about it — so the "full chain -> collapsed
+   back-affordance + current page" swap is split OUT of the 768px mobile
+   block below and given its own, wider breakpoint. Everything genuinely
+   mobile/touch-specific (the rail becoming a swipeable drawer, the
+   hamburger menu, touch target sizing, the phone-legibility font bump)
+   stays at 768px, unchanged — a narrowed desktop window at 900px must not
+   also get a touch drawer and hidden keyboard-shortcut hints it has no use
+   for. See Breadcrumbs.tsx and the .fleet-breadcrumb-mobile rule above for
+   why the swap itself is CSS-driven (both chain shapes always render;
+   exactly one is visible at a given width) rather than a JS width check. */
+@media (max-width: 960px) {
+  .fleet-breadcrumbs {
+    flex: 1;
+    min-width: 0;
+  }
+  .fleet-breadcrumb-seg {
+    display: none;
+  }
+  .fleet-breadcrumb-mobile {
+    display: flex;
+  }
+}
+
 @media (max-width: 768px) {
   .fleet-shell-panel {
     margin: 0;
@@ -8136,23 +8166,6 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
     font-size: 12px;
   }
 
-  /* Full chain -> collapsed back-affordance + current page (see the
-     .fleet-breadcrumb-mobile rule above for why this is CSS-driven rather
-     than a JS width check). .fleet-breadcrumbs itself needs flex+min-width
-     so it can actually shrink below its content's intrinsic width inside
-     the topbar row (hamburger + breadcrumbs + right-aligned page action) —
-     otherwise a long current-page label pushes the action button off the
-     48px-tall mobile topbar instead of eliding. */
-  .fleet-breadcrumbs {
-    flex: 1;
-    min-width: 0;
-  }
-  .fleet-breadcrumb-seg {
-    display: none;
-  }
-  .fleet-breadcrumb-mobile {
-    display: flex;
-  }
   .fleet-breadcrumb-mobile-current {
     font-size: 15px;
     font-weight: var(--weight-medium);
