@@ -4909,6 +4909,74 @@ async def handle_sage_chat(**kwargs: Any) -> dict:
     return result
 
 
+async def _resolve_channel_sender_class(
+    *, channel_origin: str, sender_id: str | None, workspace_id: str,
+) -> str:
+    """owner / audience / unknown — the Phase U2 tool-authority
+    classification for a channel turn. Pulled out as its own top-level
+    function so it has a unit-testable home (same rationale as
+    _resolve_turn_engine_id's own docstring), and because it is the one
+    place CLAUDE.md itself flags: getting it wrong turns a lockout into a
+    stranger holding shell and hardware tools.
+
+    AUTHORITATIVE SOURCE: personal_channels_repository, never workspace.
+    identity_links. That table is genuinely readable now (control_plane_
+    repository.get_workspace_by_id's SELECT was fixed to return it), but
+    nothing in the shipped product has ever WRITTEN to it — routes_
+    workspaces.py's identity-links endpoints have zero frontend callers —
+    so it was never a second, populated answer to "is this sender the
+    owner"; it was a second CODE PATH that always resolved empty and
+    silently won by default, downgrading every real, linked owner to
+    "audience" (serve-only tools, no shell/hardware/fleet/memory_write/
+    connector_write) on every channel message. personal_channels_
+    repository's linked_jid/linked_user_id/linked_identity columns are the
+    ACTUAL data a real pairing/login event populates, and it is already
+    what _is_owner_message (personal_channels_service.py) trusts for the
+    DM-policy gate that runs before this turn is even dispatched — so
+    consulting it here is not a new judgment, it is the existing correct
+    one finally reaching the turn's own tool-authority decision too. Do
+    not resurrect identity_links as a second binding source beside this
+    one, even "just as a fallback" — a fact that can silently win by being
+    empty is exactly the shape that produced this bug, and a second source
+    only recreates the ambiguity about which one is true.
+
+    Returns "owner" unconditionally when there is no channel context
+    (channel_origin/sender_id empty — the web/API case, where there is no
+    sender identity to doubt). Otherwise FAILS CLOSED: any lookup
+    exception, same as an unlinked sender, resolves to "audience" — never
+    silently "owner". An unresolvable identity is not an owner.
+    """
+    if not channel_origin or not sender_id:
+        return "owner"
+    try:
+        from server_modules.triage_service import resolve_sender_identity
+        from server_modules.personal_channels_repository import (
+            list_owner_linked_channel_identities_for_workspace,
+        )
+
+        linked_by_channel = list_owner_linked_channel_identities_for_workspace(workspace_id)
+        bindings: list[dict[str, Any]] = [
+            {
+                "channel_type": str(channel_key or "").strip().lower(),
+                "linked_user_id": str(linked_id or "").strip(),
+            }
+            for channel_key, linked_id in linked_by_channel.items()
+            if str(channel_key or "").strip() and str(linked_id or "").strip()
+        ]
+        return resolve_sender_identity(
+            sender_id=sender_id,
+            channel_origin=channel_origin,
+            channel_bindings=bindings,
+            audience_enabled=True,  # Phase U2: channels are audience-facing by default
+        )
+    except Exception:
+        # FAIL CLOSED. Matches resolve_sender_identity's own fail-closed
+        # fallthrough (empty bindings -> "audience", never "owner") for the
+        # case where the lookup itself blew up instead of just finding
+        # nothing.
+        return "audience"
+
+
 async def _handle_sage_chat_unguarded(
     *,
     workspace_id: str,
@@ -5109,31 +5177,15 @@ async def _handle_sage_chat_unguarded(
         used_context.append("identity_link")
 
     # ── Phase U2: resolve sender class (owner / audience / unknown) ──
-    _sender_class = "owner"  # default: web/API sessions are owner
-    if channel_origin and sender_id:
-        try:
-            from server_modules.triage_service import resolve_sender_identity
-            # Build channel bindings from identity links
-            _bindings: list[dict[str, Any]] = []
-            if identity_links:
-                for ch_type, ch_data in identity_links.items():
-                    if isinstance(ch_data, dict):
-                        _bindings.append({
-                            "channel_type": str(ch_type or "").strip().lower(),
-                            "linked_user_id": str(ch_data.get("user_id") or "").strip(),
-                            "owner_sender_hash": str(ch_data.get("sender_hash") or "").strip(),
-                        })
-            _sender_class = resolve_sender_identity(
-                sender_id=sender_id,
-                channel_origin=channel_origin,
-                channel_bindings=_bindings,
-                audience_enabled=True,  # Phase U2: channels are audience-facing by default
-            )
-            if _sender_class != "owner":
-                from server_modules.audience_tool_filter import audience_behavior_instructions
-                used_context.append("audience_session")
-        except Exception:
-            pass
+    # See _resolve_channel_sender_class's own docstring for the full
+    # reasoning: personal_channels_repository is the sole authoritative
+    # source (never workspace.identity_links), and any lookup failure
+    # fails CLOSED to "audience", never "owner".
+    _sender_class = await _resolve_channel_sender_class(
+        channel_origin=channel_origin, sender_id=sender_id, workspace_id=normalized_workspace_id,
+    )
+    if channel_origin and sender_id and _sender_class != "owner":
+        used_context.append("audience_session")
 
     # ── Attribution for memory-write stamping (task: attribution-aware
     # memory) ────────────────────────────────────────────────────────────
