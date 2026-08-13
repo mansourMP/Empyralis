@@ -55,6 +55,23 @@ for pkg in ca-certificates curl git build-essential openssl sudo tar gzip xz-uti
 done
 check "python3 is on PATH" command -v python3
 
+# ── Docker sandbox (shell.execute / filesystem.read_write) ─────────────────
+# This is the check that would have caught the missing bake-time Docker step
+# in the first place: 60-docker.sh's own install/verify loop is fatal, but a
+# build gate exists precisely so a build can never "pass" on the strength of
+# one script's internal opinion of itself — see this file's own header
+# comment. `docker info` as SERVICE_USER (not root) is the one assertion that
+# actually matters: it is exactly what the gateway's probeDocker does
+# (empyralis-gateway/src/health/service-inventory.ts) before it will ever
+# advertise shell.execute/filesystem.read_write to the control plane, so
+# anything short of that check can pass while the customer-visible capability
+# stays dark.
+check "docker is on PATH" command -v docker
+check "docker service is enabled" systemctl is-enabled docker
+check "docker service is active" systemctl is-active --quiet docker
+check "service user empyralis is in the docker group" bash -c 'id -nG empyralis | tr " " "\n" | grep -qx docker'
+check "docker info succeeds as empyralis (not root)" sudo -u empyralis docker info
+
 # ── Service user and tree ───────────────────────────────────────────────────
 check "service user empyralis exists" id empyralis
 check "install root exists" test -d /opt/empyralis/agent-computer
