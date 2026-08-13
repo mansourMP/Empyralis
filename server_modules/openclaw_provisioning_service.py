@@ -71,6 +71,85 @@ class OpenClawProvisioningError(RuntimeError):
         self.status_code = status_code
 
 
+class OpenClawProvisioningConflictError(OpenClawProvisioningError):
+    """Two different agents on the SAME gateway both hold an enabled
+    binding for the same OpenClaw channel — the one configuration OpenClaw's
+    own config schema cannot express (verified against every channel in the
+    pinned build's own generated manifest: a channel node is a single
+    credential, never a named-accounts map; see CLAUDE.md
+    "Multi-agent-per-box"). A distinct subclass, not a bare
+    OpenClawProvisioningError with a different message, so a caller can
+    `except OpenClawProvisioningConflictError` and treat it as its own
+    outcome rather than lumping it in with "the box could not be reached" —
+    the exact three-facts-collapsed-into-two shape this codebase keeps
+    re-discovering (filter_channel_outbound_reply's silent/undelivered
+    split, the workspace-invite email's three delivery states).
+
+    THE MESSAGE IS THE OWNER-FACING TEXT, not a log line. str(this) is
+    already plain language, names the specific agents and channel, and says
+    what to do — no "binding", "provisioning", "channel_key", or "gateway"
+    anywhere in it, the same no-mechanism rule CLAUDE.md documents for this
+    surface's remediation copy elsewhere. This is deliberate: the existing
+    `.../provision` route already does `detail=str(exc)` on any
+    OpenClawProvisioningError, and the frontend's `getErrorMessage` already
+    surfaces a string `detail` verbatim — so this reaches the "Set up"
+    button's error display with ZERO frontend changes, by construction,
+    rather than by remembering to special-case a new error shape.
+
+    `conflicts` is also kept as structured data (channel_key/channel_id/
+    channel_label/agent_ids/agent_labels per conflicting channel) for a
+    caller that wants to render something richer than one string —
+    reconcile_openclaw_policy_best_effort's return value uses it."""
+
+    def __init__(self, conflicts: List[Dict[str, Any]]) -> None:
+        self.conflicts = conflicts
+        super().__init__(_conflict_owner_message(conflicts), status_code=409)
+
+
+def _conflict_owner_message(conflicts: List[Dict[str, Any]]) -> str:
+    """Plain language. Names which agents, names which channel, says what to
+    do about it. Never a mechanism word."""
+    sentences: List[str] = []
+    for conflict in conflicts:
+        names = [str(name).strip() for name in (conflict.get("agent_labels") or conflict.get("agent_ids") or []) if str(name).strip()]
+        channel_label = str(conflict.get("channel_label") or "").strip() or "this channel"
+        if len(names) > 2:
+            who = ", ".join(names[:-1]) + f", and {names[-1]}"
+        elif len(names) == 2:
+            who = f"{names[0]} and {names[1]}"
+        elif names:
+            who = names[0]
+        else:
+            who = "more than one agent"
+        sentences.append(
+            f"{who} are both set up to use {channel_label} on this computer, which can only "
+            f"connect one account per channel. Turn {channel_label} off for one of them, then try again."
+        )
+    return " ".join(sentences) or "This computer can only connect one account per channel, and more than one agent is set up for the same one."
+
+
+async def _agent_display_name(agent_id: str, *, tenant_id: str, workspace_id: str) -> str:
+    """Best-effort human label for an agent_install_id — an owner's own
+    chosen label first, the agent definition's own name second, the bare id
+    as a last resort (never blank; a conflict message with an empty name is
+    worse than one with a raw id, but the id itself must never be silently
+    dropped from the picture either)."""
+    try:
+        bundle = await agent_registry_repository.get_workspace_agent_install_bundle(
+            agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+        )
+    except Exception:
+        bundle = None
+    if isinstance(bundle, dict):
+        label = str(bundle.get("label") or "").strip()
+        if label:
+            return label
+        definition_name = str(bundle.get("agent_definition_name") or "").strip()
+        if definition_name:
+            return definition_name
+    return agent_id
+
+
 def openclaw_channel_id(channel_key: str) -> str:
     """`openclaw_feishu` -> `feishu`.
 
@@ -182,8 +261,23 @@ async def _resolve_channel_owners_for_gateway(
     gateway_id: str,
 ) -> Dict[str, List[str]]:
     """channel_key -> agent_ids (among the agents that share this gateway,
-    i.e. install_metadata.preferred_gateway_id == gateway_id) that hold an
-    ENABLED agent_channel_bindings row for it.
+    i.e. install_metadata.preferred_gateway_id == gateway_id) that this
+    module's OWN channels_in_use() already calls "in use" for that channel.
+
+    Reuses channels_in_use rather than reading agent_channel_bindings
+    directly — deliberately, and not merely for consistency. Verified while
+    building this: agent_channel_bindings is populated for OpenClaw-
+    transported channels by NOTHING in this codebase today (the only writer,
+    _ensure_agent_channel_binding_enabled, fires exclusively for
+    whatsapp_personal/telegram_personal's own "connected" state sync). A
+    bindings-only version of this function would be structurally correct
+    and practically inert for the very channel family this exists to
+    protect. channels_in_use's own two-signal definition (an enabled
+    binding OR a stored dm_policy/group_policy key — the SAME "presence,
+    never value" rule that breaks the connect/plugin-install deadlock
+    elsewhere in this module) is the one place a channel's real usage is
+    actually observable today, so this reuses it rather than inventing a
+    narrower second opinion.
 
     Empty when gateway_id is blank or fewer than two agents share this
     gateway — the ordinary single-agent-per-box case is untouched and costs
@@ -194,9 +288,9 @@ async def _resolve_channel_owners_for_gateway(
     against the pinned build's own `openclaw config schema`: every channel
     node is a single account, never a named-accounts map).
 
-    ONE binding read per gateway-sharing agent, not one per channel — a
-    provisioning call touches every OpenClaw channel, so this is computed
-    once and reused, never re-derived per channel."""
+    ONE channels_in_use call per gateway-sharing agent, not one per channel
+    — a provisioning call touches every OpenClaw channel, so this is
+    computed once and reused, never re-derived per channel."""
     if not str(gateway_id or "").strip():
         return {}
     gateway_agents = await personal_channels_service.agents_sharing_gateway(
@@ -207,22 +301,17 @@ async def _resolve_channel_owners_for_gateway(
     owners: Dict[str, List[str]] = {}
     for candidate_id in gateway_agents:
         try:
-            bindings = await agent_bindings_repository.list_agent_channel_bindings(
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                agent_install_id=candidate_id,
-                enabled_only=True,
+            in_use = await channels_in_use(
+                tenant_id=tenant_id, workspace_id=workspace_id, agent_id=candidate_id,
             )
         except Exception:
             _logger.warning(
-                "openclaw provisioning: binding lookup failed for gateway_id=%s candidate agent_id=%s",
+                "openclaw provisioning: channels_in_use lookup failed for gateway_id=%s candidate agent_id=%s",
                 gateway_id, candidate_id, exc_info=True,
             )
             continue
-        for row in bindings or []:
-            key = str((row or {}).get("key") or "").strip()
-            if key in personal_channels_service.OPENCLAW_PERSONAL_CHANNELS:
-                owners.setdefault(key, []).append(candidate_id)
+        for key in in_use:
+            owners.setdefault(key, []).append(candidate_id)
     return owners
 
 
@@ -283,19 +372,27 @@ async def build_openclaw_channel_policies(
     channel_owners = await _resolve_channel_owners_for_gateway(
         tenant_id=tenant_id, workspace_id=workspace_id, gateway_id=gateway_id,
     )
-    conflicts = {key: owners for key, owners in channel_owners.items() if len(owners) > 1}
-    if conflicts:
-        detail = "; ".join(
-            f"{key} is claimed by {len(owners)} agents ({', '.join(sorted(owners))})"
-            for key, owners in sorted(conflicts.items())
-        )
-        raise OpenClawProvisioningError(
-            "This computer's OpenClaw channel transport cannot be provisioned: more than one "
-            f"agent on this gateway holds an enabled binding for the same channel — {detail}. "
-            "OpenClaw supports exactly one account per channel. Disable the channel binding for "
-            "every agent except the one that should own it, then provision again.",
-            status_code=409,
-        )
+    conflicting_keys = sorted(key for key, owners in channel_owners.items() if len(owners) > 1)
+    if conflicting_keys:
+        structured_conflicts: List[Dict[str, Any]] = []
+        for key in conflicting_keys:
+            owner_ids = sorted(channel_owners[key])
+            owner_labels = [
+                await _agent_display_name(owner_id, tenant_id=tenant_id, workspace_id=workspace_id)
+                for owner_id in owner_ids
+            ]
+            structured_conflicts.append(
+                {
+                    "channel_key": key,
+                    "channel_id": openclaw_channel_id(key),
+                    "channel_label": personal_channels_service.OPENCLAW_PERSONAL_CHANNELS.get(key, {}).get(
+                        "label", key
+                    ),
+                    "agent_ids": owner_ids,
+                    "agent_labels": owner_labels,
+                }
+            )
+        raise OpenClawProvisioningConflictError(structured_conflicts)
 
     requested = {
         str(key or "").strip()
@@ -407,6 +504,12 @@ async def provision_openclaw_gateway(
     return {"gateway_id": gateway_id, "run_id": run_id, **result}
 
 
+_RECONCILE_UNREACHABLE_MESSAGE = (
+    "This computer could not be reached to apply the change just now. It will pick up the new "
+    "setting automatically the next time it is online."
+)
+
+
 async def reconcile_openclaw_policy_best_effort(
     *,
     channel_key: str,
@@ -420,23 +523,37 @@ async def reconcile_openclaw_policy_best_effort(
     channel, so their setting takes effect on the box instead of at the next
     boot.
 
-    BEST EFFORT, and deliberately so: the policy is already saved in Postgres
-    and the box re-asserts it from its own provisioning record on every boot
-    (OpenClawProvisioningRuntime.reconcileFromLastAppliedPolicy), so an offline
-    or unpaired gateway must never turn a successful settings change into a
-    500. Returns None when the push could not be attempted — including when
-    build_openclaw_channel_policies refuses because a DIFFERENT agent on this
-    same gateway already holds the enabled binding for this channel (see its
-    own docstring); the specific "why", including which agent conflicts,
-    is in the log line this swallows, not in this function's return value.
-    A caller that needs to explain the refusal to the owner should call
-    provision_openclaw_gateway directly (as the explicit "provision" action
-    already does) rather than read anything into a None here. Returns the
-    box's result otherwise — including a `disabled_channels` entry when the
-    setting they just chose is one OpenClaw cannot carry, which is the ONLY
-    moment that fact can be put in front of them (the messages it affects
-    are dropped
-    before Empyralis ever sees them).
+    THREE FACTS, NEVER TWO. This function's return value distinguishes:
+      - "it worked" — status "provisioned" (or the box's own "refused" for a
+        box-side reason, e.g. a version mismatch or a lockdown finding —
+        passed through verbatim, box's own vocabulary),
+      - "another agent already owns this channel" — status "agent_conflict",
+        carrying WHICH agents and WHICH channel (OpenClawProvisioningConflictError's
+        own structured `conflicts` plus its already-owner-facing message), and
+      - "the box could not be reached at all right now" — status
+        "unreachable".
+    Collapsing the last two into a bare `None` was the exact "silence is a
+    decision" defect this codebase keeps re-discovering at other seams
+    (filter_channel_outbound_reply's silent/undelivered collapse, the
+    workspace-invite email's three delivery states) — an owner who saw
+    nothing had no way to learn a setting they just changed silently isn't
+    in force, or why, or what to do about it.
+
+    STILL BEST-EFFORT in the sense that matters: "unreachable" is not raised
+    as an error, because the box re-asserts the last policy it can reach
+    from its own provisioning record at next boot regardless — a transient
+    network gap must never turn a successful settings save into something
+    the owner has to act on right now. "agent_conflict" is different: it will
+    NOT resolve itself at the next boot, because the same two conflicting
+    channel claims will still exist then, so it is returned as a real,
+    distinct outcome rather than folded into the same "try again later"
+    bucket as an offline box.
+
+    Both new-agents-conflict and not-reachable now ALWAYS return a dict
+    (never a bare `None`) once this function has actually attempted a push —
+    the two early guard clauses below (not an OpenClaw channel; missing
+    gateway_id/agent_id) stay `None` because those are "this call does not
+    apply", never a real attempted-and-failed outcome to report.
 
     Not a fire-and-forget task on purpose: the caller surfaces the result.
     """
@@ -452,6 +569,19 @@ async def reconcile_openclaw_policy_best_effort(
             agent_id=agent_id,
             actor_id=actor_id,
         )
+    except OpenClawProvisioningConflictError as exc:
+        _logger.info(
+            "openclaw provisioning conflict for gateway_id=%s channel=%s: %s",
+            gateway_id,
+            channel_key,
+            exc,
+        )
+        return {
+            "status": "agent_conflict",
+            "channel_key": channel_key,
+            "conflicts": exc.conflicts,
+            "message": str(exc),
+        }
     except OpenClawProvisioningError as exc:
         _logger.info(
             "openclaw provisioning reconcile skipped for gateway_id=%s channel=%s: %s",
@@ -459,7 +589,7 @@ async def reconcile_openclaw_policy_best_effort(
             channel_key,
             exc,
         )
-        return None
+        return {"status": "unreachable", "channel_key": channel_key, "message": _RECONCILE_UNREACHABLE_MESSAGE}
     except Exception:
         _logger.warning(
             "openclaw provisioning reconcile failed for gateway_id=%s channel=%s",
@@ -467,4 +597,4 @@ async def reconcile_openclaw_policy_best_effort(
             channel_key,
             exc_info=True,
         )
-        return None
+        return {"status": "unreachable", "channel_key": channel_key, "message": _RECONCILE_UNREACHABLE_MESSAGE}

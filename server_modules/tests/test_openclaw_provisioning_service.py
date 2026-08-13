@@ -188,10 +188,13 @@ def test_provision_dispatches_the_capability_with_the_policy_and_trusts_the_box(
     assert result["config_fingerprint"] == "abc"
 
 
-def test_reconcile_is_best_effort_and_never_raises(monkeypatch):
+def test_reconcile_never_raises_and_reports_unreachable_as_a_real_outcome(monkeypatch):
     """A saved setting must not fail because the box is offline — it is already
     in Postgres, and the box re-asserts it from its own provisioning record at
-    next boot."""
+    next boot. But "could not be reached" must still be a REPORTED outcome,
+    not a bare None a caller can't distinguish from any other kind of
+    silence — the same three-facts-never-two rule this module now applies
+    to the agent_conflict outcome below."""
 
     async def boom(**kwargs):
         raise openclaw_provisioning_service.OpenClawProvisioningError("gateway offline", status_code=409)
@@ -206,7 +209,51 @@ def test_reconcile_is_best_effort_and_never_raises(monkeypatch):
             agent_id="a",
         )
     )
-    assert result is None
+    assert result == {
+        "status": "unreachable",
+        "channel_key": "openclaw_feishu",
+        "message": openclaw_provisioning_service._RECONCILE_UNREACHABLE_MESSAGE,
+    }
+
+
+def test_reconcile_reports_agent_conflict_as_its_own_distinct_outcome(monkeypatch):
+    """The specific defect this build closes: a conflict used to collapse
+    into the SAME None as an offline box. Now it is status "agent_conflict",
+    carrying the plain-language, agent-and-channel-naming message and the
+    structured conflicts list -- never lumped in with "unreachable"."""
+    installs = [
+        {"id": "agent-a", "enabled": True, "metadata": {"preferred_gateway_id": "gw-conflict"}},
+        {"id": "agent-b", "enabled": True, "metadata": {"preferred_gateway_id": "gw-conflict"}},
+    ]
+    _stub_gateway_sharing(
+        monkeypatch, installs=installs,
+        bindings_by_agent={"agent-a": ["openclaw_feishu"], "agent-b": ["openclaw_feishu"]},
+    )
+
+    result = _run(
+        openclaw_provisioning_service.reconcile_openclaw_policy_best_effort(
+            channel_key="openclaw_feishu",
+            gateway_id="gw-conflict",
+            tenant_id="t",
+            workspace_id="w",
+            agent_id="agent-a",
+        )
+    )
+    assert result["status"] == "agent_conflict"
+    assert result["channel_key"] == "openclaw_feishu"
+    assert result["conflicts"] == [
+        {
+            "channel_key": "openclaw_feishu",
+            "channel_id": "feishu",
+            "channel_label": "Feishu",
+            "agent_ids": ["agent-a", "agent-b"],
+            "agent_labels": ["agent-a", "agent-b"],  # no label/definition name stubbed -> id fallback
+        }
+    ]
+    # Never the same string as the unreachable outcome -- a caller (or an
+    # owner) must never be able to confuse the two.
+    assert result["message"] != openclaw_provisioning_service._RECONCILE_UNREACHABLE_MESSAGE
+    assert "Feishu" in result["message"]
 
 
 def test_reconcile_is_a_no_op_for_a_non_openclaw_channel(monkeypatch):
@@ -383,15 +430,70 @@ def test_refuses_to_provision_when_two_agents_claim_the_same_channel(monkeypatch
     monkeypatch.setattr(personal_channels_service, "_load_agent_dm_policy_config", should_not_run)
     monkeypatch.setattr(personal_channels_service, "_load_agent_group_policy_config", should_not_run)
 
-    with pytest.raises(openclaw_provisioning_service.OpenClawProvisioningError) as excinfo:
+    with pytest.raises(openclaw_provisioning_service.OpenClawProvisioningConflictError) as excinfo:
         _run(
             openclaw_provisioning_service.build_openclaw_channel_policies(
                 tenant_id="t", workspace_id="w", agent_id="agent-a", gateway_id="gw-conflict",
             )
         )
     assert excinfo.value.status_code == 409
-    assert "openclaw_feishu" in str(excinfo.value)
-    assert "agent-a" in str(excinfo.value) and "agent-b" in str(excinfo.value)
+    # A distinct SUBCLASS a caller can `except` on -- not just a status code,
+    # which "gateway not connected" also uses.
+    assert isinstance(excinfo.value, openclaw_provisioning_service.OpenClawProvisioningError)
+    # The message is OWNER-FACING plain language: names the channel by its
+    # real label, names the agents (id fallback here since no display name
+    # was stubbed), says what to do, and never leaks internal vocabulary.
+    message = str(excinfo.value)
+    assert "Feishu" in message
+    assert "agent-a" in message and "agent-b" in message
+    assert "one account per channel" in message
+    for mechanism_word in ("binding", "provisioning", "channel_key", "gateway"):
+        assert mechanism_word not in message.lower()
+    # And the structured data survives for a caller that wants more than a
+    # single string (reconcile_openclaw_policy_best_effort's return value).
+    assert excinfo.value.conflicts == [
+        {
+            "channel_key": "openclaw_feishu",
+            "channel_id": "feishu",
+            "channel_label": "Feishu",
+            "agent_ids": ["agent-a", "agent-b"],
+            "agent_labels": ["agent-a", "agent-b"],
+        }
+    ]
+
+
+def test_conflict_message_uses_a_resolved_agent_label_when_one_is_set(monkeypatch):
+    """Plain language means a NAME an owner recognizes, not a raw
+    agent_install_id, whenever one is available -- the label an owner chose
+    for the agent first, the agent definition's own name second."""
+    installs = [
+        {"id": "agent-a", "enabled": True, "metadata": {"preferred_gateway_id": "gw-named"}},
+        {"id": "agent-b", "enabled": True, "metadata": {"preferred_gateway_id": "gw-named"}},
+    ]
+    _stub_gateway_sharing(
+        monkeypatch, installs=installs,
+        bindings_by_agent={"agent-a": ["openclaw_feishu"], "agent-b": ["openclaw_feishu"]},
+    )
+
+    async def fake_install_bundle(install_id, *, tenant_id=None, workspace_id=None):
+        labels = {"agent-a": "Sales Bot", "agent-b": "Support Bot"}
+        return {"label": labels.get(install_id, "")}
+
+    monkeypatch.setattr(
+        openclaw_provisioning_service.agent_registry_repository,
+        "get_workspace_agent_install_bundle",
+        fake_install_bundle,
+    )
+
+    with pytest.raises(openclaw_provisioning_service.OpenClawProvisioningConflictError) as excinfo:
+        _run(
+            openclaw_provisioning_service.build_openclaw_channel_policies(
+                tenant_id="t", workspace_id="w", agent_id="agent-a", gateway_id="gw-named",
+            )
+        )
+    message = str(excinfo.value)
+    assert "Sales Bot" in message and "Support Bot" in message
+    assert "agent-a" not in message and "agent-b" not in message
 
 
 def test_provision_openclaw_gateway_threads_gateway_id_into_the_conflict_check(monkeypatch):

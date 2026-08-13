@@ -3226,3 +3226,72 @@ and at minimum one real channel credential (a Telegram bot token is the
 cheapest) — not attempted here per this session's constraints (no paid
 droplet, no company spend, no credential requested from the founder,
 without asking first).
+
+**Follow-up, same day: the reconcile function's `None` was collapsing "a
+different agent already owns this channel" into the SAME value as "the box
+is offline" — the exact three-facts-into-two shape this codebase keeps
+re-discovering elsewhere, and worse than ranked in the pass above.** Fixed.
+`reconcile_openclaw_policy_best_effort` now always returns a dict once it
+has actually attempted a push: `status: "provisioned"`/`"refused"` (the
+box's own vocabulary, passed through), `status: "agent_conflict"` (new —
+carries structured `conflicts` and an owner-facing `message`), or
+`status: "unreachable"` (new — replaces the bare `None` an offline/failed
+push used to return). `OpenClawProvisioningConflictError` is a distinct
+exception subclass (not a bare `OpenClawProvisioningError` with a
+different message) so a caller can `except` it specifically rather than
+lump it in with "gateway not connected", which used the same status code.
+
+**The conflict message IS the owner-facing text, not a log line, and reaches
+the screen with ZERO frontend changes — by construction, not by
+remembering to special-case a new error shape.** `str(exc)` is already
+plain language ("Sales Bot and Support Bot are both set up to use Feishu on
+this computer, which can only connect one account per channel. Turn Feishu
+off for one of them, then try again.") — no "binding", "provisioning",
+"channel_key", or "gateway" anywhere in it, asserted by a mechanical test.
+Agent names are resolved (an owner's own chosen label first, the agent
+definition's name second, the raw id only as a last resort) rather than
+left as opaque ids. This reaches the screen today through
+`OpenClawChannelsPanel.tsx`'s existing "Set up" button flow: the
+`.../provision` route already does `detail=str(exc)` on any
+`OpenClawProvisioningError`, and the frontend's `getErrorMessage` (see the
+"backend error body" entry elsewhere in this file) already surfaces a
+string `detail` verbatim — no route or component changed to wire this.
+
+**Honest limit found while wiring this, and worth recording precisely: the
+"Set up" button is the ONLY reachable "moment they try" this constraint can
+be enforced at in the product TODAY.** Traced every write path that could
+plausibly represent "agent X owns channel Y" before deciding where to put
+the refusal:
+- `PUT .../openclaw/gateways/{id}/channels/{key}/credential` (the
+  credential form) takes NO `agent_id` at all — the credential is written
+  to the box, gateway+channel-scoped only. There is no "this agent" to
+  compare against at that seam.
+- `PATCH .../{channel_key}/gateways/{id}/group-policy` — the ONE route that
+  writes a real per-agent `dm_policy`/`group_policy` distinction — has ZERO
+  frontend callers (grepped the whole `frontend/` tree for `group-policy`
+  and `group_policy`: nothing). It is fully built, unit-tested, and
+  unreachable from any screen — its own "built, tested, and never wired"
+  instance, not fixed here (building a settings UI from scratch is out of
+  this pass's scope).
+- `agent_channel_bindings` is populated for the OpenClaw-transported
+  channel family by NOTHING today. Its only writer,
+  `_ensure_agent_channel_binding_enabled`, fires exclusively for
+  `whatsapp_personal`/`telegram_personal`'s own "connected" state sync —
+  never for Signal/iMessage/WeChat or any `openclaw_*` channel. A
+  bindings-only version of the conflict/composition logic above would have
+  been structurally correct and PRACTICALLY INERT for the very channel
+  family it exists to protect. Caught and fixed the same day it was built:
+  `_resolve_channel_owners_for_gateway` now calls this module's own
+  `channels_in_use()` (bindings ∪ stored policy key — the same two-signal,
+  presence-not-value definition that already breaks the plugin-install
+  deadlock elsewhere in this module) instead of reading
+  `agent_channel_bindings` directly, so it is meaningful against what is
+  actually populated today, not just against what the schema implies should
+  be.
+
+Net: the constraint refuses clearly at the one place an owner can actually
+trigger it right now (the "Set up" button), with a real name-and-channel
+message. The dedicated per-agent channel-settings surface that would let
+this constraint be checked BEFORE a credential is even entered does not
+exist in the product yet — that is a separate, larger UI gap, flagged here
+rather than built speculatively.
