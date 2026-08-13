@@ -42,8 +42,11 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from claude_agent_sdk import types as sdk_types
+
 from server_modules import claude_agent_sdk_bridge
 from server_modules import sage_agent_runtime_service
+from server_modules.tests.test_claude_agent_sdk_bridge import _fake_claude_sdk_client
 
 
 SAGE_RUNTIME_SOURCE = Path(sage_agent_runtime_service.__file__)
@@ -101,6 +104,7 @@ class _TurnHarness:
         debit_result=None,
         sdk_events=None,
         legacy_usage=None,
+        real_bridge: bool = False,
         **chat_kwargs,
     ):
         meter_calls: list[dict] = []
@@ -126,11 +130,6 @@ class _TurnHarness:
             ),
             patch("server_modules.billing_service.debit_workspace_credits_for_turn", new=hosted_debit),
             patch("server_modules.usage_events_repository.record_usage_from_context", new=_record),
-            patch(
-                "server_modules.sage_agent_runtime_service.claude_agent_sdk_bridge."
-                "collect_events_via_claude_agent_sdk",
-                return_value=sdk_events if sdk_events is not None else _sdk_events(),
-            ),
             patch(
                 "server_modules.direct_chat_generation_service.stream_provider_backed_direct_chat",
                 new=legacy_stream,
@@ -180,6 +179,22 @@ class _TurnHarness:
                 "emit_security_audit_event"
             ),
         ]
+        # real_bridge=True (ServedModelFullPathIntegrationTest below): the
+        # real claude_agent_sdk_bridge.collect_events_via_claude_agent_sdk
+        # runs, all the way down to a real ClaudeAgentOptions/
+        # create_sdk_mcp_server and a real translate_sdk_message call — the
+        # caller is responsible for patching claude_agent_sdk.ClaudeSDKClient
+        # itself (via _fake_claude_sdk_client-shaped test double) BEFORE
+        # calling this method. Every other test in this file mocks the
+        # bridge's own OUTPUT and never exercises its internals at all.
+        if not real_bridge:
+            patches.append(
+                patch(
+                    "server_modules.sage_agent_runtime_service.claude_agent_sdk_bridge."
+                    "collect_events_via_claude_agent_sdk",
+                    return_value=sdk_events if sdk_events is not None else _sdk_events(),
+                )
+            )
         if workspace_record is not None:
             patches.append(
                 patch(
@@ -388,6 +403,98 @@ class DefaultEngineCreditDebitTests(unittest.TestCase):
             )
         self.assertEqual(run["result"]["message"], "Here is your answer.")
         self.assertEqual(exploded["result"]["message"], "Here is your answer.")
+
+
+class FullPathRealDefaultEngineIntegrationTest(unittest.TestCase):
+    """ONE test that exercises the REAL default-engine path end to end, with
+    nothing mocked between "a web chat message arrives" and "a real reply
+    ships" except the two boundaries no test may cross: the live LLM
+    provider (claude_agent_sdk.ClaudeSDKClient, mocked here the same way
+    test_claude_agent_sdk_bridge.py's own bridge-internals tests already
+    do) and the money ledger (debit_workspace_credits_for_turn_atomic).
+
+    Every other test in this file mocks claude_agent_sdk_bridge.collect_
+    events_via_claude_agent_sdk directly — real coverage of the SELECTION
+    wiring and the debit fusion, but zero coverage of translate_sdk_message
+    itself running on this path. This test closes that gap:
+
+        handle_sage_chat (real, PYTEST_CURRENT_TEST shortcut disabled so
+          _resolve_turn_engine_id takes its REAL production branch)
+        -> _run_sage_action_loop_v3 -> _collect_stream_events (real)
+        -> claude_agent_sdk_bridge.collect_events_via_claude_agent_sdk (real)
+        -> run_claude_agent_sdk_turn (real: ClaudeAgentOptions,
+           create_sdk_mcp_server, the whole options-building path)
+        -> ClaudeSDKClient (FAKE — the LLM boundary)
+        -> translate_sdk_message (real) turns the scripted AssistantMessage/
+           ResultMessage into the same event dicts a live turn would produce
+        -> _meter_and_debit_turn (real) resolves served_model from the
+           scripted ResultMessage.model_usage and debits against it
+        -> debit_workspace_credits_for_turn_atomic (FAKE — the money ledger)
+        -> a real reply string ships back out of handle_sage_chat
+    """
+
+    def setUp(self) -> None:
+        self.harness = _TurnHarness(self)
+
+    def test_default_engine_full_path_bills_served_model_and_ships_a_real_reply(self) -> None:
+        fake_client = _fake_claude_sdk_client([
+            [
+                sdk_types.AssistantMessage(
+                    content=[sdk_types.TextBlock(text="Full-path reply.")],
+                    model="deepseek-v4-flash",
+                ),
+                sdk_types.ResultMessage(
+                    subtype="success",
+                    duration_ms=10,
+                    duration_api_ms=8,
+                    is_error=False,
+                    num_turns=1,
+                    session_id="sess-full-path",
+                    result="Full-path reply.",
+                    usage={"input_tokens": 900, "output_tokens": 60},
+                    model_usage={
+                        "deepseek-v4-flash": {
+                            "inputTokens": 900,
+                            "outputTokens": 60,
+                            "cacheReadInputTokens": 0,
+                            "cacheCreationInputTokens": 0,
+                            "contextWindow": 128000,
+                            "canonicalModel": "deepseek-v4-flash",
+                        }
+                    },
+                ),
+            ]
+        ])
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch("claude_agent_sdk.ClaudeSDKClient", new=fake_client),
+            patch.object(claude_agent_sdk_bridge.agent_trace_service, "persist_ephemeral_envelope", new=AsyncMock()),
+        ):
+            os.environ.pop("PYTEST_CURRENT_TEST", None)
+            os.environ.pop("EMPYRALIS_FORCE_LEGACY_ENGINE", None)
+            run = self.harness.run(
+                engine=claude_agent_sdk_bridge.ENGINE_ID,
+                real_bridge=True,
+                workspace_id="ws-full-path",
+                message="hello",
+                request_id="turn-full-path",
+            )
+
+        # A real reply shipped, translated by the real bridge from the
+        # scripted ResultMessage — not a hand-built event dict.
+        self.assertEqual(run["result"]["message"], "Full-path reply.")
+        # The real ClaudeSDKClient double was actually invoked — this is
+        # not accidentally still hitting the mocked-bridge path.
+        self.assertEqual(len(fake_client.calls), 1)
+        # Billed exactly once, against the served model the scripted
+        # ResultMessage reported (see _meter_and_debit_turn's own "SERVED
+        # VS REQUESTED" docstring) — a call count, not "at least one".
+        self.assertEqual(run["debit"].await_count, 1)
+        self.assertEqual(len(run["meter_calls"]), 1)
+        self.assertEqual(run["meter_calls"][0]["model"], "deepseek-v4-flash")
+        self.assertEqual(run["meter_calls"][0]["tokens_in"], 900)
+        self.assertEqual(run["meter_calls"][0]["tokens_out"], 60)
 
 
 def _sdk_events_with_model_usage(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import time
 import unittest
@@ -3218,17 +3219,51 @@ class SageAgentRuntimeEngineSelectionResolutionTests(unittest.TestCase):
         mock_stream.assert_not_called()
         self.assertEqual(result["message"], "SDK reply")
 
-    def test_byok_specialist_with_unset_engine_stays_on_the_legacy_stream(self):
-        """The safety property this whole phase must not break: an agent
-        with no engine configured (every agent that existed before this
-        phase) must call the EXACT SAME legacy entry point as always, and
-        never touch the bridge."""
+    def test_byok_specialist_with_unset_engine_under_pytest_shortcut_stays_on_legacy_stream(self):
+        """NOT a production guarantee — this is the PYTEST_CURRENT_TEST
+        shortcut's own effect (_resolve_turn_engine_id returns "" under
+        pytest specifically so pre-existing mocks like this one keep
+        working), and it was previously mislabeled as one. Before MAN-310
+        (c96c7138a, "Claude Agent SDK is now the default turn engine") an
+        agent with no engine configured really did stay on the legacy
+        stream in production too, and this test's old name/docstring
+        ("The safety property this whole phase must not break... must call
+        the EXACT SAME legacy entry point as always") was accurate then.
+        It has been false in production since that commit — this test
+        stayed green only because it always runs under pytest, which is
+        exactly the blind spot CLAUDE.md's own MAN-310 entry warns about:
+        "every test that does not pass engine_options exercises the engine
+        production does NOT use." See the companion test immediately below
+        for what an unset engine actually selects outside pytest."""
         spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api")
         result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
 
         mock_stream.assert_called_once()
         mock_bridge.assert_not_called()
         self.assertEqual(result["message"], "Legacy reply")
+
+    def test_byok_specialist_with_unset_engine_uses_the_sdk_bridge_in_real_production(self):
+        """The real default, outside the pytest shortcut the test above
+        documents. Same specialist config (no model_config.engine at all)
+        as the test above — the ONLY difference is PYTEST_CURRENT_TEST
+        being unset for the duration of this one call, the same technique
+        test_default_engine_credit_debit.py's own
+        test_production_default_engine_is_the_claude_agent_sdk uses to
+        pin _resolve_turn_engine_id's real default. This is the actual
+        behavior every one of this codebase's real customers gets today
+        for an agent that has never touched model_config.engine."""
+        spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api")
+        with patch.dict(os.environ, {}, clear=False):
+            saved_pytest_marker = os.environ.pop("PYTEST_CURRENT_TEST", None)
+            try:
+                result, mock_stream, mock_bridge = self._run_chat(specialist_context=spec)
+            finally:
+                if saved_pytest_marker is not None:
+                    os.environ["PYTEST_CURRENT_TEST"] = saved_pytest_marker
+
+        mock_bridge.assert_called_once()
+        mock_stream.assert_not_called()
+        self.assertEqual(result["message"], "SDK reply")
 
     def test_byok_specialist_with_literal_legacy_engine_stays_on_the_legacy_stream(self):
         spec = self._spec(provider="anthropic", model="claude-sonnet-4-6", mode="byok_api", engine="legacy")
