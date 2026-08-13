@@ -100,7 +100,10 @@ class ProviderCatalogServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(providers["openai"]["sage_visible"])
         self.assertTrue(providers["openai"]["studio_visible"])
-        self.assertTrue(any(model["id"] == "deepseek-chat" for model in providers["deepseek"]["models"]))
+        # "deepseek-chat" is retired (2026-07-24) and deliberately no longer
+        # in the selectable catalog — see provider_profiles.py's "deepseek"
+        # entry. "deepseek-v4-flash" is its real successor.
+        self.assertTrue(any(model["id"] == "deepseek-v4-flash" for model in providers["deepseek"]["models"]))
         self.assertEqual(providers["deepseek"]["state"], "active")
         self.assertEqual(providers["deepseek"]["active_source"], "env-deepseek")
 
@@ -407,9 +410,14 @@ class ProviderCatalogServiceTests(unittest.IsolatedAsyncioTestCase):
                     )
 
     def test_model_route_policy_keeps_deepseek_platform_paid_when_priced(self) -> None:
+        # "deepseek-v4-flash", not "deepseek-chat" — DeepSeek retired
+        # "deepseek-chat" 2026-07-24 (provider_profiles.py's own "deepseek"
+        # catalog entry) and PLATFORM_CREDIT_MODEL_ALLOWLIST no longer
+        # lists it; see the two tests immediately below for the retired-id
+        # side of this.
         policy = provider_catalog_service.assert_model_route_policy(
             provider="deepseek",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             surface="sage",
             payer="platform_credits",
         )
@@ -420,11 +428,28 @@ class ProviderCatalogServiceTests(unittest.IsolatedAsyncioTestCase):
     def test_model_route_policy_rejects_non_deepseek_platform_credit_models(self) -> None:
         with self.assertRaisesRegex(ValueError, "Empyralis credits only support"):
             provider_catalog_service.assert_model_route_policy(
-                provider="deepseek",
-                model="deepseek-v4-flash",
+                provider="openai",
+                model="gpt-5.4",
                 surface="sage",
                 payer="platform_credits",
             )
+
+    def test_model_route_policy_rejects_deepseeks_own_retired_model_ids(self) -> None:
+        """The bug this fix closes: BEFORE it, this allowlist accepted the
+        two RETIRED DeepSeek ids and rejected the real current "light"
+        tier id ("deepseek-v4-flash") — the exact opposite of correct. A
+        deployed agent on the "light" tier (which now resolves to
+        "deepseek-v4-flash", see empyralis_model_tier_contract.py) would
+        have been rejected by its own platform's policy gate."""
+        for retired_model in ("deepseek-chat", "deepseek-reasoner"):
+            with self.subTest(model=retired_model):
+                with self.assertRaisesRegex(ValueError, "Empyralis credits only support"):
+                    provider_catalog_service.assert_model_route_policy(
+                        provider="deepseek",
+                        model=retired_model,
+                        surface="sage",
+                        payer="platform_credits",
+                    )
 
     def test_resolve_empyralis_model_tier_selection_hides_raw_route_by_default(self) -> None:
         route = provider_catalog_service.resolve_empyralis_model_tier_selection(public_tier="pro")

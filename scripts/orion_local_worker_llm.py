@@ -1077,6 +1077,48 @@ def resolve_requested_provider(context: Dict[str, Any], metadata: Dict[str, Any]
     return raw_provider
 
 
+def _deepseek_default_model() -> str:
+    """The one place this file decides "what DeepSeek model, if nobody
+    asked for a specific one" — provider_profiles.py's own "deepseek"
+    catalog entry (default_model) is the single source of truth, never a
+    second hardcoded copy. Three separate copies of this fallback existed
+    here before this fix, ALL still returning DeepSeek's retired
+    "deepseek-chat" id (retired 2026-07-24) — discovered by a full-path
+    integration test that ran the real resolution chain rather than
+    mocking it (test_default_engine_credit_debit.py's
+    FullPathRealDefaultEngineIntegrationTest). "deepseek-v4-flash" is the
+    final fallback only if the catalog lookup itself fails (should not
+    happen — defensive, not a second source of truth)."""
+    try:
+        from server_modules import provider_profiles as _provider_profiles
+
+        catalog_default = str(
+            _provider_profiles.provider_catalog_entry("deepseek").get("default_model") or ""
+        ).strip()
+    except Exception:
+        catalog_default = ""
+    return (
+        os.getenv("ORION_LOCAL_WORKER_DEEPSEEK_MODEL") or catalog_default or "deepseek-v4-flash"
+    ).strip() or "deepseek-v4-flash"
+
+
+def _deepseek_model_is_known(model: str) -> bool:
+    """Is `model` one of DeepSeek's real, current, selectable model ids?
+    Delegates to provider_profiles.model_is_known_for_provider — the SAME
+    save-time gate fleet_tools.configure_agent uses — rather than a second,
+    hand-kept name set. Also see that function's own docstring on why it
+    deliberately does NOT resolve "deepseek-chat"/"deepseek-reasoner"
+    forward: recognizing the retired names here as still-valid would put
+    them right back into circulation the moment any caller checked
+    membership before choosing whether to send a model string as-is."""
+    try:
+        from server_modules import provider_profiles as _provider_profiles
+
+        return _provider_profiles.model_is_known_for_provider("deepseek", model)
+    except Exception:
+        return False
+
+
 def resolve_requested_model(context: Dict[str, Any], metadata: Dict[str, Any], provider: str = "") -> str:
     requested = str(
         context.get("model")
@@ -1108,7 +1150,7 @@ def resolve_requested_model(context: Dict[str, Any], metadata: Dict[str, Any], p
     if pid == "qwen":
         return (os.getenv("ORION_LOCAL_WORKER_QWEN_MODEL") or "qwen-turbo").strip() or "qwen-turbo"
     if pid == "deepseek":
-        return (os.getenv("ORION_LOCAL_WORKER_DEEPSEEK_MODEL") or "deepseek-chat").strip() or "deepseek-chat"
+        return _deepseek_default_model()
     if pid == "mistral":
         return (os.getenv("ORION_LOCAL_WORKER_MISTRAL_MODEL") or "mistral-small-latest").strip() or "mistral-small-latest"
     return ""
@@ -1139,7 +1181,16 @@ def coerce_requested_model_for_provider(requested_model: Any, provider: str) -> 
     if pid == "anthropic":
         return normalize_anthropic_model(model)
     if pid == "deepseek":
-        return model if model in {"deepseek-chat", "deepseek-reasoner"} else default_openai_compatible_model("deepseek")
+        # BEFORE this fix: backwards. The old whitelist was exactly the
+        # two RETIRED names ({"deepseek-chat", "deepseek-reasoner"}), so a
+        # caller explicitly requesting a real current id ("deepseek-v4-
+        # flash"/"deepseek-v4-pro") had it silently DISCARDED and replaced
+        # with the default, while a caller carrying the dead name had it
+        # preserved untouched. _deepseek_model_is_known checks against the
+        # real, current catalog (provider_profiles.py), so a valid
+        # explicit choice now survives and a retired one is coerced to the
+        # real default instead of being passed through.
+        return model if _deepseek_model_is_known(model) else default_openai_compatible_model("deepseek")
     if pid == "ollama_cloud":
         return model or ((os.getenv("ORION_LOCAL_WORKER_OLLAMA_CLOUD_MODEL") or "gpt-oss:120b").strip() or "gpt-oss:120b")
     return model
@@ -1743,7 +1794,12 @@ def default_openai_compatible_model(provider: str) -> str:
     if pid == "qwen":
         return (os.getenv("ORION_LOCAL_WORKER_QWEN_MODEL") or "qwen-turbo").strip() or "qwen-turbo"
     if pid == "deepseek":
-        return (os.getenv("ORION_LOCAL_WORKER_DEEPSEEK_MODEL") or "deepseek-chat").strip() or "deepseek-chat"
+        # This is the resolver openai_compatible_model_from_request (and
+        # therefore iter_openai_compatible_chat_events — the function that
+        # actually sends a request to DeepSeek's wire) falls back to when
+        # nobody supplied an explicit model. See _deepseek_default_model's
+        # own docstring for why this used to be "deepseek-chat".
+        return _deepseek_default_model()
     if pid == "mistral":
         return (os.getenv("ORION_LOCAL_WORKER_MISTRAL_MODEL") or "mistral-small-latest").strip() or "mistral-small-latest"
     if pid == "groq":
@@ -2094,6 +2150,69 @@ def iter_openai_compatible_chat_events(
             message = choices[0].get("message") if isinstance(choices[0], dict) else None
             tool_calls = _normalize_openai_function_call(message)
             final_text = _extract_openai_message_text(message)
+            # MAN-308 shape, generalized across the whole DeepSeek path (not
+            # a per-model fix): a model can emit a tool call as plain/fenced
+            # JSON text in `content` instead of populating the structured
+            # `tool_calls` field. This is the SAME failure class
+            # extract_dsml_tool_calls_from_text already recovers for Codex's
+            # DSML envelope — DeepSeek does not emit that envelope, so that
+            # recovery never fires for it, and the model's own upstream
+            # issue (deepseek-ai/DeepSeek-V3#1244, filed 2026-04-24, still
+            # open, measured ~11% of completions) has the identical shape:
+            # a real tool call the model intended, written as prose instead
+            # of dispatched. Wired generically across every model this
+            # function serves (not keyed to a specific model id) so
+            # whichever model the "pro"/"light" tiers point at today or
+            # later is covered — CLAUDE.md's own rule that a fix belongs on
+            # the provider/path, never hand-tied to one model string that
+            # rots the moment a tier's mapping changes.
+            #
+            # Reuses internal_tool_markup_service.extract_textual_tool_call_
+            # mentions (the MAN-263 detector) rather than reimplementing the
+            # JSON-scan/name-normalization it already has. That function's
+            # own docstring says it is "never wired to any executor" — true
+            # of its EXISTING caller (tool_honesty_guard's synthesis-turn
+            # dishonesty check, which must never double-execute a call that
+            # already ran for real this turn). This call site is safe for
+            # exactly the reason that one is not: it only runs when the
+            # structured `tool_calls` came back EMPTY, i.e. nothing else
+            # fired this turn to double up against — this IS the invocation
+            # turn, not a synthesis turn describing a past success.
+            # Restricted to tool names this turn actually OFFERED
+            # (tool_specs): a recovered mention naming anything else is a
+            # false positive (quoted JSON, an unrelated example) and is
+            # dropped rather than guessed into a dispatched call — the same
+            # "never trust an unregistered name" posture claude_agent_sdk_
+            # bridge.is_registered_empyralis_tool already applies on the SDK
+            # engine's own tool-call path.
+            if not tool_calls and final_text and tool_specs:
+                _offered_tool_names = {item["name"] for item in tool_specs}
+                _recovered_mentions = [
+                    mention
+                    for mention in internal_tool_markup_service.extract_textual_tool_call_mentions(final_text)
+                    if mention.get("name") in _offered_tool_names
+                ]
+                if _recovered_mentions:
+                    print(
+                        f"[DS_TEXTUAL_TOOLCALL_RECOVERED] provider={provider} model={model} "
+                        f"recovered={len(_recovered_mentions)} names={[m['name'] for m in _recovered_mentions]}",
+                        flush=True,
+                    )
+                    tool_calls = [
+                        {
+                            "id": None,
+                            "name": mention["name"],
+                            "arguments": json.dumps(mention.get("arguments") or {}),
+                        }
+                        for mention in _recovered_mentions
+                    ]
+                    # The recovered text DESCRIBED a call, it did not ANSWER
+                    # the user — never stream or return it as the reply
+                    # alongside the recovered call, the same "a tool-shaped
+                    # message is not automatically the agent speaking"
+                    # principle claude_agent_sdk_bridge.translate_sdk_
+                    # message applies to a provider-error AssistantMessage.
+                    final_text = ""
             if final_text:
                 yield {"type": "delta", "delta": final_text, "model": model}
             usage = parsed.get("usage") if isinstance(parsed.get("usage"), dict) else None

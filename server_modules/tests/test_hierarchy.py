@@ -40,6 +40,25 @@ class FleetToolRoleTests(unittest.TestCase):
         self.assertFalse(meta["subagents_enabled"])
         self.assertEqual(meta["model_config"]["mode"], "platform_credits")
 
+    def test_seed_specialist_model_is_a_real_current_deepseek_id(self):
+        """Programmatic guard, not a hand check: seed_specialist_metadata
+        builds its model_config dict directly rather than through fleet_
+        tools.configure_agent's validated patch path, so it needed its OWN
+        fix when DeepSeek retired "deepseek-reasoner" (2026-07-24) — it
+        was seeding every NEW specialist agent with a dead model id. Checked
+        against the live provider catalog (provider_profiles.
+        model_is_known_for_provider), not a hardcoded string, so this
+        cannot go stale silently the same way again."""
+        from server_modules import provider_profiles
+
+        meta = fleet_tools.seed_specialist_metadata()
+        model_config = meta["model_config"]
+        self.assertTrue(
+            provider_profiles.model_is_known_for_provider(
+                model_config.get("provider") or "deepseek", model_config["model"],
+            )
+        )
+
     def test_operator_role_resolves_correctly(self):
         """role=operator in install_metadata resolves to operator."""
         install = {"install_metadata": {"role": "operator"}}
@@ -661,6 +680,70 @@ class FleetConfigureValidationTests(unittest.TestCase):
         )
         self.assertFalse(result["ok"])
         self.assertIn("Invalid model_config runtime", result["error"])
+
+    def test_invalid_model_config_model_rejected_up_front(self):
+        """Billing-honesty fix: a model id not on the provider's own
+        catalog fails loudly at SAVE TIME (before any DB lookup), never
+        forwarded as free text into a live provider call. Mirrors
+        test_invalid_model_config_runtime_rejected's own shape."""
+        result = _run(
+            fleet_tools.fleet_configure_agent(
+                actor_id="agent-op-1",
+                workspace_id="ws-test",
+                agent_id="agent-x",
+                patch={"model_config": {"mode": "platform_credits", "provider": "deepseek", "model": "deepseek-v5-ultra-nonexistent"}},
+            )
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("Invalid model_config model", result["error"])
+
+    def test_retired_deepseek_model_id_rejected_up_front(self):
+        """The specific bug this fix closes: DeepSeek retired
+        "deepseek-chat"/"deepseek-reasoner" 2026-07-24 (provider_profiles.py's
+        "deepseek" catalog entry) but its API silently accepts the old name
+        and substitutes a different model rather than rejecting it — so a
+        NEW save of the retired name must fail loudly here rather than
+        quietly relying on that undocumented substitution at every turn."""
+        for retired_model in ("deepseek-chat", "deepseek-reasoner"):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="agent-op-1",
+                    workspace_id="ws-test",
+                    agent_id="agent-x",
+                    patch={"model_config": {"mode": "platform_credits", "provider": "deepseek", "model": retired_model}},
+                )
+            )
+            self.assertFalse(result["ok"], f"{retired_model} must be rejected at save time")
+            self.assertIn("Invalid model_config model", result["error"])
+
+    def test_valid_deepseek_model_config_model_passes_validation(self):
+        """The current, real model ids are accepted (fails later at DB
+        lookup for a nonexistent agent, not at this validation step —
+        same convention as test_configure_agent_valid_patch_keys_accepted)."""
+        for real_model in ("deepseek-v4-flash", "deepseek-v4-pro"):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="agent-op-1",
+                    workspace_id="ws-test",
+                    agent_id="agent-x",
+                    patch={"model_config": {"mode": "platform_credits", "provider": "deepseek", "model": real_model}},
+                )
+            )
+            self.assertNotIn("Invalid model_config model", str(result.get("error") or ""))
+
+    def test_open_catalog_provider_model_is_never_rejected(self):
+        """Ollama's model space is whatever is pulled locally — never a
+        fixed list this validation could enumerate — so nothing here is
+        ever rejected on the model axis for it."""
+        result = _run(
+            fleet_tools.fleet_configure_agent(
+                actor_id="agent-op-1",
+                workspace_id="ws-test",
+                agent_id="agent-x",
+                patch={"model_config": {"mode": "byok_api", "provider": "ollama", "model": "some-locally-pulled-model"}},
+            )
+        )
+        self.assertNotIn("Invalid model_config model", str(result.get("error") or ""))
 
     def _mandate_patch_result(self, mandate_patch, *, existing_mandate=None):
         """mandate's shape validation runs AFTER the install-bundle lookup

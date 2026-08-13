@@ -42,9 +42,16 @@ class EmpyralisModelTierRoutingServiceTests(unittest.TestCase):
         self.assertEqual(legacy_max_route["public_tier"], "pro")
         self.assertEqual(legacy_max_route["model"], "deepseek-v4-pro")
         self.assertEqual(legacy_max_route["reasoning_effort"], "high")
-        self.assertIn("deepseek-chat", deepseek_models)
+        # "deepseek-chat" is retired (DeepSeek, 2026-07-24) and deliberately
+        # NOT in the selectable catalog any more — see provider_profiles.py's
+        # "deepseek" entry. A caller still carrying the old string is
+        # forwarded to the real current id via PROVIDER_MODEL_ALIASES
+        # (test_provider_profiles.py covers that), never re-offered as a
+        # pickable catalog entry.
+        self.assertNotIn("deepseek-chat", deepseek_models)
+        self.assertIn("deepseek-v4-flash", deepseek_models)
         self.assertIn("deepseek-v4-pro", deepseek_models)
-        self.assertIn("context_window_tokens", deepseek_models["deepseek-chat"])
+        self.assertIn("context_window_tokens", deepseek_models["deepseek-v4-flash"])
         self.assertEqual(deepseek_models["deepseek-v4-pro"]["context_window_tokens"], 1000000)
         self.assertTrue(deepseek_models["deepseek-v4-pro"]["supports_reasoning"])
         self.assertEqual(deepseek_models["deepseek-v4-pro"]["reasoning_levels"], ["high", "max"])

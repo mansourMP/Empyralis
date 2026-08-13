@@ -50,7 +50,23 @@ MODEL_TIER_CONTRACTS: Dict[str, EmpyralisModelTierContract] = {
         public_tier="light",
         public_label="Light",
         internal_provider="deepseek",
-        internal_model="deepseek-chat",
+        # "deepseek-chat" was DeepSeek's own model id here until this fix —
+        # DeepSeek retired it 2026-07-24 (provider_profiles.py's own comment
+        # on its "deepseek" catalog entry documents the retirement date and
+        # DeepSeek's undocumented behavior of silently substituting
+        # deepseek-v4-flash under the old name rather than rejecting it).
+        # So every "light" tier turn had been silently served by
+        # deepseek-v4-flash for three weeks while the request wire carried
+        # the dead name — exactly the substitution
+        # sage_agent_runtime_service._resolve_served_model_from_usage now
+        # detects and bills correctly, but there is no reason to keep
+        # SENDING a retired id when the real one is known. "pro"/"max"
+        # below already point at the current name; this completes that
+        # migration. provider_profiles.PROVIDER_MODEL_ALIASES["deepseek"]
+        # still maps the retired names forward for any other caller/stored
+        # config that has not been updated — this is the one place that
+        # generates FRESH traffic and gets fixed at the source.
+        internal_model="deepseek-v4-flash",
         reasoning_effort=None,
         max_output_tier="standard",
         agent_budget_tier="standard",

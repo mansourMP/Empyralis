@@ -361,6 +361,40 @@ def _resolve_turn_payer_mode(workspace_record: Any) -> str:
     return "platform_credits"
 
 
+def _resolve_served_model_from_usage(
+    requested_model: str | None, model_usage: dict[str, Any] | None,
+) -> str | None:
+    """What model actually served this turn, per the SDK's own honest
+    per-model report (``ResultMessage.model_usage[...].canonicalModel`` —
+    claude_agent_sdk_bridge.translate_sdk_message's ResultMessage branch
+    copies it through unmodified) — or ``None`` when that report gives no
+    usable answer, which callers must treat as "no evidence of a
+    substitution", never as "confirmed unchanged".
+
+    A turn ordinarily produces exactly one ``model_usage`` entry (the
+    single top-level model call this bridge drives — no subagent/Agent
+    fan-out is wired, see the bridge's own module docstring), so the
+    common case is simply "the one entry's canonicalModel". Multiple
+    entries are handled defensively for a future multi-model turn: if
+    every entry reports the SAME canonicalModel, that is still a single,
+    confident answer; if they disagree, this returns ``None`` rather than
+    guessing which one was "the" served model — an unresolved answer must
+    never silently pick a price.
+    """
+    if not isinstance(model_usage, dict) or not model_usage:
+        return None
+    canonical_models: set[str] = set()
+    for entry in model_usage.values():
+        if not isinstance(entry, dict):
+            continue
+        canonical = str(entry.get("canonicalModel") or "").strip()
+        if canonical:
+            canonical_models.add(canonical)
+    if len(canonical_models) == 1:
+        return next(iter(canonical_models))
+    return None
+
+
 async def _meter_and_debit_turn(
     *,
     workspace_id: str,
@@ -377,6 +411,7 @@ async def _meter_and_debit_turn(
     run_id: str | None = None,
     trace_id: str = "",
     metadata: dict[str, Any] | None = None,
+    served_model: str | None = None,
 ) -> dict[str, Any]:
     """Record ONE turn's usage AND debit its credits. The single seam.
 
@@ -424,6 +459,28 @@ async def _meter_and_debit_turn(
     Idempotent per ``credit_idempotency_key``: the ledger dedupes on it, and
     it is the same key threaded into the legacy engine's own in-generation
     debit, so the two can never both charge one logical turn.
+
+    SERVED VS REQUESTED (billing-honesty fix). ``served_model`` is what the
+    SDK itself reports actually answered this turn
+    (``ResultMessage.model_usage[...].canonicalModel`` —
+    ``_resolve_served_model_from_usage``'s own docstring on how a caller
+    should derive it). ``model`` is what the customer's tier/config
+    requested. The rule, stated once, here, so no caller can charge the
+    requested model while a different one was served: **billing is always
+    computed against the served model when one is known.** DeepSeek is
+    documented (provider_profiles.py's "deepseek" catalog entry) to
+    silently substitute a different model under a retired name rather than
+    reject the call — this is exactly the case that makes "trust the
+    request" wrong. ``billed_model`` below (never ``model`` directly) is
+    what reaches both the usage-event row and the pricing lookup, so a
+    downgrade is billed at the cheaper price automatically (DeepSeek's own
+    per-model pricing does the rest) and a customer is never charged for a
+    tier they did not actually receive. ``outcome`` carries
+    ``requested_model``/``served_model``/``model_overridden`` unconditionally
+    (never only on mismatch) so a caller can surface the comparison to the
+    customer even when nothing was substituted — CLAUDE.md's own rule that
+    an unasked question ("did this diverge?") must have an answer, not an
+    absence.
     """
     outcome: dict[str, Any] = {
         "mode": _resolve_turn_payer_mode(workspace_record),
@@ -435,12 +492,38 @@ async def _meter_and_debit_turn(
     clean_tokens_in = max(0, int(tokens_in or 0))
     clean_tokens_out = max(0, int(tokens_out or 0))
 
+    requested_model_clean = str(model or "").strip()
+    served_model_clean = str(served_model or "").strip()
+    # billed_model is the ONE model id every downstream consumer (metering,
+    # pricing, the debit's own outcome) sees from here on — "model" (the
+    # request) never reaches either directly. When no served model is
+    # known (None from _resolve_served_model_from_usage, or a caller that
+    # doesn't pass one at all — e.g. the legacy engine, which already has
+    # its own ground-truth usd_cost and doesn't need this), billed_model
+    # falls back to the request, which is the only information available —
+    # not a weaker guarantee, since there is nothing else to bill against.
+    billed_model = served_model_clean or requested_model_clean
+    model_overridden = bool(
+        served_model_clean
+        and requested_model_clean
+        and served_model_clean.lower() != requested_model_clean.lower()
+    )
+    outcome["requested_model"] = requested_model_clean or None
+    outcome["served_model"] = served_model_clean or requested_model_clean or None
+    outcome["model_overridden"] = model_overridden
+    if model_overridden:
+        logger.warning(
+            "credit_debit: workspace=%s trace_id=%s requested model=%r but was served "
+            "model=%r — billing the SERVED model, never the requested one.",
+            workspace_id, trace_id, requested_model_clean, served_model_clean,
+        )
+
     try:
         from server_modules import usage_events_repository as _usage_repo
 
         await _usage_repo.record_usage_from_context(
             provider=provider or None,
-            model=model or None,
+            model=billed_model or None,
             tokens_in=clean_tokens_in,
             tokens_out=clean_tokens_out,
             tokens_cache_creation=max(0, int(tokens_cache_creation or 0)),
@@ -448,7 +531,11 @@ async def _meter_and_debit_turn(
             usd_cost=usd_cost,
             run_id=run_id or None,
             mode=outcome["mode"],
-            metadata=metadata,
+            metadata=(
+                {**(metadata or {}), "requested_model": requested_model_clean, "model_overridden": model_overridden}
+                if model_overridden
+                else metadata
+            ),
         )
     except Exception:
         logger.warning("turn metering failed (non-fatal) for workspace=%s trace_id=%s", workspace_id, trace_id)
@@ -458,7 +545,7 @@ async def _meter_and_debit_turn(
         if resolved_cost is None:
             from server_modules import pricing_registry_service as _pricing
 
-            resolved_cost = _pricing.estimate_cost_usd(provider, model, clean_tokens_in, clean_tokens_out)
+            resolved_cost = _pricing.estimate_cost_usd(provider, billed_model, clean_tokens_in, clean_tokens_out)
         outcome["usd_cost"] = resolved_cost
         if outcome["mode"] != "platform_credits" or resolved_cost is None:
             return outcome
@@ -6232,6 +6319,15 @@ async def _handle_sage_chat_unguarded(
         # `metadata` — usage_events.metadata is the existing JSONB
         # extension point (see e.g. _ledger_cli_subscription_turn's
         # tokens_known / gateway_id usage above), not a new column.
+        # Default when the try block below never runs/raises before setting
+        # it (no usage reported this turn, or metering itself failed) — a
+        # turn with no billing-honesty signal must render as "nothing to
+        # report", never crash the response assembly further down.
+        _sdk_model_billing_context: Dict[str, Any] = {
+            "requested_model": requested_model or None,
+            "effective_model": requested_model or None,
+            "model_overridden": False,
+        }
         try:
             _sdk_tokens_in = 0
             _sdk_tokens_out = 0
@@ -6294,13 +6390,25 @@ async def _handle_sage_chat_unguarded(
                 # is DeepSeek-only), which is exactly why the helper falls
                 # back to the same pricing lookup usage_events itself uses —
                 # otherwise the SDK engine would "debit" zero forever.
-                await _meter_and_debit_turn(
+                #
+                # _sdk_served_model: the SDK's own honest report of what
+                # actually answered this turn (canonicalModel), NOT
+                # `requested_model` — see _resolve_served_model_from_usage
+                # and _meter_and_debit_turn's own "SERVED VS REQUESTED"
+                # docstring section. Passing it here is the whole billing-
+                # honesty fix: DeepSeek is documented to silently substitute
+                # a model under a retired/mismatched name, and this is what
+                # makes the debit follow what was actually served instead
+                # of what was asked for.
+                _sdk_served_model = _resolve_served_model_from_usage(requested_model, model_usage_payload)
+                _sdk_debit_outcome = await _meter_and_debit_turn(
                     workspace_id=normalized_workspace_id,
                     tenant_id=normalized_tenant_id,
                     credit_idempotency_key=turn_credit_idempotency_key,
                     workspace_record=_ws_record,
                     provider=provider or None,
                     model=requested_model or None,
+                    served_model=_sdk_served_model,
                     tokens_in=_sdk_tokens_in,
                     tokens_out=_sdk_tokens_out,
                     tokens_cache_creation=int(_sdk_usage_metadata.get("cache_creation_input_tokens") or 0),
@@ -6310,6 +6418,15 @@ async def _handle_sage_chat_unguarded(
                     trace_id=trace_id,
                     metadata=_sdk_usage_metadata,
                 )
+                # Surfaced to the customer, not just priced correctly — see
+                # this function's own "surface it" requirement. Read back
+                # further down where the turn's response/persisted-turn
+                # metadata is assembled (`_sdk_model_billing_context`).
+                _sdk_model_billing_context = {
+                    "requested_model": _sdk_debit_outcome.get("requested_model"),
+                    "effective_model": _sdk_debit_outcome.get("served_model"),
+                    "model_overridden": bool(_sdk_debit_outcome.get("model_overridden")),
+                }
         except Exception:
             logging.getLogger(__name__).warning(
                 "claude_agent_sdk engine usage_events metering failed (non-fatal)"
@@ -6381,7 +6498,25 @@ async def _handle_sage_chat_unguarded(
                     reply=reply,
                     status="completed",
                     run_id=trace_id,
-                    metadata={"channel": channel_origin or "sage", "request_id": (request_id or None)},
+                    # requested_model/effective_model/model_overridden: the
+                    # billing-honesty signal (_sdk_model_billing_context,
+                    # computed above from _meter_and_debit_turn's own
+                    # outcome — see that function's "SERVED VS REQUESTED"
+                    # docstring section). Makes a substitution VISIBLE, not
+                    # just correctly priced — chat-message.tsx's
+                    # effectiveProviderLabel already prefers
+                    # metadata.effective_model over metadata.model for
+                    # every turn it renders, so this reaches the customer
+                    # with no frontend change. Falls back to
+                    # requested_model/False (never a fabricated "no
+                    # override") when this turn's own metering never ran —
+                    # see this block's own top-of-function default.
+                    metadata={
+                        "channel": channel_origin or "sage",
+                        "request_id": (request_id or None),
+                        "model": requested_model or None,
+                        **_sdk_model_billing_context,
+                    },
                 )
         except Exception:
             pass  # never break a reply just because persistence failed
@@ -6537,6 +6672,13 @@ async def _handle_sage_chat_unguarded(
             "trace_events": trace_events,
             "provider": provider,
             "model": requested_model or None,
+            # Billing-honesty signal (see _meter_and_debit_turn's "SERVED VS
+            # REQUESTED" docstring section) — same values already threaded
+            # into the persisted assistant turn's metadata above, repeated
+            # here for any caller of this function that reads the return
+            # dict directly rather than reloading thread history.
+            "effective_model": _sdk_model_billing_context.get("effective_model"),
+            "model_overridden": bool(_sdk_model_billing_context.get("model_overridden")),
             # Phase 4: which agent actually ran this turn (specialist vs Sage).
             "acting_agent_install_id": _spec_install_id or None,
             "acting_agent_label": (str(getattr(_spec, "agent_label", "") or "").strip() or None) if _spec is not None else None,

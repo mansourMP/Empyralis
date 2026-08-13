@@ -128,7 +128,13 @@ export const MODELS_BY_PROVIDER: Record<string, string[]> = {
     "gemini-3-pro-preview", "gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite",
     "gemini-2.5-pro", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro",
   ],
-  deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+  // "deepseek-chat"/"deepseek-reasoner" deliberately NOT listed — DeepSeek
+  // retired them 2026-07-24 (provider_profiles.py's own "deepseek" catalog
+  // entry). Offering them here would let a BYOK customer pick a dead id
+  // that server_modules/provider_profiles.py's model_is_known_for_provider
+  // now rejects at save time (fleet_tools.configure_agent) — mirrors that
+  // backend catalog exactly, same two entries.
+  deepseek: ["deepseek-v4-flash", "deepseek-v4-pro"],
   groq: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
   openrouter: [
     "openai/gpt-5.5", "openai/gpt-5.5-pro", "openai/gpt-5.4", "openai/gpt-5.4-mini",
@@ -162,7 +168,9 @@ export const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-5.4-mini",
   gemini: "gemini-2.5-flash",
-  deepseek: "deepseek-chat",
+  // Real current id, not the retired "deepseek-chat" — matches
+  // provider_profiles.py's "deepseek" catalog default_model.
+  deepseek: "deepseek-v4-flash",
   groq: "llama-3.3-70b-versatile",
   openrouter: "openai/gpt-5.2",
   xai: "grok-4",

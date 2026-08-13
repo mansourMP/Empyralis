@@ -382,18 +382,25 @@ def seed_operator_metadata() -> Dict[str, Any]:
 def seed_specialist_metadata() -> Dict[str, Any]:
     """Return the install_metadata for a new specialist.
 
-    model is explicit here (not left for the runtime's own deepseek-chat
+    model is explicit here (not left for the runtime's own deepseek default
     fallback in resolve_requested_model()) specifically so that changing the
     default only affects NEW agents — an agent created before this default
     changed keeps an empty model_config and keeps falling through to
     whatever the runtime fallback was at the time, untouched. Deny-a-
-    successful-tool rate empirically measured this session: deepseek-chat
-    5/5, deepseek-reasoner 1/5 (guard stays on regardless either way).
+    successful-tool rate empirically measured in the original session:
+    deepseek-chat 5/5, deepseek-reasoner 1/5 (guard stays on regardless
+    either way) — "deepseek-reasoner" was DeepSeek's own pre-v4 reasoning
+    model and is retired (2026-07-24); "deepseek-v4-pro" is its real
+    current successor and is what this now seeds, never the dead id
+    (provider_profiles.model_is_known_for_provider would reject a NEW save
+    of "deepseek-reasoner" through fleet_tools.configure_agent, but this
+    function builds the metadata dict directly rather than going through
+    that validated patch path, so it needed its own fix).
     """
     return {
         "role": SPECIALIST_ROLE,
         "subagents_enabled": False,
-        "model_config": {"mode": "platform_credits", "model": "deepseek-reasoner"},
+        "model_config": {"mode": "platform_credits", "model": "deepseek-v4-pro"},
     }
 
 
@@ -1529,6 +1536,33 @@ async def fleet_configure_agent(
                         + (f". Must be one of: {', '.join(sorted(_valid_efforts))}" if _valid_efforts else " — reasoning effort isn't available for this mode.")
                     ),
                 }
+        # Model identity — validate at SAVE TIME against the provider's own
+        # catalog (provider_profiles.model_is_known_for_provider), so a
+        # retired or mistyped model id fails loudly here instead of being
+        # forwarded as free text straight into a live ClaudeAgentOptions
+        # (model=...) call (claude_agent_sdk_bridge.py) or a legacy-engine
+        # provider call. CLAUDE.md's standing rule: stale model/provider
+        # config must fail loudly, never fall through to a default —
+        # unenforced for `model` until now. Only platform_credits/byok_api:
+        # those are the two modes whose `model` field is genuinely a
+        # provider model id; cli_subscription/local use a different
+        # vocabulary already validated above (see reasoning_effort's own
+        # mode branching).
+        model_value = str(mc.get("model") or "").strip()
+        model_provider_value = str(mc.get("provider") or "").strip().lower()
+        if model_value and model_provider_value and mode in ("platform_credits", "byok_api"):
+            from server_modules import provider_profiles
+
+            if not provider_profiles.model_is_known_for_provider(model_provider_value, model_value):
+                _known_models = provider_profiles._provider_model_identifier_list(model_provider_value)
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Invalid model_config model '{model_value}' for provider '{model_provider_value}'."
+                        + (f" Must be one of: {', '.join(_known_models)}." if _known_models else "")
+                    ),
+                }
+
         gateway_binding = mc.get("gateway_binding")
         if gateway_binding is not None and not isinstance(gateway_binding, str):
             return {

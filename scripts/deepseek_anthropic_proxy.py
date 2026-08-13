@@ -29,7 +29,10 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 PROXY_PORT = int(os.environ.get("PROXY_PORT", "8799"))
 PROXY_HOST = os.environ.get("PROXY_HOST", "127.0.0.1")
-DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+# "deepseek-chat" was DeepSeek's own model id here until this fix — DeepSeek
+# retired it 2026-07-24 (see server_modules/provider_profiles.py's
+# "deepseek" catalog entry). "deepseek-v4-flash" is its real successor.
+DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
 # Reasonable timeout for long generations (up to 10 min)
 TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=30.0, pool=30.0)
