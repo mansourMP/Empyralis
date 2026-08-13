@@ -1018,12 +1018,51 @@ lease/quota gate (`thread_busy`, `agent_limit_exceeded`,
 and five test files, wired to nothing. Its only importer,
 `channel_execution_quota_adapter.py`, has zero callers of its own; the one
 test that patches it through `agent_channel_router` patches symbols that
-module no longer has. So `thread_busy` cannot fire today and no channel
-message is ever refused for concurrency: a second message arriving mid-turn
-starts a SECOND CONCURRENT TURN that read thread history before the first
-turn's reply was written. Nothing is dropped; context is torn and reply order
-is nondeterministic. Verified 2026-08-09. Do not describe the concurrency
-gate as live, and do not "fix" a thread_busy drop that does not exist.
+module no longer has. Verified 2026-08-09. Do not describe THIS service as
+live, and do not "fix" a `thread_busy` drop that does not exist.
+
+**Correction, 2026-08-13 (hardware chain audit): the paragraph above
+overstated the blast radius — this file's own next line said "no channel
+message is ever refused for concurrency," which was never quite true.** A
+SEPARATE, simpler mechanism (`sage_reply_dispatcher.py`'s
+`_CHANNEL_TURN_LOCKS`, a per-`(workspace_id, thread_id)` `asyncio.Lock`
+inside `dispatch_sage_reply`) already serialized turns for hosted-bot and
+WeChat-official channels — its only 4 real callers
+(`sage_telegram_hosted_service.py`, `hosted_bot_provisioning_service.py`,
+`wechat_official_service.py`, `routes_sage_telegram_hosted.py`). The real
+gap was narrower and channel-specific: the whole personal-channel family
+(WhatsApp, Telegram-personal, Discord DMs, local-bridge/OpenClaw) funnels
+through `personal_channel_sage_bridge_service.py`'s
+`_execute_channel_turn_with_envelope` instead, which called
+`execute_sage_turn` directly with no lock anywhere in that file — THAT is
+where two messages on one thread actually raced. Fixed on
+`fix/personal-channel-turn-lock-and-gateway-cap` (committed, not yet
+merged/deployed) by extending the same `_CHANNEL_TURN_LOCKS` dict to that
+chokepoint via a new public `sage_reply_dispatcher.acquire_channel_turn_
+lock()`, keyed by a derived `f"personal:{surface_channel}:{remote_jid}"` —
+not a second mechanism, and deliberately per-thread rather than per-box or
+global (MAN-318 measured 8 fully concurrent turns running cleanly on a
+1vCPU box; a global lock would have silently undone that). A separate,
+generous per-gateway concurrent-execution CAP (32, resource protection
+only, not correctness) was added alongside it in
+`gateway_execution_service.py`, so a genuine burst degrades by queueing
+instead of thrashing one box's vCPU.
+
+`channel_concurrency_service` itself is recommended for DELETION, not
+adoption, evaluated fresh during that same audit: its extra coverage over
+a per-thread lock is real (agent-level and workspace-level caps across
+ALL of an agent's/workspace's threads, plus workspace-wide rate limiting
+— things a per-thread lock structurally cannot see), but the machinery has
+already rotted out of sync with the code it was meant to plug into — its
+own negative-path Rust-gate test is red, its own router-integration test
+targets `agent_channel_router.execute_canonical_channel_turn`, a function
+that no longer exists (zero `concurrency`/`execution_slot` references
+remain in that module — the router was refactored out from under this
+test and nobody noticed), and every quota knob it reads has zero
+production writers, so wiring it in today would only ever enforce
+hardcoded defaults nobody chose. Not deleted in that pass — reviving or
+removing it is a decision for the founder, reported rather than
+actioned as a side effect of the concurrency fix above.
 
 **A row written under one scope and updated under another is a silent
 no-op, and a test that reads the UNION of both scopes will never see it.**
