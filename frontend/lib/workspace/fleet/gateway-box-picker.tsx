@@ -231,10 +231,16 @@ export type HardwarePlacementTone = "cloud" | "online" | "offline" | "degraded" 
 
 export type HardwarePlacement = { label: string; tone: HardwarePlacementTone };
 
-function connectionTone(g: FleetGateway): HardwarePlacementTone {
+export function connectionTone(g: FleetGateway): HardwarePlacementTone {
   const raw = `${g.connection_status || g.status || ""}`.toLowerCase();
   if (raw === "online") return "online";
-  if (raw === "degraded" || raw === "reconnecting") return "degraded";
+  // execution_blocked (gateway_registry_service._gateway_connection_payload):
+  // the WSS session and heartbeat are genuinely fine — this is NOT a
+  // connectivity problem, so it isn't "offline" — but shell.execute/
+  // filesystem.read_write would fail on this box right now. "degraded" is
+  // the closest existing tone (amber, not green, not red); the label is
+  // what carries the specific fact.
+  if (raw === "degraded" || raw === "reconnecting" || raw === "execution_blocked") return "degraded";
   return "offline";
 }
 
@@ -250,6 +256,15 @@ function connectionTone(g: FleetGateway): HardwarePlacementTone {
 export function connectionPresentation(g: FleetGateway): { tone: AgentStatusTone; label: string } {
   const raw = `${g.connection_status || g.status || ""}`.toLowerCase();
   if (raw === "online") return { tone: "online", label: "Online" };
+  // A box must not read "Online" if the first shell.execute would fail on
+  // it — connectivity and execution readiness are different facts, and this
+  // is the honest third state rather than folding one into the other (the
+  // same collapse this codebase has already found and fixed once, for the
+  // OpenClaw outbound socket). Backend-computed in
+  // gateway_registry_service._gateway_connection_payload from the gateway's
+  // own live capability_readiness.blocked list, so a box on the pre-fix
+  // installer/image (no Docker) never reads Online.
+  if (raw === "execution_blocked") return { tone: "degraded", label: "Online — tools unavailable" };
   if (raw === "degraded") return { tone: "degraded", label: "Degraded" };
   if (raw === "reconnecting") return { tone: "degraded", label: "Reconnecting" };
   if (raw === "revoked") return { tone: "error", label: "Revoked" };
@@ -531,7 +546,6 @@ export function GatewayBoxPicker({
             <option value="">{copy ? `Select a ${copy.noun}…` : "Select a computer…"}</option>
             {gateways.map((g) => {
               const id = gatewayId(g);
-              const online = gatewayIsOnline(g);
               const suffix = requireLocalModel
                 ? (gatewayLocalModelReady(g) ? "· Ollama ready" : "· no local model")
                 : requireRuntime
@@ -543,7 +557,12 @@ export function GatewayBoxPicker({
                       ? `· ${runtimeLabel} not signed in`
                       : `· ${runtimeLabel} not installed`;
                   })()
-                : (online ? "· online" : "· offline");
+                // gatewayIsOnline's plain online/offline binary can't say
+                // "connected but can't run tools" — connectionPresentation
+                // is the one shared place that already knows the honest
+                // third state (execution_blocked), so this option reads the
+                // same fact the Hardware list and machine detail page show.
+                : `· ${connectionPresentation(g).label.toLowerCase()}`;
               return (
                 <option key={id} value={id}>
                   {gatewayLabel(g)} {suffix}

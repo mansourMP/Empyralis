@@ -69,5 +69,137 @@ class ShellFullAccessLocallyEnabledPayloadTests(unittest.TestCase):
         self.assertIsNone(payload["shell_full_access_locally_enabled"])
 
 
+class ExecutionBlockedConnectionStatusTests(unittest.TestCase):
+    """Connectivity and execution readiness are two different facts. A box
+    can have a perfectly live WSS session and a fresh heartbeat while its
+    Docker sandbox is not ready (e.g. a box still on a pre-fix installer/
+    image with no Docker at all — see deploy/packer/scripts/60-docker.sh),
+    which means shell.execute/filesystem.read_write — the founder's stated
+    launch bar for what a box must be able to do — would fail. Reporting
+    that box as "online" is exactly the collapsed-two-facts-into-one-light
+    bug CLAUDE.md already documents for the OpenClaw outbound socket.
+    connection_status must read "execution_blocked" instead, and ONLY when
+    it would otherwise have been "online" — a box that's degraded/
+    reconnecting/revoked/offline already has a more urgent, honest reason
+    for that label."""
+
+    @staticmethod
+    def _online_registration(capability_readiness=None):
+        # session_status "connected" is threaded through
+        # gateway_state_repository.get_latest_gateway_session, which this
+        # unit test does not have a live session table to back — reaching
+        # connection_status == "online" through the real function requires
+        # mocking that lookup. See the connection_status branch tests below,
+        # which patch it directly.
+        metadata = {}
+        if capability_readiness is not None:
+            metadata["capability_readiness"] = capability_readiness
+        return {
+            "gateway_id": "gateway-1",
+            "device_id": "device-1",
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+            "user_id": "user-1",
+            "status": "active",
+            "device_trust_state": "verified",
+            "metadata": metadata,
+            "capabilities": [],
+        }
+
+    @staticmethod
+    def _online_session(capability_readiness):
+        from datetime import datetime, timezone
+
+        return {
+            "session_id": "session-1",
+            "status": "connected",
+            "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"capability_readiness": capability_readiness} if capability_readiness else {},
+        }
+
+    def test_online_box_with_blocked_shell_execute_reads_execution_blocked(self) -> None:
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        session = self._online_session(
+            {"requested": ["shell.execute", "filesystem.read_write"], "ready": [], "blocked": ["shell.execute", "filesystem.read_write"]}
+        )
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=session,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(
+                self._online_registration()
+            )
+        self.assertEqual(payload["connection_status"], "execution_blocked")
+
+    def test_online_box_with_ready_shell_execute_stays_online(self) -> None:
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        session = self._online_session(
+            {"requested": ["shell.execute", "filesystem.read_write"], "ready": ["shell.execute", "filesystem.read_write"], "blocked": []}
+        )
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=session,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(
+                self._online_registration()
+            )
+        self.assertEqual(payload["connection_status"], "online")
+
+    def test_no_capability_readiness_reported_yet_stays_online_not_guessed_blocked(self) -> None:
+        # An older gateway build, or one that hasn't heartbeated with this
+        # field yet. Must never be guessed as blocked — that would report a
+        # real capability gap that hasn't actually been observed.
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        session = self._online_session(None)
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=session,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(
+                self._online_registration()
+            )
+        self.assertEqual(payload["connection_status"], "online")
+
+    def test_already_degraded_box_is_not_relabeled_execution_blocked(self) -> None:
+        # A box with a stale heartbeat is already reporting an honest,
+        # more urgent reason ("degraded") — folding execution readiness in
+        # here would obscure which fact is actually true.
+        from unittest.mock import patch
+
+        from datetime import datetime, timezone, timedelta
+
+        from server_modules import gateway_registry_service
+
+        stale_session = {
+            "session_id": "session-1",
+            "status": "connected",
+            "last_heartbeat_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+            "metadata": {
+                "capability_readiness": {
+                    "requested": ["shell.execute", "filesystem.read_write"],
+                    "ready": [],
+                    "blocked": ["shell.execute", "filesystem.read_write"],
+                }
+            },
+        }
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=stale_session,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(
+                self._online_registration()
+            )
+        self.assertEqual(payload["connection_status"], "degraded")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -104,6 +104,30 @@ def _gateway_connection_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
     live_capability_readiness = latest_session_metadata.get("capability_readiness")
     if not isinstance(live_capability_readiness, dict) or not live_capability_readiness:
         live_capability_readiness = None
+    # Connectivity and execution readiness are two different facts, and
+    # collapsing them into one "online" light is exactly the class of bug
+    # this codebase keeps finding (see CLAUDE.md: a configured-but-
+    # disconnected outbound socket once got reported with an inbound-blocking
+    # status). A box can have a perfectly live WSS session and a fresh
+    # heartbeat while its Docker sandbox — the only thing that makes
+    # shell.execute/filesystem.read_write actually work — is not ready, e.g.
+    # a box still on a pre-fix installer/image with no Docker at all. Only
+    # demotes an otherwise-"online" box: degraded/reconnecting/revoked/
+    # offline already carry a more urgent, already-honest reason for that
+    # label, and folding a second fact in there would obscure which one is
+    # true.
+    if connection_status == "online" and live_capability_readiness is not None:
+        blocked_capabilities = {
+            str(item or "").strip().lower()
+            for item in (live_capability_readiness.get("blocked") or [])
+            if str(item or "").strip()
+        }
+        # requestedCapabilities() (empyralis-gateway/src/shell/runtime.ts)
+        # always reports exactly these two — the founder's stated launch
+        # bar for what a box must be able to do to be worth placing an
+        # agent on.
+        if blocked_capabilities & {"shell.execute", "filesystem.read_write"}:
+            connection_status = "execution_blocked"
     return {
         "connection_status": connection_status,
         "reported_health_state": reported_health_state or None,
