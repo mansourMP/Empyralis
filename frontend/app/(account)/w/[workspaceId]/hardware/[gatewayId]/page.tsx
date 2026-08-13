@@ -13,9 +13,11 @@ import {
   Loader2,
   LogIn,
   MemoryStick,
+  Radio,
   Server,
   ServerOff,
   Thermometer,
+  Waypoints,
 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -24,6 +26,12 @@ import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
 import { StatusChip, StatusDot, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
 import { CHANNEL_ICONS, CHANNEL_LABELS } from "@/lib/workspace/fleet/fleet-icons";
 import { deriveStatus, formatDate, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
+import {
+  channelTransportPill,
+  channelTransportSummary,
+  planChannelTransportState,
+  type ProbeStatus,
+} from "@/lib/workspace/fleet/box-capability-state";
 import { HardwareRenameField } from "@/lib/workspace/fleet/hardware-rename-field";
 import { useBreadcrumbLabel } from "@/lib/workspace/fleet/Breadcrumbs";
 import { useFleetAgents } from "@/lib/workspace/fleet/fleet-data";
@@ -52,7 +60,15 @@ import { type CliSubscriptionRuntime } from "@/lib/workspace/fleet/fleet-provide
  *  through CliSetupControl (real actions), DETECTED_SERVICE_ORDER always
  *  renders as plain status readouts (no button, ever). */
 const INSTALLABLE_TOOL_ORDER = ["claude_cli", "codex_cli", "grok_cli", "cursor_cli"] as const;
-const DETECTED_SERVICE_ORDER = ["docker", "ollama", "postgres", "gpu"] as const;
+// openclaw/openclaw_channel_plugins: the honest box-capability-reporting pass
+// (the empyralis.ai/install/agent-computer.sh incident — a stale, zero-Docker,
+// zero-OpenClaw installer served to every real customer box with nothing in
+// the product noticing). Same passive-probe family as docker/ollama above
+// (empyralis-gateway/src/health/service-inventory.ts's probeOpenClaw /
+// probeOpenClawChannelPlugins), so they slot into this existing read-only
+// list with no new plumbing — serviceItemPresentation()'s generic
+// ready/degraded/offline/missing/unknown handling below already covers them.
+const DETECTED_SERVICE_ORDER = ["docker", "ollama", "postgres", "gpu", "openclaw", "openclaw_channel_plugins"] as const;
 const CAPABILITY_LABEL: Record<string, string> = {
   claude_cli: "Claude Code",
   codex_cli: "Codex",
@@ -62,6 +78,8 @@ const CAPABILITY_LABEL: Record<string, string> = {
   ollama: "Ollama",
   postgres: "PostgreSQL",
   gpu: "GPU",
+  openclaw: "Channel transport",
+  openclaw_channel_plugins: "Channel plugins",
 };
 
 /** Small leading glyph per detected service — the same icon+label pattern
@@ -73,6 +91,8 @@ const SERVICE_ICON: Record<string, ReactNode> = {
   ollama: <Brain size={13} strokeWidth={1.75} />,
   postgres: <Database size={13} strokeWidth={1.75} />,
   gpu: <Gpu size={13} strokeWidth={1.75} />,
+  openclaw: <Radio size={13} strokeWidth={1.75} />,
+  openclaw_channel_plugins: <Waypoints size={13} strokeWidth={1.75} />,
 };
 
 /** Maps a service_inventory row id to its cli_subscription runtime key —
@@ -1425,6 +1445,139 @@ function GatewaySelfUpdateControl({
   );
 }
 
+/** Honest "are channels actually going to work on this box" summary — the
+ *  card-face doctrine already established for the channel grid
+ *  (openclaw-channel-copy.ts's channelCardPill/remediationFor), applied here
+ *  at the BOX level instead of per-channel: icon + one pill + a single
+ *  mechanism-free line, everything else omitted. The fact this reports on
+ *  (box-capability-state.ts's planChannelTransportState, fed by the
+ *  `openclaw`/`openclaw_channel_plugins` rows in the read-only list below)
+ *  is exactly the one the empyralis.ai/install/agent-computer.sh incident
+ *  proved the product had no way to see: a box can heartbeat healthy —
+ *  connected, online, every other capability fine — while its channel
+ *  transport was never installed at all, and nothing said so anywhere
+ *  short of this reading its own passive probes.
+ *
+ *  Deliberately placed ABOVE "Channels through this box": an empty channel
+ *  list there is ambiguous on its own (no agent has set one up yet, OR the
+ *  transport itself is broken) — this line resolves that ambiguity before
+ *  the customer has to guess which one they're looking at. */
+function ChannelTransportBanner({
+  openclawStatus,
+  pluginsStatus,
+  gatewayId,
+  workspaceId,
+  setupAgentId,
+  refresh,
+}: {
+  openclawStatus: ProbeStatus;
+  pluginsStatus: ProbeStatus;
+  gatewayId: string;
+  workspaceId: string;
+  /** The agent whose channel policy a "Set up" click provisions — the
+   *  transport is provisioned FOR an agent's own settings, so there is
+   *  nothing this button can do without one. `null` when this box has no
+   *  agent pinned to it yet, in which case the button is not rendered at
+   *  all (CLAUDE.md: "no dead controls" — a control that cannot act is not
+   *  shown, not shown-and-disabled). */
+  setupAgentId: string | null;
+  refresh: (opts?: { silent?: boolean }) => Promise<FleetGateway[]>;
+}) {
+  const state = planChannelTransportState({ transportStatus: openclawStatus, pluginsStatus });
+  const pill = channelTransportPill(state);
+  const summary = channelTransportSummary(state);
+
+  const [busy, setBusy] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+    };
+  }, []);
+
+  const runSetup = useCallback(async () => {
+    if (!setupAgentId) return;
+    setBusy(true);
+    setError(null);
+    const stateBefore = state;
+    try {
+      const result = await postCliAction(
+        `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/provision?agent_id=${encodeURIComponent(setupAgentId)}`,
+        { install_channels: [] },
+      );
+      // A "refused" result is a SUCCESSFUL round trip carrying a reason from
+      // the box itself (wrong version, a failed lockdown read-back, an
+      // unclean security audit) — surfaced immediately rather than left to
+      // the verify-poll to time out and say nothing useful.
+      const provisioning = result?.openclaw_provisioning as { refusal?: { code?: string; detail?: string } } | undefined;
+      if (provisioning?.refusal) {
+        setBusy(false);
+        setError(provisioning.refusal.detail || provisioning.refusal.code || "This computer refused the setup request.");
+        return;
+      }
+      setBusy(false);
+      setVerifying(true);
+      const startedAt = Date.now();
+      if (pollRef.current) window.clearInterval(pollRef.current);
+      pollRef.current = window.setInterval(async () => {
+        if (Date.now() - startedAt > VERIFY_TIMEOUT_MS) {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+          pollRef.current = null;
+          setVerifying(false);
+          return;
+        }
+        const list = await refresh({ silent: true });
+        const match = list.find((g) => idOf(g) === gatewayId);
+        const items: ServiceInventoryItem[] = match?.metadata?.service_inventory || [];
+        const nowById = new Map(items.map((item) => [String(item.id || ""), item]));
+        const nowState = planChannelTransportState({
+          transportStatus: nowById.get("openclaw")?.status as ProbeStatus,
+          pluginsStatus: nowById.get("openclaw_channel_plugins")?.status as ProbeStatus,
+        });
+        if (nowState !== stateBefore) {
+          if (pollRef.current) window.clearInterval(pollRef.current);
+          pollRef.current = null;
+          setVerifying(false);
+        }
+      }, VERIFY_POLL_MS);
+    } catch (err) {
+      setBusy(false);
+      setError(err instanceof Error ? err.message : "Could not reach this computer.");
+    }
+  }, [gatewayId, setupAgentId, state, refresh]);
+
+  return (
+    <div
+      className="fleet-hw-dash-empty"
+      style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start", marginBottom: 12 }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <StatusChip
+          tone={pill.tone === "connected" ? "ready" : pill.tone === "setup" ? "degraded" : "unknown"}
+          label={pill.label}
+        />
+        <span className="fleet-hw-dash-empty-desc" style={{ margin: 0 }}>
+          {summary.headline}
+        </span>
+      </div>
+      {summary.hasSetupAction && setupAgentId && (
+        <button type="button" className="fleet-btn" disabled={busy || verifying} onClick={() => void runSetup()}>
+          {(busy || verifying) ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+          {busy ? "Starting…" : verifying ? "Setting up…" : "Set up"}
+        </button>
+      )}
+      {error && (
+        <span className="fleet-channel-expand-error" style={{ margin: 0 }}>
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** In-product "restart the gateway" — gap-hardware-gateway.md Part 1 item 2.
  *  Before this, the only way to restart a stuck gateway process without
  *  destroying the whole VPS was SSH + `systemctl restart` (see the manual
@@ -1816,6 +1969,11 @@ export default function GatewayDetailPage() {
         .filter((key) => key.length > 0),
     ),
   );
+  // Which agent a "Set up" click provisions for — the transport is
+  // provisioned against a specific agent's channel policy, so the first
+  // agent pinned to this box is as good a choice as any (provisioning is
+  // additive/idempotent, never destructive to another agent's setup).
+  const setupAgentId = boundAgents[0]?.agent_id || null;
 
   return (
     <main className="fleet-hw-dashboard">
@@ -1954,6 +2112,14 @@ export default function GatewayDetailPage() {
       <div className="fleet-hw-dash-band">
         <div className="fleet-hw-dash-panel">
           <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>Channels through this box</div>
+          <ChannelTransportBanner
+            openclawStatus={byId.get("openclaw")?.status as ProbeStatus}
+            pluginsStatus={byId.get("openclaw_channel_plugins")?.status as ProbeStatus}
+            gatewayId={targetGatewayId}
+            workspaceId={workspaceId}
+            setupAgentId={setupAgentId}
+            refresh={refresh}
+          />
           {channelKeys.length === 0 ? (
             <div className="fleet-hw-dash-empty">
               <div className="fleet-hw-dash-empty-title">No channels yet</div>
