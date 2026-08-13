@@ -979,6 +979,22 @@ real commits, all superseded by the same fixes re-implemented directly on
 main days later. If a branch exists, merge it or delete it — leaving it means
 someone rebuilds it.
 
+**A Linear ticket's status can lag its own fix, and a dispatched work order
+will faithfully re-diagnose a bug that's already gone.** MAN-263 ("agent
+narrates a tool call as text after the tool already succeeded") sat in
+Backlog for eight days after its actual fix (`edb773210`, direction #5 in
+`tool_honesty_guard.py`) merged to main — nobody moved the ticket, so a later
+dispatch carrying the ticket's own original repro text read as a fresh,
+uncovered bug. `git log --oneline --all | grep -i MAN-263` (or the ticket
+number in a commit message search) before starting a diagnosis-from-scratch
+would have surfaced it in one command. The session's actual contribution
+ended up being narrower and more valuable than the dispatch implied:
+verifying the existing fix red-before-green, proving it's reachable on the
+live path (an AST wiring test — CLAUDE.md's own "guard called once in a
+large function" failure mode had already bitten this exact call site once),
+and moving the ticket to reflect reality. Grep the ticket ID against git log
+before assuming a described bug is still open.
+
 **An untracked work order is invisible to the agent doing the work.** Since
 one agent = one worktree, an uncommitted file exists ONLY in the primary
 tree. `CHANNEL-ADOPTION-PLAN.md` sat untracked for three whole build steps
