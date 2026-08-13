@@ -16,6 +16,21 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
+class DeepseekShortcutModelTests(unittest.TestCase):
+    """_deepseek_shortcut_model — the Agent Machine shortcut's chat-
+    completion model used to be a hardcoded "deepseek-chat" literal,
+    DeepSeek's own retired pre-v4 id (2026-07-24), sent on every shortcut
+    call. Now sourced from provider_profiles.py's catalog default, single
+    source of truth."""
+
+    def test_resolves_to_the_real_current_deepseek_catalog_default(self):
+        from server_modules import sage_telegram_hosted_service
+
+        model = sage_telegram_hosted_service._deepseek_shortcut_model()
+        self.assertNotIn(model, {"deepseek-chat", "deepseek-reasoner"})
+        self.assertEqual(model, "deepseek-v4-flash")
+
+
 class MessageSplittingTests(unittest.TestCase):
     """Verify _split_long_message splits at sensible boundaries."""
 

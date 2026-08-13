@@ -628,7 +628,7 @@ async def _handle_model(
     if not model_name:
         services = kwargs.get("services")
         if services is None:
-            return {"reply": "Usage: /model <name>\nExample: /model deepseek-chat\n\n(Model list unavailable — services not loaded.)"}
+            return {"reply": "Usage: /model <name>\nExample: /model deepseek-v4-flash\n\n(Model list unavailable — services not loaded.)"}
         try:
             connected = services.connected_provider_tokens(workspace_id)
             lines: list[str] = ["Available models:"]
@@ -646,7 +646,7 @@ async def _handle_model(
             lines.append("\nSet one: /model <name or partial match>")
             return {"reply": "\n".join(lines)}
         except Exception:
-            return {"reply": "Usage: /model <name>\nExample: /model deepseek-chat"}
+            return {"reply": "Usage: /model <name>\nExample: /model deepseek-v4-flash"}
 
     # ── With arg — fuzzy-match against catalog labels ──────────────────
     resolved = model_name  # default: use the raw input

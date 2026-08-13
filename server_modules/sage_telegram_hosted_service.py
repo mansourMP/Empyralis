@@ -24,6 +24,24 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 _TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 _TYPING_REFRESH_SECONDS = 4.0  # re-send typing before Telegram's ~5s expiry
 
+
+def _deepseek_shortcut_model() -> str:
+    """The DeepSeek chat-completion model this file's Agent Machine shortcut
+    calls. Never a hardcoded literal — this used to be "deepseek-chat",
+    DeepSeek's own retired pre-v4 id (retired 2026-07-24, see
+    provider_profiles.py's "deepseek" catalog entry), sent on every
+    shortcut call. provider_profiles.py's default_model is the single
+    source of truth; "deepseek-v4-flash" is the fallback only if that
+    lookup itself fails."""
+    try:
+        from server_modules import provider_profiles
+
+        return str(
+            provider_profiles.provider_catalog_entry("deepseek").get("default_model") or ""
+        ).strip() or "deepseek-v4-flash"
+    except Exception:
+        return "deepseek-v4-flash"
+
 # ── Typing indicator task registry ──
 # chat_id → asyncio.Task (running typing-refresh loop)
 _TYPING_TASKS: Dict[str, Any] = {}
@@ -1365,7 +1383,7 @@ async def _run_agent_machine_shortcut(
     for _turn in range(max_turns):
         try:
             response = await client.chat.completions.create(
-                model="deepseek-chat",
+                model=_deepseek_shortcut_model(),
                 messages=messages,
                 tools=tools,
                 temperature=0.7,
@@ -1441,7 +1459,7 @@ async def _run_agent_machine_shortcut(
             pass
     try:
         response = await client.chat.completions.create(
-            model="deepseek-chat",
+            model=_deepseek_shortcut_model(),
             messages=messages + [{"role": "user", "content": "Please summarize what you did in one concise reply."}],
             max_tokens=500,
         )
