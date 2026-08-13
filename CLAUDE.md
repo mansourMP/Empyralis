@@ -141,6 +141,39 @@ after examining Linear's model, where a project carries its own member list and
 lead independent of teams. Empyralis has one workflow, so a team tier would be
 ceremony every customer leaves empty.
 
+**AN AGENT BELONGS TO ITS PROJECT AND WORKS ONLY THERE. That is the design,
+not a gap.** Founder's correction, 2026-08-13, after an agent was dispatched
+to "fix" it: *"Agent should not be able to work in a different project if
+it's not enabled to? And that's the reason why we have projects and inside
+project you are going to create agents and agent is going to work in that
+project."*
+
+So `"No agents in this project yet"` beside `"Create your first agent"` in a
+project that has none is **correct behaviour**, not the empty state of a
+broken feature. MAN-304 called this "the most consequential of the three"
+bugs and it is not a bug at all. Do not build cross-project assignment, do
+not add an "add an existing agent" affordance, and do not treat the absence
+of one as an oversight. His qualifier *"if it's not enabled to"* leaves room
+for some future opt-in; that is an unmade product decision, not licence to
+design for it speculatively.
+
+**The rule above is about PEOPLE, and it does not generalise to agents.** The
+line "projects hold members directly" was written about the Teams layer —
+i.e. a person's membership is granted per project rather than inherited from
+a team. It was misread as "membership is direct, therefore an agent is a
+portable member that can be added anywhere," which is the opposite of the
+model. A person can be a member of several projects. An agent is created
+inside one and lives there. Those are two different questions and collapsing
+them is what produced the wrong dispatch.
+
+Consequence for NAVIGATION, and it is not small: if an agent belongs to its
+project, then a top-level "Agents" list and a top-level "Conversations" list
+are both aggregations ACROSS the boundary this rule establishes — they are
+surfaces that contradict the model rather than merely duplicating it. The
+project is the spine; agents and the conversations with them are reached
+through the project they live in. Weigh any new top-level surface against
+that before adding it.
+
 **Non-owners never see personal or self-chat threads.** Conservative default,
 enforced without asking.
 
