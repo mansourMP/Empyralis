@@ -303,6 +303,31 @@ export function PrimaryRail({
   const gPendingRef = useRef(false);
   const gTimer = useRef<number | null>(null);
 
+  // THE KEYBOARD CURSOR MUST BE TRANSIENT, and it was permanent.
+  //
+  // focusIdx is set ONLY by the j/k rail navigation below, and it drew
+  // `.fleet-rail-item--focus` — a 1px accent ring. Nothing ever cleared it:
+  // not clicking a rail item, not navigating, not using the mouse at all. So
+  // one stray `j` or `k` (easy to hit — the rail listens globally whenever
+  // you are not typing in a field) parked a purple outline on a rail item
+  // for the rest of the session. The founder reported it twice as "this
+  // purple thing I always have on the ui".
+  //
+  // Cleared on any pointer interaction and on every route change: a
+  // keyboard cursor means "where the KEYBOARD is", so the moment the person
+  // reaches for the mouse or actually goes somewhere, it has nothing left to
+  // point at. j/k still work exactly as before and still show the ring while
+  // they are being used, which is the one case it exists for.
+  useEffect(() => {
+    setFocusIdx(-1);
+  }, [pathname]);
+
+  useEffect(() => {
+    const clear = () => setFocusIdx((i) => (i < 0 ? i : -1));
+    window.addEventListener("pointerdown", clear, true);
+    return () => window.removeEventListener("pointerdown", clear, true);
+  }, []);
+
   const hrefFor = (seg: string) => `/w/${encodeURIComponent(workspaceId)}/${seg}`;
 
   // Keyboard navigation. Ignored while typing or when a modifier is held (so
