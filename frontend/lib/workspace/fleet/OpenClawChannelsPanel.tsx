@@ -463,3 +463,247 @@ export function CredentialForm({
     </>
   );
 }
+
+type GroupPolicyState = {
+  allowlist: string[];
+  requireMention: boolean;
+};
+
+/** Which groups this agent may reply in for ONE OpenClaw-transported
+ *  channel, and whether it needs an @-mention there once it can. The same
+ *  two facts the live group gate reads
+ *  (personal_channels_service._load_agent_group_policy_config: mode /
+ *  allowlist / require_mention) — this is a screen for an axis that
+ *  already existed and, until now, had no screen: PATCH .../group-policy
+ *  had zero frontend callers, so no owner could ever open a group by any
+ *  means the product offered them, and a group stayed silent forever with
+ *  nothing on screen explaining why.
+ *
+ *  THE GROUP LIST CANNOT BE SHOWN, ON PURPOSE — NOT A GAP TO FILL LATER.
+ *  Gate-before-model means a message from a group this agent has not been
+ *  cleared to answer is refused before it is ever recorded anywhere
+ *  (personal_channels_service._handle_local_bridge_gateway_channel_inbound:
+ *  the group gate runs BEFORE record_inbound_message), so there is no
+ *  message history, however long, that could ever populate a picker here.
+ *  Only the owner, from outside Empyralis, knows which groups this agent
+ *  has actually been added to. A dropdown here would be exactly the dead-
+ *  control defect this shell's own file doc names; the honest form of that
+ *  is one sentence saying there is nothing to choose from, plus a place to
+ *  type an ID once the owner has one.
+ *
+ *  ALWAYS SAVES mode: "allowlist" — never "open", never "disabled". This
+ *  screen exists to let an owner deliberately open ONE group at a time; it
+ *  has no control that widens beyond that, and the default (no groups
+ *  allowed, mention required once one is) never changes on its own. */
+export function GroupAllowlistForm({
+  gatewayId,
+  agentId,
+  channelKey,
+  channelLabel,
+}: {
+  gatewayId: string;
+  agentId: string;
+  channelKey: string;
+  channelLabel: string;
+}) {
+  const [policy, setPolicy] = useState<GroupPolicyState | null>(null);
+  const [loading, setLoading] = useState(true);
+  // Distinct from "loaded, and there are genuinely zero groups yet" —
+  // collapsing the two would tell an owner whose read failed (an expired
+  // session, a network blip) that nothing they saved ever took, which is
+  // the same "silence reads as absence" defect this codebase keeps
+  // re-finding at other seams. A failed load renders its OWN state below,
+  // never the empty-state copy.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [newGroupId, setNewGroupId] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `/api/personal-channels/${encodeURIComponent(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/group-policy?agent_id=${encodeURIComponent(agentId)}`,
+        { credentials: "include", headers: buildCookieAuthHeaders("GET") },
+      );
+      const body = await res.json().catch(() => ({}));
+      const config = body?.group_policy;
+      if (res.ok && config) {
+        setPolicy({
+          allowlist: Array.isArray(config.allowlist) ? config.allowlist.map(String) : [],
+          // Absent/anything-but-false reads as the safe default (mention
+          // required) — only an explicit `false` loosens it.
+          requireMention: config.require_mention !== false,
+        });
+        setLoadFailed(false);
+      } else {
+        setLoadFailed(true);
+      }
+    } catch {
+      setLoadFailed(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [channelKey, gatewayId, agentId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useCallback(
+    async (nextAllowlist: string[], nextRequireMention: boolean) => {
+      setSaving(true);
+      setError(null);
+      try {
+        const res = await fetch(
+          `/api/personal-channels/${encodeURIComponent(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/group-policy?agent_id=${encodeURIComponent(agentId)}`,
+          {
+            method: "PATCH",
+            credentials: "include",
+            headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              mode: "allowlist",
+              allowlist: nextAllowlist,
+              require_mention: nextRequireMention,
+            }),
+          },
+        );
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(getErrorMessage(body, `Could not save (${res.status}).`));
+          return;
+        }
+        setPolicy({ allowlist: nextAllowlist, requireMention: nextRequireMention });
+        // The setting is saved either way (it is already in Postgres by the
+        // time this response comes back) — this is only about whether the
+        // computer's own copy actually caught up just now. Three distinct
+        // outcomes, never collapsed: it reached the computer, another agent
+        // already owns this channel, or the computer could not be reached.
+        const provisioning = body?.openclaw_provisioning;
+        if (provisioning?.status === "agent_conflict") {
+          setError(provisioning.message || "Another agent on this computer already uses this channel.");
+        } else if (provisioning?.status === "unreachable") {
+          setError(provisioning.message || "Saved, but this computer could not be reached to apply it yet.");
+        } else if (provisioning?.status === "refused") {
+          setError(provisioning.refusal?.detail || "The computer could not apply this change.");
+        }
+      } catch {
+        setError("Could not reach this computer.");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [channelKey, gatewayId, agentId],
+  );
+
+  if (loading) {
+    return (
+      <p className="fleet-subtitle" style={{ marginTop: "var(--space-4)" }}>
+        Reading group settings…
+      </p>
+    );
+  }
+
+  if (loadFailed) {
+    return (
+      <div style={{ marginTop: "var(--space-4)" }}>
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>Could not read group settings just now.</span>
+        </div>
+        <button type="button" className="fleet-btn" onClick={() => void load()}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  const groups = policy?.allowlist ?? [];
+  const requireMention = policy?.requireMention ?? true;
+  const addGroup = () => {
+    const trimmed = newGroupId.trim();
+    if (!trimmed || groups.includes(trimmed)) return;
+    setNewGroupId("");
+    void save([...groups, trimmed], requireMention);
+  };
+
+  return (
+    <div
+      style={{ marginTop: "var(--space-4)", paddingTop: "var(--space-4)", borderTop: "1px solid var(--border)" }}
+    >
+      {error ? (
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      <p className="openclaw-form-note" style={{ marginTop: 0 }}>
+        {groups.length === 0
+          ? `This agent stays silent in every ${channelLabel} group until you add one here. There's no list to choose from — Empyralis only learns about a group once you've allowed it. Add a group's ID below to let it start replying there.`
+          : `This agent may reply in the ${channelLabel} ${groups.length === 1 ? "group" : "groups"} below. Add another by its ID, or remove one to close it again.`}
+      </p>
+
+      {groups.length > 0 ? (
+        <div className="openclaw-group-list">
+          {groups.map((groupId) => (
+            <div key={groupId} className="openclaw-group-chip">
+              <span className="openclaw-group-chip-id">{groupId}</span>
+              <button
+                type="button"
+                className="openclaw-group-chip-remove"
+                disabled={saving}
+                aria-label={`Remove ${groupId}`}
+                onClick={() => void save(groups.filter((id) => id !== groupId), requireMention)}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="openclaw-group-add">
+        <input
+          className="fleet-wizard-input"
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="Group ID"
+          aria-label="Group ID"
+          value={newGroupId}
+          disabled={saving}
+          onChange={(event) => setNewGroupId(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") addGroup();
+          }}
+        />
+        <button type="button" className="fleet-btn" disabled={saving || !newGroupId.trim()} onClick={addGroup}>
+          Add
+        </button>
+      </div>
+
+      {groups.length > 0 ? (
+        <label
+          style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", marginTop: "var(--space-3)" }}
+        >
+          <button
+            type="button"
+            role="switch"
+            aria-checked={requireMention}
+            aria-label="Only reply when mentioned"
+            className={`fleet-toggle${requireMention ? " is-on" : ""}`}
+            disabled={saving}
+            onClick={() => void save(groups, !requireMention)}
+          />
+          <span style={{ fontSize: 13 }}>
+            Only reply when mentioned
+            <span style={{ display: "block", fontSize: 12, color: "var(--text-muted)" }}>
+              Off replies to every message in these groups, not just ones that mention it.
+            </span>
+          </span>
+        </label>
+      ) : null}
+    </div>
+  );
+}

@@ -1610,6 +1610,7 @@ function ChatTab({
 import { IMessageSetupPanel } from "./IMessageSetupPanel";
 import {
   CredentialForm,
+  GroupAllowlistForm,
   StateChip,
   useOpenClawChannelSetup,
 } from "./OpenClawChannelsPanel";
@@ -2606,6 +2607,18 @@ export function ChannelsTab({
                               await openclaw.refresh({ silent: true });
                             }}
                           />
+                          {/* Only once the channel itself works — configuring
+                              which groups may receive replies before there is a
+                              working identity to reply WITH has nothing to act
+                              on yet. */}
+                          {openclawDetail.remediation.kind === "ready" ? (
+                            <GroupAllowlistForm
+                              gatewayId={agentGatewayId}
+                              agentId={agentId}
+                              channelKey={openclawDetail.entry.channel_key}
+                              channelLabel={openclawDetail.entry.label}
+                            />
+                          ) : null}
                         </div>
                       ) : openclawDetail.remediation.kind === "install" || openclawDetail.remediation.kind === "enable" ? (
                         <div style={{ marginTop: "var(--space-4)" }}>
