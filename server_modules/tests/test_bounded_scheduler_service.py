@@ -939,5 +939,336 @@ class WakeRequestScannerPersistentLoopTests(unittest.TestCase):
         )
 
 
+class DelegationActorAttributionTests(unittest.IsolatedAsyncioTestCase):
+    """MAN-304 (3): every delegation-class ledger event this module writes
+    used to unconditionally stamp the workspace's own Sage/Operator install
+    as the actor -- even for trigger kinds that already have a REAL
+    specialist agent's install_id in hand (task_assigned, task_commented, a
+    goal's own agent_id, a recurring schedule's own agent_id). The Inbox
+    (frontend/app/(account)/w/[workspaceId]/inbox/page.tsx) resolves the
+    sender purely from install_id via agentNameByInstall, so a brand-new
+    user assigning their own agent a task saw "Sage" -- an entity they
+    never created -- as the sender of "Delegated wake request scheduled".
+
+    _resolve_delegation_actor is the one seam every one of these ledger
+    writes now goes through."""
+
+    def setUp(self):
+        global bounded_scheduler_service
+
+        bounded_scheduler_service = importlib.import_module("server_modules.bounded_scheduler_service")
+
+    def test_resolve_delegation_actor_prefers_the_real_agent_when_given_one(self):
+        actor_type, actor_id, install_id = bounded_scheduler_service._resolve_delegation_actor(
+            master_install={"id": "install-sage"},
+            attributed_agent_install_id="install-specialist-1",
+        )
+        self.assertEqual(actor_type, "agent")
+        self.assertEqual(actor_id, "install-specialist-1")
+        self.assertEqual(install_id, "install-specialist-1")
+
+    def test_resolve_delegation_actor_falls_back_to_sage_with_no_agent(self):
+        """The genuinely Sage-owned triggers (self-proposed wakeups,
+        context-engine event triggers) have no per-agent install_id at all
+        -- this is the ONLY case that should still resolve to Sage, and it
+        must keep resolving there so those triggers don't regress."""
+        actor_type, actor_id, install_id = bounded_scheduler_service._resolve_delegation_actor(
+            master_install={"id": "install-sage"},
+            attributed_agent_install_id=None,
+        )
+        self.assertEqual(actor_type, "sage")
+        self.assertEqual(actor_id, "install-sage")
+        self.assertEqual(install_id, "install-sage")
+
+    def test_resolve_delegation_actor_falls_back_to_system_with_no_master_install_either(self):
+        actor_type, actor_id, install_id = bounded_scheduler_service._resolve_delegation_actor(
+            master_install=None,
+            attributed_agent_install_id=None,
+        )
+        self.assertEqual(actor_type, "system")
+        self.assertEqual(actor_id, "scheduler")
+        self.assertIsNone(install_id)
+
+    def test_resolve_delegation_actor_blank_string_is_treated_as_absent(self):
+        actor_type, actor_id, install_id = bounded_scheduler_service._resolve_delegation_actor(
+            master_install={"id": "install-sage"},
+            attributed_agent_install_id="   ",
+        )
+        self.assertEqual(actor_type, "sage")
+        self.assertEqual(install_id, "install-sage")
+
+    async def _persist_wakeup_and_capture_ledger_call(self, *, attributed_agent_install_id):
+        """Drives the REAL _persist_wakeup (not a stand-in) so the
+        assertion covers the actual seam a customer's write goes through --
+        only its three external dependencies (the Rust kernel gate, the
+        wake-request repository write, and the activity ledger append) are
+        stood in for."""
+        captured: Dict[str, Any] = {}
+
+        async def fake_append_activity_event(**kwargs):
+            captured.update(kwargs)
+            return {"id": "event-1"}
+
+        policy = bounded_scheduler_service.SchedulerPolicyBounds(
+            quiet_hours_start=0,
+            quiet_hours_end=0,
+            max_event_triggers_per_hour=4,
+            max_self_proposed_per_hour=2,
+            max_runtime_seconds=20,
+            minimum_battery_percent=20,
+            require_network_online=False,
+            require_owner_approval_for_privileged_wakeups=True,
+            plan_tier="standard",
+        )
+        with (
+            patch.object(
+                bounded_scheduler_service,
+                "_enforce_session_scheduler_decision",
+                return_value={"next_action": "schedule_event_trigger"},
+            ),
+            patch.object(
+                bounded_scheduler_service.control_plane_repository,
+                "append_agent_scheduler_wake_request",
+                new=AsyncMock(return_value={"id": "wake-1", "status": "pending"}),
+            ),
+            patch(
+                "server_modules.activity_ledger_service.append_activity_event",
+                new=fake_append_activity_event,
+            ),
+        ):
+            await bounded_scheduler_service._persist_wakeup(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                master_install={"id": "install-sage"},
+                trigger_kind="task_assigned",
+                source="project_tasks",
+                requested_by="owner",
+                reason="task_assigned",
+                summary="Task assigned: Ship the widget",
+                payload={},
+                policy=policy,
+                due_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+                approval_required=False,
+                status="pending",
+                denial_reason=None,
+                metadata={},
+                attributed_agent_install_id=attributed_agent_install_id,
+            )
+        return captured
+
+    async def test_persist_wakeup_attributes_the_ledger_event_to_the_real_agent(self):
+        captured = await self._persist_wakeup_and_capture_ledger_call(
+            attributed_agent_install_id="install-specialist-1",
+        )
+        self.assertEqual(captured["title"], "Delegated wake request scheduled")
+        self.assertEqual(captured["actor_type"], "agent")
+        self.assertEqual(captured["actor_id"], "install-specialist-1")
+        self.assertEqual(captured["install_id"], "install-specialist-1")
+        self.assertNotEqual(captured["install_id"], "install-sage")
+
+    async def test_persist_wakeup_still_falls_back_to_sage_when_no_agent_is_attributed(self):
+        """Regression guard for the genuinely Sage-owned triggers (self-
+        proposed wakeups, context-engine event triggers) -- these must keep
+        attributing to Sage exactly as before this fix."""
+        captured = await self._persist_wakeup_and_capture_ledger_call(
+            attributed_agent_install_id=None,
+        )
+        self.assertEqual(captured["actor_type"], "sage")
+        self.assertEqual(captured["install_id"], "install-sage")
+
+    async def test_schedule_task_assigned_wakeup_attributes_to_the_assignee_not_sage(self):
+        """End-to-end from the real call site a brand-new user hits every
+        time they assign a task to their own agent."""
+        captured: Dict[str, Any] = {}
+
+        async def fake_persist(**kwargs):
+            captured.update(kwargs)
+            return {"id": "wake-1", "status": "pending"}
+
+        with (
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, self._policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=0),
+            ),
+            patch("server_modules.bounded_scheduler_service._persist_wakeup", side_effect=fake_persist),
+            patch("server_modules.bounded_scheduler_service._trigger_ambient_monitor", return_value={"ok": True}),
+        ):
+            await bounded_scheduler_service.schedule_task_assigned_wakeup(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                agent_id="install-specialist-1",
+                task_id="task-1",
+                title="Ship the widget",
+            )
+
+        self.assertEqual(captured["attributed_agent_install_id"], "install-specialist-1")
+        self.assertNotEqual(captured["attributed_agent_install_id"], "install-sage")
+
+    async def test_schedule_task_commented_wakeup_attributes_to_the_assignee_not_sage(self):
+        captured: Dict[str, Any] = {}
+
+        async def fake_persist(**kwargs):
+            captured.update(kwargs)
+            return {"id": "wake-1", "status": "pending"}
+
+        with (
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, self._policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=0),
+            ),
+            patch("server_modules.bounded_scheduler_service._persist_wakeup", side_effect=fake_persist),
+            patch("server_modules.bounded_scheduler_service._trigger_ambient_monitor", return_value={"ok": True}),
+        ):
+            await bounded_scheduler_service.schedule_task_commented_wakeup(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                agent_id="install-specialist-1",
+                task_id="task-1",
+                title="Ship the widget",
+                comment_body="try approach B instead",
+            )
+
+        self.assertEqual(captured["attributed_agent_install_id"], "install-specialist-1")
+
+    async def test_create_goal_attributes_both_the_wake_and_the_created_event_to_the_agent(self):
+        captured_wake: Dict[str, Any] = {}
+        captured_ledger_calls: list = []
+
+        async def fake_persist(**kwargs):
+            captured_wake.update(kwargs)
+            return {"id": "wake-1", "status": "pending"}
+
+        async def fake_append_activity_event(**kwargs):
+            captured_ledger_calls.append(kwargs)
+            return {"id": "event-1"}
+
+        with (
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, self._policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.append_agent_goal",
+                new=AsyncMock(return_value={"id": "goal-1"}),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.update_agent_goal",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("server_modules.bounded_scheduler_service._persist_wakeup", side_effect=fake_persist),
+            patch("server_modules.bounded_scheduler_service._trigger_ambient_monitor", return_value={"ok": True}),
+            patch(
+                "server_modules.activity_ledger_service.append_activity_event",
+                new=fake_append_activity_event,
+            ),
+        ):
+            await bounded_scheduler_service.create_goal(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                project_id="project-1",
+                agent_id="install-specialist-1",
+                goal_text="Negotiate a better rate with the supplier.",
+            )
+
+        self.assertEqual(captured_wake["attributed_agent_install_id"], "install-specialist-1")
+        goal_created_calls = [c for c in captured_ledger_calls if c.get("title") == "Goal created"]
+        self.assertEqual(len(goal_created_calls), 1)
+        self.assertEqual(goal_created_calls[0]["actor_type"], "agent")
+        self.assertEqual(goal_created_calls[0]["install_id"], "install-specialist-1")
+
+    async def test_create_recurring_schedule_attributes_the_created_event_to_the_agent(self):
+        captured_ledger_calls: list = []
+
+        async def fake_append_activity_event(**kwargs):
+            captured_ledger_calls.append(kwargs)
+            return {"id": "event-1"}
+
+        with (
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, self._policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.append_agent_recurring_schedule",
+                new=AsyncMock(return_value={"id": "schedule-1"}),
+            ),
+            patch(
+                "server_modules.activity_ledger_service.append_activity_event",
+                new=fake_append_activity_event,
+            ),
+        ):
+            await bounded_scheduler_service.create_recurring_schedule(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                agent_id="install-specialist-1",
+                cron_expression="0 9 * * *",
+                instruction="Check the inbox and reply to anything urgent.",
+            )
+
+        recurring_created_calls = [
+            c for c in captured_ledger_calls if c.get("title") == "Recurring wake schedule created"
+        ]
+        self.assertEqual(len(recurring_created_calls), 1)
+        self.assertEqual(recurring_created_calls[0]["actor_type"], "agent")
+        self.assertEqual(recurring_created_calls[0]["install_id"], "install-specialist-1")
+
+    async def test_maybe_schedule_event_trigger_still_attributes_to_sage_unchanged(self):
+        """Control case: a context-engine event trigger has no per-agent
+        install_id at all and must keep resolving to Sage exactly as before
+        this fix -- confirms the fix is additive, not a blanket rename."""
+        captured: Dict[str, Any] = {}
+
+        async def fake_persist(**kwargs):
+            captured.update(kwargs)
+            return {"id": "wake-1", "status": "pending"}
+
+        with (
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, self._policy())),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service.control_plane_repository.count_agent_scheduler_wake_requests_since",
+                new=AsyncMock(return_value=0),
+            ),
+            patch("server_modules.bounded_scheduler_service._persist_wakeup", side_effect=fake_persist),
+            patch("server_modules.bounded_scheduler_service._trigger_ambient_monitor", return_value={"ok": True}),
+        ):
+            await bounded_scheduler_service.maybe_schedule_event_trigger(
+                tenant_id="tenant-1",
+                workspace_id="ws-1",
+                event={
+                    "id": "event-1",
+                    "priority": 90,
+                    "scope": {"audience": ["sage"]},
+                    "event_type": "something_happened",
+                    "summary": "Something happened.",
+                },
+            )
+
+        self.assertNotIn("attributed_agent_install_id", captured)
+
+    def _policy(self) -> "bounded_scheduler_service.SchedulerPolicyBounds":
+        return bounded_scheduler_service.SchedulerPolicyBounds(
+            quiet_hours_start=0,
+            quiet_hours_end=0,
+            max_event_triggers_per_hour=4,
+            max_self_proposed_per_hour=2,
+            max_runtime_seconds=20,
+            minimum_battery_percent=20,
+            require_network_online=False,
+            require_owner_approval_for_privileged_wakeups=True,
+            plan_tier="standard",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

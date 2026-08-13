@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
@@ -765,6 +765,38 @@ def _apply_policy_to_due_at(
     return adjusted_due_at, reason
 
 
+def _resolve_delegation_actor(
+    *,
+    master_install: Optional[Dict[str, Any]],
+    attributed_agent_install_id: Optional[str] = None,
+) -> Tuple[str, str, Optional[str]]:
+    """Every ledger write in this module used to unconditionally stamp the
+    workspace's own Sage/Operator install (master_install) as the actor of a
+    delegated wake/goal/recurring-schedule event -- even for trigger kinds
+    that already have a REAL specialist agent's install_id in hand
+    (task_assigned, task_commented, a goal's own agent_id). MAN-304 (3): a
+    brand-new user assigning their own agent a task saw the Inbox attribute
+    "Delegated wake request scheduled" to "Sage" -- an entity they never
+    created and could not find anywhere, because agentNameByInstall
+    (frontend/app/(account)/w/[workspaceId]/inbox/page.tsx) resolves the
+    sender purely from install_id, and this module always sent Sage's.
+
+    One resolver, called everywhere this module writes an actor onto a
+    ledger event, so a future trigger kind cannot reintroduce the mistake at
+    its own call site: pass the real per-agent install_id whenever the
+    caller already has one (it always does for task/goal triggers), and it
+    wins; only genuinely Sage-owned triggers (self-proposed wakeups,
+    context-engine event triggers) have no such id and fall back to
+    Sage/system exactly as before.
+    """
+    resolved_agent_install_id = str(attributed_agent_install_id or "").strip()
+    if resolved_agent_install_id:
+        return "agent", resolved_agent_install_id, resolved_agent_install_id
+    master_install_id = str(_coerce_dict(master_install).get("id") or "").strip() or None
+    actor_type = "sage" if master_install_id else "system"
+    return actor_type, master_install_id or "scheduler", master_install_id
+
+
 async def _persist_wakeup(
     *,
     tenant_id: str,
@@ -782,6 +814,7 @@ async def _persist_wakeup(
     status: str,
     denial_reason: Optional[str],
     metadata: Optional[Dict[str, Any]],
+    attributed_agent_install_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     payload_dict = _coerce_dict(payload)
     metadata_dict = _coerce_dict(metadata)
@@ -832,14 +865,16 @@ async def _persist_wakeup(
     try:
         from server_modules import activity_ledger_service
 
-        master_install_id = str(_coerce_dict(master_install).get("id") or "").strip() or None
-        actor_type = "sage" if master_install_id else "system"
+        actor_type, actor_id, install_id = _resolve_delegation_actor(
+            master_install=master_install,
+            attributed_agent_install_id=attributed_agent_install_id,
+        )
         await activity_ledger_service.append_activity_event(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
             actor_type=actor_type,
-            actor_id=master_install_id or "scheduler",
-            install_id=master_install_id,
+            actor_id=actor_id,
+            install_id=install_id,
             event_class="delegation",
             detail_level="timeline_detail",
             action=trigger_kind,
@@ -1039,6 +1074,7 @@ async def schedule_task_assigned_wakeup(
         status="pending",
         denial_reason=None,
         metadata=metadata,
+        attributed_agent_install_id=resolved_agent_id,
     )
     if due_at <= _utc_now() + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
         _trigger_ambient_monitor(workspace_id)
@@ -1182,6 +1218,7 @@ async def schedule_task_commented_wakeup(
         status="pending",
         denial_reason=None,
         metadata=metadata,
+        attributed_agent_install_id=resolved_agent_id,
     )
     if due_at <= _utc_now() + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
         _trigger_ambient_monitor(workspace_id)
@@ -1415,13 +1452,16 @@ async def create_recurring_schedule(
     try:
         from server_modules import activity_ledger_service
 
-        master_install_id = str(_coerce_dict(master_install).get("id") or "").strip() or None
+        actor_type, actor_id, install_id = _resolve_delegation_actor(
+            master_install=master_install,
+            attributed_agent_install_id=resolved_agent_id,
+        )
         await activity_ledger_service.append_activity_event(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
-            actor_type="sage" if master_install_id else "system",
-            actor_id=master_install_id or "scheduler",
-            install_id=master_install_id,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            install_id=install_id,
             event_class="delegation",
             detail_level="timeline_detail",
             action="recurring_schedule_created",
@@ -1597,6 +1637,7 @@ async def _fire_recurring_schedule(schedule: Dict[str, Any]) -> Dict[str, Any]:
         status="pending",
         denial_reason=None,
         metadata=metadata,
+        attributed_agent_install_id=agent_id,
     )
     if due_at <= now_utc + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
         _trigger_ambient_monitor(workspace_id)
@@ -1965,6 +2006,7 @@ async def create_goal(
         status="pending",
         denial_reason=None,
         metadata=wake_metadata,
+        attributed_agent_install_id=resolved_agent_id,
     )
     await control_plane_repository.update_agent_goal(
         tenant_id=tenant_id,
@@ -1977,13 +2019,16 @@ async def create_goal(
     try:
         from server_modules import activity_ledger_service
 
-        master_install_id = str(_coerce_dict(master_install).get("id") or "").strip() or None
+        actor_type, actor_id, install_id = _resolve_delegation_actor(
+            master_install=master_install,
+            attributed_agent_install_id=resolved_agent_id,
+        )
         await activity_ledger_service.append_activity_event(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
-            actor_type="sage" if master_install_id else "system",
-            actor_id=master_install_id or "scheduler",
-            install_id=master_install_id,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            install_id=install_id,
             event_class="delegation",
             detail_level="timeline_detail",
             action="goal_created",
@@ -2249,6 +2294,7 @@ async def _fire_goal(goal: Dict[str, Any]) -> Dict[str, Any]:
         status="pending",
         denial_reason=None,
         metadata=wake_metadata,
+        attributed_agent_install_id=agent_id,
     )
     if due_at <= now_utc + timedelta(seconds=IMMEDIATE_TRIGGER_WINDOW_SECONDS):
         _trigger_ambient_monitor(workspace_id)
