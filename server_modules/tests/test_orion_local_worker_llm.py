@@ -649,6 +649,127 @@ class OrionLocalWorkerLlmTests(unittest.TestCase):
         self.assertEqual(events[1]["text"], "Desktop files listed.")
         self.assertEqual(events[1]["usage"], {"input_tokens": 3, "output_tokens": 5})
 
+    def _run_iter_openai_compatible(self, *, message_content, tools):
+        """Drains iter_openai_compatible_chat_events for one DeepSeek-shaped
+        turn, mocking only the HTTP boundary and credential/base-url
+        resolution — everything else (recovery, payload shaping) is
+        production code. Returns the list of yielded events."""
+
+        def _mock_request(*, base_url, api_key, payload, timeout_seconds, query_params=None):
+            return {
+                "choices": [{"message": {"role": "assistant", "content": message_content}}],
+                "usage": {"prompt_tokens": 40, "completion_tokens": 20, "total_tokens": 60},
+            }
+
+        with patch.object(
+            worker_llm, "resolve_openai_compatible_api_key", return_value="k",
+        ), patch.object(
+            worker_llm, "openai_compatible_model_from_request", return_value="deepseek-v4-pro",
+        ), patch.object(
+            worker_llm, "resolve_openai_compatible_base_url", return_value="https://api.deepseek.com/v1",
+        ), patch.object(
+            worker_llm, "openai_compatible_query_params", return_value={},
+        ), patch.object(
+            worker_llm, "_openai_compatible_chat_completion_request", side_effect=_mock_request,
+        ):
+            return list(
+                worker_llm.iter_openai_compatible_chat_events(
+                    "You are an agent with tools.",
+                    "Create a task for this.",
+                    provider="deepseek",
+                    tools=tools,
+                )
+            )
+
+    def test_prose_tool_call_is_recovered_when_structured_tool_calls_is_empty(self):
+        """MAN-308 shape, generalized across the DeepSeek path: the model
+        wrote its intended tool call as fenced JSON in `content` instead of
+        the structured `tool_calls` field — this must be recovered and
+        dispatched as a real call, and the prose must NEVER reach the
+        customer as if it were the agent's answer."""
+        tools = [{"name": "project_task__create", "description": "Create a task.", "parameters": {"type": "object", "properties": {}}}]
+        prose = (
+            "I'll create that task now.\n```json\n"
+            '{"tool": "project_task__create", "arguments": {"project_id": "proj-1", "title": "Ship it"}}'
+            "\n```"
+        )
+        events = self._run_iter_openai_compatible(message_content=prose, tools=tools)
+
+        done_events = [e for e in events if e.get("type") == "done"]
+        delta_events = [e for e in events if e.get("type") == "delta"]
+        self.assertEqual(len(done_events), 1)
+        done = done_events[0]
+        self.assertEqual(len(done["tool_calls"]), 1)
+        self.assertEqual(done["tool_calls"][0]["name"], "project_task__create")
+        import json as _json
+        self.assertEqual(
+            _json.loads(done["tool_calls"][0]["arguments"]),
+            {"project_id": "proj-1", "title": "Ship it"},
+        )
+        # The prose that DESCRIBED the call must never be shown as the
+        # reply — neither streamed as a delta nor carried on "done".
+        self.assertEqual(delta_events, [])
+        self.assertEqual(done["text"], "")
+
+    def test_prose_mention_of_an_unoffered_tool_is_not_recovered(self):
+        """A recovered mention naming a tool this turn never offered is a
+        false positive (quoted JSON, an unrelated example) — dropped, never
+        guessed into a dispatched call. The prose ships as an ordinary
+        reply instead, unchanged."""
+        tools = [{"name": "project_task__create", "description": "Create a task.", "parameters": {"type": "object", "properties": {}}}]
+        prose = 'Here is an example payload: {"tool": "some_other_tool", "arguments": {"x": 1}}'
+        events = self._run_iter_openai_compatible(message_content=prose, tools=tools)
+
+        done_events = [e for e in events if e.get("type") == "done"]
+        self.assertEqual(len(done_events), 1)
+        self.assertEqual(done_events[0]["tool_calls"], [])
+        self.assertEqual(done_events[0]["text"], prose)
+
+    def test_real_structured_tool_call_is_never_touched_by_recovery(self):
+        """The common, healthy case — the API already returned a real
+        structured tool_calls entry — must be completely unaffected by the
+        recovery path (it only ever runs when tool_calls came back empty)."""
+
+        def _mock_request(*, base_url, api_key, payload, timeout_seconds, query_params=None):
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {"id": "call_1", "type": "function", "function": {"name": "project_task__create", "arguments": '{"project_id": "proj-1", "title": "Ship it"}'}},
+                        ],
+                    },
+                }],
+                "usage": {"prompt_tokens": 40, "completion_tokens": 20, "total_tokens": 60},
+            }
+
+        tools = [{"name": "project_task__create", "description": "Create a task.", "parameters": {"type": "object", "properties": {}}}]
+        with patch.object(
+            worker_llm, "resolve_openai_compatible_api_key", return_value="k",
+        ), patch.object(
+            worker_llm, "openai_compatible_model_from_request", return_value="deepseek-v4-pro",
+        ), patch.object(
+            worker_llm, "resolve_openai_compatible_base_url", return_value="https://api.deepseek.com/v1",
+        ), patch.object(
+            worker_llm, "openai_compatible_query_params", return_value={},
+        ), patch.object(
+            worker_llm, "_openai_compatible_chat_completion_request", side_effect=_mock_request,
+        ):
+            events = list(
+                worker_llm.iter_openai_compatible_chat_events(
+                    "You are an agent with tools.",
+                    "Create a task for this.",
+                    provider="deepseek",
+                    tools=tools,
+                )
+            )
+
+        done_events = [e for e in events if e.get("type") == "done"]
+        self.assertEqual(len(done_events), 1)
+        self.assertEqual(len(done_events[0]["tool_calls"]), 1)
+        self.assertEqual(done_events[0]["tool_calls"][0]["name"], "project_task__create")
+
     def test_ollama_enabled_when_local_service_has_models(self):
         with patch.dict(os.environ, {"ORION_LOCAL_WORKER_OLLAMA_ENABLED": "0"}, clear=False):
             with patch.object(

@@ -2094,6 +2094,69 @@ def iter_openai_compatible_chat_events(
             message = choices[0].get("message") if isinstance(choices[0], dict) else None
             tool_calls = _normalize_openai_function_call(message)
             final_text = _extract_openai_message_text(message)
+            # MAN-308 shape, generalized across the whole DeepSeek path (not
+            # a per-model fix): a model can emit a tool call as plain/fenced
+            # JSON text in `content` instead of populating the structured
+            # `tool_calls` field. This is the SAME failure class
+            # extract_dsml_tool_calls_from_text already recovers for Codex's
+            # DSML envelope — DeepSeek does not emit that envelope, so that
+            # recovery never fires for it, and the model's own upstream
+            # issue (deepseek-ai/DeepSeek-V3#1244, filed 2026-04-24, still
+            # open, measured ~11% of completions) has the identical shape:
+            # a real tool call the model intended, written as prose instead
+            # of dispatched. Wired generically across every model this
+            # function serves (not keyed to a specific model id) so
+            # whichever model the "pro"/"light" tiers point at today or
+            # later is covered — CLAUDE.md's own rule that a fix belongs on
+            # the provider/path, never hand-tied to one model string that
+            # rots the moment a tier's mapping changes.
+            #
+            # Reuses internal_tool_markup_service.extract_textual_tool_call_
+            # mentions (the MAN-263 detector) rather than reimplementing the
+            # JSON-scan/name-normalization it already has. That function's
+            # own docstring says it is "never wired to any executor" — true
+            # of its EXISTING caller (tool_honesty_guard's synthesis-turn
+            # dishonesty check, which must never double-execute a call that
+            # already ran for real this turn). This call site is safe for
+            # exactly the reason that one is not: it only runs when the
+            # structured `tool_calls` came back EMPTY, i.e. nothing else
+            # fired this turn to double up against — this IS the invocation
+            # turn, not a synthesis turn describing a past success.
+            # Restricted to tool names this turn actually OFFERED
+            # (tool_specs): a recovered mention naming anything else is a
+            # false positive (quoted JSON, an unrelated example) and is
+            # dropped rather than guessed into a dispatched call — the same
+            # "never trust an unregistered name" posture claude_agent_sdk_
+            # bridge.is_registered_empyralis_tool already applies on the SDK
+            # engine's own tool-call path.
+            if not tool_calls and final_text and tool_specs:
+                _offered_tool_names = {item["name"] for item in tool_specs}
+                _recovered_mentions = [
+                    mention
+                    for mention in internal_tool_markup_service.extract_textual_tool_call_mentions(final_text)
+                    if mention.get("name") in _offered_tool_names
+                ]
+                if _recovered_mentions:
+                    print(
+                        f"[DS_TEXTUAL_TOOLCALL_RECOVERED] provider={provider} model={model} "
+                        f"recovered={len(_recovered_mentions)} names={[m['name'] for m in _recovered_mentions]}",
+                        flush=True,
+                    )
+                    tool_calls = [
+                        {
+                            "id": None,
+                            "name": mention["name"],
+                            "arguments": json.dumps(mention.get("arguments") or {}),
+                        }
+                        for mention in _recovered_mentions
+                    ]
+                    # The recovered text DESCRIBED a call, it did not ANSWER
+                    # the user — never stream or return it as the reply
+                    # alongside the recovered call, the same "a tool-shaped
+                    # message is not automatically the agent speaking"
+                    # principle claude_agent_sdk_bridge.translate_sdk_
+                    # message applies to a provider-error AssistantMessage.
+                    final_text = ""
             if final_text:
                 yield {"type": "delta", "delta": final_text, "model": model}
             usage = parsed.get("usage") if isinstance(parsed.get("usage"), dict) else None

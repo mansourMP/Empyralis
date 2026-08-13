@@ -76,10 +76,60 @@ class ProviderProfilesTests(unittest.TestCase):
             for item in provider_profiles.provider_model_catalog("deepseek")
         }
 
-        self.assertAlmostEqual(models["deepseek-chat"]["input_cost_per_1k_usd"], 0.00014, places=8)
-        self.assertAlmostEqual(models["deepseek-chat"]["output_cost_per_1k_usd"], 0.00028, places=8)
-        self.assertAlmostEqual(models["deepseek-reasoner"]["input_cost_per_1k_usd"], 0.00014, places=8)
-        self.assertAlmostEqual(models["deepseek-reasoner"]["output_cost_per_1k_usd"], 0.00028, places=8)
+        # "deepseek-chat"/"deepseek-reasoner" are retired (2026-07-24) and
+        # deliberately excluded from the selectable catalog now — see this
+        # module's own "deepseek" PROVIDER_CATALOG entry and
+        # model_is_known_for_provider. Their real current successors carry
+        # the identical rate.
+        self.assertNotIn("deepseek-chat", models)
+        self.assertNotIn("deepseek-reasoner", models)
+        self.assertAlmostEqual(models["deepseek-v4-flash"]["input_cost_per_1k_usd"], 0.00014, places=8)
+        self.assertAlmostEqual(models["deepseek-v4-flash"]["output_cost_per_1k_usd"], 0.00028, places=8)
+        # v4-pro is genuinely more expensive than v4-flash — this is what
+        # makes the served-vs-requested billing fix
+        # (test_default_engine_credit_debit.py's ServedVsRequestedModel
+        # BillingTests) a real price difference to get right, not a no-op.
+        self.assertGreater(models["deepseek-v4-pro"]["input_cost_per_1k_usd"], models["deepseek-v4-flash"]["input_cost_per_1k_usd"])
+        self.assertGreater(models["deepseek-v4-pro"]["output_cost_per_1k_usd"], models["deepseek-v4-flash"]["output_cost_per_1k_usd"])
+
+    def test_retired_deepseek_model_ids_normalize_forward_via_alias_table(self) -> None:
+        """PROVIDER_MODEL_ALIASES is the defense-in-depth half of the fix —
+        any EXISTING caller still carrying the retired name (an old stored
+        per-agent model_config, a script) resolves to the real current id
+        instead of sending the dead name to the wire."""
+        self.assertEqual(
+            provider_profiles.normalize_provider_model_id("deepseek", "deepseek-chat"),
+            "deepseek-v4-flash",
+        )
+        self.assertEqual(
+            provider_profiles.normalize_provider_model_id("deepseek", "deepseek-reasoner"),
+            "deepseek-v4-pro",
+        )
+
+    def test_model_is_known_for_provider_rejects_retired_deepseek_ids(self) -> None:
+        """The other half — a NEW save of a retired id must fail loudly
+        (fleet_tools.configure_agent's save-time validation), never be
+        silently forwarded as free text. See CLAUDE.md's standing rule:
+        stale model/provider config must fail loudly, never fall through
+        to a default."""
+        self.assertFalse(provider_profiles.model_is_known_for_provider("deepseek", "deepseek-chat"))
+        self.assertFalse(provider_profiles.model_is_known_for_provider("deepseek", "deepseek-reasoner"))
+        self.assertTrue(provider_profiles.model_is_known_for_provider("deepseek", "deepseek-v4-flash"))
+        self.assertTrue(provider_profiles.model_is_known_for_provider("deepseek", "deepseek-v4-pro"))
+        # Nonexistent id for a real, closed-catalog provider — rejected.
+        self.assertFalse(provider_profiles.model_is_known_for_provider("deepseek", "deepseek-v5-ultra-nonexistent"))
+        # Open-catalog providers: nothing to validate against, so anything
+        # passes — a local Ollama pull or an Azure deployment name can
+        # never be enumerated in advance.
+        self.assertTrue(provider_profiles.model_is_known_for_provider("ollama", "some-locally-pulled-model"))
+        self.assertTrue(provider_profiles.model_is_known_for_provider("azure_openai", "my-company-deployment-3"))
+        self.assertTrue(provider_profiles.model_is_known_for_provider("custom_openai_compatible", "anything-at-all"))
+        # Unknown provider: nothing to validate against, so it passes too —
+        # a provider-level check is a separate concern from this one.
+        self.assertTrue(provider_profiles.model_is_known_for_provider("not_a_real_provider", "whatever"))
+        # Empty model string: nothing to validate — a separate "required"
+        # check owns that.
+        self.assertTrue(provider_profiles.model_is_known_for_provider("deepseek", ""))
 
     def test_deepseek_platform_runtime_profile_is_secretless(self) -> None:
         self.assertTrue(provider_profiles.provider_supports_auth_mode("deepseek", "platform_runtime"))
