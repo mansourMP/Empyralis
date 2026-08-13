@@ -5,7 +5,10 @@ import Link from "next/link";
 import { useRouter, usePathname, useSelectedLayoutSegment } from "next/navigation";
 import {
   BarChart3,
+  Bot,
   ChevronRight,
+  FileText,
+  ListChecks,
   LogOut,
   Moon,
   PanelLeftClose,
@@ -13,6 +16,7 @@ import {
   Search,
   Settings,
   Sun,
+  type LucideIcon,
 } from "lucide-react";
 
 import { logout } from "@/lib/auth/auth-client";
@@ -47,6 +51,21 @@ import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
 const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
+
+// Finishing project-as-spine (CLAUDE.md, 2026-08-13 — "it should be
+// possible to open a project in the rail and reach its Tasks, Documents and
+// Agents from there"): the projects subnav above already listed every
+// project; it never went one level deeper into a project's own sections.
+// These three mirror ProjectDetailPage's own three views exactly (same
+// segments, same default-to-tasks rule) — only the currently ACTIVE
+// project shows them, nested directly beneath its own row, so opening a
+// project and reaching its work is one rail, not a rail plus a second tab
+// strip once you land.
+const PROJECT_SECTIONS: { key: "tasks" | "documents" | "agents"; label: string; segment: string; icon: LucideIcon }[] = [
+  { key: "tasks", label: "Tasks", segment: "tasks", icon: ListChecks },
+  { key: "documents", label: "Documents", segment: "documents", icon: FileText },
+  { key: "agents", label: "Agents", segment: "agents", icon: Bot },
+];
 
 // 4 decimals, matching AgentsList/billing/project detail's cost formatters —
 // real per-turn costs are fractions of a cent, and this line sits directly
@@ -272,6 +291,17 @@ export function PrimaryRail({
     const m = pathname.match(/\/projects\/([^/]+)/);
     return m ? decodeURIComponent(m[1]) : null;
   }, [pathname]);
+  // Which of the active project's own three sections is open — mirrors
+  // ProjectDetailPage's own `view` derivation (pathname-matched, bare and
+  // /tasks both read as "tasks", its default landing view). Only meaningful
+  // for whichever project activeProjectId names; every other project's
+  // subitem just links to its own bare page, same as before this existed.
+  const activeProjectSection: "tasks" | "documents" | "agents" | null = useMemo(() => {
+    if (!activeProjectId) return null;
+    if (pathname.includes("/documents")) return "documents";
+    if (pathname.includes("/agents")) return "agents";
+    return "tasks";
+  }, [activeProjectId, pathname]);
   const segment = useSelectedLayoutSegment();
 
   // Footer pulse — the exact same status tones the Agents table itself
@@ -499,15 +529,41 @@ export function PrimaryRail({
                 <div className="fleet-rail-subnav">
                   {projects.map((p) => {
                     const projectActive = activeProjectId === p.id;
+                    const projectHref = `${hrefFor("projects")}/${encodeURIComponent(p.id)}`;
                     return (
-                      <Link
-                        key={p.id}
-                        href={`${hrefFor("projects")}/${encodeURIComponent(p.id)}`}
-                        className={`fleet-rail-subitem${projectActive ? " fleet-rail-subitem--active" : ""}`}
-                      >
-                        <ProjectIcon icon={p.icon} tint={p.tint} size={18} glyphSize={11} />
-                        <span className="fleet-rail-subitem-label">{p.name}</span>
-                      </Link>
+                      <div key={p.id} className="fleet-rail-subnav-project">
+                        <Link
+                          href={projectHref}
+                          className={`fleet-rail-subitem${projectActive ? " fleet-rail-subitem--active" : ""}`}
+                        >
+                          <ProjectIcon icon={p.icon} tint={p.tint} size={18} glyphSize={11} />
+                          <span className="fleet-rail-subitem-label">{p.name}</span>
+                        </Link>
+                        {/* Only the ACTIVE project's sections render — a
+                            second toggle per project would be one click too
+                            many for what's already a two-click reach
+                            (rail → project → section); being inside a
+                            project is what earns it this row. */}
+                        {projectActive && (
+                          <div className="fleet-rail-subsubnav">
+                            {PROJECT_SECTIONS.map((section) => {
+                              const SectionIcon = section.icon;
+                              const sectionActive = activeProjectSection === section.key;
+                              return (
+                                <Link
+                                  key={section.key}
+                                  href={`${projectHref}/${section.segment}`}
+                                  className={`fleet-rail-subsubitem${sectionActive ? " fleet-rail-subsubitem--active" : ""}`}
+                                  aria-current={sectionActive ? "page" : undefined}
+                                >
+                                  <SectionIcon size={13} strokeWidth={1.75} />
+                                  <span className="fleet-rail-subsubitem-label">{section.label}</span>
+                                </Link>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
