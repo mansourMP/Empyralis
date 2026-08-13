@@ -19,10 +19,17 @@ export function FleetRightPanel({
   open,
   onClose,
   children,
+  ariaLabel = "Properties",
 }: {
   open: boolean;
   onClose: () => void;
   children: ReactNode;
+  /** Overrides the drawer's accessible name and close-button label — e.g.
+   *  "Sessions" for the agent detail page, where this same drawer carries a
+   *  Sessions section below its unchanged Properties section. Defaults to
+   *  "Properties" so every other caller (Agents/Projects list pages) is
+   *  unaffected. */
+  ariaLabel?: string;
 }) {
   const panel = useResizableWidth({
     storageKey: PANEL_WIDTH.key,
@@ -65,7 +72,7 @@ export function FleetRightPanel({
         className="fleet-properties-drawer"
         data-open={open}
         role="complementary"
-        aria-label="Properties"
+        aria-label={ariaLabel}
         aria-hidden={!open}
         inert={!open}
       >
@@ -73,10 +80,10 @@ export function FleetRightPanel({
           {...panel.separatorProps}
           tabIndex={open ? 0 : -1}
           className="fleet-properties-resizer"
-          aria-label="Resize properties panel"
+          aria-label={`Resize ${ariaLabel.toLowerCase()} panel`}
           title="Drag to resize"
         />
-        <button type="button" className="fleet-properties-drawer-close" onClick={onClose} aria-label="Close properties">
+        <button type="button" className="fleet-properties-drawer-close" onClick={onClose} aria-label={`Close ${ariaLabel.toLowerCase()}`}>
           <X size={15} strokeWidth={1.75} />
         </button>
         <div className="fleet-properties-drawer-inner">{children}</div>
@@ -89,13 +96,18 @@ export function PanelSection({
   title,
   action,
   children,
+  className,
 }: {
   title: string;
   action?: ReactNode;
   children: ReactNode;
+  /** Extra class on the section's root — e.g. the agent detail page's
+   *  `.fleet-agent-sessions`, so its own list can flex to fill the drawer
+   *  and scroll independently of the Properties section above it. */
+  className?: string;
 }) {
   return (
-    <div>
+    <div className={className}>
       <div
         className="fleet-right-panel-section-title"
         style={action ? { display: "flex", justifyContent: "space-between", alignItems: "center" } : undefined}

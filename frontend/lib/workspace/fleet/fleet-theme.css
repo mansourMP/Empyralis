@@ -2268,6 +2268,36 @@ a.fleet-breadcrumb:hover {
 .fleet-panel-row-value--muted { color: var(--text-muted); font-weight: var(--weight-medium); }
 .fleet-panel-row-value--accent { color: var(--accent); }
 
+/* ── Sessions section of the agent detail page's right panel (Part 2) ────
+   The drawer's own scroll (.fleet-properties-drawer-inner, overflow-y:auto)
+   would otherwise scroll Properties and a long session list as ONE unit —
+   the founder's own requirement is that a long history "never scrolls the
+   whole page". Whenever this section is present the drawer's own scroll is
+   switched off (:has, already an established pattern in this stylesheet —
+   see .fleet-detail-body:has(> .fleet-work-root)) and .fleet-agent-sessions
+   flexes to fill whatever height Properties left, owning its own scrollbar
+   instead. Properties (fixed, usually 5-10 short rows) stays fully visible
+   above it either way. */
+.fleet-properties-drawer-inner:has(.fleet-agent-sessions) {
+  overflow: hidden;
+}
+.fleet-agent-sessions {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.fleet-agent-sessions-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 -4px;
+}
+.fleet-agent-sessions-list .fleet-sage-history-row {
+  border-radius: var(--radius-control);
+  padding: 8px 10px;
+}
+
 /* Composer popover variant of .fleet-toolbar-popover — the composer sits at
    the bottom of the view, so its controls' popovers open UPWARD and
    left-aligned instead of the toolbar default (down + right-aligned). */
@@ -4467,17 +4497,6 @@ a.fleet-breadcrumb:hover {
 
 .fleet-activity-time { font-variant-numeric: tabular-nums; }
 
-.fleet-activity-day-group + .fleet-activity-day-group {
-  margin-top: 4px;
-}
-
-.fleet-activity-day-heading {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-muted);
-  padding: 12px 20px 4px;
-}
-
 .fleet-activity-skeleton {
   padding: 16px 20px;
   display: flex;
@@ -4540,22 +4559,6 @@ a.fleet-breadcrumb:hover {
   font-size: 13px;
   color: var(--text-muted);
   line-height: 1.5;
-}
-
-/* ── Now strip ────────────────────────────────────────────────────────────── */
-
-.fleet-now-strip {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 0 20px;
-  margin: 4px 0 12px;
-}
-
-.fleet-now-meta {
-  font-size: 12px;
-  color: var(--text-muted);
 }
 
 /* ── Model / config tab ──────────────────────────────────────────────────── */
@@ -7370,78 +7373,11 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
   height: 100%;
   min-height: 0;
 }
-/* ── Chat tab header controls (New chat / History) ─────────────────────────
-   Moved out of a toolbar above the message list and into the page header
-   itself (FleetAgentDetail's tabbar, next to Configure) — chat history is
-   page-level chrome, not composer content. Model/reasoning-effort/context-
-   usage moved the other direction, INTO the composer (see AgentChat.tsx) —
-   they're properties of the thing you're about to send, not the page. New
-   chat/History reuse the header's own .fleet-icon-btn geometry (same as the
-   Properties rail toggle beside them) and the shared .fleet-toolbar-popover
-   box, so neither invents a second control idiom. */
-/* Wider than the generic .fleet-toolbar-popover default (220px) — a
-   conversation title needs more room than a menu option does — and
-   height-capped since a busy agent can have many conversations; the list
-   scrolls internally rather than growing the popover past the viewport. */
-.fleet-agent-chat-history-popover {
-  width: 280px;
-  max-height: 320px;
-  padding: 6px;
-  overflow-y: auto;
-}
-.fleet-agent-chat-history-popover .fleet-sage-panel {
-  overflow-y: visible;
-}
-.fleet-agent-chat-history-popover .fleet-toolbar-popover-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-/* "See all N conversations" — a real link (Next <Link>), styled as a quiet
-   footer row rather than a second accent button; the popover's own rows
-   are the primary content, this is just the escape hatch past the ~10 cap. */
-.fleet-agent-chat-history-see-all {
-  display: block;
-  margin-top: 4px;
-  padding: 8px 10px;
-  border-top: 1px solid var(--border);
-  font-size: var(--text-xs);
-  color: var(--text-secondary);
-  text-decoration: none;
-  text-align: center;
-}
-.fleet-agent-chat-history-see-all:hover {
-  color: var(--text-primary);
-}
-/* Full conversation list (?history=all) — replaces the composer view
-   entirely rather than opening a second popover-of-a-popover; same
-   .fleet-sage-history-row rows as the popover, just uncapped and full-height. */
-.fleet-agent-chat-history-full-header {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-4) var(--space-5) 0;
-}
-.fleet-agent-chat-history-full-title {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
-  margin: 0;
-}
-.fleet-agent-chat-history-full-list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-4) var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.fleet-agent-chat-history-full-list .fleet-sage-history-row {
-  border-radius: var(--radius-control);
-  padding: 8px 10px;
-}
+/* Chat tab header controls (New chat / History) used to live here —
+   deleted 2026-08-13 (Part 2, "the right panel becomes sessions"). Both
+   are now the Sessions section of the persistent right panel instead of a
+   toolbar popover/full-page view scoped to the Chat tab alone — see
+   FleetAgentDetail.tsx's sessionsContent and .fleet-agent-sessions* above. */
 /* Sits in the breadcrumb row now (see SageChat.tsx's useBreadcrumbBadge), not
    a standalone header block — no margin-left override needed here since the
    base .fleet-badge's own margin-left is exactly the gap it needs next to
