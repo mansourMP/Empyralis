@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -109,7 +111,7 @@ export function HardwareTab({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`,
         {
           method: "PATCH",

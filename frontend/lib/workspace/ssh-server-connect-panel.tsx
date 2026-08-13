@@ -1,5 +1,7 @@
 'use client';
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 
@@ -13,7 +15,7 @@ import { getErrorMessage } from '@/lib/ui/api-error';
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = String(init.method || 'GET');
   const headers = buildCookieAuthHeaders(method, { accept: 'application/json', ...(init.headers as Record<string, string> | undefined) });
-  const response = await fetch(path, { ...init, headers, credentials: 'include' });
+  const response = await fleetAuthorizedFetch(path, { ...init, headers, credentials: 'include' });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(getErrorMessage(data, `Request failed with status ${response.status}.`));

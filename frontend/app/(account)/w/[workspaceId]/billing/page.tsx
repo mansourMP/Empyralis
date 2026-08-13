@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { BarChart3 } from "lucide-react";
@@ -140,7 +142,7 @@ export default function UsagePage() {
     setLoading(true);
     Promise.all(
       agents.map((a) =>
-        fetch(
+        fleetAuthorizedFetch(
           `/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(a.agent_id)}&period=day`,
           { credentials: "include" },
         )
@@ -170,7 +172,7 @@ export default function UsagePage() {
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=workspace&period=day`, { credentials: "include" })
+    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=workspace&period=day`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled) return;

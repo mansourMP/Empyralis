@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 // Project documents (MAN-115 follow-up) — a project's own flat markdown
 // knowledge base. Backend contract (server_modules/routes_fleet.py, verified
 // file:line at the time this was written):
@@ -106,7 +108,7 @@ async function documentsRequest(
   body?: Record<string, unknown>,
 ): Promise<any> {
   const path = `/api/w/${encodeURIComponent(workspaceId)}/fleet/documents${suffix}`;
-  const res = await fetch(path, {
+  const res = await fleetAuthorizedFetch(path, {
     method,
     credentials: "include",
     headers: buildCookieAuthHeaders(method, { "Content-Type": "application/json" }),

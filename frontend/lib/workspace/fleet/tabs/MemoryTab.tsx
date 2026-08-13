@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FileText, Info, Loader2, Trash2 } from "lucide-react";
 
@@ -171,7 +173,7 @@ export function MemoryTab({
   const loadTree = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const res = await fetch(`${apiBase}/tree`, { credentials: "include" });
+      const res = await fleetAuthorizedFetch(`${apiBase}/tree`, { credentials: "include" });
       const d = await res.json().catch(() => ({}));
       const idxPath = String(d?.index?.path || "MEMORY.md");
       setIndexPath(idxPath);
@@ -197,7 +199,7 @@ export function MemoryTab({
     setFileLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/file?path=${encodeURIComponent(path)}`, { credentials: "include" });
+      const res = await fleetAuthorizedFetch(`${apiBase}/file?path=${encodeURIComponent(path)}`, { credentials: "include" });
       const d = await res.json().catch(() => ({}));
       const c = String(d?.content ?? d?.text ?? "");
       setContent(c);
@@ -220,7 +222,7 @@ export function MemoryTab({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/file?path=${encodeURIComponent(selected)}`, {
+      const res = await fleetAuthorizedFetch(`${apiBase}/file?path=${encodeURIComponent(selected)}`, {
         method: "PUT",
         credentials: "include",
         headers: buildCookieAuthHeaders("PUT", { "Content-Type": "application/json" }),
@@ -245,7 +247,7 @@ export function MemoryTab({
     if (typeof window !== "undefined" && !window.confirm(`Delete ${selected}?`)) return;
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/file?path=${encodeURIComponent(selected)}`, {
+      const res = await fleetAuthorizedFetch(`${apiBase}/file?path=${encodeURIComponent(selected)}`, {
         method: "DELETE",
         credentials: "include",
         headers: buildCookieAuthHeaders("DELETE", {}),

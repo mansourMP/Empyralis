@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -52,7 +54,7 @@ export function useCreditBalance(workspaceId: string) {
     }
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/billing/credits/balance?workspace_id=${encodeURIComponent(workspaceId)}`,
         { credentials: "include" },
       );
@@ -86,7 +88,7 @@ export function useCreditUsageHistory(workspaceId: string, limit = 100) {
     }
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/billing/credits/usage-history?workspace_id=${encodeURIComponent(workspaceId)}&limit=${limit}`,
         { credentials: "include" },
       );
@@ -159,7 +161,7 @@ export type TopUpResult =
  */
 export async function startCreditTopUp(workspaceId: string, amountUsd: number): Promise<TopUpResult> {
   try {
-    const res = await fetch("/api/billing/credits/purchase", {
+    const res = await fleetAuthorizedFetch("/api/billing/credits/purchase", {
       method: "POST",
       credentials: "include",
       headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),

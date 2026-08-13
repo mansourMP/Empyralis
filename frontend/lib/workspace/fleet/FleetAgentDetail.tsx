@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
@@ -452,7 +454,7 @@ export function FleetAgentDetail({
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=${costPeriod}`, { credentials: "include" })
+    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=${costPeriod}`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d) return;
@@ -1219,7 +1221,7 @@ function AgentTitle({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -1323,7 +1325,7 @@ function PersonaEditor({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -1880,7 +1882,7 @@ export function ChannelsTab({
     setByoBotBusy(true);
     setByoBotError(null);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/${channel}?agent_id=${encodeURIComponent(agentId)}`,
         {
           method: "POST",
@@ -1913,7 +1915,7 @@ export function ChannelsTab({
     setWechatBusy(true);
     setWechatError(null);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/wechat?agent_id=${encodeURIComponent(agentId)}`,
         {
           method: "POST",
@@ -1945,7 +1947,7 @@ export function ChannelsTab({
     setFirstContactReply(next);
     setFirstContactSaving(true);
     try {
-      await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -1962,7 +1964,7 @@ export function ChannelsTab({
     setOauthBusy(id);
     setOauthError(null);
     try {
-      const res = await fetch(`/api/connections/${encodeURIComponent(id)}/setup/start`, {
+      const res = await fleetAuthorizedFetch(`/api/connections/${encodeURIComponent(id)}/setup/start`, {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -1998,7 +2000,7 @@ export function ChannelsTab({
     setSlackBindBusy(true);
     setSlackBindError(null);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-channels/slack?agent_id=${encodeURIComponent(agentId)}`,
         {
           method: "POST",
@@ -3211,7 +3213,7 @@ function ToolsTab({
     setPending(toolId);
     setError(null);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -3236,7 +3238,7 @@ function ToolsTab({
     if (grant) nextGranted.add(toolId);
     else nextGranted.delete(toolId);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -3400,7 +3402,7 @@ function SkillsTab({
   async function persist(nextSkills: FleetAgentSkill[]): Promise<boolean> {
     setError(null);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -3768,7 +3770,7 @@ function CapabilitiesTab({
     setPending(capabilityId);
     setError(null);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
@@ -3803,7 +3805,7 @@ function CapabilitiesTab({
     setError(null);
     try {
       const results = await Promise.all(openaiEligible.map(async (c) => {
-        const res = await fetch(
+        const res = await fleetAuthorizedFetch(
           `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-capabilities/key?agent_id=${encodeURIComponent(agentId)}`,
           {
             method: "POST",
@@ -3832,7 +3834,7 @@ function CapabilitiesTab({
     setError(null);
     try {
       const results = await Promise.all(targets.map(async (c) => {
-        const res = await fetch(
+        const res = await fleetAuthorizedFetch(
           `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-capabilities/key?agent_id=${encodeURIComponent(agentId)}&capability=${encodeURIComponent(c.id)}`,
           { method: "DELETE", credentials: "include", headers: buildCookieAuthHeaders("DELETE", {}) },
         );
@@ -3977,7 +3979,7 @@ function AgentModelSummary({ workspaceId, agentId, agent }: { workspaceId: strin
   const [cost, setCost] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=${costPeriod}`, { credentials: "include" })
+    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=agent&id=${encodeURIComponent(agentId)}&period=${costPeriod}`, { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (cancelled || !d) return;
@@ -4067,7 +4069,7 @@ function ContextPolicySection({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),

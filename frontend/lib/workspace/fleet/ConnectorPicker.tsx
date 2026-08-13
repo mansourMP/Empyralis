@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useMemo, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
@@ -151,7 +153,7 @@ export function ConnectorPicker({
     setBusyKey(key);
     setError(null);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}`,
         {
           method: "POST",
@@ -179,7 +181,7 @@ export function ConnectorPicker({
     setBusyKey(key);
     setError(null);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}&connector_key=${encodeURIComponent(connector.id)}`,
         {
           method: "DELETE",
@@ -202,7 +204,7 @@ export function ConnectorPicker({
     setBusyKey(key);
     setError(null);
     try {
-      const res = await fetch(`/api/connections/${encodeURIComponent(connector.id)}/setup/start`, {
+      const res = await fleetAuthorizedFetch(`/api/connections/${encodeURIComponent(connector.id)}/setup/start`, {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -236,7 +238,7 @@ export function ConnectorPicker({
     setBusyKey(key);
     setError(null);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/w/${encodeURIComponent(workspaceId)}/fleet/agent-connectors?agent_id=${encodeURIComponent(agentId)}`,
         {
           method: "POST",

@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 // Workspace members + invites (Multiplayer Projects Phase 1 — MAN-114).
 //
 // Backend contract (verified file:line, server_modules/routes_workspaces.py):
@@ -68,7 +70,7 @@ export type WorkspacePendingInvite = {
 };
 
 async function getJson(path: string): Promise<any> {
-  const res = await fetch(path, { credentials: "include" });
+  const res = await fleetAuthorizedFetch(path, { credentials: "include" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`);
@@ -77,7 +79,7 @@ async function getJson(path: string): Promise<any> {
 }
 
 async function mutateJson(path: string, method: string, body?: Record<string, unknown>): Promise<any> {
-  const res = await fetch(path, {
+  const res = await fleetAuthorizedFetch(path, {
     method,
     credentials: "include",
     headers: buildCookieAuthHeaders(method, { "Content-Type": "application/json" }),

@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useEffect, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -39,7 +41,7 @@ export function WorkspaceNameSection({ workspaceId }: { workspaceId: string }) {
     setError(null);
     setSaved(false);
     try {
-      const res = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
         method: "PATCH",
         credentials: "include",
         headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),

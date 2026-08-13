@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 // Channel sender pairing — Settings → Connections. Inbound: a channel sender
 // (a Slack user DMing the app, a phone number texting a bound Twilio number,
 // a WeChat Official Account follower, a Telegram/WhatsApp identity) connecting
@@ -105,7 +107,7 @@ function formatEpochSeconds(value: number | null | undefined): string {
 }
 
 async function getJson(path: string): Promise<any> {
-  const res = await fetch(path, { credentials: "include" });
+  const res = await fleetAuthorizedFetch(path, { credentials: "include" });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`);
@@ -114,7 +116,7 @@ async function getJson(path: string): Promise<any> {
 }
 
 async function mutateJson(path: string, method: string, body?: Record<string, unknown>): Promise<any> {
-  const res = await fetch(path, {
+  const res = await fleetAuthorizedFetch(path, {
     method,
     credentials: "include",
     headers: buildCookieAuthHeaders(method, { "Content-Type": "application/json" }),

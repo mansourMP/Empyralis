@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useEffect, useRef, useState } from "react";
 import { Bug } from "lucide-react";
 
@@ -13,7 +15,7 @@ async function submitBugReport(
   workspaceId: string,
   input: { title: string; description: string; page_path: string }
 ): Promise<void> {
-  const res = await fetch(`/api/w/${workspaceId}/fleet/bug-reports`, {
+  const res = await fleetAuthorizedFetch(`/api/w/${workspaceId}/fleet/bug-reports`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),

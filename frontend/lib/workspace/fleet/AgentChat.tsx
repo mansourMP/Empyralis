@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -382,7 +384,7 @@ function uploadErrorMessage(body: string): string {
 async function uploadChatAttachment(workspaceId: string, file: File): Promise<PendingAttachment> {
   const formData = new FormData();
   formData.append("file", file);
-  const res = await fetch(`/api/sage-chat/attachments?workspace_id=${encodeURIComponent(workspaceId)}`, {
+  const res = await fleetAuthorizedFetch(`/api/sage-chat/attachments?workspace_id=${encodeURIComponent(workspaceId)}`, {
     method: "POST",
     credentials: "include",
     // No Content-Type override — the browser sets the multipart boundary
@@ -794,7 +796,7 @@ export function AgentChat({
 
   const loadThread = useCallback(async () => {
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/threads/${encodeURIComponent(threadId)}?workspace_id=${encodeURIComponent(workspaceId)}`,
         { credentials: "include" },
       );
@@ -877,7 +879,7 @@ export function AgentChat({
 
     try {
       if (!sessionRef.current) {
-        const sessionRes = await fetch("/api/sessions", {
+        const sessionRes = await fleetAuthorizedFetch("/api/sessions", {
           method: "POST",
           credentials: "include",
           headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -894,7 +896,7 @@ export function AgentChat({
       }
 
       const requestId = `${sourceTag}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const turnRes = await fetch("/api/turn", {
+      const turnRes = await fleetAuthorizedFetch("/api/turn", {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),

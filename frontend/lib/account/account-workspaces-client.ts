@@ -1,5 +1,7 @@
 'use client';
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { buildCookieAuthHeaders } from '@/lib/auth/csrf';
 import type { AccountShellBootstrap } from '@/lib/shell/account-shell-store';
 import { parseAccountShellPayload } from '@/lib/shell/account-shell-payload';
@@ -94,7 +96,7 @@ async function requestJson<T>(
   init: RequestInit,
   parser: (payload: unknown) => T,
 ): Promise<T> {
-  const response = await fetch(`${apiBaseUrl()}${path}`, {
+  const response = await fleetAuthorizedFetch(`${apiBaseUrl()}${path}`, {
     ...init,
     credentials: 'include',
     headers: buildCookieAuthHeaders(init.method ?? 'GET', {

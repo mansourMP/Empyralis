@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
@@ -344,7 +346,7 @@ export default function ProjectDetailPage() {
     // way (period only controls how `buckets` are grouped) — day gives the
     // daily granularity the cost sparkline needs; month would collapse to
     // one point.
-    fetch(`${base.replace("/w/", "/api/w/")}/fleet/usage?scope=project&id=${encodeURIComponent(projectId)}&period=day`, { credentials: "include" })
+    fleetAuthorizedFetch(`${base.replace("/w/", "/api/w/")}/fleet/usage?scope=project&id=${encodeURIComponent(projectId)}&period=day`, { credentials: "include" })
       .then((r) => r.json())
       .then((d) => {
         if (cancelled) return;
@@ -357,7 +359,7 @@ export default function ProjectDetailPage() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=workspace&period=day`, { credentials: "include" })
+    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/usage?scope=workspace&period=day`, { credentials: "include" })
       .then((r) => r.json())
       .then((d) => {
         if (cancelled) return;

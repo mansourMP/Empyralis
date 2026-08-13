@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useEffect, useRef, useState } from "react";
 import { Activity } from "lucide-react";
 
@@ -33,7 +35,7 @@ function useTelegramBreakerStatus(workspaceId: string, enabled: boolean): Telegr
   useEffect(() => {
     if (!enabled || !workspaceId) return;
     let cancelled = false;
-    fetch(`/api/sage/telegram-hosted/pair/status?workspace_id=${encodeURIComponent(workspaceId)}`, {
+    fleetAuthorizedFetch(`/api/sage/telegram-hosted/pair/status?workspace_id=${encodeURIComponent(workspaceId)}`, {
       credentials: "include",
     })
       .then((r) => (r.ok ? r.json() : null))

@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Inbox as InboxIcon,
@@ -539,7 +541,7 @@ function useThreadTraceMap(workspaceId: string, threads: Thread[], priorityThrea
           const cached = cacheRef.current.get(traceId);
           if (cached && cached.trace.finished_at) return [threadId, cached] as const;
           try {
-            const r = await fetch(`/api/agent-traces/${encodeURIComponent(traceId)}?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" });
+            const r = await fleetAuthorizedFetch(`/api/agent-traces/${encodeURIComponent(traceId)}?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" });
             if (!r.ok) return [threadId, cached || null] as const;
             const d = await r.json();
             const entry: TraceMapEntry = { traceId, trace: d.trace || {}, events: Array.isArray(d.events) ? d.events : [] };
@@ -745,7 +747,7 @@ export function WorkTab({
 
   const loadThreads = useCallback(async () => {
     try {
-      const r = await fetch(url, { credentials: "include" });
+      const r = await fleetAuthorizedFetch(url, { credentials: "include" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       const list = (d?.items || []) as Thread[];

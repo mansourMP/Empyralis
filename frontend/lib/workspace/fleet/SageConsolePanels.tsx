@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useState } from "react";
 
 import { useAccountShell } from "@/lib/shell/account-shell-context";
@@ -103,7 +105,7 @@ export function useSageConversations(workspaceId: string, enabled: boolean) {
       return;
     }
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/threads?workspace_id=${encodeURIComponent(workspaceId)}&limit=50`,
         { credentials: "include" },
       );

@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, MessagesSquare } from "lucide-react";
 
@@ -128,7 +130,7 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
 
   const loadList = useCallback(async () => {
     try {
-      const r = await fetch(listUrl, { credentials: "include" });
+      const r = await fleetAuthorizedFetch(listUrl, { credentials: "include" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
       const list = Array.isArray(d?.conversations) ? (d.conversations as ConversationSummary[]) : [];
@@ -194,7 +196,7 @@ export function ConversationsView({ workspaceId }: { workspaceId: string }) {
     let cancelled = false;
     setDetailLoading(true);
     setDetailError(null);
-    fetch(`/api/w/${encodeURIComponent(workspaceId)}/conversations/${encodeURIComponent(selectedId)}`, {
+    fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/conversations/${encodeURIComponent(selectedId)}`, {
       credentials: "include",
     })
       .then((r) => r.json())

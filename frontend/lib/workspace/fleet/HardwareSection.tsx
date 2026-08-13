@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 // HARDWARE — the workspace's computers (cloud servers + paired machines).
 //
 // Repositioned 2026-07: hardware is a SETUP concern, not a daily one, so it
@@ -225,7 +227,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/gateway/registrations?workspace_id=${encodeURIComponent(workspaceId)}`, {
         credentials: "include",
       });
       if (!res.ok) {
@@ -343,7 +345,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
     if (!gatewayId) return;
     setRemovingId(gatewayId);
     try {
-      const res = await fetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/revoke`, {
+      const res = await fleetAuthorizedFetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/revoke`, {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -370,7 +372,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
     setRemovingId(target.gatewayId);
     try {
       if (target.vpsId) {
-        const res = await fetch(`/api/hardware/vps/${encodeURIComponent(target.vpsId)}`, {
+        const res = await fleetAuthorizedFetch(`/api/hardware/vps/${encodeURIComponent(target.vpsId)}`, {
           method: "DELETE",
           credentials: "include",
           headers: buildCookieAuthHeaders("DELETE"),
@@ -379,7 +381,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
       }
       // Revoke the pairing too so the row disappears; best-effort (the droplet
       // is already gone, which is the destructive part the user asked for).
-      await fetch(`/api/gateway/registrations/${encodeURIComponent(target.gatewayId)}/revoke`, {
+      await fleetAuthorizedFetch(`/api/gateway/registrations/${encodeURIComponent(target.gatewayId)}/revoke`, {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -424,7 +426,7 @@ export function HardwareSection({ workspaceId, heading = true }: { workspaceId: 
       );
     applySharing(next);
     try {
-      const res = await fetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/project-sharing-opt-in`, {
+      const res = await fleetAuthorizedFetch(`/api/gateway/registrations/${encodeURIComponent(gatewayId)}/project-sharing-opt-in`, {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),

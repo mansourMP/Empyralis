@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useState } from "react";
 import { Check, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
 
@@ -36,7 +38,7 @@ export function McpApiKeysSection({ workspaceId }: { workspaceId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/connections/mcp-keys?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" });
+      const res = await fleetAuthorizedFetch(`/api/connections/mcp-keys?workspace_id=${encodeURIComponent(workspaceId)}`, { credentials: "include" });
       if (!res.ok) throw new Error(`Could not load API keys (HTTP ${res.status})`);
       const data = await res.json();
       setKeys(Array.isArray(data?.keys) ? data.keys : []);
@@ -54,7 +56,7 @@ export function McpApiKeysSection({ workspaceId }: { workspaceId: string }) {
     setError(null);
     setFreshKey(null);
     try {
-      const res = await fetch("/api/connections/mcp-keys", {
+      const res = await fleetAuthorizedFetch("/api/connections/mcp-keys", {
         method: "POST",
         credentials: "include",
         headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -76,7 +78,7 @@ export function McpApiKeysSection({ workspaceId }: { workspaceId: string }) {
   const revokeKey = useCallback(async (keyId: string) => {
     setError(null);
     try {
-      const res = await fetch(`/api/connections/mcp-keys/${encodeURIComponent(keyId)}`, {
+      const res = await fleetAuthorizedFetch(`/api/connections/mcp-keys/${encodeURIComponent(keyId)}`, {
         method: "DELETE",
         credentials: "include",
         headers: buildCookieAuthHeaders("DELETE"),

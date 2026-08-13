@@ -1,5 +1,7 @@
 "use client";
 
+import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
@@ -168,7 +170,7 @@ export function usePersonalChannelStatus(
       return null;
     }
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         withAgentId(`/api/personal-channels/${channelPath(channelKey)}/gateways/${encodeURIComponent(gatewayId)}`, agentId),
         { credentials: "include" },
       );
@@ -217,7 +219,7 @@ export async function setupTelegramPersonalChannel(
   body: { phone_number?: string; login_code?: string; password?: string },
   agentId?: string | null,
 ): Promise<PersonalChannelView> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     withAgentId(`/api/personal-channels/telegram/gateways/${encodeURIComponent(gatewayId)}/setup`, agentId),
     {
       method: "POST",
@@ -234,7 +236,7 @@ export async function setupWhatsAppPersonalChannel(
   body: { phone_number?: string },
   agentId?: string | null,
 ): Promise<PersonalChannelView> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     withAgentId(`/api/personal-channels/whatsapp/gateways/${encodeURIComponent(gatewayId)}/setup`, agentId),
     {
       method: "POST",
@@ -350,7 +352,7 @@ function refreshSurfaces(gatewayId: string): Promise<void> {
   if (entry.inflight) return entry.inflight;
   const run = (async () => {
     try {
-      const res = await fetch(`/api/personal-channels/gateways/${encodeURIComponent(gatewayId)}/channels`, {
+      const res = await fleetAuthorizedFetch(`/api/personal-channels/gateways/${encodeURIComponent(gatewayId)}/channels`, {
         credentials: "include",
       });
       const data = await parseJsonResponse(res);
@@ -435,7 +437,7 @@ export interface ImessageInstallResult {
 }
 
 export async function recheckImessagePersonalChannel(gatewayId: string): Promise<ImessageRecheckResult> {
-  const res = await fetch(`/api/personal-channels/imessage/gateways/${encodeURIComponent(gatewayId)}/recheck`, {
+  const res = await fleetAuthorizedFetch(`/api/personal-channels/imessage/gateways/${encodeURIComponent(gatewayId)}/recheck`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -444,7 +446,7 @@ export async function recheckImessagePersonalChannel(gatewayId: string): Promise
 }
 
 export async function installImsgViaHomebrew(gatewayId: string): Promise<ImessageInstallResult> {
-  const res = await fetch(`/api/personal-channels/imessage/gateways/${encodeURIComponent(gatewayId)}/install`, {
+  const res = await fleetAuthorizedFetch(`/api/personal-channels/imessage/gateways/${encodeURIComponent(gatewayId)}/install`, {
     method: "POST",
     credentials: "include",
     headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
@@ -457,7 +459,7 @@ export async function disconnectPersonalChannel(
   gatewayId: string,
   agentId?: string | null,
 ): Promise<{ gateway_id: string; channel_key: string; status: string }> {
-  const res = await fetch(
+  const res = await fleetAuthorizedFetch(
     withAgentId(
       `/api/personal-channels/${channelPath(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/disconnect`,
       agentId,
