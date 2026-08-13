@@ -681,11 +681,53 @@ install_gateway_from_artifact() {
   # (dist/ + node_modules + package.json) and unpack it. No git, no build,
   # no credential of any kind on the box.
   local stage_dir="$1"
-  local tmp_dir gateway_archive
+  local tmp_dir gateway_archive gateway_url expected_sha256=""
   tmp_dir="$(mktemp -d)"
   gateway_archive="${tmp_dir}/gateway.tar.gz"
+  gateway_url="${GATEWAY_ARTIFACT_URL}"
 
-  log "downloading prebuilt gateway artifact ${GATEWAY_ARTIFACT_URL}"
+  # CACHE-BUST THE DEFAULT ARTIFACT URL (2026-08-13 gateway-artifact-staleness
+  # incident, same fix in shape as vps_provisioning_service.agent_installer_url()
+  # for the installer script one level up). Cloudflare fronts this domain and
+  # caches per FULL URL including query string; install-agent-computer.sh
+  # always requests the exact same literal path
+  # (".../releases/agent-computer/latest/empyralis-gateway-linux-x64.tar.gz")
+  # on every boot, forever, so a freshly published tarball can sit behind a
+  # cached response indefinitely at that one URL regardless of its own
+  # cache-control. The release workflow (release-gateway-linux.yml) already
+  # writes a `.sha256` sidecar beside every tarball for exactly this purpose
+  # — fetch it first (it's ~90 bytes, so a stale CACHED sidecar costs seconds
+  # of staleness, never a stale multi-megabyte binary) and use its hash to
+  # bust the big download. A changed artifact is a changed sidecar is a
+  # changed URL is a guaranteed cache miss, self-healing on every future
+  # publish rather than a one-time purge. This also buys the boot-time
+  # install a real integrity check it never had before — only the packer
+  # image-bake path (deploy/packer/scripts/40-gateway-artifact.sh) verified
+  # the checksum until now.
+  #
+  # An explicitly configured EMPYRALIS_GATEWAY_ARTIFACT_URL is passed through
+  # UNTOUCHED, same rule agent_installer_url() applies to
+  # EMPYRALIS_AGENT_INSTALLER_URL: an operator pointing at their own artifact
+  # host has their own cache story, and appending a query string to someone
+  # else's URL is not ours to do.
+  if [[ -z "${EMPYRALIS_GATEWAY_ARTIFACT_URL:-}" ]]; then
+    local checksum_file="${tmp_dir}/gateway.tar.gz.sha256" checksum_http_status="" checksum_curl_exit=0
+    checksum_http_status="$(curl -sS -L -m 30 -w '%{http_code}' \
+      -o "${checksum_file}" "${gateway_url}.sha256" 2>/dev/null)" || checksum_curl_exit=$?
+    if [[ "${checksum_curl_exit}" -eq 0 && "${checksum_http_status}" == "200" && -s "${checksum_file}" ]]; then
+      expected_sha256="$(awk '{print $1}' "${checksum_file}" | head -c 64)"
+      if [[ "${expected_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
+        gateway_url="${gateway_url}?v=${expected_sha256:0:12}"
+      else
+        expected_sha256=""
+      fi
+    fi
+    # A missing/unreadable sidecar must never block a provision — the box
+    # just gets whatever the CDN happens to be serving at the un-busted URL,
+    # exactly the behavior before this fix.
+  fi
+
+  log "downloading prebuilt gateway artifact ${gateway_url}"
   # MAN-121: this download is the single most likely silent killer of a
   # provision — if the release host does not serve this exact object (wrong or
   # unpublished ${AGENT_COMPUTER_VERSION}, moved path, 404, 403, rate limit,
@@ -694,10 +736,19 @@ install_gateway_from_artifact() {
   # exit code so the reported reason names the cause rather than just the URL.
   local http_status="" curl_exit=0
   http_status="$(curl -sS -L -m 180 -w '%{http_code}' \
-    -o "${gateway_archive}" "${GATEWAY_ARTIFACT_URL}" 2>/dev/null)" || curl_exit=$?
+    -o "${gateway_archive}" "${gateway_url}" 2>/dev/null)" || curl_exit=$?
   if [[ ! -s "${gateway_archive}" || "${http_status}" != "200" ]]; then
     rm -rf "${tmp_dir}"
-    fail "could not download the gateway artifact from ${GATEWAY_ARTIFACT_URL} (HTTP ${http_status:-none}, curl exit ${curl_exit}). The release host must serve this exact file for version '${AGENT_COMPUTER_VERSION}'; check EMPYRALIS_AGENT_COMPUTER_VERSION / EMPYRALIS_ARTIFACT_BASE_URL."
+    fail "could not download the gateway artifact from ${gateway_url} (HTTP ${http_status:-none}, curl exit ${curl_exit}). The release host must serve this exact file for version '${AGENT_COMPUTER_VERSION}'; check EMPYRALIS_AGENT_COMPUTER_VERSION / EMPYRALIS_ARTIFACT_BASE_URL."
+  fi
+
+  if [[ -n "${expected_sha256}" ]]; then
+    local actual_sha256
+    actual_sha256="$(sha256sum "${gateway_archive}" | awk '{print $1}')"
+    if [[ "${actual_sha256}" != "${expected_sha256}" ]]; then
+      rm -rf "${tmp_dir}"
+      fail "gateway artifact failed checksum verification (expected ${expected_sha256}, got ${actual_sha256}) — the download may have been corrupted or the CDN served a mismatched object."
+    fi
   fi
 
   rm -rf "${stage_dir}"
