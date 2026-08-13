@@ -926,6 +926,11 @@ async def fleet_assign_task(
                 task_id=task_id,
                 agent_id=agent_id,
                 triggered_by=str((current_user or {}).get("user_id") or "").strip() or "owner",
+                # authority_tier deliberately omitted (defaults to None):
+                # this call has no turn to inherit a tier from, only an
+                # authenticated human who already cleared this route's own
+                # member+ gate above -- schedule_task_assigned_wakeup
+                # resolves that to TIER_OWNER (see its docstring, 2026-08-13).
             )
         elif user_id:
             result = await tasks.assign_task_to_user(

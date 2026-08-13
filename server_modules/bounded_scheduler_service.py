@@ -979,6 +979,7 @@ async def schedule_task_assigned_wakeup(
     title: str,
     description: str = "",
     triggered_by: str = "owner",
+    authority_tier: Optional[str] = None,
 ) -> Dict[str, Any]:
     """docs/design/tasks-to-agents-research.md Section 4.6 step 3: a new
     trigger reason ("task_assigned"), not a new execution engine. Called by
@@ -1009,7 +1010,43 @@ async def schedule_task_assigned_wakeup(
     wakeup's privileged-runtime branch): assigning a task is itself the
     explicit human action, matching the hard constraint that this feature
     adds no approval system beyond what the scheduler already has
-    natively."""
+    natively.
+
+    AUTHORITY TIER (found and fixed 2026-08-13): this function used to omit
+    `authority_tier` from the persisted payload entirely, unlike its sibling
+    maybe_schedule_event_trigger above (which explicitly stamps TIER_AUDIENCE
+    for its own genuinely-senderless context-engine events). The consuming
+    scan (`_wake_request_tier`) treats an absent tier from an unrecognized
+    producer as a REAL gap, not a documented default, and fails safe to
+    audience — so every task-assigned wake ran as audience tier, and an
+    audience-tier turn may only call `audience_safe` tools. `project_task.list`
+    is not one, so the resulting turn could not even read the task it had
+    just been handed (`mandate_blocked`, observed live 2026-08-13). Two
+    distinct callers, two distinct correct tiers, so this takes an explicit
+    `authority_tier` rather than hardcoding one value the way
+    maybe_schedule_event_trigger safely can:
+      - A human assigning via the HTTP route (routes_fleet.fleet_assign_task
+        -> project_tasks_service.assign_task) passes no turn to inherit a
+        tier from at all — but the route itself already required at least
+        `member` role to reach this point (MAN-64/MAN-70), so it is never a
+        bare/audience trigger. Leaving `authority_tier` at its default
+        (None) resolves to TIER_OWNER below. The mandate model has no tier
+        between "owner" and "audience" today (a documented, separate gap —
+        see CLAUDE.md's authority-mandate note), so this is the closest
+        correct value, not a redesign of the tier taxonomy; a future
+        project-teammate tier should replace it here too.
+      - An agent delegating via the project_task__assign TOOL (a turn
+        already running under its own resolved tier) must INHERIT that
+        tier, never be upgraded to owner just because it happened to call
+        this function — an audience-tier turn delegating a task must not be
+        able to mint an owner-tier wake for itself. skills_service.py's
+        dispatcher passes its own `session_ctx["authority_tier"]` through
+        assign_task -> here explicitly for this reason."""
+    resolved_tier = (
+        authority_mandate_service.inherit_tier(authority_tier)
+        if authority_tier is not None
+        else authority_mandate_service.TIER_OWNER
+    )
     resolved_agent_id = str(agent_id or "").strip()
     resolved_task_id = str(task_id or "").strip()
     resolved_title = str(title or "").strip()
@@ -1067,6 +1104,7 @@ async def schedule_task_assigned_wakeup(
             "task_id": resolved_task_id,
             "task_title": resolved_title,
             "task_description": str(description or "").strip(),
+            "authority_tier": resolved_tier,
         },
         policy=policy,
         due_at=due_at,
@@ -2717,6 +2755,11 @@ def _wake_request_tier(item: Dict[str, Any]) -> "tuple[str, bool]":
     # stamps this explicitly now; this branch covers pre-existing rows).
     if str(item.get("trigger_kind") or "").strip() == "event_trigger":
         return authority_mandate_service.TIER_AUDIENCE, False
+    # 2026-08-13: task_assigned rows now always stamp authority_tier (see
+    # schedule_task_assigned_wakeup's own docstring) and so never reach this
+    # line going forward. A task_assigned row that DOES land here is a
+    # legacy row persisted before that fix -- correctly unattributed, since
+    # this function genuinely cannot recover which tier it should have had.
     return authority_mandate_service.TIER_AUDIENCE, True
 
 

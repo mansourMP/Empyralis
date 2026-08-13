@@ -6666,6 +6666,13 @@ def execute_single_direct_tool_call(
                         task_id=task_id,
                         agent_id=target_agent_id,
                         triggered_by=f"agent:{_caller_agent_id}",
+                        # 2026-08-13: INHERIT this turn's own tier, never
+                        # default to owner just because it called this tool
+                        # -- an audience-tier turn delegating a task must not
+                        # be able to mint an owner-tier wake for the agent it
+                        # hands off to. See schedule_task_assigned_wakeup's
+                        # own docstring for the full reasoning.
+                        authority_tier=(session_ctx if isinstance(session_ctx, dict) else {}).get("authority_tier"),
                     )
                 )
             except ValueError as exc:
