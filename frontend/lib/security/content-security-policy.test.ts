@@ -10,6 +10,18 @@
  * script; a structural one catches a weakened directive the moment it's
  * typed, in the same process as `npm run test:unit`.
  *
+ * IMPORTANT, 2026-08-13: this file passing is NOT evidence the browser
+ * console is clean. It correctly proves style-src is nonce-only with no
+ * `unsafe-inline` in prod — that shape is real — but a real `next build &&
+ * next start` walkthrough hit 10+ distinct style-src violations on an
+ * ordinary page anyway: react-dom/server serializes every `style={{...}}`
+ * prop into a literal `style=""` HTML attribute, and a CSP nonce, per spec,
+ * never covers that attribute (only `'unsafe-inline'` or `'unsafe-hashes'`
+ * do, and a nonce present in the directive disables the former). See
+ * CLAUDE.md's "CORRECTION, 2026-08-13" note under the CSP section for the
+ * full mechanism and what an actual fix needs — this test cannot catch it
+ * because it never runs a browser, by design (see the paragraph above).
+ *
  * Run: npx tsx lib/security/content-security-policy.test.ts
  */
 
