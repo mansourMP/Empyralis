@@ -1256,6 +1256,7 @@ async def get_openclaw_channel_setup(
     catalog = openclaw_channel_setup_service.openclaw_channel_setup_catalog()
     observed: Optional[Dict[str, Any]] = None
     observed_error: Optional[str] = None
+    observed_error_code: Optional[str] = None
     try:
         observed = await openclaw_channel_setup_service.read_channel_setup_state(
             gateway_id=gateway_id,
@@ -1268,6 +1269,13 @@ async def get_openclaw_channel_setup(
         # "the channel is not connected" is exactly the state confusion this
         # screen exists to remove.
         observed_error = str(exc)
+        # The STRUCTURED reason, alongside the human message above — the
+        # frontend banner branches on this (e.g. "the box never had the
+        # transport installed" vs "the box is offline right now") rather
+        # than matching on the message's words, per CLAUDE.md's "stale
+        # string matching" rule. None when the caught error wasn't one of
+        # gateway_execution_service's known readiness tokens.
+        observed_error_code = exc.reason_code
     # The channels a first-party Empyralis runtime already carries (Telegram,
     # WhatsApp, Discord, Signal, iMessage, Slack, WeChat, SMS as of writing) —
     # why they are absent from `catalog` above. COMPUTED from the same
@@ -1285,6 +1293,7 @@ async def get_openclaw_channel_setup(
         "channels": catalog,
         "observed": observed,
         "observed_error": observed_error,
+        "observed_error_code": observed_error_code,
         "already_available_channels": already_available_channels,
     }
 

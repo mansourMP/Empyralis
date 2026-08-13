@@ -1613,7 +1613,7 @@ import {
   StateChip,
   useOpenClawChannelSetup,
 } from "./OpenClawChannelsPanel";
-import { channelCardPill, formatChannelList } from "./openclaw-channel-copy";
+import { channelCardPill, formatChannelList, openclawObservedErrorBanner } from "./openclaw-channel-copy";
 import {
   CHANNEL_GRID_PLATFORMS,
   channelDoorChoiceNote,
@@ -2365,6 +2365,15 @@ export function ChannelsTab({
   const legacyLabels = new Set(CHANNEL_GRID_PLATFORMS.map((p) => p.label));
   const unmappedSupersededChannels = openclaw.alreadyAvailable.filter((label) => !legacyLabels.has(label));
 
+  // "the box could not be reached" and "the box answered fine but has never
+  // had the transport installed" are different facts (2026-08-13 audit,
+  // #2b) — this is the one place that decides both the banner text AND
+  // whether a retry control makes sense, off the STRUCTURED reason code,
+  // never a text-match on the message. See openclawObservedErrorBanner's
+  // own doc comment.
+  const openclawBanner = openclawObservedErrorBanner(openclaw.observedError, openclaw.observedErrorCode);
+  const openclawRetryable = openclawBanner?.retryable ?? true;
+
   return (
     <div>
       {/* Channels vs. Connectors reads as one undifferentiated "integrations"
@@ -2378,29 +2387,33 @@ export function ChannelsTab({
           <span>{openclaw.error}</span>
         </div>
       ) : null}
-      {openclaw.observedError ? (
+      {openclawBanner ? (
         <div className="openclaw-banner" role="status">
           <AlertTriangle size={14} aria-hidden />
-          <span>
-            This agent&apos;s computer could not be reached, so some channels below show an unknown state.
-            Their setup fields are still accurate.
-          </span>
+          <span>{openclawBanner.text}</span>
         </div>
       ) : null}
 
       {agentGatewayId ? (
         <div className="openclaw-toolbar">
-          <button
-            type="button"
-            className={`fleet-btn ${openclaw.repairable.length > 0 ? "fleet-btn--accent-fill" : ""}`}
-            onClick={() => void openclaw.provision(openclaw.repairable)}
-            disabled={openclaw.busy !== null || openclaw.loading}
-          >
-            {openclaw.busy === "__all__" ? <Loader2 size={14} className="openclaw-spin" /> : <Plug size={14} />}
-            {openclaw.repairable.length > 0
-              ? `Set up ${openclaw.repairable.length} channel${openclaw.repairable.length === 1 ? "" : "s"}`
-              : "Re-check this computer"}
-          </button>
+          {/* No control that cannot work: when the box answered fine but
+              never had the transport installed, retrying provision hits the
+              exact same "not set up" answer every time — there is nothing
+              this button could do here today. Refresh stays either way; it
+              only re-reads state, so it is honest to show regardless. */}
+          {openclawRetryable ? (
+            <button
+              type="button"
+              className={`fleet-btn ${openclaw.repairable.length > 0 ? "fleet-btn--accent-fill" : ""}`}
+              onClick={() => void openclaw.provision(openclaw.repairable)}
+              disabled={openclaw.busy !== null || openclaw.loading}
+            >
+              {openclaw.busy === "__all__" ? <Loader2 size={14} className="openclaw-spin" /> : <Plug size={14} />}
+              {openclaw.repairable.length > 0
+                ? `Set up ${openclaw.repairable.length} channel${openclaw.repairable.length === 1 ? "" : "s"}`
+                : "Re-check this computer"}
+            </button>
+          ) : null}
           <button
             type="button"
             className="fleet-btn"

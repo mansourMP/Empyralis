@@ -95,6 +95,13 @@ type SetupResponse = {
   channels?: OpenClawChannelCatalogEntry[];
   observed?: { status?: string; channels?: OpenClawObservedChannel[]; refusal?: { detail?: string } | null } | null;
   observed_error?: string | null;
+  // The STRUCTURED reason behind observed_error above (e.g.
+  // "gateway_capability_missing"), when the backend recognized one — see
+  // gateway_reason_messages.KNOWN_REASON_TOKENS. null for an unreachable box
+  // (a genuinely unclassified failure) or an older response shape; either
+  // way openclawObservedErrorBanner degrades to the existing generic
+  // "could not be reached" copy, never a raw token.
+  observed_error_code?: string | null;
   // Channels a first-party Empyralis runtime already carries (Telegram,
   // WhatsApp, ...) — computed on the backend from the same overlap logic
   // that decides which channels this hook's catalog carries, never
@@ -303,6 +310,7 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
     loading,
     error,
     observedError: data?.observed_error ?? null,
+    observedErrorCode: data?.observed_error_code ?? null,
     busy,
     rows,
     alreadyAvailable,

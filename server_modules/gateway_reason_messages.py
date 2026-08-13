@@ -83,6 +83,19 @@ _BROWSER_CAPABILITIES = {
     "browser.session.interrupt",
 }
 
+# openclaw_provisioning_service.OPENCLAW_PROVISION_CAPABILITY /
+# openclaw_channel_setup_service.OPENCLAW_CHANNEL_SETUP_CAPABILITY. Kept as a
+# literal pair here (this module must not import those services — they are
+# the CALLERS of gateway_reason_message, and importing them back would be a
+# cycle) rather than a shared constant. Without this branch, a capability-
+# missing openclaw action falls through to the generic message below, which
+# does two things wrong for this specific case: it names the raw capability
+# id verbatim ("openclaw.provision" is exactly as much an internal enum to a
+# customer as the reason token it replaces), and it says "Reconnect the
+# gateway, then retry" — a promise this action cannot keep, because the
+# transport was never installed and no amount of reconnecting installs it.
+_OPENCLAW_TRANSPORT_CAPABILITIES = {"openclaw.provision", "openclaw.channel_setup"}
+
 
 def _capability_missing_message(capability_id: str) -> str:
     normalized = _text(capability_id)
@@ -100,6 +113,13 @@ def _capability_missing_message(capability_id: str) -> str:
         )
     if normalized in _BROWSER_CAPABILITIES:
         return "Browser control isn't available on this machine yet. Reconnect the gateway, then retry."
+    if normalized in _OPENCLAW_TRANSPORT_CAPABILITIES:
+        # No "reconnect"/"retry" promise: the box is reachable (that check
+        # already passed), the channel transport has simply never been
+        # installed on it, and reconnecting cannot install it. One honest
+        # fact, no control implied — see FleetAgentDetail.tsx's toolbar,
+        # which renders no "Re-check this computer" button for this state.
+        return "Channels aren't set up on this computer yet."
     if normalized == "llm.generate":
         return (
             "No local model runtime is ready on this machine. Start Ollama, or sign in "
@@ -116,6 +136,11 @@ def _capability_not_ready_message(capability_id: str) -> str:
     normalized = _text(capability_id)
     if normalized in _DOCKER_GATED_CAPABILITIES:
         return "Docker is starting up on this machine but isn't ready yet. Wait a moment, then retry."
+    if normalized in _OPENCLAW_TRANSPORT_CAPABILITIES:
+        # Distinct from _capability_missing_message above: the box HAS
+        # advertised this one, it just isn't finished yet — "wait" is an
+        # honest instruction here in a way it is not for capability_missing.
+        return "This computer is still finishing channel setup. Wait a moment, then retry."
     if normalized:
         return f'"{normalized}" is registered on this machine but isn’t ready yet. Wait a moment, then retry.'
     return "This action's capability is registered but isn't ready yet. Wait a moment, then retry."
@@ -163,6 +188,20 @@ _FALLBACK_MESSAGE = (
     "This computer isn't ready for this action right now. Check its status on the Hardware page, then retry."
 )
 
+# Every reason token this module recognizes, from BOTH tables — the single
+# source callers use to tell "an internal token we can translate" from
+# "already-human prose from a different raise site on the same seam" (see
+# humanize_if_reason_token below). Also what
+# test_openclaw_readiness_reason_leak.py's drift test checks the PRODUCER
+# (gateway_execution_service.gateway_registration_execution_readiness)
+# against — enumerated by source-scanning that function rather than hand-
+# copied here, so a token added to the producer without a matching entry in
+# either table below fails that test loudly instead of leaking a raw token
+# to a customer screen.
+KNOWN_REASON_TOKENS: frozenset[str] = frozenset(_STATIC_REASON_MESSAGES) | frozenset(
+    _DYNAMIC_REASON_MESSAGE_BUILDERS
+)
+
 
 def gateway_reason_message(reason: object, *, capability_id: object = None) -> str:
     """Translates a gateway/hardware-action reason token into one plain-
@@ -184,3 +223,27 @@ def gateway_reason_message(reason: object, *, capability_id: object = None) -> s
     if builder:
         return builder(_text(capability_id))
     return _FALLBACK_MESSAGE
+
+
+def humanize_if_reason_token(raw_message: object, *, capability_id: object = None) -> str:
+    """Like gateway_reason_message() above, but for a caller that caught an
+    exception whose message MIGHT be one of this module's internal snake_case
+    tokens, or might already be human prose from a different raise site on
+    the same seam (e.g. `_require_active_gateway_registration` in
+    gateway_execution_service.py raises "Gateway registration was not
+    found." directly — already a sentence, not a token).
+
+    gateway_reason_message() itself cannot be reused for this: it must
+    degrade any UNRECOGNIZED input to the generic fallback (that is its own
+    contract, documented above), which would silently discard whatever
+    specific — and often already fine — prose the caller had. This function
+    only translates input that IS one of the known tokens; anything else
+    passes through byte-for-byte.
+
+    Never raises, for the same reason gateway_reason_message never does:
+    this sits on a failure path and must not introduce a second one.
+    """
+    text = _text(raw_message)
+    if text in KNOWN_REASON_TOKENS:
+        return gateway_reason_message(text, capability_id=capability_id)
+    return text

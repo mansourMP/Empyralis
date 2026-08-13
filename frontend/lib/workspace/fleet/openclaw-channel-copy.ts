@@ -201,3 +201,40 @@ export function remediationFor(
     detail: "Set up and switched on. A message arriving is what proves it.",
   };
 }
+
+/** The banner shown when this agent's box could not be asked for its own
+ *  channel state — GET .../setup failed. Two genuinely different facts hide
+ *  behind that one failure, and 2026-08-13's audit found them collapsed onto
+ *  one sentence AND one retry button:
+ *
+ *    "the box is offline / stale / unhealthy" — worth retrying, so the
+ *      toolbar's "Re-check this computer" button pairs with this banner.
+ *    "the box answered fine, but the channel transport was never installed
+ *      on it" (`gateway_capability_missing`) — the box is reachable, and no
+ *      amount of re-checking installs the transport. A control that cannot
+ *      work must not render (standing product law), so this banner pairs
+ *      with NO retry control at all.
+ *
+ *  Driven off the STRUCTURED `observed_error_code` the backend now sends
+ *  (gateway_reason_messages.KNOWN_REASON_TOKENS), never a text-match on the
+ *  human `observed_error` message — CLAUDE.md's "stale string matching"
+ *  rule. An unrecognized or missing code (an older response, or a genuinely
+ *  unclassified failure) degrades to the original "could not be reached"
+ *  copy, same as before this function existed. */
+export type OpenClawObservedErrorBanner = { text: string; retryable: boolean };
+
+export const OPENCLAW_UNREACHABLE_BANNER_TEXT =
+  "This agent's computer could not be reached, so some channels below show an unknown state. Their setup fields are still accurate.";
+
+export const OPENCLAW_CAPABILITY_MISSING_BANNER_TEXT = "Channels aren't set up on this computer yet.";
+
+export function openclawObservedErrorBanner(
+  observedError: string | null | undefined,
+  observedErrorCode: string | null | undefined,
+): OpenClawObservedErrorBanner | null {
+  if (!observedError) return null;
+  if (observedErrorCode === "gateway_capability_missing") {
+    return { text: OPENCLAW_CAPABILITY_MISSING_BANNER_TEXT, retryable: false };
+  }
+  return { text: OPENCLAW_UNREACHABLE_BANNER_TEXT, retryable: true };
+}

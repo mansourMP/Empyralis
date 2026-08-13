@@ -43,6 +43,7 @@ from server_modules import (
     agent_bindings_repository,
     agent_registry_repository,
     gateway_execution_service,
+    gateway_reason_messages,
     openclaw_channel_registry,
     personal_channels_service,
 )
@@ -64,11 +65,22 @@ DEFAULT_PROVISION_TIMEOUT_SECONDS = 180
 class OpenClawProvisioningError(RuntimeError):
     """Raised by provision_openclaw_gateway(); a route maps status_code +
     message straight into an HTTPException, same contract as
-    GatewayDoctorError."""
+    GatewayDoctorError.
 
-    def __init__(self, message: str, *, status_code: int = 400) -> None:
+    `reason_code`: the raw gateway_reason_messages token this error was
+    built from, when it was one — None for a validation-style error that was
+    already human prose to begin with (e.g. `_validate_credential_values`'s
+    raises in openclaw_channel_setup_service.py). `message` is ALWAYS
+    customer-facing text; `reason_code` is the structured fact a caller can
+    branch on (e.g. FleetAgentDetail.tsx deciding whether a retry control
+    makes sense) without resorting to matching on the message's words — see
+    CLAUDE.md's "stale string matching" rule.
+    """
+
+    def __init__(self, message: str, *, status_code: int = 400, reason_code: Optional[str] = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.reason_code = reason_code
 
 
 def openclaw_channel_id(channel_key: str) -> str:
@@ -290,8 +302,23 @@ async def provision_openclaw_gateway(
             timeout_seconds=DEFAULT_PROVISION_TIMEOUT_SECONDS,
         )
     except (ValueError, PermissionError) as exc:
+        # str(exc) here is EITHER already-human prose (most PermissionErrors,
+        # and some ValueErrors raised directly inside
+        # _require_active_gateway_registration) OR one of
+        # gateway_execution_service's internal snake_case readiness tokens
+        # (gateway_capability_missing, gateway_offline, ...) raised verbatim
+        # by execute_tool_via_gateway's own readiness check. Only the second
+        # kind gets translated — see humanize_if_reason_token's own
+        # docstring for why gateway_reason_message() itself cannot be reused
+        # here. Passing the raw token straight to a customer was exactly the
+        # 2026-08-13 audit's #2/#2b finding.
+        raw_reason = str(exc)
         raise OpenClawProvisioningError(
-            str(exc), status_code=403 if isinstance(exc, PermissionError) else 409
+            gateway_reason_messages.humanize_if_reason_token(
+                raw_reason, capability_id=OPENCLAW_PROVISION_CAPABILITY
+            ),
+            status_code=403 if isinstance(exc, PermissionError) else 409,
+            reason_code=raw_reason if raw_reason in gateway_reason_messages.KNOWN_REASON_TOKENS else None,
         ) from exc
 
     result = execution.get("result") if isinstance(execution.get("result"), dict) else {}

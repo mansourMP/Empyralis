@@ -320,12 +320,28 @@ export function FleetCreateAgentWizard({
     }
   }
 
+  // The ONE place a box picked in Placement also becomes the Brain step's
+  // pre-filled choice, so a customer who places the agent on a specific
+  // box never has to find and reselect that same box a step later when
+  // choosing "Your subscription"/"Run locally" — GatewayBoxPicker's own
+  // `value` is exactly this identifier space (gateway_id), same as
+  // nodeId()'s. Harmless to set even when the customer ends up choosing
+  // "Cloud only" instead: gatewayBinding is simply never read on that path.
+  // Before this existed, only two of five node-selection call sites
+  // (applyRecommendedSubscription and the post-pair "Use it as this
+  // agent's brain" CTA) did this — every other way of picking a box here
+  // silently dropped it.
+  function selectNode(id: string) {
+    setSelectedNodeId(id);
+    if (id) setGatewayBinding(id);
+  }
+
   async function handleVpsConnected() {
     setVpsPanelOpen(false);
     const before = new Set(nodes.map(nodeId));
     const after = await refreshNodes();
     const added = after.find((n) => n.hardware_kind === "cloud_vps" && !before.has(nodeId(n)));
-    if (added) setSelectedNodeId(nodeId(added));
+    if (added) selectNode(nodeId(added));
   }
 
   async function handleSshConnected() {
@@ -333,12 +349,12 @@ export function FleetCreateAgentWizard({
     const before = new Set(nodes.map(nodeId));
     const after = await refreshNodes();
     const added = after.find((n) => !before.has(nodeId(n)));
-    if (added) setSelectedNodeId(nodeId(added));
+    if (added) selectNode(nodeId(added));
   }
 
   function handleGatewayPaired(g: GatewayRegistrationRecord) {
     setShowGatewayPair(false);
-    setSelectedNodeId(String(g.gateway_id || ""));
+    selectNode(String(g.gateway_id || ""));
     void refreshNodes();
   }
 
@@ -598,7 +614,7 @@ export function FleetCreateAgentWizard({
                             key={nodeId(n)}
                             type="button"
                             className={`fleet-wizard-option${selectedNodeId === nodeId(n) ? " is-selected" : ""}`}
-                            onClick={() => setSelectedNodeId(nodeId(n))}
+                            onClick={() => selectNode(nodeId(n))}
                           >
                             <span className="fleet-wizard-option-label">{nodeLabel(n)}</span>
                             <span className="fleet-wizard-option-body">{nodeOnline(n) ? "Online" : "Offline"}</span>
@@ -640,7 +656,7 @@ export function FleetCreateAgentWizard({
                             key={nodeId(n)}
                             type="button"
                             className={`fleet-wizard-option${selectedNodeId === nodeId(n) ? " is-selected" : ""}`}
-                            onClick={() => setSelectedNodeId(nodeId(n))}
+                            onClick={() => selectNode(nodeId(n))}
                           >
                             <span className="fleet-wizard-option-label">{nodeLabel(n)}</span>
                             <span className="fleet-wizard-option-body">{nodeOnline(n) ? "Online" : "Offline"}</span>
@@ -670,8 +686,7 @@ export function FleetCreateAgentWizard({
                               type="button"
                               className="fleet-btn fleet-btn--accent"
                               onClick={() => {
-                                setSelectedNodeId(gid);
-                                setGatewayBinding(gid);
+                                selectNode(gid);
                                 setProviderMode("subscription");
                                 setShowGatewayPair(false);
                                 setStep(2);

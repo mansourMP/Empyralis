@@ -61,7 +61,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from server_modules import gateway_execution_service, openclaw_channel_registry
+from server_modules import gateway_execution_service, gateway_reason_messages, openclaw_channel_registry
 from server_modules.openclaw_provisioning_service import OpenClawProvisioningError
 
 OPENCLAW_CHANNEL_SETUP_CAPABILITY = "openclaw.channel_setup"
@@ -139,8 +139,20 @@ async def _invoke(
             timeout_seconds=DEFAULT_CHANNEL_SETUP_TIMEOUT_SECONDS,
         )
     except (ValueError, PermissionError) as exc:
+        # See openclaw_provisioning_service's identical comment: str(exc) is
+        # either already-human prose or one of gateway_execution_service's
+        # raw readiness tokens raised verbatim — only the second kind gets
+        # translated. This is the ONE call site both read_channel_setup_state
+        # and write_channel_credential funnel through, so fixing it here
+        # fixes the leak on both the channel-grid banner and the credential
+        # form's error text at once.
+        raw_reason = str(exc)
         raise OpenClawProvisioningError(
-            str(exc), status_code=403 if isinstance(exc, PermissionError) else 409
+            gateway_reason_messages.humanize_if_reason_token(
+                raw_reason, capability_id=OPENCLAW_CHANNEL_SETUP_CAPABILITY
+            ),
+            status_code=403 if isinstance(exc, PermissionError) else 409,
+            reason_code=raw_reason if raw_reason in gateway_reason_messages.KNOWN_REASON_TOKENS else None,
         ) from exc
     result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
     return {"gateway_id": gateway_id, "run_id": run_id, **result}
