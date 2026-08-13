@@ -2258,6 +2258,91 @@ def _resolve_agent_id_for_inbound(gateway_id: str, channel_key: str) -> str:
     return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
 
 
+async def agents_sharing_gateway(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    gateway_id: str,
+) -> List[str]:
+    """Every ENABLED agent install in this (tenant, workspace) whose own
+    install_metadata.preferred_gateway_id points at this gateway_id — i.e.
+    every agent legitimately placed on this box (CLAUDE.md: "AN AGENT
+    BELONGS TO ITS PROJECT AND WORKS ONLY THERE" is about project scope, not
+    hardware — one owner's several agents can share one gateway by design).
+
+    Extracted from what was inline in _resolve_local_bridge_agent_id's slow
+    path so the SAME "who is on this box" answer feeds both inbound
+    resolution (this module) and provisioning-conflict detection
+    (openclaw_provisioning_service.build_openclaw_channel_policies) — two
+    readers computing this independently would be exactly the "second
+    opinion that can disagree" shape this file warns about elsewhere.
+
+    Fails closed to an empty list on any read error or a blank gateway_id,
+    matching every other fail-closed reader on this path — a caller seeing
+    zero sharing agents falls back to its own single-agent behavior, never
+    to "assume nobody else is here" when the read simply failed."""
+    normalized_gateway_id = str(gateway_id or "").strip()
+    if not normalized_gateway_id:
+        return []
+    try:
+        from server_modules import agent_registry_repository as _repo
+
+        installs = await _repo.list_workspace_agent_installs(tenant_id=tenant_id, workspace_id=workspace_id)
+    except Exception:
+        _logger.warning(
+            "agents_sharing_gateway: preferred_gateway_id lookup failed for gateway_id=%s",
+            normalized_gateway_id, exc_info=True,
+        )
+        return []
+    return sorted({
+        str(install.get("id") or "").strip()
+        for install in installs
+        if isinstance(install, dict)
+        and bool(install.get("enabled"))
+        and str((install.get("metadata") or {}).get("preferred_gateway_id") or "").strip() == normalized_gateway_id
+        and str(install.get("id") or "").strip()
+    })
+
+
+async def agents_bound_to_channel(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    candidate_agent_ids: List[str],
+    channel_key: str,
+) -> List[str]:
+    """Which of candidate_agent_ids holds an ENABLED agent_channel_bindings
+    row for this exact channel_key — the channel-specific narrowing that
+    agents_sharing_gateway alone cannot provide (two agents can share a box
+    without sharing a channel). Order of candidate_agent_ids is preserved
+    among matches. Fails closed per-agent: a read error for one candidate
+    excludes only that candidate rather than aborting the whole answer,
+    matching channels_in_use's own "fewer channels, never more" posture."""
+    if not candidate_agent_ids:
+        return []
+    from server_modules import agent_bindings_repository
+
+    normalized_channel_key = str(channel_key or "").strip()
+    owners: List[str] = []
+    for candidate_id in candidate_agent_ids:
+        try:
+            bindings = await agent_bindings_repository.list_agent_channel_bindings(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_install_id=candidate_id,
+                enabled_only=True,
+            )
+        except Exception:
+            _logger.warning(
+                "agents_bound_to_channel: binding lookup failed for agent_id=%s channel=%s",
+                candidate_id, normalized_channel_key, exc_info=True,
+            )
+            continue
+        if any(str((row or {}).get("key") or "").strip() == normalized_channel_key for row in bindings or []):
+            owners.append(candidate_id)
+    return owners
+
+
 async def _resolve_local_bridge_agent_id(
     *,
     gateway_id: str,
@@ -2293,21 +2378,44 @@ async def _resolve_local_bridge_agent_id(
 
     Slow path (only runs until the fast path has something to find):
     reverse-scans this gateway's own tenant/workspace fleet for agent
-    installs whose preferred_gateway_id equals this gateway_id. Exactly one
-    match claims and persists a row (personal_channel_local_bridge_states),
-    so every later message on this gateway+channel hits the fast path
-    instead. Zero or multiple matches is genuinely ambiguous (no agent has
-    claimed this box, or more than one has — the "multi-agent-per-box" case
-    noted in find_agent_id_for_telegram_session's own docstring as not yet
-    resolvable) — returns LEGACY_UNSCOPED_AGENT_ID and claims nothing, so a
-    later, unambiguous state doesn't have a wrong row to override.
+    installs whose preferred_gateway_id equals this gateway_id
+    (agents_sharing_gateway), THEN narrows by which of those agents actually
+    holds an enabled binding for THIS channel_key (agents_bound_to_channel).
+
+    The narrowing step is the fix for a real regression this shipped with:
+    two agents legitimately sharing one box (agent A on Telegram, agent B on
+    Discord — the ordinary, working multi-agent-per-box case) used to make
+    EVERY local-bridge/OpenClaw channel on that box permanently ambiguous
+    the moment the second agent's preferred_gateway_id was set, because the
+    old check only asked "how many agents prefer this gateway" and never
+    "which of them actually use this channel" — so adding an unrelated
+    second agent to a box silently broke the first agent's already-working
+    channel, forever (ambiguous resolves to unscoped, which claims nothing,
+    so the NEXT message hits the same broken check again). Narrowing by
+    channel-specific binding first, and only falling back to the broader
+    "who shares this box" set when nobody has an enabled binding yet (a
+    genuinely fresh, unclaimed channel), fixes that without weakening the
+    real conflict case: if two DIFFERENT agents both hold an enabled binding
+    for the SAME channel_key — the one configuration OpenClaw's own schema
+    genuinely cannot express (a channel node is a single account, verified
+    against the pinned build's own config schema, never a named-accounts
+    map) — this still resolves ambiguous and fails closed, exactly as
+    before.
+
+    Exactly one match claims and persists a row
+    (personal_channel_local_bridge_states), so every later message on this
+    gateway+channel hits the fast path instead. Zero or multiple matches is
+    genuinely ambiguous (no agent has claimed this channel, or more than one
+    conflicting agent has) — returns LEGACY_UNSCOPED_AGENT_ID and claims
+    nothing, so a later, unambiguous state doesn't have a wrong row to
+    override.
 
     UNLIKE WhatsApp/Telegram's own ambiguous-lookup fallback (which only
     costs specialist-scoping — the turn still runs as Sage), an unresolved
     result here also denies the group/DM gates by construction (see
     _unresolved_identity_group_policy_config / _unresolved_identity_dm_policy_config)
     rather than defaulting open — there is no "the owner already configured
-    this specific agent" story to lean on for a gateway nobody has claimed,
+    this specific agent" story to lean on for a channel nobody has claimed,
     or that more than one agent claims."""
     resolved = _resolve_agent_id_for_inbound(gateway_id, channel_key)
     if resolved and resolved != personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID:
@@ -2317,31 +2425,33 @@ async def _resolve_local_bridge_agent_id(
         return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
     tenant_id = str(registration.get("tenant_id") or "default").strip() or "default"
     workspace_id = str(registration.get("workspace_id") or "default").strip() or "default"
-    try:
-        from server_modules import agent_registry_repository as _repo
-
-        installs = await _repo.list_workspace_agent_installs(tenant_id=tenant_id, workspace_id=workspace_id)
-    except Exception:
-        _logger.warning(
-            "local_bridge: preferred_gateway_id lookup failed for gateway_id=%s channel=%s",
-            normalized_gateway_id, channel_key, exc_info=True,
+    matches = await agents_sharing_gateway(
+        tenant_id=tenant_id, workspace_id=workspace_id, gateway_id=normalized_gateway_id,
+    )
+    if len(matches) > 1:
+        # Narrow "shares this box" down to "actually uses this channel" —
+        # see the docstring above for why this step exists. An empty result
+        # here means nobody has an enabled binding for this channel_key yet
+        # (a fresh, unclaimed channel on a shared box); keep the broader set
+        # in that case so the pre-existing ambiguity-denial below still
+        # applies rather than silently resolving to nothing.
+        channel_owners = await agents_bound_to_channel(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            candidate_agent_ids=matches,
+            channel_key=channel_key,
         )
-        return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
-    matches = sorted({
-        str(install.get("id") or "").strip()
-        for install in installs
-        if isinstance(install, dict)
-        and bool(install.get("enabled"))
-        and str((install.get("metadata") or {}).get("preferred_gateway_id") or "").strip() == normalized_gateway_id
-        and str(install.get("id") or "").strip()
-    })
+        if channel_owners:
+            matches = channel_owners
     if len(matches) != 1:
         if len(matches) > 1:
             _logger.warning(
-                "local_bridge: gateway_id=%s is preferred_gateway_id for %d agents (%s) — "
-                "ambiguous, leaving channel=%s identity unresolved (fails closed rather than "
-                "guessing which agent owns it).",
-                normalized_gateway_id, len(matches), matches, channel_key,
+                "local_bridge: gateway_id=%s channel=%s has %d conflicting agent claims (%s) — "
+                "ambiguous, leaving identity unresolved (fails closed rather than guessing which "
+                "agent owns it). OpenClaw's own config schema cannot express two accounts on one "
+                "channel node; this is a real configuration conflict, not a false positive from "
+                "box-sharing alone.",
+                normalized_gateway_id, channel_key, len(matches), matches,
             )
         return personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID
     resolved_agent_id = matches[0]

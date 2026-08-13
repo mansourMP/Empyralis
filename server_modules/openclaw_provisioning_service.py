@@ -175,11 +175,63 @@ async def channels_in_use(
     return in_use
 
 
+async def _resolve_channel_owners_for_gateway(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    gateway_id: str,
+) -> Dict[str, List[str]]:
+    """channel_key -> agent_ids (among the agents that share this gateway,
+    i.e. install_metadata.preferred_gateway_id == gateway_id) that hold an
+    ENABLED agent_channel_bindings row for it.
+
+    Empty when gateway_id is blank or fewer than two agents share this
+    gateway — the ordinary single-agent-per-box case is untouched and costs
+    nothing extra. One entry per channel with more than zero owners; a
+    channel with exactly one owner is unambiguous (compose using that
+    agent's policy — see the caller), a channel with more than one owner is
+    a real conflict OpenClaw's own config schema cannot express (verified
+    against the pinned build's own `openclaw config schema`: every channel
+    node is a single account, never a named-accounts map).
+
+    ONE binding read per gateway-sharing agent, not one per channel — a
+    provisioning call touches every OpenClaw channel, so this is computed
+    once and reused, never re-derived per channel."""
+    if not str(gateway_id or "").strip():
+        return {}
+    gateway_agents = await personal_channels_service.agents_sharing_gateway(
+        tenant_id=tenant_id, workspace_id=workspace_id, gateway_id=gateway_id,
+    )
+    if len(gateway_agents) <= 1:
+        return {}
+    owners: Dict[str, List[str]] = {}
+    for candidate_id in gateway_agents:
+        try:
+            bindings = await agent_bindings_repository.list_agent_channel_bindings(
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_install_id=candidate_id,
+                enabled_only=True,
+            )
+        except Exception:
+            _logger.warning(
+                "openclaw provisioning: binding lookup failed for gateway_id=%s candidate agent_id=%s",
+                gateway_id, candidate_id, exc_info=True,
+            )
+            continue
+        for row in bindings or []:
+            key = str((row or {}).get("key") or "").strip()
+            if key in personal_channels_service.OPENCLAW_PERSONAL_CHANNELS:
+                owners.setdefault(key, []).append(candidate_id)
+    return owners
+
+
 async def build_openclaw_channel_policies(
     *,
     tenant_id: str,
     workspace_id: str,
     agent_id: str,
+    gateway_id: str = "",
     install_channel_keys: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """The full policy set for every OpenClaw-transported channel, read
@@ -199,13 +251,52 @@ async def build_openclaw_channel_policies(
     provisioning run left in OpenClaw's config — the stale derived artifact
     this whole step exists to eliminate.
 
+    MULTI-AGENT-PER-BOX (gateway_id): provisioning writes ONE config file for
+    the whole box, and — before this — always rendered EVERY channel from the
+    CALLING agent's own policy, even for a channel a different agent on the
+    same gateway actually owns. Whichever agent provisioned most recently
+    silently overwrote every other agent's channel with its own (often
+    fail-closed-default) policy — a working channel could go dark because a
+    completely unrelated agent on the same box saved an unrelated setting.
+    When gateway_id is given, each channel's policy is now read from
+    whichever agent on this SAME gateway actually holds the enabled binding
+    for it (_resolve_channel_owners_for_gateway), falling back to the
+    calling agent only for channels nobody on this gateway has claimed yet.
+    Two agents on one box using two DIFFERENT channels now compose correctly
+    instead of racing to overwrite each other. Two agents both claiming the
+    SAME channel is a genuine conflict — see OpenClawProvisioningConflictError
+    below — because OpenClaw's config has no way to hold two accounts on one
+    channel node; provisioning refuses rather than silently picking one.
+    Callers that omit gateway_id (or pass "") get the prior single-agent
+    behavior exactly as before, at zero extra cost.
+
     `install_plugin` is the ONE per-channel axis that is narrowed, and it is a
     different question entirely: not "what may this channel do" but "does this
     box need this channel's third-party plugin package on disk". See
     channels_in_use(). `install_channel_keys` force-adds to that set, which is
     how an explicit setup action ("connect Feishu") brings a channel up before
-    any binding or stored policy exists for it.
+    any binding or stored policy exists for it. A channel composed from a
+    DIFFERENT agent's binding also folds that agent's own channels_in_use into
+    the install set — otherwise a box with two agents where only the first
+    ever calls provision would never fetch the second agent's channel plugin.
     """
+    channel_owners = await _resolve_channel_owners_for_gateway(
+        tenant_id=tenant_id, workspace_id=workspace_id, gateway_id=gateway_id,
+    )
+    conflicts = {key: owners for key, owners in channel_owners.items() if len(owners) > 1}
+    if conflicts:
+        detail = "; ".join(
+            f"{key} is claimed by {len(owners)} agents ({', '.join(sorted(owners))})"
+            for key, owners in sorted(conflicts.items())
+        )
+        raise OpenClawProvisioningError(
+            "This computer's OpenClaw channel transport cannot be provisioned: more than one "
+            f"agent on this gateway holds an enabled binding for the same channel — {detail}. "
+            "OpenClaw supports exactly one account per channel. Disable the channel binding for "
+            "every agent except the one that should own it, then provision again.",
+            status_code=409,
+        )
+
     requested = {
         str(key or "").strip()
         for key in (install_channel_keys or [])
@@ -214,18 +305,35 @@ async def build_openclaw_channel_policies(
     install_keys = requested | await channels_in_use(
         tenant_id=tenant_id, workspace_id=workspace_id, agent_id=agent_id
     )
+    other_owning_agents = {
+        owner_id
+        for owners in channel_owners.values()
+        for owner_id in owners
+        if owner_id != agent_id
+    }
+    for other_agent_id in other_owning_agents:
+        install_keys |= await channels_in_use(
+            tenant_id=tenant_id, workspace_id=workspace_id, agent_id=other_agent_id
+        )
+
     policies: List[Dict[str, Any]] = []
     for channel_key in sorted(personal_channels_service.OPENCLAW_PERSONAL_CHANNELS):
+        owners = channel_owners.get(channel_key) or []
+        # Exactly one non-conflicting owner on this gateway -> compose using
+        # THEIR policy. No owner yet (or gateway_id not given) -> the calling
+        # agent's own policy, unchanged from before this function knew about
+        # sharing.
+        policy_agent_id = owners[0] if len(owners) == 1 else agent_id
         dm_policy = await personal_channels_service._load_agent_dm_policy_config(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
-            agent_id=agent_id,
+            agent_id=policy_agent_id,
             channel_key=channel_key,
         )
         group_policy = await personal_channels_service._load_agent_group_policy_config(
             tenant_id=tenant_id,
             workspace_id=workspace_id,
-            agent_id=agent_id,
+            agent_id=policy_agent_id,
             channel_key=channel_key,
         )
         policies.append(
@@ -275,6 +383,7 @@ async def provision_openclaw_gateway(
         tenant_id=tenant_id,
         workspace_id=workspace_id,
         agent_id=agent_id,
+        gateway_id=gateway_id,
         install_channel_keys=install_channel_keys,
     )
     try:
@@ -315,10 +424,18 @@ async def reconcile_openclaw_policy_best_effort(
     and the box re-asserts it from its own provisioning record on every boot
     (OpenClawProvisioningRuntime.reconcileFromLastAppliedPolicy), so an offline
     or unpaired gateway must never turn a successful settings change into a
-    500. Returns None when the push could not be attempted; returns the box's
-    result otherwise — including a `disabled_channels` entry when the setting
-    they just chose is one OpenClaw cannot carry, which is the ONLY moment that
-    fact can be put in front of them (the messages it affects are dropped
+    500. Returns None when the push could not be attempted — including when
+    build_openclaw_channel_policies refuses because a DIFFERENT agent on this
+    same gateway already holds the enabled binding for this channel (see its
+    own docstring); the specific "why", including which agent conflicts,
+    is in the log line this swallows, not in this function's return value.
+    A caller that needs to explain the refusal to the owner should call
+    provision_openclaw_gateway directly (as the explicit "provision" action
+    already does) rather than read anything into a None here. Returns the
+    box's result otherwise — including a `disabled_channels` entry when the
+    setting they just chose is one OpenClaw cannot carry, which is the ONLY
+    moment that fact can be put in front of them (the messages it affects
+    are dropped
     before Empyralis ever sees them).
 
     Not a fire-and-forget task on purpose: the caller surfaces the result.

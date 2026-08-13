@@ -3093,3 +3093,136 @@ and both bugs need their own careful verification (which Next.js
 instance/build is actually serving that route; whether the gateway release
 pipeline needs to bundle the `openclaw/provisioning` output) rather than a
 guess fixed under time pressure.
+
+## Multi-agent-per-box (2026-08-13) — one gateway, N agents, verified
+
+The founder's own question: does one Agent Computer correctly serve several
+of his agents on different accounts/channels at once, or was a previous
+agent's reassurance wrong. Verdict per sub-question, established from code
+and from the pinned OpenClaw build's own generated manifest
+(`server_modules/openclaw_channel_manifest.json`), not from a prior claim.
+
+**1. One gateway, N agents IS the real architecture — nothing on the live
+path assumes one agent per box.** `agent_channel_bindings` keys on
+`(agent_install_id, channel_key)`, not on `gateway_id`; a gateway's
+`owner_user_id` is a PERSON, and any of that person's agents can point
+`install_metadata.preferred_gateway_id` at the same box —
+`POST .../openclaw/gateways/{gateway_id}/provision` takes `agent_id` as a
+separate, required parameter precisely because many agents are expected to
+call it against one `gateway_id` over time. Confirmed true.
+
+**2. Two agents CANNOT each hold their own account on the SAME channel
+type. This is a hard OpenClaw limitation, not an Empyralis choice.**
+Checked every one of the 27 channels in the generated manifest — zero
+"accounts"-shaped fields anywhere; `channels.<id>.*` is a flat node with
+scalar credential fields (`botToken`, `appId`, ...), never a named-accounts
+map. `googlechat.serviceAccount` and `sms.accountSid` are single-credential
+field names, not evidence of multiplicity. OpenClaw's own error text
+("Feishu account \"default\" not configured") is their hardcoded label for
+the ONE slot a channel node has, not a name a customer chooses. Two agents
+both wanting `openclaw_telegram` is therefore not fixable by writing better
+Empyralis code — it needs N separate OpenClaw instances per box, out of
+scope here. Confirmed false, and now understood precisely rather than
+guessed at.
+
+**3. Provisioning DID silently clobber, confirmed and FIXED.**
+`build_openclaw_channel_policies` rendered EVERY OpenClaw channel from the
+CALLING agent's own policy alone, and `openclaw.provision` on the box is a
+full-replace render (`OpenClawProvisioningRuntime.runProvision` ->
+`OpenClawProvisioner.provision()`, `lastAppliedChannelPolicies()` persists
+only the most recent call). So the ordinary, WORKING multi-agent case
+(agent A on Telegram, agent B on Feishu, same box) was silently broken:
+whichever agent provisioned last overwrote every channel, including ones it
+never touched, with its own fail-closed default — a working channel could
+go dark because an unrelated agent on the same box saved an unrelated
+setting. Fixed in `server_modules/openclaw_provisioning_service.py`:
+`build_openclaw_channel_policies` now takes an optional `gateway_id` and,
+when given, discovers which OTHER agent on the same gateway holds the
+enabled binding for each channel (`_resolve_channel_owners_for_gateway`,
+one binding read per gateway-sharing agent, not per channel) and composes
+that channel's policy from THAT agent's identity instead of the caller's.
+Two agents on different channels now compose correctly. Two agents BOTH
+claiming the same channel — the one case OpenClaw's schema (point 2) cannot
+express — refuses the WHOLE provisioning call with `OpenClawProvisioningError`
+(409, names the channel and both agent ids) rather than silently picking a
+winner, consistent with the pre-existing "every channel, always, never a
+partial push" design this module already had. `provision_openclaw_gateway`
+and `reconcile_openclaw_policy_best_effort` both thread `gateway_id` through
+automatically — no route changes were needed, both the explicit "Set up"
+action and the auto-reconcile-after-save path get the fix for free.
+`reconcile_openclaw_policy_best_effort` is best-effort and swallows a
+conflict into `None` exactly like an offline box — the specific "which two
+agents conflict" detail is in the log line, not in that function's return
+value; a caller that needs to explain the refusal to the owner should call
+`provision_openclaw_gateway` directly. Surfacing the conflict distinctly
+through the reconcile path's own return contract is a smaller, separate
+follow-up, not done here.
+
+**4. Inbound routing DID misattribute, confirmed and FIXED — and the
+codebase already knew about it.** `find_agent_id_for_telegram_session`'s own
+docstring said, verbatim, "well-defined as long as only one agent's session
+is live per gateway+channel... not built yet" for the multi-agent case —
+honest, but the consequence was worse than the docstring implied.
+`_resolve_local_bridge_agent_id`'s slow path (which OpenClaw-transported
+channels use too — `LOCAL_BRIDGE_PERSONAL_CHANNELS.update
+(OPENCLAW_PERSONAL_CHANNELS)`) narrowed ambiguity by asking "how many
+agents prefer this gateway", never "which of them actually use THIS
+channel". So the moment a SECOND, completely unrelated agent was placed on
+a box (any reason — it never had to touch channels at all), the FIRST
+agent's already-working channel became permanently ambiguous: the check
+denied and claimed nothing, so the identical false ambiguity fired again on
+every subsequent message, forever. Fixed with two new shared functions in
+`personal_channels_service.py` — `agents_sharing_gateway` (the existing
+`preferred_gateway_id` reverse-scan, extracted so both the inbound resolver
+and the provisioning-conflict check in point 3 compute "who shares this
+box" identically, never as two independently-drifting opinions) and
+`agents_bound_to_channel` (which of a candidate set holds an ENABLED
+binding for one specific `channel_key`). The slow path now narrows by
+channel-specific binding FIRST and only falls back to the broader "shares
+this box" ambiguity check when nobody has claimed the channel yet — so
+sharing a box no longer breaks an unrelated already-working channel, while
+two agents genuinely claiming the SAME channel (point 2's real conflict)
+still fails closed exactly as before.
+
+**5. Outbound identity and seq allocation needed no fix — verified, not
+assumed.** `gateway_protocol_service.dispatch_channel_outbound` has no
+`agent_id` parameter at all, and that is CORRECT rather than a gap: point 2
+establishes there is only ever one identity per channel per box, so there
+is nothing for an agent id to select between at the outbound layer — the
+identity question is fully resolved upstream, at point 4's inbound
+resolution, which is what decides which agent's turn runs and therefore
+which agent's reply reaches `dispatch_channel_outbound` in the first place.
+Idempotency keys are built from `external_message_id`/`gateway_id`/
+`channel_key`, never agent_id, which is the right scope for the same
+reason. `GatewayCheckpoints.allocateClientSeq()` (the seq-race fix recorded
+elsewhere in this file) is a WS-transport frame counter, correctly
+agent-agnostic — it orders FRAMES on one shared loopback session, not
+identities, and needed no change here.
+
+**Both fixes are unit-tested, red-before-green** (the pre-fix file swapped
+in via `git show HEAD:<path>`, confirmed 5 new tests fail with the OLD
+behavior and only those 5, then the fix restored and all 111 tests across
+the personal-channel/OpenClaw test surface pass) — see
+`server_modules/tests/test_openclaw_provisioning_service.py` (the
+composition/conflict tests) and
+`server_modules/tests/test_local_bridge_agent_identity.py` (the inbound
+narrowing/conflict tests).
+
+**What real hardware would still be needed to prove, and was NOT provable
+locally in this pass:** everything above is verified against the generated
+OpenClaw manifest (itself generated from the pinned build, per the
+"OpenClaw's config is a DERIVED ARTIFACT" entry above) and against mocked
+repository-layer unit tests — never against a live OpenClaw process. Two
+things specifically cannot be proven without a real box and a real
+credential: (a) that `openclaw config patch` on a real installed instance
+actually rejects or silently drops a second `channels.<id>` write the way
+the schema's shape implies rather than erroring in some other way — the
+manifest proves the SHAPE has no accounts field, not the RUNTIME behavior
+of writing to it twice; (b) end-to-end, that two real agents on one real
+box, one on a real Telegram bot and one on a real Discord webhook, actually
+deliver and reply correctly through this fix on hardware, not just in a
+mocked unit test. Both need a real DigitalOcean-provisioned Agent Computer
+and at minimum one real channel credential (a Telegram bot token is the
+cheapest) — not attempted here per this session's constraints (no paid
+droplet, no company spend, no credential requested from the founder,
+without asking first).

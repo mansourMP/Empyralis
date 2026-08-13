@@ -229,6 +229,203 @@ def test_reconcile_is_a_no_op_for_a_non_openclaw_channel(monkeypatch):
         )
 
 
+# ── multi-agent-per-box: composing across agents that share one gateway ───
+#
+# Before this fix, build_openclaw_channel_policies always rendered EVERY
+# channel from the CALLING agent's own policy alone. Two agents sharing a
+# box (agent A on Telegram, agent B on Feishu -- the ordinary, working case
+# the founder asked about) silently fought over the box's one config file:
+# whichever agent provisioned most recently overwrote every channel,
+# including ones it never touched, with its own fail-closed default. These
+# tests prove the fix -- gateway_id lets the function discover which OTHER
+# agent on the same box owns a channel and compose using THEIR policy -- and
+# prove the one case that must still refuse: two agents both claiming the
+# SAME channel, which OpenClaw's own config schema (verified against the
+# pinned build's `openclaw config schema`: one credential per channel node,
+# never a named-accounts map) genuinely cannot express.
+
+
+def _stub_gateway_sharing(monkeypatch, *, installs, bindings_by_agent):
+    async def fake_installs(*, tenant_id, workspace_id):
+        return installs
+
+    async def fake_bindings(*, tenant_id, workspace_id, agent_install_id, enabled_only):
+        assert enabled_only is True
+        return [{"key": key} for key in bindings_by_agent.get(agent_install_id, [])]
+
+    monkeypatch.setattr(
+        "server_modules.agent_registry_repository.list_workspace_agent_installs",
+        fake_installs,
+    )
+    monkeypatch.setattr(
+        openclaw_provisioning_service.agent_bindings_repository,
+        "list_agent_channel_bindings",
+        fake_bindings,
+    )
+
+
+def test_gateway_id_omitted_keeps_the_prior_single_agent_behavior(monkeypatch):
+    """No gateway_id -> no sharing lookup at all, proven by leaving
+    agent_registry_repository.list_workspace_agent_installs unmocked and
+    still succeeding. Every existing caller that never passes gateway_id
+    (the default) is unaffected by this change."""
+
+    async def fake_dm(*, tenant_id, workspace_id, agent_id, channel_key):
+        assert agent_id == "agent-a"
+        return {"mode": "owner_only", "allowlist": [], "pending_pairing": {}}
+
+    async def fake_group(*, tenant_id, workspace_id, agent_id, channel_key):
+        assert agent_id == "agent-a"
+        return {"mode": "disabled", "allowlist": [], "require_mention": True}
+
+    monkeypatch.setattr(personal_channels_service, "_load_agent_dm_policy_config", fake_dm)
+    monkeypatch.setattr(personal_channels_service, "_load_agent_group_policy_config", fake_group)
+
+    policies = _run(
+        openclaw_provisioning_service.build_openclaw_channel_policies(
+            tenant_id="t", workspace_id="w", agent_id="agent-a",
+        )
+    )
+    assert len(policies) == len(personal_channels_service.OPENCLAW_PERSONAL_CHANNELS)
+
+
+def test_a_lone_agent_on_its_gateway_is_unaffected(monkeypatch):
+    """Only one agent shares the gateway -- agents_sharing_gateway's result
+    has length <= 1, so the per-channel binding lookup is skipped entirely,
+    proven by never mocking agent_bindings_repository at all here."""
+    installs = [{"id": "agent-solo", "enabled": True, "metadata": {"preferred_gateway_id": "gw-solo"}}]
+
+    async def fake_installs(*, tenant_id, workspace_id):
+        return installs
+
+    async def fake_dm(*, tenant_id, workspace_id, agent_id, channel_key):
+        assert agent_id == "agent-solo"
+        return {"mode": "owner_only", "allowlist": [], "pending_pairing": {}}
+
+    async def fake_group(*, tenant_id, workspace_id, agent_id, channel_key):
+        assert agent_id == "agent-solo"
+        return {"mode": "disabled", "allowlist": [], "require_mention": True}
+
+    monkeypatch.setattr(
+        "server_modules.agent_registry_repository.list_workspace_agent_installs", fake_installs,
+    )
+    monkeypatch.setattr(personal_channels_service, "_load_agent_dm_policy_config", fake_dm)
+    monkeypatch.setattr(personal_channels_service, "_load_agent_group_policy_config", fake_group)
+
+    policies = _run(
+        openclaw_provisioning_service.build_openclaw_channel_policies(
+            tenant_id="t", workspace_id="w", agent_id="agent-solo", gateway_id="gw-solo",
+        )
+    )
+    assert len(policies) == len(personal_channels_service.OPENCLAW_PERSONAL_CHANNELS)
+
+
+def test_composes_a_different_agents_policy_for_a_channel_it_owns_on_the_shared_gateway(monkeypatch):
+    """The core fix. agent-a provisions the gateway; agent-b shares it and
+    owns openclaw_feishu. agent-a's own provisioning run must render
+    openclaw_feishu from agent-b's policy, never agent-a's -- and every
+    other channel (nobody else claims them) still renders from agent-a's
+    own, exactly as before this fix existed."""
+    installs = [
+        {"id": "agent-a", "enabled": True, "metadata": {"preferred_gateway_id": "gw-shared"}},
+        {"id": "agent-b", "enabled": True, "metadata": {"preferred_gateway_id": "gw-shared"}},
+    ]
+    _stub_gateway_sharing(
+        monkeypatch, installs=installs, bindings_by_agent={"agent-b": ["openclaw_feishu"]},
+    )
+
+    seen_agent_ids_for_feishu: List[str] = []
+
+    async def fake_dm(*, tenant_id, workspace_id, agent_id, channel_key):
+        if channel_key == "openclaw_feishu":
+            seen_agent_ids_for_feishu.append(agent_id)
+        return {"mode": "owner_only", "allowlist": [], "pending_pairing": {}}
+
+    async def fake_group(*, tenant_id, workspace_id, agent_id, channel_key):
+        return {"mode": "disabled", "allowlist": [], "require_mention": True}
+
+    monkeypatch.setattr(personal_channels_service, "_load_agent_dm_policy_config", fake_dm)
+    monkeypatch.setattr(personal_channels_service, "_load_agent_group_policy_config", fake_group)
+
+    policies = _run(
+        openclaw_provisioning_service.build_openclaw_channel_policies(
+            tenant_id="t", workspace_id="w", agent_id="agent-a", gateway_id="gw-shared",
+        )
+    )
+    assert len(policies) == len(personal_channels_service.OPENCLAW_PERSONAL_CHANNELS)
+    # openclaw_feishu's policy was read under agent-b's identity, never agent-a's
+    # -- the clobber this fix exists to close.
+    assert seen_agent_ids_for_feishu == ["agent-b"]
+    feishu = next(p for p in policies if p["channel_key"] == "openclaw_feishu")
+    # Folded in from agent-b's own channels_in_use, not agent-a's -- else a box
+    # where only agent-a ever calls provision would never fetch agent-b's plugin.
+    assert feishu["install_plugin"] is True
+
+
+def test_refuses_to_provision_when_two_agents_claim_the_same_channel(monkeypatch):
+    """The genuine conflict OpenClaw's own config schema cannot express.
+    Must refuse the WHOLE call before reading any per-channel policy --
+    partially provisioning from an unresolvable channel is the same
+    stale-artifact failure the "every channel, always" design already
+    guards against, just from a different direction."""
+    installs = [
+        {"id": "agent-a", "enabled": True, "metadata": {"preferred_gateway_id": "gw-conflict"}},
+        {"id": "agent-b", "enabled": True, "metadata": {"preferred_gateway_id": "gw-conflict"}},
+    ]
+    _stub_gateway_sharing(
+        monkeypatch, installs=installs,
+        bindings_by_agent={"agent-a": ["openclaw_feishu"], "agent-b": ["openclaw_feishu"]},
+    )
+
+    async def should_not_run(*args, **kwargs):  # pragma: no cover - must never execute
+        raise AssertionError("must refuse before reading any per-channel policy")
+
+    monkeypatch.setattr(personal_channels_service, "_load_agent_dm_policy_config", should_not_run)
+    monkeypatch.setattr(personal_channels_service, "_load_agent_group_policy_config", should_not_run)
+
+    with pytest.raises(openclaw_provisioning_service.OpenClawProvisioningError) as excinfo:
+        _run(
+            openclaw_provisioning_service.build_openclaw_channel_policies(
+                tenant_id="t", workspace_id="w", agent_id="agent-a", gateway_id="gw-conflict",
+            )
+        )
+    assert excinfo.value.status_code == 409
+    assert "openclaw_feishu" in str(excinfo.value)
+    assert "agent-a" in str(excinfo.value) and "agent-b" in str(excinfo.value)
+
+
+def test_provision_openclaw_gateway_threads_gateway_id_into_the_conflict_check(monkeypatch):
+    """The wiring, not just the primitive: provision_openclaw_gateway (the
+    function every route/reconcile call actually goes through) must pass
+    its own gateway_id into build_openclaw_channel_policies, or the
+    conflict check above is dead code no real caller reaches."""
+    installs = [
+        {"id": "agent-a", "enabled": True, "metadata": {"preferred_gateway_id": "gw-wired"}},
+        {"id": "agent-b", "enabled": True, "metadata": {"preferred_gateway_id": "gw-wired"}},
+    ]
+    _stub_gateway_sharing(
+        monkeypatch, installs=installs,
+        bindings_by_agent={"agent-a": ["openclaw_feishu"], "agent-b": ["openclaw_feishu"]},
+    )
+
+    async def should_not_run(**kwargs):  # pragma: no cover - must never execute
+        raise AssertionError("gateway_execution_service must not be reached on a refused conflict")
+
+    monkeypatch.setattr(
+        openclaw_provisioning_service.gateway_execution_service,
+        "execute_tool_via_gateway",
+        should_not_run,
+    )
+
+    with pytest.raises(openclaw_provisioning_service.OpenClawProvisioningError) as excinfo:
+        _run(
+            openclaw_provisioning_service.provision_openclaw_gateway(
+                gateway_id="gw-wired", tenant_id="t", workspace_id="w", agent_id="agent-a",
+            )
+        )
+    assert excinfo.value.status_code == 409
+
+
 # ── which channels get their PLUGIN installed (step 5) ────────────────────
 #
 # Twenty of OpenClaw's twenty-seven channels are separate npm packages. Policy
