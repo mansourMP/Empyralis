@@ -139,15 +139,32 @@ def get_inline_shortcuts() -> list[str]:
 async def _is_sender_owner(sender_id: str, workspace_id: str) -> bool:
     """Check if *sender_id* is the workspace owner.
 
-    Matches *sender_id* against the workspace's identity_links — the same
-    owner-linkage triage_service.resolve_sender_identity() checks for channel
-    sender classification (identity_links[channel_type] = {user_id,
-    sender_hash}). Deliberately channel-agnostic: this signature has no
-    channel_origin, and a sender_id (a Telegram numeric id, a Discord
-    snowflake, ...) is not expected to collide across channel types, so a
-    match on ANY linked channel is treated as owner. Fails to False (not
-    owner) on any missing input or lookup error — an owner-gated command
-    must never execute for a sender we couldn't positively identify.
+    Two independent checks, either one is sufficient:
+
+    1. ``created_by_user_id`` — the workspace's own platform-account owner
+       column (control_plane_repository.get_workspace_by_id's Postgres
+       SELECT always returns it). This is the one that matters for the WEB
+       surface: a browser session's ``sender_id`` is the authenticated
+       platform user's own id (direct_chat_runtime_service.build_direct_
+       operator_reply passes session_ctx["current_user"]'s id), which was
+       never linked into any channel's identity_links and would otherwise
+       never match anything below — leaving every owner-gated command
+       (/config /mcp /plugins /debug /bash) silently unreachable on web,
+       for the owner included, with the raw command text falling through
+       to the model as literal chat. See this module's own docstring/the
+       audit that found this.
+    2. ``identity_links`` — matches *sender_id* against the workspace's
+       identity_links (identity_links[channel_type] = {user_id,
+       sender_hash} — the same owner-linkage triage_service.
+       resolve_sender_identity() checks for channel sender classification).
+       Deliberately channel-agnostic: this signature has no channel_origin,
+       and a sender_id (a Telegram numeric id, a Discord snowflake, ...) is
+       not expected to collide across channel types, so a match on ANY
+       linked channel is treated as owner.
+
+    Fails to False (not owner) on any missing input or lookup error — an
+    owner-gated command must never execute for a sender we couldn't
+    positively identify.
     """
     clean_sender_id = str(sender_id or "").strip()
     clean_workspace_id = str(workspace_id or "").strip()
@@ -161,6 +178,10 @@ async def _is_sender_owner(sender_id: str, workspace_id: str) -> bool:
         return False
     if not isinstance(workspace, dict):
         return False
+
+    created_by_user_id = str(workspace.get("created_by_user_id") or "").strip()
+    if created_by_user_id and created_by_user_id == clean_sender_id:
+        return True
 
     raw_links = workspace.get("identity_links")
     identity_links: Dict[str, Any] = {}
