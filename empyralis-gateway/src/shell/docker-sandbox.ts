@@ -100,7 +100,21 @@ export interface BuildDockerRunArgsOptions {
 
 /** Self-contained hardened `docker run` argv (mirrors build_hardened_docker_command). */
 export function buildDockerRunArgs(options: BuildDockerRunArgsOptions): string[] {
-  const args: string[] = ["run", "--rm"];
+  // `-i` is required for spawnDockerRun's `stdin` option to reach the
+  // container at all. Without it, `docker run` closes the container's
+  // stdin immediately regardless of what the parent Node process writes to
+  // the `docker` CLI's own stdin pipe — verified directly against the
+  // daemon: `echo x | docker run --rm alpine sh -c 'cat > f; wc -c f'`
+  // writes a 0-byte file without `-i`, 2 bytes with it. That silently broke
+  // filesystem.read_write's sandbox WRITE/APPEND mode (runtime.ts's
+  // filesystemInnerArgs uses `cat > "$1"` / `cat >> "$1"`, both stdin-fed):
+  // the call reported success with the real exit code and no stderr, while
+  // writing an empty file — an "empty string is not a decision" failure,
+  // undetected because shell.execute (this function's only OTHER caller)
+  // never uses stdin, so no real-Docker test exercised this path. Harmless
+  // for shell.execute and filesystem READ: spawnDockerRun always calls
+  // `child.stdin.end()`, so an unused, always-open stdin just gets EOF.
+  const args: string[] = ["run", "--rm", "-i"];
   if (options.readOnly ?? true) {
     args.push("--read-only");
   }
