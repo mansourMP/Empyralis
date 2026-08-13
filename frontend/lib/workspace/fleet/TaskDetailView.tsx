@@ -280,6 +280,7 @@ function activityActorLabel(
   event: TaskActivityEvent,
   agents: FleetAgent[],
   members?: WorkspaceMember[],
+  identityLookupFailed?: boolean,
 ): string {
   const resolved = resolveEitherActor(event.actor_id, agents, members || []);
   if (resolved) {
@@ -290,6 +291,11 @@ function activityActorLabel(
   const name = String(event.actor_name || "").trim();
   const id = String(event.actor_id || "").trim();
   if (name && name !== id) return name;
+  // "Someone" claims nobody identifiable did this — true only when the
+  // lookup actually ran and came up empty. When the lookup itself failed to
+  // load, there IS a real actor; we just don't have the roster to name them
+  // right now, which is a different, non-anonymous fact.
+  if (identityLookupFailed) return "Couldn't load who";
   return "Someone";
 }
 
@@ -482,6 +488,7 @@ export function TaskDetailView({
   onSubTaskCreated,
   onLabelsChanged,
   onCommentPosted,
+  identityLookupFailed,
 }: {
   task: FleetTask;
   /** Agents in this project — valid AGENT assignees. */
@@ -539,6 +546,18 @@ export function TaskDetailView({
    *  not part of the task PATCH, so the composer below writes directly and
    *  then asks the page to re-read the (30s-polled) task list. */
   onCommentPosted?: () => void | Promise<void>;
+  /** True when the agents/members lookup itself failed to load (a network
+   *  blip, an expired session) rather than loaded and genuinely found no
+   *  match. Found live 2026-08-13: on a stale/expiring session, `agents`/
+   *  `members` silently resolved to empty arrays and every actor on this
+   *  page — including the task's own creator, moments after they created
+   *  it — rendered as "Someone" / vanished from Created by, indistinguishable
+   *  from a genuinely-anonymous system action. Identity attribution is
+   *  central to this product's review-not-approve model, so a fetch
+   *  failure must present as a fetch failure, never as an anonymous actor.
+   *  See resolveEitherActor's callers below for how this changes the
+   *  fallback. */
+  identityLookupFailed?: boolean;
 }) {
   const router = useRouter();
   const headingRef = useRef<HTMLHeadingElement | null>(null);
@@ -1190,7 +1209,7 @@ export function TaskDetailView({
                       const ts = e.timestamp || "";
                       return (
                         <li key={`evt-${i}`} className="fleet-task-page-activity-event">
-                          <span className="fleet-activity-actor">{activityActorLabel(e, agents, members)}</span>
+                          <span className="fleet-activity-actor">{activityActorLabel(e, agents, members, identityLookupFailed)}</span>
                           {" "}
                           <span className="fleet-activity-action">{describeActivity(e)}</span>
                           {ts ? (
@@ -1542,10 +1561,15 @@ export function TaskDetailView({
           </div>
 
           {/* "Created by" — omitted outright, not shown as "Unknown", when
-              task.created_by is empty or doesn't resolve to anyone still in
-              `agents`/`members` (see resolveEitherActor and the file header's
-              ATTRIBUTION note). Real identity only, same avatar+name shape
-              as Assignee above — never the raw id. */}
+              task.created_by is genuinely EMPTY (see resolveEitherActor and
+              the file header's ATTRIBUTION note). Real identity only, same
+              avatar+name shape as Assignee above — never the raw id. But an
+              empty createdByActor with a non-empty task.created_by AND a
+              failed lookup is a different fact: a real creator exists and
+              we simply couldn't load who — found live 2026-08-13 under an
+              expiring session, where this row silently vanished for a task
+              created moments earlier by the viewer's own account. Render
+              that honestly instead of erasing the row. */}
           {createdByActor ? (
             <div className="fleet-panel-row">
               <span className="fleet-panel-row-label">
@@ -1555,6 +1579,14 @@ export function TaskDetailView({
               <span className="fleet-task-detail-control">
                 <TaskActorBadge actor={createdByActor} />
               </span>
+            </div>
+          ) : identityLookupFailed && task.created_by ? (
+            <div className="fleet-panel-row">
+              <span className="fleet-panel-row-label">
+                <span className="fleet-panel-row-icon"><UserPlus size={15} strokeWidth={1.75} /></span>
+                <span>Created by</span>
+              </span>
+              <span className="fleet-panel-row-value fleet-panel-row-value--muted">Couldn't load who</span>
             </div>
           ) : null}
 
@@ -1587,6 +1619,14 @@ export function TaskDetailView({
               <span className="fleet-task-detail-control">
                 <TaskActorBadge actor={completedByActor} />
               </span>
+            </div>
+          ) : identityLookupFailed && task.status === "done" && (task.completed_by_agent_id || task.completed_by_user_id) ? (
+            <div className="fleet-panel-row">
+              <span className="fleet-panel-row-label">
+                <span className="fleet-panel-row-icon"><CheckCircle2 size={15} strokeWidth={1.75} /></span>
+                <span>Completed by</span>
+              </span>
+              <span className="fleet-panel-row-value fleet-panel-row-value--muted">Couldn't load who</span>
             </div>
           ) : null}
 
