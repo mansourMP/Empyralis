@@ -777,10 +777,29 @@ def build_direct_operator_reply(
     if slash_command_name:
         from server_modules.command_registry import dispatch_sync as _cmd_dispatch
 
+        # sender_id: the authenticated platform user's own id — required for
+        # command_registry._is_sender_owner to ever return True on this
+        # surface. Its absence here meant EVERY owner-gated command
+        # (/config /mcp /plugins /debug /bash) silently failed the owner
+        # check for every web caller, including the workspace's own owner —
+        # dispatch() returned None and the raw command text fell through as
+        # literal chat text to the model (the "silent misrouting beats loud
+        # failure" shape). session_ctx["current_user"] is the same dict this
+        # module already reads elsewhere for auth/role checks (see this
+        # file's own current_user usage above) — "user_id" first, "id" as
+        # the same defensive fallback every other call site in this
+        # codebase uses.
+        _web_current_user = (
+            session_ctx.get("current_user")
+            if isinstance(session_ctx, dict) and isinstance(session_ctx.get("current_user"), dict)
+            else {}
+        )
+        _web_sender_id = str(_web_current_user.get("user_id") or _web_current_user.get("id") or "").strip()
         slash_payload = _cmd_dispatch(
             text=f"/{slash_command_name} {slash_remainder}".strip(),
             workspace_id=normalized_workspace_id,
             surface="web",
+            sender_id=_web_sender_id,
             services=services.direct_chat_response_services,
             availability_payload=availability_payload,
             connected_systems=connected_systems,
@@ -792,6 +811,45 @@ def build_direct_operator_reply(
             slash_payload.setdefault("suggestions", proactive_suggestions)
             print(f"[DR_EXIT] ws={normalized_workspace_id} EXIT=registry_command cmd={slash_command_name}", flush=True)
             yield {"type": "final", "payload": slash_payload}
+            return
+        # dispatch_sync returned None. That means one of TWO different
+        # things, and they must not be handled the same way:
+        #   1. slash_command_name is not a real registered command at all —
+        #      the message merely started with "/" (parse_slash_command has
+        #      no registry awareness — see its own docstring). This is
+        #      ordinary chat text ("/etc/passwd contains...", "/help me
+        #      think through X") and must fall through unchanged, exactly
+        #      as before this fix.
+        #   2. slash_command_name IS a real command, but its own scope
+        #      excludes "web" or its owner-gate refused this sender
+        #      (command_registry.dispatch's own comment: it returns None
+        #      rather than raising specifically so an unauthorized sender
+        #      isn't told the command exists). Falling through here would
+        #      hand the raw command text — potentially a real /bash
+        #      argument — to the model as if it were an ordinary question,
+        #      and the customer who typed a real command gets a confusing
+        #      unrelated chat reply instead of any signal their command
+        #      didn't run. That is the "silent misrouting beats loud
+        #      failure" shape this fix exists to close.
+        # Case 2 is answered here, honestly but without over-explaining
+        # (never the raw command text, never a mechanism-level reason) —
+        # case 1 is left completely alone.
+        from server_modules import command_registry as _command_registry
+
+        if _command_registry.get(slash_command_name) is not None:
+            print(
+                f"[DR_EXIT] ws={normalized_workspace_id} EXIT=registry_command_blocked cmd={slash_command_name}",
+                flush=True,
+            )
+            yield {
+                "type": "final",
+                "payload": {
+                    "reply": "That command isn't available to you on this workspace.",
+                    "actions": [],
+                    "mode": "answer",
+                    "suggestions": proactive_suggestions,
+                },
+            }
             return
     print(f"[DR_DBG] ws={normalized_workspace_id} thread={normalized_thread_id} msg_len={len(normalized_message)} provider={normalized_requested_provider} model={normalized_requested_model} availability.ai_ready={availability_payload.get('ai_ready')} credential_plane={availability_payload.get('credential_plane')} host_tier={availability_payload.get('ai_tier')} tools={len(tools)} max_iter={resolved_chat_max_iterations}", flush=True)
 

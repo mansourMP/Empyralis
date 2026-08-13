@@ -86,6 +86,41 @@ class IsSenderOwnerTests(unittest.TestCase):
         ):
             self.assertFalse(_run(command_registry._is_sender_owner("tg-owner-123", "ws-1")))
 
+    def test_matches_workspace_created_by_user_id_for_the_web_surface(self):
+        """The web surface's sender_id is the authenticated platform user's
+        own id — never a channel identity, so identity_links can never
+        match it. Before this fix every owner-gated command silently
+        failed the owner check for every web caller, including the actual
+        workspace owner."""
+        workspace = {"created_by_user_id": "user-abc-123", "identity_links": {}}
+        with patch(
+            "server_modules.control_plane_repository.get_workspace_by_id",
+            new=AsyncMock(return_value=workspace),
+        ):
+            self.assertTrue(_run(command_registry._is_sender_owner("user-abc-123", "ws-1")))
+
+    def test_created_by_user_id_mismatch_falls_through_to_identity_links(self):
+        """A workspace member who did not create the workspace but IS
+        linked as a channel owner (an edge case, but the two checks must
+        not shadow each other) still resolves as owner."""
+        workspace = {
+            "created_by_user_id": "someone-else",
+            "identity_links": {"telegram_personal": {"user_id": "tg-owner-123"}},
+        }
+        with patch(
+            "server_modules.control_plane_repository.get_workspace_by_id",
+            new=AsyncMock(return_value=workspace),
+        ):
+            self.assertTrue(_run(command_registry._is_sender_owner("tg-owner-123", "ws-1")))
+
+    def test_neither_created_by_user_id_nor_identity_links_match_is_false(self):
+        workspace = {"created_by_user_id": "someone-else", "identity_links": {}}
+        with patch(
+            "server_modules.control_plane_repository.get_workspace_by_id",
+            new=AsyncMock(return_value=workspace),
+        ):
+            self.assertFalse(_run(command_registry._is_sender_owner("user-abc-123", "ws-1")))
+
 
 class OwnerGatedDispatchTests(unittest.TestCase):
     """End-to-end proof that dispatch() gates access via the fixed

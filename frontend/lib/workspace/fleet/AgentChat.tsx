@@ -43,6 +43,67 @@ const ENVELOPE_PLATFORM_LABELS = new Set([
   "Discord", "Slack", "GitHub", "SMS", "Console", "API",
 ]);
 
+// ── Slash command discoverability ───────────────────────────────────────────
+//
+// 22 commands (command_registry.py's own _register_builtins) are fully
+// reachable from this composer (direct_chat_runtime_service.py's slash
+// dispatch — see build_direct_operator_reply) with NO affordance anywhere
+// telling a customer they exist. A hint, not a new surface: a small
+// filtered list appears above the textarea while the draft starts with "/",
+// click-to-fill, nothing more. Names/descriptions are a hand-kept mirror of
+// command_registry.py's own `register(...)` calls — there is no generated
+// source for this yet (unlike e.g. openclaw_channel_manifest.json), so this
+// is a real drift risk if a command is added/renamed there and not here;
+// flagged rather than silently accepted as permanent. `owner` marks the
+// four admin commands (access="owner") so the hint can say so rather than
+// let someone discover the gate only after typing the whole thing.
+type SlashCommandHint = { name: string; description: string; owner?: boolean };
+const SLASH_COMMAND_HINTS: SlashCommandHint[] = [
+  { name: "new", description: "Start a new task session" },
+  { name: "main", description: "Return to the main thread" },
+  { name: "compact", description: "Summarise and clear old context" },
+  { name: "stop", description: "Abort the current run" },
+  { name: "clear", description: "Clear conversation history for this thread" },
+  { name: "export", description: "Export session data" },
+  { name: "model", description: "Set the AI model, or show available models" },
+  { name: "thinking", description: "Set thinking effort level (off|minimal|low|medium|high)" },
+  { name: "help", description: "Show available commands" },
+  { name: "commands", description: "Show full command catalog" },
+  { name: "tools", description: "Show what the agent can use right now" },
+  { name: "status", description: "Report AI readiness and connected providers" },
+  { name: "whoami", description: "Show your sender ID" },
+  { name: "usage", description: "Show token and cost summary" },
+  { name: "memory", description: "View saved memory entries for this workspace" },
+  { name: "forget", description: "Delete a memory entry by key" },
+  { name: "tasks", description: "List background tasks" },
+  { name: "agents", description: "List sub-agents for this session" },
+  { name: "skills", description: "List or run available skills" },
+  { name: "config", description: "Read or write configuration", owner: true },
+  { name: "mcp", description: "Manage MCP server configuration", owner: true },
+  { name: "plugins", description: "Manage plugins", owner: true },
+  { name: "debug", description: "Runtime-only config overrides", owner: true },
+  { name: "tts", description: "Text-to-speech control" },
+  { name: "bash", description: "Execute a host shell command", owner: true },
+];
+
+/** Matches ONLY a standalone leading command — the same shape
+ *  direct_chat_entry_service.parse_slash_command requires ("/" then the
+ *  first whitespace-delimited token) — so a message that merely mentions a
+ *  slash mid-sentence never triggers this. Empty query (just "/" typed so
+ *  far) returns the full list; a query that matches no real command
+ *  (a normal sentence starting with a word after "/") returns none, so the
+ *  hint disappears rather than showing an irrelevant list. */
+function matchingSlashCommandHints(draft: string): SlashCommandHint[] {
+  const trimmed = draft.trimStart();
+  if (!trimmed.startsWith("/") || trimmed.includes("\n")) return [];
+  // Once the token after "/" is followed by whitespace, the customer has
+  // moved on to arguments — the hint's job (helping pick a command) is
+  // done, so it disappears rather than sitting there stale.
+  if (/^\/\S+\s/.test(trimmed)) return [];
+  const query = trimmed.slice(1).toLowerCase();
+  return SLASH_COMMAND_HINTS.filter((c) => c.name.startsWith(query));
+}
+
 /**
  * Drop the server's attribution header from a message before showing it.
  *
@@ -1214,6 +1275,16 @@ export function AgentChat({
     }
   };
 
+  // Discoverability only — see SLASH_COMMAND_HINTS' own comment. Recomputed
+  // from `draft` on every keystroke via matchingSlashCommandHints (a pure
+  // function), so there is no separate "is the hint open" state to fall out
+  // of sync with what's actually typed.
+  const slashCommandHints = useMemo(() => matchingSlashCommandHints(draft), [draft]);
+  const applySlashCommandHint = useCallback((name: string) => {
+    setDraft(`/${name} `);
+    textareaRef.current?.focus();
+  }, []);
+
   const onAttachClick = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
@@ -1332,6 +1403,32 @@ export function AgentChat({
           Fleet agent (agentInstallId + agent both set) — Sage's own
           workspace-wide chat has no model_config to control. */}
       <div className="fleet-sage-chat-composer">
+        {slashCommandHints.length > 0 && (
+          <div
+            className="fleet-toolbar-popover fleet-composer-popover fleet-slash-command-hints"
+            role="listbox"
+            aria-label="Matching commands"
+          >
+            {slashCommandHints.map((cmd) => (
+              <button
+                key={cmd.name}
+                type="button"
+                role="option"
+                className="fleet-slash-command-hint-option"
+                // onMouseDown (not onClick) fires before the textarea's own
+                // blur — a plain onClick would let the blur run first and
+                // the click never lands on a control that's about to
+                // unmount when this list's own visibility depends on the
+                // textarea staying focused-with-content.
+                onMouseDown={(e) => { e.preventDefault(); applySlashCommandHint(cmd.name); }}
+              >
+                <span className="fleet-slash-command-hint-name">/{cmd.name}</span>
+                <span className="fleet-slash-command-hint-description">{cmd.description}</span>
+                {cmd.owner && <span className="fleet-slash-command-hint-owner-badge">owner</span>}
+              </button>
+            ))}
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           className="fleet-sage-chat-input"

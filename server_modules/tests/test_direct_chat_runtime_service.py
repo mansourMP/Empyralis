@@ -379,6 +379,108 @@ class DirectChatRuntimeServiceTests(unittest.TestCase):
             ],
         )
 
+    def _slash_command_prepared(self, *, slash_command_name: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            tool_registry=[],  # see module-level MAN-139 note near the top of this file
+            normalized_message=f"/{slash_command_name}",
+            normalized_workspace_id="default",
+            normalized_thread_id="thread-1",
+            normalized_requested_provider="openai",
+            normalized_requested_model="gpt-5.4",
+            normalized_reasoning_effort="medium",
+            compaction={},
+            compacted_prior_messages=[],
+            proactive_suggestions=[],
+            tool_loop_session_key="loop",
+            availability_payload={"ai_ready": True},
+            connected_systems=[],
+            tool_capabilities=[],
+            tools=[],
+            approved_action_payload=None,
+            base_context_used={"workspace_id": "default"},
+            slash_command_name=slash_command_name,
+            slash_remainder="",
+            resolved_chat_max_iterations=3,
+        )
+
+    def test_web_slash_dispatch_passes_the_authenticated_user_as_sender_id(self) -> None:
+        """The bug this fix closes: command_registry.dispatch_sync was
+        called with no sender_id at all, so command_registry._is_sender_
+        owner could never return True on the web surface — every
+        owner-gated command silently failed for every web caller,
+        including the workspace's own owner."""
+        prepared = self._slash_command_prepared(slash_command_name="help")
+        services = self._runtime_services(prepared)
+        services.prepare_direct_chat_request = lambda **kwargs: prepared
+
+        captured_dispatch_kwargs: dict[str, object] = {}
+
+        def _fake_dispatch_sync(**kwargs):
+            captured_dispatch_kwargs.update(kwargs)
+            return {"reply": "help text"}
+
+        with mock.patch(
+            "server_modules.command_registry.dispatch_sync", side_effect=_fake_dispatch_sync,
+        ):
+            list(
+                direct_chat_runtime_service.build_direct_operator_reply(
+                    services=services,
+                    message="/help",
+                    workspace_id="default",
+                    requested_model="gpt-5.4",
+                    requested_provider="openai",
+                    session_ctx={"current_user": {"user_id": "user-abc-123", "email": "owner@example.com"}},
+                )
+            )
+
+        self.assertEqual(captured_dispatch_kwargs.get("sender_id"), "user-abc-123")
+
+    def test_owner_gated_command_blocked_for_non_owner_never_reaches_generation(self) -> None:
+        """A REAL owner-gated command ("/config"), dispatched through the
+        REAL command_registry (only get_workspace_by_id is mocked, to a
+        workspace this sender does not own). Before this fix the raw
+        command text fell through to the model as an ordinary chat
+        message — asserted here by tripwiring every generation-path lambda
+        in the services fixture to fail the test if called at all."""
+        prepared = self._slash_command_prepared(slash_command_name="config")
+        services = self._runtime_services(prepared)
+        services.prepare_direct_chat_request = lambda **kwargs: prepared
+
+        def _tripwire(*_args, **_kwargs):
+            self.fail("generation path reached — the blocked command's text leaked through as chat")
+
+        import dataclasses as _dataclasses
+
+        services.resolve_provider_for_direct_chat_message = _tripwire
+        services.plan_direct_chat_route = _tripwire
+        services.direct_chat_generation_services = direct_chat_generation_service.DirectChatGenerationServices(
+            **{
+                field.name: _tripwire
+                for field in _dataclasses.fields(direct_chat_generation_service.DirectChatGenerationServices)
+            }
+        )
+
+        with mock.patch(
+            "server_modules.control_plane_repository.get_workspace_by_id",
+            new=mock.AsyncMock(return_value={"created_by_user_id": "someone-else", "identity_links": {}}),
+        ):
+            events = list(
+                direct_chat_runtime_service.build_direct_operator_reply(
+                    services=services,
+                    message="/config",
+                    workspace_id="default",
+                    requested_model="gpt-5.4",
+                    requested_provider="openai",
+                    session_ctx={"current_user": {"user_id": "not-the-owner"}},
+                )
+            )
+
+        final_events = [e for e in events if e.get("type") == "final"]
+        self.assertEqual(len(final_events), 1)
+        reply_text = str(final_events[0]["payload"].get("reply") or "")
+        self.assertNotIn("config", reply_text.lower())
+        self.assertIn("isn't available", reply_text.lower())
+
     def test_build_chat_turn_event_stream_prefers_request_meta_turn_request(self) -> None:
         captured: dict[str, object] = {}
         services = self._runtime_services(SimpleNamespace())
