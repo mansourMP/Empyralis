@@ -84,7 +84,7 @@ assertEqual(safeExternalImageSrc("//evil.example.com/x.png"), null, "img src: pr
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..", "..");
 
-type Seam = { file: string; sinkPattern: RegExp; guardPattern: RegExp; label: string };
+type Seam = { file: string; sinkPattern: RegExp; guardPattern: RegExp; rawSinkPattern: RegExp; label: string };
 
 const SEAMS: Seam[] = [
   {
@@ -95,6 +95,7 @@ const SEAMS: Seam[] = [
     file: "lib/workspace/chat-message.tsx",
     sinkPattern: /href=\{(?:href|a\.url)\}/,
     guardPattern: /safeExternalHref\(a\.url\)/,
+    rawSinkPattern: /href=\{a\.url\}/,
     label: "chat-message.tsx: attachment chip href is guarded by safeExternalHref",
   },
   {
@@ -104,7 +105,23 @@ const SEAMS: Seam[] = [
     file: "app/(account)/w/[workspaceId]/hardware/[gatewayId]/page.tsx",
     sinkPattern: /href=\{safeUrl\}/,
     guardPattern: /safeExternalHref\(urlText\)/,
+    rawSinkPattern: /href=\{urlText\}/,
     label: "hardware page: CLI login URL href is guarded by safeExternalHref",
+  },
+  {
+    // A turn's `metadata.action_href` reaching a Next <Link href>. No
+    // producer sets this field anywhere in server_modules today (grepped),
+    // so this branch is dead on the live path — but the render seam does
+    // not know that, same reasoning as the attachment chip above: turn
+    // metadata is data a future producer can populate, not a literal this
+    // component authored, and an unguarded `<Link href={actionHref}>`
+    // would execute `javascript:`/`data:` the moment anything starts
+    // setting the field (security review, 2026-08-13).
+    file: "lib/workspace/chat-message.tsx",
+    sinkPattern: /href=\{safeActionHref\}/,
+    guardPattern: /safeExternalHref\(actionHref\)/,
+    rawSinkPattern: /href=\{actionHref\}/,
+    label: "chat-message.tsx: provider_error action_href is guarded by safeExternalHref",
   },
 ];
 
@@ -116,12 +133,7 @@ for (const seam of SEAMS) {
   // sanitized value, reaches href in this seam -- an unguarded second href
   // reading the raw field directly would slip past a guard-presence check
   // alone (the guard could be dead code sitting next to a live raw sink).
-  const rawSinkPatterns: RegExp[] = seam.file.includes("chat-message")
-    ? [/href=\{a\.url\}/]
-    : [/href=\{urlText\}/];
-  for (const rawSink of rawSinkPatterns) {
-    assert(!rawSink.test(source), `${seam.label} (no remaining unguarded raw href)`);
-  }
+  assert(!seam.rawSinkPattern.test(source), `${seam.label} (no remaining unguarded raw href)`);
 }
 
 // The module itself must never be bypassed by a same-shaped local
