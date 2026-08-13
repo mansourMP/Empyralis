@@ -91,7 +91,12 @@ export default function JoinWorkspaceInvitePage() {
       if (bootstrap) {
         actions.replaceSession(bootstrap);
       }
-      router.replace(`/w/${encodeURIComponent(result.workspace_id)}/agents`);
+      // Bare workspace route, not /agents (project-as-spine nav, 2026-08-13
+      // — Agents is no longer a top-level, linked destination): this is
+      // FleetHome, the genuine landing page, and it works at any agent
+      // count, including the zero a person just-invited-in almost always
+      // has.
+      router.replace(`/w/${encodeURIComponent(result.workspace_id)}`);
     })();
     return () => { cancelled = true; };
     // `actions` is intentionally excluded: it's a new object identity on
@@ -159,7 +164,7 @@ export default function JoinWorkspaceInvitePage() {
           <div className="invite-landing__actions">
             <AppButton
               tone="primary"
-              onClick={() => router.push(workspaceId ? `/w/${encodeURIComponent(workspaceId)}/agents` : '/')}
+              onClick={() => router.push(workspaceId ? `/w/${encodeURIComponent(workspaceId)}` : '/')}
             >
               Continue to workspace
             </AppButton>
