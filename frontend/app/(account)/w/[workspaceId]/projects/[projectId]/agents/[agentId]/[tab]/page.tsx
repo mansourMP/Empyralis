@@ -8,7 +8,12 @@ import { FleetAgentDetail } from "@/lib/workspace/fleet/FleetAgentDetail";
 import { useBreadcrumbLabel, useBreadcrumbIcon } from "@/lib/workspace/fleet/Breadcrumbs";
 import { ProjectIcon } from "@/lib/workspace/fleet/fleet-project-identity";
 
-const VALID_TABS = ["overview", "work", "channels", "connectors", "tools", "capabilities", "hardware", "model", "skills", "memory", "chat"] as const;
+// "overview" is deliberately absent — Overview was removed outright
+// (FleetAgentDetail.tsx's own TABS comment). A stale bookmark/deep-link to
+// it isn't a dead page: rawTab's own fallback below coerces any
+// unrecognized tab string to "chat" (the agent's front door), the same
+// graceful landing every other typo'd tab already gets.
+const VALID_TABS = ["general", "work", "channels", "connectors", "tools", "capabilities", "hardware", "model", "skills", "memory", "chat"] as const;
 type Tab = (typeof VALID_TABS)[number];
 
 export default function AgentDetailPage() {

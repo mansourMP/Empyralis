@@ -1,120 +1,93 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState } from "react";
 import Link from "next/link";
 
 import { Bot, Radio, Plug, Cpu } from "lucide-react";
 
-import { resolveAgentProjectId, useFleetAgents, useFleetProjects, useWorkspaceActivity, useWorkspaceStatusStrip, type FleetProject } from "./fleet-data";
-import { FleetCard } from "./FleetCard";
+import { useFleetAgents, useFleetProjects, useWorkspaceActivity, useWorkspaceStatusStrip, type FleetProject } from "./fleet-data";
 import { FleetCreateAgentWizard } from "./FleetCreateAgentWizard";
 import { TelegramPairPanel } from "./TelegramPairPanel";
-import { isSageAgent, toAgentSummary, formatDateTime } from "./fleet-presentation";
-import { useWorkspaceGateways } from "./gateway-box-picker";
-import { planAgentCountShape } from "./agent-count-shape";
+import { findSageAgent, formatDateTime } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
 
+/**
+ * The workspace home — finishing project-as-spine (CLAUDE.md, 2026-08-13):
+ * "The workspace home should be the workspace — its projects and the work
+ * in them — not a roster of all agents." This used to map every real agent
+ * across every project into one `.fleet-grid` of `FleetCard`s under "Your
+ * fleet · N agents · M online" — the exact cross-project aggregation
+ * `primary-rail-nav.ts` already removed Conversations/Agents from the rail
+ * to get away from, just re-grown one page over. Gone outright, not
+ * softened: this page's shape now turns on PROJECT count, never agent
+ * count — projects are the workspace's OWN data, not a view of the fleet.
+ *
+ * The fleet-wide agent grid also carried the founder's separately-flagged
+ * bug: it rendered inside plain `.fleet-content`, capped at
+ * `--content-max` (820px, a READING width — see theme-tokens.css's own
+ * comment) and centred, so on a wide screen it sat in a narrow column with
+ * dead space either side. The replacement grid below is a card grid, not a
+ * reading column, so it composes `.fleet-content--wide`
+ * (`--content-max-wide`, 1140px) instead — the class that already exists
+ * for exactly this shape (ProjectsPage/ProjectDetailPage's own
+ * `.fleet-content-main` use it too).
+ */
 export function FleetHome({ workspaceId }: { workspaceId: string }) {
   const { agents, loading, error, refresh } = useFleetAgents(workspaceId);
-  // Fetched once here (not per-card) — resolveHardwarePlacement needs it for
-  // every card's "where does this run" line.
-  const { gateways } = useWorkspaceGateways(workspaceId);
-  const { projects } = useFleetProjects(workspaceId);
+  const { projects, loading: projectsLoading } = useFleetProjects(workspaceId);
   const [wizardOpen, setWizardOpen] = useState(false);
-  const router = useRouter();
 
   const base = `/w/${encodeURIComponent(workspaceId)}`;
-  // Selecting an agent opens its routed detail page (was a modal). Agents
-  // created before the projects feature existed can have a blank project_id
-  // (nullable column, never backfilled) — resolveAgentProjectId falls back
-  // to the workspace default so the card still opens instead of silently
-  // doing nothing.
-  const goToAgentTab = (agentId: string, tab = "chat") => {
-    const a = agents.find((x) => x.agent_id === agentId);
-    const pid = resolveAgentProjectId(a?.project_id, projects);
-    if (!pid) return;
-    router.push(`${base}/projects/${encodeURIComponent(pid)}/agents/${encodeURIComponent(agentId)}/${tab}`);
-  };
+
   // Sage is now a corner console (SageLauncher), not a routed page.
   // Dispatch an event that FleetShell listens for to open the console.
   const openSageConsole = () =>
     window.dispatchEvent(new CustomEvent("fleet:open-sage"));
 
-  const mapped = agents.map((a, i) => toAgentSummary(a, i));
-  const sageAgent = mapped.find(isSageAgent);
-  // The REAL agent count — Sage/the Operator is never a listed worker (same
-  // exclusion AgentsList/PrimaryRail/the command palette already apply).
-  // Every fleet_list_agents response carries the workspace's Operator
-  // install from the moment the workspace exists (include_master=True on
-  // the backend), so `mapped.length` alone is NEVER zero for a real
-  // workspace — a brand-new account's header used to read "1 agent · 0
-  // online" and the grid rendered as a blank void instead of the "start
-  // your first agent" teaching state, because the old `mapped.length === 0`
-  // check could never be true. Fixed here, and it's the same count MAN-317's
-  // mode decision needs anyway.
-  const otherAgents = mapped.filter((a) => a !== sageAgent);
-  const onlineCount = otherAgents.filter((a) => a.hardwareStatus === "online").length;
-
-  // MAN-317 — the count decides the shape, never a tier check. See
-  // agent-count-shape.ts for the rule and why each threshold is where it is.
-  const mode = planAgentCountShape(otherAgents.length);
-
-  // SOLO DOES NOT REDIRECT AWAY FROM HERE, and that is a deliberate
-  // departure from MAN-317's "Directions worth exploring" (which suggested
-  // the agent's own conversation becomes the landing at one agent).
-  //
-  // This route IS the workspace home. CLAUDE.md's positioning entry is the
-  // senior instruction and it is unambiguous: "The WORKSPACE is the product.
-  // The agent layer is the second thing, not the headline... never lead with
-  // agents." A redirect here would mean a customer with exactly one agent —
-  // the overwhelmingly common case, and the one this ticket is about — can
-  // never reach their own projects, documents and tasks from the front door.
-  // It would also undo the landing fix shipped hours earlier the same day,
-  // which stopped fresh accounts being dropped into an agent surface instead
-  // of their workspace.
-  //
-  // The ticket's actual complaint is narrower than the direction it proposed:
-  // "the Agents list is a fleet-management table (Agent / Brain / Placement /
-  // Channels / Last active / Cost / Status) showing exactly one row. A table
-  // of one is worse than no table." That table is `/agents`, not this page —
-  // and THAT is where the solo redirect belongs and still lives. This page
-  // renders a card grid, which is perfectly reasonable holding one card.
-  //
-  // So solo changes only the SURVEY FRAMING here: "Your fleet · 1 agent · 1
-  // online" is a dashboard sentence for comparing agents against each other,
-  // and there is nothing to compare. See the header below.
+  // Sage/the Operator is never a real, listed agent anywhere in this UI —
+  // the same exclusion AgentsList/PrimaryRail/ProjectsPage/the command
+  // palette all already apply — so the per-project counts below match what
+  // clicking into a project actually shows.
+  const sageAgent = findSageAgent(agents);
+  const realAgents = sageAgent ? agents.filter((a) => a.agent_id !== sageAgent.agent_id) : agents;
+  const agentCountByProject = new Map<string, number>();
+  for (const a of realAgents) {
+    const pid = (a.project_id || "").trim();
+    if (!pid) continue;
+    agentCountByProject.set(pid, (agentCountByProject.get(pid) || 0) + 1);
+  }
 
   // ── Loading ──
-  if (loading && agents.length === 0) {
+  if ((loading || projectsLoading) && agents.length === 0 && projects.length === 0) {
     return (
       <main className="fleet-page-state">
-        <div className="fleet-page-state-body">Loading fleet…</div>
+        <div className="fleet-page-state-body">Loading workspace…</div>
       </main>
     );
   }
 
   // ── Error ──
-  if (error && agents.length === 0) {
+  if (error && agents.length === 0 && projects.length === 0) {
     return (
       <main className="fleet-page-state">
-        <div className="fleet-page-state-title">Could not load agents</div>
+        <div className="fleet-page-state-title">Could not load your workspace</div>
         <div className="fleet-page-state-body">{error}</div>
       </main>
     );
   }
 
+  const hasProjects = projects.length > 0;
 
   return (
     <>
-      <main className="fleet-content">
-        {mode === "none" ? (
+      <main className={`fleet-content${hasProjects ? " fleet-content--wide" : ""}`}>
+        {!hasProjects ? (
           <>
-            {/* No "Your fleet · 0 agents · 0 online" survey framing — there
-                is nothing to survey yet. "New agent" stays the one accent
-                FILL on screen; EmptyFleet's own "Ask AI" is deliberately the
-                quieter outline variant (unchanged), so this never becomes
-                two filled accents at once. */}
+            {/* Nothing exists yet — the true zero state, not "zero agents".
+                Creating the first agent is still the fastest path in (it
+                sets up its own project for you, see FleetCreateAgentWizard),
+                so this branch is otherwise unchanged from before this
+                pass. */}
             <div className="fleet-header">
               <h1 className="fleet-title">Get started</h1>
               <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
@@ -124,47 +97,37 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
             </div>
             <TelegramPairPanel workspaceId={workspaceId} />
             <EmptyFleet onChat={openSageConsole} />
-            {/* The fleet is empty; the WORKSPACE need not be — projects,
-                tasks and documents are the product regardless of agent
-                count (CLAUDE.md positioning). Never assume the whole screen
-                is empty just because the fleet is. */}
-            <WorkspaceProjectsPeek workspaceId={workspaceId} projects={projects} />
           </>
         ) : (
           <>
-            {/* "Your fleet · N agents · M online" is a SURVEY sentence: it
-                exists so someone can compare agents against each other at a
-                glance. At one agent there is nothing to compare, and the
-                plural is simply wrong. The page itself is unchanged (one
-                card in a card grid is fine — the ticket's "a table of one is
-                worse than no table" is about /agents' column table, not this
-                grid); only the framing adapts to the count. */}
             <div className="fleet-header">
               <div>
-                <h1 className="fleet-title">{mode === "solo" ? "Your workspace" : "Your fleet"}</h1>
+                <h1 className="fleet-title">Your workspace</h1>
                 <p className="fleet-subtitle">
-                  {mode === "solo"
-                    ? `1 agent · ${onlineCount === 1 ? "online" : "offline"}`
-                    : `${otherAgents.length} agents · ${onlineCount} online`}
+                  {projects.length} {projects.length === 1 ? "project" : "projects"} · {realAgents.length} {realAgents.length === 1 ? "agent" : "agents"}
                 </p>
               </div>
-              <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={() => setWizardOpen(true)}>
+              {/* Primary action is a project now, not an agent — an agent is
+                  created INSIDE a project (CLAUDE.md: "an agent belongs to
+                  its project"), so the fast path from here is the same one
+                  the command palette's "New project" already uses rather
+                  than a second composer built here. */}
+              <Link href={`${base}/projects?new=1`} className="fleet-btn fleet-btn--accent-fill">
                 <span className="fleet-btn-plus">+</span>
-                New agent
-              </button>
+                New project
+              </Link>
             </div>
 
             {/* Pair Telegram — first-run CTA. Self-hides when already paired. */}
             <TelegramPairPanel workspaceId={workspaceId} />
 
-            <div className="fleet-grid">
-              {otherAgents.map((a) => (
-                <FleetCard
-                  key={a.id}
-                  agent={a}
-                  gateways={gateways}
-                  onSelect={(id) => goToAgentTab(id, "chat")}
-                  onChat={openSageConsole}
+            <div className="fleet-home-projects-grid">
+              {projects.map((p) => (
+                <WorkspaceProjectTile
+                  key={p.id}
+                  workspaceId={workspaceId}
+                  project={p}
+                  agentCount={agentCountByProject.get(p.id) || 0}
                 />
               ))}
             </div>
@@ -172,17 +135,18 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
         )}
 
         {/* Workspace status strip — real counts, each jumps to its page.
-            Independent of agent count (channels/connectors/hardware can all
-            be set up before the first agent exists), so it renders at every
+            Independent of project/agent count (channels/connectors/hardware
+            can all be set up before either exists), so it renders at every
             count, unchanged. */}
         <StatusStrip workspaceId={workspaceId} />
 
-        {/* Recent activity across the whole fleet */}
+        {/* Recent activity across the whole workspace */}
         <ActivityFeed workspaceId={workspaceId} />
       </main>
 
-      {/* Create-agent wizard — on finish, refresh the list; the new agent
-          appears in the grid and opens to its routed detail page on click. */}
+      {/* Create-agent wizard — the zero-state's own entry point. Refreshes
+          the agent list on finish; the new agent's own project shows up in
+          the grid above on the next render (useFleetProjects polls). */}
       {wizardOpen && (
         <FleetCreateAgentWizard
           workspaceId={workspaceId}
@@ -197,27 +161,31 @@ export function FleetHome({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-// ── Your projects — the workspace's own content, shown alongside a zero-
-//    agent empty state so the screen never reads as fully empty just
-//    because the fleet is (CLAUDE.md: "the workspace itself... may well be
-//    non-empty"). Self-hides with no real projects — this is a peek at
-//    existing content, never another empty state of its own. ─────────────
+// ── Project tile ─────────────────────────────────────────────────────────
 
-function WorkspaceProjectsPeek({ workspaceId, projects }: { workspaceId: string; projects: FleetProject[] }) {
-  if (projects.length === 0) return null;
+function WorkspaceProjectTile({
+  workspaceId,
+  project,
+  agentCount,
+}: {
+  workspaceId: string;
+  project: FleetProject;
+  agentCount: number;
+}) {
   const base = `/w/${encodeURIComponent(workspaceId)}`;
   return (
-    <div className="fleet-home-projects">
-      <h2 className="fleet-detail-section-title">Your projects</h2>
-      <div className="fleet-home-projects-list">
-        {projects.map((p) => (
-          <Link key={p.id} href={`${base}/projects/${encodeURIComponent(p.id)}`} className="fleet-home-project-row">
-            <ProjectIcon icon={p.icon} tint={p.tint} size={22} glyphSize={13} />
-            <span className="fleet-home-project-row-label">{p.name}</span>
-          </Link>
-        ))}
+    <Link href={`${base}/projects/${encodeURIComponent(project.id)}`} className="fleet-home-project-tile">
+      <div className="fleet-home-project-tile-top">
+        <ProjectIcon icon={project.icon} tint={project.tint} size={30} glyphSize={16} />
       </div>
-    </div>
+      <span className="fleet-home-project-tile-name">{project.name || project.id}</span>
+      {project.description && (
+        <span className="fleet-home-project-tile-desc">{project.description}</span>
+      )}
+      <span className="fleet-home-project-tile-meta">
+        {agentCount} {agentCount === 1 ? "agent" : "agents"}
+      </span>
+    </Link>
   );
 }
 
@@ -256,7 +224,7 @@ function StatusStrip({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-// ── Recent activity across the fleet ────────────────────────────────────────
+// ── Recent activity across the workspace ────────────────────────────────────
 
 function ActivityFeed({ workspaceId }: { workspaceId: string }) {
   const { events, loading } = useWorkspaceActivity(workspaceId, 8);
