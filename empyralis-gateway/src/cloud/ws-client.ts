@@ -546,6 +546,11 @@ export class GatewayWsClient {
     const checkpoints = await this.checkpoints.load();
     const outboxSummary = await this.outbox.summarize();
     const localRunnerReady = await this.checkLocalRunnerHealth();
+    // openclawProfile/openclawBinaryPath are deliberately NOT passed to this
+    // fast-path builder: buildFastPassiveInventorySnapshot() never runs any
+    // command probe (see its own "must not run command probes" test) — the
+    // real OpenClaw probe only ever runs inside collectPassiveInventorySnapshot
+    // below, same as every other CLI/service probe in this file.
     const inventory = applyLocalRunnerReadiness(this.passiveInventorySnapshot ?? buildFastPassiveInventorySnapshot({
       requestedCapabilities: runtimeMetadata.requestedCapabilities,
       localRunnerReady,
@@ -622,6 +627,8 @@ export class GatewayWsClient {
     this.passiveInventoryRefresh = collectPassiveInventorySnapshot({
       requestedCapabilities,
       shellFullAccessLocallyEnabled: this.config.shellFullAccessLocallyEnabled,
+      openclawProfile: this.config.openclawProfile,
+      openclawBinaryPath: this.config.openclawBinaryPath,
     })
       .then((snapshot) => {
         this.passiveInventorySnapshot = applyLocalRunnerReadiness(snapshot, localRunnerReady);
