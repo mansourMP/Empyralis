@@ -1844,6 +1844,7 @@ async def assign_task(
     task_id: str,
     agent_id: str,
     triggered_by: str = "owner",
+    authority_tier: Optional[str] = None,
 ) -> Dict[str, Any]:
     """THE single code path for setting a task's AGENT assignee -- called by
     the HTTP API today and, per the research doc's pitfall #2, must be the
@@ -1871,7 +1872,14 @@ async def assign_task(
     workspace. Best-effort on the wakeup: a scheduler failure is reported in
     the return payload rather than raised, since the assignment itself
     (the durable, addressable fact the owner cares about) already
-    succeeded by that point."""
+    succeeded by that point.
+
+    `authority_tier`: passed straight through to schedule_task_assigned_
+    wakeup, which resolves its own default -- see that function's docstring
+    (2026-08-13) for why this must be an explicit pass-through rather than a
+    value derived or defaulted here: the two real callers (a human via the
+    HTTP route, an agent via the project_task__assign tool) need two
+    different tiers, and only each caller knows which."""
     resolved_tenant_id = str(tenant_id or "").strip()
     resolved_workspace_id = str(workspace_id or "").strip()
     resolved_task_id = str(task_id or "").strip()
@@ -1931,6 +1939,7 @@ async def assign_task(
             title=updated.get("title") or "",
             description=updated.get("description") or "",
             triggered_by=triggered_by,
+            authority_tier=authority_tier,
         )
         wake_request = wake_result
     except Exception as exc:

@@ -171,9 +171,11 @@ def _callbacks() -> direct_tool_execution_service.DirectToolExecutionCallbacks:
     )
 
 
-def _call(tool_name: str, arguments: dict, *, pool: _QueuedFakePool, agent_id: str = "agent-1"):
+def _call(tool_name: str, arguments: dict, *, pool: _QueuedFakePool, agent_id: str = "agent-1", session_ctx_extra: dict | None = None):
     from unittest.mock import AsyncMock, patch
 
+    session_ctx = {"agent_install_id": agent_id, "tenant_id": "tenant-1"}
+    session_ctx.update(session_ctx_extra or {})
     with patch(
         "server_modules.project_tasks_service.control_plane_repository.ensure_control_plane_schema",
         new=AsyncMock(return_value=pool),
@@ -182,7 +184,7 @@ def _call(tool_name: str, arguments: dict, *, pool: _QueuedFakePool, agent_id: s
             tool_call={"name": tool_name, "arguments": arguments},
             workspace_id="ws-1",
             thread_id="thread-1",
-            session_ctx={"agent_install_id": agent_id, "tenant_id": "tenant-1"},
+            session_ctx=session_ctx,
             callbacks=_callbacks(),
         )
     return json.loads(raw)
@@ -307,6 +309,37 @@ class ProjectTaskNativeToolTests(unittest.TestCase):
         result = _call("project_task__assign", {"task_id": "task-1", "agent_id": "agent-2"}, pool=pool)
         self.assertTrue(result["ok"])
         self.assertEqual(result["task"]["assignee_agent_id"], "agent-2")
+
+    def test_assign_inherits_the_calling_agents_own_authority_tier(self):
+        """2026-08-13: an agent turn currently running as AUDIENCE (serving
+        an end customer) delegates a task to another agent via this tool.
+        The resulting wake must inherit that same audience tier, never
+        upgrade to owner just because a tool call happened to route through
+        schedule_task_assigned_wakeup — see that function's own docstring."""
+        from unittest.mock import AsyncMock, patch
+        from server_modules import authority_mandate_service
+
+        pool = _QueuedFakePool(
+            fetchrow_results=[
+                {"project_id": "proj-1"},        # caller's own project
+                _task_row(project_id="proj-1"),  # ownership check on the task
+                {"project_id": "proj-1"},        # target agent's project (same)
+                _task_row(project_id="proj-1"),  # assign_task's own get_task
+                {"project_id": "proj-1"},        # assign_task's own agent_project_id
+                _task_row(project_id="proj-1", assignee_agent_id="agent-2", status="in_progress"),
+            ],
+        )
+        wake_mock = AsyncMock(return_value={"id": "wake-1", "status": "pending"})
+        with patch("server_modules.bounded_scheduler_service.schedule_task_assigned_wakeup", new=wake_mock):
+            result = _call(
+                "project_task__assign",
+                {"task_id": "task-1", "agent_id": "agent-2"},
+                pool=pool,
+                session_ctx_extra={"authority_tier": authority_mandate_service.TIER_AUDIENCE},
+            )
+        self.assertTrue(result["ok"])
+        wake_mock.assert_awaited_once()
+        self.assertEqual(wake_mock.await_args.kwargs["authority_tier"], authority_mandate_service.TIER_AUDIENCE)
 
 
 class ProjectTaskStatusVocabularyReachabilityTests(unittest.TestCase):

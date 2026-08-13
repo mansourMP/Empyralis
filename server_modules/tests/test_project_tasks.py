@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from server_modules import agent_trace_service
+from server_modules import authority_mandate_service
 from server_modules import bounded_scheduler_service
 from server_modules import direct_chat_generation_service
 from server_modules import project_tasks_service
@@ -1293,6 +1294,7 @@ class AssignTaskTests(unittest.IsolatedAsyncioTestCase):
             title="Ship the widget",
             description="Build and ship it.",
             triggered_by="owner-user",
+            authority_tier=None,
         )
         # The UPDATE went through the assignee column, not a generic patch.
         update_query, update_args = pool.fetchrow_calls[-1]
@@ -1389,7 +1391,62 @@ class ScheduleTaskAssignedWakeupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["task_id"], "task-1")
         self.assertEqual(payload["task_title"], "Ship the widget")
         self.assertEqual(payload["task_description"], "Build and ship it.")
+        # 2026-08-13: no authority_tier was passed (the HTTP-route caller's
+        # shape -- a human, no turn to inherit from) so this must resolve to
+        # OWNER, never silently omit the field the way it used to (which
+        # made every task-assigned wake run as audience and left the woken
+        # agent unable to even call project_task.list on its own assignment
+        # -- observed live as a mandate_blocked event).
+        self.assertEqual(payload["authority_tier"], authority_mandate_service.TIER_OWNER)
         trigger_mock.assert_called_once_with("ws-1")
+
+    async def _schedule_with_policy_and_tier(self, *, authority_tier):
+        policy = bounded_scheduler_service.SchedulerPolicyBounds(
+            quiet_hours_start=0, quiet_hours_end=0,
+            max_event_triggers_per_hour=4, max_self_proposed_per_hour=2,
+            max_runtime_seconds=20, minimum_battery_percent=20,
+            require_network_online=False, require_owner_approval_for_privileged_wakeups=True,
+            plan_tier="standard",
+        )
+        with (
+            patch(
+                "server_modules.bounded_scheduler_service._load_scheduler_scope",
+                new=AsyncMock(return_value=({"metadata": {}}, {"id": "install-sage", "metadata": {}}, policy)),
+            ),
+            patch(
+                "server_modules.bounded_scheduler_service._persist_wakeup",
+                new=AsyncMock(return_value={"id": "wake-3", "status": "pending"}),
+            ) as persist_mock,
+            patch("server_modules.bounded_scheduler_service._trigger_ambient_monitor", return_value={"ok": True}),
+        ):
+            await bounded_scheduler_service.schedule_task_assigned_wakeup(
+                tenant_id="tenant-1", workspace_id="ws-1", agent_id="agent-1", task_id="task-1",
+                title="Ship the widget", authority_tier=authority_tier,
+            )
+        return persist_mock.await_args.kwargs["payload"]["authority_tier"]
+
+    async def test_explicit_audience_tier_is_inherited_not_upgraded_to_owner(self):
+        """The project_task__assign-tool caller's shape: an agent turn
+        currently running as audience (serving an end customer) delegates a
+        task to another agent. That must NOT mint an owner-tier wake just
+        because it called this function -- an audience-tier turn spawning
+        owner-tier work would be a privilege escalation."""
+        tier = await self._schedule_with_policy_and_tier(
+            authority_tier=authority_mandate_service.TIER_AUDIENCE,
+        )
+        self.assertEqual(tier, authority_mandate_service.TIER_AUDIENCE)
+
+    async def test_explicit_owner_tier_passes_through(self):
+        tier = await self._schedule_with_policy_and_tier(
+            authority_tier=authority_mandate_service.TIER_OWNER,
+        )
+        self.assertEqual(tier, authority_mandate_service.TIER_OWNER)
+
+    async def test_garbage_authority_tier_fails_safe_to_audience(self):
+        """inherit_tier is normalize_tier under the hood -- an invalid value
+        must never accidentally grant more than audience."""
+        tier = await self._schedule_with_policy_and_tier(authority_tier="not-a-real-tier")
+        self.assertEqual(tier, authority_mandate_service.TIER_AUDIENCE)
 
     async def test_task_wake_ceiling_rejects_loudly_at_the_limit(self):
         """STEP 6 numeric backstop (agent-identity plan): once a task_id has
