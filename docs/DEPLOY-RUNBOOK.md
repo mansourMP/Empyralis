@@ -39,6 +39,7 @@ Confirmed by directly test-booting the app with the real production-style flags 
 |---|---|---|
 | `EMPYRALIS_INVITE_CODE` | unset, or a real code | Unset = open signup (today's behavior, unchanged). Set = signup requires this exact code; wrong/missing code gets an honest "Empyralis is invite-only right now." Change this whenever you want to open or close signups — no redeploy needed, just edit `.env` and restart the backend. |
 | `EMPYRALIS_TOOL_HONESTY_GUARD_ENABLED` | unset (defaults to on) or `1` | Structural guard that blocks a reply from shipping if it contradicts the turn's real tool trace. Leave on in production; `0` is the empirical-testing escape hatch, not a prod toggle. |
+| `EMPYRALIS_FORCE_LEGACY_ENGINE` | unset (defaults off) or `1` | MAN-312 emergency rollback: the Claude Agent SDK is the default turn engine for every agent (`sage_agent_runtime_service._resolve_turn_engine_id`) — set this to `1` and restart the backend to force EVERY turn on EVERY agent/workspace back onto the legacy engine (`direct_chat_generation_service`) with no redeploy, overriding any per-agent `model_config.engine` choice. Whole-fleet only, not per-tenant — for reverting a single misbehaving agent instead, set that agent's `model_config.engine` to `"legacy"` via `fleet_configure_agent` (no dedicated frontend UI for this yet; reachable via the fleet API or by asking an operator's own agent to make the change). Unset (or `0`) to go back to the SDK default. |
 
 ### Provider keys, secrets (values are real credentials — never commit)
 
