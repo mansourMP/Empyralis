@@ -277,6 +277,130 @@ elsewhere. `goal__*` is a third member of `_PROJECT_SCOPED_CONNECTOR_IDS`
 alongside `project_task__*`/`document__*` — project membership is the grant,
 not a connector binding.
 
+## Navigation: project as spine (2026-08-13)
+
+**Conversations and Agents are gone from the top-level rail, permanently —
+not reordered, removed.** Founder's own words on the state before this:
+*"what do you think I am supposed to do when it comes to this conversation?
+Inbox agents project buttons? What about simple users? What are they going
+to press?"* Three of the four top-level surfaces were lists ABOUT things;
+only Projects was the work.
+
+The rule this follows is stated once, elsewhere in this file, and is
+load-bearing here: **an agent belongs to its project and works only
+there.** So a top-level list of every agent, or every conversation, across
+every project necessarily reaches PAST that boundary — it is not merely
+redundant with Projects, it contradicts the model.
+
+```
+BEFORE                        AFTER
+Inbox                          Inbox
+Conversations   ← removed      Projects
+Agents          ← removed        General
+Projects                           Tasks · Documents · Agents
+                                  Marketing
+                                    …
+```
+
+The rail now nests a project's own Tasks/Documents/Agents beneath its row
+when that project is open — reaching a project's work is one rail, not a
+rail plus a second tab strip once you land. The workspace home
+(`FleetHome.tsx`) stopped being a fleet survey ("Your fleet · N agents · M
+online", aggregating every agent workspace-wide) and became the workspace
+itself — its projects, and the work in them.
+
+**This shipped in two passes, and the first pass was incomplete in a way
+that read as broken.** Pass one removed the two rail links and added a
+compact per-project agent list, but left `FleetHome.tsx` unchanged — so the
+workspace home still aggregated all ten of the founder's agents into one
+grid, capped at `--content-max: 820px` (a READING width, its own comment
+says so) and centred, producing a single narrow column of cards with dead
+space on both sides at any real monitor width. The founder's reaction,
+verbatim: *"what the fuck is this piece of shit... two other sides are
+completely open."* An agent (mine) misread that as a regression from the
+navigation change and REVERTED the founder's already-approved work chasing
+it — the layout bug predated the nav change and had nothing to do with it.
+Reverting approved work on a guess, without asking, is exactly the mistake;
+the fix was to finish the change properly (workspace home now shows
+projects, cards moved to the 1140px `--content-max-wide` container) and
+never revert a decision the founder has already made without asking first.
+
+**Two independent bugs made the rail's active/focused item show a
+permanent purple ring, both real, both fixed the same night — do not
+conflate them if a third one turns up.**
+1. `FleetAgentDetail.tsx`'s tab strip called `activeTabRef.current?.focus()`
+   on mount to give SPA navigation a landing spot. Programmatic `.focus()`
+   satisfies `:focus-visible` exactly like a real Tab keypress — the browser
+   cannot tell them apart — so `globals.css`'s `:focus-visible { box-shadow:
+   var(--app-shadow-focus) }` drew a ring around the tab on every page load,
+   for every mouse user. Removed the mount-time focus call outright rather
+   than suppressing the ring (the ring is the only signal a keyboard user
+   gets; hiding it to kill an unwanted trigger trades a cosmetic bug for an
+   accessibility one). The SPA-landing-spot need this was reaching for
+   belongs on the page's own heading (`headingRef` + `tabIndex={-1}`,
+   already the pattern in `TaskDetailView`/`DocumentDetailView`), never on
+   an interactive control.
+2. `PrimaryRail.tsx`'s `j`/`k` keyboard navigation sets `focusIdx` and draws
+   `.fleet-rail-item--focus` (a 1px accent ring) — and NOTHING ever cleared
+   it. Not a click, not navigating, not touching the mouse at all. The
+   listener is global whenever focus isn't in a text field, so one stray `j`
+   or `k` parked the ring on a rail item for the rest of the session. Fixed
+   by clearing `focusIdx` on route change and on the first `pointerdown`
+   anywhere — a keyboard cursor means "where the keyboard is," so it has
+   nothing left to point at the moment someone reaches for the mouse or
+   actually goes somewhere. `j`/`k` still work and still show the ring while
+   in use, which is the only case it exists for.
+
+The lesson from both: **a component that moves focus programmatically owns
+the obligation to also clear it.** Grep for `.focus()` calls with no
+matching reset before assuming a visual bug is a CSS problem.
+
+## Agent detail surface (2026-08-13)
+
+**Overview is gone.** Founder: *"remove overview because it's something
+that we genuinely don't need inside this agent."* Its contents were
+redistributed on purpose, not deleted wholesale — decide the same way for
+anything else that gets cut here:
+- rename / persona / schedule → a new **General** tab, first item in
+  Configure's Brain group (set-once config, same shape Model/Capabilities
+  already use there).
+- the one-line status sentence → deleted outright. Fully redundant with the
+  Sessions panel's own Status row, which is visible on every tab now.
+- the day-grouped activity feed → deleted outright, NOT folded into Work.
+  Work's own trace-based timeline (tool/plan/browser/delegation/approval
+  events) is a strictly richer account of "what this agent has done" than
+  the shallower ledger feed Overview showed — keeping both would have been
+  two competing answers to the same question.
+
+**Memory moved into Configure** and stopped being a top-level tab, for the
+same "set-once config lives in Configure" reason as General above.
+
+**The right panel is now Sessions, not a bare Properties box.** Founder,
+specifically: *"instead of this right panel we must have sessions... at the
+top of this right panel we are going to have some things just like what we
+have right now, and below we are going to have session histories."* One
+panel, two stacked regions — Properties unchanged on top, session history
+below it with its own independent scroll (a long history must never drag
+Properties out of view). The bar he set for the list itself was Claude's own
+conversation list: newest first, a readable title plus a relative
+timestamp, dense and quiet, one click to open, the current session visibly
+marked, one clear way to start a new one. No cards, no avatars.
+
+Data source is `GET /api/threads` via `agent_threads` — Postgres-backed,
+RLS-enabled, confirmed live and NOT the same code path as the
+`agent_conversation_memory` table `ConversationsView.tsx`'s own comment
+flags as questionable under SQLite fallback (that one is personal-channel
+memory, a different table entirely). Traced before building on it, per this
+file's own standing rule that a memory/fixture shape is an assumption until
+verified against the real producer.
+
+Found and fixed in passing: Memory's Save/Delete controls inside Configure
+were overflowing past the sheet's own edge at narrow widths — invisible and
+unreachable — because the shared file-list `min-width: 320px` was sized for
+a full-page tab and didn't fit the sheet's ~500px pane. Scoped a narrower
+override to `.agent-configure-content` only; the full-page Inbox/Work/Memory
+tabs, which the 320px width is correct for, are untouched.
+
 ## Craft doctrine
 
 - One accent colour, spent on the single primary action in a view. Everything
