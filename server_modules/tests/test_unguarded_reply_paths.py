@@ -333,11 +333,28 @@ class StructuralGuardSeamTests(unittest.TestCase):
         self.assertEqual(len(call_lines), 1, f"expected one call site, found {call_lines}")
         self.assertIn(call_lines[0], wrapper_lines)
 
+    # Test files that reference "_handle_sage_chat_unguarded" only as a
+    # string/AST target for their OWN structural (source-inspection) tests —
+    # never a live call or import that could route a real reply around the
+    # guard. A naive substring scan cannot tell "calls it" from "parses the
+    # source and looks for its name", so these are named exclusions rather
+    # than a smarter (AST-on-every-candidate-file) scanner, matching this
+    # test's own existing exclusion of itself for the identical reason.
+    # test_default_engine_credit_debit.py's own AST checks predate this file
+    # noticing the collision; test_tool_honesty_guard_wiring.py (MAN-263)
+    # added the second.
+    _STRUCTURAL_INSPECTION_ONLY_FILES = {
+        "test_default_engine_credit_debit.py",
+        "test_tool_honesty_guard_wiring.py",
+    }
+
     def test_no_other_module_reaches_the_unguarded_body(self):
         root = Path(sage_agent_runtime_service.__file__).parent
         offenders = []
         for path in root.rglob("*.py"):
             if path.name in {"sage_agent_runtime_service.py", Path(__file__).name}:
+                continue
+            if path.name in self._STRUCTURAL_INSPECTION_ONLY_FILES:
                 continue
             if "_handle_sage_chat_unguarded" in path.read_text():
                 offenders.append(str(path))
