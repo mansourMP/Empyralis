@@ -19,6 +19,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from server_modules import fleet_tools
+from server_modules import codex_model_catalog_service
 
 
 def _run(coro):
@@ -1021,6 +1022,137 @@ class FleetConfigureAgentCliSubscriptionSaveTimeHonestyTests(unittest.TestCase):
             llm_runtimes={"cursor_cli": {"installed": True, "authenticated": True}},
         )
         self.assertTrue(result["ok"], result.get("error"))
+
+
+class FleetConfigureAgentCodexModelLiveValidationTests(unittest.TestCase):
+    """URGENT fix (2026-08-14): a cli_subscription + codex model_config.model
+    is now validated at save time against the Gateway's own live model
+    catalog (codex_model_catalog_service.fetch_codex_model_catalog), not
+    accepted sight-unseen — the exact gap that let a since-retired
+    "gpt-5.4" sit in a saved agent config and only fail mid-turn with a raw
+    provider error."""
+
+    @staticmethod
+    def _bundle(agent_id="agent-x", metadata=None):
+        return {"id": agent_id, "install_metadata": dict(metadata or {})}
+
+    @staticmethod
+    def _registration(**overrides):
+        base = {"gateway_id": "gateway-1", "workspace_id": "ws-1", "status": "active", "device_trust_state": "trusted"}
+        base.update(overrides)
+        return base
+
+    def _configure(self, model_config, *, catalog_result=None, catalog_side_effect=None):
+        catalog_mock = AsyncMock(return_value=catalog_result, side_effect=catalog_side_effect)
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={
+                    "llm_runtimes": {"codex": {"installed": True, "authenticated": True}},
+                    "display_name": "Test Box",
+                },
+            ),
+            patch("server_modules.codex_model_catalog_service.fetch_codex_model_catalog", new=catalog_mock),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"model_config": {**model_config, "runtime": "codex", "gateway_binding": "gateway-1"}},
+                )
+            )
+        return result, catalog_mock
+
+    def test_a_model_the_live_catalog_no_longer_recognizes_is_rejected(self):
+        result, catalog_mock = self._configure(
+            {"mode": "cli_subscription", "model": "gpt-5.4"},
+            catalog_result={
+                "supported": True,
+                "auth_method": "chatgpt",
+                "models": [
+                    {"id": "gpt-5.6-terra", "hidden": False, "is_default": True},
+                    {"id": "gpt-5.6-luna", "hidden": False, "is_default": False},
+                ],
+            },
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("gpt-5.4", result["error"])
+        self.assertIn("gpt-5.6-terra", result["error"])
+        catalog_mock.assert_awaited_once()
+
+    def test_a_model_the_live_catalog_recognizes_saves_cleanly(self):
+        result, _ = self._configure(
+            {"mode": "cli_subscription", "model": "gpt-5.6-terra"},
+            catalog_result={
+                "supported": True,
+                "auth_method": "chatgpt",
+                "models": [{"id": "gpt-5.6-terra", "hidden": False, "is_default": True}],
+            },
+        )
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_a_hidden_but_real_model_is_accepted_not_just_the_default_pickers_visible_set(self):
+        result, _ = self._configure(
+            {"mode": "cli_subscription", "model": "codex-auto-review"},
+            catalog_result={
+                "supported": True,
+                "auth_method": "chatgpt",
+                "models": [{"id": "codex-auto-review", "hidden": True, "is_default": False}],
+            },
+        )
+        self.assertTrue(result["ok"], result.get("error"))
+
+    def test_an_unreachable_live_check_fails_open_never_blocks_an_otherwise_valid_save(self):
+        # Advisory, not authoritative — a transient Gateway hiccup must not
+        # make every save depend on a live round trip succeeding.
+        result, catalog_mock = self._configure(
+            {"mode": "cli_subscription", "model": "gpt-5.4"},
+            catalog_side_effect=codex_model_catalog_service.CodexModelCatalogError("gateway offline", status_code=409),
+        )
+        self.assertTrue(result["ok"], result.get("error"))
+        catalog_mock.assert_awaited_once()
+
+    def test_an_empty_unset_model_is_never_validated_the_cli_own_default_applies(self):
+        catalog_mock = AsyncMock()
+        with (
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.update_workspace_agent_install",
+                new=AsyncMock(return_value=self._bundle()),
+            ),
+            patch("server_modules.gateway_state_repository.get_gateway_registration", return_value=self._registration()),
+            patch(
+                "server_modules.gateway_registry_service.gateway_registration_public_payload",
+                return_value={
+                    "llm_runtimes": {"codex": {"installed": True, "authenticated": True}},
+                    "display_name": "Test Box",
+                },
+            ),
+            patch("server_modules.codex_model_catalog_service.fetch_codex_model_catalog", new=catalog_mock),
+        ):
+            result = _run(
+                fleet_tools.fleet_configure_agent(
+                    actor_id="owner-1",
+                    workspace_id="ws-1",
+                    agent_id="agent-x",
+                    patch={"model_config": {"mode": "cli_subscription", "runtime": "codex", "gateway_binding": "gateway-1"}},
+                )
+            )
+        self.assertTrue(result["ok"], result.get("error"))
+        catalog_mock.assert_not_awaited()
 
 
 class FleetConfigureAgentRenameCollisionTests(unittest.TestCase):
