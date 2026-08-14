@@ -871,6 +871,17 @@ WorkingDirectory=${CURRENT_DIR}
 ExecStart=${BIN_DIR}/run-gateway
 Restart=always
 RestartSec=5
+# A registration failure the gateway itself has determined can never succeed
+# by retrying (a consumed/revoked/expired pairing token — see
+# empyralis-gateway/src/cloud/registration-failure.ts's
+# classifyRegistrationFailure and index.ts's EXIT_PERMANENT_REGISTRATION_
+# FAILURE) exits with this exact code. Without this line, Restart=always +
+# StartLimitIntervalSec=0 below retries such a box FOREVER with the exact
+# same doomed token — observed live at 518 restarts and counting. Every
+# OTHER failure (network errors, a transient 5xx, a genuine crash) still
+# exits 1 and is still retried exactly as before; this line is deliberately
+# narrow to the one class of failure retrying can never fix.
+RestartPreventExitStatus=78
 KillSignal=SIGTERM
 TimeoutStopSec=30
 NoNewPrivileges=true

@@ -37,6 +37,7 @@ import { GatewayRuntimeMetadata } from "../runtime/runtime-metadata";
 import { HeartbeatLoop } from "./heartbeat";
 import { resolveMediaFetch, type GatewayMediaFetchRequestPayload } from "./media-fetch";
 import { ReconnectBackoff, classifyReconnectError, classifyCloseCode, sleep, type CloseCodeContext } from "./reconnect";
+import { GatewayRegistrationError } from "./registration-failure";
 import { GatewayCapabilityRouter } from "../supervisor/capability-router";
 import { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
 import { buildGatewayHeartbeatPayload } from "./heartbeat-payload";
@@ -223,19 +224,32 @@ export class GatewayWsClient {
     identity: GatewayDeviceIdentity,
     runtimeMetadata: GatewayRuntimeMetadata,
   ): Promise<GatewayRegistrationPayload> {
-    const response = await fetch(`${this.config.apiBaseUrl}/gateway/registrations`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        pairing_token: pairingToken,
-        device_id: identity.deviceId,
-        gateway_id: identity.gatewayId,
-        display_name: this.config.displayName,
-        platform: runtimeMetadata.platform,
-        capabilities: runtimeMetadata.requestedCapabilities,
-        metadata: runtimeMetadata.deviceMetadata,
-      }),
-    });
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await fetch(`${this.config.apiBaseUrl}/gateway/registrations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          pairing_token: pairingToken,
+          device_id: identity.deviceId,
+          gateway_id: identity.gatewayId,
+          display_name: this.config.displayName,
+          platform: runtimeMetadata.platform,
+          capabilities: runtimeMetadata.requestedCapabilities,
+          metadata: runtimeMetadata.deviceMetadata,
+        }),
+      });
+    } catch (error) {
+      // fetch() itself rejected: DNS not resolvable yet, connection refused,
+      // TLS handshake failure, timeout. No response was ever received, so
+      // there is nothing to classify by status — this is always worth
+      // retrying (see registration-failure.ts's classifyRegistrationFailure).
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new GatewayRegistrationError(
+        `Gateway registration request failed before a response was received: ${detail}`,
+        { status: undefined, detail },
+      );
+    }
     if (!response.ok) {
       const rawBody = await response.text().catch(() => "");
       let detail = rawBody.trim();
@@ -247,8 +261,9 @@ export class GatewayWsClient {
           // Keep the raw body when the runtime does not return JSON.
         }
       }
-      throw new Error(
+      throw new GatewayRegistrationError(
         `Gateway registration failed with status ${response.status}${detail ? `: ${detail}` : ""}`,
+        { status: response.status, detail },
       );
     }
     const payload = (await response.json()) as GatewayRegistrationPayload;
