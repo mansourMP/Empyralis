@@ -2458,6 +2458,43 @@ async def get_hardware_vps_provider_availability(
     return {"providers": vps_provisioning_service.provider_availability()}
 
 
+@router.get("/hardware/vps")
+async def list_hardware_vps(
+    workspace_id: str = Query(..., min_length=1),
+    current_user=Depends(require_api_key),
+):
+    """Every Agent Computer provisioning record for this workspace, newest
+    first. Existed as a service function (vps_provisioning_service.
+    list_workspace_vps, MAN-130) with no route ever wrapping it — the
+    frontend had no way to ask "what VPSes does this workspace actually
+    have" at all, only to poll a SPECIFIC vps_id it already knew.
+
+    That gap is exactly what let a lost `POST /hardware/vps/provision`
+    response become a false "could not create Agent Computer": the backend
+    commits a real, billed droplet-provisioning record and schedules the
+    real background lifecycle task BEFORE returning (see that route's own
+    docstring) — a dropped connection after that point left the browser with
+    no vps_id to check status on, no way to tell "never created" from
+    "created, but the response was lost", and the setup panel's only next
+    action was retrying, which creates a SECOND real droplet. This route is
+    what cloud-vps-setup-panel.tsx's createServer() now calls, once, only
+    after that exact ambiguous failure, to look for the record it would have
+    gotten a vps_id for — never polled routinely, never used in place of the
+    per-vps_id status route above.
+    """
+    resolved_workspace_id = enforce_workspace_access(
+        current_user,
+        workspace_id,
+        minimum_role="viewer",
+    )
+    tenant_id = workspace_tenant_id(current_user, resolved_workspace_id)
+    items = await vps_provisioning_service.list_workspace_vps(
+        workspace_id=resolved_workspace_id,
+        tenant_id=tenant_id,
+    )
+    return {"workspace_id": resolved_workspace_id, "items": items}
+
+
 @router.get("/hardware/vps/{vps_id}/status")
 async def get_hardware_vps_status(
     vps_id: str,

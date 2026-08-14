@@ -25,10 +25,24 @@ import {
 // same CSRF handling, no dependency on a context fleet doesn't provide. See
 // FleetAgentDetail.tsx's LegacyMemoryTab comment for the same trade-off made
 // elsewhere in the fleet rewrite.
+/** Thrown only when the request itself never produced a response (fetch()
+ *  rejected — offline, a dropped connection, a timeout). A genuinely
+ *  different fact from the server answering with a non-2xx status: see
+ *  createServer() below, the reason this exists — POST /hardware/vps/
+ *  provision commits a real, billed droplet-provisioning record and starts
+ *  the real background lifecycle task BEFORE it returns (that route's own
+ *  docstring), so a rejected fetch here does NOT mean nothing happened. */
+class RequestNetworkError extends Error {}
+
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = String(init.method || 'GET');
   const headers = buildCookieAuthHeaders(method, { accept: 'application/json', ...(init.headers as Record<string, string> | undefined) });
-  const response = await fleetAuthorizedFetch(path, { ...init, headers, credentials: 'include' });
+  let response: Response;
+  try {
+    response = await fleetAuthorizedFetch(path, { ...init, headers, credentials: 'include' });
+  } catch (e) {
+    throw new RequestNetworkError(e instanceof Error ? e.message : 'Network request failed.');
+  }
   if (!response.ok) {
     // Surface the backend's own detail message when there is one (e.g. "This
     // AWS connection request expired.") instead of just the status code —
@@ -46,6 +60,44 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
     throw new Error(getErrorMessage(body, `Request failed with status ${response.status}.`));
   }
   return (await response.json()) as T;
+}
+
+/** Best-effort lookup for a droplet this exact panel already provisioned,
+ *  used only after createServer()'s POST fails with NO response at all —
+ *  see RequestNetworkError above. Matches by provider/region/size and a
+ *  created_at at or after the attempt's own start time (a small negative
+ *  grace window absorbs clock skew between browser and server); returns the
+ *  newest such record, since GET /hardware/vps already returns newest-first.
+ *  Returns null on any read failure or when nothing matches — this is a
+ *  safety net, not a new failure mode, so the caller falls back to the
+ *  honest "couldn't confirm" message either way. */
+async function findJustCreatedVps(
+  workspaceId: string,
+  provider: VpsProviderId,
+  region: string,
+  size: string,
+  attemptStartedAtMs: number,
+): Promise<{ vps_id: string; provider_resource_id: string } | null> {
+  try {
+    const data = await requestJson<{ items?: Array<Record<string, unknown>> }>(
+      `/api/hardware/vps?workspace_id=${encodeURIComponent(workspaceId)}`,
+    );
+    const items = Array.isArray(data?.items) ? data.items : [];
+    const graceMs = 30_000;
+    const match = items.find((item) => {
+      if (String(item.provider || '') !== provider) return false;
+      if (String(item.region || '') !== region) return false;
+      if (String(item.size || '') !== size) return false;
+      const createdAt = Date.parse(String(item.created_at || ''));
+      return Number.isFinite(createdAt) && createdAt >= attemptStartedAtMs - graceMs;
+    });
+    if (!match) return null;
+    const vpsId = String(match.vps_id || '').trim();
+    if (!vpsId) return null;
+    return { vps_id: vpsId, provider_resource_id: String(match.provider_resource_id || '').trim() };
+  } catch {
+    return null;
+  }
 }
 
 // Query-string suffix for the two oauth/*/start requests below, telling the
@@ -1300,9 +1352,12 @@ export function CloudVpsSetupPanel({
     setBusy(true);
     setError(null);
     setCreateError(null);
-    setCreateStartedAt(Date.now());
+    const attemptStartedAt = Date.now();
+    setCreateStartedAt(attemptStartedAt);
     connectedHandledRef.current = null;
     setStep('progress');
+    let nextVpsId = '';
+    let providerResourceId = '';
     try {
       const payload = await requestJson<VpsProvisionResponse>('/api/hardware/vps/provision', {
         method: 'POST',
@@ -1323,28 +1378,55 @@ export function CloudVpsSetupPanel({
           },
         }),
       });
-      const nextVpsId = String(payload?.vps_id || '').trim();
+      nextVpsId = String(payload?.vps_id || '').trim();
+      providerResourceId = String(payload?.provider_resource_id || '').trim();
       if (!nextVpsId) {
         throw new Error('VPS provisioning id was not returned.');
       }
-      // Hand the build over to the watcher: from here on the browser's only
-      // job is polling GET /status, and that outlives this modal. Dismissing
-      // the modal now cancels nothing — the server-side lifecycle task keeps
-      // running either way.
-      startVpsProvisionWatch({
-        vpsId: nextVpsId,
-        workspaceId,
-        provider: selectedProvider,
-        providerLabel: PROVIDERS[selectedProvider]?.label || 'Cloud',
-        planLabel: plans.find((plan) => plan.id === effectivePlanId)?.label || '',
-        regionLabel: regions.find((region) => region.id === effectiveRegionId)?.label || effectiveRegionId,
-        providerResourceId: String(payload?.provider_resource_id || '').trim(),
-      });
     } catch (provisionError) {
-      setCreateError(provisionError instanceof Error ? provisionError.message : 'Could not create Agent Computer.');
-    } finally {
-      setBusy(false);
+      // POST /hardware/vps/provision commits a real, billed droplet-
+      // provisioning record and starts the real background lifecycle task
+      // BEFORE it returns (that route's own docstring) — so a request that
+      // never produced a RESPONSE (RequestNetworkError; a definitive
+      // rejection from the server, like a quota or credential error, is a
+      // different, reliable fact and skips this) does not mean nothing
+      // happened. Check for the record this exact attempt would have
+      // gotten a vps_id for before ever telling the customer it failed —
+      // the natural next action on that screen is retrying, which would
+      // otherwise provision a SECOND real, billed droplet.
+      if (provisionError instanceof RequestNetworkError) {
+        const recovered = await findJustCreatedVps(
+          workspaceId,
+          selectedProvider,
+          effectiveRegionId,
+          effectivePlanId,
+          attemptStartedAt,
+        );
+        if (recovered) {
+          nextVpsId = recovered.vps_id;
+          providerResourceId = recovered.provider_resource_id;
+        }
+      }
+      if (!nextVpsId) {
+        setCreateError(provisionError instanceof Error ? provisionError.message : 'Could not create Agent Computer.');
+        setBusy(false);
+        return;
+      }
     }
+    // Hand the build over to the watcher: from here on the browser's only
+    // job is polling GET /status, and that outlives this modal. Dismissing
+    // the modal now cancels nothing — the server-side lifecycle task keeps
+    // running either way.
+    startVpsProvisionWatch({
+      vpsId: nextVpsId,
+      workspaceId,
+      provider: selectedProvider,
+      providerLabel: PROVIDERS[selectedProvider]?.label || 'Cloud',
+      planLabel: plans.find((plan) => plan.id === effectivePlanId)?.label || '',
+      regionLabel: regions.find((region) => region.id === effectiveRegionId)?.label || effectiveRegionId,
+      providerResourceId,
+    });
+    setBusy(false);
   }
 
   async function deleteFailedServer() {

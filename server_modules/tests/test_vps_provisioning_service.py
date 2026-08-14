@@ -721,6 +721,89 @@ async def test_list_hardware_vps_connections_route_returns_workspace_connections
     }
 
 
+@pytest.mark.asyncio
+async def test_list_hardware_vps_route_returns_workspace_records_newest_first(tmp_path, monkeypatch):
+    """New route (outcome-honesty sweep, 2026-08-14): GET /hardware/vps wraps
+    the pre-existing vps_provisioning_service.list_workspace_vps (MAN-130)
+    with a route -- there was previously NO way for the frontend to ask "what
+    VPS records does this workspace have" at all, which is exactly what made
+    a lost POST /hardware/vps/provision response into an unrecoverable false
+    failure (see cloud-vps-setup-panel.tsx's createServer()). This proves the
+    route: real records written via record_vps_provision (the same function
+    the provision route itself calls), read back newest-first, scoped to the
+    requested workspace, with vault-encrypted fields never surfacing in the
+    public payload."""
+    monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
+    monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
+    monkeypatch.setattr(vps.vault_store, "_openssl_decrypt", lambda text: text.removeprefix("enc:"))
+
+    older = await vps.record_vps_provision(
+        vps_id="vps-older",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="do-111",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-1gb",
+        status="provisioning",
+        pairing_token="pt-older",
+        credentials={"foo": "bar"},
+    )
+    assert older["vps_id"] == "vps-older"
+    time.sleep(0.01)  # created_at is second-resolution ISO in the legacy store
+    newer = await vps.record_vps_provision(
+        vps_id="vps-newer",
+        workspace_id="ws-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        provider="digitalocean",
+        provider_resource_id="do-222",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-1gb",
+        status="provisioning",
+        pairing_token="pt-newer",
+        credentials={"foo": "bar"},
+    )
+    assert newer["vps_id"] == "vps-newer"
+    # A record in a DIFFERENT workspace must never leak into this list --
+    # the whole reason this route needs enforce_workspace_access at all.
+    await vps.record_vps_provision(
+        vps_id="vps-other-workspace",
+        workspace_id="ws-2",
+        tenant_id="tenant-2",
+        user_id="user-2",
+        provider="digitalocean",
+        provider_resource_id="do-333",
+        public_ip=None,
+        region="nyc3",
+        size="s-1vcpu-1gb",
+        status="provisioning",
+        pairing_token="pt-other",
+        credentials={"foo": "bar"},
+    )
+
+    with (
+        patch.object(routes_gateway, "enforce_workspace_access", return_value="ws-1") as access_mock,
+        patch.object(routes_gateway, "workspace_tenant_id", return_value="tenant-1") as tenant_mock,
+    ):
+        response = await routes_gateway.list_hardware_vps(
+            workspace_id="ws-1", current_user={"user_id": "user-1"}
+        )
+
+    access_mock.assert_called_once()
+    tenant_mock.assert_called_once()
+    assert response["workspace_id"] == "ws-1"
+    vps_ids = [item["vps_id"] for item in response["items"]]
+    assert vps_ids == ["vps-newer", "vps-older"], "expected newest-first, scoped to ws-1 only"
+    # No encrypted/secret field of any kind in the public payload.
+    for item in response["items"]:
+        assert "credentials_ciphertext" not in item
+        assert "pairing_token_ciphertext" not in item
+
+
 def test_load_vps_provider_credentials_proactively_refreshes_expiring_digitalocean_token(tmp_path, monkeypatch):
     monkeypatch.setattr(vps, "VPS_STATE_FILE", tmp_path / "vps.json")
     monkeypatch.setattr(vps.vault_store, "_openssl_encrypt", lambda text: f"enc:{text}")
