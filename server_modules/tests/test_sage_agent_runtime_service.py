@@ -2632,6 +2632,72 @@ class FriendlyCliSubscriptionErrorTests(unittest.TestCase):
         )
 
 
+class CliSubscriptionProviderRejectionClassificationTests(unittest.TestCase):
+    """URGENT fix (2026-08-14): a real customer's chat showed the raw
+    provider JSON verbatim ("Heads up: Codex exited unexpectedly —
+    {"type":"error","status":400,"error":{"type":"invalid_request_error",
+    "message":"The 'gpt-5.4' model is not supported when using Codex with a
+    ChatGPT account."}}") because Codex's own app-server sometimes forwards
+    the underlying provider error body as its notification message verbatim.
+    _classify_cli_subscription_provider_rejection must turn that into a
+    clean, actionable message and never let the JSON reach the screen."""
+
+    def test_the_exact_live_bug_produces_a_clean_actionable_message(self):
+        reason = (
+            "Codex exited unexpectedly on this Gateway "
+            '({"type":"error","status":400,"error":{"type":"invalid_request_error",'
+            '"message":"The \'gpt-5.4\' model is not supported when using Codex with a '
+            'ChatGPT account."}}).'
+        )
+        message = sage_agent_runtime_service._classify_cli_subscription_provider_rejection(
+            reason, model="gpt-5.4", runtime="codex",
+        )
+        self.assertIsNotNone(message)
+        self.assertIn("Heads up:", message)
+        self.assertIn("gpt-5.4", message)
+        self.assertIn("Model tab", message)
+        # The whole point: no raw JSON syntax reaches the customer.
+        self.assertNotIn("{", message)
+        self.assertNotIn("}", message)
+        self.assertNotIn("invalid_request_error", message)
+        self.assertNotIn('"type"', message)
+
+    def test_other_invalid_request_errors_still_get_a_clean_message_without_presupposing_the_model(self):
+        reason = (
+            "Codex exited unexpectedly on this Gateway "
+            '({"type":"error","status":400,"error":{"type":"invalid_request_error",'
+            '"message":"reasoning effort \'ultra\' is not a recognized value."}}).'
+        )
+        message = sage_agent_runtime_service._classify_cli_subscription_provider_rejection(
+            reason, model="gpt-5.6-terra", runtime="codex",
+        )
+        self.assertIsNotNone(message)
+        self.assertIn("Heads up:", message)
+        self.assertIn("reasoning effort", message)
+        self.assertNotIn("{", message)
+        self.assertNotIn("}", message)
+
+    def test_a_reason_with_no_embedded_json_falls_through_to_the_generic_classifier(self):
+        message = sage_agent_runtime_service._classify_cli_subscription_provider_rejection(
+            "Codex exited unexpectedly on this Gateway (segfault).", model="gpt-5.2", runtime="codex",
+        )
+        self.assertIsNone(message)
+
+    def test_falling_through_still_composes_a_full_message_via_the_existing_classifier(self):
+        # Proves the two functions compose the way the real raise site does —
+        # a None from the structural classifier must not leave the caller
+        # with nothing to show.
+        reason = "Codex exited unexpectedly on this Gateway (segfault)."
+        self.assertIsNone(
+            sage_agent_runtime_service._classify_cli_subscription_provider_rejection(
+                reason, model="gpt-5.2", runtime="codex",
+            )
+        )
+        fallback = sage_agent_runtime_service._friendly_cli_subscription_error(reason, runtime="codex")
+        self.assertIn("Heads up:", fallback)
+        self.assertIn("segfault", fallback)
+
+
 class SageAgentRuntimeSpecialistProviderResolutionTests(unittest.TestCase):
     """§25.3/§28.2 — a specialist with its OWN provider/model_config binding
     must resolve provider AND credentials TOGETHER via
