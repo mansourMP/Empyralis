@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
 
 import {
   resolveExpectedSupervisorUnit,
@@ -75,6 +76,44 @@ test("resolveExpectedSupervisorUnit returns null on an unsupported platform (e.g
     logDir: "C:\\gateway\\logs",
   });
   assert.equal(definition, null);
+});
+
+test("the GATEWAY's own unit names an absolute program, and its inputs cannot be otherwise", () => {
+  // Companion to openclaw-supervisor-binary-path.test.ts, which exists because
+  // the OpenClaw unit was rendered with the bare name "openclaw" and died with
+  // launchd status 78 (EX_CONFIG) on every start, silently. The gateway's own
+  // unit does NOT share that exposure, and this records why rather than
+  // leaving the next reader to re-derive it:
+  //
+  //   execPath   process.execPath        — always absolute, per Node's docs
+  //   entryPath  require.main?.filename  — module filenames are resolved
+  //              || process.argv[1]      — Node resolves the entry to absolute
+  //              || process.execPath     — absolute again
+  //
+  // So no refusal was added there; a guard would only ever fire on an input
+  // Node cannot produce. The assertion below is on the REAL values this
+  // process was launched with, so it would fail if that ever stopped holding.
+  assert.ok(path.isAbsolute(process.execPath), process.execPath);
+  const entryPath = require.main?.filename || process.argv[1] || process.execPath;
+  assert.ok(path.isAbsolute(entryPath), entryPath);
+
+  for (const platform of ["darwin", "linux"] as const) {
+    const definition = resolveExpectedSupervisorUnit({
+      platform,
+      env: {},
+      homeDir: "/Users/tester",
+      execPath: process.execPath,
+      entryPath,
+      logDir: "/opt/empyralis/gateway/state/logs",
+    });
+    assert.ok(definition);
+    const program =
+      platform === "darwin"
+        ? /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(definition!.contents)?.[1]
+        : /^ExecStart=(\S+)/m.exec(definition!.contents)?.[1];
+    assert.ok(program, definition!.contents);
+    assert.ok(path.isAbsolute(program!), `${platform}: ${program}`);
+  }
 });
 
 test("resolveExpectedSupervisorUnit rendering is deterministic for the same inputs", () => {
@@ -164,6 +203,72 @@ test("repairGatewaySupervisorUnit is a no-op when already matching", async () =>
   assert.equal(result.action, "no_change");
   assert.equal(result.changed, false);
   assert.equal(wrote, false);
+});
+
+// A launchd plist names its own log file, and launchd — not the program —
+// opens it, before exec, without creating the parent directory. A missing
+// parent is exit 78 (EX_CONFIG) and an empty universe: no log (the log is
+// what failed), nothing in the gateway journal, just `launchctl list`
+// showing 78 forever. That is how the Empyralis-managed OpenClaw transport
+// silently never started on macOS on 2026-08-14. These two tests are the
+// only thing standing between that and a repeat: the plist renders
+// perfectly, the write succeeds, and the job still cannot start.
+test("repairGatewaySupervisorUnit creates the log file's parent directory, not just the unit's", async () => {
+  const definition: GatewaySupervisorUnitDefinition = {
+    ...fakeDefinition("expected-contents"),
+    logPath: "/var/state/logs/openclaw-empyralis.log",
+  };
+  const madeDirs: string[] = [];
+  const result = await repairGatewaySupervisorUnit({
+    definition,
+    fileState: "missing",
+    mkdir: async (dirPath) => {
+      madeDirs.push(dirPath);
+    },
+    writeFile: async () => undefined,
+  });
+  assert.equal(result.action, "wrote_new_unit");
+  assert.ok(
+    madeDirs.includes("/var/state/logs"),
+    `expected the log directory to be created, got ${JSON.stringify(madeDirs)}`,
+  );
+});
+
+test("repairGatewaySupervisorUnit creates the log directory even when the unit file already matches (heals an installed-but-dead job)", async () => {
+  const definition: GatewaySupervisorUnitDefinition = {
+    ...fakeDefinition("expected-contents"),
+    logPath: "/var/state/logs/openclaw-empyralis.log",
+  };
+  const madeDirs: string[] = [];
+  let wrote = false;
+  const result = await repairGatewaySupervisorUnit({
+    definition,
+    fileState: "present_matching",
+    mkdir: async (dirPath) => {
+      madeDirs.push(dirPath);
+    },
+    writeFile: async () => {
+      wrote = true;
+    },
+  });
+  assert.equal(result.action, "no_change");
+  assert.equal(wrote, false, "a matching unit must still never be rewritten");
+  assert.deepEqual(madeDirs, ["/var/state/logs"]);
+});
+
+test("repairGatewaySupervisorUnit skips log-directory creation when the unit redirects nowhere (systemd journals)", async () => {
+  const definition = fakeDefinition("expected-contents");
+  assert.equal(definition.logPath, undefined);
+  const madeDirs: string[] = [];
+  await repairGatewaySupervisorUnit({
+    definition,
+    fileState: "missing",
+    mkdir: async (dirPath) => {
+      madeDirs.push(dirPath);
+    },
+    writeFile: async () => undefined,
+  });
+  assert.deepEqual(madeDirs, [path.dirname(definition.unitPath)]);
 });
 
 test("repairGatewaySupervisorUnit writes a missing unit and registers it when a registrar is provided", async () => {

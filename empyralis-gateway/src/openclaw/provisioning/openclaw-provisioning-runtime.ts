@@ -208,7 +208,16 @@ export class OpenClawProvisioningRuntime {
       platform,
       homeDir,
       stateDir: this.options.stateDir,
-      binaryPath: this.options.binaryPath || "openclaw",
+      // Passed through UNRESOLVED and possibly undefined, on purpose. This
+      // used to default to the bare string "openclaw", which is correct for
+      // OpenClawCli's execFile (it does a PATH lookup) and fatal for a
+      // supervisor unit (launchd resolves ProgramArguments[0] against its own
+      // minimal PATH, systemd rejects a non-absolute ExecStart outright) —
+      // and this is the path EVERY gateway takes at boot, so every unit it
+      // ever wrote was a job that could not start. The provisioner resolves
+      // an absolute path itself, after the install step. See
+      // ./openclaw-binary-path.ts.
+      binaryPath: this.options.binaryPath,
       record: this.options.record,
     });
   }
@@ -350,6 +359,9 @@ function serialize(result: OpenClawProvisionResult): Record<string, unknown> {
     supervisor: result.supervisor
       ? {
           supported: result.supervisor.supported,
+          // "this OS has no supervisor we manage" and "openclaw is not on this
+          // box" are different facts, and only the second is actionable.
+          unsupported_reason: result.supervisor.unsupportedReason ?? null,
           file_state: result.supervisor.fileState,
           action: result.supervisor.repair?.action ?? null,
           requires_manual_reload: result.supervisor.repair?.requiresManualReload ?? null,

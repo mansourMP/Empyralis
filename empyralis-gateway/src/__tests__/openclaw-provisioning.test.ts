@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
@@ -936,6 +937,97 @@ test("a happy path provisions, records a fingerprint, and reports no drift", asy
   assert.ok(result.configFingerprint);
   assert.equal(result.healthy, true);
   assert.equal(result.supervisor?.supported, true);
+});
+
+test("the supervised unit points at WHERE openclaw is, not at what it is called", async () => {
+  // The wiring, not the resolver. Every gateway reaches provisioning through
+  // OpenClawProvisioningRuntime, which had no configured binary path on
+  // essentially every box and defaulted to the bare string "openclaw" —
+  // correct for OpenClawCli's execFile (it does a PATH lookup) and fatal for
+  // a supervisor unit (launchd resolves ProgramArguments[0] against its OWN
+  // minimal PATH, systemd rejects a non-absolute ExecStart at load). A test
+  // of the resolver alone stays green while the provisioner passes the raw
+  // configured value straight through, which is exactly what it did.
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "empyralis-openclaw-bin-"));
+  const binary = path.join(binDir, "openclaw");
+  fs.writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  try {
+    const state: FakeCliState = {
+      version: OPENCLAW_PINNED_VERSION,
+      schema: schemaFixture(),
+      effective: effectiveFor([policy({ channelId: "feishu" })]),
+      audit: { findings: [] },
+      patchCode: 0,
+    };
+    const result = await fakeProvisioner(state, {
+      // The poison value itself, plus a PATH on which it genuinely resolves.
+      // binDir is FIRST, so this resolves to the file written above even on a
+      // machine that has a real openclaw installed.
+      binaryPath: "openclaw",
+      env: { PATH: `${binDir}:/usr/bin:/bin` },
+    }).provision();
+
+    assert.equal(result.status, "provisioned", result.refusal?.detail);
+    assert.equal(result.supervisor?.supported, true);
+    assert.equal(result.supervisor?.unsupportedReason, undefined);
+    const contents = result.supervisor?.definition?.contents ?? "";
+    assert.match(contents, new RegExp(`<string>${binary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</string>`));
+    assert.equal(
+      /<string>openclaw<\/string>/.test(contents),
+      false,
+      "a bare program name is a job that dies with status 78 and logs nothing",
+    );
+  } finally {
+    fs.rmSync(binDir, { recursive: true, force: true });
+  }
+});
+
+test("nothing to point at means NO unit, with a reason — never a unit that cannot start", async () => {
+  const written: string[] = [];
+  {
+    const state: FakeCliState = {
+      version: OPENCLAW_PINNED_VERSION,
+      schema: schemaFixture(),
+      effective: effectiveFor([policy({ channelId: "feishu" })]),
+      audit: { findings: [] },
+      patchCode: 0,
+    };
+    const files = new Map<string, string>();
+    const result = await fakeProvisioner(state, {
+      // A non-absolute name that cannot resolve on ANY box, so this test does
+      // not depend on whether the machine running it happens to have a real
+      // openclaw installed. The PATH is a real one so `sh` itself resolves.
+      binaryPath: "empyralis-openclaw-that-is-not-installed",
+      env: { PATH: "/usr/bin:/bin" },
+      fs: {
+        readFile: async (filePath: string) => {
+          const found = files.get(filePath);
+          if (found === undefined) throw new Error("ENOENT");
+          return found;
+        },
+        writeFile: async (filePath: string, contents: string) => {
+          written.push(filePath);
+          files.set(filePath, contents);
+        },
+        mkdir: async () => undefined,
+        rm: async (filePath: string) => {
+          files.delete(filePath);
+        },
+      },
+    }).provision();
+
+    // The RUN still succeeds — a box with no transport binary is still locked
+    // down, audited and recorded; only supervision is honestly absent.
+    assert.equal(result.status, "provisioned", result.refusal?.detail);
+    assert.equal(result.supervisor?.supported, false);
+    assert.equal(result.supervisor?.unsupportedReason, "binary_path_not_absolute");
+    assert.equal(result.supervisor?.definition, null);
+    assert.equal(
+      written.some((filePath) => filePath.includes("LaunchAgents")),
+      false,
+      "nothing may write a plist whose program does not exist",
+    );
+  }
 });
 
 test("drift is DETECTED, named, and corrected — never silently tolerated", async () => {

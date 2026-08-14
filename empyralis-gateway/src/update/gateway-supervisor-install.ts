@@ -117,6 +117,28 @@ export interface GatewaySupervisorUnitDefinition {
   /** Human-readable unit/label name, for logging and launchctl/systemctl
    *  target arguments. */
   name: string;
+  /** Absolute path this unit redirects its stdout/stderr to, when the
+   *  platform's supervisor redirects to a FILE rather than a journal.
+   *
+   *  Load-bearing, not informational: launchd opens StandardOutPath /
+   *  StandardErrorPath itself, BEFORE exec'ing the program, and a missing
+   *  parent directory is not created for it — the job dies immediately with
+   *  exit status 78 (EX_CONFIG) and writes nothing anywhere, because the
+   *  only place it could have written is the file it just failed to open.
+   *  `repairGatewaySupervisorUnit` therefore mkdir -p's this path's parent
+   *  alongside the unit file's own, and the failure this closes is silent by
+   *  construction: `launchctl list` shows status 78, the log file does not
+   *  exist, and nothing else reports anything at all.
+   *
+   *  Hit for real 2026-08-14 on macOS: the Empyralis-managed OpenClaw
+   *  transport's plist pointed at <stateDir>/logs/openclaw-<profile>.log,
+   *  nothing ever created <stateDir>/logs, so the channel transport never
+   *  started on any Mac — the gateway just logged openclaw.outbound.
+   *  connect_rejected forever against whatever else held the loopback port.
+   *
+   *  Optional because systemd's renderer journals instead of redirecting, so
+   *  a linux definition has nothing to create. */
+  logPath?: string;
 }
 
 export interface ResolveExpectedSupervisorUnitOptions {
@@ -278,6 +300,7 @@ export function resolveExpectedSupervisorUnit(
       mode: "launchd",
       unitPath,
       name: label,
+      logPath,
       contents: renderLaunchAgentPlist({
         label,
         programArguments: [opts.execPath, opts.entryPath],
@@ -352,6 +375,26 @@ export interface GatewaySupervisorRepairResult {
 export async function repairGatewaySupervisorUnit(
   opts: GatewaySupervisorRepairOptions,
 ): Promise<GatewaySupervisorRepairResult> {
+  // BEFORE the present_matching early return, deliberately. launchd opens
+  // the redirect target itself, before exec, and will not create its parent
+  // — so a plist that is byte-for-byte correct still dies on every start
+  // with exit 78 (EX_CONFIG) when that directory is missing, and writes no
+  // log saying so because the log is precisely what failed to open. A fix
+  // that only ran on the write path would heal a fresh install and leave
+  // every already-installed box broken forever, which is the state this was
+  // found in. mkdir -p is idempotent, so running it on the matching path
+  // costs one syscall and makes the repair self-healing. See the logPath
+  // field's own comment on GatewaySupervisorUnitDefinition.
+  if (opts.definition.logPath) {
+    try {
+      await opts.mkdir(path.dirname(opts.definition.logPath));
+    } catch {
+      // Never fail a repair over the log directory: the unit write below is
+      // the thing being reported on, and on the present_matching path there
+      // is nothing to report at all.
+    }
+  }
+
   if (opts.fileState === "present_matching") {
     return {
       action: "no_change",

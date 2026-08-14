@@ -110,6 +110,7 @@ import {
   resolveOpenClawPluginHookFlags,
   type OpenClawChannelShapeFinding,
 } from "./openclaw-channel-shapes";
+import { resolveOpenClawBinaryPath } from "./openclaw-binary-path";
 import { OpenClawCli, openClawProfileStateDir } from "./openclaw-cli";
 import {
   detectForbiddenCredentialEnvNames,
@@ -307,8 +308,19 @@ export interface OpenClawProvisionerOptions {
   /** Where the Empyralis gateway keeps its own state; the OpenClaw
    *  provisioning record and supervised-process logs live under it. */
   stateDir: string;
-  /** Absolute path to the `openclaw` binary, for the supervisor unit. */
-  binaryPath: string;
+  /**
+   * The CONFIGURED `openclaw` binary path (EMPYRALIS_OPENCLAW_BINARY), which
+   * is unset on essentially every box — hence optional.
+   *
+   * NOT passed to the supervisor unit as-is. The unit needs an ABSOLUTE path
+   * (launchd and systemd each resolve it themselves, and neither consults the
+   * unit's own PATH), so this run resolves it through
+   * ./openclaw-binary-path.ts after the CLI has been installed, and renders no
+   * unit at all when there is nothing absolute to point at. A bare "openclaw"
+   * here is what wrote a launchd job that died with status 78 on every start
+   * and logged nothing.
+   */
+  binaryPath?: string;
   record?: (messageType: string, payload: Record<string, unknown>) => Promise<unknown>;
   /** Injectable for tests. */
   fs?: {
@@ -785,10 +797,19 @@ export class OpenClawProvisioner {
     // ── 8. Record, supervise, probe ─────────────────────────────────────
     await this.writeStoredRecord(rendered.fingerprint, version.expected, pluginOutcome.resolvedPins);
 
+    // WHERE openclaw is, not what it is called. Resolved HERE — after the
+    // install step above, so a box that acquired the CLI on this very run
+    // still gets a unit — and through the same resolver the root installer
+    // uses, never a second one. undefined means "no absolute path exists", and
+    // auditAndRepairOpenClawSupervisorUnit then reports `supported: false`
+    // with `unsupportedReason: "binary_path_not_absolute"` instead of writing
+    // a unit that cannot start.
+    const supervisedBinaryPath = await resolveOpenClawBinaryPath(this.options.binaryPath, transportEnv);
+
     const supervisor = await auditAndRepairOpenClawSupervisorUnit(
       {
         profile,
-        binaryPath: this.options.binaryPath,
+        binaryPath: supervisedBinaryPath,
         gatewayPort: this.options.plan.gatewayPort,
         environment: this.supervisedEnvironment(),
         platform: this.platform,

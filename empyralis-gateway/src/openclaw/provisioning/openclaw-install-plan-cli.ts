@@ -47,6 +47,7 @@ import path from "path";
 import { loadGatewayConfig, openClawGatewayPortFromUrl } from "../../config";
 import { OPENCLAW_INBOUND_PATH } from "../inbound-listener";
 import { resolveOpenClawLocalSecrets } from "../openclaw-local-secrets";
+import { resolveOpenClawBinaryPath } from "./openclaw-binary-path";
 import { OpenClawCli, openClawProfileStateDir } from "./openclaw-cli";
 import { buildOpenClawProvisioningRuntime } from "./openclaw-provisioning-runtime";
 import { ensureOpenClawRuntimeInstalled, type OpenClawRuntimeInstallOutcome } from "./openclaw-runtime-install";
@@ -132,24 +133,6 @@ export interface BuildOpenClawInstallPlanOptions {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   homeDir?: string;
-}
-
-/** Where `openclaw` ended up, asked of the shell rather than assumed. Returns
- *  undefined when it is not on PATH — the plan then carries no unit, because
- *  a unit whose ExecStart does not exist is a restart loop. */
-async function resolveOpenClawBinaryPath(
-  configured: string | undefined,
-  env: NodeJS.ProcessEnv,
-): Promise<string | undefined> {
-  const explicit = String(configured || "").trim();
-  if (explicit) return explicit;
-  const { execFileWithTimeout } = await import("../../shell/exec-file-with-timeout");
-  const result = await execFileWithTimeout("/usr/bin/env", ["sh", "-c", "command -v openclaw"], 15_000, {
-    env,
-    encoding: "utf8" as const,
-  });
-  const found = String(result.stdout || "").trim().split("\n")[0]?.trim();
-  return found && path.isAbsolute(found) ? found : undefined;
 }
 
 export async function buildOpenClawInstallPlan(

@@ -43,8 +43,17 @@ import { assertValidOpenClawProfile, openClawProfileStateDir } from "./openclaw-
 
 export interface OpenClawSupervisorUnitOptions {
   profile: string;
-  /** Absolute path to the `openclaw` binary. */
-  binaryPath: string;
+  /**
+   * ABSOLUTE path to the `openclaw` binary, from
+   * ./openclaw-binary-path.ts's resolveOpenClawBinaryPath — never a bare name
+   * and never a configured value taken on faith.
+   *
+   * Deliberately `string | undefined` rather than optional: "we could not find
+   * openclaw" is a state every caller must pass through explicitly, because
+   * the wrong handling of it (writing a unit anyway) fails silently on both
+   * platforms. See resolveExpectedOpenClawSupervisorUnit's refusal below.
+   */
+  binaryPath: string | undefined;
   gatewayPort: number;
   /** The FULL environment for the supervised process. Callers pass
    *  OpenClawCli.childEnv()'s sanitized copy, reduced to what OpenClaw
@@ -121,9 +130,24 @@ export function buildOpenClawSupervisedEnv(params: {
 
 /**
  * The unit this platform should have for this customer's OpenClaw instance.
- * Returns null on a platform neither launchd nor systemd applies to — the
- * caller reports "unsupported", never treats it as a failure, exactly as
- * resolveExpectedSupervisorUnit does for the Empyralis gateway.
+ *
+ * Returns null in TWO cases, and the caller reports "unsupported" for both
+ * rather than treating either as a failure (auditAndRepairOpenClawSupervisorUnit
+ * below distinguishes them in `unsupportedReason`, because they are different
+ * facts and this codebase does not collapse those):
+ *
+ *  1. A platform neither launchd nor systemd applies to, exactly as
+ *     resolveExpectedSupervisorUnit does for the Empyralis gateway.
+ *  2. A program path that is not ABSOLUTE — including the bare "openclaw"
+ *     OpenClawCli quite correctly defaults to for its own execFile calls.
+ *     Refusing here rather than rendering is the whole point: launchd
+ *     resolves ProgramArguments[0] against its OWN minimal PATH and not the
+ *     plist's EnvironmentVariables.PATH, so a bare name dies before exec with
+ *     status 78 and an empty log file; systemd rejects a non-absolute
+ *     ExecStart at unit load. Both failures are silent, permanent, and
+ *     indistinguishable from "the channel transport is broken". A unit that
+ *     provably cannot start is worse than no unit, because it also reads as
+ *     supervision that exists. See ./openclaw-binary-path.ts.
  *
  * The argv is OpenClaw's own documented headless boot, verified live under an
  * isolated profile (CHANNEL-ADOPTION-PLAN.md's feasibility table). `--token`
@@ -135,10 +159,12 @@ export function resolveExpectedOpenClawSupervisorUnit(
 ): GatewaySupervisorUnitDefinition | null {
   const platform = options.platform ?? process.platform;
   const homeDir = options.homeDir ?? os.homedir();
+  const binaryPath = String(options.binaryPath || "").trim();
+  if (!path.isAbsolute(binaryPath)) return null;
   const profile = assertValidOpenClawProfile(options.profile);
   const label = openClawSupervisorLabel(profile);
   const programArguments = [
-    options.binaryPath,
+    binaryPath,
     "--profile",
     profile,
     "gateway",
@@ -153,15 +179,17 @@ export function resolveExpectedOpenClawSupervisorUnit(
   const workingDirectory = openClawProfileStateDir(profile, homeDir);
 
   if (platform === "darwin") {
+    const logPath = path.join(options.logDir, `openclaw-${profile}.log`);
     return {
       mode: "launchd",
       name: label,
       unitPath: path.join(homeDir, "Library", "LaunchAgents", `${label}.plist`),
+      logPath,
       contents: renderLaunchAgentPlist({
         label,
         programArguments,
         workingDirectory,
-        logPath: path.join(options.logDir, `openclaw-${profile}.log`),
+        logPath,
         environment: options.environment,
       }),
     };
@@ -191,6 +219,18 @@ export interface OpenClawSupervisorInstallOutcome {
   definition: GatewaySupervisorUnitDefinition | null;
   fileState: GatewaySupervisorFileState | "not_applicable";
   repair?: GatewaySupervisorRepairResult;
+  /**
+   * WHY there is no unit, when there is none. Present only alongside
+   * `supported: false`.
+   *
+   * "this OS has no supervisor we manage" and "openclaw is not installed on
+   * this box" are different facts with different remedies — the first is
+   * permanent and expected, the second is a real, fixable reason the channel
+   * transport is not running. One boolean cannot say which, and saying only
+   * "unsupported" for the second is how a missing binary reads as a platform
+   * limitation nobody investigates.
+   */
+  unsupportedReason?: "platform" | "binary_path_not_absolute";
 }
 
 export interface AuditAndRepairOpenClawSupervisorOptions extends OpenClawSupervisorUnitOptions {
@@ -209,7 +249,14 @@ export async function auditAndRepairOpenClawSupervisorUnit(
 ): Promise<OpenClawSupervisorInstallOutcome> {
   const definition = resolveExpectedOpenClawSupervisorUnit(options);
   if (!definition) {
-    return { supported: false, definition: null, fileState: "not_applicable" };
+    const platform = options.platform ?? process.platform;
+    const platformSupervised = platform === "darwin" || platform === "linux";
+    return {
+      supported: false,
+      definition: null,
+      fileState: "not_applicable",
+      unsupportedReason: platformSupervised ? "binary_path_not_absolute" : "platform",
+    };
   }
   const fileState = await auditGatewaySupervisorUnit({ definition, readFile: options.readFile });
   if (!attemptRepair) {
