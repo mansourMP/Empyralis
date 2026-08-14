@@ -281,3 +281,46 @@ test("real Docker: the pre-execution filter rejects a hard-blocked command befor
   const frame = makeInvokeFrame("shell.execute", { command: "rm -rf /" });
   await assert.rejects(runtime.handleCapabilityInvoke(frame), /permanently blocked/);
 });
+
+// filesystem.read_write's sandbox WRITE/APPEND mode pipes content through
+// the container's stdin (runtime.ts's filesystemInnerArgs: `cat > "$1"` /
+// `cat >> "$1"`) — unlike shell.execute, which passes the command as argv
+// and never touches stdin. That made it a genuinely different code path
+// from every other "real Docker" test above, and it silently wrote 0-byte
+// files (reported as success) until buildDockerRunArgs started passing
+// `-i`. Real Docker only: a mocked dockerReadyCheck proves nothing about
+// whether `docker run`'s own stdin plumbing is wired correctly.
+test("real Docker: filesystem.read_write sandbox mode round-trips real content through container stdin", async (t) => {
+  if (!(await realDockerAvailable())) {
+    t.skip("Docker daemon is not available on this machine");
+    return;
+  }
+  const runtime = new GatewayShellRuntime(baseConfig({ dockerReadyCheck: async () => true }));
+  const writeFrame = makeInvokeFrame("filesystem.read_write", {
+    path: "sandbox-note.txt",
+    mode: "write",
+    content: "real docker sandbox stdin round-trip",
+  });
+  const writeResult = await runtime.handleCapabilityInvoke(writeFrame);
+  assert.equal(writeResult.execution_mode, "sandbox");
+  assert.equal((writeResult.sandbox as Record<string, unknown>).mode, "docker");
+
+  // Read back in a FRESH container (per-call isolation, same as shell.execute
+  // above) — this only sees the content if it landed on the bind-mounted
+  // workspace volume, not merely inside the writing container's own layer.
+  const readFrame = makeInvokeFrame("filesystem.read_write", { path: "sandbox-note.txt", mode: "read" });
+  const readResult = await runtime.handleCapabilityInvoke(readFrame);
+  assert.equal(readResult.execution_mode, "sandbox");
+  assert.equal(readResult.content, "real docker sandbox stdin round-trip");
+
+  const appendFrame = makeInvokeFrame("filesystem.read_write", {
+    path: "sandbox-note.txt",
+    mode: "append",
+    content: " — appended",
+  });
+  await runtime.handleCapabilityInvoke(appendFrame);
+  const readAfterAppend = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame("filesystem.read_write", { path: "sandbox-note.txt", mode: "read" }),
+  );
+  assert.equal(readAfterAppend.content, "real docker sandbox stdin round-trip — appended");
+});
