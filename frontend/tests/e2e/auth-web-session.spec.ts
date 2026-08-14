@@ -16,7 +16,18 @@ test.describe('browser auth session', () => {
     const postedSignupRequest = await signupRequest;
     expect(JSON.parse(postedSignupRequest.postData() || '{}').acquisition_token).toBe('tg-signup-token');
 
-    await page.waitForURL(/\/w\/.+\/sage(?:[/?#]|$)/);
+    // Signup always lands on the "check your email" screen before it ever
+    // sees the app -- signup/page.tsx's handleSubmit unconditionally calls
+    // window.location.replace('/verify-email') in its `finally` block,
+    // whether or not the post-signup readiness poll succeeds. There is no
+    // '/sage' page in this flow and never a hop through the workspace shell
+    // -- '/sage' is now just a redirect for stale bookmarks straight back to
+    // the bare workspace route (app/(account)/w/[workspaceId]/sage/page.tsx),
+    // and signup never visits it even transiently. Confirmed by driving the
+    // real flow in a browser, not by reading the route table -- see
+    // CLAUDE.md's own documented trap about next.config redirects resolving
+    // ahead of the router.
+    await page.waitForURL(/\/verify-email(?:[/?#]|$)/);
     await expect(page).not.toHaveURL(/\/onboarding(?:[/?#]|$)/);
     await page.reload();
     await expect(page).not.toHaveURL(/\/login$/);
@@ -88,12 +99,27 @@ test.describe('browser auth session', () => {
     const postedLoginRequest = await loginRequest;
     expect(JSON.parse(postedLoginRequest.postData() || '{}').acquisition_token).toBe('tg-login-token');
 
-    await page.waitForURL(/\/w\/.+\/sage(?:[/?#]|$)/);
+    // login/page.tsx redirects to '/' by default, and app/page.tsx's root
+    // route lands on the workspace's own stored default_route or, absent
+    // one, the bare workspace shell (/w/{id}) -- never '/sage', which is now
+    // only a redirect target for stale bookmarks and is not on this path at
+    // all. Confirmed by driving the real flow in a browser: this seeded
+    // account lands directly on the bare workspace route with zero agents,
+    // never on '/sage' even transiently.
+    await page.waitForURL(/\/w\/[^/?#]+\/?(?:[?#]|$)/);
     await expect(page).not.toHaveURL(/\/onboarding(?:[/?#]|$)/);
     await page.reload();
     await expect(page).not.toHaveURL(/\/login$/);
   });
 
+  // CSRF protection (validateBrowserCsrf in control-plane-proxy.ts) applies
+  // to every unsafe request that carries a live session cookie -- exercised
+  // here against verify-email/resend, a route with no bypass. This test used
+  // to hit /api/auth/logout instead, which happened to also return 403 only
+  // because it predated logout's deliberate bypassCsrf grant (see the next
+  // test) -- it was accidentally asserting the one exception rather than the
+  // rule, so a real regression in the general case would have gone
+  // undetected while this test stayed green.
   test('unsafe cookie-auth requests fail closed without a CSRF header', async ({ page }) => {
     await page.goto('/login');
     await page.getByLabel('Email').fill('owner@example.com');
@@ -101,8 +127,28 @@ test.describe('browser auth session', () => {
     await page.getByRole('button', { name: /^continue$/i }).click();
     await page.waitForURL(/\/(w\/|onboarding|$)/);
 
-    const response = await page.request.post('/api/auth/logout');
+    const response = await page.request.post('/api/auth/verify-email/resend');
     expect(response.status()).toBe(403);
+  });
+
+  // Deliberate exception to the rule above, not a gap. logout/route.ts sets
+  // bypassCsrf: true -- it is the ONLY route in the app that does -- because
+  // logout is the guaranteed escape hatch from a stuck session and must
+  // always reach the backend and clear cookies, even when the browser's CSRF
+  // cookie is missing, stale, or was never fetched. A forged cross-site
+  // logout only logs the victim out, which is not a meaningful attack, so
+  // the trade favors "logout always works" over "logout is CSRF-protected
+  // like everything else." If this test starts failing, the fix is almost
+  // certainly to restore the bypass, not to weaken this assertion.
+  test('logout succeeds even without a CSRF header, by design', async ({ page }) => {
+    await page.goto('/login');
+    await page.getByLabel('Email').fill('owner@example.com');
+    await page.getByLabel('Password').fill('password-123');
+    await page.getByRole('button', { name: /^continue$/i }).click();
+    await page.waitForURL(/\/(w\/|onboarding|$)/);
+
+    const response = await page.request.post('/api/auth/logout');
+    expect(response.ok()).toBeTruthy();
   });
 
   test('logout clears the browser session', async ({ page }) => {
@@ -124,7 +170,7 @@ test.describe('browser auth session', () => {
     await expect(page).toHaveURL(/\/login$/);
   });
 
-  test('google auth completion redirects the original auth tab into Sage', async ({ browser }) => {
+  test('google auth completion redirects the original auth tab into the workspace', async ({ browser }) => {
     const context = await browser.newContext();
     const loginPage = await context.newPage();
     await loginPage.goto('/login');
@@ -164,8 +210,12 @@ test.describe('browser auth session', () => {
     const callbackPage = await context.newPage();
     await callbackPage.goto('/auth/complete?provider=google&next=/', { waitUntil: 'domcontentloaded' });
 
-    await callbackPage.waitForURL(/\/w\/.+\/sage(?:[/?#]|$)/);
-    await loginPage.waitForURL(/\/w\/.+\/sage(?:[/?#]|$)/);
+    // '/auth/complete' replaces to `next` ('/'), and app/page.tsx's root
+    // route resolves that to the bare workspace shell for an account with no
+    // configured default_route -- never '/sage'. Confirmed by driving this
+    // exact synthetic-signup-then-callback flow in a browser.
+    await callbackPage.waitForURL(/\/w\/[^/?#]+\/?(?:[?#]|$)/);
+    await loginPage.waitForURL(/\/w\/[^/?#]+\/?(?:[?#]|$)/);
     await expect(loginPage).not.toHaveURL(/\/login(?:[/?#]|$)/);
   });
 });
