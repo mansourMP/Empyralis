@@ -431,7 +431,7 @@ test("a channel with no sender list is left on its own default, never on a mode 
   const rendered = renderOpenClawConfig(
     {
       ...plan([policy({ channelId: "telegram" })]),
-      channelKeySupport: [{ channelId: "telegram", keys: ["enabled", "groupPolicy"], acceptsUndeclaredKeys: false }],
+      channelKeySupport: [{ channelId: "telegram", hasConfigNode: true, keys: ["enabled", "groupPolicy"], acceptsUndeclaredKeys: false }],
     },
     { gatewayToken: "t" },
   );
@@ -448,7 +448,7 @@ test("a channel that will not even take `enabled` is left out entirely, not push
   const rendered = renderOpenClawConfig(
     {
       ...plan([policy({ channelId: "telegram" })]),
-      channelKeySupport: [{ channelId: "telegram", keys: [], acceptsUndeclaredKeys: false }],
+      channelKeySupport: [{ channelId: "telegram", hasConfigNode: true, keys: [], acceptsUndeclaredKeys: false }],
     },
     { gatewayToken: "t" },
   );
@@ -482,6 +482,104 @@ test("a channel whose every schema branch demands credentials is left out, and s
     rendered.disabledChannels.map((finding) => finding.code),
     ["channel_not_configurable"],
   );
+});
+
+// ── a channel id this box does not have is never written ──────────────────
+//
+// THE SECOND REGRESSION, from the run right after the first fix landed —
+// same blast radius, completely different cause:
+//
+//   openclaw_config_patch_failed — "Config validation failed:
+//   channels.openclaw-weixin: unknown channel id: openclaw-weixin"
+//
+// `openclaw-weixin` is a real channel in OpenClaw's own registry, but its
+// config namespace only exists once its PLUGIN is installed. The generator
+// wrote `{enabled: false}` for it — which does not help, because the id is
+// refused before its contents are looked at — and the all-or-nothing push
+// took every other channel down with it.
+
+test("a channel with no config namespace on this box is OMITTED, not written as {enabled:false}", () => {
+  const support = [
+    { channelId: "openclaw-weixin", hasConfigNode: false, keys: [], acceptsUndeclaredKeys: false },
+    { channelId: "telegram", hasConfigNode: true, keys: ["enabled", "dmPolicy", "allowFrom", "groupPolicy"], acceptsUndeclaredKeys: false },
+  ];
+  const rendered = renderOpenClawConfig(
+    {
+      ...plan([policy({ channelId: "openclaw-weixin" }), policy({ channelId: "telegram" })]),
+      channelKeySupport: support,
+    },
+    { gatewayToken: "t" },
+  );
+
+  const channels = rendered.config.channels as Record<string, unknown>;
+  assert.equal(Object.hasOwn(channels, "openclaw-weixin"), false, "the ID ITSELF is what OpenClaw refuses");
+  // The whole point: the channel that IS present still gets configured. Before
+  // the fix this assertion was unreachable in production — the push was
+  // refused wholesale.
+  assert.equal((channels.telegram as Record<string, unknown>).enabled, true);
+
+  assert.deepEqual(
+    rendered.disabledChannels.map((finding) => [finding.channelId, finding.code]),
+    [["openclaw-weixin", "channel_absent_from_this_box"]],
+  );
+  // Its own code, not `channel_not_configurable`: that one means "the code is
+  // here and none of it is writable" and asks the owner to change something.
+  // This one clears by itself when the plugin lands.
+  const detail = rendered.disabledChannels[0].detail;
+  assert.match(detail, /not set up on this computer yet/);
+  assert.match(detail, /nothing you have configured is lost/);
+});
+
+test("every channel id the config names is one the installed schema declares", () => {
+  // The whole-document form, over the FULL Empyralis channel set — including
+  // the four whose plugin contributes their config node (`openclaw-weixin`,
+  // `openclaw-zaloclawbot`, `wecom`, `yuanbao`), which every earlier test in
+  // this file filtered out and which is exactly why this shipped.
+  const schema = schemaFixture() as any;
+  const declared = new Set(Object.keys(schema.properties.channels.properties as Record<string, unknown>));
+  const everyChannelId = GENERATED_OPENCLAW_MANIFEST.channels.map((channel) => channel.id);
+  const pluginOnly = everyChannelId.filter((id) => !declared.has(id));
+  assert.ok(pluginOnly.length > 0, "expected the fixture to include plugin-contributed channels");
+
+  const rendered = renderOpenClawConfig(
+    {
+      ...plan(everyChannelId.map((channelId) => policy({ channelId }))),
+      channelKeySupport: resolveOpenClawChannelKeySupport(schema, everyChannelId),
+    },
+    { gatewayToken: "t" },
+  );
+
+  for (const channelId of Object.keys(rendered.config.channels as object)) {
+    assert.ok(declared.has(channelId), `channels.${channelId} is not a channel id this box has`);
+  }
+  // Omitted, but never silently: every one of them is reported.
+  const reported = new Set(rendered.disabledChannels.map((finding) => finding.channelId));
+  for (const channelId of pluginOnly) {
+    assert.ok(reported.has(channelId), `${channelId} was dropped from the config without saying so`);
+  }
+});
+
+test("no Empyralis channel can ever be one of OpenClaw's `configurable: false` ids", () => {
+  // The one gap between "the installed schema declares a node" (what this
+  // module reads) and "the validator accepts the id" (what actually decides).
+  // Their rule is `bundled metadata WHERE configurable !== false`, and
+  // `qa-channel` is the only entry in the pinned build that fails it: it has a
+  // full schema node and is still refused with `unknown channel id`, measured.
+  //
+  // It is unreachable because it is not in their channel REGISTRY, so it is
+  // not in the generated manifest either — a second, independent source from
+  // the schema. Asserted rather than assumed, because the day a real channel
+  // is marked non-configurable this file should fail rather than the box.
+  const manifestIds = GENERATED_OPENCLAW_MANIFEST.channels.map((channel) => channel.id);
+  assert.equal(manifestIds.includes("qa-channel"), false);
+
+  // And if one ever were, it would arrive through the manifest — which is
+  // generated from `openclaw channels list`, the registry that excludes it. So
+  // the guard that matters is that every id Empyralis renders came from there.
+  assert.ok(manifestIds.length > 20);
+  for (const channelId of Object.keys(OPENCLAW_CHANNEL_POLICY_SHAPES)) {
+    assert.ok(manifestIds.includes(channelId), `${channelId} has a shape but is not a registry channel`);
+  }
 });
 
 test("an unknown channel id is never configured from a guess", () => {

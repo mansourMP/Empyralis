@@ -134,6 +134,17 @@ const channels = [
     dmPolicy: { mode: "open", allowlist: [] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: true },
   },
+  {
+    // NO `channels.<id>` NAMESPACE AT ALL on a box without its plugin, so the
+    // ID is refused rather than its contents — `unknown channel id`, a
+    // different refusal from every case above and equally fatal to the whole
+    // push. This is the one the previous pass shipped: the generator wrote
+    // `{enabled: false}` for it, believing that was the safe minimum.
+    channelId: "openclaw-weixin",
+    enabled: true,
+    dmPolicy: { mode: "open", allowlist: [] },
+    groupPolicy: { mode: "open", allowlist: [], requireMention: true },
+  },
 ];
 
 function buildProvisioner() {

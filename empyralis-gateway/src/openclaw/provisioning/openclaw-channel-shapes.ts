@@ -98,10 +98,20 @@ function toPolicyShape(shape: GeneratedOpenClawPolicyShape): OpenClawChannelPoli
  *
  * A channel with NO entry here is not an oversight: four catalogued channels
  * (`wecom`, `openclaw-weixin`, `openclaw-zaloclawbot`, `yuanbao`) contribute
- * their config node only once their plugin is installed. `renderOpenClawConfig`
- * already handles a missing shape correctly — it writes `{enabled: false}` and
- * reports a `disabledChannels` finding, rather than guessing at an
- * authorization mapping — so those degrade honestly instead of silently.
+ * their config node only once their plugin is installed.
+ *
+ * WHAT THIS TABLE CANNOT ANSWER, and the bug that came of assuming it could:
+ * whether a channel is absent HERE. The four above are the channels that had
+ * no node ON THE BOX THE MANIFEST WAS GENERATED FROM — a per-version snapshot,
+ * while plugin installs are per-machine and change under it in both
+ * directions. The live answer is `resolveOpenClawChannelKeySupport`'s
+ * `hasConfigNode`, read from the schema of the OpenClaw actually installed.
+ *
+ * This comment used to say `renderOpenClawConfig` "writes `{enabled: false}`
+ * and reports a finding, so those degrade honestly". That was the bug: an id
+ * with no config namespace is refused OUTRIGHT (`unknown channel id`), so
+ * `{enabled: false}` is not a safe minimum — it is the same refusal in a
+ * smaller costume, and it took every other channel on the box down with it.
  *
  * Provisioning is where the verbatim-id invariant stopped being theoretical:
  * writing `channels.<id>` into a real OpenClaw config is the first operation
@@ -325,6 +335,46 @@ export const OPENCLAW_CHANNEL_WRITABLE_KEYS: readonly string[] = [
 
 export interface OpenClawChannelKeySupport {
   readonly channelId: string;
+  /**
+   * Whether THIS BOX's OpenClaw has a `channels.<id>` config namespace at all.
+   *
+   * A DIFFERENT FAILURE from "declared, but nothing on it is writable" — and it
+   * has to be, because the two need opposite documents. An undeclared KEY on a
+   * declared channel is refused with `must not have additional properties`; an
+   * undeclared CHANNEL is refused with `unknown channel id`, and there is no
+   * block small enough to get past it. Not `{enabled: false}`, not `{}`.
+   *
+   * THE RULE, read out of their validator (dist/io-*.js) and then measured:
+   *
+   *   allowed = bundled channel-config metadata WHERE configurable !== false
+   *           ∪ channel ids contributed by INSTALLED plugins
+   *
+   * so `openclaw config schema`'s `channels.properties` keys are the same set
+   * plus the `configurable: false` entries, which is why this is read off the
+   * schema rather than guessed. Measured on a bare profile
+   * (`config patch --dry-run`, one probe, five ids):
+   *
+   *   channels.openclaw-weixin:      unknown channel id: openclaw-weixin
+   *   channels.openclaw-zaloclawbot: unknown channel id: openclaw-zaloclawbot
+   *   channels.wecom:                unknown channel id: wecom
+   *   channels.yuanbao:              unknown channel id: yuanbao
+   *   channels.qa-channel:           unknown channel id: qa-channel
+   *   channels.telegram:             (accepted)
+   *
+   * Three things that rule is NOT, each of which looks right and is wrong:
+   *
+   *   `channels list --all --json` -> `installed`   ALL 27 report false on a
+   *     bare profile, yet 23 of them are perfectly writable. Installation is
+   *     what a channel needs to CARRY TRAFFIC, not to be configured.
+   *   presence in `dist/extensions/`                only 7 chat channels are on
+   *     disk; the config metadata for 24 is compiled into the binary.
+   *   a schema node existing                        `qa-channel` has a full
+   *     schema node and `configurable: false`, so it is refused anyway. It is
+   *     the ONLY such entry in the pinned build, and it is absent from their
+   *     channel registry, so no Empyralis channel can ever be it — but that is
+   *     a fact worth an assertion, not an assumption (see the test).
+   */
+  readonly hasConfigNode: boolean;
   /** The keys from OPENCLAW_CHANNEL_WRITABLE_KEYS this node declares. */
   readonly keys: readonly string[];
   /** True when the node's `additionalProperties` is anything other than
@@ -400,10 +450,15 @@ export function resolveOpenClawChannelKeySupport(
 
   for (const channelId of channelIds) {
     const node = channels[channelId];
-    // A channel with no node at all contributes its schema only once its
-    // plugin is installed. renderOpenClawConfig already leaves those off via
-    // the missing-policy-shape path; nothing to say here.
-    if (!node) continue;
+    // NO NODE AT ALL = this box's OpenClaw does not have this channel's config
+    // namespace, so `channels.<id>` is not a key it will accept in any form —
+    // not even `{enabled: false}`. Reported as its own fact rather than skipped;
+    // see hasConfigNode's own comment for why this is a different failure from
+    // "declared, but nothing writable on it".
+    if (!node) {
+      support.push({ channelId, hasConfigNode: false, keys: [], acceptsUndeclaredKeys: false });
+      continue;
+    }
     const record = node as Record<string, unknown>;
     const branches = Array.isArray(record.anyOf)
       ? record.anyOf
@@ -421,7 +476,12 @@ export function resolveOpenClawChannelKeySupport(
         ? { keys: [], acceptsUndeclaredKeys: false, writable: false }
         : candidates.reduce((widest, candidate) => (candidate.keys.length > widest.keys.length ? candidate : widest));
 
-    support.push({ channelId, keys: best.keys, acceptsUndeclaredKeys: best.acceptsUndeclaredKeys });
+    support.push({
+      channelId,
+      hasConfigNode: true,
+      keys: best.keys,
+      acceptsUndeclaredKeys: best.acceptsUndeclaredKeys,
+    });
   }
 
   return support;

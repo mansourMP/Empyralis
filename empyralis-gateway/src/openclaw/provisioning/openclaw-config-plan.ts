@@ -251,6 +251,15 @@ export type OpenClawPolicyFindingCode =
   /** The channel's node will not even accept `enabled`, so provisioning
    *  cannot switch it on or off. Nothing is written for it at all. */
   | "channel_not_configurable"
+  /** This box's OpenClaw has no `channels.<id>` namespace — the channel's
+   *  plugin is not installed here, so the ID ITSELF is refused, whatever the
+   *  block contains. Distinct from `channel_not_configurable` on purpose:
+   *  that one is "the code is here and none of it is writable" and is a
+   *  property of the channel; this one is "the code is not here yet" and is a
+   *  property of the MACHINE, so it clears the moment the plugin lands and
+   *  needs no owner action at all. Collapsing them would tell someone to go
+   *  fix a channel that is fine. */
+  | "channel_absent_from_this_box"
   /** Expressible only more loosely than Empyralis's own policy. Safe (we
    *  re-decide), but recorded rather than assumed. */
   | "dm_pairing_widened_to_open"
@@ -1003,6 +1012,38 @@ export function renderOpenClawConfig(
   const channels: Record<string, unknown> = {};
 
   for (const policy of [...plan.channels].sort((a, b) => a.channelId.localeCompare(b.channelId))) {
+    // ── Does this box's OpenClaw know this channel id AT ALL? ────────────
+    //
+    // FIRST, before the policy shape, because it decides whether `channels
+    // .<id>` may be a key rather than what may go under it. A channel whose
+    // plugin is not installed here has no config namespace, and OpenClaw
+    // refuses the key outright:
+    //
+    //   openclaw_config_patch_failed — "Config validation failed:
+    //   channels.openclaw-weixin: unknown channel id: openclaw-weixin"
+    //
+    // — measured through the product's own provisioning route, on a box where
+    // only feishu and the bundled set were installed. The push is
+    // all-or-nothing, so that one key refused every channel on the box, the
+    // same blast radius as the `additionalProperties` refusal above and a
+    // completely different cause. Writing `{enabled: false}` does not help:
+    // the id is rejected before its contents are ever looked at.
+    //
+    // This is NOT the same fact as `installed` from `channels list` — see
+    // OpenClawChannelKeySupport.hasConfigNode, where the rule is written out
+    // and the three plausible-but-wrong proxies are named.
+    const support = plan.channelKeySupport?.find((entry) => entry.channelId === policy.channelId);
+    if (support && !support.hasConfigNode) {
+      disabledChannels.push({
+        channelId: policy.channelId,
+        code: "channel_absent_from_this_box",
+        detail:
+          `This channel is not set up on this computer yet, so Empyralis left it alone. Its settings are kept and ` +
+          `will be applied the moment ${policy.channelId} is added here — nothing you have configured is lost.`,
+      });
+      continue;
+    }
+
     const shape = OPENCLAW_CHANNEL_POLICY_SHAPES[policy.channelId];
     if (!shape) {
       // A channel id with no transcribed shape is a channel whose policy
