@@ -95,6 +95,24 @@ export interface TelegramAdapterClient {
    * revocation).
    */
   checkAuthorized?: () => Promise<void>;
+  /**
+   * Registers a callback for connection-level failures GramJS reports
+   * through its own public `client.onError` setter (TelegramBaseClient's
+   * `set onError`, node_modules/telegram/client/telegramBaseClient.js) —
+   * the same `_errorHandler` hook GramJS's internal `_updateLoop` ping
+   * keepalive (node_modules/telegram/client/updates.js), send loop, and
+   * recv loop all already call on failure (a ping TIMEOUT, a dropped
+   * socket, a failed reconnect). Before this was wired, every one of those
+   * failures went ONLY to a bare `console.error` (via the log shim's
+   * canSend() always returning true) — visible as a raw stack trace in the
+   * gateway's journal with no application-level signal anywhere, and
+   * nothing in this runtime ever learned the live connection was in
+   * trouble sooner than the next scheduled runHealthCheck (up to
+   * TELEGRAM_HEALTH_CHECK_INTERVAL_MS later). See
+   * TelegramPersonalRuntime.handleLiveConnectionIssue's doc for what this
+   * feeds.
+   */
+  setConnectionIssueHandler?: (handler: (error: unknown) => void) => void;
 }
 
 export interface TelegramRuntimeAdapter {
@@ -467,6 +485,50 @@ const TELEGRAM_INBOUND_TYPING_MAX_TTL_MS = 90_000;
  */
 const TELEGRAM_HEALTH_CHECK_INTERVAL_MS = 3 * 60 * 1000;
 
+/**
+ * Upper bound on how long a single health probe (client.checkAuthorized,
+ * i.e. GramJS's getMe()) is allowed to hang before this runtime treats it as
+ * a failure. Without this, a probe against a connection that is silently
+ * dead in the specific way GramJS's own `_updateLoop` ping keepalive can
+ * observe (node_modules/telegram/client/updates.js: `_sender.send()`
+ * queues the RPC and its returned promise only resolves once a response
+ * genuinely arrives — there is no built-in timeout anywhere in GramJS's
+ * `invoke()`/`send()` path; `_updateLoop` itself only survives this by
+ * wrapping its own ping in an ad hoc `Promise.race` timeout, see that
+ * file's `timeout()` helper) would simply hang FOREVER alongside it,
+ * silently. That is the exact bug this constant exists to close: the
+ * connection-state honesty mechanism runHealthCheck was built for (see its
+ * doc) could itself be defeated by the same failure mode it was built to
+ * detect, leaving "connected" persisted forever with no error anywhere —
+ * confirmed live 2026-08-14 (a real Agent Computer's gramjs update loop
+ * dead since boot, `[gateway] channel.telegram.personal` still reporting
+ * "Connected"). Set comfortably above GramJS's own worst-case single ping
+ * cycle (PING_TIMEOUT=10s x PING_FAIL_ATTEMPTS=3 ≈ 30s) so a probe that
+ * would have succeeded on GramJS's own terms isn't cut off early, while
+ * staying well under TELEGRAM_HEALTH_CHECK_INTERVAL_MS.
+ */
+export const TELEGRAM_HEALTH_CHECK_TIMEOUT_MS = 35_000;
+
+/** Races `promise` against a timer, rejecting with `timeoutMessage` if the
+ *  timer wins. Always attaches a handler to `promise` itself (rather than
+ *  only to the race) so a slow promise that eventually settles AFTER the
+ *  timeout has already won can never produce an unhandled rejection. */
+function withTimeout<T>(promise: Promise<T>, ms: number, timeoutMessage: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(timeoutMessage)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 // ── Self-chat loop-guard tuning (see TelegramPersonalRuntime's
 // pendingSelfChatSends/selfChatTurnTimestamps fields and
 // isOwnSelfChatEcho/admitSelfChatTurnOrTrip for the mechanisms these tune).
@@ -718,7 +780,16 @@ export class TelegramPersonalRuntime {
   private readonly configStore: PersonalChannelConfigStore;
   private readonly sessionStore: TelegramSessionStore;
   private readonly outboundStore: TelegramOutboundStore;
-  private readonly logger = pino({ level: "silent" });
+  // "warn" — not "silent". This used to suppress every log line this
+  // runtime ever produces, including the ones that exist specifically to
+  // report a connection dying (handleConnectionFailure, runHealthCheck's
+  // catch, handleLiveConnectionIssue below) — the reason a real, dead
+  // update loop produced no application-level signal anywhere in the
+  // gateway's journal except GramJS's own raw stack trace (confirmed live
+  // 2026-08-14). "warn" keeps this quiet in the ordinary case (no per-
+  // message/per-turn noise — nothing here logs at info/debug) while
+  // guaranteeing every honesty-relevant transition is actually visible.
+  private readonly logger = pino({ level: "warn" });
   private publisher?: TelegramGatewayPublisher;
   private adapter?: TelegramRuntimeAdapter;
   private client: TelegramAdapterClient | null = null;
@@ -1359,6 +1430,10 @@ export class TelegramPersonalRuntime {
       this.client.setMessageHandler((message) => {
         void this.handleInboundMessage(message);
       });
+      // See handleLiveConnectionIssue's doc — turns a GramJS-internal
+      // failure (ping timeout, dropped socket) into an immediate honesty
+      // probe instead of waiting up to TELEGRAM_HEALTH_CHECK_INTERVAL_MS.
+      this.client.setConnectionIssueHandler?.((error) => this.handleLiveConnectionIssue(error));
       const exportedSession = await Promise.resolve(this.client.exportSessionString?.());
       if (exportedSession) {
         await this.sessionStore.saveSessionString(exportedSession);
@@ -1438,6 +1513,17 @@ export class TelegramPersonalRuntime {
       lastDisconnectCode: reconnectState.statusCode,
     });
     await this.flushState();
+    if (options.fromLiveConnection) {
+      // The outcome-honesty-relevant moment: a status that was "connected"
+      // a second ago is now something else, and every UI reading it
+      // (connect modal, Channels tile) is about to change. Logged
+      // unconditionally (not only on an unexpected status) so a downgrade
+      // is always traceable in the journal, not just inferable from it.
+      this.logger?.warn?.(
+        { status: reconnectState.status, reason: reconnectState.reason, willReconnect: reconnectState.shouldReconnect },
+        "telegram personal downgraded from a live connection to an honest status",
+      );
+    }
     if (reconnectState.shouldReconnect && this.started) {
       this.scheduleReconnect();
     }
@@ -1490,7 +1576,28 @@ export class TelegramPersonalRuntime {
    * blip still self-heals via the normal reconnect path instead of being
    * treated as fatal.
    */
+  /**
+   * Deduplicates concurrent runHealthCheck() calls — handleLiveConnectionIssue
+   * can trigger one on top of the periodically scheduled one (see its doc);
+   * both should observe the SAME probe rather than firing two overlapping
+   * checkAuthorized() calls.
+   */
+  private healthCheckInFlight: Promise<void> | null = null;
+
   private async runHealthCheck(): Promise<void> {
+    if (this.healthCheckInFlight) {
+      return this.healthCheckInFlight;
+    }
+    const task = this.runHealthCheckInternal().finally(() => {
+      if (this.healthCheckInFlight === task) {
+        this.healthCheckInFlight = null;
+      }
+    });
+    this.healthCheckInFlight = task;
+    return task;
+  }
+
+  private async runHealthCheckInternal(): Promise<void> {
     const client = this.client;
     if (!client || typeof client.checkAuthorized !== "function") {
       // No live client, or a client build too old to support the probe —
@@ -1501,11 +1608,46 @@ export class TelegramPersonalRuntime {
       return;
     }
     try {
-      await client.checkAuthorized();
+      // TELEGRAM_HEALTH_CHECK_TIMEOUT_MS's doc: checkAuthorized() itself has
+      // NO built-in timeout — an un-timed-out probe against the exact
+      // failure mode this check exists to catch would hang forever,
+      // silently, instead of ever reaching the catch block below.
+      await withTimeout(client.checkAuthorized(), TELEGRAM_HEALTH_CHECK_TIMEOUT_MS, "telegram_health_check_timeout");
       this.scheduleHealthCheck();
     } catch (error) {
+      this.logger?.error?.(
+        { error: error instanceof Error ? error.message : String(error) },
+        "telegram personal health probe failed — the connection is not usable; downgrading the persisted status instead of continuing to report connected",
+      );
       await this.handleConnectionFailure(error, { fromLiveConnection: true });
     }
+  }
+
+  /**
+   * Fed by TelegramAdapterClient.setConnectionIssueHandler (GramJS's own
+   * `client.onError` hook) — fires whenever GramJS's internal `_updateLoop`
+   * ping keepalive, send loop, or recv loop hits a failure (a ping TIMEOUT,
+   * a dropped socket, a failed reconnect attempt). Those failures used to
+   * be invisible to this runtime entirely (a bare `console.error`, nothing
+   * more) and left the honest health check — runHealthCheck — to find out
+   * on its own up to TELEGRAM_HEALTH_CHECK_INTERVAL_MS (3 minutes) later.
+   * Running an accelerated probe here means a dead update loop gets caught
+   * and the persisted status downgraded within roughly one GramJS ping
+   * cycle instead of up to three minutes of continuing to report
+   * "connected" while nothing arrives. runHealthCheck's own dedupe
+   * (healthCheckInFlight) makes this safe to call repeatedly — GramJS can
+   * report the same underlying failure on every ~9s ping tick while it's
+   * failing to reconnect, and this must never queue up overlapping probes.
+   */
+  private handleLiveConnectionIssue(error: unknown): void {
+    if (!this.client) {
+      return;
+    }
+    this.logger?.warn?.(
+      { error: error instanceof Error ? error.message : String(error) },
+      "telegram personal connection reported an internal error — running an accelerated health probe instead of waiting for the next scheduled one",
+    );
+    void this.runHealthCheck();
   }
 
   private async handleInboundMessage(message: TelegramInboundMessage): Promise<void> {
@@ -2153,6 +2295,17 @@ export class TelegramPersonalRuntime {
             // deliberately swallows that exact failure instead.
             checkAuthorized: async () => {
               await client.getMe();
+            },
+            setConnectionIssueHandler: (handler) => {
+              // GramJS's own public hook (see TelegramAdapterClient.
+              // setConnectionIssueHandler's doc) — every internal loop
+              // (_updateLoop's ping keepalive, the send/recv loops) already
+              // calls this on failure; wiring it is the only way this
+              // runtime learns about one of those failures before the next
+              // scheduled health check.
+              client.onError = async (error: unknown) => {
+                handler(error);
+              };
             },
           },
         };
