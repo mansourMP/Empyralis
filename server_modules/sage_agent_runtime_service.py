@@ -1367,6 +1367,62 @@ def _extract_cli_gateway_detail(reason: str) -> str:
     return text[start:end].strip()
 
 
+def _classify_cli_subscription_provider_rejection(
+    reason: str, *, model: str, runtime: str,
+) -> Optional[str]:
+    """URGENT fix (2026-08-14): the live bug this closes. Codex's own
+    app-server sometimes propagates the underlying provider's error body
+    VERBATIM as its notification's `message` field — a JSON object, not
+    prose — and `_extract_cli_gateway_detail` above (correctly, for every
+    OTHER case) surfaces the CLI's own message as-is. The result reached a
+    real customer's chat unmodified:
+
+        Heads up: Codex exited unexpectedly — {"type":"error","status":400,
+        "error":{"type":"invalid_request_error","message":"The 'gpt-5.4'
+        model is not supported when using Codex with a ChatGPT account."}}
+
+    This is exactly the "internal error string reaches the screen" defect
+    CLAUDE.md already fixed once for gateway readiness codes — same fix
+    shape, applied here. Classify STRUCTURALLY (parse the embedded JSON and
+    read its own `error.type`/`message` fields), never by pattern-matching
+    the outer prose — a CLI wrapper's own wording around the blob is not
+    contract, only the JSON payload it forwards from the provider is.
+
+    Returns a clean, actionable platform-voice message naming the model and
+    what to do, or None when `reason` carries no such structured rejection
+    (the caller falls through to the existing generic classifier)."""
+    detail = _extract_cli_gateway_detail(reason) or str(reason or "")
+    start = detail.find("{")
+    end = detail.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(detail[start:end + 1])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    inner_error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+    error_type = str(inner_error.get("type") or payload.get("type") or "").strip().lower()
+    provider_message = str(inner_error.get("message") or payload.get("message") or "").strip()
+    if error_type != "invalid_request_error" or not provider_message:
+        return None
+    label = _CLI_SUBSCRIPTION_RUNTIME_LABEL.get(str(runtime or "").strip().lower(), runtime or "This runtime")
+    model_clause = f" ('{model}')" if model else ""
+    # "not supported" covers the confirmed live case (a retired/account-
+    # incompatible model id); other invalid_request_error shapes (a bad
+    # reasoning-effort value, a malformed prompt, etc.) still get a clean,
+    # honest message rather than the raw blob, just without presupposing
+    # the model is the cause.
+    if "not supported" in provider_message.lower() and "model" in provider_message.lower():
+        return (
+            f"Heads up: the model configured for this agent{model_clause} isn't supported by "
+            f"{label} on the account signed in on its computer. Open the Model tab and pick a "
+            "different model, or leave it on the CLI's own default."
+        )
+    return f"Heads up: {label} rejected this request — {provider_message}"
+
+
 def _friendly_cli_subscription_error(reason: str, *, runtime: str) -> str:
     """Map a raw dispatch/readiness reason to a platform-voice message, one
     per distinct failure mode (G5) — never one blanket string. The turn is
@@ -1805,7 +1861,12 @@ async def _dispatch_cli_subscription_gateway_brain(
             workspace_id=workspace_id, tenant_id=tenant_id, agent_id=agent_id, gateway_id=gateway_id,
             runtime=_runtime, reason=_reason, trace_id=trace_id,
         )
-        raise RuntimeError(_friendly_cli_subscription_error(_reason, runtime=_runtime)) from exc
+        _provider_rejection = _classify_cli_subscription_provider_rejection(
+            _reason, model=_model, runtime=_runtime,
+        )
+        raise RuntimeError(
+            _provider_rejection or _friendly_cli_subscription_error(_reason, runtime=_runtime)
+        ) from exc
 
     result = response.get("result") if isinstance(response.get("result"), dict) else {}
     reply = str(result.get("text") or "").strip()
