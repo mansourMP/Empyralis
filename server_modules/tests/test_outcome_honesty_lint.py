@@ -47,6 +47,19 @@ exact false-positive class `_finalize_workspace_invite_acceptance`
 LOGGER.exception(...)` is the CORRECT pattern (log, do not raise, the
 outer membership grant already succeeded) and must never be flagged.
 
+THE FIX THIS FILE POINTS AT IS A PATTERN, NOT A FUNCTION. The frontend
+sibling (outcome-honesty-drift.test.ts) names a real, importable helper
+(`runMutationWithBestEffortRefresh`) in its own failure message, because
+JS's own syntax makes one flat try/catch around two awaits the path of
+least resistance -- the helper exists to make the CORRECT shape the EASY
+one. Python does not have that problem: a nested `try: ... except
+Exception: LOGGER.exception(...)` around the follow-up step is ALREADY
+the idiomatic, easy way to say "this part is best-effort" -- wrapping a
+function around it would only hide what one `except:` clause already
+says directly. So this file's own failure message points at the PATTERN
+above (`_finalize_workspace_invite_acceptance`'s own inner try/except),
+never at a shared helper that does not and should not exist.
+
 WHAT IT DELIBERATELY CANNOT CATCH (do not extend this file to chase these
 — they need a different tool, not a bigger AST walk):
   - A function whose RETURN VALUE collapses two facts into one shape
@@ -347,12 +360,33 @@ def test_no_new_files_with_collapsed_except_blocks() -> None:
         "New file(s) introduce a try/except that calls 2+ distinct functions "
         "(at least one mutation-shaped) but whose except side cannot tell "
         "which one failed -- CLAUDE.md's 'after an action, the product must "
-        "tell the person what actually happened' law. Either split the "
-        "try/except per step, give the except a real way to distinguish "
-        "outcomes, or -- if a self-contained nested try/except this scanner "
-        "cannot see already handles the ambiguity -- add the file to "
-        "BASELINE_FILES in server_modules/tests/test_outcome_honesty_lint.py "
-        "with a written reason:\n  "
+        "tell the person what actually happened' law.\n"
+        "  FIRST thing to reach for: there is NO shared helper function for "
+        "this in Python, and there should not be one -- unlike the frontend "
+        "(JS's own syntax makes one flat try/catch around two awaits the "
+        "EASY shape, which is why frontend/lib/workspace/mutation-outcome.ts's "
+        "runMutationWithBestEffortRefresh exists to make the correct shape "
+        "the easy one), Python's nested try/except is ALREADY the easy, "
+        "idiomatic way to say 'this specific step is best-effort, log and "
+        "move on' -- wrapping a helper function around it would only hide "
+        "what one `except:` clause already says directly. Give the follow-up "
+        "step its OWN try/except that logs and does not re-raise, exactly "
+        "like routes_workspaces.py's _finalize_workspace_invite_acceptance "
+        "does around its own project-access grant "
+        "(`try: await grant_invite_project_access(...) except Exception: "
+        "LOGGER.exception(...)` -- the membership grant right above it is "
+        "already committed, so a failure here must not read as the whole "
+        "acceptance failing). That single pattern, repeated per call site, "
+        "is the fix -- not a function to import.\n"
+        "  If instead this is 2+ REAL writes whose outcomes are both worth "
+        "knowing (see sage_agent_runtime_service.py's record_assistant_turn "
+        "+ record_user_turn, in this file's own baseline), give the except "
+        "a way to distinguish them (separate except clauses, or a branch "
+        "inside one). Only once neither applies -- a self-contained nested "
+        "try/except this scanner cannot see already handles the ambiguity --"
+        " add the file to BASELINE_FILES in "
+        "server_modules/tests/test_outcome_honesty_lint.py with a written "
+        "reason:\n  "
         + "\n  ".join(
             f"{f} (lines {[h.lineno for h in by_file[f]]}, callees {[h.callee_names for h in by_file[f]]})"
             for f in sorted(new_files)

@@ -76,6 +76,7 @@ import { AlertTriangle, Loader2 } from "lucide-react";
 
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
+import { runMutationWithBestEffortRefresh } from "@/lib/workspace/mutation-outcome";
 import {
   remediationFor,
   type OpenClawChannelCatalogEntry,
@@ -369,37 +370,49 @@ export function CredentialForm({
     }
     setSaving(true);
     try {
-      const res = await fleetAuthorizedFetch(
-        `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/channels/${encodeURIComponent(entry.channel_key)}/credential`,
-        {
-          method: "PUT",
-          credentials: "include",
-          headers: buildCookieAuthHeaders("PUT", { "Content-Type": "application/json" }),
-          body: JSON.stringify({ values: payload }),
-        },
-      );
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setError(getErrorMessage(body, `Save failed (${res.status}).`));
-        return;
-      }
-      const refusal = body?.openclaw_channel_setup?.refusal;
-      if (refusal) {
-        setError(`${refusal.code}: ${refusal.detail}`);
-        return;
-      }
-      // Cleared rather than retained: nothing typed here is kept in the tab
-      // any longer than the request needs it.
-      setValues({});
-    } catch {
-      setError("Could not reach this computer.");
-      setSaving(false);
-      return;
+      // The credential is already saved on the box the moment the PUT
+      // resolves ok with no refusal — a failure to refresh this panel's
+      // own state afterward must not be reported as "Could not reach this
+      // computer," which would read as the save itself failing.
+      await runMutationWithBestEffortRefresh(async () => {
+        let res: Response;
+        try {
+          res = await fleetAuthorizedFetch(
+            `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/channels/${encodeURIComponent(entry.channel_key)}/credential`,
+            {
+              method: "PUT",
+              credentials: "include",
+              headers: buildCookieAuthHeaders("PUT", { "Content-Type": "application/json" }),
+              body: JSON.stringify({ values: payload }),
+            },
+          );
+        } catch {
+          // A genuine fetch()-level failure (offline, a dropped connection)
+          // carries no useful message of its own — friendly text, same as
+          // this form always showed, rather than a raw "Failed to fetch."
+          throw new Error("Could not reach this computer.");
+        }
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(getErrorMessage(body, `Save failed (${res.status}).`));
+        }
+        const refusal = body?.openclaw_channel_setup?.refusal;
+        if (refusal) {
+          throw new Error(`${refusal.code}: ${refusal.detail}`);
+        }
+        // Cleared rather than retained: nothing typed here is kept in the
+        // tab any longer than the request needs it.
+        setValues({});
+      }, () => Promise.resolve(onSaved()));
+    } catch (e) {
+      // Restructuring the three failure branches (fetch-level, !res.ok,
+      // refusal) into `throw` so they all land in this ONE catch also fixed
+      // a real stuck-spinner bug: the previous early-return shape called
+      // setError and `return`ed straight out of the !res.ok and refusal
+      // branches without ever calling setSaving(false), so `saving` stayed
+      // true forever on either path.
+      setError(e instanceof Error ? e.message : "Could not reach this computer.");
     }
-    // The credential is already saved on the box — a failure to refresh
-    // this panel's own state afterward must not be reported as "Could not
-    // reach this computer," which would read as the save itself failing.
-    await Promise.resolve(onSaved()).catch(() => {});
     setSaving(false);
   };
 

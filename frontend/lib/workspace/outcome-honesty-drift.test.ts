@@ -27,6 +27,16 @@
  * source-scan half: it looks for the literal shape of the bug rather than
  * exercising it.
  *
+ * THE FIX, not just the catch: `frontend/lib/workspace/mutation-outcome.ts`
+ * holds `runMutationWithBestEffortRefresh` (shape 1's majority case — one
+ * mutation, one best-effort follow-up refresh) and `MutateNetworkError`
+ * (written independently twice before that file existed — members-data.ts's
+ * acceptWorkspaceInvite and cloud-vps-setup-panel.tsx's createServer() —
+ * which is the actual argument for a shared primitive over a third
+ * hand-rolled copy). Both are named directly in this file's own failure
+ * message below, because a guard that only catches a mistake is worth
+ * less than one that also points at the fix.
+ *
  * WHAT IT CATCHES — two independent shapes, both proven live (not
  * hypothetical) before this file existed:
  *
@@ -276,6 +286,62 @@ function stripNestedTryCatchBlocks(body: string): string {
   return out;
 }
 
+/** Blanks out the BODY of every nested arrow-function/function-expression
+ *  block (`=> { ... }`, `function (...) { ... }`, `async function (...) {
+ *  ... }`) inside a block body — keeping the function's own signature and
+ *  newlines intact, only hollowing out what runs inside it.
+ *
+ *  Awaits inside a callback passed as an ARGUMENT to another call are not
+ *  sequential steps of the OUTER try body the way two directly-sequential
+ *  `await` statements are — the callback's own execution is scheduled by
+ *  whatever it was handed to, not by "the next line of this try block".
+ *  Without this, adopting runMutationWithBestEffortRefresh(mutate, refresh)
+ *  itself trips this scanner: `await runMutationWithBestEffortRefresh(async
+ *  () => { await createWorkspaceInvite(...); ... }, refresh)` reads, to a
+ *  naive text scan, as TWO sequential awaited calls at the try body's own
+ *  level (runMutationWithBestEffortRefresh, then createWorkspaceInvite) —
+ *  which would make adopting the sweep's own recommended fix the thing
+ *  that fails its own guard. Measured directly: this was found by running
+ *  the scanner against this session's OWN adoption commits.
+ *
+ *  Same brace-matching approach as stripNestedTryCatchBlocks, and the same
+ *  "not every case" caveat: an arrow function with an EXPRESSION body
+ *  (`() => someExpr`, no braces) has nothing to blank here, but such a body
+ *  cannot itself contain a sequential `await` statement in the shape this
+ *  check cares about either — only a block body can. */
+function stripNestedFunctionExpressionBodies(body: string): string {
+  let out = body;
+  for (let pass = 0; pass < 5; pass++) {
+    const opens: number[] = [];
+    const re = /(?:=>\s*\{|\bfunction\b[^{(]*\([^)]*\)\s*\{)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(out))) {
+      opens.push(m.index + m[0].length - 1); // index of the opening `{`
+    }
+    if (opens.length === 0) break;
+
+    let next = "";
+    let cursor = 0;
+    for (const braceStart of opens) {
+      if (braceStart < cursor) continue; // inside a span already blanked this pass
+      let depth = 1;
+      let j = braceStart + 1;
+      while (j < out.length && depth > 0) {
+        if (out[j] === "{") depth++;
+        else if (out[j] === "}") depth--;
+        j++;
+      }
+      if (depth !== 0) continue; // unbalanced — skip rather than misreport
+      next += out.slice(cursor, braceStart + 1);
+      next += out.slice(braceStart + 1, j - 1).replace(/[^\n]/g, " ");
+      cursor = j - 1;
+    }
+    next += out.slice(cursor);
+    out = next;
+  }
+  return out;
+}
+
 /** Distinct top-level-ish `await <callee>(` names inside a block body —
  *  `<callee>` is the identifier or property-access chain immediately before
  *  the `(`, e.g. `await signup(...)` -> "signup",
@@ -322,13 +388,17 @@ type ScanHit =
   | { kind: "collapsed-catch"; file: string; line: number; calleeNames: string[] }
   | { kind: "blind-navigation"; file: string; line: number };
 
-function scanFile(absPath: string, relPath: string): ScanHit[] {
-  const raw = readFileSync(absPath, "utf8");
+/** The scan logic proper, factored out of scanFile so the exact same code
+ *  path can be driven against an in-memory fixture string (see
+ *  runFixtureChecks below) as well as a real file on disk — the same
+ *  "the detector must be provable in memory" discipline the Python sibling
+ *  (test_exception_and_task_lint.py's TestFixtureDetection) already uses. */
+function scanSource(raw: string, relPath: string): ScanHit[] {
   const source = stripCommentsAndStrings(raw);
   const hits: ScanHit[] = [];
 
   for (const block of findTryCatchBlocks(source)) {
-    const strippedTryBody = stripNestedTryCatchBlocks(block.tryBody);
+    const strippedTryBody = stripNestedFunctionExpressionBodies(stripNestedTryCatchBlocks(block.tryBody));
     // Line number from the STRIPPED source, not `raw`: stripCommentsAndStrings
     // deletes comment/string-body characters (shrinking absolute offsets)
     // but never deletes a newline, so a newline COUNT up to a given index is
@@ -367,7 +437,71 @@ function scanFile(absPath: string, relPath: string): ScanHit[] {
   return hits;
 }
 
+function scanFile(absPath: string, relPath: string): ScanHit[] {
+  return scanSource(readFileSync(absPath, "utf8"), relPath);
+}
+
+/** In-memory proofs of the detector itself — the frontend counterpart to
+ *  test_exception_and_task_lint.py's TestFixtureDetection class. Run before
+ *  the real file scan so a detector regression fails loudly here rather
+ *  than as a confusing false positive/negative buried in a 20-file scan. */
+function runFixtureChecks(): void {
+  const flagged = (source: string) =>
+    scanSource(source, "fixture.ts").some((h) => h.kind === "collapsed-catch");
+
+  assert(
+    flagged(
+      "async function f() {\n" +
+        "  try {\n" +
+        "    await createThing();\n" +
+        "    await notifyThingCreated();\n" +
+        "  } catch (e) {\n" +
+        "    setError(e instanceof Error ? e.message : 'failed');\n" +
+        "  }\n" +
+        "}\n",
+    ),
+    "fixture: flags two distinct mutation-shaped awaits collapsed into one catch",
+  );
+
+  assert(
+    !flagged(
+      "async function f() {\n" +
+        "  try {\n" +
+        "    await runMutationWithBestEffortRefresh(async () => {\n" +
+        "      const created = await createWorkspaceInvite(workspaceId, email, role);\n" +
+        "      setFreshLink(created.token);\n" +
+        "    }, refreshInvites);\n" +
+        "  } catch (e) {\n" +
+        "    setInviteError(e instanceof Error ? e.message : 'Could not create this invite.');\n" +
+        "  }\n" +
+        "}\n",
+    ),
+    "fixture: adopting runMutationWithBestEffortRefresh must not itself trip the guard " +
+      "(the callback's own await must not read as a second sequential step of the outer try)",
+  );
+
+  assert(
+    flagged(
+      "async function f() {\n" +
+        "  try {\n" +
+        "    await createThing();\n" +
+        "    somePromise.then(async function () {\n" +
+        "      await someUnrelatedCallbackWork();\n" +
+        "    });\n" +
+        "    await notifyThingCreated();\n" +
+        "  } catch (e) {\n" +
+        "    setError(e instanceof Error ? e.message : 'failed');\n" +
+        "  }\n" +
+        "}\n",
+    ),
+    "fixture: a real second sequential mutation OUTSIDE any callback still flags, " +
+      "even when an unrelated callback sits between them",
+  );
+}
+
 function main(): void {
+  runFixtureChecks();
+
   const files: string[] = [];
   for (const d of SCAN_DIRS) walk(join(FRONTEND_ROOT, d), files);
   assert(files.length > 100, `sanity: scanned a real number of files (got ${files.length})`);
@@ -401,7 +535,7 @@ function main(): void {
           collapsedCatchHits
             .map((v) => `    ${v.file}:${v.line}: awaits [${v.calleeNames.join(", ")}]`)
             .join("\n") +
-          "\n  Either give the catch a way to distinguish outcomes (a second state signal, or verify the real result before reporting failure — see frontend/app/join/[token]/page.tsx for the pattern this change added), split the try/catch per step, or add a reasoned entry to ALLOWLIST in this test.",
+          "\n  FIRST thing to reach for: if this is one mutation followed by a plain refresh whose own failure should never read as the mutation failing, wrap it in runMutationWithBestEffortRefresh (frontend/lib/workspace/mutation-outcome.ts) — most sites are exactly this shape, and it is a one-line change around the existing try/catch (see ChannelPairingSection.tsx / MembersSection.tsx / ProjectMemberAdd.tsx / McpServersSection.tsx / OpenClawChannelsPanel.tsx / NewWorkspacePageClient.tsx for real adoptions). If the mutation's own outcome can be genuinely UNKNOWN (a fetch() that never produced a response), reach for the shared MutateNetworkError class in that same file rather than re-deriving it — never adopt either mechanically without checking the fit: a follow-up failure that must be SURFACED (not silently logged) with distinguishing wording, two or more independent follow-ups, or a sequence of 2+ real mutations each needing their own message are all shapes the helper does not fit — split the try/catch by hand instead, or verify the real result before reporting failure (frontend/app/join/[token]/page.tsx). Whatever you do, add a reasoned entry to ALLOWLIST in this test only as a last resort.",
   );
 
   assert(

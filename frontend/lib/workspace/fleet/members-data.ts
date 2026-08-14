@@ -1,6 +1,7 @@
 "use client";
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+import { MutateNetworkError } from "@/lib/workspace/mutation-outcome";
 
 // Workspace members + invites (Multiplayer Projects Phase 1 — MAN-114).
 //
@@ -77,17 +78,6 @@ async function getJson(path: string): Promise<any> {
   }
   return data;
 }
-
-/** Thrown only when the request itself never produced a response (fetch()
- *  rejected -- offline, DNS failure, a dropped connection, an abort/timeout).
- *  That is a genuinely different fact from the server answering with a
- *  non-2xx status: a rejected fetch means the outcome is UNKNOWN -- the
- *  server may have received and fully processed the request before the
- *  connection died -- while a non-ok response is the server's own,
- *  definitive answer. Callers that need to tell "we don't know" from "the
- *  server said no" (acceptWorkspaceInvite below is the reason this exists)
- *  branch on `error instanceof MutateNetworkError`. */
-export class MutateNetworkError extends Error {}
 
 async function mutateJson(path: string, method: string, body?: Record<string, unknown>): Promise<any> {
   let res: Response;

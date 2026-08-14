@@ -1380,7 +1380,12 @@ async def _serve(host: str, port: int, started: threading.Event, result: Dict[st
         try:
             await server.shutdown()
         except Exception:  # pragma: no cover
-            pass
+            # Best-effort cleanup of a loopback dev/adapter server that is
+            # already going away either way -- but a shutdown that itself
+            # raises is worth knowing about (a wedged socket, a leaked
+            # listener) rather than disappearing silently
+            # (test_exception_and_task_lint.py).
+            LOGGER.exception("openai_compat_adapter loopback server shutdown raised")
 
 
 def ensure_adapter_server_running(*, host: str = "127.0.0.1", port: int = 0) -> str:

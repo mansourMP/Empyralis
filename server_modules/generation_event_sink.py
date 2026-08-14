@@ -11,7 +11,10 @@ Extracted from direct_chat_generation_service.py during SDK migration.
 from __future__ import annotations
 
 import contextvars
+import logging
 from typing import Any, Callable, Dict, Iterator, Optional
+
+_LOGGER = logging.getLogger(__name__)
 
 _GENERATION_EVENT_SINK: contextvars.ContextVar[
     Optional[Callable[[Dict[str, Any]], None]]
@@ -34,5 +37,12 @@ def wrap_generation_with_sink(
             try:
                 sink(event)
             except Exception:
-                pass
+                # Best-effort forwarding only: the generation loop itself
+                # must never break because the SSE transport (or whatever
+                # else is subscribed) choked on one event. Logged rather
+                # than silently swallowed (test_exception_and_task_lint.py)
+                # — a sink that is permanently broken should be visible
+                # somewhere, even though no single dropped event is worth
+                # interrupting a live generation stream over.
+                _LOGGER.exception("generation event sink raised; continuing the stream")
         yield event
