@@ -4051,6 +4051,23 @@ async def ensure_control_plane_schema() -> Any:
             "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS "
             "slack_team_id VARCHAR(64)"
         )
+        # identity_links has been read (get_workspace_by_id, 2622b8928) and
+        # written (update_workspace_identity_links) for a while, but the
+        # column itself was never added anywhere in versioned schema code —
+        # not here, not in migrations/*.sql. Production's own `workspaces`
+        # table apparently has it already (signup/get_workspace_by_id do not
+        # 500 there), so it was evidently added out-of-band at some point and
+        # never captured. Any OTHER Postgres this schema boots against --
+        # every disposable/CI/e2e stack, and any future fresh production-shaped
+        # database -- does not have it, and get_workspace_by_id's SELECT
+        # (which every signup's ensure_workspace_billing_defaults call goes
+        # through) raises asyncpg.exceptions.UndefinedColumnError outright.
+        # Reproduced directly while standing up a throwaway stack for MAN-343:
+        # first signup on a fresh DB never got past account creation.
+        await pool.execute(
+            "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS "
+            "identity_links JSONB DEFAULT '{}'::jsonb"
+        )
         # ── Phase 2: Projects entity — link each agent install to a project. ──
         await pool.execute(
             "ALTER TABLE workspace_agent_installs ADD COLUMN IF NOT EXISTS "
