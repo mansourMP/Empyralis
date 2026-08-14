@@ -20,8 +20,26 @@ name: Release Gateway (Linux)
 #     <stage>/empyralis-gateway, then asserts dist/index.js exists)
 #   - empyralis-gateway/src/update/gateway-artifact-installer.ts:202-233
 #     (identical extraction + assertion for self-update)
-# => the archive ROOT holds dist/, node_modules/, package.json. No wrapper
-# directory. Both consumers create the `empyralis-gateway/` level themselves.
+# => the archive ROOT holds dist/, node_modules/, package.json,
+# openclaw-bridge-plugin/. No wrapper directory. Both consumers create the
+# `empyralis-gateway/` level themselves.
+#
+# openclaw-bridge-plugin/ (added 2026-08-14, MAN-channel-transport-missing):
+# openclaw-provisioning-runtime.ts's defaultBridgePluginPath() resolves the
+# OpenClaw channel-transport plugin at runtime as
+# <package root>/openclaw-bridge-plugin, i.e. a SIBLING of dist/ — a path
+# this workflow never staged or packed. Every Agent Computer ever built from
+# this pipeline therefore came up with a working gateway and a channel
+# transport that OpenClaw refused to load ("plugin path not found"),
+# degrading silently to "the Agent Computer works, channels do not". Shipped
+# as raw .ts SOURCE, not compiled: OpenClaw's own plugin loader
+# (plugin-module-loader-cache.js) transpiles a non-.js/.mjs/.cjs plugin
+# entry on the fly via its bundled `jiti`, and the plugin's own
+# openclaw.plugin.json declares its entry as "./index.ts" — verified locally
+# against the pinned openclaw@2026.6.10 build (`plugins doctor` / `plugins
+# list --json` report status "loaded" reading directly off this exact
+# directory shape, no build step). See the "Verify archive matches..." step
+# below for what closes the gap that let this ship unnoticed.
 
 on:
   workflow_dispatch:
@@ -127,7 +145,28 @@ jobs:
           mv "$RUNNER_TEMP/dist" "$STAGE/dist"
           cp -R empyralis-gateway/node_modules "$STAGE/node_modules"
           cp empyralis-gateway/package.json "$STAGE/package.json"
+
+          # The OpenClaw channel-transport plugin. Ship exactly what OpenClaw
+          # loads at runtime (index.ts, openclaw.plugin.json, src/*.ts,
+          # types/*.d.ts, package.json) and nothing dev-only: unit tests, the
+          # local verification harness (which embeds its own throwaway
+          # openclaw.plugin.json and would otherwise ship a second, unloaded
+          # plugin manifest inside this one's directory), tsconfig.json and
+          # package-lock.json are never opened by OpenClaw's loader at load
+          # time. See the header comment above for why raw .ts is correct
+          # here rather than a build step.
+          mkdir -p "$STAGE/openclaw-bridge-plugin"
+          rsync -a \
+            --exclude 'src/__tests__' \
+            --exclude 'verify' \
+            --exclude 'node_modules' \
+            --exclude 'package-lock.json' \
+            --exclude 'tsconfig.json' \
+            empyralis-gateway/openclaw-bridge-plugin/ "$STAGE/openclaw-bridge-plugin/"
+
           test -f "$STAGE/dist/index.js"
+          test -f "$STAGE/openclaw-bridge-plugin/index.ts"
+          test -f "$STAGE/openclaw-bridge-plugin/openclaw.plugin.json"
 
       - name: Create tarball and checksum
         run: |
@@ -136,7 +175,7 @@ jobs:
           OUT="$RUNNER_TEMP/out"
           mkdir -p "$OUT"
           TARBALL="empyralis-gateway-linux-${{ matrix.arch }}.tar.gz"
-          tar -czf "$OUT/$TARBALL" -C "$STAGE" dist node_modules package.json
+          tar -czf "$OUT/$TARBALL" -C "$STAGE" dist node_modules package.json openclaw-bridge-plugin
           ( cd "$OUT" && sha256sum "$TARBALL" > "$TARBALL.sha256" )
           ls -l "$OUT"
           echo "GATEWAY_TARBALL=$TARBALL" >> "$GITHUB_ENV"
@@ -216,6 +255,76 @@ jobs:
             echo "archive is missing one or more files scripts/install-agent-computer.sh requires by path — install_channel_transport (install-agent-computer.sh:392-430) needs dist/openclaw/provisioning/openclaw-install-plan-cli.js, and its Node-version read (install-agent-computer.sh:344) needs dist/openclaw/provisioning/openclaw-version.js. This is the exact shape of the 2026-08-13 gateway-artifact-staleness incident (dist/index.js present, a whole feature directory absent) — refusing to publish a tarball an Agent Computer cannot fully install channels from." >&2
             exit 1
           fi
+
+          # SECOND completeness check, deliberately sourced from a DIFFERENT
+          # file than the one above. The grep against install-agent-computer.sh
+          # can only ever see paths that script names literally — it is blind
+          # to a path the *gateway's own runtime* resolves relative to its
+          # package root in TypeScript. That blind spot is exactly how the
+          # openclaw-bridge-plugin/ directory (the OpenClaw channel-transport
+          # plugin, loaded at runtime by defaultBridgePluginPath() as
+          # "<package root>/openclaw-bridge-plugin", a SIBLING of dist/) went
+          # unpacked for every release before 2026-08-14: install-agent-
+          # computer.sh never names that path, so it could never appear in
+          # REQUIRED_PATHS above no matter how that grep is written.
+          #
+          # Expected value comes from openclaw-provisioning-runtime.ts's own
+          # defaultBridgePluginPath() source (not from this workflow, not from
+          # the packing step above); actual comes from extracting the tarball
+          # this job just built — two independent reads, same discipline as
+          # the block above.
+          RUNTIME_SRC="empyralis-gateway/src/openclaw/provisioning/openclaw-provisioning-runtime.ts"
+          BRIDGE_PLUGIN_DIR_NAME="$(grep -oE 'path\.resolve\(path\.dirname\(entryPath\), "\.\.", "[A-Za-z0-9_-]+"\)' "$RUNTIME_SRC" \
+            | grep -oE '"[A-Za-z0-9_-]+"\)$' | tr -d '")')"
+
+          if [[ -z "${BRIDGE_PLUGIN_DIR_NAME}" ]]; then
+            echo "could not derive the bridge plugin directory name from ${RUNTIME_SRC}'s defaultBridgePluginPath() — that function's shape changed and this grep no longer matches it; fix the grep in release-gateway-linux.yml before trusting this gate" >&2
+            exit 1
+          fi
+          if [[ "${BRIDGE_PLUGIN_DIR_NAME}" != "openclaw-bridge-plugin" ]]; then
+            echo "derived bridge plugin directory name is '${BRIDGE_PLUGIN_DIR_NAME}', expected 'openclaw-bridge-plugin' — either the runtime source changed the directory name (update the packing/tar steps above to match) or this grep drifted; fix before trusting this gate" >&2
+            exit 1
+          fi
+
+          BRIDGE_PLUGIN_DIR="$VERIFY/empyralis-gateway/${BRIDGE_PLUGIN_DIR_NAME}"
+          if [[ ! -d "${BRIDGE_PLUGIN_DIR}" ]]; then
+            echo "archive is missing ${BRIDGE_PLUGIN_DIR_NAME}/ — defaultBridgePluginPath() resolves the OpenClaw channel-transport plugin here, relative to the package root, and every provisioned Agent Computer would come up with a working gateway and NO channel transport (OpenClaw refuses with 'plugin path not found', logged, never failing the install). This is the exact bug fixed 2026-08-14." >&2
+            exit 1
+          fi
+          if [[ -z "$(find "${BRIDGE_PLUGIN_DIR}" -type f -print -quit)" ]]; then
+            echo "${BRIDGE_PLUGIN_DIR_NAME}/ exists in the archive but is empty" >&2
+            exit 1
+          fi
+
+          # The directory existing and being non-empty is not enough — assert
+          # the specific files OpenClaw's plugin loader actually opens.
+          # openclaw.plugin.json carries this plugin's id/name/description
+          # (confirmed against a real `openclaw plugins list --json` read,
+          # which reports "name": "Empyralis Bridge" straight off this file)
+          # but NOT the entry path — that is declared in package.json's own
+          # "openclaw.extensions" array (also confirmed live: `plugins list`
+          # reports this plugin's loaded "source" as index.ts, the exact
+          # value package.json declares, not anything in openclaw.plugin.json,
+          # which has no "extensions" key at all). Read each from where
+          # OpenClaw actually reads it — a THIRD independent source from
+          # this workflow's packing list and the runtime source grepped
+          # above.
+          PLUGIN_MANIFEST="${BRIDGE_PLUGIN_DIR}/openclaw.plugin.json"
+          test -f "${PLUGIN_MANIFEST}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/openclaw.plugin.json (OpenClaw's plugin loader reads this for id/name/description)" >&2; exit 1; }
+
+          PLUGIN_PACKAGE_JSON="${BRIDGE_PLUGIN_DIR}/package.json"
+          test -f "${PLUGIN_PACKAGE_JSON}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/package.json (declares this plugin's entry path under .openclaw.extensions)" >&2; exit 1; }
+
+          PLUGIN_ENTRY_REL="$(jq -r '.openclaw.extensions[0] // empty' "${PLUGIN_PACKAGE_JSON}")"
+          if [[ -z "${PLUGIN_ENTRY_REL}" ]]; then
+            echo "${BRIDGE_PLUGIN_DIR_NAME}/package.json has no .openclaw.extensions[0] — cannot determine what OpenClaw would try to load; fix the plugin's package.json or this check" >&2
+            exit 1
+          fi
+          PLUGIN_ENTRY_REL="${PLUGIN_ENTRY_REL#./}"
+          test -f "${BRIDGE_PLUGIN_DIR}/${PLUGIN_ENTRY_REL}" \
+            || { echo "MISSING: ${BRIDGE_PLUGIN_DIR_NAME}/${PLUGIN_ENTRY_REL} — declared as this plugin's own entry point in package.json's .openclaw.extensions, but absent from the packed archive" >&2; exit 1; }
 
       # Best-effort: GitHub's attestation storage isn't available for
       # user-owned private repos on the current plan ("Feature not available
