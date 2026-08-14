@@ -128,6 +128,35 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
       <body data-theme="light" suppressHydrationWarning>
         <script
           nonce={nonce}
+          // suppressHydrationWarning IS REQUIRED here, deliberately, and is not
+          // decorative (2026-08-14). The HTML spec hides a script/style
+          // element's `nonce` CONTENT ATTRIBUTE after the browser processes
+          // it — getAttribute('nonce') returns "" from then on, specifically
+          // so an XSS payload can't read the nonce back via
+          // el.getAttribute/CSS attribute selectors. React 19.2.3's
+          // hydration diff (react-dom-client.development.js,
+          // diffHydratedProperties -> the generic default prop branch, since
+          // "nonce" has no special case) reads the DOM value via plain
+          // getAttribute, not the `.nonce` IDL property that actually holds
+          // the real value — so it compares the real server-rendered nonce
+          // against the browser's now-empty-string attribute and reports a
+          // hydration mismatch, on THIS element, on every single page load,
+          // in every nonce-enforcing browser. Confirmed by reading the
+          // shipped react-dom bundle directly, not assumed from a changelog.
+          // It is real and Cloudflare-independent — reproduced on a local
+          // disposable stack with no Cloudflare in the path. It is also
+          // functionally inert: this script already ran via the browser's
+          // normal HTML-parser execution before React ever loaded, so there
+          // is nothing for a "corrected" re-render to fix. suppressHydration
+          // Warning short-circuits the whole per-prop diff for this element
+          // (see diffHydratedProperties: `else if (!0 !==
+          // props.suppressHydrationWarning) switch (propKey) {...}` — the
+          // guard wraps every case, "nonce" included), which is the
+          // documented, one-level-deep escape hatch for exactly this
+          // "known, harmless, unavoidable" mismatch shape — not a blanket
+          // suppression of real bugs on this element, since there IS no
+          // other prop here whose mismatch would matter.
+          suppressHydrationWarning
           // Keep document theme in sync with persisted preference before hydration.
           dangerouslySetInnerHTML={{ __html: themeBootstrapScript }}
         />

@@ -2946,6 +2946,120 @@ narrower attack surface than script injection, but still a security-posture
 decision, not a call to make silently in a drive-by fix. Until one of those
 lands, do not cite "zero console violations" as current, verified state.
 
+**Option (b) above LANDED, 2026-08-14 — `style-src` is now `'self'
+'unsafe-inline'`, no nonce, in both prod and dev.** Triggered by the
+founder hitting this live on Settings → Connections: 6+ style-src
+violations in the console at once, PLUS an uncaught React hydration error
+(#418) on the same page — the volume of style-src noise is exactly what
+buried the hydration error and made it look like a wall of unrelated
+console spam rather than one real bug worth chasing. `script-src` is
+completely unchanged — still nonce + `'strict-dynamic'`, no
+`'unsafe-inline'`, no weakening whatsoever. The nonce is dropped from
+`style-src` ENTIRELY rather than adding `'unsafe-inline'` alongside it:
+per CSP's own backward-compat rule, a nonce present in the same directive
+makes every nonce-aware browser silently ignore `'unsafe-inline'`, which
+would have reintroduced this exact bug while looking fixed. Full reasoning
+and the migration path back to a nonced style-src both live in
+`frontend/lib/security/content-security-policy.ts`'s module header (the
+authoritative version — do not let this paragraph go stale relative to
+it) and in `content-security-policy.test.ts`'s own header comment, whose
+assertions were flipped to assert the new shape (carries `'unsafe-inline'`,
+carries no nonce token) rather than deleted, so nobody mistakes the old
+nonce-only shape for the one still intended. Cost, stated plainly: this
+makes CSS-injection possible on this origin where it was nominally blocked
+— a real widening, and a much narrower surface than script injection
+(no code execution, no fetch/XHR exfiltration via CSS alone) — and the
+nonce-only policy was not actually stopping anything in production anyway,
+since it was violating on every authenticated page rather than being
+enforced against a real attacker. Do not re-add the nonce to `style-src`
+without first migrating the SSR-reachable `style={{...}}` call sites this
+file's own "CORRECTION, 2026-08-13" note already flags as untriaged
+(~666 grep hits at the time of that note) — re-adding it without that
+migration reproduces the original bug, just with a passing test suite that
+was never asked to catch it.
+
+That same live incident's OTHER finding, separate from style-src and NOT
+yet acted on: Cloudflare is injecting
+`/cdn-cgi/scripts/<hash>/cloudflare-static/email-decode.min.js` on
+authenticated pages, and `script-src`'s `'strict-dynamic'` correctly
+blocks it (it is not our script, has no nonce, and should not run). That
+filename is Cloudflare's own asset for **Email Address Obfuscation**
+(Scrape Shield) — it rewrites any plain-text email pattern it finds in a
+response body into a decoded `<span>`/`<a data-cfemail>` and injects this
+script to reverse it client-side, and it only fires on a response that
+actually contained an obfuscatable email. The app's own pages carry no
+visible email markup (grepped: no `mailto:`/literal email strings under
+`frontend/app/(account)` or the workspace UI) — the far more likely
+source is the founder's own email address serialized as plain text inside
+the per-request React Server Component/flight payload every authenticated
+page embeds to hydrate `AccountShellProvider`
+(`frontend/lib/server/load-account-shell-session.ts`'s `account` bootstrap
+data, which plausibly carries `email`) — Cloudflare's scraper is not known
+to reliably exempt `<script>`-embedded JSON from its regex. This is a
+**Cloudflare dashboard toggle** (zone `empyralis.ai` → Rules/Configuration
+→ **Scrape Shield → Email Address Obfuscation**, turn OFF), not something
+fixable in this repo — the founder is the only one who can flip it. Left
+unflipped as of this writing; only he can act on it. Whether it is ALSO a
+contributing cause of the React #418 hydration error (by rewriting HTML
+the browser parses into something that no longer matches what Next.js's
+server render produced) is plausible and would be consistent with the
+observed symptom (a dead button with zero network request, i.e. broken
+client-side interactivity) but was not directly proven — no authenticated
+production session was used to confirm it, on purpose (see "Testing the
+UI" below: never test against the founder's live session or database).
+If turning the toggle off does not by itself resolve the hydration error,
+the remaining suspect is a genuine app-side SSR/CSR mismatch unrelated to
+Cloudflare, and that would need its own investigation with a seeded local
+account, not a guess from outside.
+
+**CORRECTION, same day — a specific alternative theory for the #418 was
+raised and tested directly; it did not hold, and the Cloudflare theory
+above is the one still standing.** A colleague investigating in parallel
+found that `app/layout.tsx`'s hand-written theme-bootstrap `<script
+nonce={nonce}>` is exactly the shape that can hydration-mismatch: the
+HTML spec hides a script/style element's `nonce` CONTENT ATTRIBUTE after
+the browser parses it (`getAttribute('nonce')` returns `""` from then on
+— confirmed directly, live, in a real browser via `javascript_tool`
+against this exact page: `getAttribute` `""`, `.nonce` property the real
+value), and React 19.2.3's hydration diff
+(`react-dom-client.development.js`, `diffHydratedProperties`'s generic
+default prop branch — "nonce" has no special case in this version, read
+directly off the shipped bundle) compares via `getAttribute`, not
+`.nonce`. That mechanism is real and independent of Cloudflare — Next's
+OWN framework-generated inline scripts carry the identical nonce and are
+identically hidden, they just never go through hydration diffing since
+they're injected as raw HTML outside the React element tree, while this
+one hand-written script genuinely is a diffed element.
+
+**But it does not reproduce.** Tested directly against a disposable local
+stack (`frontend/scripts/start-e2e-backend.sh`, a real seeded owner
+account, `next build && next start` — matching how empyralis.ai actually
+runs — and separately `next dev`) on the UNMODIFIED `layout.tsx`: zero
+hydration console errors, and the DigitalOcean connect button on
+Settings → Connections (the exact page and control named in the incident)
+opened its panel correctly every time, in both modes. Reverting the
+speculative fix and re-running reproduces the same clean result. A
+`suppressHydrationWarning` was still added to that script tag
+(`frontend/app/layout.tsx`) because the underlying attribute-hiding fact
+is real and the fix is free — but it is NOT shown to fix anything a user
+would notice, and must not be cited as the resolution to this incident.
+Why the mismatch never surfaces here is unconfirmed (candidates: this
+React/Next version may special-case it somewhere not found by the grep
+above, or a DEV-only diff path that never throws in a production build) —
+not chased further, since the practical question was "does this explain
+the founder's report" and the direct test answered no.
+
+Net: with the alternative theory tested and not reproducing locally, the
+Email Address Obfuscation theory above is the one with actual supporting
+evidence (the exact injected script name) and no local counter-evidence,
+and is still the one item only the founder can act on. Two possibilities
+remain open and neither is proven: the toggle is the whole story, or
+production has a third cause not yet identified that a local disposable
+stack — lacking Cloudflare entirely — cannot surface by construction. If
+flipping the toggle doesn't resolve it, the next step is reproducing
+against the REAL production edge (or a Cloudflare-fronted staging copy),
+not further local guessing.
+
 **The fleet UI collapses to what actually exists — the agent COUNT decides
 the shape, never a tier check.** MAN-317, 2026-08-13. `agent-count-shape.ts`'s
 `planAgentCountShape(realAgentCount)` is the whole rule, same shape as
