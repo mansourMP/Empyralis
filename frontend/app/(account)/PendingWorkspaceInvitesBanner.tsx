@@ -21,6 +21,7 @@ import { Check, X } from 'lucide-react';
 
 import {
   declinePendingWorkspaceInvite,
+  fetchMyPendingWorkspaceInviteIds,
   joinPendingWorkspaceInvite,
   useMyPendingWorkspaceInvites,
   type MyPendingWorkspaceInvite,
@@ -55,17 +56,33 @@ export function PendingWorkspaceInvitesBanner() {
     setBusyId(invite.id);
     clearError(invite.id);
     const result = await joinPendingWorkspaceInvite(invite.id);
-    setBusyId(null);
-    if (!result.ok) {
-      setErrorById((prev) => ({ ...prev, [invite.id]: result.error }));
+    if (result.ok) {
+      setBusyId(null);
+      // A brand-new membership means the account shell's server-resolved
+      // workspace list (loadAccountShellSession) is stale -- reload rather
+      // than trying to splice a membership into client state the shell
+      // otherwise treats as fixed for the session. Rare, cold action; not
+      // worth a second state-sync mechanism.
+      window.location.reload();
       return;
     }
-    // A brand-new membership means the account shell's server-resolved
-    // workspace list (loadAccountShellSession) is stale -- reload rather
-    // than trying to splice a membership into client state the shell
-    // otherwise treats as fixed for the session. Rare, cold action; not
-    // worth a second state-sync mechanism.
-    window.location.reload();
+    if (result.ambiguous) {
+      // The join request itself never produced a response -- the server may
+      // already have processed it. Before ever telling the person it
+      // failed, check the actual source of truth: if this invite no longer
+      // shows up as pending, the join went through and we must not report
+      // failure on a success.
+      const stillPending = await fetchMyPendingWorkspaceInviteIds()
+        .then((ids) => ids.includes(invite.id))
+        .catch(() => true); // can't verify -- fall through to the honest error below
+      if (!stillPending) {
+        setBusyId(null);
+        window.location.reload();
+        return;
+      }
+    }
+    setBusyId(null);
+    setErrorById((prev) => ({ ...prev, [invite.id]: result.error }));
   }
 
   async function handleDecline(invite: MyPendingWorkspaceInvite) {
