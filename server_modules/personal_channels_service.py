@@ -2343,6 +2343,254 @@ async def agents_bound_to_channel(
     return owners
 
 
+class AgentNotPlacedOnGatewayError(ValueError):
+    """Raised by assert_agent_placed_on_gateway below. A ValueError subclass
+    (not a bare RuntimeError) so it falls straight into the `except
+    ValueError` -> 400 handling every WhatsApp/Telegram/iMessage personal-
+    channel route already has, with zero route changes needed; the OpenClaw
+    provisioning path re-wraps it into OpenClawProvisioningError(status_code
+    =403, reason_code="agent_not_placed_on_gateway") — see
+    openclaw_provisioning_service.provision_openclaw_gateway.
+
+    str(this) is already the owner-facing sentence — no "gateway_id",
+    "install_metadata", or "preferred_gateway_id" anywhere in it, matching
+    OpenClawProvisioningConflictError's own no-mechanism rule elsewhere in
+    this codebase."""
+
+    def __init__(self, *, agent_label: str, gateway_id: str, preferred_gateway_id: str) -> None:
+        self.gateway_id = gateway_id
+        self.preferred_gateway_id = preferred_gateway_id
+        if preferred_gateway_id:
+            message = (
+                f"{agent_label} is placed on a different computer than this one. A channel "
+                f"runs on the computer its agent is placed on — open {agent_label}'s Hardware "
+                "tab to move it here, or set this channel up from that agent's own Channels panel."
+            )
+        else:
+            message = (
+                f"{agent_label} isn't placed on any computer yet. Open its Hardware tab and "
+                "assign it a computer before setting up a channel for it."
+            )
+        super().__init__(message)
+
+
+async def assert_agent_placed_on_gateway(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    gateway_id: str,
+) -> None:
+    """THE enforcement point for CLAUDE.md's execution-locality doctrine
+    applied to channels. Founder, 2026-08-14: "I clearly connected my agent
+    to a hardware and channel came from there as well... If X agent is
+    connected to Z hardware, gateway and channel must run there as well."
+
+    Before this, every write that binds one agent's channel state to a
+    gateway_id (configure_whatsapp_personal_gateway,
+    configure_telegram_personal_gateway, recheck/install_imessage_*,
+    openclaw_provisioning_service.provision_openclaw_gateway) accepted ANY
+    gateway_id the caller's OWNER role could reach in the workspace — never
+    checked against which box the named agent is actually placed on. A
+    gateway's per-channel software CAPABILITY (e.g. channel.telegram.
+    personal, advertised unconditionally by every gateway process that
+    bundles the runtime — see get_gateway_personal_channel_surfaces's own
+    doc comment on `stage`/`proven_live`) was the only thing that looked
+    like a gate, and it says nothing about binding: three gateways in one
+    workspace can all legitimately advertise `telegram: True` in software
+    while only one of them is where a given agent's tools actually run.
+
+    install_metadata.preferred_gateway_id is the single field already
+    treated as authoritative for "where does this agent's hardware run" —
+    resolveHardwarePlacement (frontend), _resolve_local_bridge_agent_id,
+    agents_sharing_gateway, and routes_fleet.fleet_agent_channels's
+    selected_gateway_id all key off it already. This is that same fact
+    enforced at every channel WRITE, not just read — one authoritative
+    source, checked at the narrow waist each mutation already passes
+    through, rather than a defensive re-check invented per route.
+
+    Fails CLOSED: an unreadable install bundle raises rather than allowing
+    the write through — the cost of a false positive here (a channel wired
+    to hardware the agent was never placed on) is a cross-box credential
+    leak or a repeat of the group-ban incident CLAUDE.md already documents;
+    the cost of a false negative is a retryable error."""
+    normalized_agent_id = str(agent_id or "").strip()
+    normalized_gateway_id = str(gateway_id or "").strip()
+    if not normalized_agent_id or not normalized_gateway_id:
+        # Nothing to enforce: an unscoped call (no agent_id) is the
+        # pre-existing "route as Sage" behavior _claim_agent_channel_state
+        # already tolerates, and a blank gateway_id never reaches a real
+        # mutation (the route's own gateway lookup 404s first).
+        return
+    from server_modules import agent_registry_repository as _repo
+
+    try:
+        bundle = await _repo.get_workspace_agent_install_bundle(
+            normalized_agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+        )
+    except Exception:
+        _logger.warning(
+            "assert_agent_placed_on_gateway: install lookup failed for agent_id=%s gateway_id=%s",
+            normalized_agent_id, normalized_gateway_id, exc_info=True,
+        )
+        bundle = None
+    if not isinstance(bundle, dict):
+        raise AgentNotPlacedOnGatewayError(
+            agent_label=normalized_agent_id,
+            gateway_id=normalized_gateway_id,
+            preferred_gateway_id="",
+        )
+    metadata = bundle.get("install_metadata") if isinstance(bundle.get("install_metadata"), dict) else bundle.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    preferred = str(metadata.get("preferred_gateway_id") or "").strip()
+    if preferred and preferred == normalized_gateway_id:
+        return
+    label = str(bundle.get("label") or bundle.get("agent_definition_name") or "").strip() or normalized_agent_id
+    raise AgentNotPlacedOnGatewayError(
+        agent_label=label,
+        gateway_id=normalized_gateway_id,
+        preferred_gateway_id=preferred,
+    )
+
+
+async def handle_agent_hardware_relocated(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    old_gateway_id: str,
+    new_gateway_id: str,
+    actor_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Called as a best-effort side effect of fleet_tools.fleet_configure_agent
+    whenever an agent's own install_metadata.preferred_gateway_id changes
+    away from a real, previously-set gateway (a MOVE or an unbind — never
+    fires on the FIRST placement, where old_gateway_id is blank).
+
+    WHY THIS EXISTS: assert_agent_placed_on_gateway above stops new writes
+    from landing on the wrong box, but a channel that was ALREADY connected
+    on the OLD box before the move does not become disconnected just
+    because Empyralis's own metadata changed — the founder's own scenario
+    ("channels already paired elsewhere") demands this actively do
+    something, not silently leave a channel answering from hardware the
+    product now says the agent isn't on. CLAUDE.md's outcome-honesty law
+    ("after an action, the product must tell the person what actually
+    happened") applies here too: this never raises past the caller, and its
+    return value is always a real report, not a swallowed None.
+
+    WhatsApp/Telegram personal: these are single-session-per-box channels
+    (find_agent_id_for_telegram_session/_whatsapp_session resolve by "most
+    recently touched row for this gateway+channel", not per-agent) — the
+    live session credential lives ON the old box's process memory/disk, so
+    the only honest way to actually end it is the SAME disconnect capability
+    the Channels panel's own "Disconnect" button already calls
+    (disconnect_whatsapp_personal_gateway/disconnect_telegram_personal_gateway).
+    Reused here rather than re-implemented, and best-effort: an offline old
+    box means the session simply logs out the next time it can, exactly
+    like any other disconnect attempt against an unreachable gateway.
+
+    OpenClaw-transported / local-bridge channels: there is no per-channel
+    disconnect RPC (CLAUDE.md: these are OS-level bridges or a shared
+    OpenClaw config, not something Empyralis logs in and out of). The
+    honest action there is to re-push the old gateway's OpenClaw policy —
+    build_openclaw_channel_policies recomputes ownership fresh from CURRENT
+    preferred_gateway_id on every call, so once this agent's own metadata
+    has already moved, provisioning the OLD gateway (as whichever OTHER
+    agent still shares it, if any) naturally stops including this agent's
+    settings. Skipped, honestly, when no other agent remains on the old box
+    to provision as — there is nothing left to push, and the old box's
+    config will keep whatever it had until it is next reached, which is
+    reported rather than hidden.
+    """
+    normalized_agent_id = str(agent_id or "").strip()
+    normalized_old_gateway_id = str(old_gateway_id or "").strip()
+    normalized_new_gateway_id = str(new_gateway_id or "").strip()
+    report: Dict[str, Any] = {
+        "old_gateway_id": normalized_old_gateway_id or None,
+        "new_gateway_id": normalized_new_gateway_id or None,
+        "released_channels": [],
+        "notes": [],
+    }
+    if not normalized_agent_id or not normalized_old_gateway_id:
+        return report
+    if normalized_old_gateway_id == normalized_new_gateway_id:
+        return report
+
+    old_registration = gateway_state_repository.get_gateway_registration(normalized_old_gateway_id)
+    if not old_registration:
+        report["notes"].append("The previous computer's pairing record is gone; nothing to release there.")
+        return report
+
+    # WhatsApp / Telegram personal — only if THIS agent is the one currently
+    # holding the row (the "most recently touched" claim), never someone
+    # else's session that merely shares the old gateway.
+    for channel_key, disconnect_fn, provider in (
+        (WHATSAPP_PERSONAL_CHANNEL_KEY, disconnect_whatsapp_personal_gateway, WHATSAPP_PERSONAL_PROVIDER),
+        (TELEGRAM_PERSONAL_CHANNEL_KEY, disconnect_telegram_personal_gateway, TELEGRAM_PERSONAL_PROVIDER),
+    ):
+        try:
+            existing = _personal_channel_state(normalized_old_gateway_id, channel_key)
+        except Exception:
+            existing = None
+        claimant = _resolve_agent_id_for_inbound(normalized_old_gateway_id, channel_key)
+        if existing is None or claimant != normalized_agent_id:
+            continue
+        try:
+            await disconnect_fn(
+                gateway_id=normalized_old_gateway_id,
+                registration=old_registration,
+                agent_id=normalized_agent_id,
+            )
+            report["released_channels"].append(channel_key)
+            report["notes"].append(f"{provider}: disconnected on the previous computer.")
+        except Exception as exc:
+            report["notes"].append(
+                f"{provider}: could not disconnect on the previous computer right now "
+                f"({exc}); it will pick up the change once it's next reachable."
+            )
+
+    # OpenClaw-transported / local-bridge channels — re-push the OLD
+    # gateway's policy under whichever OTHER agent still shares it, so
+    # ownership recomputes without this agent. Nothing to push if this was
+    # the only agent on that box.
+    try:
+        remaining_agents = [
+            a for a in await agents_sharing_gateway(
+                tenant_id=tenant_id, workspace_id=workspace_id, gateway_id=normalized_old_gateway_id,
+            )
+            if a != normalized_agent_id
+        ]
+    except Exception:
+        remaining_agents = []
+    if remaining_agents:
+        try:
+            from server_modules import openclaw_provisioning_service as _openclaw
+
+            await _openclaw.provision_openclaw_gateway(
+                gateway_id=normalized_old_gateway_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_id=remaining_agents[0],
+                actor_id=actor_id,
+            )
+            report["notes"].append(
+                "OpenClaw-transported channels on the previous computer were re-provisioned "
+                "under the agent(s) still placed there."
+            )
+        except Exception as exc:
+            report["notes"].append(
+                f"Could not re-provision the previous computer's OpenClaw transport right now "
+                f"({exc}); it will pick up the change the next time anyone provisions it."
+            )
+    else:
+        report["notes"].append(
+            "No other agent is placed on the previous computer, so its OpenClaw-transported "
+            "channel policy was left as-is; it will refresh the next time that computer is "
+            "provisioned."
+        )
+    return report
+
+
 async def _resolve_local_bridge_agent_id(
     *,
     gateway_id: str,
@@ -4383,6 +4631,12 @@ async def recheck_imessage_personal_gateway(
         IMESSAGE_PERSONAL_CHANNEL_KEY,
         IMESSAGE_PERSONAL_PROVIDER,
     )
+    await assert_agent_placed_on_gateway(
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=agent_id,
+        gateway_id=gateway_id,
+    )
     # Claim identity for this (gateway_id, channel_key) under the real
     # agent_id the route already received — iMessage's one genuine in-app
     # action for a channel family that otherwise has none (see
@@ -4451,6 +4705,12 @@ async def install_imessage_imsg_gateway(
     channel_lane_contract_service.assert_personal_gateway_channel(
         IMESSAGE_PERSONAL_CHANNEL_KEY,
         IMESSAGE_PERSONAL_PROVIDER,
+    )
+    await assert_agent_placed_on_gateway(
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=agent_id,
+        gateway_id=gateway_id,
     )
     # See recheck_imessage_personal_gateway's identical claim call above —
     # same reasoning applies to the install action.
@@ -4572,6 +4832,12 @@ async def configure_whatsapp_personal_gateway(
     channel_lane_contract_service.assert_personal_gateway_channel(
         WHATSAPP_PERSONAL_CHANNEL_KEY,
         WHATSAPP_PERSONAL_PROVIDER,
+    )
+    await assert_agent_placed_on_gateway(
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=agent_id,
+        gateway_id=gateway_id,
     )
     _claim_agent_channel_state(
         gateway_id=gateway_id, channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
@@ -4892,6 +5158,12 @@ async def configure_telegram_personal_gateway(
     channel_lane_contract_service.assert_personal_gateway_channel(
         TELEGRAM_PERSONAL_CHANNEL_KEY,
         TELEGRAM_PERSONAL_PROVIDER,
+    )
+    await assert_agent_placed_on_gateway(
+        tenant_id=str(registration.get("tenant_id") or "default"),
+        workspace_id=str(registration.get("workspace_id") or "default"),
+        agent_id=agent_id,
+        gateway_id=gateway_id,
     )
     _claim_agent_channel_state(
         gateway_id=gateway_id, channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,

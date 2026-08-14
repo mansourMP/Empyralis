@@ -372,6 +372,17 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
                 "server_modules.personal_channels_service.gateway_execution_service.execute_tool_via_gateway",
                 new=AsyncMock(return_value={"result": {"connected": True}}),
             ),
+            # assert_agent_placed_on_gateway's own dependency -- this agent
+            # is placed on the exact gateway_id the route call below targets.
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(
+                    return_value={
+                        "id": "agent-imsg-recheck",
+                        "metadata": {"preferred_gateway_id": "gw-imsg-3"},
+                    }
+                ),
+            ),
         ):
             await personal_channels_service.recheck_imessage_personal_gateway(
                 gateway_id="gw-imsg-3", registration=self.registration, agent_id="agent-imsg-recheck",

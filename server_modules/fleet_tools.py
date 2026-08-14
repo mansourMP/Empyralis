@@ -1725,6 +1725,7 @@ async def fleet_configure_agent(
             _next_label = requested_label
         if "telegram_first_contact_reply" in clean_patch:
             meta["telegram_first_contact_reply"] = bool(clean_patch["telegram_first_contact_reply"])
+        _prior_preferred_gateway_id = str(meta.get("preferred_gateway_id") or "").strip()
         if "preferred_gateway_id" in clean_patch:
             value = clean_patch["preferred_gateway_id"]
             if value is not None and not isinstance(value, str):
@@ -1905,6 +1906,38 @@ async def fleet_configure_agent(
             )
             if _recommendation:
                 response["recommended_model_config"] = _recommendation
+        # Execution-locality corollary, founder 2026-08-14: "If X agent is
+        # connected to Z hardware, gateway and channel must run there as
+        # well." A MOVE (a real prior placement, now changed to something
+        # else — including unbinding to "") must not silently leave a
+        # channel still answering from the box the agent no longer belongs
+        # to. Best-effort and reported, never allowed to fail this save —
+        # the metadata write above already committed by the time this runs.
+        if _prior_preferred_gateway_id and _prior_preferred_gateway_id != _bound_gateway_id:
+            try:
+                from server_modules import personal_channels_service as _pcs
+
+                response["hardware_relocated"] = await _pcs.handle_agent_hardware_relocated(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    old_gateway_id=_prior_preferred_gateway_id,
+                    new_gateway_id=_bound_gateway_id,
+                    actor_id=actor_id,
+                )
+            except Exception as exc:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "fleet_configure_agent: hardware-relocation cleanup failed for agent_id=%s "
+                    "old_gateway_id=%s", agent_id, _prior_preferred_gateway_id, exc_info=True,
+                )
+                response["hardware_relocated"] = {
+                    "old_gateway_id": _prior_preferred_gateway_id,
+                    "new_gateway_id": _bound_gateway_id or None,
+                    "released_channels": [],
+                    "notes": [f"Could not clean up channels on the previous computer right now ({exc})."],
+                }
     return response
 
 
