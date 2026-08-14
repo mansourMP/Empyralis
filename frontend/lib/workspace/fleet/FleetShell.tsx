@@ -19,15 +19,17 @@ export function FleetShell({
   workspaceId,
   shellSlot,
   children,
-  ownerName,
-  ownerEmail,
+  ownerDisplayName,
+  ownerEmailObfuscated,
   ownerRole,
 }: {
   workspaceId: string;
   shellSlot: ReactNode;
   children: ReactNode;
-  ownerName?: string;
-  ownerEmail?: string;
+  ownerDisplayName?: string;
+  // XOR-obfuscated, not display-ready — see ssr-safe-email.ts. PrimaryRail
+  // decodes it client-side via useRevealedEmail before showing it.
+  ownerEmailObfuscated?: string;
   ownerRole?: string;
 }) {
   const {
@@ -75,8 +77,8 @@ export function FleetShell({
     <div className="fleet-root" data-theme={theme}>
       <PrimaryRail
         workspaceId={workspaceId}
-        ownerName={ownerName}
-        ownerEmail={ownerEmail}
+        ownerDisplayName={ownerDisplayName}
+        ownerEmailObfuscated={ownerEmailObfuscated}
         ownerRole={ownerRole}
         collapsed={collapsed}
         onToggleCollapsed={toggleCollapsed}
