@@ -136,6 +136,48 @@ the things people look at daily.
 rendered. A control whose own label admits it does nothing is a design bug, not
 a caption.
 
+**After an action, the product must tell the person what actually happened.**
+Founder's law, 2026-08-14, escalated from a recurring bug to a standing rule
+after it hit production three times in one night in three unrelated places:
+
+```
+"failed"  and  "may have succeeded, but I lost track of it"   ← different facts
+"empty"   and  "I could not load this"                         ← different facts
+                                                     never share one message/screen
+```
+
+Reporting failure ON SUCCESS is the worst case, not the safest one: the person
+acts on the lie — retries something already done (duplicate agent, duplicate
+billed droplet, duplicate workspace), gives up on something that worked, or
+concludes the product is broken while it is fine. Confirmed live: signup
+reported "Couldn't create the account" after creating it (MAN-343); accepting
+a workspace invite reported failure after the accept had committed
+server-side; login's post-auth readiness poll navigated to the workspace on
+BOTH success and failure, so a poll hiccup after a genuinely successful login
+bounced silently back to a blank `/login` with nothing ever said. The recurring
+shape: a mutation that already committed, followed by a separate step (a
+readiness poll, a list refresh, a bootstrap re-fetch) that can independently
+fail, with both collapsed into one message or one action. The fix is never to
+invent certainty — when the client genuinely cannot tell, verify the real
+state before speaking (`frontend/app/join/[token]/page.tsx`'s pattern:
+decode what was attempted, re-check whether it actually happened, only THEN
+report), or say the honest "couldn't confirm, safe to retry" rather than a
+flat "failed."
+
+Guarded structurally, not just by the fixes:
+`frontend/lib/workspace/outcome-honesty-drift.test.ts` (wired into
+`npm run test:unit`) scans every `try/catch` for two proven live shapes — a
+mutation-shaped step collapsed with a follow-up into one undifferentiated
+catch, and a navigation call duplicated on both the success and failure
+paths — with a written-reason allowlist for the false positives it cannot
+see around (cross-function reasoning, mutually-exclusive if/else branches).
+Like every drift test in this codebase, it cannot catch what it was not
+built to catch: an "empty vs. could-not-load" collapse outside a multi-await
+try/catch, a lying message on structurally fine code, or the identical shape
+in the Python backend (server_modules has its own AST-based drift-test
+idiom for that surface, e.g. `test_exception_and_task_lint.py` —
+extend that family for a backend instance, not this file).
+
 **Projects hold members directly. There is no Teams layer.** Decided 2026-07-31
 after examining Linear's model, where a project carries its own member list and
 lead independent of teams. Empyralis has one workflow, so a team tier would be

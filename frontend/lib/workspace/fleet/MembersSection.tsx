@@ -91,12 +91,19 @@ export function MembersSection({ workspaceId }: { workspaceId: string }) {
       setFreshLink(buildWorkspaceInviteJoinUrl(created.token));
       setDelivery(inviteEmailDelivery(created));
       setEmail("");
-      await refreshInvites();
     } catch (e2) {
       setInviteError(e2 instanceof Error ? e2.message : "Could not create this invite.");
-    } finally {
       setInviting(false);
+      return;
     }
+    // The invite itself is already created and its real link is already on
+    // screen above — a failure here is only the pending-invites LIST
+    // failing to re-fetch, not the invite failing to exist. Reporting it as
+    // "Could not create this invite" would contradict the link this exact
+    // render also shows. Best-effort only: a stale list until the next
+    // natural refresh is a much smaller harm than a false failure claim.
+    await refreshInvites().catch(() => {});
+    setInviting(false);
   }
 
   function copyLink() {

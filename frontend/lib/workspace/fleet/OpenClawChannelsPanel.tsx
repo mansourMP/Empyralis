@@ -391,12 +391,16 @@ export function CredentialForm({
       // Cleared rather than retained: nothing typed here is kept in the tab
       // any longer than the request needs it.
       setValues({});
-      await onSaved();
     } catch {
       setError("Could not reach this computer.");
-    } finally {
       setSaving(false);
+      return;
     }
+    // The credential is already saved on the box — a failure to refresh
+    // this panel's own state afterward must not be reported as "Could not
+    // reach this computer," which would read as the save itself failing.
+    await Promise.resolve(onSaved()).catch(() => {});
+    setSaving(false);
   };
 
   return (
@@ -532,7 +536,7 @@ export function GroupAllowlistForm({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(
+      const res = await fleetAuthorizedFetch(
         `/api/personal-channels/${encodeURIComponent(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/group-policy?agent_id=${encodeURIComponent(agentId)}`,
         { credentials: "include", headers: buildCookieAuthHeaders("GET") },
       );
@@ -565,7 +569,7 @@ export function GroupAllowlistForm({
       setSaving(true);
       setError(null);
       try {
-        const res = await fetch(
+        const res = await fleetAuthorizedFetch(
           `/api/personal-channels/${encodeURIComponent(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/group-policy?agent_id=${encodeURIComponent(agentId)}`,
           {
             method: "PATCH",

@@ -56,6 +56,9 @@ function authErrorCopy(error: string): string {
   if (normalized.includes('status 401')) {
     return 'Email or password was not accepted.';
   }
+  if (normalized.includes('session not ready')) {
+    return "You're signed in, but your session isn't ready yet. Press Continue again in a moment.";
+  }
   if (normalized.includes('csrf')) {
     return "Your session looks out of date. Clear this site's cookies in your browser, then try again.";
   }
@@ -216,14 +219,30 @@ function LoginPageContent() {
       setSubmitting(false);
       return;
     }
+    // login() succeeded — a real session and its cookies already exist on
+    // that response. This poll exists only to smooth over cookie-
+    // propagation latency before the next request, exactly like signup's
+    // own post-signup poll (MAN-343). The two differ on what a POLL FAILURE
+    // should do next: signup proceeds to /verify-email regardless, because
+    // that page works from the stored email/code and does not need a live
+    // session. This page's destination (loginRedirectTarget, the workspace
+    // shell) genuinely DOES need one — blindly redirecting here used to
+    // send an unready session straight into a page whose own auth guard
+    // would find nothing and bounce it right back to a blank /login, with
+    // nothing on screen ever explaining why. A submitted login must never
+    // resolve into silence: on a poll failure, stay here and say so — the
+    // login itself is not in question, only whether the session has
+    // finished propagating, and pressing Continue again (this same handler)
+    // both re-confirms and re-polls.
     try {
       await awaitBrowserAuthReady({ attempts: 12, delayMs: 250 });
-      window.location.replace(loginRedirectTarget);
     } catch {
-      window.location.replace(loginRedirectTarget);
-    } finally {
+      setError('Session not ready.');
       setSubmitting(false);
+      return;
     }
+    window.location.replace(loginRedirectTarget);
+    setSubmitting(false);
   }
 
   const authRuntimeUnavailable = authRuntimeError !== null;

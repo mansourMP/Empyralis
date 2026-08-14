@@ -181,12 +181,17 @@ export function ChannelPairingSection({ workspaceId }: { workspaceId: string }) 
         metadata: { source: "settings_connections" },
       });
       setFreshIntent((data?.intent as ChannelPairingIntent) ?? null);
-      await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create a pairing code.");
-    } finally {
       setCreating(false);
+      return;
     }
+    // The pairing code is already minted and already on screen (freshIntent
+    // above) — a failure here is only the pairing LIST failing to re-fetch,
+    // not the create failing. Reporting it as "Could not create a pairing
+    // code" would contradict the code this exact render also shows.
+    await load().catch(() => {});
+    setCreating(false);
   }, [provider, workspaceId, load]);
 
   const revokeLink = useCallback(
@@ -198,12 +203,15 @@ export function ChannelPairingSection({ workspaceId }: { workspaceId: string }) 
           confirm: true,
           reason: "Revoked from workspace Settings → Connections.",
         });
-        await load();
       } catch (e) {
         setError(e instanceof Error ? e.message : "Could not revoke this pairing.");
-      } finally {
         setRevokingId(null);
+        return;
       }
+      // The revoke already happened — a failed re-fetch afterward must not
+      // be reported as "Could not revoke this pairing."
+      await load().catch(() => {});
+      setRevokingId(null);
     },
     [load],
   );

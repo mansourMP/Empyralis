@@ -128,17 +128,27 @@ export default function TaskDetailPage() {
     ),
   );
 
+  // Every handler below follows the same shape: the mutation's own
+  // try/catch decides `notice`, and the follow-up `refresh()` — a plain GET
+  // — is always awaited SEPARATELY, outside that try, swallowed with
+  // `.catch(() => {})`. A mutation that succeeds and is then followed by a
+  // refresh that fails must never report "Could not update this task": the
+  // update already happened, and the only real cost of a failed refresh is
+  // this view staying stale until the next natural reload — reporting it as
+  // the mutation failing would tell the person to redo work that is already
+  // done (CLAUDE.md's "reporting failure on success" law).
   const handleStatusChange = useCallback(async (id: string, status: FleetTaskStatus) => {
     setNotice(null);
     setPendingStatus(status);
     try {
       await patchFleetTask(workspaceId, id, { status });
-      await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not update this task.");
-    } finally {
       setPendingStatus(null);
+      return;
     }
+    refresh();
+    setPendingStatus(null);
   }, [workspaceId, refresh]);
 
   const handlePriorityChange = useCallback(async (id: string, priority: number) => {
@@ -146,12 +156,13 @@ export default function TaskDetailPage() {
     setPendingPriority(priority);
     try {
       await patchFleetTask(workspaceId, id, { priority });
-      await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not update this task's priority.");
-    } finally {
       setPendingPriority(null);
+      return;
     }
+    refresh();
+    setPendingPriority(null);
   }, [workspaceId, refresh]);
 
   // MAN-64/MAN-70: assignee is agent-or-human -- dispatch to whichever of
@@ -159,21 +170,25 @@ export default function TaskDetailPage() {
   // Only the agent path can ever report a wake failure.
   const handleAssign = useCallback(async (id: string, selection: TaskAssigneeSelection) => {
     setNotice(null);
+    let wakeNotice: string | null = null;
     try {
       if (selection.kind === "agent") {
         const { wakeError } = await assignFleetTask(workspaceId, id, selection.id);
         if (wakeError) {
-          setNotice(
-            `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`,
-          );
+          wakeNotice = `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`;
         }
       } else {
         await assignFleetTaskToUser(workspaceId, id, selection.id);
       }
-      await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not assign this task.");
+      return;
     }
+    // The assign itself is done — a refresh failure here must not clobber
+    // (or invent, when there's nothing to say) the notice above with a
+    // false "Could not assign this task."
+    refresh();
+    if (wakeNotice) setNotice(wakeNotice);
   }, [workspaceId, refresh]);
 
   const handleDueChange = useCallback(async (id: string, dueAt: string | null) => {
@@ -186,12 +201,13 @@ export default function TaskDetailPage() {
       // date, which requires clear_due_at: true or the backend's
       // `ELSE due_at` SQL branch silently keeps the old value.
       await patchFleetTask(workspaceId, id, { due_at: dueAt, clear_due_at: dueAt === null });
-      await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not update this task's due date.");
-    } finally {
       setPendingDue(null);
+      return;
     }
+    refresh();
+    setPendingDue(null);
   }, [workspaceId, refresh]);
 
   const handleTitleChange = useCallback(async (id: string, title: string) => {
@@ -199,12 +215,13 @@ export default function TaskDetailPage() {
     setPendingTitle(title);
     try {
       await patchFleetTask(workspaceId, id, { title });
-      await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not rename this task.");
-    } finally {
       setPendingTitle(null);
+      return;
     }
+    refresh();
+    setPendingTitle(null);
   }, [workspaceId, refresh]);
 
   const handleDescriptionChange = useCallback(async (id: string, description: string) => {
@@ -212,22 +229,24 @@ export default function TaskDetailPage() {
     setPendingDescription(description);
     try {
       await patchFleetTask(workspaceId, id, { description });
-      await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not update this task's description.");
-    } finally {
       setPendingDescription(null);
+      return;
     }
+    refresh();
+    setPendingDescription(null);
   }, [workspaceId, refresh]);
 
   const handleSetParent = useCallback(async (id: string, parentTaskId: string | null) => {
     setNotice(null);
     try {
       await setFleetTaskParent(workspaceId, id, parentTaskId);
-      await refresh();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "Could not set parent task.");
+      return;
     }
+    refresh();
   }, [workspaceId, refresh]);
 
   const handleSubTaskCreated = useCallback(async () => {

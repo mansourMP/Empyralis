@@ -368,16 +368,21 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
         enabled: true,
         discover_tools: false,
       });
-      setEndpointInput("");
-      setLabelInput("");
-      await refresh();
-      setExpandedKey(id);
-      void attemptDiscovery({ key: id, title: "", subtitle: "", servers: [{ id } as McpServerRecord] });
     } catch (e) {
       setAddError(e instanceof Error ? e.message : "Could not connect to that MCP server.");
-    } finally {
       setAdding(false);
+      return;
     }
+    // The server is already saved — a failed re-fetch of the list must not
+    // be reported as "Could not connect to that MCP server." Expanding the
+    // row and kicking off discovery still happen either way: both operate
+    // on the id just PUT, not on anything the list refresh would supply.
+    setEndpointInput("");
+    setLabelInput("");
+    await refresh().catch(() => {});
+    setExpandedKey(id);
+    void attemptDiscovery({ key: id, title: "", subtitle: "", servers: [{ id } as McpServerRecord] });
+    setAdding(false);
   }
 
   async function handleToggleEnabled(group: ServiceGroup) {
@@ -438,14 +443,17 @@ export function McpServersSection({ workspaceId }: { workspaceId: string }) {
         workspace_id: workspaceId,
         tool_name: toolName,
       });
-      clearRowErr(groupKey);
-      await refresh();
     } catch (e) {
       const verb = action === "approve" ? "approve" : "revoke";
       setRowErr(groupKey, e instanceof Error ? e.message : `Could not ${verb} "${toolName}".`);
-    } finally {
       setBusyKey((k) => (k === key ? null : k));
+      return;
     }
+    // The approve/deny already happened — a failed re-fetch must not be
+    // reported as "Could not approve/revoke" that tool.
+    clearRowErr(groupKey);
+    await refresh().catch(() => {});
+    setBusyKey((k) => (k === key ? null : k));
   }
 
   return (

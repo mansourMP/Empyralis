@@ -78,13 +78,29 @@ async function getJson(path: string): Promise<any> {
   return data;
 }
 
+/** Thrown only when the request itself never produced a response (fetch()
+ *  rejected -- offline, DNS failure, a dropped connection, an abort/timeout).
+ *  That is a genuinely different fact from the server answering with a
+ *  non-2xx status: a rejected fetch means the outcome is UNKNOWN -- the
+ *  server may have received and fully processed the request before the
+ *  connection died -- while a non-ok response is the server's own,
+ *  definitive answer. Callers that need to tell "we don't know" from "the
+ *  server said no" (acceptWorkspaceInvite below is the reason this exists)
+ *  branch on `error instanceof MutateNetworkError`. */
+export class MutateNetworkError extends Error {}
+
 async function mutateJson(path: string, method: string, body?: Record<string, unknown>): Promise<any> {
-  const res = await fleetAuthorizedFetch(path, {
-    method,
-    credentials: "include",
-    headers: buildCookieAuthHeaders(method, { "Content-Type": "application/json" }),
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fleetAuthorizedFetch(path, {
+      method,
+      credentials: "include",
+      headers: buildCookieAuthHeaders(method, { "Content-Type": "application/json" }),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    throw new MutateNetworkError(e instanceof Error ? e.message : "Network request failed.");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${res.status}`);
@@ -274,6 +290,17 @@ export function useMyPendingWorkspaceInvites() {
   return { invites, loading, error, refresh };
 }
 
+/** Standalone read of the caller's own pending invite ids, outside the hook
+ *  above — used to verify a real outcome after an ambiguous
+ *  joinPendingWorkspaceInvite failure (PendingWorkspaceInvitesBanner.tsx):
+ *  if an invite no longer appears here, it is no longer pending, which
+ *  means the join the client couldn't confirm actually went through. */
+export async function fetchMyPendingWorkspaceInviteIds(): Promise<string[]> {
+  const data = await getJson("/api/workspaces/invites/pending");
+  const items = Array.isArray(data?.items) ? data.items : [];
+  return items.map((item: any) => String(item?.id || "")).filter(Boolean);
+}
+
 /** Accept an invite from the in-app pending-invites list — no signed token
  *  involved (there's no email link here), so the server's whole
  *  authorization story is the caller's authenticated email matching the
@@ -287,7 +314,11 @@ export async function joinPendingWorkspaceInvite(inviteId: string): Promise<Acce
       role: (String(data?.role || "viewer").toLowerCase() as WorkspaceRole),
     };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : "Could not join this workspace." };
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Could not join this workspace.",
+      ambiguous: e instanceof MutateNetworkError,
+    };
   }
 }
 
@@ -405,7 +436,19 @@ export async function createWorkspaceInvite(
 
 export type AcceptInviteResult =
   | { ok: true; workspace_id: string; role: WorkspaceRole }
-  | { ok: false; error: string };
+  // `ambiguous: true` means the request itself never produced a response —
+  // the accept may well have gone through server-side; the client just
+  // never found out. `ambiguous: false` means the server answered directly
+  // (a token it rejected, an email mismatch, etc.) — a real, final fact.
+  // Callers must not show the same words for both: see
+  // frontend/app/join/[token]/page.tsx, which uses `ambiguous` to decide
+  // whether to verify the real outcome before ever telling the person it
+  // failed. The accept route itself deliberately treats a genuine replay of
+  // an already-accepted token as still-invalid (see
+  // test_accept_invite_succeeds_when_invitee_signup_already_auto_accepted_it),
+  // so this ambiguity has to be resolved client-side rather than by leaning
+  // on the endpoint being safe to blindly retry.
+  | { ok: false; error: string; ambiguous: boolean };
 
 /** Accept a workspace invite link. Any authenticated user may call this —
  *  the route itself gates on the caller's authenticated email matching the
@@ -419,7 +462,37 @@ export async function acceptWorkspaceInvite(token: string): Promise<AcceptInvite
       role: (String(data?.role || "viewer").toLowerCase() as WorkspaceRole),
     };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : "Could not accept this invite." };
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "Could not accept this invite.",
+      ambiguous: e instanceof MutateNetworkError,
+    };
+  }
+}
+
+/** Best-effort, UNVERIFIED read of the `workspace_id` an invite token
+ *  targets — decodes the base64url JSON payload segment of the
+ *  header.payload.signature token without checking its HMAC signature.
+ *  This is safe to do purely because nothing here is trusted: the value is
+ *  used only to pick which workspace to re-check membership against after
+ *  an ambiguous accept failure (see /join/[token]/page.tsx) — the real
+ *  grant only ever happens inside accept_workspace_invite_route, which
+ *  verifies the signature server-side. Returns null on any malformed token
+ *  rather than throwing, since this is a UI hint, not a security check. */
+export function unverifiedWorkspaceIdFromInviteToken(token: string): string | null {
+  try {
+    const [, payloadSegment] = String(token || "").split(".");
+    if (!payloadSegment) return null;
+    const padded = payloadSegment.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = "=".repeat((4 - (padded.length % 4)) % 4);
+    const json = typeof window !== "undefined" && typeof window.atob === "function"
+      ? window.atob(padded + padding)
+      : Buffer.from(padded + padding, "base64").toString("utf-8");
+    const payload = JSON.parse(json);
+    const workspaceId = typeof payload?.workspace_id === "string" ? payload.workspace_id.trim() : "";
+    return workspaceId || null;
+  } catch {
+    return null;
   }
 }
 
