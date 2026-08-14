@@ -18,20 +18,30 @@ function normalizeVisibleText(input: string): string {
 test.describe('launch sage-first smoke', () => {
   // Was "normal login path lands in sage with clean chat-first shell" —
   // asserted the post-login URL settled on `/w/ws-1/sage` with
-  // `[data-workstation-chat-composer="root"] textarea` auto-focused. Both
-  // premises are gone: `/sage` now immediately redirects again, to
-  // `/agents` (see frontend/app/(account)/w/[workspaceId]/sage/page.tsx —
-  // "Sage is now a corner console, not a full-page route"), and
-  // agents/page.tsx documents the underlying product decision directly:
-  // "Phase UC: Workspace landing = Fleet Home (not Sage chat redirect)."
-  // Chat is no longer where login lands or auto-focuses; it is one click
-  // away behind the "Ask AI" rail launcher (SageLauncher.tsx). What's still
-  // real and worth keeping: login should land in a clean shell that never
-  // leaks raw internal ids/roles, and never detours through onboarding.
+  // `[data-workstation-chat-composer="root"] textarea` auto-focused. That
+  // premise was already gone (chat moved into SageLauncher.tsx's docked
+  // "Ask AI" console), and this test was corrected once already to instead
+  // pin `/w/ws-1/agents` — and that pin is now ALSO wrong, for a completely
+  // different reason than routing: `resolvePrimaryProductWorkspaceId`
+  // (lib/shell/workspace-membership-model.ts) can legitimately resolve
+  // root '/' to a DIFFERENT workspace than 'ws-1' for this exact seeded
+  // account, because register_user auto-provisions its own personal
+  // workspace for every signup (server_modules/auth.py), created moments
+  // before the e2e seed script separately grants 'ws-1' access — whichever
+  // was created first wins. Confirmed live: this account currently lands on
+  // a bare `/w/{other-id}` (FleetHome), not `/w/ws-1/agents` at all.
+  //
+  // A test corrected once and wrong again the same way is chasing a moving
+  // target: the exact workspace id and exact path segment are both
+  // incidental, registration-time details, while the actual thing worth
+  // guaranteeing — a fresh arrival reaches a real, clean workspace shell,
+  // never onboarding, never a raw id/role leak — hasn't changed. Asserting
+  // the outcome instead of the literal path is what survives the next
+  // routing change.
   test('normal login path lands in a clean shell with no leaked internal ids', async ({ page }) => {
     await loginAsOwner(page);
     await page.goto('/', { waitUntil: 'networkidle' });
-    await expect(page).toHaveURL(/\/w\/ws-1\/agents(?:[/?#]|$)/, { timeout: 20_000 });
+    await expect(page).toHaveURL(/\/w\/[^/?#]+\/?(?:[?#]|$)/, { timeout: 20_000 });
     await expect(page.locator('.fleet-root')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Ask AI' })).toBeVisible();
 
