@@ -571,16 +571,115 @@ class PlatformGoogleOperatorCredentialCheckTests(unittest.TestCase):
         self.assertIsNone(result)  # advisory: nothing to append to errors[]
 
 
+class PlatformEmailProviderKeyCheckTests(unittest.TestCase):
+    """MAN-343: preflight.py's advisory Resend liveness check for
+    EMAIL_PROVIDER_API_KEY. Same shape as PlatformDigitalOceanTokenCheckTests
+    above and for the same reason: this is the one preflight step besides
+    those three that makes a real outbound HTTPS request, so it needs the
+    HTTP response mocked rather than left to run for real. Unlike the
+    DigitalOcean/DeepSeek/Google checks, this key is read via bare os.environ
+    (matching email_provider_service._api_key()'s own pattern), never the
+    secrets broker — so there is no broker mock here, only the env and the
+    HTTP call."""
+
+    def _run_check(self, *, http_return=None, http_side_effect=None, env=None):
+        import asyncio
+
+        http = MagicMock(return_value=http_return, side_effect=http_side_effect)
+        with patch.dict(os.environ, env or {}, clear=True), \
+             patch("server_modules.runtime_common.http_json_request", new=http):
+            with self.assertLogs(preflight.LOGGER, level="INFO") as captured:
+                asyncio.run(preflight._check_platform_email_provider_key())
+        return http, captured.output
+
+    def test_healthy_key_makes_one_send_request_to_the_test_address_and_does_not_shout(self):
+        http, logs = self._run_check(
+            env={"EMAIL_PROVIDER_API_KEY": "re_test_platform_key"},
+            http_return={"status": 200, "json": {"id": "email-abc123"}},
+        )
+        self.assertEqual(http.call_count, 1)
+        self.assertEqual(http.call_args.args[0], "https://api.resend.com/emails")
+        self.assertEqual(http.call_args.kwargs["method"], "POST")
+        self.assertIn("Bearer re_test_platform_key", http.call_args.kwargs["headers"]["Authorization"])
+        # Never a real inbox -- see the check's own docstring on why this
+        # specific address is the only safe liveness probe Resend offers.
+        self.assertEqual(http.call_args.kwargs["payload"]["to"], ["delivered@resend.dev"])
+        self.assertFalse([line for line in logs if line.startswith("CRITICAL")])
+        self.assertTrue([line for line in logs if "healthy" in line])
+
+    def test_unauthorized_key_is_reported_as_dead(self):
+        _http, logs = self._run_check(
+            env={"EMAIL_PROVIDER_API_KEY": "re_revoked"},
+            http_return={"status": 401, "json": {"name": "restricted_api_key", "message": "This API key is not valid."}},
+        )
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM EMAIL PROVIDER KEY DEAD", critical[0])
+
+    def test_malformed_200_with_no_id_is_reported_as_dead(self):
+        _http, logs = self._run_check(
+            env={"EMAIL_PROVIDER_API_KEY": "re_test_platform_key"},
+            http_return={"status": 200, "json": {}},
+        )
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM EMAIL PROVIDER KEY DEAD", critical[0])
+
+    def test_transport_failure_warns_but_never_claims_the_key_is_dead(self):
+        """Same reasoning as the DigitalOcean check's identical test: a
+        network problem is not evidence the key itself is bad."""
+        _http, logs = self._run_check(
+            env={"EMAIL_PROVIDER_API_KEY": "re_test_platform_key"},
+            http_side_effect=OSError("connection reset"),
+        )
+        self.assertFalse([line for line in logs if line.startswith("CRITICAL")])
+        self.assertTrue([line for line in logs if "network/transport" in line])
+
+    def test_no_configured_key_makes_no_request_and_is_reported_absent_not_dead(self):
+        """Absent and dead are different problems with different fixes
+        (the ticket's own framing) -- an absent key must never be reported
+        with the same "DEAD" wording a revoked key gets."""
+        http, logs = self._run_check(env={})
+        self.assertEqual(http.call_count, 0)
+        critical = [line for line in logs if line.startswith("CRITICAL")]
+        self.assertEqual(len(critical), 1)
+        self.assertIn("PLATFORM EMAIL PROVIDER KEY ABSENT", critical[0])
+        self.assertNotIn("DEAD", critical[0])
+
+    def test_skip_flag_makes_no_request_at_all(self):
+        http, logs = self._run_check(
+            env={
+                "EMAIL_PROVIDER_API_KEY": "re_test_platform_key",
+                "EMPYRALIS_SKIP_PLATFORM_EMAIL_PROVIDER_CHECK": "true",
+            },
+        )
+        self.assertEqual(http.call_count, 0)
+        self.assertTrue([line for line in logs if "skipped" in line])
+
+    def test_never_boot_blocking_even_when_dead(self):
+        """The whole point of this check: a dead key must never surface in
+        the errors list run_preflight_checks() returns, only in the logs."""
+        import asyncio
+
+        http = MagicMock(return_value={"status": 401, "json": {"message": "invalid"}})
+        with patch.dict(os.environ, {"EMAIL_PROVIDER_API_KEY": "re_test_platform_key"}, clear=True), \
+             patch("server_modules.runtime_common.http_json_request", new=http):
+            result = asyncio.run(preflight._check_platform_email_provider_key())
+        self.assertIsNone(result)  # advisory: nothing to append to errors[]
+
+
 class PreflightRunnerTests(unittest.TestCase):
     """run_preflight_checks() composition. Step 6 (the advisory DeepSeek
     balance check), step 7 (the advisory platform DigitalOcean token
-    check), and step 8 (the advisory platform Google Cloud operator
-    credential check) are mocked out in every test here because none is the
-    subject: these assert which checks run and how their errors are
-    collected. Left unmocked, step 6 reached api.deepseek.com for real,
-    step 7 would reach api.digitalocean.com for real, and step 8 would
-    reach oauth2.googleapis.com for real — see PlatformCreditKeyCheckTests /
-    PlatformDigitalOceanTokenCheckTests / PlatformGoogleOperatorCredentialCheckTests
+    check), step 8 (the advisory platform Google Cloud operator credential
+    check), and step 9 (the advisory platform email provider key check) are
+    mocked out in every test here because none is the subject: these assert
+    which checks run and how their errors are collected. Left unmocked,
+    step 6 reached api.deepseek.com for real, step 7 would reach
+    api.digitalocean.com for real, step 8 would reach oauth2.googleapis.com
+    for real, and step 9 would reach api.resend.com for real — see
+    PlatformCreditKeyCheckTests / PlatformDigitalOceanTokenCheckTests /
+    PlatformGoogleOperatorCredentialCheckTests / PlatformEmailProviderKeyCheckTests
     above for their own coverage."""
 
     @staticmethod
@@ -604,6 +703,13 @@ class PreflightRunnerTests(unittest.TestCase):
             new=AsyncMock(return_value=None),
         )
 
+    @staticmethod
+    def _no_platform_email_call():
+        return patch(
+            "server_modules.preflight._check_platform_email_provider_key",
+            new=AsyncMock(return_value=None),
+        )
+
     def test_all_passed_returns_empty_list(self):
         """When all checks pass, errors list is empty."""
         async def _run():
@@ -615,7 +721,8 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
                  self._no_platform_credit_call(), \
                  self._no_platform_digitalocean_call(), \
-                 self._no_platform_google_call():
+                 self._no_platform_google_call(), \
+                 self._no_platform_email_call():
                 return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
@@ -632,7 +739,8 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_redis", new=AsyncMock(return_value=None)), \
                  self._no_platform_credit_call(), \
                  self._no_platform_digitalocean_call(), \
-                 self._no_platform_google_call():
+                 self._no_platform_google_call(), \
+                 self._no_platform_email_call():
                 return await preflight.run_preflight_checks()
         import asyncio
         errors = asyncio.run(_run())
@@ -650,7 +758,8 @@ class PreflightRunnerTests(unittest.TestCase):
                  patch("server_modules.preflight._check_postgres", new=AsyncMock(return_value=None)), \
                  self._no_platform_credit_call(), \
                  self._no_platform_digitalocean_call(), \
-                 self._no_platform_google_call():
+                 self._no_platform_google_call(), \
+                 self._no_platform_email_call():
                 with patch.dict(os.environ, {"EMPYRALIS_SKIP_REDIS_CHECK": "true"}):
                     return await preflight.run_preflight_checks()
         import asyncio
@@ -664,10 +773,14 @@ class PreflightRunnerTests(unittest.TestCase):
         appended to errors — only logged. This drives the REAL
         _check_platform_digitalocean_token (mocking only its HTTP call and
         secret resolution), unlike the other tests in this class. Step 8
-        (Google) is left to run for real too — with all four of its env
-        vars absent it takes its own early "not configured" exit and makes
-        no HTTP call, which is exactly what http.call_count == 1 below
-        proves: the DigitalOcean call is the ONLY one made."""
+        (Google) and step 9 (email) are left to run for real too — with
+        their env vars absent, each takes its own early "not configured"
+        exit and makes no HTTP call, which is exactly what
+        http.call_count == 1 below proves: the DigitalOcean call is the
+        ONLY one made. (Left un-popped, step 9 would share this same
+        http_json_request mock and, seeing status 401 with a truthy "id"
+        value, misread it as ITS OWN dead-key signal — a false CRITICAL
+        for a check that never should have run at all here.)"""
         resolution = MagicMock()
         resolution.value = "dop_v1_platform_test"
         http = MagicMock(return_value={"status": 401, "json": {"id": "Unauthorized"}})
@@ -692,6 +805,7 @@ class PreflightRunnerTests(unittest.TestCase):
                         "GOOGLE_CLOUD_CLIENT_SECRET",
                         "GOOGLE_CLOUD_OPERATOR_CLIENT_EMAIL",
                         "GOOGLE_CLOUD_OPERATOR_REFRESH_TOKEN",
+                        "EMAIL_PROVIDER_API_KEY",
                     ):
                         os.environ.pop(key, None)
                     return await preflight.run_preflight_checks()
