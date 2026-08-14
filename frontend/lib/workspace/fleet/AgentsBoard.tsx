@@ -48,7 +48,7 @@ import {
 } from "./agent-view-options";
 import { deriveAgentStatus, resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
-import { CHANNEL_ICONS, CHANNEL_LABELS } from "./fleet-icons";
+import { CHANNEL_LABELS, channelIconSrc } from "./fleet-icons";
 import { timeAgo, type AgentStatusTone } from "./fleet-presentation";
 import type { FleetAgent } from "./fleet-data";
 
@@ -192,7 +192,7 @@ function AgentCard({
     const channel = (agent.channel || "").trim();
     if (channel) {
       const { key, extra } = parseAgentChannelField(channel);
-      const icon = CHANNEL_ICONS[key];
+      const icon = channelIconSrc(key);
       const label = CHANNEL_LABELS[key] || key;
       fields.push({
         key: "channels",

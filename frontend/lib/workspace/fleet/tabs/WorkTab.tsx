@@ -33,7 +33,7 @@ import {
 import type { FleetAgent } from "../fleet-data";
 import { timeAgo } from "../fleet-presentation";
 import { StatusDot } from "../fleet-indicators";
-import { CHANNEL_ICONS, CONNECTOR_ICONS } from "../fleet-icons";
+import { CHANNEL_ICONS, CONNECTOR_ICONS, channelIconSrc } from "../fleet-icons";
 
 /**
  * WORK tab — the agent's control + observability backbone: a control bar
@@ -225,7 +225,8 @@ function stripMarkdownPreview(text: string): string {
 function resolveChannelIconUrl(channel: string | undefined | null): string | undefined {
   const key = (channel || "").trim().toLowerCase();
   if (!key) return undefined;
-  if (CHANNEL_ICONS[key]) return CHANNEL_ICONS[key];
+  const channelIcon = channelIconSrc(key);
+  if (channelIcon) return channelIcon;
   if (CONNECTOR_ICONS[key]) return CONNECTOR_ICONS[key];
   const prefix = key.split(/[_ ]/)[0];
   const chMatch = Object.keys(CHANNEL_ICONS).find((k) => k.startsWith(`${key}_`) || k.startsWith(`${prefix}_`) || k === prefix);

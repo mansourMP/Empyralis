@@ -50,7 +50,7 @@ import {
 import { deriveAgentStatus, resolveHardwarePlacement, type FleetGateway } from "./gateway-box-picker";
 import { AgentSigil, StatusDot } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
-import { CHANNEL_ICONS, CHANNEL_LABELS } from "./fleet-icons";
+import { CHANNEL_LABELS, channelIconSrc } from "./fleet-icons";
 import { timeAgo, type AgentStatusTone } from "./fleet-presentation";
 import type { FleetAgent, FleetProject } from "./fleet-data";
 
@@ -316,7 +316,7 @@ function AgentGroupedRow({
 
 function AgentChannelGlyph({ channel }: { channel: string }) {
   const { key, extra } = parseAgentChannelField(channel);
-  const icon = CHANNEL_ICONS[key];
+  const icon = channelIconSrc(key);
   const label = CHANNEL_LABELS[key] || key;
   return (
     <>

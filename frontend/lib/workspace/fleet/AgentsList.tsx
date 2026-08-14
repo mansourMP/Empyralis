@@ -14,7 +14,7 @@ import { type FleetAgent, type FleetProject, resumeFleetAgent, stopFleetAgent } 
 import { timeAgo } from "./fleet-presentation";
 import { StatusChip, StatusDot, AgentSigil } from "./fleet-indicators";
 import { ProjectIcon } from "./fleet-project-identity";
-import { CHANNEL_ICONS, CHANNEL_LABELS } from "./fleet-icons";
+import { CHANNEL_LABELS, channelIconSrc } from "./fleet-icons";
 import {
   type FleetGateway,
   deriveAgentStatus,
@@ -108,7 +108,7 @@ function ChannelCell({ channel }: { channel: string }) {
   const trimmed = (channel || "").trim();
   if (!trimmed) return <span className="fleet-cell-muted">None</span>;
   const { key, extra } = parseChannelField(trimmed);
-  const icon = CHANNEL_ICONS[key];
+  const icon = channelIconSrc(key);
   const label = CHANNEL_LABELS[key] || key;
   return (
     <>

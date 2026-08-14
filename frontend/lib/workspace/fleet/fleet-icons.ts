@@ -1,3 +1,5 @@
+import { channelPlatformTokenCandidates } from "./channel-platform";
+
 // Icon paths for the platform/connector grids. The backend catalog has no
 // image field (confirmed by reading connection_catalog_service.py) — brand
 // icons are a client-side lookup by id, matching the same static assets the
@@ -16,27 +18,44 @@ const withVersion = (map: Record<string, string>): Record<string, string> =>
     Object.entries(map).map(([key, path]) => [key, `${path}?v=${ASSET_VERSION}`]),
   );
 
-const RAW_CHANNEL_ICONS: Record<string, string> = {
-  sage_telegram_hosted: "/brand-assets/channels/telegram.svg",
-  telegram_personal: "/brand-assets/channels/telegram.svg",
-  telegram_bot: "/brand-assets/channels/telegram.svg",
+// ── Brand marks, keyed by PLATFORM — never by channel key ──────────────────
+//
+// A mark belongs to a platform, not to a lane or a transport. Telegram is
+// Telegram whether it is reached as `sage_telegram_hosted` (first-party hosted
+// bot), `telegram_bot` (BYO bot) or `openclaw_telegram` (the transport's Bot
+// API channel) — one asset, one row.
+//
+// THIS TABLE USED TO BE KEYED BY CHANNEL KEY, AND THAT IS WHY THE CUTOVER
+// BROKE THE LOGOS. Sixteen `openclaw_*` rows were written out by hand while
+// the five overlapping platforms (telegram/whatsapp/signal/imessage/weixin)
+// were still owned first-party and therefore never rendered as transported
+// cards. The 2026-08-14 cutover made exactly those five transported — and
+// every one of them fell through to a monogram, next to a `telegram.svg` that
+// had been sitting in `public/` the whole time. A per-key table cannot survive
+// a platform changing lanes; a per-platform table does not notice.
+//
+// Resolution is `channelIconSrc()` below, which reduces any channel key —
+// first-party id or transported `channel_key` — to its platform token. Adding
+// an OpenClaw channel still needs no code change: a platform with no entry
+// here falls through to the neutral monogram tile, which is the correct
+// rendering for "we have no licensed mark for that one".
+const PLATFORM_ICON_PATHS: Record<string, string> = {
+  telegram: "/brand-assets/channels/telegram.svg",
   slack: "/brand-assets/channels/slack.svg",
-  discord_bot: "/brand-assets/channels/discord.svg",
-  whatsapp_personal: "/brand-assets/channels/whatsapp.svg",
-  whatsapp_twilio: "/brand-assets/channels/whatsapp.svg",
-  signal_personal: "/brand-assets/channels/signal.svg",
-  imessage_personal: "/brand-assets/channels/imessage.svg",
-  wechat_personal: "/brand-assets/channels/wechat.svg",
-  wechat_official: "/brand-assets/channels/wechat.svg",
-  apple_messages_business: "/brand-assets/channels/imessage.svg",
+  discord: "/brand-assets/channels/discord.svg",
+  whatsapp: "/brand-assets/channels/whatsapp.svg",
+  signal: "/brand-assets/channels/signal.svg",
+  imessage: "/brand-assets/channels/imessage.svg",
+  applemessages: "/brand-assets/channels/imessage.svg",
+  // `wechat` is Empyralis's own spelling for the platform OpenClaw calls
+  // `weixin` (consumer WeChat) — the same two spellings the backend's
+  // PLATFORM_TOKEN_TO_OPENCLAW_ID already carries. `wecom` (WeChat Work) is a
+  // DIFFERENT PRODUCT with its own mark; do not collapse them.
+  wechat: "/brand-assets/channels/wechat.svg",
+  weixin: "/brand-assets/channels/wechat.svg",
   email: "/brand-assets/generic/email.svg",
 
-  // ── Transported (OpenClaw) channels ───────────────────────────────────────
-  // Keyed by `channel_key` verbatim (`openclaw_<their channel id>`), so the
-  // lookup is the same one-liner every other card uses and nothing here has to
-  // know what a channel IS. Adding an OpenClaw channel still needs no code
-  // change: an id with no entry falls through to the neutral monogram tile,
-  // which is the correct rendering for "we have no licensed mark for that one".
+  // ── Transported (OpenClaw) platforms ──────────────────────────────────────
   //
   // Provenance, per mark. This table is the record that makes shipping these
   // defensible; do not add a row without one. Priority order followed was the
@@ -106,23 +125,44 @@ const RAW_CHANNEL_ICONS: Record<string, string> = {
   //            as illegible grey mush in both themes; shipped as a monogram
   //            instead, because a smear is worse than a letter. Revisit only
   //            if Synology publishes an icon-only mark.
-  "openclaw_clickclack": "/brand-assets/channels/clickclack.svg",
-  "openclaw_feishu": "/brand-assets/channels/feishu.png",
-  "openclaw_googlechat": "/brand-assets/channels/googlechat.svg",
-  "openclaw_line": "/brand-assets/channels/line.svg",
-  "openclaw_matrix": "/brand-assets/channels/matrix.svg",
-  "openclaw_mattermost": "/brand-assets/channels/mattermost.svg",
-  "openclaw_msteams": "/brand-assets/channels/msteams.svg",
-  "openclaw_nextcloud-talk": "/brand-assets/channels/nextcloud.svg",
-  "openclaw_nostr": "/brand-assets/channels/nostr.svg",
-  "openclaw_openclaw-zaloclawbot": "/brand-assets/channels/zalo.svg",
-  "openclaw_qqbot": "/brand-assets/channels/qq.svg",
-  "openclaw_tlon": "/brand-assets/channels/tlon.svg",
-  "openclaw_twitch": "/brand-assets/channels/twitch.svg",
-  "openclaw_wecom": "/brand-assets/channels/wecom.svg",
-  "openclaw_zalo": "/brand-assets/channels/zalo.svg",
-  "openclaw_zalouser": "/brand-assets/channels/zalo.svg",
+  clickclack: "/brand-assets/channels/clickclack.svg",
+  feishu: "/brand-assets/channels/feishu.png",
+  googlechat: "/brand-assets/channels/googlechat.svg",
+  line: "/brand-assets/channels/line.svg",
+  matrix: "/brand-assets/channels/matrix.svg",
+  mattermost: "/brand-assets/channels/mattermost.svg",
+  msteams: "/brand-assets/channels/msteams.svg",
+  nextcloudtalk: "/brand-assets/channels/nextcloud.svg",
+  nostr: "/brand-assets/channels/nostr.svg",
+  qqbot: "/brand-assets/channels/qq.svg",
+  tlon: "/brand-assets/channels/tlon.svg",
+  twitch: "/brand-assets/channels/twitch.svg",
+  wecom: "/brand-assets/channels/wecom.svg",
+  zalo: "/brand-assets/channels/zalo.svg",
+  zalouser: "/brand-assets/channels/zalo.svg",
+  zaloclawbot: "/brand-assets/channels/zalo.svg",
 };
+
+/** The first-party channel keys the product renders an icon for. KEYS ONLY —
+ *  the asset each resolves to comes from PLATFORM_ICON_PATHS above through the
+ *  same derivation the runtime lookup uses, so a path literal is written once
+ *  and a key can never point at a file no platform declares. */
+const FIRST_PARTY_CHANNEL_KEYS = [
+  "sage_telegram_hosted",
+  "telegram_personal",
+  "telegram_bot",
+  "slack",
+  "discord_bot",
+  "discord_personal",
+  "whatsapp_personal",
+  "whatsapp_twilio",
+  "signal_personal",
+  "imessage_personal",
+  "wechat_personal",
+  "wechat_official",
+  "apple_messages_business",
+  "email",
+] as const;
 
 const RAW_CONNECTOR_ICONS: Record<string, string> = {
   // google_workspace grants Gmail + Calendar + Drive in one connection (see
@@ -231,7 +271,47 @@ const RAW_CONNECTOR_ICONS: Record<string, string> = {
 // (channel grid tiles, the expanded-channel door header, the connector
 // picker) reads from these, so all icon URLs carry the cache-bust with no
 // per-call-site changes.
-export const CHANNEL_ICONS: Record<string, string> = withVersion(RAW_CHANNEL_ICONS);
+const PLATFORM_ICONS: Record<string, string> = withVersion(PLATFORM_ICON_PATHS);
+
+/** The platform token a channel key resolves to for icon purposes, or "" when
+ *  none of its candidates names a platform we hold a mark for. */
+function iconPlatformToken(channelKey: string): string {
+  for (const candidate of channelPlatformTokenCandidates(channelKey)) {
+    if (PLATFORM_ICONS[candidate]) return candidate;
+  }
+  return "";
+}
+
+/** The brand mark for any channel key — a first-party id (`wechat_official`),
+ *  a transported `channel_key` (`openclaw_openclaw-weixin`), or an agent's own
+ *  bound key — or undefined when we hold no licensed mark for that platform,
+ *  in which case the call site renders its neutral monogram tile.
+ *
+ *  USE THIS, NOT `CHANNEL_ICONS[key]`. The Record is an exact-key lookup and
+ *  therefore blind to any key it was not written out for, which is exactly how
+ *  every transported channel lost its logo on 2026-08-14. */
+export function channelIconSrc(channelKey: string): string | undefined {
+  const token = iconPlatformToken(channelKey);
+  return token ? PLATFORM_ICONS[token] : undefined;
+}
+
+/** The first-party keys, resolved. Kept as a Record because several callers
+ *  enumerate it (WorkTab's prefix scan); prefer `channelIconSrc` for a lookup.
+ *  A key that resolves to no platform is a typo, and a silently missing logo
+ *  is precisely the defect this file has already shipped once — so it fails
+ *  loudly here instead. */
+export const CHANNEL_ICONS: Record<string, string> = Object.fromEntries(
+  FIRST_PARTY_CHANNEL_KEYS.map((key) => {
+    const src = channelIconSrc(key);
+    if (!src) {
+      throw new Error(
+        `fleet-icons: first-party channel key ${JSON.stringify(key)} resolves to no platform mark. ` +
+          "Add its platform to PLATFORM_ICON_PATHS, or drop the key.",
+      );
+    }
+    return [key, src];
+  }),
+);
 export const CONNECTOR_ICONS: Record<string, string> = withVersion(RAW_CONNECTOR_ICONS);
 
 // Short human label per channel key, keyed the same as CHANNEL_ICONS above —

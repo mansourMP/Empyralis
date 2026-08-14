@@ -26,7 +26,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { safeExternalHref } from "@/lib/workspace/safe-render-url";
 import { ConfirmDialog } from "@/lib/ui/confirm-dialog";
 import { StatusChip, StatusDot, TintTile } from "@/lib/workspace/fleet/fleet-indicators";
-import { CHANNEL_ICONS, CHANNEL_LABELS } from "@/lib/workspace/fleet/fleet-icons";
+import { CHANNEL_LABELS, channelIconSrc } from "@/lib/workspace/fleet/fleet-icons";
 import { deriveStatus, formatDate, timeAgo, type AgentStatusTone } from "@/lib/workspace/fleet/fleet-presentation";
 import {
   channelTransportPill,
@@ -2133,7 +2133,7 @@ export default function GatewayDetailPage() {
             <div className="fleet-hw-dash-channels">
               {channelKeys.map((key) => (
                 <span className="fleet-hw-dash-channel-pill" key={key}>
-                  {CHANNEL_ICONS[key] && <img src={CHANNEL_ICONS[key]} alt="" />}
+                  {channelIconSrc(key) && <img src={channelIconSrc(key)} alt="" />}
                   {CHANNEL_LABELS[key] || key}
                 </span>
               ))}

@@ -77,7 +77,7 @@ import { PanelSection, PanelRow, FleetRightPanel, type PanelValueTone } from "./
 import type { SageConversation } from "./SageConsolePanels";
 import type { UsageBucket } from "./fleet-sparkline";
 import { HeaderAction } from "./Breadcrumbs";
-import { CHANNEL_ICONS } from "./fleet-icons";
+import { channelIconSrc } from "./fleet-icons";
 import { ConnectorPicker } from "./ConnectorPicker";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
@@ -1739,6 +1739,7 @@ import {
   planDoors,
   type ChannelDoor,
 } from "./channel-doors";
+import { planUnifiedChannelGrid } from "./channel-platform";
 import { compareChannelsByPopularity } from "./channel-popularity";
 // PersonalChannelConnectPanel and IMessageSetupPanel imports DELETED
 // 2026-08-14 (full OpenClaw channel cutover) — their only call sites (the
@@ -2308,20 +2309,6 @@ export function ChannelsTab({
     open: () => void;
   };
 
-  const legacyCards: UnifiedChannelCard[] = CHANNEL_GRID_PLATFORMS.map((platform) => {
-    const pill = channelStatePill(byId.get(platform.id));
-    return {
-      key: `first_party:${platform.id}`,
-      label: platform.label,
-      iconSrc: CHANNEL_ICONS[platform.id],
-      pill,
-      waysNote: channelDoorChoiceNote(planChannelDoors(platform.id)),
-      disabled: pill.tone === "locked",
-      active: expanded === platform.id,
-      open: () => handleCardClick(platform, pill),
-    };
-  });
-
   // ONE PLATFORM = ONE CARD, on both halves of the grid. The transport models
   // every variant of a platform as its own channel (Zalo ships as `zalo`,
   // `zalouser` and `zaloclawbot`), which put THREE Zalo cards in the same grid
@@ -2333,6 +2320,31 @@ export function ChannelsTab({
     openclaw.rows.map((row) => row.entry),
   );
   const openclawRowByKey = new Map(openclaw.rows.map((row) => [row.entry.channel_key, row]));
+
+  // ...and ACROSS the two halves, which is where it was never enforced. The
+  // transported rows ARE the backend's active catalog (a platform the
+  // transport OWNS), so a first-party entry whose platform appears there has
+  // been cut over and its card is the stale one — see channel-platform.ts for
+  // why this is read off live data rather than a list of "these are dupes".
+  // Both survivors of the 2026-08-14 cutover (`sage_telegram_hosted`,
+  // `wechat_official`) drop out here; Slack and Discord keep their cards,
+  // because their OpenClaw channels are superseded upstream and never reach
+  // this catalog at all.
+  const firstPartyGrid = planUnifiedChannelGrid(CHANNEL_GRID_PLATFORMS, transportedPlatforms).firstParty;
+
+  const legacyCards: UnifiedChannelCard[] = firstPartyGrid.map((platform) => {
+    const pill = channelStatePill(byId.get(platform.id));
+    return {
+      key: `first_party:${platform.id}`,
+      label: platform.label,
+      iconSrc: channelIconSrc(platform.id),
+      pill,
+      waysNote: channelDoorChoiceNote(planChannelDoors(platform.id)),
+      disabled: pill.tone === "locked",
+      active: expanded === platform.id,
+      open: () => handleCardClick(platform, pill),
+    };
+  });
 
   // Rendered regardless of `agentGatewayId`. The catalog
   // (`useOpenClawChannelSetup`) is a property of the pinned transport, not
@@ -2356,11 +2368,15 @@ export function ChannelsTab({
       label: platform.label,
       // Same lookup a first-party card does, on the `channel_key` verbatim —
       // no per-channel code here, and no list of which channels have a mark.
-      // 17 of the 19 do (see the provenance table in fleet-icons.ts); IRC and
-      // Yuanbao have no obtainable official mark and fall through to the
+      // `channelIconSrc` reduces the key to its PLATFORM before looking a mark
+      // up, which is what makes `openclaw_telegram` resolve to the same
+      // telegram.svg `sage_telegram_hosted` used to; the exact-key table it
+      // replaced is why every cut-over channel rendered a monogram beside an
+      // asset that was already in `public/`. IRC, Yuanbao and Synology Chat
+      // have no obtainable official mark and still fall through to the
       // neutral monogram tile, which is also what a channel the transport
       // adds tomorrow will get. Never a guessed or hand-drawn logo.
-      iconSrc: CHANNEL_ICONS[platform.iconKey],
+      iconSrc: channelIconSrc(platform.iconKey),
       pill: pillRow
         ? channelCardPill(pillRow.remediation)
         : { label: "Unknown", tone: "locked" as const },
@@ -2411,7 +2427,7 @@ export function ChannelsTab({
   // is only the leftover that has no first-party card anywhere in this tab
   // (SMS today: it is a Studio business connector, not a per-agent channel).
   // Computed, never a second hand-typed list.
-  const legacyLabels = new Set(CHANNEL_GRID_PLATFORMS.map((p) => p.label));
+  const legacyLabels = new Set(firstPartyGrid.map((p) => p.label));
   const unmappedSupersededChannels = openclaw.alreadyAvailable.filter((label) => !legacyLabels.has(label));
 
   // "the box could not be reached" and "the box answered fine but has never
@@ -2540,8 +2556,8 @@ export function ChannelsTab({
           >
             <div className="fleet-channel-banner-header">
               <span className="fleet-channel-banner-icon">
-                {CHANNEL_ICONS[openclawPlatform.iconKey]
-                  ? <img src={CHANNEL_ICONS[openclawPlatform.iconKey]} alt="" width={24} height={24} />
+                {channelIconSrc(openclawPlatform.iconKey)
+                  ? <img src={channelIconSrc(openclawPlatform.iconKey)} alt="" width={24} height={24} />
                   : openclawPlatform.label.charAt(0)}
               </span>
               <span className="fleet-channel-banner-title" id="channel-detail-heading">
@@ -2742,8 +2758,8 @@ export function ChannelsTab({
           <div className="fleet-channel-banner" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="fleet-channel-banner-header">
               <span className="fleet-channel-banner-icon">
-                {CHANNEL_ICONS[activePlatform.id]
-                  ? <img src={CHANNEL_ICONS[activePlatform.id]} alt="" width={24} height={24} />
+                {channelIconSrc(activePlatform.id)
+                  ? <img src={channelIconSrc(activePlatform.id)} alt="" width={24} height={24} />
                   : activePlatform.label.charAt(0)}
               </span>
               <span className="fleet-channel-banner-title">{activePlatform.label}</span>

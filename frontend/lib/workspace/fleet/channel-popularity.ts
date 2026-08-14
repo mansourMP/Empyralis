@@ -42,7 +42,12 @@
 export const CHANNEL_POPULARITY_ORDER: readonly string[] = [
   "whatsapp",
   "telegram",
-  "wechat", // the first-party card, labelled "WeChat / WeCom"
+  // Empyralis's own spelling for consumer WeChat. Ranked, not rendered, since
+  // the 2026-08-14 cutover retired the "WeChat / WeCom" first-party card in
+  // favour of the transport's own Weixin/WeCom pair (channel-platform.ts) —
+  // this table is a PREFIX, so a rank for a label nothing currently renders
+  // costs nothing and is correct again the moment such a card returns.
+  "wechat",
   "weixin", // consumer WeChat, under the transport's own name for it
   "wecom", // WeChat Work — a different product, so a separate rank
   "discord",

@@ -312,7 +312,16 @@ export type TransportedChannelPlatform = {
 /** The transport namespaces some of its own channel ids with its own name
  *  (`openclaw-zaloclawbot`). That prefix is not part of the platform, and it
  *  is recoverable structurally: `channel_key` is the prefix plus the id, so
- *  the prefix names the transport without this module naming it. */
+ *  the prefix names the transport without this module naming it.
+ *
+ *  Exported as `transportedPlatformToken` because channel-platform.ts needs
+ *  the identical token to decide whether a FIRST-PARTY card names the same
+ *  platform as a transported one — two derivations of "which platform is
+ *  this" would be two opinions that agree only today. */
+export function transportedPlatformToken(entry: TransportedChannelInput): string {
+  return platformToken(entry);
+}
+
 function platformToken(entry: TransportedChannelInput): string {
   const key = String(entry.channel_key || "").toLowerCase();
   const id = String(entry.channel_id || "").toLowerCase();
