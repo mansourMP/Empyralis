@@ -419,21 +419,25 @@ export default function ProjectDetailPage() {
   // non-null from that branch.
   const handleAssign = async (taskId: string, selection: TaskAssigneeSelection) => {
     setTaskNotice(null);
+    let wakeNotice: string | null = null;
     try {
       if (selection.kind === "agent") {
         const { wakeError } = await assignFleetTask(workspaceId, taskId, selection.id);
         if (wakeError) {
-          setTaskNotice(
-            `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`
-          );
+          wakeNotice = `Assigned, but the agent could not be woken: ${wakeError}. It will not start until it is running.`;
         }
       } else {
         await assignFleetTaskToUser(workspaceId, taskId, selection.id);
       }
-      await refreshTasks();
     } catch (e) {
       setTaskNotice(e instanceof Error ? e.message : "Could not assign this task.");
+      return;
     }
+    // The assign itself already happened — a refresh failure here (a plain
+    // GET) must not overwrite the wake-status notice above, or invent a
+    // false "Could not assign this task" on a real success.
+    refreshTasks();
+    if (wakeNotice) setTaskNotice(wakeNotice);
   };
 
   // The first place in this UI a HUMAN can move a task. patchFleetTask has
@@ -448,16 +452,23 @@ export default function ProjectDetailPage() {
     setPendingStatus((prev) => new Map(prev).set(taskId, status));
     try {
       await patchFleetTask(workspaceId, taskId, { status });
-      await refreshTasks();
     } catch (e) {
       setTaskNotice(e instanceof Error ? e.message : "Could not update this task.");
-    } finally {
       setPendingStatus((prev) => {
         const next = new Map(prev);
         next.delete(taskId);
         return next;
       });
+      return;
     }
+    // The status change already happened — a refresh failure (a plain GET)
+    // must not report it as "Could not update this task."
+    refreshTasks();
+    setPendingStatus((prev) => {
+      const next = new Map(prev);
+      next.delete(taskId);
+      return next;
+    });
   }, [workspaceId, refreshTasks]);
 
   // A task is a PAGE now, not a drawer over this board (MAN-11x): it has its

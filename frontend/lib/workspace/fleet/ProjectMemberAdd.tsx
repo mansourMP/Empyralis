@@ -184,12 +184,17 @@ export function ProjectMemberAdd({
     try {
       await addProjectMember(workspaceId, projectId, userId);
       setAddedIds((prev) => new Set(prev).add(userId));
-      await refreshProjectMembers();
     } catch (e) {
       setAddError(e instanceof Error ? e.message : "Could not add this member.");
-    } finally {
       setAddingId(null);
+      return;
     }
+    // The member is already added and the row above already shows it — a
+    // failure here is only the project's member LIST failing to re-fetch,
+    // not the add failing. Reporting it as "Could not add this member" would
+    // contradict the row this exact render just added. Best-effort only.
+    await refreshProjectMembers().catch(() => {});
+    setAddingId(null);
   }
 
   async function handleInvite(e: FormEvent) {
@@ -205,12 +210,16 @@ export function ProjectMemberAdd({
       setFreshLink(buildWorkspaceInviteJoinUrl(created.token));
       setDelivery(inviteEmailDelivery(created));
       setEmail("");
-      await inviteStatus.refresh();
     } catch (e2) {
       setInviteError(e2 instanceof Error ? e2.message : "Could not create this invite.");
-    } finally {
       setInviting(false);
+      return;
     }
+    // Same reasoning as handleAdd above: the invite is already created and
+    // its link is already on screen — a stale invite-status list must never
+    // be reported as "Could not create this invite."
+    await inviteStatus.refresh().catch(() => {});
+    setInviting(false);
   }
 
   function copyLink() {

@@ -821,13 +821,25 @@ function LabelChip({
     if (!name || minting) return;
     setMinting(true);
     setMintError(null);
+    let created: FleetLabel;
     try {
-      const created = await createFleetLabel(workspaceId, { name, color: mintColor });
-      await onCreated(created);
-      setQuery("");
-      setMintColorOverride(null);
+      created = await createFleetLabel(workspaceId, { name, color: mintColor });
     } catch (e) {
       setMintError(e instanceof Error ? e.message : "Could not create that label.");
+      setMinting(false);
+      return;
+    }
+    setQuery("");
+    setMintColorOverride(null);
+    try {
+      await onCreated(created);
+    } catch (e) {
+      // The label itself already exists in the workspace vocabulary — only
+      // selecting it onto this in-progress task failed locally.
+      // "Could not create that label" would be false; the label is real.
+      setMintError(
+        `"${name}" was created, but could not be selected${e instanceof Error ? `: ${e.message}` : "."}`,
+      );
     } finally {
       setMinting(false);
     }

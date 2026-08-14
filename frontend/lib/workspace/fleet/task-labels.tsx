@@ -276,18 +276,36 @@ export function TaskLabelEditor({
     if (!name || busy) return;
     setError(null);
     setBusy(true);
+    let created: FleetLabel;
     try {
-      const created = await createFleetLabel(workspaceId, { name, color: mintColor });
-      await attachFleetTaskLabel(workspaceId, taskId, created.id);
-      setQuery("");
-      setMintColorOverride(null);
-      await refreshVocabulary();
-      await onChanged();
+      created = await createFleetLabel(workspaceId, { name, color: mintColor });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create that label.");
-    } finally {
       setBusy(false);
+      return;
     }
+    try {
+      await attachFleetTaskLabel(workspaceId, taskId, created.id);
+    } catch (e) {
+      // The label itself now exists in the workspace vocabulary — only
+      // attaching it to THIS task failed. "Could not create that label"
+      // would be a lie the vocabulary list (once refreshed) would visibly
+      // contradict.
+      setError(
+        `"${name}" was created, but could not be added to this task${e instanceof Error ? `: ${e.message}` : "."}`,
+      );
+      setBusy(false);
+      await refreshVocabulary().catch(() => {});
+      return;
+    }
+    setQuery("");
+    setMintColorOverride(null);
+    // Both real mutations already happened — a failure to re-fetch the
+    // vocabulary or the task's own label list must not report as "Could not
+    // create that label."
+    await refreshVocabulary().catch(() => {});
+    await Promise.resolve(onChanged()).catch(() => {});
+    setBusy(false);
   }
 
   // Recolour an EXISTING label (fleet_patch_label). Distinct from mint's
@@ -299,11 +317,14 @@ export function TaskLabelEditor({
     setError(null);
     try {
       await patchFleetLabel(workspaceId, label.id, { color });
-      await refreshVocabulary();
-      await onChanged();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not recolour that label.");
+      return;
     }
+    // The recolour already happened — a failed re-fetch must not be
+    // reported as "Could not recolour that label."
+    await refreshVocabulary().catch(() => {});
+    await Promise.resolve(onChanged()).catch(() => {});
   }
 
   return (
