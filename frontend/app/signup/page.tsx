@@ -217,31 +217,53 @@ export default function SignupPage() {
     event.preventDefault();
     setSubmitting(true);
     setError(null);
+    // MAN-343: signup() and the post-signup readiness poll used to share one
+    // try/catch, so a hiccup in the poll -- which runs AFTER the account is
+    // already created and its session cookies already set on signup()'s own
+    // response -- was reported as "Couldn't create the account" while the
+    // account, its workspace, and its verification email all genuinely
+    // existed. Split exactly like login/page.tsx's handleSubmit already
+    // does: only a rejection from signup() itself means the account was
+    // never created, so only that branch may set `error`.
+    let signupPayload: Record<string, unknown> | null = null;
     try {
-      const signupPayload = await signup(
+      signupPayload = await signup(
         email,
         password,
         name || undefined,
         pilotCode || undefined,
         inviteCode || undefined,
       );
-      // Carry "the verification email did NOT go out" across the full page
-      // load below, so /verify-email can say so instead of claiming a code is
-      // on its way. A successful send stores nothing.
-      rememberVerificationDelivery(readDeliveryFromSignupPayload(signupPayload));
-      await awaitBrowserAuthReady({ attempts: 12, delayMs: 250 });
-      // A brand-new signup goes straight to the "check your email" screen
-      // before it ever sees the app -- see docs/design/email-verification-plan.md.
-      // /verify-email carries `next` forward and lands the user on whatever
-      // `nextTarget` this page would have gone to (e.g. a pending workspace
-      // invite from /join/{token}) once the code is confirmed.
-      const verifyUrl = nextTarget === '/'
-        ? '/verify-email'
-        : `/verify-email?next=${encodeURIComponent(nextTarget)}`;
-      window.location.replace(verifyUrl);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Signup failed.');
+      setSubmitting(false);
+      return;
+    }
+    // Carry "the verification email did NOT go out" across the full page
+    // load below, so /verify-email can say so instead of claiming a code is
+    // on its way. A successful send stores nothing.
+    rememberVerificationDelivery(readDeliveryFromSignupPayload(signupPayload));
+    // A brand-new signup goes straight to the "check your email" screen
+    // before it ever sees the app -- see docs/design/email-verification-plan.md.
+    // /verify-email carries `next` forward and lands the user on whatever
+    // `nextTarget` this page would have gone to (e.g. a pending workspace
+    // invite from /join/{token}) once the code is confirmed.
+    const verifyUrl = nextTarget === '/'
+      ? '/verify-email'
+      : `/verify-email?next=${encodeURIComponent(nextTarget)}`;
+    try {
+      // Purely a readiness POLL smoothing over cookie-propagation latency
+      // before /verify-email's own first request -- not authoritative, same
+      // role as the identical post-login poll in login/page.tsx. A failure
+      // here means the poll was unlucky, never that the account doesn't
+      // exist, so it must never surface as an error -- proceed to
+      // /verify-email regardless and let that page recheck the session on
+      // its own.
+      await awaitBrowserAuthReady({ attempts: 12, delayMs: 250 });
+    } catch {
+      // proceed anyway -- see comment above.
     } finally {
+      window.location.replace(verifyUrl);
       setSubmitting(false);
     }
   }
