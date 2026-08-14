@@ -65,7 +65,7 @@ function detectPlatform(): string {
  *  (runtime_access_mode/autonomous_agent_setup_warning_acknowledged, set in
  *  handleGenerate below from this same fullAccess flag) — both are required
  *  before any call actually runs unsandboxed. */
-function pairingCommand(token: string, displayName: string, workspaceId: string, fullAccess: boolean): string {
+export function pairingCommand(token: string, displayName: string, workspaceId: string, fullAccess: boolean): string {
   if (!token) return "Pairing token unavailable";
   const name = displayName.trim() || "My device";
   const lines = [
@@ -76,7 +76,19 @@ function pairingCommand(token: string, displayName: string, workspaceId: string,
   if (fullAccess) {
     lines.push(`export EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED=true`);
   }
-  lines.push(`curl -fsSL https://get.empyralis.com/gateway | sh`);
+  // https://get.empyralis.com does not resolve — no such domain was ever
+  // provisioned. The real installer (the exact same prebuilt-artifact script
+  // the DigitalOcean cloud-init and "connect via SSH" paths both already use
+  // — see vps_provisioning_service.agent_installer_url() /
+  // routes_gateway._remote_agent_computer_setup_command()) is served at
+  // empyralis.ai. Piped to `sudo -E bash`, not `sh`: install-agent-
+  // computer.sh opens with `set -Eeuo pipefail`, which /bin/sh is dash on
+  // Ubuntu and rejects outright (see this repo's own "MUST be bash, not sh"
+  // lesson, already paid for once in the cloud-init generator) — and the
+  // installer requires root (`sudo`), which a plain `curl | sh` never had at
+  // all. `-E` carries the `export` lines above across the sudo boundary,
+  // the same reason the SSH remote-setup command uses `VAR=val sudo -E bash`.
+  lines.push(`curl -fsSL https://empyralis.ai/install/agent-computer.sh | sudo -E bash`);
   return lines.join("\n");
 }
 
