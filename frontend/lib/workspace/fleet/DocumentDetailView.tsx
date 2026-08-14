@@ -145,6 +145,7 @@ export function DocumentDetailView({
   workspaceId,
   agents,
   members,
+  identityLookupFailed,
   onSave,
   onDelete,
 }: {
@@ -161,6 +162,11 @@ export function DocumentDetailView({
   workspaceId: string;
   agents: FleetAgent[];
   members: WorkspaceMember[];
+  /** True when the agents/members fetch itself failed — threaded straight
+   *  through to DocumentHistory (see TaskDetailView.tsx's identical prop
+   *  for the full reasoning: a failed lookup must read as a failed lookup,
+   *  never as an anonymous "Someone"). This view never reads it itself. */
+  identityLookupFailed?: boolean;
   onSave: (patch: { title: string; body: string }) => Promise<void>;
   onDelete: () => Promise<void>;
 }) {
@@ -594,6 +600,7 @@ export function DocumentDetailView({
             updatedAt={document.updated_at}
             agents={agents}
             members={members}
+            identityLookupFailed={identityLookupFailed}
           />
         </div>
       </div>

@@ -78,9 +78,27 @@ function resolveRevisionActor(
   revision: FleetDocumentRevision,
   agents: FleetAgent[],
   members: WorkspaceMember[],
+  identityLookupFailed?: boolean,
 ): ResolvedRevisionActor {
   const id = revision.changed_by_id || "";
   const snapshot = revision.changed_by_display_name || "";
+  // Same distinction TaskDetailView.tsx's activityActorLabel makes:
+  // "Someone" claims nobody identifiable made this change, true only when
+  // `members`/`agents` actually loaded and came up empty. When the lookup
+  // itself failed, a real id is sitting right there in `id` — there IS an
+  // actor, we just couldn't resolve their name. That case routes to `kind:
+  // "other"` (the existing plain-muted-text badge, no avatar) rather than
+  // stuffing "Couldn't load who" into a human/agent badge that would draw
+  // an avatar off of it — an avatar implies a resolved identity, and this
+  // one explicitly isn't.
+  if (identityLookupFailed && id && !snapshot) {
+    const stillResolved =
+      (revision.changed_by_type === "agent" && agents.some((a) => a.agent_id === id)) ||
+      (revision.changed_by_type === "human" && members.some((m) => m.user_id === id));
+    if (!stillResolved && revision.changed_by_type !== "external_agent") {
+      return { kind: "other", label: "Couldn't load who", seed: id, memberIndex: 0 };
+    }
+  }
 
   if (revision.changed_by_type === "agent") {
     const agent = agents.find((a) => a.agent_id === id);
@@ -101,8 +119,10 @@ function resolveRevisionActor(
       };
     }
     // `members` is the WORKSPACE roster (useWorkspaceMembers), not a
-    // project-scoped list, so this is only reached for someone who has
-    // since left the workspace entirely. Degrades to a plain label, same
+    // project-scoped list, so this is only reached (once the fetch-failure
+    // branch above has already been ruled out) for someone who has since
+    // left the workspace entirely — a genuinely resolved "nobody matches"
+    // answer, so "Someone" is honest here. Degrades to a plain label, same
     // as resolveCommentAuthor does when a human commenter isn't in
     // `members` either.
     return { kind: "human", label: snapshot || "Someone", seed: id || "human", memberIndex: -1 };
@@ -181,6 +201,7 @@ export function DocumentHistory({
   updatedAt,
   agents,
   members,
+  identityLookupFailed,
 }: {
   workspaceId: string;
   documentId: string;
@@ -201,6 +222,11 @@ export function DocumentHistory({
    *  editor -- the owner -- to nothing. Same source TaskDetailView.tsx
    *  already threads down for its own actor resolution. */
   members: WorkspaceMember[];
+  /** True when the agents/members fetch itself failed (2026-08-13/14 —
+   *  same fix as TaskDetailView.tsx's identical prop). Changes the
+   *  unresolved-actor fallback from "Someone" to "Couldn't load who" so a
+   *  transient fetch failure never reads as an anonymous edit. */
+  identityLookupFailed?: boolean;
 }) {
   const { revisions, loading } = useFleetDocumentRevisions(workspaceId, documentId, updatedAt);
 
@@ -218,7 +244,7 @@ export function DocumentHistory({
       <h2 className="fleet-task-page-section-title">History</h2>
       <ul className="fleet-doc-history-list">
         {revisions.map((revision) => {
-          const actor = resolveRevisionActor(revision, agents, members);
+          const actor = resolveRevisionActor(revision, agents, members, identityLookupFailed);
           return (
             <li key={revision.id} className="fleet-doc-history-item">
               <div className="fleet-doc-history-head">

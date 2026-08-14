@@ -54,8 +54,13 @@ export default function DocumentDetailPage() {
   // Activity feed. useWorkspaceMembers, not useProjectMembers: a workspace
   // owner (the single most common human editor) has no project_memberships
   // row to resolve against (see DocumentHistory's own prop doc).
-  const { agents } = useFleetAgents(workspaceId);
-  const { members: workspaceMembers } = useWorkspaceMembers(workspaceId);
+  const { agents, error: agentsError } = useFleetAgents(workspaceId);
+  const { members: workspaceMembers, error: membersError } = useWorkspaceMembers(workspaceId);
+  // 2026-08-13/14: same fix as tasks/[taskId]/page.tsx's identityLookupFailed
+  // — both hooks already exposed `error`; it just wasn't read here either,
+  // so a failed fetch silently degraded DocumentHistory's attribution into
+  // an anonymous "Someone" exactly like the task page's Activity feed did.
+  const identityLookupFailed = Boolean(agentsError || membersError);
 
   const [document, setDocument] = useState<FleetDocument | null>(null);
   const [loading, setLoading] = useState(true);
@@ -151,6 +156,7 @@ export default function DocumentDetailPage() {
         workspaceId={workspaceId}
         agents={agents}
         members={workspaceMembers}
+        identityLookupFailed={identityLookupFailed}
         onSave={handleSave}
         onDelete={handleDelete}
       />
