@@ -357,6 +357,51 @@ def _coerce_list_payload(value: Any) -> list[Any]:
     return []
 
 
+def _coerce_dict_payload(value: Any) -> dict[str, Any]:
+    """The dict twin of `_coerce_list_payload`, and it exists because its
+    absence silently emptied every turn's metadata on the way out of the API.
+
+    asyncpg hands a JSONB column back as a `str` unless a type codec is
+    registered, and this pool registers none — so a row read with `SELECT *`
+    carries `metadata` as JSON TEXT. `control_plane_repository._coerce_dict`
+    is `dict(value) if isinstance(value, dict) else {}`, which is correct for
+    its own callers and catastrophic here: a perfectly good JSON object
+    becomes `{}` with no error, no log, and no failing test.
+
+    The tell was in this very function. `approvals` and `interventions` went
+    through `_coerce_list_payload`, which parses a JSON string, and survived;
+    `metadata` went through `_coerce_dict`, which does not, and did not. The
+    author already knew JSONB arrives as text and handled it for lists only.
+
+    What it cost, found 2026-08-15 by looking at the screen: the agent Work
+    tab reads each turn's `metadata.trace_id` to resolve the agent's step
+    timeline, so it rendered "detailed step tracking isn't available for this
+    conversation" on EVERY conversation while `agent_traces` and
+    `agent_trace_events` were being written perfectly. `attachments` is
+    derived from the same emptied dict one line below, so turn attachments
+    were being dropped on the same path.
+
+    The root fix is a jsonb codec on the pool, which would repair this class
+    everywhere at once; it is not done here because code elsewhere already
+    `json.loads()` these values and would break on a dict. That is a separate,
+    separately-verifiable change.
+    """
+
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        text = value.decode("utf-8", "replace") if isinstance(value, (bytes, bytearray)) else value
+        text = text.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _payload_within_workspace_history_window(
     *,
     payload: dict[str, Any],
@@ -392,11 +437,11 @@ def normalize_thread_turn_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "status": str(decision.get("normalized_status") or payload.get("status") or "").strip() or None,
         "content": str(payload.get("content") or ""),
         "run_id": str(payload.get("run_id") or "").strip() or None,
-        "actor": _coerce_dict(payload.get("actor")),
+        "actor": _coerce_dict_payload(payload.get("actor")),
         "approvals": _coerce_list_payload(payload.get("approvals")),
         "interventions": _coerce_list_payload(payload.get("interventions")),
-        "metadata": _coerce_dict(payload.get("metadata")),
-        "attachments": _coerce_list_payload(_coerce_dict(payload.get("metadata")).get("attachments")),
+        "metadata": _coerce_dict_payload(payload.get("metadata")),
+        "attachments": _coerce_list_payload(_coerce_dict_payload(payload.get("metadata")).get("attachments")),
         "created_at": str(payload.get("created_at") or "").strip() or None,
         "updated_at": str(payload.get("updated_at") or "").strip() or None,
     }
@@ -424,7 +469,10 @@ def normalize_thread_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "channel": str(payload.get("channel") or "").strip() or None,
         "title": str(decision.get("normalized_title") or payload.get("title") or "").strip() or "New chat",
         "status": str(decision.get("normalized_status") or payload.get("status") or "").strip() or None,
-        "metadata": _coerce_dict(payload.get("metadata")),
+        # Same JSONB-arrives-as-text hazard as the turn normalizer below it;
+        # see _coerce_dict_payload. The thread's own metadata was being
+        # emptied identically.
+        "metadata": _coerce_dict_payload(payload.get("metadata")),
         "created_at": str(payload.get("created_at") or "").strip() or None,
         "updated_at": str(payload.get("updated_at") or "").strip() or None,
         "last_turn_at": str(payload.get("last_turn_at") or "").strip() or None,
