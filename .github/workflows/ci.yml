@@ -50,6 +50,7 @@ jobs:
             server_modules/tests/test_gateway_execution_service.py \
             server_modules/tests/test_gateway_health_service.py \
             server_modules/tests/test_gateway_routes.py \
+            server_modules/tests/test_outcome_honesty_lint.py \
             server_modules/tests/test_provider_catalog_service.py \
             server_modules/tests/test_provider_catalog_truth.py \
             server_modules/tests/test_provider_credential_flows.py \
