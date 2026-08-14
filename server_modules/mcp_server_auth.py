@@ -18,18 +18,36 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import secrets
 import time as _time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from server_modules.state_paths import resolve_state_path
+
 LOGGER = logging.getLogger(__name__)
 
-_MCP_API_KEYS_FILE = Path(
-    os.getenv("EMPYRALIS_MCP_KEYS_FILE")
-    or os.path.join(os.path.expanduser("~"), ".empyralis", "state", "runtime", "mcp_api_keys.json")
-)
+# 2026-08-14 incident (found by preflight's new state-home-resolution scan,
+# server_modules/preflight.py's _check_local_stack_state_home_resolution):
+# this used to hardcode os.path.expanduser('~') as its fallback base and
+# ignore EMPYRALIS_STATE_HOME entirely — the same shape as
+# sage_telegram_hosted_service.py's hardcoded pairing-state path, except
+# what this file stores is hashed per-workspace MCP API KEYS, not pairing
+# metadata. A throwaway stack that set EMPYRALIS_STATE_HOME but not the
+# more specific EMPYRALIS_MCP_KEYS_FILE would still read (and, on the
+# first key creation, WRITE) the founder's real MCP key registry from a
+# process that believed it was isolated. resolve_state_path() (state_paths.
+# py) is the same explicit-override-then-EMPYRALIS_STATE_HOME-then-home
+# resolver every properly-scoped module already uses; the explicit
+# EMPYRALIS_MCP_KEYS_FILE override still wins when set, unchanged.
+#
+# Resolved via a FUNCTION, not a module-level constant — the same "don't
+# bake at import time" fix, so a test/harness that sets EMPYRALIS_STATE_HOME
+# or EMPYRALIS_MCP_KEYS_FILE AFTER this module was first imported still
+# gets the correct path rather than whatever resolved at import time.
+def _mcp_api_keys_file() -> Path:
+    return resolve_state_path("EMPYRALIS_MCP_KEYS_FILE", "runtime/mcp_api_keys.json")
+
 
 _KEYS_CACHE: Optional[Dict[str, Any]] = None
 _KEYS_CACHE_MTIME: float = 0.0
@@ -38,18 +56,19 @@ _KEYS_CACHE_MTIME: float = 0.0
 def _load_keys() -> Dict[str, Any]:
     """Load the API key registry from disk (cached by mtime)."""
     global _KEYS_CACHE, _KEYS_CACHE_MTIME
+    keys_file = _mcp_api_keys_file()
     try:
-        mtime = _MCP_API_KEYS_FILE.stat().st_mtime if _MCP_API_KEYS_FILE.exists() else 0.0
+        mtime = keys_file.stat().st_mtime if keys_file.exists() else 0.0
     except OSError:
         mtime = 0.0
     if _KEYS_CACHE is not None and mtime == _KEYS_CACHE_MTIME:
         return _KEYS_CACHE
-    if not _MCP_API_KEYS_FILE.exists():
+    if not keys_file.exists():
         _KEYS_CACHE = {"keys": {}}
         _KEYS_CACHE_MTIME = 0.0
         return _KEYS_CACHE
     try:
-        data = json.loads(_MCP_API_KEYS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(keys_file.read_text(encoding="utf-8"))
         _KEYS_CACHE = data if isinstance(data, dict) else {"keys": {}}
         _KEYS_CACHE_MTIME = mtime
         return _KEYS_CACHE
@@ -62,11 +81,12 @@ def _load_keys() -> Dict[str, Any]:
 def _save_keys(data: Dict[str, Any]) -> None:
     """Persist the API key registry to disk."""
     global _KEYS_CACHE, _KEYS_CACHE_MTIME
-    _MCP_API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _MCP_API_KEYS_FILE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    keys_file = _mcp_api_keys_file()
+    keys_file.parent.mkdir(parents=True, exist_ok=True)
+    keys_file.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
     _KEYS_CACHE = data
     try:
-        _KEYS_CACHE_MTIME = _MCP_API_KEYS_FILE.stat().st_mtime
+        _KEYS_CACHE_MTIME = keys_file.stat().st_mtime
     except OSError:
         _KEYS_CACHE_MTIME = _time.time()
 

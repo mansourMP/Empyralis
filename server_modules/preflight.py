@@ -13,6 +13,19 @@ Checks
    for any env var shaped like a third-party credential (`*_API_KEY`,
    `*_TOKEN`): a dev/test/local boot refuses to start if one looks like a
    real secret rather than a placeholder (2026-08-13 incident).
+1a2. **Local-stack state-directory resolution** — the same precondition,
+   a third time, for a SOURCE-shaped leak neither check above can see: a
+   module that resolves its state directory from the home directory
+   instead of ``EMPYRALIS_STATE_HOME`` (2026-08-14 incident:
+   sage_telegram_hosted_service.py hardcoded ``~/.empyralis/state`` and
+   silently loaded the founder's real hosted-Telegram pairing records from
+   a throwaway stack). Two classes: a module that ignores the env var
+   entirely (no allowlist — always a violation), and a module that reads
+   it but bakes the value into a module-level constant at import time
+   (seeded with the already-known set in
+   :data:`_STATE_HOME_BAKED_AT_IMPORT_EXCEPTIONS` so this catches only NEW
+   drift, not the pre-existing, not-yet-converted modules CLAUDE.md
+   already catalogued).
 2. **Rust runtime kernel** — binary must exist (built or env-var path).
 3. **PostgreSQL** — DATABASE_URL must be set, pool must be reachable,
    and ``workspace_agent_installs`` must have the stage_4b columns.
@@ -298,6 +311,225 @@ def _check_local_stack_live_provider_secrets() -> Optional[str]:
         "EMPYRALIS_ALLOW_LOCAL_STACK_LIVE_SECRETS=true if you have deliberately chosen to "
         "run this dev/test/local boot against real provider/channel credentials."
     )
+
+
+# ── local-stack state-directory resolution drift (2026-08-14) ───────────
+#
+# The two checks above close credential-SHAPED env vars. A third leak route
+# neither one covers: a module that reads/writes STATE FILES (not env vars)
+# via a path it computed from Path.home()/os.path.expanduser('~') instead of
+# EMPYRALIS_STATE_HOME. Confirmed live 2026-08-14: sage_telegram_hosted_
+# service.py hardcoded ~/.empyralis/state and ignored EMPYRALIS_STATE_HOME
+# entirely -- a throwaway stack with EMPYRALIS_STATE_HOME pointed at a fresh
+# temp dir still silently loaded the founder's real hosted-Telegram pairing
+# records from his home directory. No write occurred and no bot token was
+# set that run, so nothing leaked that time -- but a run with a token
+# configured, or one that reaches the module's own save path, would read or
+# mutate his real pairing state from a disposable process.
+#
+# Two structurally different defects, both SOURCE-shaped rather than
+# environment-shaped -- neither is visible to a check that only inspects
+# os.environ, which is why the two checks above cannot catch this class no
+# matter how many env-var-name suffixes they grow:
+#
+#   CLASS 1 -- total ignore. A module builds a Path.home()/os.path.
+#   expanduser('~') + ".empyralis" path and never references
+#   EMPYRALIS_STATE_HOME anywhere in the file. Almost never a legitimate
+#   shape -- seeded with exactly two known exceptions in
+#   _STATE_HOME_HARDCODED_HOME_DIR_EXCEPTIONS (one diagnostic-only, one not
+#   on the server boot path this check protects; see each entry's own
+#   written verdict), not a blanket pass.
+#
+#   CLASS 2 -- reads the env var, but bakes the resolved value into a
+#   MODULE-LEVEL constant, evaluated once at import time. A test fixture
+#   (or any caller) that sets EMPYRALIS_STATE_HOME AFTER the module was
+#   first imported into the process can never change what that module
+#   resolves to for the rest of the process's life. CLAUDE.md already
+#   catalogued this shape across roughly a dozen modules from an earlier,
+#   unfinished sweep -- real, but each one needs its own careful conversion
+#   (every constant DERIVED from it at import time, e.g. auth.py's
+#   AUTH_DB_FILE, has to move too; at least one test file monkeypatches the
+#   module attribute directly, which would need to change shape as well;
+#   and CLAUDE.md's own note on the earlier attempt warns a generic fix
+#   unmasked three tests that only pass today because of the real vault key
+#   file on the developer's machine) -- so this check does not fail on the
+#   already-known set in _STATE_HOME_BAKED_AT_IMPORT_EXCEPTIONS. It exists
+#   to stop an ADDITIONAL module from acquiring the same shape unnoticed,
+#   the same "seed the allowlist with what's already known, catch only new
+#   drift" posture _RLS_COVERAGE_EXCEPTIONS already uses.
+#
+# Both classes are SOURCE facts, not environment facts, so unlike the two
+# checks above this one scans server_modules/*.py itself rather than
+# os.environ. Runs only for a local/dev/test boot, same as the checks above
+# -- production is expected to have a stable EMPYRALIS_STATE_HOME set well
+# before any module imports, so import-time baking is harmless there.
+
+_STATE_HOME_ENV_VAR_NAME = "EMPYRALIS_STATE_HOME"
+
+_STATE_HOME_HOME_DIR_MARKERS = ("Path.home()", "os.path.expanduser('~')", 'os.path.expanduser("~")')
+
+# CLASS 1: known, verified 2026-08-14, deliberately NOT fixed in the same
+# pass that fixed sage_telegram_hosted_service.py and mcp_server_auth.py —
+# each for a real, specific reason, not left half-done by omission. Both
+# were FOUND by this check on its first real run against the tree, which is
+# exactly what it exists to do; the goal here is honest tracking, not a
+# clean-looking allowlist.
+_STATE_HOME_HARDCODED_HOME_DIR_EXCEPTIONS: Dict[str, str] = {
+    "doctor_report.py": (
+        "diagnostic-only fallback for vault/setup-sessions/provider-profiles/"
+        "idempotency file paths, used only to check directory existence and "
+        "write permission for a health report — never opens or reads the "
+        "files' contents. Real bug (a throwaway stack's doctor report would "
+        "check the REAL home directory's permissions and report a misleading "
+        "result), but not a data-exposure path the way the other two were."
+    ),
+    "cli_companion_service.py": (
+        "a standalone CLI companion tool's own ~/.empyralis/config.json + "
+        "session.json — imported by zero other server_modules/*.py files, so "
+        "it is not on server.py's boot path this check exists to protect. "
+        "Whether it should live under EMPYRALIS_STATE_HOME at all is a real "
+        "question (it may be intentionally separate, like ~/.aws/config), "
+        "not yet answered — flagged rather than guessed at."
+    ),
+}
+
+# CLASS 2: known, not-yet-converted modules, verified 2026-08-14 to
+# genuinely READ EMPYRALIS_STATE_HOME -- unlike the Class 1 incident, these
+# do not silently ignore an operator's override, they only ignore one set
+# AFTER the module was first imported, which is a real but narrower gap.
+# Converting the eight modules that bake EMPYRALIS_STATE_HOME itself is not
+# sufficient on its own either: agent_registry_repository.py and
+# vault_store.py both import the (stale) value FROM runtime_config.py at
+# call time inside a function (so THEIR OWN code is call-time-safe, but
+# they inherit whatever runtime_config.py resolved at ITS import time), and
+# vps_provisioning_service.py imports it at ITS OWN module level -- a
+# second freeze on top of runtime_config's own, so fixing runtime_config.py
+# alone would not fix vps_provisioning_service.py's frozen copy.
+_STATE_HOME_BAKED_AT_IMPORT_EXCEPTIONS: Dict[str, str] = {
+    "auth.py": "bakes EMPYRALIS_STATE_HOME + a derived AUTH_DB_FILE constant at import time",
+    "control_plane_repository.py": "bakes EMPYRALIS_STATE_HOME + derived LOCAL_IDENTITY_DB_FILE/control-plane file constants at import time",
+    "gateway_state_repository.py": "bakes EMPYRALIS_STATE_HOME + derived gateway-state DB path constants at import time",
+    "jwt_secret.py": "bakes EMPYRALIS_STATE_HOME at import time",
+    "kill_switch_gate.py": "bakes _EMPYRALIS_STATE_HOME + derived _KILL_SWITCH_FILE at import time",
+    "personal_channels_repository.py": "bakes EMPYRALIS_STATE_HOME at import time",
+    "runtime_config.py": "bakes EMPYRALIS_STATE_HOME at import time -- the root copy agent_registry_repository.py and vault_store.py both import from",
+    "sage_agent_computer_selection_service.py": "bakes EMPYRALIS_STATE_HOME at import time",
+    "agent_conversation_memory.py": "bakes _STATE_HOME at import time",
+    "direct_chat_hosted_usage_service.py": "bakes _STATE_HOME at import time",
+    "durable_quota_store.py": "bakes _STATE_HOME at import time",
+    "mcp_registry_service.py": "bakes _STATE_HOME at import time",
+    "vps_provisioning_service.py": "imports EMPYRALIS_STATE_HOME from runtime_config at ITS OWN module level -- a second freeze on top of runtime_config's own",
+}
+
+
+def _state_home_scan_targets() -> List[str]:
+    """server_modules/*.py, excluding test_*.py -- the real production
+    source tree, not test scaffolding."""
+    import glob as _glob  # noqa: PLC0415
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pattern = os.path.join(repo_root, "server_modules", "*.py")
+    return sorted(
+        path for path in _glob.glob(pattern)
+        if not os.path.basename(path).startswith("test_")
+    )
+
+
+def _module_level_assignment_targets(source: str) -> set:
+    """Every name assigned at MODULE level (never inside a function/class
+    body). ast.walk would also find assignments nested inside functions --
+    exactly the safe, call-time-resolved shape this check must NOT flag --
+    so only ast.Module.body's own top-level statements count."""
+    import ast as _ast  # noqa: PLC0415
+
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        return set()
+    names: set = set()
+    for node in tree.body:
+        targets: List[Any] = []
+        if isinstance(node, _ast.Assign):
+            targets = node.targets
+        elif isinstance(node, _ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        for target in targets:
+            if isinstance(target, _ast.Name):
+                names.add(target.id)
+    return names
+
+
+def _check_local_stack_state_home_resolution() -> Optional[str]:
+    """Return `None` unless this is a dev/test/local boot with a
+    server_modules/*.py file that resolves its state directory in a way
+    that can silently reach outside EMPYRALIS_STATE_HOME. See the module
+    comment above for the two classes this catches and why Class 2 is
+    seeded with an allowlist rather than failing on the already-known set."""
+    from server_modules.db import durable_runtime_required as _durable_required  # noqa: PLC0415
+
+    if _durable_required():
+        return None  # beta/staging/production: a stable state home is expected well before import
+
+    if _resolved_environment_for_local_stack_check() not in _LOCAL_STACK_ENV_TOKENS:
+        return None
+
+    class_1_violations: List[str] = []
+    class_2_violations: List[str] = []
+
+    for path in _state_home_scan_targets():
+        basename = os.path.basename(path)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                source = handle.read()
+        except OSError:
+            continue
+
+        references_env_var = _STATE_HOME_ENV_VAR_NAME in source
+        home_dir_pattern = (
+            any(marker in source for marker in _STATE_HOME_HOME_DIR_MARKERS)
+            and ".empyralis" in source
+        )
+        if home_dir_pattern and not references_env_var and basename not in _STATE_HOME_HARDCODED_HOME_DIR_EXCEPTIONS:
+            class_1_violations.append(basename)
+
+        if references_env_var:
+            state_home_like_targets = {
+                name
+                for name in _module_level_assignment_targets(source)
+                if name == _STATE_HOME_ENV_VAR_NAME or name.endswith("_STATE_HOME")
+            }
+            if state_home_like_targets and basename not in _STATE_HOME_BAKED_AT_IMPORT_EXCEPTIONS:
+                class_2_violations.append(
+                    f"{basename} (bakes {', '.join(sorted(state_home_like_targets))} at import time)"
+                )
+
+    if not class_1_violations and not class_2_violations:
+        return None
+
+    lines = [
+        "This dev/test/local boot found a server_modules/*.py file that resolves its "
+        "state directory in a way that can silently reach outside EMPYRALIS_STATE_HOME "
+        "-- the exact precondition behind the 2026-08-14 incident (sage_telegram_hosted_"
+        "service.py hardcoded ~/.empyralis/state and ignored the override entirely, so a "
+        "throwaway stack loaded the founder's real hosted-Telegram pairing records)."
+    ]
+    if class_1_violations:
+        lines.append(
+            "  CLASS 1 (hardcodes a home-directory .empyralis/state path, ignores "
+            f"EMPYRALIS_STATE_HOME entirely): {', '.join(sorted(class_1_violations))}. "
+            "Resolve the directory via EMPYRALIS_STATE_HOME (falling back to the home "
+            "path only when unset), matching server_modules/state_paths.py."
+        )
+    if class_2_violations:
+        lines.append(
+            "  CLASS 2 (bakes a state-home constant at import time -- NEW, not on the "
+            f"known list): {'; '.join(sorted(class_2_violations))}. Either resolve it at "
+            "call time instead of a module-level constant, or -- if this is one of the "
+            "already-catalogued modules under active conversion -- add it to "
+            "preflight._STATE_HOME_BAKED_AT_IMPORT_EXCEPTIONS with a written reason."
+        )
+    lines.append("  Never weaken or remove this check to make the message go away.")
+    return "\n".join(lines)
 
 
 # ── removed knowledge RAG pipeline ───────────────────────────────────
@@ -1356,6 +1588,14 @@ async def run_preflight_checks() -> List[str]:
     local_stack_secrets_err = _check_local_stack_live_provider_secrets()
     if local_stack_secrets_err:
         errors.append(local_stack_secrets_err)
+
+    # 1a2. Same precondition, third costume (2026-08-14): a dev/test/local
+    #      boot must not silently resolve its STATE DIRECTORY outside
+    #      EMPYRALIS_STATE_HOME either — a source-shaped leak the two env-
+    #      var checks above cannot see. See the check's own module comment.
+    local_stack_state_home_err = _check_local_stack_state_home_resolution()
+    if local_stack_state_home_err:
+        errors.append(local_stack_state_home_err)
 
     # 1b. Config for the removed embeddings/RAG knowledge pipeline must be
     #     gone, not silently ignored (CLAUDE.md: stale config fails loudly).

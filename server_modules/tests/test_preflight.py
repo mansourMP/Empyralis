@@ -254,6 +254,177 @@ class LocalStackLiveProviderSecretsCheckTests(unittest.TestCase):
         self.assertIn("EMPYRALIS_TELEGRAM_HOSTED_BOT_TOKEN", error)
 
 
+class StateHomeModuleLevelAssignmentTargetsTests(unittest.TestCase):
+    """_module_level_assignment_targets is the precision layer that tells a
+    module-level (import-time-baked, unsafe) constant apart from the same
+    name resolved inside a function (call-time, safe) — the exact
+    distinction Class 2 depends on."""
+
+    def test_module_level_assignment_is_found(self):
+        source = 'EMPYRALIS_STATE_HOME = Path(os.getenv("EMPYRALIS_STATE_HOME"))\n'
+        self.assertEqual(
+            preflight._module_level_assignment_targets(source),
+            {"EMPYRALIS_STATE_HOME"},
+        )
+
+    def test_underscored_variant_is_found(self):
+        source = '_STATE_HOME = Path(os.getenv("EMPYRALIS_STATE_HOME"))\n'
+        self.assertEqual(preflight._module_level_assignment_targets(source), {"_STATE_HOME"})
+
+    def test_function_scoped_assignment_is_not_found(self):
+        # The safe shape — this is exactly what sage_telegram_hosted_
+        # service.py's fix and mcp_server_auth.py's fix both moved to.
+        source = (
+            "def _state_dir():\n"
+            "    EMPYRALIS_STATE_HOME = Path(os.getenv(\"EMPYRALIS_STATE_HOME\"))\n"
+            "    return str(EMPYRALIS_STATE_HOME)\n"
+        )
+        self.assertEqual(preflight._module_level_assignment_targets(source), set())
+
+    def test_syntax_error_returns_empty_set_not_a_crash(self):
+        self.assertEqual(preflight._module_level_assignment_targets("def broken(:\n"), set())
+
+
+class LocalStackStateHomeResolutionCheckTests(unittest.TestCase):
+    """2026-08-14 incident: sage_telegram_hosted_service.py hardcoded
+    ~/.empyralis/state and ignored EMPYRALIS_STATE_HOME entirely, so a
+    throwaway stack with EMPYRALIS_STATE_HOME pointed at a fresh temp dir
+    still silently loaded the founder's real hosted-Telegram pairing
+    records. This check closes that third hole — a SOURCE-shaped leak
+    neither the DATABASE_URL nor the live-secrets check above can see,
+    since both only inspect os.environ."""
+
+    def _write(self, tmp_dir: str, name: str, content: str) -> str:
+        path = os.path.join(tmp_dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return path
+
+    def test_class_1_hardcoded_home_path_with_no_env_reference_is_caught(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bad = self._write(
+                tmp_dir,
+                "totally_new_module.py",
+                "import os\n_STATE_DIR = os.path.join(os.path.expanduser('~'), '.empyralis', 'state')\n",
+            )
+            with patch("server_modules.preflight._state_home_scan_targets", return_value=[bad]), \
+                 patch.dict(os.environ, {"ORION_ENV": "test"}, clear=True):
+                error = preflight._check_local_stack_state_home_resolution()
+        self.assertIsNotNone(error)
+        self.assertIn("totally_new_module.py", error)
+        self.assertIn("CLASS 1", error)
+
+    def test_class_1_is_not_flagged_once_the_env_var_is_referenced(self):
+        # This is exactly the shape of the fix: reference the env var at
+        # all, even sloppily, and it drops out of Class 1 (it may still be
+        # Class 2, tested separately below).
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fixed = self._write(
+                tmp_dir,
+                "fixed_module.py",
+                "import os\n"
+                "def _state_dir():\n"
+                "    return os.getenv('EMPYRALIS_STATE_HOME') or os.path.join(os.path.expanduser('~'), '.empyralis', 'state')\n",
+            )
+            with patch("server_modules.preflight._state_home_scan_targets", return_value=[fixed]), \
+                 patch.dict(os.environ, {"ORION_ENV": "test"}, clear=True):
+                error = preflight._check_local_stack_state_home_resolution()
+        self.assertIsNone(error)
+
+    def test_class_2_new_module_level_bake_is_caught(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bad = self._write(
+                tmp_dir,
+                "another_new_module.py",
+                "import os\nfrom pathlib import Path\n"
+                "EMPYRALIS_STATE_HOME = Path(os.getenv('EMPYRALIS_STATE_HOME', '/tmp'))\n",
+            )
+            with patch("server_modules.preflight._state_home_scan_targets", return_value=[bad]), \
+                 patch.dict(os.environ, {"ORION_ENV": "test"}, clear=True):
+                error = preflight._check_local_stack_state_home_resolution()
+        self.assertIsNotNone(error)
+        self.assertIn("another_new_module.py", error)
+        self.assertIn("CLASS 2", error)
+        self.assertIn("NEW, not on the", error)
+
+    def test_class_2_known_exception_does_not_block_boot(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            known = self._write(
+                tmp_dir,
+                "auth.py",
+                "import os\nfrom pathlib import Path\n"
+                "EMPYRALIS_STATE_HOME = Path(os.getenv('EMPYRALIS_STATE_HOME', '/tmp'))\n",
+            )
+            with patch("server_modules.preflight._state_home_scan_targets", return_value=[known]), \
+                 patch.dict(os.environ, {"ORION_ENV": "test"}, clear=True):
+                error = preflight._check_local_stack_state_home_resolution()
+        self.assertIsNone(error, "auth.py is a seeded, already-known Class 2 exception")
+
+    def test_class_1_known_exception_does_not_block_boot(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            known = self._write(
+                tmp_dir,
+                "cli_companion_service.py",
+                "from pathlib import Path\n_CONFIG_DIR = Path.home() / '.empyralis'\n",
+            )
+            with patch("server_modules.preflight._state_home_scan_targets", return_value=[known]), \
+                 patch.dict(os.environ, {"ORION_ENV": "test"}, clear=True):
+                error = preflight._check_local_stack_state_home_resolution()
+        self.assertIsNone(error, "cli_companion_service.py is a seeded, already-known Class 1 exception")
+
+    def test_durable_runtime_required_skips_this_check(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bad = self._write(
+                tmp_dir,
+                "would_be_flagged.py",
+                "import os\n_STATE_DIR = os.path.join(os.path.expanduser('~'), '.empyralis', 'state')\n",
+            )
+            with patch("server_modules.preflight._state_home_scan_targets", return_value=[bad]), \
+                 patch.dict(
+                     os.environ,
+                     {"ORION_ENV": "test", "ORION_REQUIRE_DURABLE_RUN_STATE": "1"},
+                     clear=True,
+                 ):
+                self.assertIsNone(preflight._check_local_stack_state_home_resolution())
+
+    def test_unrecognized_env_token_is_left_alone(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            bad = self._write(
+                tmp_dir,
+                "would_be_flagged.py",
+                "import os\n_STATE_DIR = os.path.join(os.path.expanduser('~'), '.empyralis', 'state')\n",
+            )
+            with patch("server_modules.preflight._state_home_scan_targets", return_value=[bad]), \
+                 patch.dict(os.environ, {}, clear=True):
+                self.assertIsNone(preflight._check_local_stack_state_home_resolution())
+
+    def test_the_real_source_tree_is_clean_today(self):
+        """Regression guard: proves both fixes (sage_telegram_hosted_service.py,
+        mcp_server_auth.py) actually removed the violations, and that the two
+        remaining known exceptions plus the dozen Class 2 exceptions are the
+        ONLY thing keeping this check quiet — not a scan that silently found
+        nothing because it never ran. Scans the real repo tree, unmocked."""
+        with patch.dict(os.environ, {"ORION_ENV": "test"}, clear=True):
+            targets = preflight._state_home_scan_targets()
+            self.assertGreater(len(targets), 100, "sanity: the scan actually found the real source tree")
+            error = preflight._check_local_stack_state_home_resolution()
+        self.assertIsNone(error, error)
+
+
 class RemovedKnowledgeRagConfigCheckTests(unittest.TestCase):
     """The embeddings/RAG knowledge pipeline was removed 2026-08-08. Its env
     knobs have no reader left, so a boot that still sets one must FAIL rather

@@ -84,12 +84,36 @@ _PENDING_DEEP_LINK_TOKENS: Dict[str, str] = {}  # token → workspace_id
 # --- Persistence ---
 import atexit as _atexit
 
-_STATE_DIR = os.path.join(os.path.expanduser('~'), '.empyralis', 'state')
-_STATE_FILE = os.path.join(_STATE_DIR, 'sage_telegram_hosted_pairs.json')
+from server_modules.state_paths import empyralis_state_home as _empyralis_state_home
+
+# MAN-324-adjacent incident, 2026-08-14: this used to hardcode
+# os.path.expanduser('~') and ignore EMPYRALIS_STATE_HOME entirely — the
+# third credential/state leak route found that night. A throwaway stack
+# with EMPYRALIS_STATE_HOME pointed at a fresh temp dir still silently
+# loaded the FOUNDER's real hosted-Telegram pairing records from his home
+# directory (confirmed live: the exact "loaded N pairs, M pending codes,
+# K pending tokens from disk" log line this module emits below, observed
+# against a disposable test stack). No token was set and no write occurred
+# that run, so nothing leaked that time, but a run with a bot token
+# configured, or one that reaches _save_state(), would read or mutate his
+# real pairing state from a disposable process. _empyralis_state_home()
+# is the same shared resolver state_paths.py already provides (env var
+# first, ~/.empyralis/state only when EMPYRALIS_STATE_HOME is unset) —
+# called at call time via the two _state_dir()/_state_file() functions
+# below, not cached into a module-level constant at import time, so a test
+# that sets EMPYRALIS_STATE_HOME via monkeypatch/env before calling in
+# gets the isolated path even on a process that imported this module
+# earlier under a different environment.
+def _state_dir() -> str:
+    return str(_empyralis_state_home())
+
+
+def _state_file() -> str:
+    return os.path.join(_state_dir(), 'sage_telegram_hosted_pairs.json')
 
 def _load_state() -> None:
     try:
-        with open(_STATE_FILE, 'r') as f:
+        with open(_state_file(), 'r') as f:
             data = __import__('json').load(f)
         if isinstance(data.get('pairs'), dict):
             _SAGE_HOSTED_PAIRS.update(data['pairs'])
@@ -103,15 +127,16 @@ def _load_state() -> None:
         pass
 
 def _save_state() -> None:
-    os.makedirs(_STATE_DIR, exist_ok=True)
-    tmp = _STATE_FILE + '.tmp'
+    state_file = _state_file()
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    tmp = state_file + '.tmp'
     with open(tmp, 'w') as f:
         __import__('json').dump({
             'pairs': _SAGE_HOSTED_PAIRS,
             'pending_codes': _PENDING_PAIRING_CODES,
             'pending_tokens': _PENDING_DEEP_LINK_TOKENS,
         }, f)
-    os.replace(tmp, _STATE_FILE)
+    os.replace(tmp, state_file)
 
 def _persist_after_mutation() -> None:
     try:
