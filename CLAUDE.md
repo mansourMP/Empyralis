@@ -623,6 +623,43 @@ and behaves perfectly against every child that does die on SIGTERM. When you
 add a subprocess with a timeout, the timeout is yours to enforce: resolve on
 your own deadline, escalate to SIGKILL, and unref what refuses to die.
 
+**A hung `node --test` file is not always the execFile family above — verify
+which one before reaching for that fix.** 2026-08-14,
+`ws-client-event-seq-race.test.ts`: the assertion printed a checkmark then
+the process never exited, the same surface symptom as the execFile leak. It
+was a different bug. `GatewayWsClient.connect()` starts `HeartbeatLoop` with
+a plain (non-`unref`'d) `setTimeout` — correct in production, where a
+gateway process must stay alive on a real heartbeat cadence for as long as
+the connection is meant to live — and the ONLY thing that clears it is
+`disconnect()` (`heartbeatLoop.stop()`, `cloud/ws-client.ts:747`). This test
+called `connect()` and never called `disconnect()`, so the timer (scheduled
+~11.5 days out, from the harness's own `heartbeat_interval_seconds: 999_999`
+session payload) sat there un-unref'd forever. Confirmed with
+`process.getActiveResourcesInfo()` (`["Timeout"]`, one entry) plus a patched
+`global.setTimeout` capturing call sites: the surviving timer's stack traced
+straight to `HeartbeatLoop.start` -> `GatewayWsClient.connect` ->
+`buildClient` in the test itself — a mock-harness omission, not a
+production leak. `checkpoints.ts`'s own 100ms save-debounce timer, the other
+candidate this shape usually points at, was already correctly `.unref()`'d
+(`state/checkpoints.ts:150,163`) and was not involved. Three sibling
+`ws-client-*.test.ts` files that also call `connect()`/`run()` do NOT hang,
+because each already tears down correctly:
+`ws-client-socket-error.test.ts`/`capability-reevaluation.test.ts` call
+`client.disconnect(scope)` before their `finally`, and
+`ws-client-reconnect-resource-safety.test.ts`/`startup-sequencing.test.ts`
+drive `run()` to a deliberate non-retryable failure so it throws and settles
+without a live heartbeat loop left behind — `ws-client-event-seq-race.test.ts`
+was the one file written without either pattern. Fixed by adding the same
+`disconnect()` call the sibling files already use; production code is
+unchanged, on purpose — patching this in `HeartbeatLoop`/`ws-client.ts`
+would have converted a real "keep the gateway alive" timer into one that
+stops itself, which is wrong for the thing actually running on a customer's
+box. `ws-timeout.test.ts` genuinely runs ~70s of real (unmocked)
+10s/20s/40s timeouts by design — slow, not hung; don't mistake one for the
+other from a short poll window. Full gateway suite verified green after the
+fix: `npm test` (`node --test dist/__tests__/*.test.js`), 884 tests, 884
+pass, 0 fail, 0 skipped, exit 0, ~116s.
+
 **A check that derives its own expectations from the thing it checks is
 blind, and reports "passed".** `preflight._check_rls()` verified that every
 table listed in `migrations/enable_rls.sql` had RLS + FORCE + a policy — all

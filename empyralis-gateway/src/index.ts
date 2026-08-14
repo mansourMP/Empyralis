@@ -2,8 +2,10 @@ import { promises as fs } from "fs";
 import path from "path";
 
 import { loadGatewayConfig, openClawGatewayPortFromUrl } from "./config";
+import type { GatewayConfig } from "./config";
 import { GatewayWsClient } from "./cloud/ws-client";
 import { resolveDeviceIdentity } from "./pairing/device-identity";
+import type { GatewayDeviceIdentity } from "./pairing/device-identity";
 import { GatewayTokenStore } from "./pairing/token-store";
 import type { GatewayTokenState } from "./pairing/token-store";
 import { GatewayStateDb } from "./state/db";
@@ -11,12 +13,17 @@ import { GatewayJournal } from "./state/journal";
 import { GatewayOutbox } from "./state/outbox";
 import { GatewayCheckpoints } from "./state/checkpoints";
 import { buildRuntimeMetadata } from "./runtime/runtime-metadata";
+import type { GatewayRuntimeMetadata } from "./runtime/runtime-metadata";
 // ARCHIVED (Phase U1): GatewaySupervisorClient removed.
 // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
 import { GatewayCapabilityRouter } from "./supervisor/capability-router";
+import { GatewayRegistrationError } from "./cloud/registration-failure";
 import { WhatsAppPersonalRuntime } from "./channels/whatsapp/runtime";
+import { WHATSAPP_PERSONAL_CHANNEL_KEY } from "./channels/whatsapp/session-store";
 import { TelegramPersonalRuntime } from "./channels/telegram/runtime";
+import { TELEGRAM_PERSONAL_CHANNEL_KEY } from "./channels/telegram/session-store";
 import { PersonalChannelRuntimeRegistry } from "./channels/personal-runtime";
+import { activeFirstPartyPersonalChannels } from "./openclaw/transport-ownership";
 import {
   LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS,
   LocalBridgePersonalChannelRuntime,
@@ -212,6 +219,180 @@ export function shouldAttemptPairing(
   return Boolean(pairingToken) && !storedGatewayToken;
 }
 
+/**
+ * sysexits.h EX_CONFIG: "something is wrong with the configuration files
+ * and the situation is not recoverable by trying again." A consumed,
+ * revoked, or expired pairing token is exactly that — the pairing token is
+ * effectively this box's boot-time configuration, and no amount of
+ * restarting fixes it.
+ *
+ * Chosen specifically because scripts/install-agent-computer.sh's systemd
+ * unit lists this exact value in RestartPreventExitStatus, so exiting with
+ * it is what actually stops the restart loop, not merely slows it down.
+ * Every OTHER startup failure in this file (network errors, transient 5xx
+ * registration responses, and any genuinely unexpected crash) still exits
+ * with the generic exitCode=1 below, which systemd keeps retrying exactly
+ * as before — this code is deliberately narrow to the one class of failure
+ * that can never succeed by retrying.
+ */
+export const EXIT_PERMANENT_REGISTRATION_FAILURE = 78;
+
+/**
+ * Thrown instead of a plain Error when startup fails in a way retrying can
+ * never fix, so the require.main catch below can exit with a code systemd
+ * is configured to NOT restart on, instead of the generic exitCode=1 every
+ * transient startup failure still uses.
+ */
+export class GatewayPermanentStartupFailure extends Error {
+  readonly exitCode: number;
+  constructor(message: string, exitCode: number) {
+    super(message);
+    this.name = "GatewayPermanentStartupFailure";
+    this.exitCode = exitCode;
+  }
+}
+
+/**
+ * Best-effort phone-home for a registration failure this box will never
+ * recover from by retrying. Reuses the SAME beacon endpoint install-agent-
+ * computer.sh's own report_beacon() already POSTs to
+ * (POST /gateway/provisioning-events, MAN-121) — it is keyed by pairing
+ * token, unauthenticated, and matches independently of whether that token
+ * is still "pending" in gateway_pairing_intents, so it works precisely in
+ * this scenario where the token has already been consumed/expired/revoked.
+ *
+ * For a VPS this product provisioned, a `terminal: true` beacon on this
+ * phase flips vps_provisioning_service._resolved_record_status() to
+ * "failed" on its very next poll (VPS_CONNECT_POLL_INTERVAL_SECONDS = 15s)
+ * instead of waiting out the full VPS_CONNECT_TIMEOUT_SECONDS (20 minutes) —
+ * turning "Timed out after 20 minutes waiting for the agent computer to
+ * connect" (no reason given) into the real reason, within ~15-30s. For a
+ * box paired through the manual "connect your own computer" flow (no VPS
+ * record exists), the same beacon call is silently discarded server-side —
+ * see record_vps_install_event()'s own "Returns None when the token matches
+ * no record" contract — so this call is always safe to make.
+ *
+ * Best-effort like report_beacon() itself: an unreachable control plane
+ * must never block this box from finishing its own local failure
+ * bookkeeping or exiting cleanly.
+ */
+async function reportPermanentRegistrationFailureBeacon(
+  config: Pick<GatewayConfig, "apiBaseUrl" | "pairingToken">,
+  error: GatewayRegistrationError,
+): Promise<void> {
+  const pairingToken = config.pairingToken;
+  if (!pairingToken || !config.apiBaseUrl) {
+    return;
+  }
+  const message = `Gateway registration was permanently refused (${error.code}${
+    error.status ? `, HTTP ${error.status}` : ""
+  }): ${error.detail || error.message}`.slice(0, 2000);
+  const controller = new AbortController();
+  const timeoutHandle = setTimeout(() => controller.abort(), 15_000);
+  try {
+    await fetch(`${config.apiBaseUrl}/gateway/provisioning-events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        pairing_token: pairingToken,
+        phase: "gateway_registration",
+        message,
+        terminal: true,
+        kind: "problem",
+      }),
+      signal: controller.signal,
+    });
+  } catch {
+    // Best-effort — see doc comment above.
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+/**
+ * Writes the local, human-discoverable half of a permanent registration
+ * failure: a structured state file under stateDir (readable by a human who
+ * SSHes into the box, or by a future local diagnostic that wants it) and a
+ * journal entry, then best-effort phones the failure home. Never throws —
+ * every step here is best-effort so a disk or network hiccup while
+ * RECORDING the failure can never prevent the process from actually
+ * stopping (see attemptGatewayPairing below).
+ */
+async function recordPermanentRegistrationFailure(
+  db: Pick<GatewayStateDb, "writeJson" | "filePath">,
+  journal: Pick<GatewayJournal, "append">,
+  config: Pick<GatewayConfig, "apiBaseUrl" | "pairingToken">,
+  identity: Pick<GatewayDeviceIdentity, "gatewayId" | "deviceId">,
+  error: GatewayRegistrationError,
+): Promise<void> {
+  const record = {
+    failedAt: new Date().toISOString(),
+    code: error.code,
+    httpStatus: error.status ?? null,
+    detail: error.detail || error.message,
+    gatewayId: identity.gatewayId,
+    deviceId: identity.deviceId,
+  };
+  console.error(
+    `[gateway] pairing registration failed permanently (${error.code}${
+      error.status ? `, http ${error.status}` : ""
+    }): ${record.detail} — this box will NOT keep retrying with the same pairing token. ` +
+      `See ${db.filePath("registration_failure.json")}. Re-pair this device with a fresh pairing token to bring it online.`,
+  );
+  await db.writeJson("registration_failure.json", record).catch(() => undefined);
+  await journal.append("system", "gateway.registration.permanent_failure", record).catch(() => undefined);
+  await reportPermanentRegistrationFailureBeacon(config, error);
+}
+
+/**
+ * The pairing decision main() used to inline directly. Pulled out, same
+ * spirit as shouldAttemptPairing() above, so the permanent-vs-retryable
+ * branch can be exercised in a test without running the rest of main()'s
+ * startup sequence.
+ *
+ * Resolves normally on success OR on any of the pre-existing
+ * skip/adopt-token branches (unchanged behavior). Throws
+ * GatewayPermanentStartupFailure when registerFromPairing fails in a way
+ * retrying can never fix (after recording it — see
+ * recordPermanentRegistrationFailure above); rethrows the original error
+ * unchanged for anything retryable (network errors, 5xx, 429) or
+ * unclassified, so the existing exitCode=1 + systemd-restart path is
+ * exactly what it was before this change.
+ */
+export async function attemptGatewayPairing(params: {
+  client: Pick<GatewayWsClient, "registerFromPairing">;
+  db: Pick<GatewayStateDb, "writeJson" | "filePath">;
+  journal: Pick<GatewayJournal, "append">;
+  config: Pick<GatewayConfig, "apiBaseUrl" | "pairingToken" | "gatewayToken">;
+  identity: Pick<GatewayDeviceIdentity, "gatewayId" | "deviceId">;
+  runtimeMetadata: GatewayRuntimeMetadata;
+  existingTokens: GatewayTokenState;
+  tokenStore: Pick<GatewayTokenStore, "save">;
+}): Promise<void> {
+  const { client, db, journal, config, identity, runtimeMetadata, existingTokens, tokenStore } = params;
+  if (shouldAttemptPairing(config.pairingToken, existingTokens.gatewayToken)) {
+    try {
+      await client.registerFromPairing(config.pairingToken as string, identity as GatewayDeviceIdentity, runtimeMetadata);
+    } catch (error) {
+      if (error instanceof GatewayRegistrationError && !error.retryable) {
+        await recordPermanentRegistrationFailure(db, journal, config, identity, error);
+        throw new GatewayPermanentStartupFailure(
+          `Gateway pairing failed permanently (${error.code}): ${error.detail || error.message}`,
+          EXIT_PERMANENT_REGISTRATION_FAILURE,
+        );
+      }
+      throw error;
+    }
+  } else if (!existingTokens.gatewayToken && config.gatewayToken) {
+    await tokenStore.save({ gatewayToken: config.gatewayToken });
+  } else if (config.pairingToken && existingTokens.gatewayToken) {
+    await journal.append("system", "gateway.pairing.skipped_already_registered", {
+      gatewayId: identity.gatewayId,
+      deviceId: identity.deviceId,
+    });
+  }
+}
+
 /** Selects the iMessage transport for the "imessage_personal" local-bridge
  *  config: the in-process imsg RPC runtime by default (no separate process
  *  to run — see channels/imsg-imessage-runtime.ts), or the legacy
@@ -297,13 +478,29 @@ async function main(): Promise<void> {
         },
       })
     : null;
+  // Every first-party personal-channel candidate this box COULD run, each
+  // paired with its own channel_key and a lazily-evaluated constructor (so
+  // filtering below never constructs a runtime this box shouldn't start).
+  // activeFirstPartyPersonalChannels() is the ONE gate all of them go
+  // through — see openclaw/transport-ownership.ts's doc for the full chain
+  // this reads through (channel_lane_contract_service.OPENCLAW_TRANSPORT_
+  // OWNERSHIP, generated-openclaw-channels.ts, ultimately
+  // OPENCLAW_CUT_OVER_CHANNEL_IDS). While that constant is empty (true
+  // today), every candidate below passes the filter unchanged — a strict
+  // no-op, proven by __tests__/first-party-transport-ownership-gate.test.ts.
+  // A future cutover needs no new gateway code: only the registry flip and
+  // a regenerate.
+  const firstPartyPersonalChannelCandidates: Array<{ channelKey: string; build: () => PersonalChannelRuntime }> = [
+    { channelKey: WHATSAPP_PERSONAL_CHANNEL_KEY, build: () => new WhatsAppPersonalRuntime(db) },
+    { channelKey: TELEGRAM_PERSONAL_CHANNEL_KEY, build: () => new TelegramPersonalRuntime(db) },
+    ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((bridgeConfig) => ({
+      channelKey: bridgeConfig.channelKey,
+      build: () => buildLocalBridgeChannelRuntime(bridgeConfig, db),
+    })),
+  ];
   const personalChannelRuntimes = new PersonalChannelRuntimeRegistry([
     ...(config.personalChannelsEnabled
-      ? [
-          new WhatsAppPersonalRuntime(db),
-          new TelegramPersonalRuntime(db),
-          ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((bridgeConfig) => buildLocalBridgeChannelRuntime(bridgeConfig, db)),
-        ]
+      ? activeFirstPartyPersonalChannels(firstPartyPersonalChannelCandidates).map((candidate) => candidate.build())
       : []),
     ...(openclawBridgeToken
       ? buildOpenClawPersonalChannelRuntimes(openclawGatewayClient, (messageType, payload) =>
@@ -589,16 +786,16 @@ async function main(): Promise<void> {
 
   try {
     const existingTokens: GatewayTokenState = await tokenStore.load();
-    if (shouldAttemptPairing(config.pairingToken, existingTokens.gatewayToken)) {
-      await client.registerFromPairing(config.pairingToken as string, identity, runtimeMetadata);
-    } else if (!existingTokens.gatewayToken && config.gatewayToken) {
-      await tokenStore.save({ gatewayToken: config.gatewayToken });
-    } else if (config.pairingToken && existingTokens.gatewayToken) {
-      await journal.append("system", "gateway.pairing.skipped_already_registered", {
-        gatewayId: identity.gatewayId,
-        deviceId: identity.deviceId,
-      });
-    }
+    await attemptGatewayPairing({
+      client,
+      db,
+      journal,
+      config,
+      identity,
+      runtimeMetadata,
+      existingTokens,
+      tokenStore,
+    });
 
     await journal.append("system", "gateway.process.start", {
       gatewayId: identity.gatewayId,
@@ -725,6 +922,11 @@ if (require.main === module) {
   void main().catch((error: unknown) => {
     const message = error instanceof Error ? error.stack || error.message : String(error);
     console.error(message);
-    process.exitCode = 1;
+    // GatewayPermanentStartupFailure carries its own exit code (see the doc
+    // comment on EXIT_PERMANENT_REGISTRATION_FAILURE above) so systemd's
+    // RestartPreventExitStatus can tell "will never succeed, stop" apart
+    // from every other startup failure here, which keeps the pre-existing
+    // exitCode=1 -> Restart=always retry behavior unchanged.
+    process.exitCode = error instanceof GatewayPermanentStartupFailure ? error.exitCode : 1;
   });
 }

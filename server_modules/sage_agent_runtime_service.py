@@ -3434,6 +3434,16 @@ def _normalize_direct_action_approvals(final_payload: dict[str, Any]) -> list[di
 # every no-reply turn with a non-empty blocked_tools now gets the honest
 # "the cause is not known from here" message, unconditionally, never a
 # diagnosis this module cannot actually back up.
+#
+# A same-day sibling fix (0cac7f2a7, merged as b54fe79b7) had moved this
+# classifier to a new leaf module, server_modules/sage_blocked_tools_
+# outcome.py, so sage_transparency_service.py's Work-tab/Inbox event
+# emission could reuse it instead of growing its own copy of the
+# allowlist. That module is GONE too now (see sage_transparency_service.py
+# — its blocked_tools handling collapsed to always emit "turn_failed",
+# the same reasoning as this file: the one condition the classifier
+# existed to detect, a real per-agent tool-policy code, can no longer
+# exist once there is no more per-agent Tools checklist to produce one).
 
 
 def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[str, Any]:
