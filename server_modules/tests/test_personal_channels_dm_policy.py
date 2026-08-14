@@ -387,296 +387,25 @@ class DmPolicyInboundIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.db_patcher.stop()
         self.tmpdir.cleanup()
 
-    async def test_stranger_message_is_blocked_and_never_dispatched(self) -> None:
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply"
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(side_effect=AssertionError("must not dispatch a reply to a blocked stranger")),
-                create=True,
-            ),
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
-                gateway_id="gw-dm-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "wa-stranger-1",
-                        "remote_jid": "919999999999@s.whatsapp.net",
-                        "sender_jid": "919999999999@s.whatsapp.net",
-                        "push_name": "Rando",
-                        "text": "hi, who is this?",
-                        "from_me": False,
-                    },
-                },
-            )
-        build_reply_mock.assert_not_called()
-        self.assertTrue(result.get("blocked"))
-        self.assertIsNone(result.get("outbound"))
-        self.assertEqual(result["policy"]["mode"], "owner_only")
-
-        # Still recorded ("observed") for context/audit, per the contract.
-        inbound_row = personal_channels_repository.record_inbound_message(
-            gateway_id="gw-dm-1",
-            channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-            external_message_id="wa-stranger-1",
-            remote_jid="919999999999@s.whatsapp.net",
-            sender_jid="919999999999@s.whatsapp.net",
-            push_name="Rando",
-            text="hi, who is this?",
-        )[0]
-        self.assertIsNotNone(inbound_row.get("reply_idempotency_key"))
-
-    async def test_self_chat_message_passes_the_gate(self) -> None:
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
-                return_value={"text": "On it.", "source": "sage"},
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "wa-out-1"}),
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
-                gateway_id="gw-dm-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "wa-owner-1",
-                        "remote_jid": "15550001111@s.whatsapp.net",
-                        "sender_jid": "15550001111@s.whatsapp.net",
-                        "push_name": "Me",
-                        "text": "remind me to call mom",
-                        "from_me": False,
-                        "is_self_chat": True,
-                    },
-                },
-            )
-        build_reply_mock.assert_called_once()
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
-        self.assertEqual(result["outbound"]["status"], "delivered")
-
-    async def test_telegram_self_chat_message_passes_the_gate_even_with_from_me_true(self) -> None:
-        """Mirrors test_self_chat_message_passes_the_gate above, for
-        Telegram — and, unlike that WhatsApp test (which uses from_me:
-        False), deliberately sets from_me: True here too, since a genuine
-        Telegram self-chat message is ALWAYS from_me (only the owner can
-        post into their own Saved Messages — see
-        telegram/message-mapper.ts's TelegramInboundMessage doc). This is
-        exactly the scenario _handle_telegram_gateway_channel_inbound's
-        `from_me and not is_self_chat` carve-out (mirroring the WhatsApp
-        handler) exists for: before that fix, `from_me: True` alone
-        short-circuited the handler with {"ignored": True, "reason":
-        "from_me"} regardless of is_self_chat — moot in production only
-        because the Gateway dropped self-chat messages before they ever
-        reached here at all (see runtime.ts's NewMessage subscription fix)."""
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "On it.", "source": "sage"},
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-1"}),
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-dm-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-owner-1",
-                        "remote_jid": "555444333",
-                        "sender_jid": "555444333",
-                        "push_name": "Me",
-                        "text": "remind me to call mom",
-                        "from_me": True,
-                        "is_self_chat": True,
-                    },
-                },
-            )
-        build_reply_mock.assert_called_once()
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
-        self.assertNotEqual(result.get("ignored"), True)
-        self.assertEqual(result["outbound"]["status"], "delivered")
-
-    async def test_telegram_ordinary_outgoing_message_is_still_ignored(self) -> None:
-        """Regression/distinguishing coverage for the SAME carve-out: an
-        ordinary outgoing message to someone else (from_me: True,
-        is_self_chat: False/absent — e.g. the owner replying to a contact
-        from their phone) must still be ignored exactly as before. Proves
-        the from_me-unless-self-chat carve-out doesn't accidentally let
-        every outgoing message through."""
-        with (
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply"
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(side_effect=AssertionError("must not dispatch for an ordinary outgoing echo")),
-                create=True,
-            ),
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-dm-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-outgoing-1",
-                        "remote_jid": "919999999999",
-                        "sender_jid": "919999999999",
-                        "push_name": "A Contact",
-                        "text": "see you at 7",
-                        "from_me": True,
-                        "is_self_chat": False,
-                    },
-                },
-            )
-        build_reply_mock.assert_not_called()
-        self.assertTrue(result.get("ignored"))
-        self.assertEqual(result.get("reason"), "from_me")
-
-    async def test_telegram_self_chat_message_refreshes_linked_user_id(self) -> None:
-        """The per-message state sync now mirrors the WhatsApp handler's
-        linked_jid self-heal exactly (see the sync_gateway_personal_channel_state
-        call in _handle_telegram_gateway_channel_inbound): now that Telegram's
-        message payload carries is_self_chat, a genuine self-chat message
-        supplies a NEW linked_user_id via _resolve_linked_identity_for_sync,
-        instead of Telegram's pre-fix behavior of only ever preserving
-        whatever was already persisted at login. Starts from a DIFFERENT
-        linked_user_id ("000") than the self-chat message's own sender_jid
-        ("555444333") to prove the sync actually updates it, not merely
-        leaves it alone."""
-        personal_channels_repository.upsert_telegram_state(
-            gateway_id="gw-dm-1",
-            tenant_id="tenant-1",
-            workspace_id="default",
-            user_id="",
-            channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-            agent_id="",
-            provider=personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-            status="connected",
-            linked_user_id="000",
-        )
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "On it.", "source": "sage"},
-            ),
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-2"}),
-                create=True,
-            ),
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-dm-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-owner-2",
-                        "remote_jid": "555444333",
-                        "sender_jid": "555444333",
-                        "push_name": "Me",
-                        "text": "hi self",
-                        "from_me": True,
-                        "is_self_chat": True,
-                    },
-                },
-            )
-        state = personal_channels_repository.get_telegram_state(
-            "gw-dm-1", channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY, agent_id="",
-        )
-        self.assertEqual(state["linked_user_id"], "555444333")
-
-    async def test_stranger_message_does_not_clobber_linked_jid(self) -> None:
-        """Regression test for the pre-existing clobber bug this build also
-        fixed: the per-message state sync used to pass message.sender_jid
-        straight through as `linked_jid` — for a plain 1:1 DM that equals
-        remote_jid, i.e. the CONTACT's own jid, silently overwriting the
-        real owner identity established at login on every single inbound
-        message. This would have failed before the fix (state.linked_jid
-        would end up equal to the stranger's own jid)."""
-        personal_channels_repository.upsert_whatsapp_state(
-            gateway_id="gw-dm-1",
-            tenant_id="tenant-1",
-            workspace_id="default",
-            user_id="",
-            channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-            agent_id="",
-            provider=personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
-            status="connected",
-            linked_jid="15550001111@s.whatsapp.net",
-        )
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(side_effect=AssertionError("must not dispatch")),
-                create=True,
-            ),
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
-                gateway_id="gw-dm-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "wa-stranger-2",
-                        "remote_jid": "919999999999@s.whatsapp.net",
-                        "sender_jid": "919999999999@s.whatsapp.net",
-                        "push_name": "Rando",
-                        "text": "hello?",
-                        "from_me": False,
-                    },
-                },
-            )
-        state = personal_channels_repository.get_whatsapp_state(
-            "gw-dm-1", channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY, agent_id="",
-        )
-        self.assertEqual(state["linked_jid"], "15550001111@s.whatsapp.net")
+    # test_stranger_message_is_blocked_and_never_dispatched,
+    # test_self_chat_message_passes_the_gate,
+    # test_telegram_self_chat_message_passes_the_gate_even_with_from_me_true,
+    # test_telegram_ordinary_outgoing_message_is_still_ignored,
+    # test_telegram_self_chat_message_refreshes_linked_user_id, and
+    # test_stranger_message_does_not_clobber_linked_jid DELETED 2026-08-14
+    # (full OpenClaw channel cutover): they drove
+    # _handle_whatsapp_gateway_channel_inbound / _handle_telegram_gateway_
+    # channel_inbound directly, both deleted along with the Baileys/gramjs
+    # runtimes they served. The from_me/is_self_chat carve-out and linked_
+    # jid/linked_user_id identity sync these tests protected have NO
+    # OpenClaw equivalent — normalize_openclaw_gate_facts sets
+    # is_self_chat=False unconditionally for every OpenClaw-transported
+    # message, because OpenClaw carries no such fact at its inbound tap (see
+    # that function's own docstring). This is a genuine, scoped capability
+    # loss on the cut-over channels, not a test-coverage gap papered over —
+    # see the cutover's own report for the full accounting. The remaining
+    # local-bridge tests below (test_local_bridge_*) cover the identical
+    # from_me/self-chat carve-out on the surviving generic handler.
 
     async def test_local_bridge_stranger_is_blocked_by_default(self) -> None:
         """Local-bridge channels (Signal/iMessage/WeChat) don't yet resolve
@@ -707,8 +436,8 @@ class DmPolicyInboundIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "from_me": False,
                     },
                 },
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
+                channel_key="openclaw_signal",
+                provider="openclaw",
                 label="Signal",
             )
         self.assertTrue(result.get("blocked"))
@@ -807,8 +536,8 @@ class DmPolicyInboundIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "is_self_chat": True,
                     },
                 },
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
+                channel_key="openclaw_signal",
+                provider="openclaw",
                 label="Signal",
             )
         build_reply_mock.assert_called_once()
@@ -847,8 +576,8 @@ class DmPolicyInboundIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "is_self_chat": False,
                     },
                 },
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
+                channel_key="openclaw_signal",
+                provider="openclaw",
                 label="Signal",
             )
         build_reply_mock.assert_not_called()

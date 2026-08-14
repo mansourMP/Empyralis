@@ -25,11 +25,23 @@ SPECIALIST_ROLE = "specialist"
 VALID_ROLES = {OPERATOR_ROLE, SPECIALIST_ROLE}
 FLEET_TOOL_PREFIX = "fleet_"
 
-# Allowed patch keys for fleet_configure_agent
+# Allowed patch keys for fleet_configure_agent.
+#
+# 2026-08-14 (CLAUDE.md, founder decision): "enabled_tools" and
+# "tool_toggles" are DELIBERATELY absent — there is no more per-agent
+# Tools enable/disable checklist. An agent gets whatever the platform
+# provides; a specialist's real toolset comes from
+# sage_agent_runtime_service._resolve_specialist_toolset (core tools +
+# _UNGATED_JUDGMENT_TOOL_NAMES, both unconditional, + actual connector
+# bindings), never a stored per-tool switch. "connectors" stays — it is a
+# genuine "did the owner connect a real third-party account" gate, not a
+# checklist. "mandate" also stays — WHO (owner vs. an external audience) may
+# trigger an already-available tool is a security boundary this change does
+# not touch.
 _ALLOWED_CONFIGURE_KEYS = {
-    "enabled_tools", "connectors", "channel_bindings",
+    "connectors", "channel_bindings",
     "subagents_enabled", "hardware_access", "model_config", "display_name",
-    "purpose_preset", "instructions", "context_policy", "tool_toggles",
+    "purpose_preset", "instructions", "context_policy",
     "preferred_gateway_id", "telegram_first_contact_reply", "mandate",
     "capability_config", "audience", "skills",
 }
@@ -1146,31 +1158,24 @@ async def fleet_get_agent_tools(
     tenant_id: str = "default",
     agent_id: str,
 ) -> Dict[str, Any]:
-    """Return the FULL toggleable tool catalog for a specific agent, with each
-    tool's real enabled state.
+    """Return this agent's Customer Access catalog.
 
-    "Real" here means read from the install's `tool_toggles` column — the
-    field _resolve_specialist_toolset actually enforces at runtime (see
-    sage_agent_runtime_service.py). metadata.enabled_tools is a separate,
-    display-only list nothing in the tool-dispatch path consults; toggling
-    it would be a fake control, so this function ignores it as a source of
-    truth (fleet_create_agent still seeds it, kept only for back-compat
-    display in older callers).
-
-    Core (always-on) tools split two ways. Most of them — Web Search,
-    Memory read/write/update — have a real skill_registry-backed toggle and
-    already have their own entry in `tools` above (enforced by
-    _core_tool_allowed, not bypassed); listing them again below would claim
-    they ignore a toggle that, since the Truth Map fix, they don't. Only the
-    remainder — pure plumbing with no toggle anywhere (task_complete,
-    query_tool_registry) — is returned separately under "core_tools" for
-    read-only display, because there's genuinely nothing to turn off.
+    2026-08-14 (CLAUDE.md, founder decision): there is no more per-tool
+    enable/disable checklist — every tool listed here is already available
+    to the agent itself (core tools, _UNGATED_JUDGMENT_TOOL_NAMES, and
+    anything backed by a real connector binding or resolved capability; see
+    sage_agent_runtime_service._resolve_specialist_toolset). What remains
+    genuinely configurable per tool is WHO may trigger it: an external
+    audience (a customer messaging this agent over a channel) sees only
+    audience_safe tools plus whatever the owner has explicitly granted via
+    mandate.audience_tools — the owner always has full access regardless.
+    That WHO boundary (Authority Mandate, Part 10) is a preserved security
+    control, distinct from the removed WHAT-is-switchable checklist.
     """
     from server_modules import agent_registry_repository as repo
     from server_modules import authority_mandate_service
     from server_modules import skill_registry
     from server_modules import skills_service
-    from server_modules.sage_agent_runtime_service import _core_direct_tool_names
 
     try:
         bundle = await repo.get_workspace_agent_install_bundle(
@@ -1180,19 +1185,10 @@ async def fleet_get_agent_tools(
         bundle = None
 
     if not bundle:
-        return {"ok": True, "tools": [], "core_tools": [], "agent_id": agent_id}
+        return {"ok": True, "tools": [], "agent_id": agent_id}
 
     bundle_dict = dict(bundle)
     is_master = resolve_agent_role(bundle_dict) == OPERATOR_ROLE
-    toggles = bundle_dict.get("tool_toggles")
-    if isinstance(toggles, str):
-        import json as _json
-        try:
-            toggles = _json.loads(toggles)
-        except Exception:
-            toggles = {}
-    if not isinstance(toggles, dict):
-        toggles = {}
     meta = bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {}
     mandate_audience_tools = (meta.get("mandate") or {}).get("audience_tools") or []
 
@@ -1200,20 +1196,16 @@ async def fleet_get_agent_tools(
     tools: List[Dict[str, Any]] = []
     for d in definitions:
         # `id` is the canonical enforcement tool name (not skill_registry's
-        # own hyphenated id) so this list's toggle state — and the PATCH the
+        # own hyphenated id) so this list — and the mandate PATCH the
         # frontend sends back using this same `id` — matches what
         # _specialist_tool_allowed() actually checks. See
         # skill_registry.enforcement_tool_name.
         enforcement_id = skill_registry.enforcement_tool_name(d.id)
         descriptor = skills_service.tool_descriptor_for_name(enforcement_id)
         # Capability-gated tools (generate_image today — see
-        # agent_capability_service.py) are decided SOLELY by whether their
-        # capability resolved a provider for this agent
-        # (_specialist_tool_allowed bypasses tool_toggles for these
-        # entirely) — listing one here with a toggle that has zero runtime
-        # effect would be exactly the lying-toggle facade the comment below
-        # already guards against for core tools. They live on the
-        # Capabilities tab instead.
+        # agent_capability_service.py) live on the Capabilities tab, not
+        # here — a resolved provider IS the enable for those, with no
+        # per-tool WHO-may-trigger distinction of its own yet.
         capability_id = str(getattr(descriptor, "capability_id", "") or "").strip().lower() if descriptor is not None else ""
         if capability_id:
             from server_modules import agent_capability_service as _cap_svc
@@ -1225,37 +1217,25 @@ async def fleet_get_agent_tools(
             "label": d.label,
             "description": d.description or "",
             "action_class": d.action_class,
-            # Sage (operator) isn't gated by tool_toggles at all — every tool
-            # is already available to it, so the toggle would be misleading.
-            "enabled": True if is_master else bool(toggles.get(enforcement_id, False)),
             # Customer access (Authority Mandate, Part 10): audience_safe is
             # the platform's own manifest default (informational, can't be
             # toggled off); mandate_granted is this owner's explicit
-            # audience_tools grant (see the "mandate" patch branch below —
-            # same enforcement_id, checked case-insensitively).
+            # audience_tools grant (see the "mandate" patch branch in
+            # fleet_configure_agent — same enforcement_id, checked
+            # case-insensitively).
             "audience_safe": bool(descriptor.audience_safe) if descriptor is not None else False,
             "mandate_granted": authority_mandate_service.is_audience_tool_allowed(
                 mandate_audience_tools, enforcement_id
             ),
             # Truth Map B1: email-access/calendar-access/task-runner/crm-notes
             # are execution_mode="manual" with no direct executor — the real
-            # executor only exists behind a bound connector, independent of
-            # this toggle. Flipping it on does nothing by itself, so the
-            # Tools tab needs the real requirement, not a switch that looks
-            # functional. See _CONNECTOR_REQUIRED_TOOLS below.
+            # executor only exists behind a bound Google Workspace connector.
+            # Informational: granting customer access to one of these does
+            # nothing until that connector is actually connected.
             "requires_connector": _CONNECTOR_REQUIRED_TOOLS.get(enforcement_id),
         })
 
-    # A core tool with its own entry above (Web Search, Memory read/write/
-    # update — anything skill_registry maps onto a real enforcement id) is
-    # now toggle-respecting at runtime (_core_tool_allowed), so listing it
-    # again here as "always on regardless of the toggles above" would be
-    # exactly the lying-toggle facade this was meant to fix. Only tools with
-    # no real toggle at all (task_complete, query_tool_registry, and any
-    # core tool skill_registry doesn't map) belong in this read-only bucket.
-    _toggleable_ids = {t["id"] for t in tools}
-    core_tools = sorted(name for name in _core_direct_tool_names() if name not in _toggleable_ids)
-    return {"ok": True, "tools": tools, "core_tools": core_tools, "agent_id": agent_id, "is_master": is_master}
+    return {"ok": True, "tools": tools, "agent_id": agent_id, "is_master": is_master}
 
 
 # ── Capabilities (image/video generation, TTS/STT) ─────────────────────────
@@ -1690,8 +1670,10 @@ async def fleet_configure_agent(
         bundle_dict = dict(bundle) if isinstance(bundle, dict) else {}
         meta = dict(bundle_dict.get("install_metadata") or bundle_dict.get("metadata") or {})
 
-        # Apply patch to metadata
-        for k in ("enabled_tools", "connectors", "channel_bindings"):
+        # Apply patch to metadata. ("enabled_tools" deliberately absent —
+        # see _ALLOWED_CONFIGURE_KEYS' own comment; it can never appear in
+        # clean_patch.)
+        for k in ("connectors", "channel_bindings"):
             if k in clean_patch:
                 meta[k] = clean_patch[k]
         if "subagents_enabled" in clean_patch:
@@ -1743,6 +1725,7 @@ async def fleet_configure_agent(
             _next_label = requested_label
         if "telegram_first_contact_reply" in clean_patch:
             meta["telegram_first_contact_reply"] = bool(clean_patch["telegram_first_contact_reply"])
+        _prior_preferred_gateway_id = str(meta.get("preferred_gateway_id") or "").strip()
         if "preferred_gateway_id" in clean_patch:
             value = clean_patch["preferred_gateway_id"]
             if value is not None and not isinstance(value, str):
@@ -1875,27 +1858,21 @@ async def fleet_configure_agent(
             next_capability_config = dict(meta.get("capability_config") or {})
             next_capability_config.update(clean_capability_patch)
             meta["capability_config"] = next_capability_config
-        _next_tool_toggles: Optional[Dict[str, bool]] = None
-        if "tool_toggles" in clean_patch:
-            raw_toggles = clean_patch["tool_toggles"]
-            if not isinstance(raw_toggles, dict):
-                return {"ok": False, "error": "tool_toggles must be an object of {tool_id: true|false}."}
-            _next_tool_toggles = {
-                str(tool_id).strip(): bool(enabled_flag)
-                for tool_id, enabled_flag in raw_toggles.items()
-                if str(tool_id).strip()
-            }
-
-        # Persist via update. tool_toggles / hardware_access are real columns —
-        # update_workspace_agent_install writes them directly (tool_toggles is
-        # merged with the existing dict there), everything else lives in metadata.
+        # 2026-08-14: "tool_toggles" is deliberately not a patchable field
+        # any more — see _ALLOWED_CONFIGURE_KEYS' own comment. Always pass
+        # None through (no change to the stored column) rather than
+        # resurrecting a write path for it.
+        #
+        # Persist via update. hardware_access is a real column —
+        # update_workspace_agent_install writes it directly — everything
+        # else lives in metadata.
         await repo.update_workspace_agent_install(
             agent_id,
             tenant_id=tenant_id,
             workspace_id=workspace_id,
             label=_next_label,
             metadata=meta,
-            tool_toggles=_next_tool_toggles,
+            tool_toggles=None,
             hardware_access=_next_hardware_access,
         )
     except Exception as exc:
@@ -1929,6 +1906,38 @@ async def fleet_configure_agent(
             )
             if _recommendation:
                 response["recommended_model_config"] = _recommendation
+        # Execution-locality corollary, founder 2026-08-14: "If X agent is
+        # connected to Z hardware, gateway and channel must run there as
+        # well." A MOVE (a real prior placement, now changed to something
+        # else — including unbinding to "") must not silently leave a
+        # channel still answering from the box the agent no longer belongs
+        # to. Best-effort and reported, never allowed to fail this save —
+        # the metadata write above already committed by the time this runs.
+        if _prior_preferred_gateway_id and _prior_preferred_gateway_id != _bound_gateway_id:
+            try:
+                from server_modules import personal_channels_service as _pcs
+
+                response["hardware_relocated"] = await _pcs.handle_agent_hardware_relocated(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    old_gateway_id=_prior_preferred_gateway_id,
+                    new_gateway_id=_bound_gateway_id,
+                    actor_id=actor_id,
+                )
+            except Exception as exc:
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "fleet_configure_agent: hardware-relocation cleanup failed for agent_id=%s "
+                    "old_gateway_id=%s", agent_id, _prior_preferred_gateway_id, exc_info=True,
+                )
+                response["hardware_relocated"] = {
+                    "old_gateway_id": _prior_preferred_gateway_id,
+                    "new_gateway_id": _bound_gateway_id or None,
+                    "released_channels": [],
+                    "notes": [f"Could not clean up channels on the previous computer right now ({exc})."],
+                }
     return response
 
 

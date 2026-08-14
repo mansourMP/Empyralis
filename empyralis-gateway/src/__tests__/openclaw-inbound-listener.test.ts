@@ -296,11 +296,27 @@ test("openclaw capabilities are advertised only when the bridge is configured", 
   setOpenClawTransportEnabled(false);
 });
 
-test("openclaw transport never claims a channel Empyralis already runs first-party", () => {
+test("openclaw transport claims exactly the platforms cut over 2026-08-14, and no others still owned first-party", () => {
   setOpenClawTransportEnabled(true);
   const keys = openClawTransportChannelKeys();
-  for (const firstParty of ["openclaw_telegram", "openclaw_whatsapp", "openclaw_signal", "openclaw_imessage"]) {
-    assert.equal(keys.includes(firstParty), false, `${firstParty} must wait for its step-6 cut-over`);
+  // Cut over: their first-party implementation is deleted, OpenClaw is now
+  // the live route for every one of these.
+  for (const cutOver of [
+    "openclaw_telegram",
+    "openclaw_whatsapp",
+    "openclaw_signal",
+    "openclaw_imessage",
+    "openclaw_openclaw-weixin",
+  ]) {
+    assert.equal(keys.includes(cutOver), true, `${cutOver} should be claimed post-cutover`);
+  }
+  // NOT cut over: discord/slack/sms are Studio business-connector channels
+  // (cloud-only, no Agent Computer today) — see
+  // openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS's own comment for
+  // why forcing them onto a hardware-bound transport would be a regression,
+  // not an improvement.
+  for (const stillFirstParty of ["openclaw_discord", "openclaw_slack", "openclaw_sms"]) {
+    assert.equal(keys.includes(stillFirstParty), false, `${stillFirstParty} stays first-party`);
   }
   setOpenClawTransportEnabled(false);
 });

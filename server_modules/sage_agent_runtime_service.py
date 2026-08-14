@@ -49,7 +49,7 @@ from server_modules.conversation_memory_facade_service import (
     ConversationMemoryPersistRequest,
     persist_interaction,
 )
-from server_modules.platform_event import GENERIC_ERROR, TOOLS_LIMITED_NO_REPLY, SAGE_TURN_NO_REPLY_UNKNOWN
+from server_modules.platform_event import GENERIC_ERROR, SAGE_TURN_NO_REPLY_UNKNOWN
 from server_modules.conversation_memory_policy import (
     DIRECT_CHAT_PROFILE,
     MemoryPolicyProfile,
@@ -2631,23 +2631,60 @@ def _core_direct_tool_names() -> set[str]:
         return set()
 
 
+# 2026-08-14 "no per-agent Tools checklist" (CLAUDE.md, founder decision):
+# the owner-facing enable/disable switch for these five is gone — they have
+# no third-party account or credential behind them at all (a terminal, a
+# browser runtime, the local filesystem, a memory note, the workspace's own
+# inventory table), so there is nothing for an owner to "connect" and
+# nothing left to gate. Same reasoning Claude Code uses for its own
+# terminal: "everything is reasonable by the agent itself, agent decides,
+# agent uses." Unconditionally in every specialist's toolset, same as
+# _core_direct_tool_names() — just Tier-2 (loaded on demand via
+# query_tool_registry) rather than injected every turn. Verified against
+# runtime_config.CONNECTOR_CATALOG and CHANNEL_REGISTRY: none of these five
+# prefixes/ids appear in either, so nothing genuinely bindable is being
+# bypassed here — contrast with browser_bot-, telegram_bot-, discord_bot-,
+# slack-prefixed tools, which stay gated on a real agent_connector_bindings
+# row via the connector-prefix check below, untouched by this change.
+_UNGATED_JUDGMENT_TOOL_NAMES: frozenset[str] = frozenset({
+    "browser__navigate",   # skill_registry.py "browser"
+    "shell__exec",         # skill_registry.py "code-runner"
+    "file__read",          # skill_registry.py "file-manager"
+    "memory_update",       # skill_registry.py "memory-manager"
+    "inventory-tool",      # skill_registry.py "inventory-tool"
+})
+
+
 async def _resolve_specialist_toolset(
     *, workspace_id: str, tenant_id: str, agent_install_id: str
 ) -> dict[str, Any] | None:
     """Return the tool whitelist for a specialist install, or None for the
     master/Sage path (no per-install restriction).
 
-    Sources of truth are the Phase 2 binding tables: enabled connectors from
-    ``agent_connector_bindings`` and explicit tool toggles from the install.
-    Fail-safe: on any lookup error the specialist is restricted to CORE tools
-    only (deny-more, never allow-more) so isolation holds even when the
-    control plane is briefly unavailable.
+    2026-08-14: there is no more per-tool enable/disable checklist. A
+    specialist's toolset is core tools (always on) + _UNGATED_JUDGMENT_TOOL_
+    NAMES (always on, no real integration behind them) + whatever its Phase 2
+    connector bindings (``agent_connector_bindings``) actually back, plus the
+    four google_workspace-gated tools (email/calendar/task-runner/crm) when
+    that connector is bound. ``tool_toggles`` on the install is still read
+    below into ``raw_tool_toggles`` for display/back-compat only — nothing
+    in this function or its callers (_specialist_tool_allowed,
+    _filter_registry_for_specialist, the specialist_guard execution-time
+    check) treats it as a gate anymore.
+
+    Fail-safe: on any lookup error the specialist is restricted to CORE
+    tools + the always-on judgment tools above (deny-more, never allow-more
+    for anything that depends on external data — a real connector binding,
+    a capability provider, project membership) so isolation holds even when
+    the control plane is briefly unavailable.
     """
     aid = str(agent_install_id or "").strip()
     if not aid:
         return None
     connectors: set[str] = set()
-    tools: set[str] = set()
+    # Unconditional, independent of every lookup below — see
+    # _UNGATED_JUDGMENT_TOOL_NAMES' own comment. Never subtracted from.
+    tools: set[str] = set(_UNGATED_JUDGMENT_TOOL_NAMES)
     raw_toggles: dict[str, bool] = {}
     mandate_audience_tools: list[str] = []
     capability_providers: frozenset[str] = frozenset()
@@ -2709,8 +2746,29 @@ async def _resolve_specialist_toolset(
                 if not clean_name:
                     continue
                 raw_toggles[clean_name] = bool(enabled)
-                if enabled:
+                # 2026-08-14: no per-agent Tools checklist — stored data is
+                # read for back-compat display only, never as a gate. Never
+                # let an explicit True here stand in for the real
+                # prerequisite on a tool that has one (a
+                # fleet_tools._CONNECTOR_REQUIRED_TOOLS id needs an actual
+                # google_workspace binding below, not a toggle) — that would
+                # just be the fake-control problem this whole change exists
+                # to remove, wearing legacy data as a disguise. Everything
+                # else with no real prerequisite is already unconditional
+                # via _UNGATED_JUDGMENT_TOOL_NAMES above, so this only still
+                # matters for a genuinely custom/unrecognized tool name.
+                if enabled and clean_name not in _fleet_tools_subagents._CONNECTOR_REQUIRED_TOOLS:
                     tools.add(clean_name)
+        # 2026-08-14: the four tools whose real executor lives behind
+        # Google Workspace (fleet_tools._CONNECTOR_REQUIRED_TOOLS) are
+        # granted the same way any other connector-prefixed tool is — by an
+        # actual binding, never a toggle. These four have no "__" in their
+        # enforcement id, so the generic connector-prefix check below
+        # (`name.split("__", 1)[0]`) can't reach them; granted explicitly
+        # here instead, using the SAME connectors set the prefix check uses.
+        for _req_id, _req_connector in _fleet_tools_subagents._CONNECTOR_REQUIRED_TOOLS.items():
+            if _req_connector in connectors:
+                tools.add(_req_id)
         # The owner-declared mandate (fleet_tools "mandate" patch key) — read
         # from the SAME bundle fetch so this costs no extra round-trip.
         # Threaded onto session_ctx below so the mandate gate can consult it
@@ -2795,21 +2853,19 @@ async def _resolve_specialist_toolset(
     }
 
 
-# Pure plumbing, never shown as a toggle anywhere in the Tools tab — there is
-# nothing for an owner to turn off. Every other "core" tool (memory_write,
-# memory_read, memory_update, web__search) DOES have real, owner-facing
-# toggle state, so the toggle must be authoritative for those instead of a
-# blanket always-on bypass (a disabled Web Search toggle must actually stop
-# Web Search, not just look disabled).
+# Historical: named the tools that had no per-agent enable/disable toggle at
+# all, back when the rest of "core" did. 2026-08-14 (CLAUDE.md, founder
+# decision) removed that toggle entirely — every core tool is unconditional
+# now (see _core_tool_allowed) — so this set no longer distinguishes
+# anything at runtime. Left named rather than deleted in case a future,
+# NARROW, explicitly-enumerated guardrail (CLAUDE.md's own carve-out — never
+# a blanket checklist) needs exactly this "never gated" list again.
 _ALWAYS_MANDATORY_TOOL_NAMES = frozenset({"task_complete", "query_tool_registry", "update_plan"})
 
-# web__fetch and hardware__action have no toggle of their own anywhere in the
-# UI — "Web Search" is the only web-lookup control an owner ever sees. Live
-# verification of this exact fix showed the gap directly: disabling Web
-# Search made the model call web__fetch instead and still return real web
-# content, unblocked. So web__fetch follows web__search's toggle instead of
-# being unconditionally core — the owner's one visible switch actually
-# covers the capability it claims to.
+# Historical: web__fetch used to piggyback on web__search's toggle so a
+# disabled Web Search switch couldn't be routed around. 2026-08-14: both are
+# unconditional now, so this mapping is unused (kept for the same reason as
+# _ALWAYS_MANDATORY_TOOL_NAMES above).
 _CORE_TOOL_FOLLOWS_TOGGLE = {"web__fetch": "web__search"}
 
 # fix/agent-task-tools-on-sdk-engine: project_task__* (skills_service.py's
@@ -2858,17 +2914,16 @@ _PROJECT_SCOPED_CONNECTOR_IDS = frozenset({_PROJECT_TASK_CONNECTOR_ID, _DOCUMENT
 
 
 def _core_tool_allowed(name: str, toolset: dict[str, Any]) -> bool:
-    """Is this core tool actually allowed, honoring an explicit owner toggle?
+    """Every core tool is available to every agent, unconditionally.
 
-    An explicit False is authoritative (the fix). An absent entry — the tool
-    was never touched on the Tools tab — defaults to allowed, unchanged from
-    today's behavior, so agents nobody has configured don't regress."""
-    if name in _ALWAYS_MANDATORY_TOOL_NAMES:
-        return True
-    lookup_name = _CORE_TOOL_FOLLOWS_TOGGLE.get(name, name)
-    raw_toggles = toolset.get("raw_tool_toggles", {})
-    if isinstance(raw_toggles, dict) and lookup_name in raw_toggles:
-        return bool(raw_toggles[lookup_name])
+    2026-08-14 (CLAUDE.md, founder decision): the per-agent Tools tab that
+    let an owner explicitly disable a core tool (Web Search, Memory
+    read/write/update) is gone — "the agent is going to use whatever is
+    provided to it... agent decides, agent uses," the same reasoning Claude
+    Code uses for its own terminal. `toolset` stays a parameter (not
+    inlined at the one call site) so a future NARROW, explicitly-enumerated
+    guardrail — CLAUDE.md's own carve-out, never a blanket checklist — has
+    one place to land instead of a new call site."""
     return True
 
 
@@ -2894,15 +2949,22 @@ def _specialist_tool_allowed(tool_name: str, toolset: dict[str, Any]) -> bool:
     Capability-gated tools (generate_image today) are decided SOLELY by
     whether that capability resolved a working provider for this agent
     (toolset["capability_providers"], built in _resolve_specialist_toolset) —
-    no tool_toggles/connector check applies to them, matching "a resolved
-    provider IS the enable, no separate toggle" (see agent_capability_service.py).
+    a resolved provider IS the enable, no separate toggle (see
+    agent_capability_service.py).
 
-    Everything else: allowed = a core tool whose toggle (if any) isn't
-    explicitly off, an explicitly-toggled tool, or a connector tool
-    (``{connector}__{action}``) whose connector is bound — EXCEPT the
-    project-scoped connectors (see _PROJECT_SCOPED_CONNECTOR_IDS above:
-    project_task__* and document__*), which are granted by project
-    membership instead of a connector binding.
+    Everything else: allowed = a core tool (unconditional, 2026-08-14 — see
+    _core_tool_allowed), one of _UNGATED_JUDGMENT_TOOL_NAMES or a
+    google_workspace-gated tool with that connector bound (both folded into
+    toolset["tools"] by _resolve_specialist_toolset, so this function does
+    not special-case them), or a connector tool (``{connector}__{action}``)
+    whose connector is bound — EXCEPT the project-scoped connectors (see
+    _PROJECT_SCOPED_CONNECTOR_IDS above: project_task__* and document__*),
+    which are granted by project membership instead of a connector binding.
+    There is no more per-tool enable/disable checklist (CLAUDE.md,
+    2026-08-14, founder decision) — everything above is either
+    unconditional or gated on a REAL prerequisite (an actual connector
+    binding, a resolved capability provider, project membership), never an
+    owner-facing switch.
     """
     name = str(tool_name or "").strip()
     if not name:
@@ -3363,76 +3425,25 @@ def _normalize_direct_action_approvals(final_payload: dict[str, Any]) -> list[di
     return normalized
 
 
-# blocked_tools is populated by SEVERAL structurally different producers,
-# and only one shape is a genuine tool-capability policy decision. Traced
-# end to end 2026-08-14 (a founder-reported turn on the DeepSeek/Flash
-# platform-credits tier returned no reply and was told "This agent doesn't
-# have every tool turned on"):
+# 2026-08-14 (CLAUDE.md, founder decision): "no per-agent Tools checklist"
+# removed the only thing that could ever make a blocked_tools entry mean
+# "an owner switched this off" — so there is no more genuine
+# tool-capability POLICY denial for a no-reply turn to name. See
+# platform_event.SAGE_TURN_NO_REPLY_UNKNOWN's own comment for the removed
+# _classify_sage_no_reply_outcome / TOOLS_LIMITED_NO_REPLY this replaces:
+# every no-reply turn with a non-empty blocked_tools now gets the honest
+# "the cause is not known from here" message, unconditionally, never a
+# diagnosis this module cannot actually back up.
 #
-#   claude_agent_sdk_bridge.py (the production-default engine, MAN-310 —
-#   provider-general, DeepSeek's Anthropic-compatible endpoint included):
-#     - AssistantMessage.error (auth/billing/rate-limit/server/unknown) is
-#       ALWAYS folded to the code "provider_generation_failed"
-#       (claude_agent_sdk_bridge._PROVIDER_GENERATION_FAILED_CODE).
-#     - ResultMessage.is_error passes the raw SDK subtype through verbatim
-#       (e.g. "error_max_turns", "error_during_execution") when it names a
-#       real failure, and falls back to "provider_generation_failed" when
-#       the subtype is "success"/"" (an API failure that still reports
-#       subtype="success" per the SDK's own api_error_status docstring).
-#     - "foreign_tool_call" / "orphan_tool_result"
-#       (claude_agent_sdk_bridge._FOREIGN_TOOL_TRACE_CODE /
-#       _ORPHAN_TOOL_RESULT_TRACE_CODE): SDK-bridge bookkeeping anomalies (a
-#       call to an unregistered tool, an unmatched tool result) — not a
-#       policy decision either.
-#   This module's own _collect_sage_operator_loop_v3_events "trace.failed"
-#   branch falls back to "operator_loop_failed" for a code-less trace.failed
-#   event, and its final_error catch-all folds ANY leftover
-#   final_payload["error"] in here too.
-#
-# None of the above is "a tool was disabled by this agent's own capability
-# policy". A genuine tool-capability denial
-# (direct_tool_execution_service.py's broker-guard / specialist-not-bound
-# checks) raises DURING tool execution and lands in `tool_calls` as a failed
-# entry instead — never in `blocked_tools` today. So this allowlist is
-# EMPTY on purpose: nothing currently emits a blocked_tools entry that is
-# positively a policy decision. If a future producer starts recording one,
-# it should get its own recognizable code and be added HERE explicitly —
-# the honest default for anything not in this allowlist is "we don't know
-# why", never "tools are the cause".
-_SAGE_BLOCKED_TOOLS_POLICY_CODES: frozenset[str] = frozenset()
-
-
-def _classify_sage_no_reply_outcome(blocked_tools: list[dict[str, Any]]) -> str:
-    """Classify a no-natural-language-reply turn's `blocked_tools` list.
-
-    Returns "policy_blocked" only when blocked_tools is non-empty AND every
-    readable entry code is in the (currently empty) allowlist above — the
-    honest-by-default direction: one entry this function cannot positively
-    identify as a tool-capability decision is enough to withhold the
-    tools-settings claim for the WHOLE turn. Returns "turn_failure" for any
-    other non-empty blocked_tools (including a provider/execution failure,
-    an SDK bookkeeping anomaly, or a code this function has never seen), and
-    "none" when blocked_tools is empty.
-
-    See TOOLS_LIMITED_NO_REPLY / SAGE_TURN_NO_REPLY_UNKNOWN in
-    platform_event.py for the two outcomes this decides between.
-    """
-    if not blocked_tools:
-        return "none"
-    saw_policy_code = False
-    for entry in blocked_tools:
-        if not isinstance(entry, dict):
-            continue
-        code = _coerce_text(entry.get("name")).strip().lower()
-        if code and code in _SAGE_BLOCKED_TOOLS_POLICY_CODES:
-            saw_policy_code = True
-            continue
-        # Anything not in the explicit policy allowlist — a known failure
-        # code, an unrecognized code, or an entry with no code at all —
-        # means this turn's blocked_tools cannot be trusted as "tools are
-        # the cause". One such entry is enough to classify the whole turn.
-        return "turn_failure"
-    return "policy_blocked" if saw_policy_code else "turn_failure"
+# A same-day sibling fix (0cac7f2a7, merged as b54fe79b7) had moved this
+# classifier to a new leaf module, server_modules/sage_blocked_tools_
+# outcome.py, so sage_transparency_service.py's Work-tab/Inbox event
+# emission could reuse it instead of growing its own copy of the
+# allowlist. That module is GONE too now (see sage_transparency_service.py
+# — its blocked_tools handling collapsed to always emit "turn_failed",
+# the same reasoning as this file: the one condition the classifier
+# existed to detect, a real per-agent tool-policy code, can no longer
+# exist once there is no more per-agent Tools checklist to produce one).
 
 
 def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4267,23 +4278,17 @@ async def _run_sage_action_loop_v3(
     )
     if not reply and not has_any_tool_activity:
         return None
-    # 2026-07-09 first-run integrity fix, corrected 2026-08-14: a turn that
-    # ends with nothing substantive to say (empty, or the bare catch-all)
-    # while blocked_tools is non-empty must say SOMETHING honest — but
-    # blocked_tools is not always "a tool got blocked by policy". See
-    # _classify_sage_no_reply_outcome's own comment: on the production-
-    # default engine it is also where provider/execution failures and SDK
-    # bookkeeping anomalies land, and the original fix here treated all of
-    # those as proof the cause was disabled tools. Only fires on the true
-    # silence/generic case (not on a specific, already-honest error from
-    # classify_error) so it never overrides a more precise message with a
-    # vaguer one.
-    if not reply or reply.strip() == GENERIC_ERROR.channel_text:
-        _no_reply_outcome = _classify_sage_no_reply_outcome(collected.get("blocked_tools") or [])
-        if _no_reply_outcome == "policy_blocked":
-            reply = TOOLS_LIMITED_NO_REPLY.channel_text
-        elif _no_reply_outcome == "turn_failure":
-            reply = SAGE_TURN_NO_REPLY_UNKNOWN.channel_text
+    # 2026-07-09 first-run integrity fix, corrected 2026-08-14 (twice: first
+    # to stop guessing "disabled tools" for a provider/execution failure,
+    # then again the same day to remove the "disabled tools" diagnosis
+    # entirely — there is no more per-agent Tools checklist for it to name).
+    # A turn that ends with nothing substantive to say (empty, or the bare
+    # catch-all) while blocked_tools is non-empty must say SOMETHING honest.
+    # Only fires on the true silence/generic case (not on a specific,
+    # already-honest error from classify_error) so it never overrides a
+    # more precise message with a vaguer one.
+    if (not reply or reply.strip() == GENERIC_ERROR.channel_text) and collected.get("blocked_tools"):
+        reply = SAGE_TURN_NO_REPLY_UNKNOWN.channel_text
     return {
         "message": reply,
         "error": _coerce_text(final_payload.get("error")) or None,

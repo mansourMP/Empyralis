@@ -98,9 +98,13 @@ class OpenClawOutboundRouteSurfaceTests(unittest.TestCase):
             spec = routes_personal_channels.LOCAL_BRIDGE_CHANNELS.get(channel_key)
             self.assertIsNotNone(spec, f"{channel_key} is not reachable from the manual send route")
             self.assertEqual(spec["provider"], OPENCLAW_PROVIDER)
-        # The first-party local bridges must still be there too.
+        # signal_personal/imessage_personal/wechat_personal (the first-party
+        # local bridges) were DELETED 2026-08-14 (full OpenClaw channel
+        # cutover) — their replacements (openclaw_signal/openclaw_imessage/
+        # openclaw_openclaw-weixin) are already covered by the loop above,
+        # since they are members of OPENCLAW_PERSONAL_CHANNELS.
         for channel_key in ("signal_personal", "imessage_personal", "wechat_personal"):
-            self.assertIn(channel_key, routes_personal_channels.LOCAL_BRIDGE_CHANNELS)
+            self.assertNotIn(channel_key, routes_personal_channels.LOCAL_BRIDGE_CHANNELS)
 
     def test_the_route_map_is_derived_from_the_service_map_not_re_declared(self) -> None:
         self.assertEqual(

@@ -32,8 +32,8 @@ import {
   Square,
   SquarePen,
   Trash2,
+  Users,
   Wand2,
-  Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -171,7 +171,7 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
-  { id: "tools", label: "Tools", icon: Wrench },
+  { id: "tools", label: "Tools", icon: Users },
   { id: "capabilities", label: "Capabilities", icon: Wand2 },
   { id: "hardware", label: "Hardware", icon: Cpu },
   { id: "memory", label: "Memory", icon: Brain },
@@ -554,10 +554,13 @@ export function FleetAgentDetail({
   // Truth Map B1 (mirrors ToolsTab's identical requiredConnector/
   // connectorMissing check): a tool bound behind requires_connector does
   // nothing until that connector is actually connected, so it shouldn't
-  // count toward "customer access" just because it's enabled+granted.
+  // count toward "customer access" just because it's granted. 2026-08-14:
+  // there is no more per-agent enable/disable checklist — every listed
+  // tool is already available to the agent itself, so this is purely a
+  // WHO (audience/mandate) count now, not a WHO-and-WHAT one.
   const connectorById = new Map(connectors.map((c) => [c.id, c]));
   const customerAccessCount = agentTools.filter((t) => {
-    if (!(t.enabled && (t.audience_safe || t.mandate_granted))) return false;
+    if (!(t.audience_safe || t.mandate_granted)) return false;
     const requiredConnector = t.requires_connector ? connectorById.get(t.requires_connector) : undefined;
     const connectorMissing = Boolean(t.requires_connector) && !requiredConnector?.connected;
     return !connectorMissing;
@@ -1717,7 +1720,6 @@ function ChatTab({
 
 // ── Channels ────────────────────────────────────────────────────────────────
 
-import { IMessageSetupPanel } from "./IMessageSetupPanel";
 import {
   CredentialForm,
   GroupAllowlistForm,
@@ -1738,12 +1740,14 @@ import {
   type ChannelDoor,
 } from "./channel-doors";
 import { compareChannelsByPopularity } from "./channel-popularity";
-import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
+// PersonalChannelConnectPanel and IMessageSetupPanel imports DELETED
+// 2026-08-14 (full OpenClaw channel cutover) — their only call sites (the
+// Telegram full_account door, WhatsApp/Signal/iMessage's first-party cards)
+// are deleted in the same change; see channel-doors.ts.
 import {
   isPersonalChannelStatusActive,
   useGatewayPersonalChannelSurfaces,
   usePersonalChannelStatus,
-  type GatewayPersonalChannelSurfaceItem,
   type PersonalChannelKey,
 } from "./personal-channel-pairing";
 
@@ -1760,76 +1764,11 @@ import {
 // pure data + pure functions precisely so channel-doors.test.ts can drive the
 // REAL doors instead of re-typing their strings as pinned literals.
 
-// Local-bridge channels (Signal and iMessage today; WeChat has no bridge to
-// check at all) have no in-app pairing step — the bridge runs on hardware
-// the user configures themselves. This shows the REAL health snapshot for
-// one channel_key on one gateway; there is no client-invented "connected"
-// state, and no button that claims to "connect" anything.
-//
-// iMessage is the one exception as of the imsg-based setup panel
-// (IMessageSetupPanel.tsx) — it has its own no-gateway copy inline, since
-// unlike Signal/WeChat its setup (installing imsg, checking Full Disk
-// Access) genuinely does happen in-app once a gateway exists.
-const LOCAL_BRIDGE_NO_GATEWAY_HINT: Record<string, string> = {
-  signal_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a signal-cli bridge.",
-};
-
-//
-// TAKES THE SURFACES AS PROPS. IT DOES NOT FETCH.
-// ----------------------------------------------
-// This used to call useGatewayPersonalChannelSurfaces itself, which meant a
-// fresh request with `loading: true` on every MOUNT — i.e. every time the
-// customer clicked the Signal card. Against an unreachable box that is a 2-3
-// second spinner between the click and anything appearing, while a transported
-// card opened instantly on state the tab already had. ChannelsTab now holds
-// the one subscription for the whole tab and hands the result down, so a card
-// opens with what is already known and the shared poll refreshes underneath.
-// The honest "state unknown" rendering is untouched: an unreachable box still
-// produces no item, and that still reads as not connected with the reason.
-function LocalBridgeChannelStatus({
-  channelKey,
-  gatewayId,
-  items,
-  loading,
-}: {
-  channelKey: string;
-  gatewayId: string | null;
-  items: GatewayPersonalChannelSurfaceItem[];
-  loading: boolean;
-}) {
-  if (!gatewayId) {
-    return (
-      <p className="fleet-channel-expand-hint">
-        {LOCAL_BRIDGE_NO_GATEWAY_HINT[channelKey] || "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at this channel's local bridge."}
-      </p>
-    );
-  }
-  if (loading) {
-    // A bare 14px spinner reserved no height, so the panel visibly grew the
-    // instant the fetch resolved into either `.fleet-channel-expand-success`
-    // (icon+1 line) or up to three stacked `.fleet-channel-expand-hint`
-    // lines — which of those it resolves to isn't knowable ahead of time, so
-    // this reserves ONE hint-shaped line, the minimum either real state
-    // renders (the success state is also one line tall).
-    return <p className="fleet-channel-expand-hint"><span className="fleet-skeleton-bar" style={{ width: "70%", height: 13 }} /></p>;
-  }
-
-  const item = items.find((i) => i.channel_key === channelKey) || null;
-  if (item?.connected) {
-    return (
-      <div className="fleet-channel-expand-success">
-        <Check size={16} strokeWidth={2} /> Connected{item.connected_identity ? ` — ${item.connected_identity}` : ""}
-      </div>
-    );
-  }
-  return (
-    <>
-      <p className="fleet-channel-expand-hint">{item?.detail || "This channel runs through a local bridge on this agent's own gateway."}</p>
-      <p className="fleet-channel-expand-hint">{item?.next_step || "Configure the bridge on this agent's gateway, then this status updates on its own."}</p>
-      <p className="fleet-channel-expand-hint" style={{ color: "var(--text-tertiary)" }}>{item?.status_label || "Not connected yet"}</p>
-    </>
-  );
-}
+// LOCAL_BRIDGE_NO_GATEWAY_HINT and LocalBridgeChannelStatus (the Signal
+// first-party health-check panel) DELETED 2026-08-14 (full OpenClaw channel
+// cutover) — signal_personal's first-party runtime is gone, and
+// openclaw_signal's status now renders through the generic OpenClaw channel
+// panel (OpenClawChannelsPanel.tsx / ChannelCardPanel), not this one-off.
 
 /** The door that was chosen, kept on screen while its setup runs.
  *
@@ -1929,13 +1868,12 @@ export function ChannelsTab({
   // transport is structurally box-only, so a cloud-only agent has nothing here
   // to show, not a spinner that never resolves.
   const openclaw = useOpenClawChannelSetup(agentGatewayId, agentId);
-  // ONE subscription to the local-bridge surfaces for the whole tab, started
-  // when the tab opens rather than when a card is clicked. Every card that
-  // needs it reads from here (LocalBridgeChannelStatus takes it as props;
-  // IMessageSetupPanel's own call now hits the same shared store), so opening
-  // a first-party channel costs no request and shows no spinner — the fix for
-  // "clicking Signal takes 2-3 seconds while a transported card is instant".
-  const localBridge = useGatewayPersonalChannelSurfaces(agentGatewayId);
+  // The shared local-bridge surfaces subscription (localBridge) that used to
+  // live here — read by LocalBridgeChannelStatus and IMessageSetupPanel —
+  // was deleted 2026-08-14 (full OpenClaw channel cutover) along with both
+  // of those components; nothing in this file needs
+  // useGatewayPersonalChannelSurfaces a second time (openclaw's own call
+  // above already covers the transported grid).
   // Which transported PLATFORM's panel is open, held as its base channel_key
   // (not the entry object) so an open panel re-reads the LIVE row after a
   // provision or a credential save instead of showing a snapshot from click
@@ -3049,64 +2987,17 @@ export function ChannelsTab({
                 </div>
               )}
 
-              {/* Telegram / WhatsApp: full-account (real MTProto / Baileys session),
-                   bound to this agent's own gateway via agentGatewayId — not
-                   Sage's workspace-wide Connect tab. */}
-              {activePlatform.id === "sage_telegram_hosted" && setupDoorKey === "full_account" && (
-                <div style={{ marginTop: 12 }}>
-                  <PersonalChannelConnectPanel
-                    workspaceId={workspaceId}
-                    channelKey="telegram_personal"
-                    label="Telegram"
-                    agentGatewayId={agentGatewayId}
-                    agentId={agentId}
-                    onConnected={handleChannelsChanged}
-                    onDone={() => setExpanded(null)}
-                  />
-                </div>
-              )}
-              {activePlatform.id === "whatsapp_personal" && setupDoorKey === "full_account" && (
-                <div style={{ marginTop: 12 }}>
-                  <PersonalChannelConnectPanel
-                    workspaceId={workspaceId}
-                    channelKey="whatsapp_personal"
-                    label="WhatsApp"
-                    agentGatewayId={agentGatewayId}
-                    agentId={agentId}
-                    onConnected={handleChannelsChanged}
-                    onDone={() => setExpanded(null)}
-                  />
-                </div>
-              )}
-
-              {/* Signal: same local-bridge shape as iMessage — no phone/code/QR
-                   step of its own, the bridge (signal-cli) lives on hardware the
-                   user runs themselves, configured via env vars on this agent's
-                   gateway. The only honest thing to show is real bridge health,
-                   not a fake "connect" button. */}
-              {activePlatform.id === "signal_personal" && setupDoorKey === "full_account" && (
-                <div style={{ marginTop: 12 }}>
-                  <LocalBridgeChannelStatus
-                    channelKey="signal_personal"
-                    gatewayId={agentGatewayId}
-                    items={localBridge.items}
-                    loading={localBridge.loading}
-                  />
-                </div>
-              )}
-
-              {/* iMessage: unlike Signal/WeChat, setup genuinely happens in-app —
-                   imsg runs on this agent's own gateway Mac, and the gateway's
-                   layered probe (binary / rpc / Full Disk Access / private API)
-                   is surfaced live with inline fixes and a Re-check button. The
-                   one truly manual step is Full Disk Access, which macOS will
-                   not let any process grant to itself — see
-                   IMessageSetupPanel.tsx. */}
-              {activePlatform.id === "imessage_personal" && setupDoorKey === "full_account" && (
-                <div style={{ marginTop: 12 }}>
-                  <IMessageSetupPanel gatewayId={agentGatewayId} />
-                </div>
-              )}
+              {/* Telegram's "full_account" door, WhatsApp/Signal/iMessage's
+                   first-party cards, and the panels they opened
+                   (PersonalChannelConnectPanel's telegram_personal/
+                   whatsapp_personal branches, LocalBridgeChannelStatus for
+                   signal_personal, IMessageSetupPanel) were all DELETED
+                   2026-08-14 (full OpenClaw channel cutover) along with the
+                   gramjs/Baileys/local-bridge runtimes they configured.
+                   WhatsApp/Signal/iMessage now appear only in the derived
+                   OpenClaw grid; Telegram is single-door (Chatbot only), so
+                   this activePlatform/setupDoorKey combination can no longer
+                   occur — see channel-doors.ts's CHANNEL_DOORS comment. */}
 
               {/* WeChat Official Account / WeCom: BYO AppID+AppSecret (or
                    CorpID+CorpSecret+AgentId) — bidirectional, unlike the
@@ -3284,17 +3175,27 @@ function Disclosure({
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────
+//
+// 2026-08-14 (CLAUDE.md, founder decision): there is no more per-agent Tools
+// enable/disable checklist. "Agent is going to use whatever is provided to
+// it... agent decides, agent uses" — the same reasoning Claude Code uses for
+// its own terminal. An agent's own tool availability is no longer something
+// an owner switches on this screen at all.
+//
+// What remains here, and is a genuinely different, preserved feature: WHO
+// may trigger an already-available tool when this agent is messaged by
+// someone OUTSIDE the workspace (Authority Mandate, Part 10). That is a
+// security boundary, not a capability checklist, so it keeps its own tab.
 
 function ToolCustomerAccess({
   tool, busy, onGrant, onRevoke,
 }: { tool: FleetTool; busy: boolean; onGrant: () => void; onRevoke: () => void }) {
-  const muted = !tool.enabled;
   if (tool.audience_safe) {
     return (
       <span
-        className={`fleet-badge${muted ? " fleet-badge--muted" : ""}`}
+        className="fleet-badge"
         style={{ marginLeft: 0 }}
-        title={muted ? "Enabled required to run" : "The platform marks this tool safe for anyone to trigger."}
+        title="The platform marks this tool safe for anyone to trigger."
       >
         Safe by default
       </span>
@@ -3304,11 +3205,11 @@ function ToolCustomerAccess({
     return (
       <button
         type="button"
-        className={`fleet-badge fleet-badge--lock fleet-badge--action${muted ? " fleet-badge--muted" : ""}`}
+        className="fleet-badge fleet-badge--lock fleet-badge--action"
         style={{ marginLeft: 0 }}
         disabled={busy}
         onClick={onRevoke}
-        title={muted ? "Enabled required to run — click to revoke customer access" : "Customers can trigger this. Click to revoke."}
+        title="Customers can trigger this. Click to revoke."
       >
         Granted by you
       </button>
@@ -3331,37 +3232,16 @@ function ToolCustomerAccess({
 function ToolsTab({
   workspaceId, agentId, agent, onChat,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
-  const { tools, coreTools, isMaster, loading, refresh } = useFleetAgentTools(workspaceId, agentId);
+  const { tools, isMaster, loading, refresh } = useFleetAgentTools(workspaceId, agentId);
   // Truth Map B1: a handful of tools (Calendar/Task Runner/Email/CRM) are
-  // real but execution_mode="manual" with no direct executor — the toggle
-  // above does nothing until the connector named in requires_connector is
-  // actually connected. Cross-referencing the same connector list the
-  // Connectors tab already fetches, so this stays accurate if a deployment
-  // configures Google Workspace OAuth later.
+  // real but execution_mode="manual" with no direct executor — granting
+  // customer access to one does nothing until the connector named in
+  // requires_connector is actually connected. Cross-referencing the same
+  // connector list the Connectors tab already fetches, so this stays
+  // accurate if a deployment configures Google Workspace OAuth later.
   const { connectors: toolConnectors, loading: connectorsLoading } = useFleetAgentConnectors(workspaceId, agentId);
-  const [pending, setPending] = useState<string | null>(null);
   const [mandateBusy, setMandateBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  async function toggle(toolId: string, next: boolean) {
-    setPending(toolId);
-    setError(null);
-    try {
-      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ patch: { tool_toggles: { [toolId]: next } } }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not update this tool.");
-    } finally {
-      setPending(null);
-    }
-  }
 
   async function setMandate(toolId: string, grant: boolean) {
     setMandateBusy(toolId);
@@ -3389,24 +3269,22 @@ function ToolsTab({
   }
 
   if (loading || connectorsLoading) {
-    return <FleetToggleRowsSkeleton rows={6} trailing="switch" label="Loading tools" />;
+    return <FleetToggleRowsSkeleton rows={6} trailing="button" label="Loading tools" />;
   }
 
   const connectorById = new Map(toolConnectors.map((c) => [c.id, c]));
 
-  if (tools.length === 0 && coreTools.length === 0) {
+  if (tools.length === 0) {
     return (
       <EmptyState
-        icon={Wrench}
-        title="No tools available"
+        icon={Users}
+        title="No tools to grant"
         body="Ask AI to configure tools for this agent."
         action="Chat to configure"
         onAction={onChat}
       />
     );
   }
-
-  const enabledCount = tools.filter((t) => t.enabled).length;
 
   return (
     <div className="fleet-config">
@@ -3417,8 +3295,8 @@ function ToolsTab({
           tool row wears one of these three badges, so what "customer" vs
           "owner" access means is shown at the point of use, not read once
           and forgotten above the fold. The `hint` tooltip on the Properties
-          panel's "Customer access" row (this file, PanelRow) still carries
-          the one-sentence version for whoever hovers it. */}
+          panel's "Tools" row (this file, PanelRow) still carries the
+          one-sentence version for whoever hovers it. */}
       <div
         className="fleet-subtitle"
         style={{ marginTop: 0, marginBottom: 12, display: "flex", flexWrap: "wrap", gap: "6px 16px", alignItems: "center" }}
@@ -3435,16 +3313,14 @@ function ToolsTab({
       </div>
       {isMaster ? (
         <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-          This is the operator agent — it has unrestricted tool access, not gated by these toggles.
+          This is the operator agent — it has no customer-facing surface, so there is nothing here to grant.
         </p>
       ) : (
-        <>
-          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>
-            {enabledCount} of {tools.length} tools enabled
-          </div>
-        </>
+        <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
+          The agent already has every tool below. This only controls whether someone messaging it from OUTSIDE your workspace can trigger it — you keep full access regardless.
+        </p>
       )}
-      {tools.map((t) => {
+      {!isMaster && tools.map((t) => {
         const requiredConnector = t.requires_connector ? connectorById.get(t.requires_connector) : undefined;
         const connectorMissing = Boolean(t.requires_connector) && !requiredConnector?.connected;
         return (
@@ -3452,45 +3328,20 @@ function ToolsTab({
           <div style={{ minWidth: 0 }}>
             <div className="fleet-toggle-row-label">{t.label}</div>
             {t.description && <div className="fleet-toggle-row-desc">{t.description}</div>}
-            {!connectorMissing && !t.enabled && (t.audience_safe || t.mandate_granted) && (
-              <div className="fleet-toggle-row-desc">Enabled required to run</div>
+            {connectorMissing && (t.audience_safe || t.mandate_granted) && (
+              <div className="fleet-toggle-row-desc">Connect the required account to actually run this</div>
             )}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-            {!isMaster && (
-              <ToolCustomerAccess
-                tool={t}
-                busy={mandateBusy === t.id}
-                onGrant={() => setMandate(t.id, true)}
-                onRevoke={() => setMandate(t.id, false)}
-              />
-            )}
-            <button
-              type="button"
-              role="switch"
-              aria-checked={t.enabled}
-              aria-label={`${t.enabled ? "Disable" : "Enable"} ${t.label}`}
-              className={`fleet-toggle${t.enabled ? " is-on" : ""}`}
-              disabled={isMaster || pending === t.id}
-              onClick={() => toggle(t.id, !t.enabled)}
-            />
-          </div>
+          <ToolCustomerAccess
+            tool={t}
+            busy={mandateBusy === t.id}
+            onGrant={() => setMandate(t.id, true)}
+            onRevoke={() => setMandate(t.id, false)}
+          />
         </div>
         );
       })}
       {error && <p className="fleet-channel-expand-error">{error}</p>}
-      {coreTools.length > 0 && (
-        <Disclosure label={`${coreTools.length} core ${coreTools.length === 1 ? "tool" : "tools"} — always on`}>
-          <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-            Plumbing every agent needs to function — there&apos;s no toggle for these because there&apos;s nothing to turn off. Anything with its own real toggle is listed above instead.
-          </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {coreTools.map((name) => (
-              <span key={name} className="fleet-badge" style={{ marginLeft: 0 }}>{name}</span>
-            ))}
-          </div>
-        </Disclosure>
-      )}
     </div>
   );
 }

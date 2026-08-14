@@ -121,6 +121,24 @@ def emit_sage_turn_transparency_events(
             )
 
     # ── 3. blocked_tools ─────────────────────────────────────────
+    # blocked_tools is populated by SEVERAL structurally different
+    # producers (provider errors, SDK bookkeeping anomalies, execution
+    # failures) and NONE of them is a genuine tool-capability POLICY
+    # decision — a real capability denial raises during tool execution and
+    # lands in `tool_calls` instead, never here. This used to run a
+    # classifier (sage_blocked_tools_outcome.py, since deleted) that could,
+    # in principle, distinguish a real per-agent tool-policy code from a
+    # failure — but 2026-08-14 (CLAUDE.md, founder decision) removed the
+    # only thing that could ever produce that code: there is no more
+    # per-agent Tools enable/disable checklist, so "an owner switched this
+    # off" is no longer an event that can happen. Keeping a
+    # "policy_blocked" branch "future-proofed" for a condition that is now
+    # structurally impossible would be dead code pretending to be caution.
+    # Every non-empty blocked_tools is unconditionally "turn_failed" —
+    # never blames the customer's tool settings, matching the identical
+    # collapse in sage_agent_runtime_service.py's chat-reply substitution
+    # (SAGE_TURN_NO_REPLY_UNKNOWN), so the Work-tab/Inbox event and the
+    # chat reply can never disagree about what happened.
     blocked_tools = _safe_list(sage_result.get("blocked_tools"))
     if blocked_tools:
         events.append(
@@ -132,10 +150,10 @@ def emit_sage_turn_transparency_events(
                 actor_type="sage",
                 surface="chat",
                 audience=audience,
-                event_type="policy_blocked",
-                title="Tools blocked by policy",
-                summary=f"{len(blocked_tools)} tool(s) blocked",
-                status="blocked",
+                event_type="turn_failed",
+                title="Turn failed",
+                summary=f"The turn did not complete normally ({len(blocked_tools)} step(s) affected).",
+                status="failed",
                 timestamp=_now(),
                 metadata={"blocked_tools": blocked_tools[:10]},
             )

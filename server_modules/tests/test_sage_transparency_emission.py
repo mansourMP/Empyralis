@@ -113,17 +113,59 @@ class SageTransparencyEmissionTests(unittest.TestCase):
         types = [e.event_type for e in events]
         self.assertIn("approval_required", types)
 
-    def test_blocked_tools_emit_policy_blocked(self):
+    def test_blocked_tools_with_realistic_failure_shape_emits_turn_failed_not_policy_blocked(self):
+        """blocked_tools is populated by SEVERAL structurally different
+        producers, and every real one today is a failure or bookkeeping
+        anomaly, never a genuine tool-capability policy decision. The
+        entry shape below is the REAL shape sage_agent_runtime_service.
+        _collect_sage_operator_loop_v3_events actually appends for a
+        provider/SDK trace.failed event — not an invented one. Before this
+        fix, ANY non-empty blocked_tools (including this one) emitted
+        "policy_blocked" / "Tools blocked by policy", blaming the
+        customer's own tool settings for what is actually a provider
+        failure."""
         events = emit_sage_turn_transparency_events(
             trace_id=self.TRACE_ID,
             workspace_id=self.WORKSPACE,
             user_message="use blocked tool",
             sage_result=self._result(
-                blocked_tools=["filesystem.write"],
+                blocked_tools=[
+                    {"name": "provider_generation_failed", "reason": "provider_generation_failed", "status": "blocked"},
+                ],
             ),
         )
         types = [e.event_type for e in events]
-        self.assertIn("policy_blocked", types)
+        self.assertIn("turn_failed", types)
+        self.assertNotIn("policy_blocked", types)
+        failed_event = next(e for e in events if e.event_type == "turn_failed")
+        self.assertNotIn("blocked by policy", failed_event.title.lower())
+        self.assertNotIn("tool", failed_event.title.lower())
+
+    def test_blocked_tools_never_emits_policy_blocked_even_for_a_tool_capability_denial_shape(self):
+        """2026-08-14 (CLAUDE.md, founder decision): "policy_blocked" for
+        blocked_tools is gone outright, not just made hard to reach. There
+        is no more per-agent Tools enable/disable checklist, so "an owner
+        switched this off" can no longer happen — the classifier
+        (sage_blocked_tools_outcome.py) that used to distinguish a
+        recognized policy code from a failure is deleted, and this event
+        type is unconditionally "turn_failed" now. Even a blocked_tools
+        entry shaped exactly like a genuine tool-capability denial gets the
+        same honest "turn failed" event as any other failure — mirrors
+        test_sage_agent_runtime_service.py's identical collapse on the
+        chat-reply side (SAGE_TURN_NO_REPLY_UNKNOWN)."""
+        events = emit_sage_turn_transparency_events(
+            trace_id=self.TRACE_ID,
+            workspace_id=self.WORKSPACE,
+            user_message="use blocked tool",
+            sage_result=self._result(
+                blocked_tools=[
+                    {"name": "agent_tool_capability_denied", "reason": "not bound to this agent", "status": "blocked"},
+                ],
+            ),
+        )
+        types = [e.event_type for e in events]
+        self.assertIn("turn_failed", types)
+        self.assertNotIn("policy_blocked", types)
 
     def test_error_emits_tool_failed(self):
         events = emit_sage_turn_transparency_events(

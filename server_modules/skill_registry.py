@@ -341,14 +341,17 @@ _BUNDLED_SKILL_DISPATCH: dict[str, str] = {
 
 # ── Canonical enforcement id map ────────────────────────────────────────
 # skill_registry ids are hyphenated display ids; _specialist_tool_allowed()
-# (sage_agent_runtime_service.py) and tool seeding (capability_presets.py)
-# both key tool_toggles by the literal LLM tool-call name instead. The two
-# id spaces are otherwise disconnected — a toggle stored under the display
-# id never matches what enforcement checks. This maps every built-in skill
-# that has a real, callable LLM tool onto that tool's exact name, so the
-# Tools tab (fleet_tools.fleet_get_agent_tools) can read/write the id
-# enforcement actually consults. Starts from _BUNDLED_SKILL_DISPATCH since
-# those 6 mappings already encode the same skill -> tool identity.
+# (sage_agent_runtime_service.py) keys tool gating by the literal LLM
+# tool-call name instead. The two id spaces are otherwise disconnected — a
+# mandate grant stored under the display id would never match what
+# enforcement checks. This maps every built-in skill that has a real,
+# callable LLM tool onto that tool's exact name, so the Tools tab
+# (fleet_tools.fleet_get_agent_tools) can read/write the id enforcement
+# actually consults for Customer Access (Authority Mandate) grants — the
+# per-agent enable/disable checklist this map used to also serve is gone
+# (2026-08-14, CLAUDE.md, founder decision). Starts from
+# _BUNDLED_SKILL_DISPATCH since those 6 mappings already encode the same
+# skill -> tool identity.
 # Skills with no live LLM tool_call name (connector-scoped manual skills,
 # and skills dispatched by keyword/handler rather than tool-calling) are
 # intentionally absent — enforcement never checks their id today, so they

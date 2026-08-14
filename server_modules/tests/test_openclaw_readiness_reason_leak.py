@@ -102,6 +102,9 @@ class OpenClawReadinessLeakTests(unittest.IsolatedAsyncioTestCase):
             personal_channels_service, "_load_agent_dm_policy_config", _fake_load_dm
         ), patch.object(
             personal_channels_service, "_load_agent_group_policy_config", _fake_load_group
+        ), patch(
+            "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+            new=AsyncMock(return_value={"id": "a", "metadata": {"preferred_gateway_id": "gw-1"}}),
         ), patch.object(
             openclaw_provisioning_service.gateway_execution_service,
             "execute_tool_via_gateway",

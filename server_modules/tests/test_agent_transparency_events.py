@@ -87,7 +87,7 @@ class AgentTransparencyEventModelTests(unittest.TestCase):
             "tool_completed", "tool_failed", "approval_required",
             "approval_approved", "approval_denied", "gateway_action_started",
             "gateway_action_completed", "channel_message_sent",
-            "channel_message_received", "policy_blocked",
+            "channel_message_received", "policy_blocked", "turn_failed",
             "quota_blocked", "unsafe_url_blocked",
             "final_response_started", "final_response_sent",
         ]

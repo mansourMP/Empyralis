@@ -1407,17 +1407,16 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
         self.assertIn("Work tab", result["message"])
         self.assertFalse(mock_generate.called)
 
-    def test_main_sage_chat_uses_tools_limited_copy_for_a_recognized_policy_code(self):
-        """Forward-compatibility check for _classify_sage_no_reply_outcome:
-        if a future producer starts emitting a blocked_tools entry whose
-        code is a genuine, recognized tool-capability policy decision (the
-        _SAGE_BLOCKED_TOOLS_POLICY_CODES allowlist — empty today because no
-        live producer emits one, see that constant's own comment), the
-        TOOLS_LIMITED_NO_REPLY copy is still reachable and still correct.
-        Patches the allowlist directly rather than inventing a fake
-        producer shape, so this test cannot silently pass against a
-        fixture that no real code path produces (the exact mistake the
-        sibling test above replaces)."""
+    def test_main_sage_chat_no_reply_never_blames_tool_settings_even_with_a_tool_capability_denial(self):
+        """2026-08-14 (CLAUDE.md, founder decision): the "disabled tools"
+        diagnosis (TOOLS_LIMITED_NO_REPLY, and the
+        _classify_sage_no_reply_outcome / _SAGE_BLOCKED_TOOLS_POLICY_CODES
+        forward-compat allowlist that used to back it) is gone outright —
+        there is no more per-agent Tools checklist for it to name. Even a
+        blocked_tools entry that looks exactly like a genuine
+        tool-capability policy denial now gets the same honest
+        "cause is not known" message as any other no-reply turn, never a
+        blame-the-settings guess."""
         stream_events = [
             {
                 "type": "trace",
@@ -1446,10 +1445,6 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.persist_interaction"),
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
-            patch(
-                "server_modules.sage_agent_runtime_service._SAGE_BLOCKED_TOOLS_POLICY_CODES",
-                frozenset({"agent_tool_capability_denied"}),
-            ),
         ):
             result = _run(sage_agent_runtime_service.handle_sage_chat(
                 workspace_id="ws-1",
@@ -1459,8 +1454,9 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             ))
 
         self.assertTrue(result["blocked_tools"])
-        self.assertIn("doesn't have every tool turned on", result["message"])
-        self.assertIn("Tools", result["message"])
+        self.assertNotIn("doesn't have every tool turned on", result["message"])
+        self.assertNotIn("under Tools", result["message"])
+        self.assertIn("cause is not known", result["message"])
         self.assertFalse(mock_generate.called)
 
     def test_main_sage_chat_invokes_matching_mcp_skill(self):
@@ -4514,88 +4510,6 @@ class CollectSageOperatorLoopV3EventsToolResultStatusTests(unittest.TestCase):
         events = [self._trace_event(tool_call_id="call-1", status="waiting_approval", summary="Waiting for approval.")]
         collected = sage_agent_runtime_service._collect_sage_operator_loop_v3_events(events)
         self.assertEqual(collected["tool_calls"][0]["status"], "completed")
-
-
-class ClassifySageNoReplyOutcomeTests(unittest.TestCase):
-    """_classify_sage_no_reply_outcome decides which of TOOLS_LIMITED_
-    NO_REPLY / SAGE_TURN_NO_REPLY_UNKNOWN a no-natural-language-reply turn
-    gets. 2026-08-14 fix: the previous logic treated ANY non-empty
-    blocked_tools list as proof a tool was blocked by policy, but every real
-    blocked_tools producer today (claude_agent_sdk_bridge.py's provider-
-    error/foreign-tool/orphan-tool-result trace.failed events,
-    direct_chat_generation_service.py's cost-ceiling/tool-loop-detected/
-    generation-error trace.failed events) is a FAILURE, not a policy
-    decision — see _SAGE_BLOCKED_TOOLS_POLICY_CODES's own comment. These
-    tests pin the classifier directly, independent of the full turn
-    plumbing exercised in SageAgentRuntimeResultShapeTests."""
-
-    def test_empty_blocked_tools_classifies_as_none(self) -> None:
-        self.assertEqual(sage_agent_runtime_service._classify_sage_no_reply_outcome([]), "none")
-
-    def test_known_provider_failure_code_classifies_as_turn_failure(self) -> None:
-        for code in ("provider_generation_failed", "foreign_tool_call", "orphan_tool_result", "operator_loop_failed"):
-            with self.subTest(code=code):
-                blocked = [{"name": code, "reason": code, "status": "blocked"}]
-                self.assertEqual(
-                    sage_agent_runtime_service._classify_sage_no_reply_outcome(blocked),
-                    "turn_failure",
-                )
-
-    def test_raw_sdk_subtype_code_classifies_as_turn_failure(self) -> None:
-        # claude_agent_sdk_bridge.py passes a genuine ResultMessage subtype
-        # (e.g. "error_max_turns") through verbatim as the blocked entry's
-        # code — this module cannot enumerate every subtype the SDK might
-        # ever emit, so anything not in the explicit policy allowlist stays
-        # "turn_failure" (the honest-by-default direction), not just a
-        # hand-picked set of known codes.
-        blocked = [{"name": "error_max_turns", "reason": "error_max_turns", "status": "blocked"}]
-        self.assertEqual(
-            sage_agent_runtime_service._classify_sage_no_reply_outcome(blocked),
-            "turn_failure",
-        )
-
-    def test_unrecognized_code_classifies_as_turn_failure_not_policy_blocked(self) -> None:
-        # The core of the fix: a code this function has never seen must NOT
-        # default to "tools are the cause" — that is exactly the blind spot
-        # that produced the founder-reported bug.
-        blocked = [{"name": "something_nobody_has_seen_before", "reason": "?", "status": "blocked"}]
-        self.assertEqual(
-            sage_agent_runtime_service._classify_sage_no_reply_outcome(blocked),
-            "turn_failure",
-        )
-
-    def test_recognized_policy_code_classifies_as_policy_blocked(self) -> None:
-        # No live producer emits a recognized policy code today (the
-        # allowlist is empty) — this proves the MECHANISM still works for a
-        # future one, via patching rather than inventing a fake producer
-        # shape (see the sibling turn-level test for why that distinction
-        # matters).
-        with patch(
-            "server_modules.sage_agent_runtime_service._SAGE_BLOCKED_TOOLS_POLICY_CODES",
-            frozenset({"agent_tool_capability_denied"}),
-        ):
-            blocked = [{"name": "agent_tool_capability_denied", "reason": "not bound", "status": "blocked"}]
-            self.assertEqual(
-                sage_agent_runtime_service._classify_sage_no_reply_outcome(blocked),
-                "policy_blocked",
-            )
-
-    def test_mixed_policy_and_unrecognized_codes_classifies_as_turn_failure(self) -> None:
-        # One entry the function cannot positively identify as a policy
-        # decision is enough to withhold the tools-settings claim for the
-        # WHOLE turn, even alongside an entry that IS recognized.
-        with patch(
-            "server_modules.sage_agent_runtime_service._SAGE_BLOCKED_TOOLS_POLICY_CODES",
-            frozenset({"agent_tool_capability_denied"}),
-        ):
-            blocked = [
-                {"name": "agent_tool_capability_denied", "reason": "not bound", "status": "blocked"},
-                {"name": "provider_generation_failed", "reason": "server error", "status": "blocked"},
-            ]
-            self.assertEqual(
-                sage_agent_runtime_service._classify_sage_no_reply_outcome(blocked),
-                "turn_failure",
-            )
 
 
 class CollectSageOperatorLoopV3EventsMetaToolCallsTests(unittest.TestCase):

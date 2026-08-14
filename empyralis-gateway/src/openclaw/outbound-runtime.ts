@@ -17,12 +17,13 @@
  * So the whole outbound stack already existed; the only missing piece was a
  * runtime registered under these channel keys. That is all this is. There is
  * deliberately NO second outbound path, no new frame type, no new cloud
- * route — see LocalBridgePersonalChannelRuntime for the shape this mirrors.
+ * route.
  *
- * WHAT DIFFERS from the local-bridge family: the transport. Those POST to a
- * user-owned HTTP bridge; this invokes OpenClaw's `message.action` over a
- * live authenticated WS session (see ./openclaw-gateway-client.ts for why
- * HTTP is not an option).
+ * WHAT DIFFERED from the first-party local-bridge family this transport
+ * superseded (deleted 2026-08-14, full OpenClaw channel cutover — see git
+ * history to recover): those POST to a user-owned HTTP bridge; this invokes
+ * OpenClaw's `message.action` over a live authenticated WS session (see
+ * ./openclaw-gateway-client.ts for why HTTP is not an option).
  *
  * FAILURE IS NEVER SILENT. Every outcome is journaled here, and a
  * non-delivery THROWS, which `handleServerRequest` turns into an `ok:false`

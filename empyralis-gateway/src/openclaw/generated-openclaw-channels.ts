@@ -1602,6 +1602,7 @@ export const GENERATED_OPENCLAW_ACTIVE_CHANNEL_IDS: readonly string[] = [
   "clickclack",
   "feishu",
   "googlechat",
+  "imessage",
   "irc",
   "line",
   "matrix",
@@ -1609,12 +1610,16 @@ export const GENERATED_OPENCLAW_ACTIVE_CHANNEL_IDS: readonly string[] = [
   "msteams",
   "nextcloud-talk",
   "nostr",
+  "openclaw-weixin",
   "openclaw-zaloclawbot",
   "qqbot",
+  "signal",
   "synology-chat",
+  "telegram",
   "tlon",
   "twitch",
   "wecom",
+  "whatsapp",
   "yuanbao",
   "zalo",
   "zalouser"
@@ -1625,11 +1630,6 @@ export const GENERATED_OPENCLAW_ACTIVE_CHANNEL_IDS: readonly string[] = [
  *  has to re-derive "which ones are missing and why". */
 export const GENERATED_OPENCLAW_SUPERSEDED_CHANNEL_IDS: readonly string[] = [
   "discord",
-  "imessage",
-  "openclaw-weixin",
-  "signal",
   "slack",
-  "sms",
-  "telegram",
-  "whatsapp"
+  "sms"
 ] as const;

@@ -209,41 +209,37 @@ PROVIDER_UNREACHABLE = PlatformEvent(
     severity="warning",
 )
 
-# A turn ended with nothing substantive to say and at least one tool got
-# blocked by policy (not enabled for this agent) along the way. Generic on
-# purpose — the blocked-tool records available here are internal codes, not
-# reliably human-readable tool names, so naming a specific tool risks
-# surfacing something confusing. Still strictly better than the silence or
-# unrelated error this replaces.
-TOOLS_LIMITED_NO_REPLY = PlatformEvent(
-    code="tools_limited_no_reply",
-    title="Limited by current tool settings",
-    # 2026-08-14 fix: this substitution now only fires when
-    # sage_agent_runtime_service has positively identified a genuine
-    # tool-capability policy block (see _classify_sage_no_reply_outcome) —
-    # a KNOWN fact at that point, not a guess, so the copy states it rather
-    # than hedging with "may be why".
-    detail="This agent doesn't have every tool turned on, which is why nothing came back. An owner can enable more under Tools.",
-    channel_text="This agent doesn't have every tool turned on, which is why nothing came back. An owner can enable more under Tools.",
-    severity="warning",
-)
-
-# 2026-08-14: sibling to TOOLS_LIMITED_NO_REPLY and GENERIC_ERROR for a turn
-# that ran and produced no reply for a reason the runtime cannot positively
-# name. Before this existed, sage_agent_runtime_service._run_sage_action_
-# loop_v3 treated ANY non-empty `blocked_tools` entry as proof the cause was
-# disabled tools — but blocked_tools is also where claude_agent_sdk_bridge
-# (the production-default engine, provider-general — DeepSeek's Anthropic-
-# compatible endpoint included) records provider/execution failures
-# (auth/billing/rate-limit/server errors, a raw SDK ResultMessage subtype
-# like "error_max_turns", or its own bookkeeping anomalies: a foreign tool
-# call, an orphan tool result) that have nothing to do with an agent's tool
-# settings. Firing TOOLS_LIMITED_NO_REPLY for those told the customer to go
-# fix a setting that was never the cause — a fabricated, unverified
-# diagnosis dressed as guidance. This event is the honest alternative: the
-# turn ran, nothing came back, the cause is not known from here — with a
-# real, actionable next step (retry; the Work tab, which is a real surface
-# reachable from this same chat) instead of a guess.
+# 2026-08-14 (CLAUDE.md, founder decision): TOOLS_LIMITED_NO_REPLY is GONE.
+# It used to substitute "This agent doesn't have every tool turned on...
+# An owner can enable more under Tools" for a turn that ran and said
+# nothing — and it named the exact thing the founder hit and called out:
+# the product blaming a screen ("Tools") for a failure that was actually an
+# invalid stored model. The 2026-08-14 classification fix (this file's own
+# history — see the removed _classify_sage_no_reply_outcome in
+# sage_agent_runtime_service.py) had already made the allowlist backing it
+# EMPTY, so it could never actually fire in practice; removing it outright
+# is the same fix finished, not a new one — there is no more per-agent
+# Tools enable/disable surface for this message to plausibly point at, so
+# there is no longer any code path where "policy_blocked" (as opposed to
+# "we don't know why") is even a coherent diagnosis. Every no-reply turn
+# with blocked_tools now gets SAGE_TURN_NO_REPLY_UNKNOWN below,
+# unconditionally — the honest "the cause is not known from here" message,
+# never a fabricated diagnosis.
+#
+# Sibling to GENERIC_ERROR for a turn that ran and produced no reply for a
+# reason the runtime cannot positively name. Before this existed,
+# sage_agent_runtime_service._run_sage_action_loop_v3 treated ANY non-empty
+# `blocked_tools` entry as proof the cause was disabled tools — but
+# blocked_tools is also where claude_agent_sdk_bridge (the production-
+# default engine, provider-general — DeepSeek's Anthropic-compatible
+# endpoint included) records provider/execution failures (auth/billing/
+# rate-limit/server errors, a raw SDK ResultMessage subtype like
+# "error_max_turns", or its own bookkeeping anomalies: a foreign tool call,
+# an orphan tool result) that have nothing to do with an agent's tools at
+# all. This event is the honest alternative: the turn ran, nothing came
+# back, the cause is not known from here — with a real, actionable next
+# step (retry; the Work tab, which is a real surface reachable from this
+# same chat) instead of a guess.
 SAGE_TURN_NO_REPLY_UNKNOWN = PlatformEvent(
     code="sage_turn_no_reply_unknown",
     title="No reply came back",

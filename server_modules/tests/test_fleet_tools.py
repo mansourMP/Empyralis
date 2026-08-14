@@ -99,17 +99,21 @@ class ScheduleTaskAuthorityTierTests(unittest.TestCase):
 
 
 class FleetGetAgentToolsCanonicalIdTests(unittest.TestCase):
-    """fleet_get_agent_tools must expose/read the same tool id enforcement
-    checks (sage_agent_runtime_service._specialist_tool_allowed), not
-    skill_registry's own hyphenated display id — otherwise the Tools tab's
-    enabled count and its toggle PATCH both operate on an id nothing
-    enforces. See skill_registry.enforcement_tool_name."""
+    """fleet_get_agent_tools must expose the same tool id enforcement checks
+    (sage_agent_runtime_service._specialist_tool_allowed) use, not
+    skill_registry's own hyphenated display id — otherwise a mandate
+    (Customer Access) grant PATCH would operate on an id nothing enforces.
+    See skill_registry.enforcement_tool_name.
+
+    2026-08-14 (CLAUDE.md, founder decision): there is no more per-tool
+    enable/disable checklist, so the response no longer carries an
+    `enabled` field or a `core_tools` bucket — every tool is already
+    available to the agent itself; what's left is only WHO (Customer
+    Access / mandate) may trigger it, covered by
+    FleetGetAgentToolsMandateStateTests below."""
 
     def test_returns_canonical_enforcement_ids_not_hyphenated_skill_ids(self):
-        bundle = {
-            "install_metadata": {"role": "specialist"},
-            "tool_toggles": {"web__search": True, "fleet__list_agents": True},
-        }
+        bundle = {"install_metadata": {"role": "specialist"}}
         with patch(
             "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
             AsyncMock(return_value=bundle),
@@ -123,16 +127,13 @@ class FleetGetAgentToolsCanonicalIdTests(unittest.TestCase):
         by_id = {t["id"]: t for t in result["tools"]}
         self.assertNotIn("web-search", by_id)
         self.assertIn("web__search", by_id)
-        self.assertTrue(by_id["web__search"]["enabled"])
         self.assertNotIn("fleet-list-agents", by_id)
         self.assertIn("fleet__list_agents", by_id)
-        self.assertTrue(by_id["fleet__list_agents"]["enabled"])
-        # A tool never toggled on is present (full catalog) but disabled.
         self.assertIn("browser__navigate", by_id)
-        self.assertFalse(by_id["browser__navigate"]["enabled"])
+        self.assertNotIn("enabled", by_id["browser__navigate"])
 
-    def test_master_agent_shows_everything_enabled_regardless_of_toggles(self):
-        bundle = {"install_metadata": {"role": "operator"}, "tool_toggles": {}}
+    def test_master_agent_flagged_is_master(self):
+        bundle = {"install_metadata": {"role": "operator"}}
         with patch(
             "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
             AsyncMock(return_value=bundle),
@@ -144,7 +145,6 @@ class FleetGetAgentToolsCanonicalIdTests(unittest.TestCase):
             )
         self.assertTrue(result["ok"])
         self.assertTrue(result["is_master"])
-        self.assertTrue(all(t["enabled"] for t in result["tools"]))
 
 
 class FleetGetAgentToolsExcludesCapabilityGatedToolsTests(unittest.TestCase):
@@ -157,7 +157,7 @@ class FleetGetAgentToolsExcludesCapabilityGatedToolsTests(unittest.TestCase):
     instead (fleet_get_agent_capabilities)."""
 
     def test_generate_image_is_absent_from_the_tools_list(self):
-        bundle = {"install_metadata": {"role": "specialist"}, "tool_toggles": {"generate_image": True}}
+        bundle = {"install_metadata": {"role": "specialist"}}
         with patch(
             "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
             AsyncMock(return_value=bundle),
@@ -173,11 +173,11 @@ class FleetGetAgentToolsExcludesCapabilityGatedToolsTests(unittest.TestCase):
 
 
 class FleetGetAgentToolsMandateStateTests(unittest.TestCase):
-    """Customer access (Part 10 Authority Mandate) surfaced on the Tools tab:
-    audience_safe is the platform's own manifest default (never toggleable),
-    mandate_granted reflects this owner's mandate.audience_tools list, keyed
-    by the same canonical enforcement id fleet_get_agent_tools already uses
-    for `id`/`enabled` — not the connector.action dot form."""
+    """Customer access (Part 10 Authority Mandate) surfaced on the Customer
+    Access tab: audience_safe is the platform's own manifest default (never
+    toggleable), mandate_granted reflects this owner's mandate.audience_tools
+    list, keyed by the same canonical enforcement id fleet_get_agent_tools
+    already uses for `id` — not the connector.action dot form."""
 
     def test_audience_safe_and_mandate_granted_reflect_manifest_and_owner_grant(self):
         bundle = {
@@ -185,7 +185,6 @@ class FleetGetAgentToolsMandateStateTests(unittest.TestCase):
                 "role": "specialist",
                 "mandate": {"audience_tools": ["fleet__configure_agent"]},
             },
-            "tool_toggles": {"web__search": True, "fleet__configure_agent": True, "shell__exec": True},
         }
         with patch(
             "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
@@ -212,7 +211,7 @@ class FleetGetAgentToolsMandateStateTests(unittest.TestCase):
         self.assertFalse(by_id["shell__exec"]["mandate_granted"])
 
     def test_no_mandate_metadata_defaults_every_non_safe_tool_to_ungranted(self):
-        bundle = {"install_metadata": {"role": "specialist"}, "tool_toggles": {}}
+        bundle = {"install_metadata": {"role": "specialist"}}
         with patch(
             "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
             AsyncMock(return_value=bundle),
@@ -327,8 +326,7 @@ class FleetScheduleControlTests(unittest.TestCase):
 
     def test_cancel_schedule_transitions_status_and_ledgers(self):
         """payload comes back from a real row as a JSON string, not a dict —
-        no jsonb codec is registered on this connection (see
-        fleet_get_agent_tools' tool_toggles handling for the same pattern).
+        no jsonb codec is registered on this connection.
         Regression guard: cancel_wake_request's agent_id check must parse it,
         not silently see {} and reject every real cancel as "not found"."""
         existing = {

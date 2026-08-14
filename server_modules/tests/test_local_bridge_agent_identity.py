@@ -63,7 +63,7 @@ _ALLOW_DISPATCH_DECISION = {
     "next_action": "dispatch_gateway_operation",
 }
 
-LOCAL_BRIDGE_CHANNEL_KEYS = ("signal_personal", "imessage_personal", "wechat_personal")
+LOCAL_BRIDGE_CHANNEL_KEYS = ("openclaw_signal", "openclaw_imessage", "openclaw_openclaw-weixin")
 
 
 class _FakeAgentInstallStore:
@@ -170,7 +170,7 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=installs),
         ) as list_installs_mock:
             resolved = await personal_channels_service._resolve_local_bridge_agent_id(
-                gateway_id="gw-identity-2", channel_key="signal_personal",
+                gateway_id="gw-identity-2", channel_key="openclaw_signal",
                 registration={"tenant_id": "tenant-identity", "workspace_id": "ws-identity"},
             )
         self.assertEqual(resolved, "agent-signal-owner")
@@ -182,7 +182,7 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
         # the same answer the slow way. Succeeding fast is what proves the
         # claim from above was actually persisted.
         resolved_again = await personal_channels_service._resolve_local_bridge_agent_id(
-            gateway_id="gw-identity-2", channel_key="signal_personal",
+            gateway_id="gw-identity-2", channel_key="openclaw_signal",
             registration={"tenant_id": "tenant-identity", "workspace_id": "ws-identity"},
         )
         self.assertEqual(resolved_again, "agent-signal-owner")
@@ -193,7 +193,7 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=[_fake_install(id="agent-elsewhere", preferred_gateway_id="totally-different-gw")]),
         ):
             resolved = await personal_channels_service._resolve_local_bridge_agent_id(
-                gateway_id="gw-unclaimed", channel_key="imessage_personal", registration=self.registration,
+                gateway_id="gw-unclaimed", channel_key="openclaw_imessage", registration=self.registration,
             )
         self.assertEqual(resolved, personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID)
 
@@ -210,17 +210,17 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=installs),
         ):
             resolved = await personal_channels_service._resolve_local_bridge_agent_id(
-                gateway_id="gw-ambiguous", channel_key="wechat_personal", registration=self.registration,
+                gateway_id="gw-ambiguous", channel_key="openclaw_openclaw-weixin", registration=self.registration,
             )
         self.assertEqual(resolved, personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID)
         self.assertIsNone(
             personal_channels_repository.get_local_bridge_state(
-                "gw-ambiguous", channel_key="wechat_personal", agent_id="agent-a",
+                "gw-ambiguous", channel_key="openclaw_openclaw-weixin", agent_id="agent-a",
             )
         )
         self.assertIsNone(
             personal_channels_repository.get_local_bridge_state(
-                "gw-ambiguous", channel_key="wechat_personal", agent_id="agent-b",
+                "gw-ambiguous", channel_key="openclaw_openclaw-weixin", agent_id="agent-b",
             )
         )
 
@@ -244,7 +244,7 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
         async def fake_bindings(*, tenant_id, workspace_id, agent_install_id, enabled_only):
             assert enabled_only is True
             if agent_install_id == "agent-a":
-                return [{"key": "signal_personal"}]
+                return [{"key": "openclaw_signal"}]
             return [{"key": "discord"}]  # agent-b uses a completely different channel
 
         with (
@@ -258,7 +258,7 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             resolved = await personal_channels_service._resolve_local_bridge_agent_id(
-                gateway_id="gw-shared", channel_key="signal_personal",
+                gateway_id="gw-shared", channel_key="openclaw_signal",
                 registration={"tenant_id": "tenant-identity", "workspace_id": "ws-identity"},
             )
         self.assertEqual(resolved, "agent-a")
@@ -266,7 +266,7 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
         # gateway+channel hits the fast path instead of re-running this
         # lookup (same contract as the exactly-one-preferred-gateway case).
         self.assertEqual(
-            personal_channels_service._resolve_agent_id_for_inbound("gw-shared", "signal_personal"),
+            personal_channels_service._resolve_agent_id_for_inbound("gw-shared", "openclaw_signal"),
             "agent-a",
         )
 
@@ -284,7 +284,7 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         async def fake_bindings(*, tenant_id, workspace_id, agent_install_id, enabled_only):
-            return [{"key": "signal_personal"}]  # both agents claim it
+            return [{"key": "openclaw_signal"}]  # both agents claim it
 
         with (
             patch(
@@ -297,18 +297,18 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             resolved = await personal_channels_service._resolve_local_bridge_agent_id(
-                gateway_id="gw-conflict", channel_key="signal_personal",
+                gateway_id="gw-conflict", channel_key="openclaw_signal",
                 registration={"tenant_id": "tenant-identity", "workspace_id": "ws-identity"},
             )
         self.assertEqual(resolved, personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID)
         self.assertIsNone(
             personal_channels_repository.get_local_bridge_state(
-                "gw-conflict", channel_key="signal_personal", agent_id="agent-a",
+                "gw-conflict", channel_key="openclaw_signal", agent_id="agent-a",
             )
         )
         self.assertIsNone(
             personal_channels_repository.get_local_bridge_state(
-                "gw-conflict", channel_key="signal_personal", agent_id="agent-b",
+                "gw-conflict", channel_key="openclaw_signal", agent_id="agent-b",
             )
         )
 
@@ -319,7 +319,7 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=installs),
         ):
             resolved = await personal_channels_service._resolve_local_bridge_agent_id(
-                gateway_id="gw-identity-3", channel_key="signal_personal", registration=self.registration,
+                gateway_id="gw-identity-3", channel_key="openclaw_signal", registration=self.registration,
             )
         self.assertEqual(resolved, personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID)
 
@@ -330,10 +330,10 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
         BEFORE any Gateway round trip -- proven here directly against that
         primitive, independent of the two routes' own RPC plumbing."""
         personal_channels_service._claim_agent_channel_state(
-            gateway_id="gw-imsg-1", channel_key="imessage_personal",
+            gateway_id="gw-imsg-1", channel_key="openclaw_imessage",
             agent_id="agent-imsg-owner", registration=self.registration,
         )
-        resolved = personal_channels_service._resolve_agent_id_for_inbound("gw-imsg-1", "imessage_personal")
+        resolved = personal_channels_service._resolve_agent_id_for_inbound("gw-imsg-1", "openclaw_imessage")
         self.assertEqual(resolved, "agent-imsg-owner")
 
     async def test_explicit_imessage_claim_is_a_no_op_if_that_agent_already_has_a_row(self) -> None:
@@ -342,42 +342,27 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
         session's status back to "connecting"."""
         personal_channels_repository.upsert_local_bridge_state(
             gateway_id="gw-imsg-2", tenant_id="tenant-identity", workspace_id="ws-identity", user_id="",
-            channel_key="imessage_personal", agent_id="agent-imsg-owner",
-            provider="bluebubbles_local_bridge", status="connected",
+            channel_key="openclaw_imessage", agent_id="agent-imsg-owner",
+            provider="openclaw", status="connected",
         )
         personal_channels_service._claim_agent_channel_state(
-            gateway_id="gw-imsg-2", channel_key="imessage_personal",
+            gateway_id="gw-imsg-2", channel_key="openclaw_imessage",
             agent_id="agent-imsg-owner", registration=self.registration,
         )
         state = personal_channels_repository.get_local_bridge_state(
-            "gw-imsg-2", channel_key="imessage_personal", agent_id="agent-imsg-owner",
+            "gw-imsg-2", channel_key="openclaw_imessage", agent_id="agent-imsg-owner",
         )
         self.assertEqual(state["status"], "connected")
 
-    async def test_recheck_imessage_personal_gateway_claims_identity_before_the_gateway_round_trip(self) -> None:
-        """Through the LIVE route-callable function -- proves the wiring,
-        not just the primitive. gateway_execution_service.execute_tool_via_gateway
-        is mocked (a real RPC round trip to a paired Mac has no place in a
-        unit test); _claim_agent_channel_state itself is real and unmocked."""
-        with (
-            patch(
-                "server_modules.personal_channels_service.kill_switch_gate.assert_not_killed",
-                return_value=None,
-            ),
-            patch(
-                "server_modules.personal_channels_service._enforce_personal_gateway_config_decision",
-                return_value={"ok": True},
-            ),
-            patch(
-                "server_modules.personal_channels_service.gateway_execution_service.execute_tool_via_gateway",
-                new=AsyncMock(return_value={"result": {"connected": True}}),
-            ),
-        ):
-            await personal_channels_service.recheck_imessage_personal_gateway(
-                gateway_id="gw-imsg-3", registration=self.registration, agent_id="agent-imsg-recheck",
-            )
-        resolved = personal_channels_service._resolve_agent_id_for_inbound("gw-imsg-3", "imessage_personal")
-        self.assertEqual(resolved, "agent-imsg-recheck")
+    # test_recheck_imessage_personal_gateway_claims_identity_before_the_
+    # gateway_round_trip DELETED 2026-08-14 (full OpenClaw channel cutover):
+    # recheck_imessage_personal_gateway (the in-app imsg RPC recheck route)
+    # was deleted along with ImsgIMessagePersonalChannelRuntime — iMessage's
+    # setup/health now lives entirely in OpenClaw's own provisioning and
+    # generic channel surfaces. The primitive this test also exercised,
+    # _claim_agent_channel_state, is still covered directly by
+    # test_explicit_imessage_claim_lets_the_fast_path_resolve_without_any_
+    # lookup above.
 
 
 class LocalBridgeGroupPolicyRoundTripTests(unittest.IsolatedAsyncioTestCase):
@@ -502,7 +487,7 @@ class LocalBridgeEndToEndInboundTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_addressed_message_in_the_allowed_chat_reaches_dm_policy(self) -> None:
-        await self._claim_and_configure(channel_key="signal_personal", provider="signal_local_bridge")
+        await self._claim_and_configure(channel_key="openclaw_signal", provider="openclaw")
         blocked_decision = {
             "allowed": False, "mode": "owner_only", "sender_id": "+15557654321",
             "is_owner": False, "system_reply": None, "config_changed": False,
@@ -539,8 +524,8 @@ class LocalBridgeEndToEndInboundTests(unittest.IsolatedAsyncioTestCase):
                         "is_reply_to_sage": False,
                     },
                 },
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
+                channel_key="openclaw_signal",
+                provider="openclaw",
                 label="Signal",
             )
         dm_policy_mock.assert_awaited_once()
@@ -548,7 +533,7 @@ class LocalBridgeEndToEndInboundTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.get("blocked"))  # by dmPolicy, not the group gate
 
     async def test_unaddressed_message_in_the_allowed_chat_is_refused_by_require_mention(self) -> None:
-        await self._claim_and_configure(channel_key="imessage_personal", provider="bluebubbles_local_bridge")
+        await self._claim_and_configure(channel_key="openclaw_imessage", provider="openclaw")
         with (
             _patch_agent_install_store(self.store),
             patch(
@@ -581,15 +566,15 @@ class LocalBridgeEndToEndInboundTests(unittest.IsolatedAsyncioTestCase):
                         "is_reply_to_sage": False,
                     },
                 },
-                channel_key="imessage_personal",
-                provider="bluebubbles_local_bridge",
+                channel_key="openclaw_imessage",
+                provider="openclaw",
                 label="iMessage",
             )
         self.assertTrue(result.get("ignored"))
         self.assertEqual(result.get("reason"), "group_no_mention")
 
     async def test_addressed_message_in_a_non_allowlisted_chat_is_denied(self) -> None:
-        await self._claim_and_configure(channel_key="wechat_personal", provider="wechat_local_bridge")
+        await self._claim_and_configure(channel_key="openclaw_openclaw-weixin", provider="openclaw")
         with (
             _patch_agent_install_store(self.store),
             patch(
@@ -622,8 +607,8 @@ class LocalBridgeEndToEndInboundTests(unittest.IsolatedAsyncioTestCase):
                         "is_reply_to_sage": False,
                     },
                 },
-                channel_key="wechat_personal",
-                provider="wechat_local_bridge",
+                channel_key="openclaw_openclaw-weixin",
+                provider="openclaw",
                 label="WeChat",
             )
         self.assertTrue(result.get("ignored"))

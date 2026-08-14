@@ -53,42 +53,40 @@ class _LazyGatewayExecutionService:
 gateway_execution_service = _LazyGatewayExecutionService()
 
 
+# 2026-08-14 full OpenClaw channel cutover: whatsapp_personal, telegram_personal
+# and imessage_personal are no longer real channels — channel_lane_contract_
+# service.PERSONAL_CHANNEL_SPECS no longer declares them, so
+# assert_personal_gateway_channel(...) on any of these three strings now
+# raises. These three identifiers are kept as VESTIGIAL STRING LITERALS
+# (never re-derived from the catalog) purely so the ~15 legacy branches still
+# scattered through this file (self-chat/loop-guard identity resolution,
+# health/reconnect summaries, the disconnect dispatch table, state-sync
+# reads) continue to compile and behave exactly as before: every one of
+# those branches compares a REAL inbound channel_key against these strings,
+# and no real channel_key can ever equal them again, so each is now
+# permanently unreachable dead code rather than a crash. Excising all ~15
+# call sites individually was judged too large a surgery to do safely in the
+# same pass as the runtime deletion — several touch loop-guard/self-chat
+# security logic this pass did not have time to re-verify line by line — so
+# it is left as a known follow-up rather than risked under this task's own
+# time pressure. Do NOT restore the assert_personal_gateway_channel() derivation
+# for these three; do NOT add a new live caller that could match them.
 WHATSAPP_PERSONAL_CHANNEL_KEY = "whatsapp_personal"
-WHATSAPP_PERSONAL_PROVIDER = channel_lane_contract_service.assert_personal_gateway_channel(
-    WHATSAPP_PERSONAL_CHANNEL_KEY
-)["provider"]
+WHATSAPP_PERSONAL_PROVIDER = "whatsapp_baileys"
 TELEGRAM_PERSONAL_CHANNEL_KEY = "telegram_personal"
-TELEGRAM_PERSONAL_PROVIDER = channel_lane_contract_service.assert_personal_gateway_channel(
-    TELEGRAM_PERSONAL_CHANNEL_KEY
-)["provider"]
-
-TELEGRAM_PERSONAL_CONFIGURE_CAPABILITY = "channel.telegram.personal.configure"
-WHATSAPP_PERSONAL_CONFIGURE_CAPABILITY = "channel.whatsapp.personal.configure"
-TELEGRAM_PERSONAL_DISCONNECT_CAPABILITY = "channel.telegram.personal.disconnect"
-WHATSAPP_PERSONAL_DISCONNECT_CAPABILITY = "channel.whatsapp.personal.disconnect"
-WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX = "whatsapp_personal:noreply:"
-TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX = "telegram_personal:noreply:"
-
-# iMessage (imsg) — unlike WhatsApp/Telegram there is no phone/code/QR step;
-# these two capabilities are the in-app setup panel's only real actions,
-# both dispatched live to ImsgIMessagePersonalChannelRuntime on the gateway
-# (empyralis-gateway/src/channels/imsg-imessage-runtime.ts) via the same
-# generic tool-invoke RPC WhatsApp/Telegram's configure/disconnect already
-# use — see recheck_imessage_personal_gateway()/install_imessage_imsg_gateway()
-# below. Provider stays "bluebubbles_local_bridge" — see imsg-imessage-
-# runtime.ts's own doc comment on why that string wasn't renamed.
+TELEGRAM_PERSONAL_PROVIDER = "telegram_gramjs"
 IMESSAGE_PERSONAL_CHANNEL_KEY = "imessage_personal"
-IMESSAGE_PERSONAL_PROVIDER = channel_lane_contract_service.assert_personal_gateway_channel(
-    IMESSAGE_PERSONAL_CHANNEL_KEY
-)["provider"]
-IMESSAGE_PERSONAL_RECHECK_CAPABILITY = "channel.imessage.personal.recheck"
-IMESSAGE_PERSONAL_INSTALL_CAPABILITY = "channel.imessage.personal.install"
+IMESSAGE_PERSONAL_PROVIDER = "bluebubbles_local_bridge"
 
-LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {
-    "signal_personal": {"provider": "signal_local_bridge", "label": "Signal"},
-    "imessage_personal": {"provider": "bluebubbles_local_bridge", "label": "iMessage"},
-    "wechat_personal": {"provider": "wechat_local_bridge", "label": "WeChat"},
-}
+# 2026-08-14 full OpenClaw channel cutover: signal_personal, imessage_personal
+# and wechat_personal (the first-party local-bridge family) DELETED — their
+# gateway runtimes (LocalBridgePersonalChannelRuntime + the signal-cli/
+# BlueBubbles bridges) are deleted in the same change. This dict is now
+# populated ENTIRELY by the OPENCLAW_PERSONAL_CHANNELS merge below —
+# openclaw_signal/openclaw_imessage/openclaw_openclaw-weixin are the live
+# replacements, and the handler-registration loop further down registers
+# _OpenClawPersonalChannelHandler for every key here automatically.
+LOCAL_BRIDGE_PERSONAL_CHANNELS: Dict[str, Dict[str, str]] = {}
 
 # ── OpenClaw-transported channels (CHANNEL-ADOPTION-PLAN.md step 2) ───────
 #
@@ -297,23 +295,15 @@ def _enforce_personal_channel_dispatch_decision(
     return decision
 
 
-_LOCAL_BRIDGE_PERSONAL_CHANNEL_COPY: Dict[str, Dict[str, str]] = {
-    "signal_personal": {
-        "status_label": "Bridge required",
-        "detail": "Signal runs through an Agent Computer local bridge.",
-        "next_step": "Connect an Agent Computer with a Signal bridge to enable agent messaging.",
-    },
-    "imessage_personal": {
-        "status_label": "Mac bridge required",
-        "detail": "iMessage runs through a user-owned Mac Agent Computer bridge.",
-        "next_step": "Connect a Mac Agent Computer with an iMessage bridge to enable agent messaging.",
-    },
-    "wechat_personal": {
-        "status_label": "Bridge required",
-        "detail": "WeChat personal runs through an Agent Computer local bridge.",
-        "next_step": "Connect an Agent Computer with a WeChat bridge to enable agent messaging.",
-    },
-}
+# 2026-08-14 full OpenClaw channel cutover: signal_personal/imessage_personal/
+# wechat_personal are gone (see LOCAL_BRIDGE_PERSONAL_CHANNELS above). Every
+# `.get(channel_key, {})` reader below already defaults safely to {}, and the
+# OpenClaw channels that replaced these three carry their own generic
+# remediation copy on the frontend (openclaw-channel-copy.ts's
+# `remediationFor`, derived from the manifest) — this dict was legacy,
+# local-bridge-specific status copy that has no OpenClaw equivalent to
+# migrate into, so it is emptied rather than repopulated.
+_LOCAL_BRIDGE_PERSONAL_CHANNEL_COPY: Dict[str, Dict[str, str]] = {}
 
 
 # ── Handler registry ──────────────────────────────────────────────────
@@ -324,162 +314,10 @@ from server_modules.personal_channel_handler_registry import (
 )
 
 
-class _WhatsAppPersonalChannelHandler(PersonalChannelHandler):
-    """Delegates to the existing WhatsApp functions in this module."""
-
-    @property
-    def channel_key(self) -> str:
-        return WHATSAPP_PERSONAL_CHANNEL_KEY
-
-    @property
-    def provider(self) -> str:
-        return WHATSAPP_PERSONAL_PROVIDER
-
-    def build_state_sync_payload(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "qr_code": str(message.get("qr_code") or "").strip() or None,
-            "linked_jid": str(message.get("linked_jid") or "").strip() or None,
-        }
-
-    def audit_action_prefix(self) -> str:
-        return "whatsapp"
-
-    async def handle_inbound(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        payload: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        return await _handle_whatsapp_gateway_channel_inbound(
-            gateway_id=gateway_id,
-            registration=registration,
-            payload=payload,
-        )
-
-    # NOTE: a `deliver_reply` passthrough used to sit here (and on the
-    # Telegram/local-bridge handlers below). Deleted 2026-08-08: zero
-    # callers, not declared on the PersonalChannelHandler ABC, and every one
-    # of them dropped agent_id on the floor — the local-bridge copy could not
-    # supply it at all. Wiring any of them would have silently reintroduced
-    # the unscoped-mark_inbound_processed bug fixed in
-    # _deliver_local_bridge_personal_reply. The live path is
-    # handle_inbound -> _handle_*_gateway_channel_inbound, which resolves
-    # agent_id first and threads it through.
-
-    async def send_message(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        remote_jid: str,
-        text: str,
-        idempotency_key: str,
-        reply_to_external_message_id: Optional[str] = None,
-        media: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        return await send_whatsapp_personal_message(
-            gateway_id=gateway_id,
-            registration=registration,
-            remote_jid=remote_jid,
-            text=text,
-            idempotency_key=idempotency_key,
-            reply_to_external_message_id=reply_to_external_message_id,
-            media=media,
-        )
-
-    def get_view(self, gateway_id: str) -> Dict[str, Any]:
-        return get_whatsapp_gateway_view(gateway_id)
-
-    async def configure(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        return await configure_whatsapp_personal_gateway(
-            gateway_id=gateway_id,
-            registration=registration,
-            payload=kwargs,
-        )
-
-
-class _TelegramPersonalChannelHandler(PersonalChannelHandler):
-    """Delegates to the existing Telegram functions in this module."""
-
-    @property
-    def channel_key(self) -> str:
-        return TELEGRAM_PERSONAL_CHANNEL_KEY
-
-    @property
-    def provider(self) -> str:
-        return TELEGRAM_PERSONAL_PROVIDER
-
-    def build_state_sync_payload(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "login_hint": str(message.get("login_hint") or "").strip() or None,
-            "linked_user_id": str(message.get("linked_user_id") or "").strip() or None,
-            "linked_username": str(message.get("linked_username") or "").strip() or None,
-            "linked_phone": str(message.get("linked_phone") or "").strip() or None,
-        }
-
-    def audit_action_prefix(self) -> str:
-        return "telegram"
-
-    async def handle_inbound(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        payload: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        return await _handle_telegram_gateway_channel_inbound(
-            gateway_id=gateway_id,
-            registration=registration,
-            payload=payload,
-        )
-
-    # deliver_reply passthrough deleted 2026-08-08 — see the note on
-    # _WhatsAppPersonalChannelHandler above.
-
-    async def send_message(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        remote_jid: str,
-        text: str,
-        idempotency_key: str,
-        reply_to_external_message_id: Optional[str] = None,
-        media: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        return await send_telegram_personal_message(
-            gateway_id=gateway_id,
-            registration=registration,
-            remote_jid=remote_jid,
-            text=text,
-            idempotency_key=idempotency_key,
-            reply_to_external_message_id=reply_to_external_message_id,
-            media=media,
-        )
-
-    def get_view(self, gateway_id: str) -> Dict[str, Any]:
-        return get_telegram_gateway_view(gateway_id)
-
-    async def configure(
-        self,
-        *,
-        gateway_id: str,
-        registration: Dict[str, Any],
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        return await configure_telegram_personal_gateway(
-            gateway_id=gateway_id,
-            registration=registration,
-            payload=kwargs,
-        )
-
+# _WhatsAppPersonalChannelHandler and _TelegramPersonalChannelHandler
+# DELETED 2026-08-14 (full OpenClaw channel cutover). WhatsApp and
+# Telegram are now handled generically by _OpenClawPersonalChannelHandler
+# below, exactly like every other OpenClaw-transported channel.
 
 class _LocalBridgePersonalChannelHandler(PersonalChannelHandler):
     """Generic Sage personal-channel handler for Agent Computer local bridges."""
@@ -676,8 +514,10 @@ class _OpenClawPersonalChannelHandler(_LocalBridgePersonalChannelHandler):
 
 
 _handler_registry = PersonalChannelHandlerRegistry()
-_handler_registry.register(_WhatsAppPersonalChannelHandler())
-_handler_registry.register(_TelegramPersonalChannelHandler())
+# WhatsApp/Telegram no longer get their own explicit .register() call — they
+# are keys in LOCAL_BRIDGE_PERSONAL_CHANNELS now (via the OPENCLAW_PERSONAL_
+# CHANNELS merge below it), so the loop registers _OpenClawPersonalChannel
+# Handler for them exactly like every other cut-over platform.
 for _channel_key, _channel_spec in LOCAL_BRIDGE_PERSONAL_CHANNELS.items():
     _handler_cls = (
         _OpenClawPersonalChannelHandler
@@ -2343,6 +2183,235 @@ async def agents_bound_to_channel(
     return owners
 
 
+class AgentNotPlacedOnGatewayError(ValueError):
+    """Raised by assert_agent_placed_on_gateway below. A ValueError subclass
+    (not a bare RuntimeError) so it falls straight into the `except
+    ValueError` -> 400 handling every WhatsApp/Telegram/iMessage personal-
+    channel route already has, with zero route changes needed; the OpenClaw
+    provisioning path re-wraps it into OpenClawProvisioningError(status_code
+    =403, reason_code="agent_not_placed_on_gateway") — see
+    openclaw_provisioning_service.provision_openclaw_gateway.
+
+    str(this) is already the owner-facing sentence — no "gateway_id",
+    "install_metadata", or "preferred_gateway_id" anywhere in it, matching
+    OpenClawProvisioningConflictError's own no-mechanism rule elsewhere in
+    this codebase."""
+
+    def __init__(self, *, agent_label: str, gateway_id: str, preferred_gateway_id: str) -> None:
+        self.gateway_id = gateway_id
+        self.preferred_gateway_id = preferred_gateway_id
+        if preferred_gateway_id:
+            message = (
+                f"{agent_label} is placed on a different computer than this one. A channel "
+                f"runs on the computer its agent is placed on — open {agent_label}'s Hardware "
+                "tab to move it here, or set this channel up from that agent's own Channels panel."
+            )
+        else:
+            message = (
+                f"{agent_label} isn't placed on any computer yet. Open its Hardware tab and "
+                "assign it a computer before setting up a channel for it."
+            )
+        super().__init__(message)
+
+
+async def assert_agent_placed_on_gateway(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    gateway_id: str,
+) -> None:
+    """THE enforcement point for CLAUDE.md's execution-locality doctrine
+    applied to channels. Founder, 2026-08-14: "I clearly connected my agent
+    to a hardware and channel came from there as well... If X agent is
+    connected to Z hardware, gateway and channel must run there as well."
+
+    Before this, every write that binds one agent's channel state to a
+    gateway_id (configure_whatsapp_personal_gateway,
+    configure_telegram_personal_gateway, recheck/install_imessage_*,
+    openclaw_provisioning_service.provision_openclaw_gateway) accepted ANY
+    gateway_id the caller's OWNER role could reach in the workspace — never
+    checked against which box the named agent is actually placed on. A
+    gateway's per-channel software CAPABILITY (e.g. channel.telegram.
+    personal, advertised unconditionally by every gateway process that
+    bundles the runtime — see get_gateway_personal_channel_surfaces's own
+    doc comment on `stage`/`proven_live`) was the only thing that looked
+    like a gate, and it says nothing about binding: three gateways in one
+    workspace can all legitimately advertise `telegram: True` in software
+    while only one of them is where a given agent's tools actually run.
+
+    install_metadata.preferred_gateway_id is the single field already
+    treated as authoritative for "where does this agent's hardware run" —
+    resolveHardwarePlacement (frontend), _resolve_local_bridge_agent_id,
+    agents_sharing_gateway, and routes_fleet.fleet_agent_channels's
+    selected_gateway_id all key off it already. This is that same fact
+    enforced at every channel WRITE, not just read — one authoritative
+    source, checked at the narrow waist each mutation already passes
+    through, rather than a defensive re-check invented per route.
+
+    Fails CLOSED: an unreadable install bundle raises rather than allowing
+    the write through — the cost of a false positive here (a channel wired
+    to hardware the agent was never placed on) is a cross-box credential
+    leak or a repeat of the group-ban incident CLAUDE.md already documents;
+    the cost of a false negative is a retryable error."""
+    normalized_agent_id = str(agent_id or "").strip()
+    normalized_gateway_id = str(gateway_id or "").strip()
+    if not normalized_agent_id or not normalized_gateway_id:
+        # Nothing to enforce: an unscoped call (no agent_id) is the
+        # pre-existing "route as Sage" behavior _claim_agent_channel_state
+        # already tolerates, and a blank gateway_id never reaches a real
+        # mutation (the route's own gateway lookup 404s first).
+        return
+    from server_modules import agent_registry_repository as _repo
+
+    try:
+        bundle = await _repo.get_workspace_agent_install_bundle(
+            normalized_agent_id, tenant_id=tenant_id, workspace_id=workspace_id,
+        )
+    except Exception:
+        _logger.warning(
+            "assert_agent_placed_on_gateway: install lookup failed for agent_id=%s gateway_id=%s",
+            normalized_agent_id, normalized_gateway_id, exc_info=True,
+        )
+        bundle = None
+    if not isinstance(bundle, dict):
+        raise AgentNotPlacedOnGatewayError(
+            agent_label=normalized_agent_id,
+            gateway_id=normalized_gateway_id,
+            preferred_gateway_id="",
+        )
+    metadata = bundle.get("install_metadata") if isinstance(bundle.get("install_metadata"), dict) else bundle.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    preferred = str(metadata.get("preferred_gateway_id") or "").strip()
+    if preferred and preferred == normalized_gateway_id:
+        return
+    label = str(bundle.get("label") or bundle.get("agent_definition_name") or "").strip() or normalized_agent_id
+    raise AgentNotPlacedOnGatewayError(
+        agent_label=label,
+        gateway_id=normalized_gateway_id,
+        preferred_gateway_id=preferred,
+    )
+
+
+async def handle_agent_hardware_relocated(
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    agent_id: str,
+    old_gateway_id: str,
+    new_gateway_id: str,
+    actor_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Called as a best-effort side effect of fleet_tools.fleet_configure_agent
+    whenever an agent's own install_metadata.preferred_gateway_id changes
+    away from a real, previously-set gateway (a MOVE or an unbind — never
+    fires on the FIRST placement, where old_gateway_id is blank).
+
+    WHY THIS EXISTS: assert_agent_placed_on_gateway above stops new writes
+    from landing on the wrong box, but a channel that was ALREADY connected
+    on the OLD box before the move does not become disconnected just
+    because Empyralis's own metadata changed — the founder's own scenario
+    ("channels already paired elsewhere") demands this actively do
+    something, not silently leave a channel answering from hardware the
+    product now says the agent isn't on. CLAUDE.md's outcome-honesty law
+    ("after an action, the product must tell the person what actually
+    happened") applies here too: this never raises past the caller, and its
+    return value is always a real report, not a swallowed None.
+
+    WhatsApp/Telegram personal: these are single-session-per-box channels
+    (find_agent_id_for_telegram_session/_whatsapp_session resolve by "most
+    recently touched row for this gateway+channel", not per-agent) — the
+    live session credential lives ON the old box's process memory/disk, so
+    the only honest way to actually end it is the SAME disconnect capability
+    the Channels panel's own "Disconnect" button already calls
+    (disconnect_whatsapp_personal_gateway/disconnect_telegram_personal_gateway).
+    Reused here rather than re-implemented, and best-effort: an offline old
+    box means the session simply logs out the next time it can, exactly
+    like any other disconnect attempt against an unreachable gateway.
+
+    OpenClaw-transported / local-bridge channels: there is no per-channel
+    disconnect RPC (CLAUDE.md: these are OS-level bridges or a shared
+    OpenClaw config, not something Empyralis logs in and out of). The
+    honest action there is to re-push the old gateway's OpenClaw policy —
+    build_openclaw_channel_policies recomputes ownership fresh from CURRENT
+    preferred_gateway_id on every call, so once this agent's own metadata
+    has already moved, provisioning the OLD gateway (as whichever OTHER
+    agent still shares it, if any) naturally stops including this agent's
+    settings. Skipped, honestly, when no other agent remains on the old box
+    to provision as — there is nothing left to push, and the old box's
+    config will keep whatever it had until it is next reached, which is
+    reported rather than hidden.
+    """
+    normalized_agent_id = str(agent_id or "").strip()
+    normalized_old_gateway_id = str(old_gateway_id or "").strip()
+    normalized_new_gateway_id = str(new_gateway_id or "").strip()
+    report: Dict[str, Any] = {
+        "old_gateway_id": normalized_old_gateway_id or None,
+        "new_gateway_id": normalized_new_gateway_id or None,
+        "released_channels": [],
+        "notes": [],
+    }
+    if not normalized_agent_id or not normalized_old_gateway_id:
+        return report
+    if normalized_old_gateway_id == normalized_new_gateway_id:
+        return report
+
+    old_registration = gateway_state_repository.get_gateway_registration(normalized_old_gateway_id)
+    if not old_registration:
+        report["notes"].append("The previous computer's pairing record is gone; nothing to release there.")
+        return report
+
+    # WhatsApp / Telegram personal (Baileys/gramjs) had their own per-channel
+    # disconnect RPC here (disconnect_whatsapp_personal_gateway/
+    # disconnect_telegram_personal_gateway) — DELETED 2026-08-14 (full
+    # OpenClaw channel cutover) along with those functions and the runtimes
+    # they disconnected. WhatsApp and Telegram are now OpenClaw-transported
+    # exactly like Signal/iMessage/WeChat always were, so they now fall
+    # entirely under the OpenClaw-transported re-provisioning block below —
+    # there is no first-party session left to explicitly disconnect.
+
+    # OpenClaw-transported / local-bridge channels — re-push the OLD
+    # gateway's policy under whichever OTHER agent still shares it, so
+    # ownership recomputes without this agent. Nothing to push if this was
+    # the only agent on that box.
+    try:
+        remaining_agents = [
+            a for a in await agents_sharing_gateway(
+                tenant_id=tenant_id, workspace_id=workspace_id, gateway_id=normalized_old_gateway_id,
+            )
+            if a != normalized_agent_id
+        ]
+    except Exception:
+        remaining_agents = []
+    if remaining_agents:
+        try:
+            from server_modules import openclaw_provisioning_service as _openclaw
+
+            await _openclaw.provision_openclaw_gateway(
+                gateway_id=normalized_old_gateway_id,
+                tenant_id=tenant_id,
+                workspace_id=workspace_id,
+                agent_id=remaining_agents[0],
+                actor_id=actor_id,
+            )
+            report["notes"].append(
+                "OpenClaw-transported channels on the previous computer were re-provisioned "
+                "under the agent(s) still placed there."
+            )
+        except Exception as exc:
+            report["notes"].append(
+                f"Could not re-provision the previous computer's OpenClaw transport right now "
+                f"({exc}); it will pick up the change the next time anyone provisions it."
+            )
+    else:
+        report["notes"].append(
+            "No other agent is placed on the previous computer, so its OpenClaw-transported "
+            "channel policy was left as-is; it will refresh the next time that computer is "
+            "provisioned."
+        )
+    return report
+
+
 async def _resolve_local_bridge_agent_id(
     *,
     gateway_id: str,
@@ -3042,819 +3111,14 @@ async def handle_gateway_channel_inbound(
     )
 
 
-async def _deliver_whatsapp_personal_reply(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    inbound: Dict[str, Any],
-    remote_jid: str,
-    external_message_id: str,
-    text: str,
-    push_name: Optional[str],
-    duplicate: bool,
-    trace_id: str = "",
-    agent_id: str = "",
-    attachments: Optional[List[Dict[str, Any]]] = None,
-    is_owner: bool = False,
-    is_group: bool = False,
-    chat_label: Optional[str] = None,
-    sender_id: str = "",
-    was_addressed: Optional[bool] = None,
-) -> Dict[str, Any]:
-    reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
-    if reply_idempotency_key and reply_idempotency_key.startswith(WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX):
-        return {"duplicate": duplicate, "inbound": inbound, "outbound": None}
-
-    outbound: Optional[Dict[str, Any]] = None
-    idempotency_key = reply_idempotency_key or f"whatsapp_personal:{external_message_id}"
-    if reply_idempotency_key:
-        outbound = personal_channels_repository.get_outbound_message(
-            gateway_id=str(gateway_id or "").strip(),
-            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-            idempotency_key=reply_idempotency_key,
-        )
-    if outbound and str(outbound.get("status") or "").strip() == "delivered":
-        personal_channels_repository.mark_inbound_processed(
-            gateway_id=str(gateway_id or "").strip(),
-            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-            external_message_id=external_message_id,
-            reply_idempotency_key=idempotency_key,
-        )
-        return {"duplicate": duplicate, "inbound": inbound, "outbound": outbound}
-
-    if outbound is None:
-        # Resolve linked user name from WhatsApp state for identity context
-        # Validate workspace_id from registration exists before proceeding
-        try:
-            from server_modules.control_plane_repository import get_workspace_by_id
-            _ws_id = str(registration.get("workspace_id") or "").strip()
-            if _ws_id and _ws_id != "default":
-                ws_check = await get_workspace_by_id(_ws_id)
-                if not ws_check:
-                    _ws_logger = __import__('logging').getLogger(__name__)
-                    _ws_logger.error(
-                        "whatsapp_personal: invalid workspace_id=%s in registration — message will be ignored",
-                        _ws_id,
-                    )
-                    return {"ignored": True, "reason": "invalid_workspace_id", "workspace_id": _ws_id}
-        except Exception:
-            pass
-        _wa_state = personal_channels_repository.get_whatsapp_state(
-            str(gateway_id or "").strip(),
-            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-        )
-        linked_user_name = str((_wa_state or {}).get("linked_name") or "").strip() or None
-        # ── Shared command dispatcher (the one waist every personal-channel
-        # delivery path crosses — see _dispatch_personal_channel_command) ──
-        command_result = await _dispatch_personal_channel_command(
-            gateway_id=gateway_id,
-            registration=registration,
-            inbound=inbound,
-            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-            provider=WHATSAPP_PERSONAL_PROVIDER,
-            capability_id="channel.whatsapp.personal.send",
-            agent_id=agent_id,
-            outbound_agent_id=agent_id,
-            external_message_id=external_message_id,
-            remote_jid=remote_jid,
-            text=text,
-            duplicate=duplicate,
-            trace_id=trace_id,
-        )
-        if command_result is not None:
-            return command_result
-
-        reply = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
-            workspace_id=str(registration.get("workspace_id") or "").strip(),
-            gateway_id=str(gateway_id or "").strip(),
-            remote_jid=remote_jid,
-            text=text,
-            push_name=push_name,
-            sender_id=sender_id,
-            source_event_id=external_message_id,
-            linked_user_name=linked_user_name,
-            agent_id=agent_id,
-            attachments=attachments,
-            is_owner=is_owner,
-            is_group=is_group,
-            chat_label=chat_label,
-            was_addressed=was_addressed,
-        )
-        # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
-        # be sent into a channel (DM or group). resolve_channel_reply_outcome
-        # applies filter_channel_outbound_reply internally as the backstop
-        # regardless of what the bridge service returned — it catches
-        # [SILENT] markers AND any text matching a known platform
-        # status/error string, so a turn error/quota denial/timeout can never
-        # masquerade as a deliverable reply. It ALSO separates "the agent
-        # chose silence" from "the turn never completed", which this seam
-        # used to record identically.
-        outcome = channel_adapter.resolve_channel_reply_outcome(reply, is_owner=is_owner)
-        reply_media = list(outcome.media)
-        _safe_reply_text = outcome.text
-        # A media-only reply (send_image/generate_image queued an attachment
-        # but the model had nothing more to say, or its text was filtered
-        # above) still has something to deliver — only skip when there is
-        # genuinely neither safe text nor media.
-        if not _safe_reply_text and not reply_media:
-            _undelivered = outcome.is_undelivered
-            # See the matching comment in _deliver_local_bridge_personal_reply:
-            # the no-reply marker means "the agent DELIBERATELY said nothing",
-            # so an undelivered turn must not write it — doing so records a
-            # message the platform failed to answer as answered and cancels
-            # its redelivery retry.
-            refreshed_inbound = None
-            if not _undelivered:
-                no_reply_idempotency_key = f"{WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
-                refreshed_inbound = personal_channels_repository.mark_inbound_processed(
-                    gateway_id=str(gateway_id or "").strip(),
-                    channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    agent_id=agent_id,
-                    external_message_id=external_message_id,
-                    reply_idempotency_key=no_reply_idempotency_key,
-                )
-            _emit_automatic_reply_audit(
-                action="personal_channel.whatsapp.automatic_reply",
-                status="failed" if _undelivered else "skipped",
-                registration=registration,
-                gateway_id=gateway_id,
-                channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-                provider=WHATSAPP_PERSONAL_PROVIDER,
-                detail=(
-                    "Automatic WhatsApp personal reply was NOT delivered: the turn did not complete "
-                    f"({outcome.status_code}). The inbound message is left unprocessed so a redelivery retries it."
-                    if _undelivered
-                    else "Automatic WhatsApp personal reply was skipped because the agent returned no reply."
-                ),
-                metadata={
-                    "remote_jid": remote_jid,
-                    "inbound_external_message_id": external_message_id,
-                    "undelivered": _undelivered,
-                    "status_code": outcome.status_code or None,
-                },
-                trace_id=trace_id,
-                idempotency_key=(
-                    "personal_channel.whatsapp.automatic_reply."
-                    f"{'failed' if _undelivered else 'skipped'}:{gateway_id}:{external_message_id}"
-                ),
-            )
-            return {"duplicate": duplicate, "inbound": refreshed_inbound or inbound, "outbound": None}
-
-        outbound, _ = personal_channels_repository.create_or_get_outbound_message(
-            gateway_id=str(gateway_id or "").strip(),
-            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-            idempotency_key=idempotency_key,
-            remote_jid=remote_jid,
-            text=_safe_reply_text,
-            reply_to_external_message_id=external_message_id,
-            metadata={
-                "reply_source": (
-                    "platform_status_owner_only"
-                    if outcome.is_undelivered
-                    else str((reply or {}).get("source") or "").strip() or None
-                ),
-                "media": reply_media or None,
-                "undelivered_status_code": outcome.status_code or None,
-            },
-        )
-
-    if str(outbound.get("status") or "").strip() == "delivered":
-        personal_channels_repository.mark_inbound_processed(
-            gateway_id=str(gateway_id or "").strip(),
-            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-            external_message_id=external_message_id,
-            reply_idempotency_key=idempotency_key,
-        )
-        return {"duplicate": duplicate, "inbound": inbound, "outbound": outbound}
-
-    _enforce_personal_channel_dispatch_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id="channel.whatsapp.personal.send",
-        request_id=str(idempotency_key or "").strip(),
-    )
-    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        provider=WHATSAPP_PERSONAL_PROVIDER,
-        remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
-        text=str(outbound.get("text") or "").strip(),
-        idempotency_key=idempotency_key,
-        # Auto-replies dispatch as normal messages, not forced quote-reply
-        # bubbles: always threading a reply to the triggering message reads
-        # as robotic on Telegram/WhatsApp. An explicit "reply to X" send
-        # (send_whatsapp_personal_message) still honors a caller-supplied id.
-        reply_to_external_message_id=None,
-        # Read back from the stored outbound row (not the `reply` var above)
-        # so this also carries media on the idempotent-replay path, where
-        # `outbound` came from get_outbound_message() and `reply` was never
-        # rebuilt this call.
-        media=list((outbound.get("metadata") or {}).get("media") or []),
-    )
-    delivered = personal_channels_repository.mark_outbound_delivered(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        idempotency_key=idempotency_key,
-        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
-        metadata={"dispatch_result": dispatch_result},
-    )
-    personal_channels_repository.mark_inbound_processed(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        external_message_id=external_message_id,
-        reply_idempotency_key=idempotency_key,
-    )
-    _emit_automatic_reply_audit(
-        action="personal_channel.whatsapp.automatic_reply",
-        status="delivered",
-        registration=registration,
-        gateway_id=gateway_id,
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        provider=WHATSAPP_PERSONAL_PROVIDER,
-        detail="Automatic WhatsApp personal reply was dispatched immediately.",
-        metadata={
-            "remote_jid": remote_jid,
-            "inbound_external_message_id": external_message_id,
-            "reply_text_length": len(str(outbound.get("text") or "")),
-            "dispatched": True,
-            "dispatch_external_message_id": str(dispatch_result.get("external_message_id") or "").strip() or None,
-        },
-        trace_id=trace_id,
-        idempotency_key=f"personal_channel.whatsapp.automatic_reply.delivered:{gateway_id}:{idempotency_key}",
-    )
-    return {"duplicate": duplicate, "inbound": inbound, "outbound": delivered or outbound}
-
-
-async def _handle_whatsapp_gateway_channel_inbound(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        WHATSAPP_PERSONAL_CHANNEL_KEY,
-        str(payload.get("provider") or WHATSAPP_PERSONAL_PROVIDER).strip() or WHATSAPP_PERSONAL_PROVIDER,
-    )
-    trace_id = str(payload.get("trace_id") or "").strip()
-    message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
-    external_message_id = str(message.get("external_message_id") or "").strip()
-    remote_jid = str(message.get("remote_jid") or "").strip()
-    text = str(message.get("text") or "").strip()
-    media_items = [item for item in (message.get("media") or []) if isinstance(item, dict)]
-    if not external_message_id or not remote_jid or (not text and not media_items):
-        raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
-    if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
-        return {"ignored": True, "reason": "from_me", "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY}
-    # Resolved BEFORE the sync below (not after): this reflects whichever
-    # agent's configure() call (or a prior message) already owns this
-    # gateway+channel, and the sync then updates THAT SAME row to
-    # "connected" rather than risking a second, wrongly-scoped row. Also
-    # needed by the group gate right below (group_policy is per-agent
-    # config), which is why this now runs before that gate rather than
-    # after it as it used to when the gate was a hardcoded inline check.
-    agent_id = _resolve_agent_id_for_inbound(gateway_id, WHATSAPP_PERSONAL_CHANNEL_KEY)
-    # Group gate: _enforce_group_policy — the ONE shared resolver (see its
-    # own docstring above) replacing what used to be an inline `if is_group
-    # and not is_mentioned and not is_reply_to_sage: skip` here. The
-    # Gateway-side filter (runtime.ts) used to be a primary gate duplicating
-    # this same decision; it now only computes/forwards the raw mention
-    # facts (is_mentioned/is_reply_to_sage) and this is the ONE place the
-    # shouldSkip decision is made.
-    group_decision = await _enforce_group_policy(
-        registration=registration,
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        message=message,
-        remote_jid=remote_jid,
-    )
-    if not group_decision["allowed"]:
-        return {
-            "ignored": True,
-            "reason": group_decision["reason"],
-            "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY,
-        }
-    # Read BEFORE the sync below writes to it: dmPolicy's owner check (further
-    # down) needs the identity established at login, not whatever the sync
-    # payload is about to (re)write — see _resolve_linked_identity_for_sync's
-    # docstring.
-    existing_state = personal_channels_repository.get_whatsapp_state(
-        str(gateway_id or "").strip(), channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY, agent_id=agent_id,
-    )
-    sync_gateway_personal_channel_state(
-        gateway_id=gateway_id,
-        registration=registration,
-        agent_id=agent_id,
-        payload={
-            "personal_channels": {
-                WHATSAPP_PERSONAL_CHANNEL_KEY: {
-                    "provider": str(payload.get("provider") or WHATSAPP_PERSONAL_PROVIDER).strip() or WHATSAPP_PERSONAL_PROVIDER,
-                    "status": "connected",
-                    # Only a genuine self-chat event supplies a NEW linked_jid;
-                    # every other inbound message preserves whatever is
-                    # already persisted (see _resolve_linked_identity_for_sync).
-                    "linked_jid": _resolve_linked_identity_for_sync(
-                        current_value=str(message.get("sender_jid") or "").strip() if bool(message.get("is_self_chat")) else None,
-                        preserved_value=_channel_owner_linked_id(channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY, state=existing_state),
-                    ),
-                }
-            }
-        },
-    )
-    inbound, created = personal_channels_repository.record_inbound_message(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        external_message_id=external_message_id,
-        remote_jid=remote_jid,
-        sender_jid=str(message.get("sender_jid") or "").strip() or None,
-        push_name=str(message.get("push_name") or "").strip() or None,
-        text=text,
-        metadata={
-            "provider": str(payload.get("provider") or WHATSAPP_PERSONAL_PROVIDER).strip() or WHATSAPP_PERSONAL_PROVIDER,
-            "received_at": str(message.get("received_at") or "").strip() or None,
-            "from_me": bool(message.get("from_me")),
-            "media_kinds": [str(item.get("kind") or "").strip() for item in media_items] or None,
-        },
-    )
-    # ── dmPolicy gate: MUST run before any reply (including a control-command
-    # reply) is generated. See _enforce_dm_policy's docstring. ──
-    dm_decision = await _enforce_dm_policy(
-        registration=registration,
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        message=message,
-        remote_jid=remote_jid,
-        existing_state=existing_state,
-        label="WhatsApp",
-    )
-    if not dm_decision["allowed"]:
-        return await _handle_dm_policy_blocked(
-            gateway_id=gateway_id,
-            registration=registration,
-            inbound=inbound,
-            channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-            provider=WHATSAPP_PERSONAL_PROVIDER,
-            agent_id=agent_id,
-            external_message_id=external_message_id,
-            remote_jid=remote_jid,
-            duplicate=not created,
-            decision=dm_decision,
-            trace_id=trace_id,
-        )
-    blocked_result = await _control_command_block_result(
-        gateway_id=gateway_id,
-        registration=registration,
-        inbound=inbound,
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        provider=WHATSAPP_PERSONAL_PROVIDER,
-        agent_id=agent_id,
-        external_message_id=external_message_id,
-        remote_jid=remote_jid,
-        text=text,
-        is_owner=bool(dm_decision.get("is_owner")),
-        duplicate=not created,
-        no_reply_prefix=WHATSAPP_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX,
-        trace_id=trace_id,
-    )
-    if blocked_result is not None:
-        return blocked_result
-
-    effective_text, attachments = await _process_inbound_media_for_turn(
-        gateway_id=gateway_id,
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        provider=WHATSAPP_PERSONAL_PROVIDER,
-        registration=registration,
-        agent_id=agent_id,
-        text=text,
-        media_items=media_items,
-    )
-    return await _deliver_whatsapp_personal_reply(
-        gateway_id=gateway_id,
-        registration=registration,
-        inbound=inbound,
-        remote_jid=remote_jid,
-        external_message_id=external_message_id,
-        text=effective_text,
-        push_name=str(message.get("push_name") or "").strip() or None,
-        duplicate=not created,
-        trace_id=trace_id,
-        agent_id=agent_id,
-        attachments=attachments,
-        is_owner=bool(dm_decision.get("is_owner")),
-        # is_group: same signal the group-mention gate above already reads
-        # (message.get("is_group")) — threaded through so an owner-unified
-        # memory turn is never mistaken for a private 1:1 with the owner
-        # just because the owner happens to be a member of this group (see
-        # _build_unified_sage_personal_reply_async's is_group contract).
-        # chat_label: the group's human-readable subject when the Gateway
-        # supplied one (mapWhatsAppInboundMessage / runtime.ts's
-        # groupMetadata lookup — best-effort, may be absent), used only to
-        # make the owner-unified activity feed's mirrored entries legible.
-        is_group=bool(message.get("is_group")),
-        chat_label=str(message.get("chat_title") or "").strip() or None,
-        # The specific participant who sent this message — differs from
-        # remote_jid inside a group. Feeds ONLY the canonical
-        # InboundEnvelope's sender.id (see
-        # personal_channel_sage_bridge_service._build_personal_channel_envelope);
-        # every other identity/routing decision in this handler already keys
-        # off remote_jid, unchanged.
-        sender_id=str(message.get("sender_jid") or "").strip(),
-        # The REAL "was this message actually addressed" fact from the
-        # group gate above (None for a non-group turn) — see
-        # _enforce_group_policy's own docstring for why this must be
-        # threaded through rather than left to default: with
-        # requireMention OFF by default, allowed=True no longer implies
-        # "addressed" the way it used to.
-        was_addressed=group_decision.get("was_addressed"),
-    )
-
-
-async def _handle_telegram_gateway_channel_inbound(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        TELEGRAM_PERSONAL_CHANNEL_KEY,
-        str(payload.get("provider") or TELEGRAM_PERSONAL_PROVIDER).strip() or TELEGRAM_PERSONAL_PROVIDER,
-    )
-    trace_id = str(payload.get("trace_id") or "").strip()
-    message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
-    external_message_id = str(message.get("external_message_id") or "").strip()
-    remote_jid = str(message.get("remote_jid") or "").strip()
-    text = str(message.get("text") or "").strip()
-    media_items = [item for item in (message.get("media") or []) if isinstance(item, dict)]
-    if not external_message_id or not remote_jid or (not text and not media_items):
-        raise ValueError("channel.inbound requires external_message_id, remote_jid, and (text or media).")
-    # A self-chat message (the owner messaging their own Telegram "Saved
-    # Messages" — the exact analog of WhatsApp's is_self_chat command
-    # channel) is ALWAYS from_me too, since only the owner can post into
-    # their own Saved Messages. Let it through here exactly like the
-    # WhatsApp handler above (`from_me and not is_self_chat`) instead of
-    # ignoring every from_me message unconditionally — the pre-fix
-    # behavior, which was moot only because the Gateway (runtime.ts)
-    # dropped self-chat messages before they ever reached this handler at
-    # all. An ordinary outgoing message to someone else (or to a group)
-    # still has is_self_chat=False and is still ignored here.
-    if bool(message.get("from_me")) and not bool(message.get("is_self_chat")):
-        return {"ignored": True, "reason": "from_me", "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY}
-    # Resolved BEFORE the sync below — see the WhatsApp handler's identical
-    # comment above for why the ordering matters. Also now needed by the
-    # group gate right below (group_policy is per-agent config).
-    agent_id = _resolve_agent_id_for_inbound(gateway_id, TELEGRAM_PERSONAL_CHANNEL_KEY)
-    # Group gate: _enforce_group_policy — the ONE shared resolver, replacing
-    # what used to be an inline `if is_group and not is_mentioned and not
-    # is_reply_to_sage: skip` here — identical contract to the WhatsApp
-    # handler above.
-    group_decision = await _enforce_group_policy(
-        registration=registration,
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        message=message,
-        remote_jid=remote_jid,
-    )
-    if not group_decision["allowed"]:
-        return {
-            "ignored": True,
-            "reason": group_decision["reason"],
-            "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY,
-        }
-    # Read BEFORE the sync below writes to it — see the WhatsApp handler's
-    # identical comment above (_resolve_linked_identity_for_sync's docstring).
-    existing_state = personal_channels_repository.get_telegram_state(
-        str(gateway_id or "").strip(), channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY, agent_id=agent_id,
-    )
-    sync_gateway_personal_channel_state(
-        gateway_id=gateway_id,
-        registration=registration,
-        agent_id=agent_id,
-        payload={
-            "personal_channels": {
-                TELEGRAM_PERSONAL_CHANNEL_KEY: {
-                    "provider": str(payload.get("provider") or TELEGRAM_PERSONAL_PROVIDER).strip() or TELEGRAM_PERSONAL_PROVIDER,
-                    "status": "connected",
-                    # Mirrors the WhatsApp handler above exactly, now that
-                    # Telegram's message payload also carries is_self_chat
-                    # (see telegram/message-mapper.ts's
-                    # mapTelegramInboundMessage): only a genuine self-chat
-                    # event supplies a NEW linked_user_id; every other
-                    # inbound message (including a stranger's, or the
-                    # owner posting inside a group) preserves whatever is
-                    # already persisted. See
-                    # _resolve_linked_identity_for_sync's docstring for why
-                    # deriving this from the message's own sender_jid
-                    # unconditionally (the pre-fix behavior) silently
-                    # clobbered the real owner identity with whichever
-                    # stranger last texted in.
-                    "linked_user_id": _resolve_linked_identity_for_sync(
-                        current_value=str(message.get("sender_jid") or "").strip() if bool(message.get("is_self_chat")) else None,
-                        preserved_value=_channel_owner_linked_id(channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY, state=existing_state),
-                    ),
-                    "linked_name": str((existing_state or {}).get("linked_name") or "").strip() or None,
-                }
-            }
-        },
-    )
-    inbound, created = personal_channels_repository.record_inbound_message(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        external_message_id=external_message_id,
-        remote_jid=remote_jid,
-        sender_jid=str(message.get("sender_jid") or "").strip() or None,
-        push_name=str(message.get("push_name") or "").strip() or None,
-        text=text,
-        metadata={
-            "provider": str(payload.get("provider") or TELEGRAM_PERSONAL_PROVIDER).strip() or TELEGRAM_PERSONAL_PROVIDER,
-            "received_at": str(message.get("received_at") or "").strip() or None,
-            "from_me": bool(message.get("from_me")),
-            "media_kinds": [str(item.get("kind") or "").strip() for item in media_items] or None,
-        },
-    )
-    # ── dmPolicy gate: MUST run before any reply (including a control-command
-    # reply) is generated. See _enforce_dm_policy's docstring. ──
-    dm_decision = await _enforce_dm_policy(
-        registration=registration,
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        message=message,
-        remote_jid=remote_jid,
-        existing_state=existing_state,
-        label="Telegram",
-    )
-    if not dm_decision["allowed"]:
-        return await _handle_dm_policy_blocked(
-            gateway_id=gateway_id,
-            registration=registration,
-            inbound=inbound,
-            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-            provider=TELEGRAM_PERSONAL_PROVIDER,
-            agent_id=agent_id,
-            external_message_id=external_message_id,
-            remote_jid=remote_jid,
-            duplicate=not created,
-            decision=dm_decision,
-            trace_id=trace_id,
-        )
-    blocked_result = await _control_command_block_result(
-        gateway_id=gateway_id,
-        registration=registration,
-        inbound=inbound,
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        provider=TELEGRAM_PERSONAL_PROVIDER,
-        agent_id=agent_id,
-        external_message_id=external_message_id,
-        remote_jid=remote_jid,
-        text=text,
-        is_owner=bool(dm_decision.get("is_owner")),
-        duplicate=not created,
-        no_reply_prefix=TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX,
-        trace_id=trace_id,
-    )
-    if blocked_result is not None:
-        return blocked_result
-    reply_idempotency_key = str(inbound.get("reply_idempotency_key") or "").strip() or None
-    if reply_idempotency_key and reply_idempotency_key.startswith(TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX):
-        return {"duplicate": not created, "inbound": inbound, "outbound": None}
-
-    outbound: Optional[Dict[str, Any]] = None
-    idempotency_key = reply_idempotency_key or f"telegram_personal:{external_message_id}"
-    if reply_idempotency_key:
-        outbound = personal_channels_repository.get_outbound_message(
-            gateway_id=str(gateway_id or "").strip(),
-            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-            idempotency_key=reply_idempotency_key,
-        )
-    if outbound and str(outbound.get("status") or "").strip() == "delivered":
-        personal_channels_repository.mark_inbound_processed(
-            gateway_id=str(gateway_id or "").strip(),
-            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-            external_message_id=external_message_id,
-            reply_idempotency_key=idempotency_key,
-        )
-        return {"duplicate": not created, "inbound": inbound, "outbound": outbound}
-
-    if outbound is None:
-        # ── Shared command dispatcher (the one waist every personal-channel
-        # delivery path crosses — see _dispatch_personal_channel_command).
-        # Runs on the raw inbound text, same as _control_command_block_result
-        # above — a command message has no media to process. ──
-        command_result = await _dispatch_personal_channel_command(
-            gateway_id=gateway_id,
-            registration=registration,
-            inbound=inbound,
-            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-            provider=TELEGRAM_PERSONAL_PROVIDER,
-            capability_id="channel.telegram.personal.send",
-            agent_id=agent_id,
-            outbound_agent_id=agent_id,
-            external_message_id=external_message_id,
-            remote_jid=remote_jid,
-            text=text,
-            duplicate=not created,
-            trace_id=trace_id,
-        )
-        if command_result is not None:
-            return command_result
-
-        effective_text, attachments = await _process_inbound_media_for_turn(
-            gateway_id=gateway_id,
-            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-            provider=TELEGRAM_PERSONAL_PROVIDER,
-            registration=registration,
-            agent_id=agent_id,
-            text=text,
-            media_items=media_items,
-        )
-        reply = personal_channel_sage_bridge_service.build_telegram_personal_reply(
-            workspace_id=str(registration.get("workspace_id") or "").strip(),
-            gateway_id=str(gateway_id or "").strip(),
-            remote_jid=remote_jid,
-            text=effective_text,
-            push_name=str(message.get("push_name") or "").strip() or None,
-            # The specific participant who sent this message (differs from
-            # remote_jid inside a group) — feeds ONLY the canonical
-            # InboundEnvelope's sender.id, see
-            # personal_channel_sage_bridge_service._build_personal_channel_envelope.
-            sender_id=str(message.get("sender_jid") or "").strip(),
-            source_event_id=external_message_id,
-            agent_id=agent_id,
-            attachments=attachments,
-            is_owner=bool(dm_decision.get("is_owner")),
-            # is_group/chat_title: resolved gateway-side from the already-
-            # fetched GramJS chat entity (see telegram/runtime.ts — a
-            # private chat has no .title, a group/supergroup/channel does;
-            # no extra network call). Absent on any inbound predating that
-            # Gateway upgrade, which safely reads as False/None here — never
-            # a regression.
-            is_group=bool(message.get("is_group")),
-            chat_label=str(message.get("chat_title") or "").strip() or None,
-            # The REAL "was this message actually addressed" fact from the
-            # group gate above (None for a non-group turn) — see
-            # _enforce_group_policy's own docstring for why this must be
-            # threaded through rather than left to default.
-            was_addressed=group_decision.get("was_addressed"),
-        )
-        # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
-        # be sent into a channel (DM or group — a group turn only reaches
-        # this point after already passing the mention/reply gate above, but
-        # that gate is about WHETHER to run a turn at all, not about what a
-        # turn is allowed to reply with, so this backstop still applies to
-        # every reply unconditionally). resolve_channel_reply_outcome applies
-        # filter_channel_outbound_reply internally as that backstop AND
-        # separates "the agent chose silence" from "the turn never completed".
-        outcome = channel_adapter.resolve_channel_reply_outcome(
-            reply, is_owner=bool(dm_decision.get("is_owner")),
-        )
-        reply_media = list(outcome.media)
-        _safe_reply_text = outcome.text
-        # A media-only reply (send_image/generate_image queued an attachment
-        # but the model had nothing more to say, or its text was filtered
-        # above) still has something to deliver — only skip when there is
-        # genuinely neither safe text nor media.
-        if not _safe_reply_text and not reply_media:
-            _undelivered = outcome.is_undelivered
-            # See the matching comment in _deliver_local_bridge_personal_reply:
-            # the no-reply marker means "the agent DELIBERATELY said nothing",
-            # so an undelivered turn must not write it — doing so records a
-            # message the platform failed to answer as answered and cancels
-            # its redelivery retry.
-            refreshed_inbound = None
-            if not _undelivered:
-                no_reply_idempotency_key = f"{TELEGRAM_PERSONAL_NO_REPLY_IDEMPOTENCY_PREFIX}{external_message_id}"
-                refreshed_inbound = personal_channels_repository.mark_inbound_processed(
-                    gateway_id=str(gateway_id or "").strip(),
-                    channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    agent_id=agent_id,
-                    external_message_id=external_message_id,
-                    reply_idempotency_key=no_reply_idempotency_key,
-                )
-            _emit_automatic_reply_audit(
-                action="personal_channel.telegram.automatic_reply",
-                status="failed" if _undelivered else "skipped",
-                registration=registration,
-                gateway_id=gateway_id,
-                channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-                provider=TELEGRAM_PERSONAL_PROVIDER,
-                detail=(
-                    "Automatic Telegram personal reply was NOT delivered: the turn did not complete "
-                    f"({outcome.status_code}). The inbound message is left unprocessed so a redelivery retries it."
-                    if _undelivered
-                    else "Automatic Telegram personal reply was skipped because the agent returned no reply."
-                ),
-                metadata={
-                    "remote_jid": remote_jid,
-                    "inbound_external_message_id": external_message_id,
-                    "undelivered": _undelivered,
-                    "status_code": outcome.status_code or None,
-                },
-                trace_id=trace_id,
-                idempotency_key=(
-                    "personal_channel.telegram.automatic_reply."
-                    f"{'failed' if _undelivered else 'skipped'}:{gateway_id}:{external_message_id}"
-                ),
-            )
-            return {"duplicate": not created, "inbound": refreshed_inbound or inbound, "outbound": None}
-
-        outbound, _ = personal_channels_repository.create_or_get_outbound_message(
-            gateway_id=str(gateway_id or "").strip(),
-            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-            idempotency_key=idempotency_key,
-            remote_jid=remote_jid,
-            text=_safe_reply_text,
-            reply_to_external_message_id=external_message_id,
-            metadata={
-                "reply_source": (
-                    "platform_status_owner_only"
-                    if outcome.is_undelivered
-                    else str((reply or {}).get("source") or "").strip() or None
-                ),
-                "media": reply_media or None,
-                "undelivered_status_code": outcome.status_code or None,
-            },
-        )
-
-    if str(outbound.get("status") or "").strip() == "delivered":
-        personal_channels_repository.mark_inbound_processed(
-            gateway_id=str(gateway_id or "").strip(),
-            channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-            agent_id=agent_id,
-            external_message_id=external_message_id,
-            reply_idempotency_key=idempotency_key,
-        )
-        return {"duplicate": not created, "inbound": inbound, "outbound": outbound}
-
-    _enforce_personal_channel_dispatch_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id="channel.telegram.personal.send",
-        request_id=str(idempotency_key or "").strip(),
-    )
-    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        provider=TELEGRAM_PERSONAL_PROVIDER,
-        remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
-        text=str(outbound.get("text") or "").strip(),
-        idempotency_key=idempotency_key,
-        # Auto-replies dispatch as normal messages, not forced quote-reply
-        # bubbles: always threading a reply to the triggering message reads
-        # as robotic on Telegram/WhatsApp. An explicit "reply to X" send
-        # (send_telegram_personal_message) still honors a caller-supplied id.
-        reply_to_external_message_id=None,
-        # Read back from the stored outbound row (not the `reply` var above)
-        # so this also carries media on the idempotent-replay path, where
-        # `outbound` came from get_outbound_message() and `reply` was never
-        # rebuilt this call.
-        media=list((outbound.get("metadata") or {}).get("media") or []),
-    )
-    delivered = personal_channels_repository.mark_outbound_delivered(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        idempotency_key=idempotency_key,
-        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
-        metadata={"dispatch_result": dispatch_result},
-    )
-    personal_channels_repository.mark_inbound_processed(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        external_message_id=external_message_id,
-        reply_idempotency_key=idempotency_key,
-    )
-    _emit_automatic_reply_audit(
-        action="personal_channel.telegram.automatic_reply",
-        status="delivered",
-        registration=registration,
-        gateway_id=gateway_id,
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        provider=TELEGRAM_PERSONAL_PROVIDER,
-        detail="Automatic Telegram personal reply was dispatched immediately.",
-        metadata={
-            "remote_jid": remote_jid,
-            "inbound_external_message_id": external_message_id,
-            "reply_text_length": len(str(outbound.get("text") or "")),
-            "dispatched": True,
-            "dispatch_external_message_id": str(dispatch_result.get("external_message_id") or "").strip() or None,
-        },
-        trace_id=trace_id,
-        idempotency_key=f"personal_channel.telegram.automatic_reply.delivered:{gateway_id}:{idempotency_key}",
-    )
-    return {"duplicate": not created, "inbound": inbound, "outbound": delivered or outbound}
+# _deliver_whatsapp_personal_reply, _handle_whatsapp_gateway_channel_inbound and
+# _handle_telegram_gateway_channel_inbound DELETED 2026-08-14 (full OpenClaw
+# channel cutover) along with the WhatsApp Baileys / Telegram gramjs gateway
+# runtimes they served. WhatsApp and Telegram inbound now flows through
+# _OpenClawPersonalChannelHandler.handle_inbound -> the SAME
+# _handle_local_bridge_gateway_channel_inbound every other OpenClaw-
+# transported channel already uses (see _handler_registry below). Git
+# history has the deleted functions if a first-party revival is ever needed.
 
 
 async def _deliver_local_bridge_personal_reply(
@@ -4358,627 +3622,15 @@ async def send_local_bridge_personal_message(
     return delivered or outbound
 
 
-async def recheck_imessage_personal_gateway(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    agent_id: str = "",
-) -> Dict[str, Any]:
-    """Live, on-demand re-probe of the imsg bridge on a paired gateway.
-
-    Unlike get_gateway_personal_channel_surfaces() (which reads the LAST
-    health snapshot the gateway pushed on its own connect/disconnect —
-    see sync path: ImsgIMessagePersonalChannelRuntime.getHealthSnapshot ->
-    PersonalChannelRuntimeRegistry.publishRegistryState ->
-    gateway_protocol_service's state_update handler ->
-    metadata.personal_channel_health), this dispatches a live tool-invoke
-    round trip to the gateway RIGHT NOW and returns its fresh per-stage
-    probe result directly in the response. This is what the setup panel's
-    "Re-check" button calls after the user grants Full Disk Access or
-    installs imsg, so the panel doesn't have to wait for the next gateway
-    heartbeat/reconnect to see the fix take effect.
-    """
-    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        IMESSAGE_PERSONAL_CHANNEL_KEY,
-        IMESSAGE_PERSONAL_PROVIDER,
-    )
-    # Claim identity for this (gateway_id, channel_key) under the real
-    # agent_id the route already received — iMessage's one genuine in-app
-    # action for a channel family that otherwise has none (see
-    # _resolve_local_bridge_agent_id's docstring). Mirrors
-    # configure_whatsapp_personal_gateway/configure_telegram_personal_gateway's
-    # own _claim_agent_channel_state call: seed the row BEFORE the round
-    # trip, so even a probe that reports back "not connected yet" still
-    # resolves inbound messages to the right agent from this point on.
-    _claim_agent_channel_state(
-        gateway_id=gateway_id, channel_key=IMESSAGE_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id, registration=registration,
-    )
-    run_id = f"gateway-imessage-recheck-{uuid4().hex[:12]}"
-    trace_id = f"gateway-imessage-recheck-{uuid4().hex[:12]}"
-    _enforce_personal_gateway_config_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id=IMESSAGE_PERSONAL_RECHECK_CAPABILITY,
-        run_id=run_id,
-        trace_id=trace_id,
-    )
-    execution = await gateway_execution_service.execute_tool_via_gateway(
-        gateway_id=str(gateway_id or "").strip(),
-        capability_id=IMESSAGE_PERSONAL_RECHECK_CAPABILITY,
-        arguments={},
-        run_id=run_id,
-        trace_id=trace_id,
-        workspace_id=str(registration.get("workspace_id") or "").strip(),
-        agent_scope="sage",
-    )
-    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
-    return {
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": IMESSAGE_PERSONAL_CHANNEL_KEY,
-        **secret_redaction_service.sanitize_mapping(result),
-    }
-
-
-async def install_imessage_imsg_gateway(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    agent_id: str = "",
-) -> Dict[str, Any]:
-    """Auto-install `imsg` on the paired Mac via Homebrew, run from the
-    gateway process itself so the user never opens a terminal.
-
-    Why this is safe to trigger from the gateway (per the setup panel's
-    design doc): the gateway already runs as the signed-in Mac user and
-    already spawns `imsg` subprocesses directly for the RPC bridge, so one
-    more well-known Homebrew formula install (`brew install
-    steipete/tap/imsg` — the exact command from OpenClaw's own imsg setup
-    docs) under that same already-trusted local process does not cross into
-    a new trust boundary. It is still gated behind an explicit button click
-    in the panel (never run automatically), and the manual command is
-    always ALSO shown in the UI (see IMessageSetupPanel.tsx) as a
-    copy-pasteable fallback regardless of whether this succeeds — e.g. a Mac
-    without Homebrew, where the gateway-side run reports brewFound: false.
-
-    A slower timeout than the default tool-invoke window: a cold Homebrew
-    tap clone (or a source build with no bottle for this macOS/arch) can
-    run for a few minutes, longer than the platform's normal 120s
-    interactive-tool budget.
-    """
-    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        IMESSAGE_PERSONAL_CHANNEL_KEY,
-        IMESSAGE_PERSONAL_PROVIDER,
-    )
-    # See recheck_imessage_personal_gateway's identical claim call above —
-    # same reasoning applies to the install action.
-    _claim_agent_channel_state(
-        gateway_id=gateway_id, channel_key=IMESSAGE_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id, registration=registration,
-    )
-    run_id = f"gateway-imessage-install-{uuid4().hex[:12]}"
-    trace_id = f"gateway-imessage-install-{uuid4().hex[:12]}"
-    _enforce_personal_gateway_config_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id=IMESSAGE_PERSONAL_INSTALL_CAPABILITY,
-        run_id=run_id,
-        trace_id=trace_id,
-    )
-    execution = await gateway_execution_service.execute_tool_via_gateway(
-        gateway_id=str(gateway_id or "").strip(),
-        capability_id=IMESSAGE_PERSONAL_INSTALL_CAPABILITY,
-        arguments={},
-        run_id=run_id,
-        trace_id=trace_id,
-        workspace_id=str(registration.get("workspace_id") or "").strip(),
-        agent_scope="sage",
-        timeout_seconds=280,
-    )
-    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
-    return {
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": IMESSAGE_PERSONAL_CHANNEL_KEY,
-        **secret_redaction_service.sanitize_mapping(result),
-    }
-
-
-async def send_whatsapp_personal_message(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    remote_jid: str,
-    text: str,
-    idempotency_key: str,
-    reply_to_external_message_id: Optional[str] = None,
-    agent_id: str = "",
-    media: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        WHATSAPP_PERSONAL_CHANNEL_KEY,
-        WHATSAPP_PERSONAL_PROVIDER,
-    )
-    outbound, _ = personal_channels_repository.create_or_get_outbound_message(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        idempotency_key=str(idempotency_key or "").strip(),
-        remote_jid=str(remote_jid or "").strip(),
-        text=str(text or "").strip(),
-        reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
-        metadata={"source": "manual_api", "media": list(media) if media else None},
-    )
-    if str(outbound.get("status") or "").strip() == "delivered":
-        return outbound
-
-    _enforce_personal_channel_dispatch_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id="channel.whatsapp.personal.send",
-        request_id=str(idempotency_key or "").strip(),
-    )
-    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        provider=WHATSAPP_PERSONAL_PROVIDER,
-        remote_jid=str(remote_jid or "").strip(),
-        text=str(text or "").strip(),
-        idempotency_key=str(idempotency_key or "").strip(),
-        reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
-        media=media,
-    )
-    delivered = personal_channels_repository.mark_outbound_delivered(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        idempotency_key=str(idempotency_key or "").strip(),
-        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
-        metadata={"dispatch_result": dispatch_result},
-    )
-    return delivered or outbound
-
-
-def get_whatsapp_gateway_view(gateway_id: str, *, agent_id: str = "") -> Dict[str, Any]:
-    state = personal_channels_repository.get_whatsapp_state(
-        str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-    )
-    recent = personal_channels_repository.list_recent_gateway_messages(
-        str(gateway_id or "").strip(),
-        channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-    )
-    return {
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY,
-        "state": state,
-        "recent_messages": recent,
-    }
-
-
-async def configure_whatsapp_personal_gateway(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    phone_number: Optional[str] = None,
-    custom_pairing_code: Optional[str] = None,
-    agent_id: str = "",
-) -> Dict[str, Any]:
-    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        WHATSAPP_PERSONAL_CHANNEL_KEY,
-        WHATSAPP_PERSONAL_PROVIDER,
-    )
-    _claim_agent_channel_state(
-        gateway_id=gateway_id, channel_key=WHATSAPP_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id, registration=registration,
-    )
-    arguments: Dict[str, Any] = {}
-    if str(phone_number or "").strip():
-        arguments["phone_number"] = str(phone_number).strip()
-    if str(custom_pairing_code or "").strip():
-        arguments["custom_pairing_code"] = str(custom_pairing_code).strip()
-    # Unlike Telegram, an empty call is valid here -- it means "begin/retry
-    # the QR flow", which needs no fields at all. See the matching change in
-    # WhatsAppPersonalRuntime.handleConfigure() (empyralis-gateway) for why.
-    run_id = f"gateway-whatsapp-setup-{uuid4().hex[:12]}"
-    trace_id = f"gateway-whatsapp-setup-{uuid4().hex[:12]}"
-    _enforce_personal_gateway_config_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id=WHATSAPP_PERSONAL_CONFIGURE_CAPABILITY,
-        run_id=run_id,
-        trace_id=trace_id,
-    )
-    execution = await gateway_execution_service.execute_tool_via_gateway(
-        gateway_id=str(gateway_id or "").strip(),
-        capability_id=WHATSAPP_PERSONAL_CONFIGURE_CAPABILITY,
-        arguments=arguments,
-        run_id=run_id,
-        trace_id=trace_id,
-        workspace_id=str(registration.get("workspace_id") or "").strip(),
-        agent_scope="sage",
-    )
-    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
-    return {
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY,
-        **result,
-    }
-
-
-async def disconnect_whatsapp_personal_gateway(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    agent_id: str = "",
-) -> Dict[str, Any]:
-    """Full reset: tears down any live/stuck session and clears the entire
-    persisted config (phone number, pairing state) so a subsequent setup
-    call starts genuinely fresh rather than inheriting a stuck pending
-    login — see WhatsAppPersonalRuntime.handleDisconnect()'s doc comment.
-
-    agent_id: accepted for the route contract (see routes_personal_channels.py)
-    even though the Gateway itself has exactly one session to tear down
-    today, regardless of which agent owns it — the subsequent
-    gateway.state.update ("disconnected"/"idle") is picked up by
-    sync_gateway_personal_channel_state's own reverse lookup, which
-    resolves to this same agent (the most recently touched row)."""
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        WHATSAPP_PERSONAL_CHANNEL_KEY,
-        WHATSAPP_PERSONAL_PROVIDER,
-    )
-    run_id = f"gateway-whatsapp-disconnect-{uuid4().hex[:12]}"
-    trace_id = f"gateway-whatsapp-disconnect-{uuid4().hex[:12]}"
-    _enforce_personal_gateway_config_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id=WHATSAPP_PERSONAL_DISCONNECT_CAPABILITY,
-        run_id=run_id,
-        trace_id=trace_id,
-    )
-    execution = await gateway_execution_service.execute_tool_via_gateway(
-        gateway_id=str(gateway_id or "").strip(),
-        capability_id=WHATSAPP_PERSONAL_DISCONNECT_CAPABILITY,
-        arguments={},
-        run_id=run_id,
-        trace_id=trace_id,
-        workspace_id=str(registration.get("workspace_id") or "").strip(),
-        agent_scope="sage",
-    )
-    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
-    return {
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": WHATSAPP_PERSONAL_CHANNEL_KEY,
-        **result,
-    }
-
-
-async def dispatch_approved_personal_channel_outbound(
-    *,
-    gateway_id: str,
-    capability_id: str,
-    arguments: Dict[str, Any],
-    run_id: str,
-    trace_id: str,
-    workspace_id: str,
-    timeout_seconds: int,
-    request_id: Optional[str] = None,
-    runtime_access_mode: Optional[str] = None,
-    empyralis_approved: bool = False,
-) -> Dict[str, Any]:
-    channel_key = str(arguments.get("channel_key") or "").strip()
-    if not channel_key:
-        token = str(capability_id or "").strip().lower()
-        if token == "channel.whatsapp.personal.send":
-            channel_key = WHATSAPP_PERSONAL_CHANNEL_KEY
-        elif token == "channel.telegram.personal.send":
-            channel_key = TELEGRAM_PERSONAL_CHANNEL_KEY
-    provider = str(arguments.get("provider") or "").strip()
-    if channel_key == WHATSAPP_PERSONAL_CHANNEL_KEY:
-        provider = provider or WHATSAPP_PERSONAL_PROVIDER
-    elif channel_key == TELEGRAM_PERSONAL_CHANNEL_KEY:
-        provider = provider or TELEGRAM_PERSONAL_PROVIDER
-    else:
-        provider = provider or LOCAL_BRIDGE_PERSONAL_CHANNELS.get(channel_key, {}).get("provider", "")
-    channel_lane_contract_service.assert_personal_gateway_channel(channel_key, provider)
-    remote_jid = str(arguments.get("remote_jid") or "").strip()
-    text = str(arguments.get("text") or "").strip()
-    idempotency_key = str(arguments.get("idempotency_key") or request_id or "").strip()
-    reply_to_external_message_id = str(arguments.get("reply_to_external_message_id") or "").strip() or None
-    if not remote_jid or not text or not idempotency_key:
-        raise ValueError("Approved personal-channel dispatch requires remote_jid, text, and idempotency_key.")
-    outbound, _ = personal_channels_repository.create_or_get_outbound_message(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=channel_key,
-        idempotency_key=idempotency_key,
-        remote_jid=remote_jid,
-        text=text,
-        reply_to_external_message_id=reply_to_external_message_id,
-        metadata={
-            "source": str(arguments.get("source") or "approved_personal_channel_send").strip(),
-            "approval_run_id": run_id,
-            "approval_trace_id": trace_id,
-            "empyralis_approved": bool(empyralis_approved),
-        },
-    )
-    if str(outbound.get("status") or "").strip() == "delivered":
-        return {"status": "completed", "outbound": outbound, "gateway_id": str(gateway_id or "").strip(), "channel_key": channel_key}
-    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=channel_key,
-        provider=provider,
-        remote_jid=str(outbound.get("remote_jid") or remote_jid).strip(),
-        text=str(outbound.get("text") or text).strip(),
-        idempotency_key=idempotency_key,
-        reply_to_external_message_id=str(outbound.get("reply_to_external_message_id") or "").strip() or reply_to_external_message_id,
-        timeout_seconds=timeout_seconds,
-    )
-    delivered = personal_channels_repository.mark_outbound_delivered(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=channel_key,
-        idempotency_key=idempotency_key,
-        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
-        metadata={"dispatch_result": dispatch_result, "approval_run_id": run_id, "approval_trace_id": trace_id},
-    )
-    return {
-        "status": "completed",
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": channel_key,
-        "outbound": delivered or outbound,
-        "dispatch_result": dispatch_result,
-    }
-
-
-async def send_telegram_personal_message(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    remote_jid: str,
-    text: str,
-    idempotency_key: str,
-    reply_to_external_message_id: Optional[str] = None,
-    agent_id: str = "",
-    media: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        TELEGRAM_PERSONAL_CHANNEL_KEY,
-        TELEGRAM_PERSONAL_PROVIDER,
-    )
-    outbound, _ = personal_channels_repository.create_or_get_outbound_message(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        idempotency_key=str(idempotency_key or "").strip(),
-        remote_jid=str(remote_jid or "").strip(),
-        text=str(text or "").strip(),
-        reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
-        metadata={"source": "manual_api", "media": list(media) if media else None},
-    )
-    if str(outbound.get("status") or "").strip() == "delivered":
-        return outbound
-
-    _enforce_personal_channel_dispatch_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id="channel.telegram.personal.send",
-        request_id=str(idempotency_key or "").strip(),
-    )
-    dispatch_result = await gateway_protocol_service.dispatch_channel_outbound(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        provider=TELEGRAM_PERSONAL_PROVIDER,
-        remote_jid=str(remote_jid or "").strip(),
-        text=str(text or "").strip(),
-        idempotency_key=str(idempotency_key or "").strip(),
-        reply_to_external_message_id=str(reply_to_external_message_id or "").strip() or None,
-        media=media,
-    )
-    delivered = personal_channels_repository.mark_outbound_delivered(
-        gateway_id=str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-        idempotency_key=str(idempotency_key or "").strip(),
-        external_message_id=str(dispatch_result.get("external_message_id") or "").strip() or None,
-        metadata={"dispatch_result": dispatch_result},
-    )
-    return delivered or outbound
-
-
-def get_telegram_gateway_view(gateway_id: str, *, agent_id: str = "") -> Dict[str, Any]:
-    state = personal_channels_repository.get_telegram_state(
-        str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-    )
-    recent = personal_channels_repository.list_recent_gateway_messages(
-        str(gateway_id or "").strip(),
-        channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id,
-    )
-    return {
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY,
-        "state": state,
-        "recent_messages": recent,
-    }
-
-
-def _platform_telegram_single_api_id() -> Optional[int]:
-    for name in ("EMPYRALIS_TELEGRAM_API_ID", "TELEGRAM_API_ID"):
-        raw = str(os.getenv(name) or "").strip()
-        if not raw:
-            continue
-        try:
-            parsed = int(raw)
-        except ValueError:
-            continue
-        if parsed > 0:
-            return parsed
-    return None
-
-
-def _platform_telegram_single_api_hash() -> Optional[str]:
-    for name in ("EMPYRALIS_TELEGRAM_API_HASH", "TELEGRAM_API_HASH"):
-        raw = str(os.getenv(name) or "").strip()
-        if raw:
-            return raw
-    return None
-
-
-def _platform_telegram_credential_pool() -> List[Tuple[int, str]]:
-    """Small pool of platform-level Telegram api_id/api_hash pairs, indexed
-    EMPYRALIS_TELEGRAM_API_ID_1/EMPYRALIS_TELEGRAM_API_HASH_1, _2, _3, ...
-    A single shared credential means Telegram's anti-abuse systems flagging
-    or rate-limiting it breaks onboarding for every workspace at once; a
-    pool bounds that blast radius to whichever slice of workspaces hash to
-    the affected member. Falls back to the single un-indexed
-    EMPYRALIS_TELEGRAM_API_ID/_API_HASH as a pool of size 1 if no indexed
-    pool is configured, so existing single-credential deployments keep
-    working unchanged."""
-    pool: List[Tuple[int, str]] = []
-    index = 1
-    while True:
-        raw_id = str(os.getenv(f"EMPYRALIS_TELEGRAM_API_ID_{index}") or "").strip()
-        raw_hash = str(os.getenv(f"EMPYRALIS_TELEGRAM_API_HASH_{index}") or "").strip()
-        if not raw_id and not raw_hash:
-            break
-        try:
-            parsed_id = int(raw_id)
-        except ValueError:
-            parsed_id = 0
-        if parsed_id > 0 and raw_hash:
-            pool.append((parsed_id, raw_hash))
-        index += 1
-    if pool:
-        return pool
-    single_id = _platform_telegram_single_api_id()
-    single_hash = _platform_telegram_single_api_hash()
-    if single_id is not None and single_hash:
-        return [(single_id, single_hash)]
-    return []
-
-
-def _platform_telegram_credentials_for_workspace(workspace_id: str) -> Tuple[Optional[int], Optional[str]]:
-    pool = _platform_telegram_credential_pool()
-    if not pool:
-        return None, None
-    normalized = str(workspace_id or "").strip() or "default"
-    # A stable hash (not Python's built-in hash(), which is randomized per
-    # process via PYTHONHASHSEED) so the same workspace always resolves to
-    # the same pool member across restarts and re-pairing attempts.
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-    selected = pool[int(digest, 16) % len(pool)]
-    return selected
-
-
-async def configure_telegram_personal_gateway(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    api_id: Optional[int] = None,
-    api_hash: Optional[str] = None,
-    phone_number: Optional[str] = None,
-    login_code: Optional[str] = None,
-    password: Optional[str] = None,
-    agent_id: str = "",
-) -> Dict[str, Any]:
-    kill_switch_gate.assert_not_killed(gateway_id=gateway_id)
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        TELEGRAM_PERSONAL_CHANNEL_KEY,
-        TELEGRAM_PERSONAL_PROVIDER,
-    )
-    _claim_agent_channel_state(
-        gateway_id=gateway_id, channel_key=TELEGRAM_PERSONAL_CHANNEL_KEY,
-        agent_id=agent_id, registration=registration,
-    )
-    pool_api_id, pool_api_hash = _platform_telegram_credentials_for_workspace(
-        str(registration.get("workspace_id") or "").strip()
-    )
-    resolved_api_id = api_id if api_id is not None else pool_api_id
-    resolved_api_hash = str(api_hash or "").strip() or pool_api_hash
-    arguments: Dict[str, Any] = {}
-    if resolved_api_id is not None:
-        arguments["api_id"] = int(resolved_api_id)
-    if str(resolved_api_hash or "").strip():
-        arguments["api_hash"] = str(resolved_api_hash).strip()
-    if str(phone_number or "").strip():
-        arguments["phone_number"] = str(phone_number).strip()
-    if str(login_code or "").strip():
-        arguments["login_code"] = str(login_code).strip()
-    if str(password or "").strip():
-        arguments["password"] = str(password).strip()
-    if not arguments:
-        raise ValueError("At least one Telegram personal setup field is required.")
-    run_id = f"gateway-telegram-setup-{uuid4().hex[:12]}"
-    trace_id = f"gateway-telegram-setup-{uuid4().hex[:12]}"
-    _enforce_personal_gateway_config_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id=TELEGRAM_PERSONAL_CONFIGURE_CAPABILITY,
-        run_id=run_id,
-        trace_id=trace_id,
-    )
-    execution = await gateway_execution_service.execute_tool_via_gateway(
-        gateway_id=str(gateway_id or "").strip(),
-        capability_id=TELEGRAM_PERSONAL_CONFIGURE_CAPABILITY,
-        arguments=arguments,
-        run_id=run_id,
-        trace_id=trace_id,
-        workspace_id=str(registration.get("workspace_id") or "").strip(),
-        agent_scope="sage",
-    )
-    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
-    return {
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY,
-        **result,
-    }
-
-
-async def disconnect_telegram_personal_gateway(
-    *,
-    gateway_id: str,
-    registration: Dict[str, Any],
-    agent_id: str = "",
-) -> Dict[str, Any]:
-    """Full reset — see disconnect_whatsapp_personal_gateway()'s doc comment
-    (including its note on why agent_id is accepted but not load-bearing
-    here yet) and TelegramPersonalRuntime.handleDisconnect() for why this
-    exists."""
-    channel_lane_contract_service.assert_personal_gateway_channel(
-        TELEGRAM_PERSONAL_CHANNEL_KEY,
-        TELEGRAM_PERSONAL_PROVIDER,
-    )
-    run_id = f"gateway-telegram-disconnect-{uuid4().hex[:12]}"
-    trace_id = f"gateway-telegram-disconnect-{uuid4().hex[:12]}"
-    _enforce_personal_gateway_config_decision(
-        gateway_id=str(gateway_id or "").strip(),
-        registration=registration,
-        capability_id=TELEGRAM_PERSONAL_DISCONNECT_CAPABILITY,
-        run_id=run_id,
-        trace_id=trace_id,
-    )
-    execution = await gateway_execution_service.execute_tool_via_gateway(
-        gateway_id=str(gateway_id or "").strip(),
-        capability_id=TELEGRAM_PERSONAL_DISCONNECT_CAPABILITY,
-        arguments={},
-        run_id=run_id,
-        trace_id=trace_id,
-        workspace_id=str(registration.get("workspace_id") or "").strip(),
-        agent_scope="sage",
-    )
-    result = execution.get("result") if isinstance(execution.get("result"), dict) else {}
-    return {
-        "gateway_id": str(gateway_id or "").strip(),
-        "channel_key": TELEGRAM_PERSONAL_CHANNEL_KEY,
-        **result,
-    }
+# recheck_imessage_personal_gateway, install_imessage_imsg_gateway,
+# send/get_view/configure/disconnect_whatsapp_personal_gateway,
+# dispatch_approved_personal_channel_outbound (already dead — zero
+# production callers even before this change), send/get_view/configure/
+# disconnect_telegram_personal_gateway, and the Telegram api_id/api_hash
+# platform-credential-pool helpers (_platform_telegram_*, gramjs-only,
+# meaningless to a Bot API credential) ALL DELETED 2026-08-14 (full
+# OpenClaw channel cutover). Git history has them if a first-party
+# revival is ever needed.
 
 # ── Stage 2: Cloud Session Manager integration ──────────────────
 
