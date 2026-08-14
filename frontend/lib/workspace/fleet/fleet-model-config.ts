@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
 /**
@@ -327,4 +328,123 @@ export async function saveAgentModelConfig(
   } else {
     await patchModelConfig();
   }
+}
+
+// ── Live cli_subscription model catalog (URGENT fix, 2026-08-14) ───────────
+//
+// MODELS_BY_PROVIDER["openai-codex"] in fleet-provider-constants.ts was a
+// hand-typed mirror of provider_profiles.py's catalog, and both had already
+// rotted: verified live against a real, pinned codex 0.144.1 install, NONE
+// of "gpt-5.4"/"gpt-5.3-codex"/"gpt-5.2" exist in a real `model/list`
+// response any more (OpenAI replaced them with gpt-5.6-terra/luna). That
+// staleness is exactly what put an unusable model in front of a customer
+// and, separately, in the exact model_config that turn-time dispatch had no
+// reason to doubt. This hook asks the paired Gateway's own Codex CLI what
+// it can actually run right now (server_modules/codex_model_catalog_service.py
+// -> GET /gateway/registrations/{id}/llm/models), the same "provider's own
+// surface, never a hand-typed list" rule CLAUDE.md already applies to the
+// OpenClaw channel manifest. A picker using this should treat `supported:
+// false` (or any fetch failure) as "can't verify right now" — fall back to
+// the static MODELS_BY_PROVIDER catalog with an honest note that it may be
+// stale, never a silent, confident-looking empty state.
+
+export type CodexModelCatalogEntry = {
+  id: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+};
+
+export type CodexModelCatalogState = {
+  /** true once a fetch has resolved (success OR failure) — distinguishes
+   *  "still checking" from "checked, and here's what we know." */
+  loaded: boolean;
+  /** true while a request is in flight. */
+  loading: boolean;
+  /** true when the live check ran and the Gateway can genuinely answer for
+   *  this runtime — false for any other runtime, an unreachable Gateway, or
+   *  a request that hasn't completed yet. */
+  supported: boolean;
+  models: CodexModelCatalogEntry[];
+  authMethod: string | null;
+};
+
+const EMPTY_CODEX_MODEL_CATALOG: CodexModelCatalogState = {
+  loaded: false,
+  loading: false,
+  supported: false,
+  models: [],
+  authMethod: null,
+};
+
+/** Fetches the live Codex model catalog for one paired Gateway. Re-fetches
+ *  whenever gatewayId/runtime changes; a runtime other than "codex" or an
+ *  empty gatewayId short-circuits to the empty/unsupported state without a
+ *  network call — nothing here fabricates a list for a runtime we have no
+ *  verified way to ask. */
+export function useCodexModelCatalog(
+  workspaceId: string,
+  gatewayId: string,
+  runtime: string,
+): CodexModelCatalogState {
+  const [state, setState] = useState<CodexModelCatalogState>(EMPTY_CODEX_MODEL_CATALOG);
+  const requestIdRef = useRef(0);
+
+  const refresh = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    if (runtime !== "codex" || !gatewayId.trim()) {
+      setState(EMPTY_CODEX_MODEL_CATALOG);
+      return;
+    }
+    setState((prev) => ({ ...prev, loading: true }));
+    try {
+      const res = await fleetAuthorizedFetch(
+        `/api/gateway/registrations/${encodeURIComponent(gatewayId)}/llm/models`
+          + `?workspace_id=${encodeURIComponent(workspaceId)}&runtime=${encodeURIComponent(runtime)}`,
+        { credentials: "include" },
+      );
+      const data = res.ok ? await res.json().catch(() => ({})) : {};
+      if (requestIdRef.current !== requestId) return;
+      const models: CodexModelCatalogEntry[] = Array.isArray(data?.models)
+        ? data.models
+            .filter((m: unknown) => m && typeof m === "object" && typeof (m as Record<string, unknown>).id === "string" && (m as Record<string, unknown>).id)
+            .map((m: Record<string, unknown>) => ({
+              id: String(m.id),
+              displayName: String(m.display_name || m.id),
+              description: String(m.description || ""),
+              hidden: Boolean(m.hidden),
+              isDefault: Boolean(m.is_default),
+            }))
+        : [];
+      setState({
+        loaded: true,
+        loading: false,
+        supported: res.ok && Boolean(data?.supported),
+        models,
+        authMethod: typeof data?.auth_method === "string" ? data.auth_method : null,
+      });
+    } catch {
+      if (requestIdRef.current !== requestId) return;
+      // Fetch failure is "couldn't verify," never "verified as empty" — the
+      // caller's fallback path (the static catalog, clearly labeled as
+      // possibly stale) is what renders here, not a bare empty list.
+      setState({ loaded: true, loading: false, supported: false, models: [], authMethod: null });
+    }
+  }, [workspaceId, gatewayId, runtime]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return state;
+}
+
+/** Models a picker should actually show: the live, non-hidden set when the
+ *  Gateway could answer, else null (meaning "fall back to the static
+ *  catalog and say so honestly" — see FleetAgentDetail.tsx/
+ *  FleetCreateAgentWizard.tsx's cli_subscription Model picker). */
+export function visibleCodexModels(catalog: CodexModelCatalogState): CodexModelCatalogEntry[] | null {
+  if (!catalog.supported || catalog.models.length === 0) return null;
+  return catalog.models.filter((m) => !m.hidden);
 }
