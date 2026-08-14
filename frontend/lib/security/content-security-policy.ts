@@ -15,17 +15,73 @@
  *
  * Every directive here is backed by a real finding, not a guess:
  *
- *   script-src / style-src   'self' 'nonce-<per-request>' 'strict-dynamic'
+ *   script-src   'self' 'nonce-<per-request>' 'strict-dynamic'
  *     — the standard "strict CSP" shape (Next.js's own docs, Google's CSP
  *     guide). 'strict-dynamic' makes browsers that support it ignore the
  *     'self' fallback and trust only nonce-carrying scripts plus whatever
  *     THEY load; browsers that don't support it fall back to 'self' +
  *     nonce. No CSS-in-JS runtime in this app (grepped: no
  *     styled-components/emotion/styled-jsx in package.json) — the only
- *     inline <style>/<script> tags are ones Next.js itself generates
- *     (which it nonces automatically, per its own docs) and the one
- *     hand-written inline <script> in app/layout.tsx (the pre-hydration
- *     theme bootstrap), which is nonced explicitly there.
+ *     inline <script> tags are ones Next.js itself generates (which it
+ *     nonces automatically, per its own docs) and the one hand-written
+ *     inline <script> in app/layout.tsx (the pre-hydration theme
+ *     bootstrap), which is nonced explicitly there. UNCHANGED by the
+ *     style-src posture change below — no weakening here, ever.
+ *
+ *   style-src   'self' 'unsafe-inline'   (2026-08-14, deliberate posture
+ *     change — was 'self' 'nonce-<per-request>', matching script-src)
+ *     — CSP's `style-src` governs the literal `style=""` HTML ATTRIBUTE,
+ *     and a nonce source, per spec, NEVER covers that attribute — only
+ *     `'unsafe-inline'` (disabled the instant a nonce/hash is present in
+ *     the same directive — CSP's backward-compat rule) or `'unsafe-hashes'`
+ *     (a hash per exact string, impractical for a value that changes every
+ *     render) can permit it. React's `style={{...}}` prop is CSP-safe
+ *     client-side (React sets it via a JS property assignment, which CSP
+ *     does not restrict) but react-dom/server has no live DOM to call that
+ *     on, so SSR serializes every `style={{...}}` prop into a literal
+ *     `style="..."` string attribute — and every route in this app is
+ *     dynamically rendered (RootLayout's headers() call), so this is not a
+ *     corner case. Measured directly against a real `next build && next
+ *     start`: 10+ distinct style-src violations on an ordinary document
+ *     detail page alone (see CLAUDE.md's "CORRECTION, 2026-08-13" note
+ *     under the CSP section for the full mechanism). The nonce-only
+ *     style-src was being violated on every authenticated page in
+ *     production — a policy violated everywhere is not protecting
+ *     anything, it is only noise that hides real console errors (it was
+ *     the direct cause of one: a genuine React hydration failure on
+ *     Settings → Connections got lost among 6+ style-src violation lines
+ *     in the same console, 2026-08-14).
+ *
+ *     The fix removes the nonce from style-src ENTIRELY rather than adding
+ *     `'unsafe-inline'` alongside it — per the backward-compat rule above,
+ *     a nonce present in the same directive makes every nonce-aware
+ *     browser ignore `'unsafe-inline'` outright, which would silently
+ *     reproduce this exact bug. `'self'` is kept so the directive still
+ *     says something (blocks a `<link rel="stylesheet">` to a foreign
+ *     origin); `'unsafe-inline'` is what actually unblocks `style={{...}}`.
+ *
+ *     Cost, stated plainly: this makes CSS-injection possible on this
+ *     origin where it was nominally blocked before — a real widening, and
+ *     a much narrower attack surface than script injection (CSS alone
+ *     cannot execute arbitrary JS or exfiltrate via fetch/XHR; the classic
+ *     CSS-injection risks are content scraping via attribute selectors and
+ *     UI redress, not code execution). It was not actually blocking
+ *     anything in production anyway — the nonce-only policy was already
+ *     failing open in effect, because it violated on every page without
+ *     ever being enforced against a real attacker; this change trades
+ *     theoretical protection nobody was getting for a console that reports
+ *     real problems again.
+ *
+ *     THE PATH BACK: once every SSR-reachable `style={{...}}` call site
+ *     (grep `style={{` across frontend/lib and frontend/app — ~666 hits at
+ *     the time of this note, not triaged) is migrated to a CSS custom
+ *     property set via a class name or a nonced `<style>` block instead of
+ *     an inline attribute, style-src can retake the nonce and drop
+ *     `'unsafe-inline'`, matching script-src again. That migration is a
+ *     separate, large, cross-cutting change — not done here. Do not widen
+ *     this further (no `'unsafe-hashes'`, no wildcard) and do not let
+ *     `'unsafe-inline'` migrate into script-src, which keeps its nonce and
+ *     `'strict-dynamic'` untouched.
  *
  *   img-src 'self' data: blob: https:
  *     — https: is a DELIBERATE, NARROW widening, not a default. Documents
@@ -104,7 +160,13 @@ export function buildContentSecurityPolicyDirectives({
   return {
     'default-src': [`'self'`],
     'script-src': [`'self'`, nonceSource, `'strict-dynamic'`, ...(isDev ? [`'unsafe-eval'`] : [])],
-    'style-src': [`'self'`, nonceSource, ...(isDev ? [`'unsafe-inline'`] : [])],
+    // No nonce here, deliberately, in prod AND dev alike — see the module
+    // header's "style-src" entry (2026-08-14). A nonce alongside
+    // 'unsafe-inline' makes every nonce-aware browser ignore
+    // 'unsafe-inline' (CSP's own backward-compat rule), which would
+    // silently reintroduce the exact bug this shape fixes. script-src is
+    // untouched by this and keeps its nonce + 'strict-dynamic' in both modes.
+    'style-src': [`'self'`, `'unsafe-inline'`],
     'img-src': [`'self'`, 'data:', 'blob:', 'https:'],
     'font-src': [`'self'`],
     'connect-src': [`'self'`],
