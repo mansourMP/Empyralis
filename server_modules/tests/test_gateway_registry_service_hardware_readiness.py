@@ -201,5 +201,153 @@ class ExecutionBlockedConnectionStatusTests(unittest.TestCase):
         self.assertEqual(payload["connection_status"], "degraded")
 
 
+class FleetWideServiceReadinessTests(unittest.TestCase):
+    """The fleet-wide answer to "which boxes lack Docker or OpenClaw" —
+    service_readiness on gateway_registration_public_payload, reachable in
+    ONE call via GET /gateway/registrations (list_workspace_gateways calls
+    this per box), instead of an N+1 loop over each box's own /doctor
+    endpoint.
+
+    This also proves the underlying staleness fix: service_inventory used
+    to only ever be read off registration.metadata (refreshed only by the
+    rare gateway.state.update frame — usually empty/stale in production,
+    a check deriving its expectations from a field nothing keeps
+    populated), never off the CONTINUOUS gateway.heartbeat stream the
+    live session actually carries it on — the identical staleness gap
+    capability_readiness already had, fixed the identical way."""
+
+    @staticmethod
+    def _registration(stale_service_inventory=None):
+        metadata: dict = {}
+        if stale_service_inventory is not None:
+            metadata["service_inventory"] = stale_service_inventory
+        return {
+            "gateway_id": "gateway-1",
+            "device_id": "device-1",
+            "tenant_id": "tenant-1",
+            "workspace_id": "workspace-1",
+            "user_id": "user-1",
+            "status": "active",
+            "device_trust_state": "verified",
+            "metadata": metadata,
+            "capabilities": [],
+        }
+
+    @staticmethod
+    def _session_with_live_inventory(service_inventory):
+        from datetime import datetime, timezone
+
+        return {
+            "session_id": "session-1",
+            "status": "connected",
+            "last_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {"service_inventory": service_inventory} if service_inventory else {},
+        }
+
+    def test_docker_and_openclaw_both_ready(self) -> None:
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        session = self._session_with_live_inventory(
+            [
+                {"id": "docker", "status": "ready", "detected": True},
+                {"id": "openclaw", "status": "ready", "detected": True},
+            ]
+        )
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=session,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(
+                self._registration()
+            )
+        self.assertEqual(payload["service_readiness"]["docker"], {"detected": True, "status": "ready", "ready": True})
+        self.assertEqual(payload["service_readiness"]["openclaw"], {"detected": True, "status": "ready", "ready": True})
+
+    def test_docker_missing_openclaw_ready_are_reported_separately(self) -> None:
+        # The exact shape the coordinator's brief asks for: two DIFFERENT
+        # facts, not collapsed into one light.
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        session = self._session_with_live_inventory(
+            [
+                {"id": "docker", "status": "missing", "detected": False},
+                {"id": "openclaw", "status": "ready", "detected": True},
+            ]
+        )
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=session,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(
+                self._registration()
+            )
+        self.assertFalse(payload["service_readiness"]["docker"]["ready"])
+        self.assertEqual(payload["service_readiness"]["docker"]["status"], "missing")
+        self.assertTrue(payload["service_readiness"]["openclaw"]["ready"])
+
+    def test_no_inventory_ever_reported_reads_unknown_not_guessed(self) -> None:
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        session = self._session_with_live_inventory(None)
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=session,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(
+                self._registration()
+            )
+        self.assertEqual(payload["service_readiness"]["docker"]["status"], "unknown")
+        self.assertFalse(payload["service_readiness"]["docker"]["ready"])
+        self.assertEqual(payload["service_readiness"]["openclaw"]["status"], "unknown")
+
+    def test_live_heartbeat_inventory_wins_over_stale_registration_metadata(self) -> None:
+        # THE staleness fix, proved directly: the registration's own
+        # metadata.service_inventory (only ever refreshed by the rare
+        # gateway.state.update frame) says docker is missing; the live
+        # session's heartbeat-sourced copy says it's ready. The live copy
+        # must win — it is what the box is ACTUALLY reporting right now.
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        stale_registration = self._registration(
+            stale_service_inventory=[{"id": "docker", "status": "missing", "detected": False}]
+        )
+        live_session = self._session_with_live_inventory(
+            [{"id": "docker", "status": "ready", "detected": True}]
+        )
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=live_session,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(stale_registration)
+        self.assertTrue(payload["service_readiness"]["docker"]["ready"])
+
+    def test_no_live_session_falls_back_to_registration_metadata_not_a_crash(self) -> None:
+        # An older gateway build, or a box that has never connected since
+        # this shipped — no live session at all. Must degrade to whatever
+        # the registration's own (possibly stale) metadata says, never
+        # raise and never silently report "ready".
+        from unittest.mock import patch
+
+        from server_modules import gateway_registry_service
+
+        registration = self._registration(
+            stale_service_inventory=[{"id": "docker", "status": "ready", "detected": True}]
+        )
+        with patch(
+            "server_modules.gateway_state_repository.get_latest_gateway_session",
+            return_value=None,
+        ):
+            payload = gateway_registry_service.gateway_registration_public_payload(registration)
+        self.assertTrue(payload["service_readiness"]["docker"]["ready"])
+
+
 if __name__ == "__main__":
     unittest.main()

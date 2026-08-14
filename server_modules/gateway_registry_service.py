@@ -128,6 +128,26 @@ def _gateway_connection_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
         # agent on.
         if blocked_capabilities & {"shell.execute", "filesystem.read_write"}:
             connection_status = "execution_blocked"
+    # Same staleness gap as capability_readiness above, same fix: the
+    # gateway's passive service_inventory (Docker, Ollama, the CLIs, GPU,
+    # ...) is reported on every heartbeat tick but gateway_protocol_
+    # service.py's heartbeat handler only ever persists it onto the live
+    # gateway_sessions row, never onto the registration's own metadata
+    # (which only the much rarer gateway.state.update frame refreshes).
+    # Before this, _llm_runtime_summary and any per-box Docker/OpenClaw
+    # readiness derived from registration.metadata.service_inventory read a
+    # copy that — on a real box that has been up for more than one
+    # gateway.state.update cycle — is usually empty or stale: a check
+    # deriving its expectations from a field nothing in production keeps
+    # populated, which reports "unknown" forever rather than the true
+    # state. Surfaced here so gateway_registration_public_payload can
+    # prefer the live copy the identical way it already does for
+    # capability_readiness. Computed AFTER the execution_blocked demotion
+    # above so the two additions stay independent — this one never reads
+    # or changes connection_status.
+    live_service_inventory = latest_session_metadata.get("service_inventory")
+    if not isinstance(live_service_inventory, list) or not live_service_inventory:
+        live_service_inventory = None
     return {
         "connection_status": connection_status,
         "reported_health_state": reported_health_state or None,
@@ -138,6 +158,7 @@ def _gateway_connection_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
         "latest_connected_at": (latest_session or {}).get("connected_at"),
         "latest_disconnected_at": (latest_session or {}).get("disconnected_at"),
         "live_capability_readiness": live_capability_readiness,
+        "live_service_inventory": live_service_inventory,
     }
 
 
@@ -233,6 +254,49 @@ def _llm_runtime_summary(metadata: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _hardware_execution_readiness_summary(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Docker + OpenClaw channel-transport readiness, distilled from the same
+    live service_inventory _llm_runtime_summary already reads above — the
+    fleet-wide answer to "which boxes lack Docker or OpenClaw" in ONE call
+    (GET /gateway/registrations, which calls gateway_registration_public_
+    payload per box via list_workspace_gateways) rather than an N+1 loop
+    over each box's own /doctor endpoint.
+
+    Item ids ("docker", "openclaw") are empyralis-gateway/src/health/
+    service-inventory.ts's own, matching what gateway_health_service.
+    gateway_doctor_payload's passive_service_inventory check already
+    reports per-box — this is the same signal, just distilled to the two
+    facts that decide whether shell.execute/filesystem.read_write (docker)
+    and messaging channels (openclaw) can work at all, and surfaced at the
+    list level instead of requiring a per-box detail fetch.
+
+    A box that has never reported service_inventory (an older gateway
+    build predating this field, or one that hasn't heartbeated yet) reads
+    status "unknown" for both — never guessed as installed or missing,
+    same discipline as _runtime() above.
+    """
+    inventory = metadata.get("service_inventory")
+    items = inventory if isinstance(inventory, list) else []
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        if isinstance(item, dict) and str(item.get("id") or "").strip():
+            by_id[str(item["id"]).strip()] = item
+
+    def _readiness(entry_id: str) -> Dict[str, Any]:
+        entry = by_id.get(entry_id) or {}
+        status = str(entry.get("status") or "unknown").strip().lower()
+        return {
+            "detected": bool(entry.get("detected")),
+            "status": status,
+            "ready": status == "ready",
+        }
+
+    return {
+        "docker": _readiness("docker"),
+        "openclaw": _readiness("openclaw"),
+    }
+
+
 def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[str, Any]:
     # Lazy import to break a module-load cycle: gateway_self_update_service pulls
     # in gateway_execution_service -> gateway_protocol_service, and protocol reads
@@ -256,6 +320,15 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
     live_capability_readiness = connection_payload.pop("live_capability_readiness", None)
     if isinstance(live_capability_readiness, dict) and live_capability_readiness:
         metadata["capability_readiness"] = live_capability_readiness
+    # Same fix, same reason, for service_inventory (see
+    # _gateway_connection_payload's own comment on live_service_inventory) —
+    # BEFORE _llm_runtime_summary and _hardware_execution_readiness_summary
+    # below read metadata["service_inventory"], so both derive from what the
+    # box actually reported on its last heartbeat rather than a copy that is
+    # usually empty in production.
+    live_service_inventory = connection_payload.pop("live_service_inventory", None)
+    if isinstance(live_service_inventory, list) and live_service_inventory:
+        metadata["service_inventory"] = live_service_inventory
     runtime_access_mode = execution_mode_policy.normalize_runtime_access_mode(
         metadata.get("runtime_access_mode")
     )
@@ -312,6 +385,7 @@ def gateway_registration_public_payload(registration: Dict[str, Any]) -> Dict[st
         "project_sharing_opt_in": metadata.get("project_sharing_opt_in") is True,
         "capabilities": list(registration.get("capabilities") or []),
         "llm_runtimes": _llm_runtime_summary(metadata),
+        "service_readiness": _hardware_execution_readiness_summary(metadata),
         "journal_cursor": int(registration.get("journal_cursor") or 0),
         "checkpoint_cursor": int(registration.get("checkpoint_cursor") or 0),
         "created_at": registration.get("created_at"),
