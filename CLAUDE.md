@@ -3012,6 +3012,54 @@ the remaining suspect is a genuine app-side SSR/CSR mismatch unrelated to
 Cloudflare, and that would need its own investigation with a seeded local
 account, not a guess from outside.
 
+**CORRECTION, same day — a specific alternative theory for the #418 was
+raised and tested directly; it did not hold, and the Cloudflare theory
+above is the one still standing.** A colleague investigating in parallel
+found that `app/layout.tsx`'s hand-written theme-bootstrap `<script
+nonce={nonce}>` is exactly the shape that can hydration-mismatch: the
+HTML spec hides a script/style element's `nonce` CONTENT ATTRIBUTE after
+the browser parses it (`getAttribute('nonce')` returns `""` from then on
+— confirmed directly, live, in a real browser via `javascript_tool`
+against this exact page: `getAttribute` `""`, `.nonce` property the real
+value), and React 19.2.3's hydration diff
+(`react-dom-client.development.js`, `diffHydratedProperties`'s generic
+default prop branch — "nonce" has no special case in this version, read
+directly off the shipped bundle) compares via `getAttribute`, not
+`.nonce`. That mechanism is real and independent of Cloudflare — Next's
+OWN framework-generated inline scripts carry the identical nonce and are
+identically hidden, they just never go through hydration diffing since
+they're injected as raw HTML outside the React element tree, while this
+one hand-written script genuinely is a diffed element.
+
+**But it does not reproduce.** Tested directly against a disposable local
+stack (`frontend/scripts/start-e2e-backend.sh`, a real seeded owner
+account, `next build && next start` — matching how empyralis.ai actually
+runs — and separately `next dev`) on the UNMODIFIED `layout.tsx`: zero
+hydration console errors, and the DigitalOcean connect button on
+Settings → Connections (the exact page and control named in the incident)
+opened its panel correctly every time, in both modes. Reverting the
+speculative fix and re-running reproduces the same clean result. A
+`suppressHydrationWarning` was still added to that script tag
+(`frontend/app/layout.tsx`) because the underlying attribute-hiding fact
+is real and the fix is free — but it is NOT shown to fix anything a user
+would notice, and must not be cited as the resolution to this incident.
+Why the mismatch never surfaces here is unconfirmed (candidates: this
+React/Next version may special-case it somewhere not found by the grep
+above, or a DEV-only diff path that never throws in a production build) —
+not chased further, since the practical question was "does this explain
+the founder's report" and the direct test answered no.
+
+Net: with the alternative theory tested and not reproducing locally, the
+Email Address Obfuscation theory above is the one with actual supporting
+evidence (the exact injected script name) and no local counter-evidence,
+and is still the one item only the founder can act on. Two possibilities
+remain open and neither is proven: the toggle is the whole story, or
+production has a third cause not yet identified that a local disposable
+stack — lacking Cloudflare entirely — cannot surface by construction. If
+flipping the toggle doesn't resolve it, the next step is reproducing
+against the REAL production edge (or a Cloudflare-fronted staging copy),
+not further local guessing.
+
 **The fleet UI collapses to what actually exists — the agent COUNT decides
 the shape, never a tier check.** MAN-317, 2026-08-13. `agent-count-shape.ts`'s
 `planAgentCountShape(realAgentCount)` is the whole rule, same shape as
