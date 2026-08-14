@@ -3987,6 +3987,31 @@ def _local_workspace_membership_rows(connection: sqlite3.Connection, user_id: st
 
 
 def _workspace_invite_record_from_row(row: Any) -> Optional[Dict[str, Any]]:
+    """MAN-343 follow-up: the four timestamp fields used a bare
+    ``int(row[...])`` cast, which is only correct for the SQLite fallback
+    (epoch integers). Every real Postgres caller stores these columns as
+    TIMESTAMPTZ, which asyncpg decodes to a native ``datetime.datetime`` --
+    ``int(a_datetime)`` raises TypeError unconditionally, on every row, on
+    every real Postgres database. Found while verifying MAN-70/MAN-335
+    against a genuinely fresh (never hand-patched) throwaway Postgres:
+    record_workspace_invite_email_delivery's Postgres branch calls this
+    function on a raw ``SELECT *`` row, so the invite's email-delivery
+    status (sent/not_configured/failed/withheld -- workspace_invite_email_
+    service's own three/four-state doctrine) has never once been
+    successfully persisted on real Postgres; the caller's own try/except
+    only logs and swallows it, so this was invisible in every environment
+    that has a real EMAIL_PROVIDER_API_KEY and therefore never noticed the
+    write silently failing. list_workspace_invites_for_project's Postgres
+    branch calls this function UNCAUGHT -- the owner-facing "who's been
+    invited" panel (ProjectMemberAdd.tsx) 500s outright on real Postgres
+    the moment a workspace has any invite at all.
+
+    Fixed by switching to _ts_or_none (already used by every OTHER
+    Postgres-reading function in this file that touches these same
+    columns -- get_workspace_by_id, list_pending_workspace_invites, etc.),
+    which handles a real datetime as well as a SQLite epoch int uniformly,
+    so this function's SQLite callers are unaffected.
+    """
     if row is None:
         return None
     keys = set(row.keys()) if hasattr(row, "keys") else set()
@@ -4008,10 +4033,10 @@ def _workspace_invite_record_from_row(row: Any) -> Optional[Dict[str, Any]]:
         "invited_by_user_id": str(row["invited_by_user_id"] or "").strip() or None,
         "accepted_by_user_id": str(row["accepted_by_user_id"] or "").strip() or None,
         "metadata": metadata,
-        "created_at": int(row["created_at"]) if row["created_at"] is not None else None,
-        "updated_at": int(row["updated_at"]) if row["updated_at"] is not None else None,
-        "accepted_at": int(row["accepted_at"]) if row["accepted_at"] is not None else None,
-        "revoked_at": int(row["revoked_at"]) if row["revoked_at"] is not None else None,
+        "created_at": _ts_or_none(row["created_at"]),
+        "updated_at": _ts_or_none(row["updated_at"]),
+        "accepted_at": _ts_or_none(row["accepted_at"]),
+        "revoked_at": _ts_or_none(row["revoked_at"]),
     }
 
 
