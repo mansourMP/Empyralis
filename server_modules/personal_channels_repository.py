@@ -770,6 +770,80 @@ def find_agent_id_for_local_bridge_session(
     return str(row["agent_id"] or "") if row is not None else LEGACY_UNSCOPED_AGENT_ID
 
 
+def list_owner_linked_channel_identities_for_workspace(
+    workspace_id: str,
+    *,
+    db_path: Optional[Path | str] = None,
+) -> Dict[str, str]:
+    """The single authoritative source for "which sender id is the owner
+    on which channel" for this workspace — {channel_key: linked_id},
+    across all three personal-channel families (WhatsApp's linked_jid,
+    Telegram's linked_user_id, and the Signal/iMessage/WeChat/OpenClaw
+    local-bridge family's linked_identity).
+
+    This is real, correct, already-populated data: written only from a
+    genuine owner/self-chat signal (see _resolve_linked_identity_for_sync
+    in personal_channels_service.py, and that function's own docstring on
+    the clobber bug already fixed here — a stranger's sender_jid can never
+    land in these columns) at connect/login time, which is exactly the
+    moment "who is the owner on this channel" is actually established.
+    It is what _is_owner_message (personal_channels_service.py) already
+    checks for the DM-policy gate that runs before every reply.
+
+    sage_agent_runtime_service.py's owner/audience tool-authority
+    classification uses this — and ONLY this — as of the fix that added
+    this function; see that module's own comment on why
+    workspace.identity_links must never be consulted for the SAME
+    question again beside it. Two independent answers to "is this the
+    owner" is the shape that let one of them (identity_links, dead
+    because nothing has ever written it) silently win by default.
+
+    The three tables key their rows by (gateway_id, channel_key,
+    agent_id), not workspace_id — but workspace_id is a stored column on
+    every row, so this queries across gateways/agents for the workspace
+    directly rather than requiring a gateway_id the caller may not have
+    at the point this question is asked. The LAST-updated row per
+    channel_key wins if more than one gateway/agent has written one for
+    this workspace (mirrors find_agent_id_for_local_bridge_session's own
+    "whoever most recently touched this" convention above) — a stale
+    linked identity for a channel this workspace no longer actively uses
+    is the acceptable failure mode, never a wrong-workspace one, since
+    every row queried is already filtered to this workspace_id.
+    """
+    normalized_workspace_id = str(workspace_id or "").strip()
+    if not normalized_workspace_id:
+        return {}
+    linked: Dict[str, str] = {}
+    with _DB_LOCK:
+        connection = _connect(db_path)
+        try:
+            for table, id_column in (
+                ("personal_channel_whatsapp_states", "linked_jid"),
+                ("personal_channel_telegram_states", "linked_user_id"),
+                ("personal_channel_local_bridge_states", "linked_identity"),
+            ):
+                rows = connection.execute(
+                    f"""
+                    SELECT channel_key, {id_column} AS linked_id, updated_at
+                    FROM {table}
+                    WHERE workspace_id = ? AND {id_column} IS NOT NULL AND {id_column} != ''
+                    ORDER BY updated_at ASC
+                    """,
+                    (normalized_workspace_id,),
+                ).fetchall()
+                for row in rows:
+                    channel_key = str(row["channel_key"] or "").strip()
+                    linked_id = str(row["linked_id"] or "").strip()
+                    if channel_key and linked_id:
+                        # ORDER BY updated_at ASC + plain dict assignment:
+                        # the last (most recent) row for a given channel_key
+                        # naturally wins, no separate max() pass needed.
+                        linked[channel_key] = linked_id
+        finally:
+            connection.close()
+    return linked
+
+
 def record_inbound_message(
     *,
     gateway_id: str,
