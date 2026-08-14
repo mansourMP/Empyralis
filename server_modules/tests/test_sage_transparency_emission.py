@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from server_modules.sage_transparency_service import (
     emit_sage_turn_transparency_events,
@@ -113,17 +114,65 @@ class SageTransparencyEmissionTests(unittest.TestCase):
         types = [e.event_type for e in events]
         self.assertIn("approval_required", types)
 
-    def test_blocked_tools_emit_policy_blocked(self):
+    def test_blocked_tools_with_realistic_failure_shape_emits_turn_failed_not_policy_blocked(self):
+        """blocked_tools is populated by SEVERAL structurally different
+        producers (see sage_blocked_tools_outcome.py's own docstring), and
+        every real one today is a failure or bookkeeping anomaly, never a
+        genuine tool-capability policy decision. The entry shape below is
+        the REAL shape sage_agent_runtime_service._collect_sage_operator_
+        loop_v3_events actually appends for a provider/SDK trace.failed
+        event — not an invented one. Before this fix, ANY non-empty
+        blocked_tools (including this one) emitted "policy_blocked" /
+        "Tools blocked by policy", blaming the customer's own tool settings
+        for what is actually a provider failure."""
         events = emit_sage_turn_transparency_events(
             trace_id=self.TRACE_ID,
             workspace_id=self.WORKSPACE,
             user_message="use blocked tool",
             sage_result=self._result(
-                blocked_tools=["filesystem.write"],
+                blocked_tools=[
+                    {"name": "provider_generation_failed", "reason": "provider_generation_failed", "status": "blocked"},
+                ],
             ),
         )
         types = [e.event_type for e in events]
+        self.assertIn("turn_failed", types)
+        self.assertNotIn("policy_blocked", types)
+        failed_event = next(e for e in events if e.event_type == "turn_failed")
+        self.assertNotIn("blocked by policy", failed_event.title.lower())
+        self.assertNotIn("tool", failed_event.title.lower())
+
+    def test_blocked_tools_with_a_recognized_policy_code_still_emits_policy_blocked(self):
+        """Forward-compatibility check: if a future producer starts
+        emitting a blocked_tools entry whose code IS a genuine,
+        recognized tool-capability policy decision (the
+        SAGE_BLOCKED_TOOLS_POLICY_CODES allowlist in
+        sage_blocked_tools_outcome.py — empty today because no live
+        producer emits one), "Tools blocked by policy" / "policy_blocked"
+        is still reachable and still correct. Patches the allowlist
+        directly rather than inventing a fake producer shape, so this test
+        cannot silently pass against a fixture no real code path
+        produces."""
+        from server_modules import sage_blocked_tools_outcome
+
+        with mock.patch.object(
+            sage_blocked_tools_outcome,
+            "SAGE_BLOCKED_TOOLS_POLICY_CODES",
+            frozenset({"agent_tool_capability_denied"}),
+        ):
+            events = emit_sage_turn_transparency_events(
+                trace_id=self.TRACE_ID,
+                workspace_id=self.WORKSPACE,
+                user_message="use blocked tool",
+                sage_result=self._result(
+                    blocked_tools=[
+                        {"name": "agent_tool_capability_denied", "reason": "not bound to this agent", "status": "blocked"},
+                    ],
+                ),
+            )
+        types = [e.event_type for e in events]
         self.assertIn("policy_blocked", types)
+        self.assertNotIn("turn_failed", types)
 
     def test_error_emits_tool_failed(self):
         events = emit_sage_turn_transparency_events(

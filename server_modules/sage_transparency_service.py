@@ -35,6 +35,7 @@ from server_modules.agent_transparency_events import (
     Audience,
     TransparencyEventType,
 )
+from server_modules.sage_blocked_tools_outcome import classify_sage_blocked_tools_outcome
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -121,25 +122,62 @@ def emit_sage_turn_transparency_events(
             )
 
     # ── 3. blocked_tools ─────────────────────────────────────────
+    # blocked_tools is populated by SEVERAL structurally different
+    # producers, and only one shape is a genuine tool-capability policy
+    # decision — see sage_blocked_tools_outcome.py's own docstring for the
+    # full trace. This used to treat ANY non-empty blocked_tools as proof a
+    # tool was blocked by this agent's own capability policy, which is
+    # wrong every time it fires today: every real producer (provider
+    # errors, SDK bookkeeping anomalies, execution failures) is a FAILURE,
+    # never a policy decision, and a genuine capability denial raises
+    # during tool execution and lands in `tool_calls` instead. Reuses the
+    # same classifier sage_agent_runtime_service.py's TOOLS_LIMITED_NO_REPLY
+    # / SAGE_TURN_NO_REPLY_UNKNOWN chat-reply choice already relies on, so
+    # the Work-tab/Inbox event and the chat reply can never disagree about
+    # which of the two actually happened.
     blocked_tools = _safe_list(sage_result.get("blocked_tools"))
     if blocked_tools:
-        events.append(
-            AgentTransparencyEvent(
-                event_id=f"stevt-{uuid4().hex[:12]}",
-                trace_id=trace_id,
-                workspace_id=workspace_id,
-                agent_id=agent_id,
-                actor_type="sage",
-                surface="chat",
-                audience=audience,
-                event_type="policy_blocked",
-                title="Tools blocked by policy",
-                summary=f"{len(blocked_tools)} tool(s) blocked",
-                status="blocked",
-                timestamp=_now(),
-                metadata={"blocked_tools": blocked_tools[:10]},
+        outcome = classify_sage_blocked_tools_outcome(blocked_tools)
+        if outcome == "policy_blocked":
+            events.append(
+                AgentTransparencyEvent(
+                    event_id=f"stevt-{uuid4().hex[:12]}",
+                    trace_id=trace_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    actor_type="sage",
+                    surface="chat",
+                    audience=audience,
+                    event_type="policy_blocked",
+                    title="Tools blocked by policy",
+                    summary=f"{len(blocked_tools)} tool(s) blocked",
+                    status="blocked",
+                    timestamp=_now(),
+                    metadata={"blocked_tools": blocked_tools[:10]},
+                )
             )
-        )
+        else:
+            # "turn_failure" — the honest default for anything the
+            # classifier cannot positively identify as a policy decision
+            # (a known failure code, an unrecognized code, or an entry with
+            # no code at all). Never blames the customer's tool settings.
+            events.append(
+                AgentTransparencyEvent(
+                    event_id=f"stevt-{uuid4().hex[:12]}",
+                    trace_id=trace_id,
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    actor_type="sage",
+                    surface="chat",
+                    audience=audience,
+                    event_type="turn_failed",
+                    title="Turn failed",
+                    summary=f"The turn did not complete normally ({len(blocked_tools)} step(s) affected).",
+                    status="failed",
+                    timestamp=_now(),
+                    metadata={"blocked_tools": blocked_tools[:10]},
+                )
+            )
 
     # ── 4. tool_calls (started / completed / failed) ─────────────
     tool_calls = _safe_list(sage_result.get("tool_calls"))

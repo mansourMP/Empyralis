@@ -1411,8 +1411,9 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
         """Forward-compatibility check for _classify_sage_no_reply_outcome:
         if a future producer starts emitting a blocked_tools entry whose
         code is a genuine, recognized tool-capability policy decision (the
-        _SAGE_BLOCKED_TOOLS_POLICY_CODES allowlist — empty today because no
-        live producer emits one, see that constant's own comment), the
+        SAGE_BLOCKED_TOOLS_POLICY_CODES allowlist, now in
+        server_modules/sage_blocked_tools_outcome.py — empty today because
+        no live producer emits one, see that constant's own comment), the
         TOOLS_LIMITED_NO_REPLY copy is still reachable and still correct.
         Patches the allowlist directly rather than inventing a fake
         producer shape, so this test cannot silently pass against a
@@ -1447,7 +1448,7 @@ class SageAgentRuntimeResultShapeTests(unittest.TestCase):
             patch("server_modules.sage_agent_runtime_service.activity_ledger_service.append_activity_event", new=AsyncMock()),
             patch("server_modules.sage_agent_runtime_service.security_audit_service.emit_security_audit_event"),
             patch(
-                "server_modules.sage_agent_runtime_service._SAGE_BLOCKED_TOOLS_POLICY_CODES",
+                "server_modules.sage_blocked_tools_outcome.SAGE_BLOCKED_TOOLS_POLICY_CODES",
                 frozenset({"agent_tool_capability_denied"}),
             ),
         ):
@@ -4525,8 +4526,13 @@ class ClassifySageNoReplyOutcomeTests(unittest.TestCase):
     error/foreign-tool/orphan-tool-result trace.failed events,
     direct_chat_generation_service.py's cost-ceiling/tool-loop-detected/
     generation-error trace.failed events) is a FAILURE, not a policy
-    decision — see _SAGE_BLOCKED_TOOLS_POLICY_CODES's own comment. These
-    tests pin the classifier directly, independent of the full turn
+    decision — see server_modules/sage_blocked_tools_outcome.py's own
+    comment (the classifier and its SAGE_BLOCKED_TOOLS_POLICY_CODES
+    allowlist moved there 2026-08-14 so sage_transparency_service.py's
+    Work-tab/Inbox event emission could reuse them instead of growing its
+    own copy; _classify_sage_no_reply_outcome / _SAGE_BLOCKED_TOOLS_
+    POLICY_CODES here are just the original private names, re-exported).
+    These tests pin the classifier directly, independent of the full turn
     plumbing exercised in SageAgentRuntimeResultShapeTests."""
 
     def test_empty_blocked_tools_classifies_as_none(self) -> None:
@@ -4571,7 +4577,7 @@ class ClassifySageNoReplyOutcomeTests(unittest.TestCase):
         # shape (see the sibling turn-level test for why that distinction
         # matters).
         with patch(
-            "server_modules.sage_agent_runtime_service._SAGE_BLOCKED_TOOLS_POLICY_CODES",
+            "server_modules.sage_blocked_tools_outcome.SAGE_BLOCKED_TOOLS_POLICY_CODES",
             frozenset({"agent_tool_capability_denied"}),
         ):
             blocked = [{"name": "agent_tool_capability_denied", "reason": "not bound", "status": "blocked"}]
@@ -4585,7 +4591,7 @@ class ClassifySageNoReplyOutcomeTests(unittest.TestCase):
         # decision is enough to withhold the tools-settings claim for the
         # WHOLE turn, even alongside an entry that IS recognized.
         with patch(
-            "server_modules.sage_agent_runtime_service._SAGE_BLOCKED_TOOLS_POLICY_CODES",
+            "server_modules.sage_blocked_tools_outcome.SAGE_BLOCKED_TOOLS_POLICY_CODES",
             frozenset({"agent_tool_capability_denied"}),
         ):
             blocked = [

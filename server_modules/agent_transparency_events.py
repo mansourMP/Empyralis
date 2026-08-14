@@ -34,6 +34,7 @@ TransparencyEventType = Literal[
     "channel_message_sent",
     "channel_message_received",
     "policy_blocked",
+    "turn_failed",
     "quota_blocked",
     "unsafe_url_blocked",
     "final_response_started",
