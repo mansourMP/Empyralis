@@ -5,17 +5,22 @@
     "channels": {
       "properties": {
         "clickclack": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
                 "type": "string"
               },
               "type": "array"
+            },
+            "enabled": {
+              "type": "boolean"
             }
           },
           "type": "object"
         },
         "discord": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -35,6 +40,9 @@
               ],
               "type": "string"
             },
+            "enabled": {
+              "type": "boolean"
+            },
             "groupPolicy": {
               "default": "allowlist",
               "enum": [
@@ -45,9 +53,13 @@
               "type": "string"
             }
           },
+          "required": [
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "feishu": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -65,6 +77,14 @@
             "configWrites": {
               "type": "boolean"
             },
+            "connectionMode": {
+              "default": "websocket",
+              "enum": [
+                "websocket",
+                "webhook"
+              ],
+              "type": "string"
+            },
             "dmPolicy": {
               "default": "pairing",
               "enum": [
@@ -73,6 +93,26 @@
                 "allowlist"
               ],
               "type": "string"
+            },
+            "domain": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "feishu",
+                    "lark"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "format": "uri",
+                  "pattern": "^https:\\/\\/.*",
+                  "type": "string"
+                }
+              ],
+              "default": "feishu"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -182,15 +222,50 @@
               },
               "type": "object"
             },
+            "reactionNotifications": {
+              "default": "own",
+              "enum": [
+                "off",
+                "own",
+                "all"
+              ],
+              "type": "string"
+            },
             "requireMention": {
               "type": "boolean"
+            },
+            "resolveSenderNames": {
+              "default": true,
+              "type": "boolean"
+            },
+            "typingIndicator": {
+              "default": true,
+              "type": "boolean"
+            },
+            "webhookPath": {
+              "default": "/feishu/events",
+              "type": "string"
             }
           },
+          "required": [
+            "domain",
+            "connectionMode",
+            "webhookPath",
+            "dmPolicy",
+            "groupPolicy",
+            "reactionNotifications",
+            "typingIndicator",
+            "resolveSenderNames"
+          ],
           "type": "object"
         },
         "googlechat": {
+          "additionalProperties": false,
           "properties": {
             "configWrites": {
+              "type": "boolean"
+            },
+            "enabled": {
               "type": "boolean"
             },
             "groupAllowFrom": {
@@ -277,9 +352,13 @@
               "type": "boolean"
             }
           },
+          "required": [
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "imessage": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -307,6 +386,9 @@
               ],
               "type": "string"
             },
+            "enabled": {
+              "type": "boolean"
+            },
             "groupAllowFrom": {
               "items": {
                 "anyOf": [
@@ -402,9 +484,14 @@
               "type": "object"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "irc": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -428,6 +515,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -546,9 +636,14 @@
               "type": "object"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "line": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -572,6 +667,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -636,10 +734,18 @@
               "type": "object"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "matrix": {
+          "additionalProperties": false,
           "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
             "groupAllowFrom": {
               "items": {
                 "anyOf": [
@@ -768,6 +874,7 @@
           "type": "object"
         },
         "mattermost": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -794,6 +901,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -836,9 +946,14 @@
               "type": "boolean"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "msteams": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -858,6 +973,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -1030,9 +1148,14 @@
               "type": "object"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "nextcloud-talk": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1050,6 +1173,9 @@
               ],
               "type": "string"
             },
+            "enabled": {
+              "type": "boolean"
+            },
             "groupAllowFrom": {
               "items": {
                 "type": "string"
@@ -1066,9 +1192,14 @@
               "type": "string"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "nostr": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1091,11 +1222,15 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             }
           },
           "type": "object"
         },
         "qqbot": {
+          "additionalProperties": {},
           "properties": {
             "allowFrom": {
               "items": {
@@ -1117,6 +1252,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -1224,6 +1362,7 @@
           "type": "object"
         },
         "signal": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1250,6 +1389,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -1346,9 +1488,14 @@
               "type": "object"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "slack": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1374,6 +1521,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupPolicy": {
               "default": "allowlist",
@@ -1384,13 +1534,36 @@
               ],
               "type": "string"
             },
+            "mode": {
+              "default": "socket",
+              "enum": [
+                "socket",
+                "http"
+              ],
+              "type": "string"
+            },
             "requireMention": {
               "type": "boolean"
+            },
+            "userTokenReadOnly": {
+              "default": true,
+              "type": "boolean"
+            },
+            "webhookPath": {
+              "default": "/slack/events",
+              "type": "string"
             }
           },
+          "required": [
+            "mode",
+            "webhookPath",
+            "userTokenReadOnly",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "sms": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1414,15 +1587,23 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             }
           },
+          "required": [
+            "dmPolicy"
+          ],
           "type": "object"
         },
         "synology-chat": {
+          "additionalProperties": {},
           "properties": {},
           "type": "object"
         },
         "telegram": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1449,6 +1630,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -1664,17 +1848,151 @@
               "type": "object"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy"
+          ],
           "type": "object"
         },
         "tlon": {
-          "properties": {},
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
           "type": "object"
         },
         "twitch": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "accessToken": {
+                  "type": "string"
+                },
+                "allowFrom": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "channel": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "requireMention": {
+                  "type": "boolean"
+                },
+                "username": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "username",
+                "accessToken",
+                "channel"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "accounts": {
+                  "additionalProperties": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "accessToken": {
+                        "type": "string"
+                      },
+                      "allowFrom": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "allowedRoles": {
+                        "items": {
+                          "enum": [
+                            "moderator",
+                            "owner",
+                            "vip",
+                            "subscriber",
+                            "all"
+                          ],
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "channel": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "clientId": {
+                        "type": "string"
+                      },
+                      "clientSecret": {
+                        "type": "string"
+                      },
+                      "enabled": {
+                        "type": "boolean"
+                      },
+                      "expiresIn": {
+                        "anyOf": [
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "obtainmentTimestamp": {
+                        "type": "number"
+                      },
+                      "refreshToken": {
+                        "type": "string"
+                      },
+                      "requireMention": {
+                        "type": "boolean"
+                      },
+                      "responsePrefix": {
+                        "type": "string"
+                      },
+                      "username": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "username",
+                      "accessToken",
+                      "channel"
+                    ],
+                    "type": "object"
+                  },
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                "enabled": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "accounts"
+              ],
+              "type": "object"
+            }
+          ],
           "properties": {},
           "type": "object"
         },
         "whatsapp": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1685,6 +2003,12 @@
             "configWrites": {
               "type": "boolean"
             },
+            "debounceMs": {
+              "default": 0,
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
             "dmPolicy": {
               "default": "pairing",
               "enum": [
@@ -1694,6 +2018,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -1782,6 +2109,12 @@
               },
               "type": "object"
             },
+            "mediaMaxMb": {
+              "default": 50,
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991,
+              "type": "integer"
+            },
             "pluginHooks": {
               "additionalProperties": false,
               "properties": {
@@ -1792,9 +2125,16 @@
               "type": "object"
             }
           },
+          "required": [
+            "dmPolicy",
+            "groupPolicy",
+            "debounceMs",
+            "mediaMaxMb"
+          ],
           "type": "object"
         },
         "zalo": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1817,6 +2157,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -1843,6 +2186,7 @@
           "type": "object"
         },
         "zalouser": {
+          "additionalProperties": false,
           "properties": {
             "allowFrom": {
               "items": {
@@ -1865,6 +2209,9 @@
                 "disabled"
               ],
               "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
             },
             "groupAllowFrom": {
               "items": {
@@ -1929,6 +2276,9 @@
               "type": "object"
             }
           },
+          "required": [
+            "groupPolicy"
+          ],
           "type": "object"
         }
       },

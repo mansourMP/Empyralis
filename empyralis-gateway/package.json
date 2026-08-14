@@ -5,7 +5,7 @@
   "description": "Persistent local gateway for Empyralis personal channels and local runtime control-plane connectivity.",
   "main": "dist/index.js",
   "scripts": {
-    "build": "./node_modules/.bin/tsc -p tsconfig.json",
+    "build": "rm -rf dist && ./node_modules/.bin/tsc -p tsconfig.json",
     "typecheck": "./node_modules/.bin/tsc -p tsconfig.json --noEmit",
     "test": "npm run build --silent && node --test dist/__tests__/*.test.js",
     "dev:bridge": "npm run build --silent && node dist/dev/local-bridge-harness.js",

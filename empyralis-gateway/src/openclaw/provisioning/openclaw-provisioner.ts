@@ -106,6 +106,7 @@ import path from "path";
 
 import {
   auditOpenClawChannelShapes,
+  resolveOpenClawChannelKeySupport,
   resolveOpenClawChannelToolFlags,
   resolveOpenClawPluginHookFlags,
   type OpenClawChannelShapeFinding,
@@ -668,6 +669,12 @@ export class OpenClawProvisioner {
     // was invisible until step 5.
     const channelTools = resolveOpenClawChannelToolFlags(schema, channelIds);
     shapeFindings.push(...channelTools.findings);
+    // Which top-level keys each channel node will ACCEPT. Also after the
+    // plugin install, for the same reason: a channel's config node arrives
+    // with its plugin. Not a shape FINDING — an unwritable key is a channel we
+    // configure less completely and say so, never a reason to refuse a whole
+    // box's provisioning.
+    const channelKeySupport = resolveOpenClawChannelKeySupport(schema, channelIds);
     base.shapeFindings = shapeFindings;
     if (shapeFindings.length > 0) {
       return this.refuse(
@@ -689,6 +696,7 @@ export class OpenClawProvisioner {
         profileStateDir: openClawProfileStateDir(profile, this.homeDir),
         pluginHookFlags: hooks.enable,
         channelToolFlags: channelTools.disable,
+        channelKeySupport,
         // Straight from the install pass, so `plugins.allow` names exactly
         // what this box installed — never a hand-kept second list, and never
         // an intent that the install did not actually produce.

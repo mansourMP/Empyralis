@@ -76,6 +76,44 @@
  * group-ness: when the honest answer is unavailable, take the strict side and
  * say so.
  *
+ * ─── A THIRD CASE: THE AXIS HAS NO FIELD AT ALL ──────────────────────────
+ *
+ * The table above assumes both stores can at least SAY the thing. Nine of the
+ * pinned build's twenty-three channel nodes cannot:
+ *
+ *   clickclack  no dmPolicy, no groupPolicy   allowFrom is the only lever
+ *   synology    no dmPolicy, no groupPolicy   (additionalProperties, permissive)
+ *   tlon        no dmPolicy, no groupPolicy, no allowFrom
+ *   twitch      no writable branch at all     every branch demands a credential
+ *   matrix      no dmPolicy, no allowFrom     both moved under a nested `dm`
+ *   googlechat  no dmPolicy, no allowFrom     "
+ *   nostr/sms   no groupPolicy
+ *   feishu      dmPolicy without "disabled"   a mode outside the enum, same class
+ *
+ * Writing a key a node does not declare is not ignored — `openclaw config
+ * patch` VALIDATES, almost every node is `additionalProperties: false`, and
+ * this module pushes the whole document as ONE patch. So one unwritable key on
+ * one channel refuses EVERY channel on the box. Measured, from a real
+ * provisioning run through the product's own route:
+ *
+ *   openclaw_config_patch_failed — "Config validation failed:
+ *   channels.clickclack: invalid config: must not have additional
+ *   properties: \"groupPolicy\", \"dmPolicy\""
+ *
+ * — which is why no channel, Telegram included, could be provisioned on any
+ * box. The rule that follows: NEVER write a key or a mode the channel's own
+ * schema does not carry, and never state a policy the owner did not choose
+ * just to have something to write. The axis is left on OpenClaw's default and
+ * the omission is RECORDED with its own code — a different fact from the
+ * widenings above ("we chose something looser" vs "nobody could choose"), and
+ * one that would be a lie if the two shared a code.
+ *
+ * Where an omission would be WORSE than nothing, nothing is written at all:
+ * `dmPolicy: "open"` without the `allowFrom` wildcard means DROP EVERY DM, and
+ * `channels.<id>: {}` is a present object that gets validated like any other
+ * (`channels.twitch: {}` is refused for a missing `username`), so an empty
+ * block is omitted from the document rather than written as `{}`.
+ *
  * ─── DRIFT ────────────────────────────────────────────────────────────────
  *
  * The generated document is a DERIVED ARTIFACT of Empyralis's policy, in the
@@ -91,6 +129,7 @@ import crypto from "crypto";
 
 import {
   OPENCLAW_CHANNEL_POLICY_SHAPES,
+  type OpenClawChannelKeySupport,
   type OpenClawChannelPolicyShape,
 } from "./openclaw-channel-shapes";
 
@@ -173,6 +212,19 @@ export interface OpenClawProvisioningPlan {
    *  channel plugin's own tool surface is not covered by the global `tools.*`
    *  lockdown, and a transport instance carries no tool authority. */
   channelToolFlags?: Array<{ channelId: string; flag: string }>;
+  /** Which top-level `channels.<id>.*` keys each channel's node will ACCEPT,
+   *  discovered by resolveOpenClawChannelKeySupport from the installed schema.
+   *  Answers `enabled` and `allowFrom` only — every other key this file writes
+   *  is answered by the channel's policy shape, which auditOpenClawChannelShapes
+   *  has already cross-checked against that same schema.
+   *
+   *  Absent (or missing an entry for a channel) means "assume acceptable",
+   *  which is what this file did before key support existed. The two keys it
+   *  covers are present on every channel in the pinned build EXCEPT
+   *  `allowFrom` on matrix/googlechat/tlon, so a caller that omits it is not
+   *  silently reintroducing the ClickClack refusal — that one is closed by the
+   *  policy shape, which is always available. */
+  channelKeySupport?: readonly OpenClawChannelKeySupport[];
   /** Channel-plugin ids this box has actually installed, from OpenClaw's own
    *  install registry (./openclaw-plugin-install.ts). They join the bridge
    *  plugin in `plugins.allow`, so the instance's plugin inventory is an
@@ -196,12 +248,42 @@ export type OpenClawPolicyFindingCode =
   /** The owner's policy cannot be expressed and Empyralis cannot re-enforce
    *  it either. The channel is disabled. */
   | "require_mention_off_not_expressible"
+  /** The channel's node will not even accept `enabled`, so provisioning
+   *  cannot switch it on or off. Nothing is written for it at all. */
+  | "channel_not_configurable"
   /** Expressible only more loosely than Empyralis's own policy. Safe (we
    *  re-decide), but recorded rather than assumed. */
   | "dm_pairing_widened_to_open"
   | "dm_owner_only_widened_to_open"
   | "dm_allowlist_mode_unavailable_widened_to_open"
-  | "group_allowlist_not_keyed_by_chat_widened_to_open";
+  | "group_allowlist_not_keyed_by_chat_widened_to_open"
+  // ── The axis has no field on this channel at all ────────────────────────
+  //
+  // A DIFFERENT FACT from the four above, and deliberately not folded into
+  // them. Those four say "we deliberately wrote something looser than your
+  // setting, and Empyralis re-decides that axis". These say "there is no
+  // field to write, so OpenClaw's OWN default governs and Empyralis cannot
+  // vouch that it is not stricter than what you chose". Both end up in
+  // `widenings` because both are safe-enough-to-enable, but a reader who
+  // cannot tell them apart cannot tell "we chose this" from "nobody chose
+  // this".
+  /** No `dmPolicy` field, but `allowFrom` exists — the sender list is the only
+   *  lever, and it was written. */
+  | "dm_policy_mode_not_expressible_sender_list_only"
+  /** Neither `dmPolicy` nor `allowFrom`. Nothing was written for direct
+   *  messages; Empyralis enforces the whole policy itself. */
+  | "dm_policy_not_expressible_no_lever"
+  /** `dmPolicy` exists but cannot be set to the mode Empyralis needs, and the
+   *  wildcard sender list that makes "open" mean open is unavailable. Writing
+   *  `dmPolicy: "open"` without it would DROP EVERY DM — the unrecoverable
+   *  direction — so neither key is written. */
+  | "dm_policy_open_requires_wildcard_allowlist"
+  /** No `groupPolicy` field. OpenClaw's own group default governs; Empyralis
+   *  applies the owner's group policy itself on every message that arrives. */
+  | "group_policy_not_expressible"
+  /** `groupPolicy` exists but not the mode Empyralis needs, so it is set to
+   *  the widest mode the channel does have. */
+  | "group_policy_mode_unavailable_widened_to_open";
 
 export interface OpenClawPolicyFinding {
   channelId: string;
@@ -547,12 +629,54 @@ interface RenderedChannel {
   widenings: OpenClawPolicyFinding[];
 }
 
+/**
+ * Whether a top-level `channels.<id>.<key>` may be written at all.
+ *
+ * ONLY `enabled` and `allowFrom` go through here. Every other key this file
+ * writes is gated on the channel's POLICY SHAPE — an empty `dmPolicyModes` IS
+ * "this channel has no dmPolicy field", `perChatMapKey: null` IS "no groups
+ * map", and auditOpenClawChannelShapes refuses the whole run if the installed
+ * schema and that shape ever disagree. Routing those through a second source
+ * would be two answers to one question.
+ */
+function channelKeyWriter(
+  channelId: string,
+  keySupport: readonly OpenClawChannelKeySupport[] | undefined,
+): (key: "enabled" | "allowFrom") => boolean {
+  const entry = keySupport?.find((candidate) => candidate.channelId === channelId);
+  if (!entry) return () => true;
+  return (key) => entry.acceptsUndeclaredKeys || entry.keys.includes(key);
+}
+
 function renderChannel(
   policy: EmpyralisChannelPolicy,
   shape: OpenClawChannelPolicyShape,
+  keySupport: readonly OpenClawChannelKeySupport[] | undefined,
 ): RenderedChannel {
   const widenings: OpenClawPolicyFinding[] = [];
   const block: Record<string, unknown> = {};
+  const canWrite = channelKeyWriter(policy.channelId, keySupport);
+
+  // ── Can this channel be switched at all? ────────────────────────────────
+  //
+  // Before anything else, including the `enabled: false` shortcut: a node that
+  // refuses `enabled` refuses `{enabled: false}` just as hard, and one refused
+  // key refuses the entire push for every channel on the box.
+  if (!canWrite("enabled")) {
+    return {
+      channelId: policy.channelId,
+      block: {},
+      widenings,
+      disabled: {
+        channelId: policy.channelId,
+        code: "channel_not_configurable",
+        detail:
+          `This channel is left alone because OpenClaw's ${policy.channelId} channel does not accept an on/off ` +
+          "switch from Empyralis. Configuring it from here would be refused outright, and refusing it would take " +
+          "every other channel on this computer down with it.",
+      },
+    };
+  }
 
   if (!policy.enabled) {
     return { channelId: policy.channelId, block: { enabled: false }, widenings };
@@ -592,24 +716,30 @@ function renderChannel(
   }
 
   // ── Axis 2: group chat policy. Empyralis re-decides; OpenClaw ⊇. ───────
+  //
+  // `groupTarget` is what Empyralis's policy MEANS in OpenClaw's vocabulary.
+  // Whether that word can actually be written is a second question, answered
+  // below against the channel's own enum — the two were fused before, which is
+  // how `groupPolicy` came to be written to a channel that has no such field.
+  let groupTarget: EmpyralisGroupPolicyMode;
   if (policy.groupPolicy.mode === "disabled") {
-    block.groupPolicy = "disabled";
+    groupTarget = "disabled";
   } else if (policy.groupPolicy.mode === "open") {
-    block.groupPolicy = "open";
+    groupTarget = "open";
   } else if (policy.groupPolicy.allowlist.length === 0) {
     // An allowlist with nothing in it admits nothing. Saying "disabled" is
     // the exact same policy stated in the vocabulary OpenClaw actually has,
     // and it is the DEFAULT state of a freshly-bound agent
     // (DEFAULT_GROUP_POLICY_MODE = allowlist, allowlist = []).
-    block.groupPolicy = "disabled";
+    groupTarget = "disabled";
   } else if (shape.perChatMapKeyedOnChatId && shape.perChatMapKey) {
-    block.groupPolicy = "allowlist";
+    groupTarget = "allowlist";
   } else {
     // The channel has no chat-id-keyed map. `groupAllowFrom` exists but is a
     // SENDER allowlist — a different axis — so writing chat ids into it would
     // authorize nothing while looking configured. Widen to open and let
     // Empyralis's own chat-id gate (which still sees the chat id) decide.
-    block.groupPolicy = "open";
+    groupTarget = "open";
     widenings.push({
       channelId: policy.channelId,
       code: "group_allowlist_not_keyed_by_chat_widened_to_open",
@@ -619,9 +749,51 @@ function renderChannel(
     });
   }
 
+  // An EMPTY enum is the shape's way of saying the field does not exist —
+  // clickclack, nostr, sms, tlon and twitch all reach this. A mode outside a
+  // non-empty enum is the same class of defect one level down: `disabled`
+  // written to a channel that only has [allowlist, open] would be refused
+  // just as loudly.
+  if (shape.groupPolicyModes.length === 0) {
+    widenings.push({
+      channelId: policy.channelId,
+      code: "group_policy_not_expressible",
+      detail:
+        `OpenClaw's ${policy.channelId} channel has no setting for group chats, so it uses its own default and ` +
+        "Empyralis applies your group policy itself on every message that reaches it. Your setting is still " +
+        "enforced for anything the agent can see.",
+    });
+  } else if (shape.groupPolicyModes.includes(groupTarget)) {
+    block.groupPolicy = groupTarget;
+  } else if (shape.groupPolicyModes.includes("open")) {
+    // Never the reverse: narrowing to a mode the owner did not choose is the
+    // direction where messages vanish before Empyralis exists.
+    block.groupPolicy = "open";
+    widenings.push({
+      channelId: policy.channelId,
+      code: "group_policy_mode_unavailable_widened_to_open",
+      detail:
+        `OpenClaw's ${policy.channelId} channel has no "${groupTarget}" setting for group chats, so it is set to ` +
+        "accept them and Empyralis applies your group policy itself. Your setting is still enforced.",
+    });
+  } else {
+    widenings.push({
+      channelId: policy.channelId,
+      code: "group_policy_not_expressible",
+      detail:
+        `OpenClaw's ${policy.channelId} channel has no "${groupTarget}" setting for group chats and no wider one ` +
+        "either, so it uses its own default and Empyralis applies your group policy itself. Your setting is still " +
+        "enforced for anything the agent can see.",
+    });
+  }
+
   // The per-conversation map carries BOTH the chat allowlist (its keys) and
-  // the mention lever (its entries). Built once, from both.
-  if (shape.perChatMapKey && shape.perChatMapKeyedOnChatId && block.groupPolicy !== "disabled") {
+  // the mention lever (its entries). Built once, from both. Keyed off
+  // `groupTarget` rather than off what was written: a channel whose map exists
+  // but whose groupPolicy field does not must still get the mention lever, or
+  // enabling it on the strength of that map (see canExpressMentionOff above)
+  // would be enabling it on a lever nothing ever pulled.
+  if (shape.perChatMapKey && shape.perChatMapKeyedOnChatId && groupTarget !== "disabled") {
     const entries: Record<string, unknown> = {};
     if (policy.groupPolicy.mode === "allowlist") {
       for (const chatId of [...policy.groupPolicy.allowlist].sort()) {
@@ -658,9 +830,15 @@ function renderChannel(
   // openclaw@2026.6.10 and reading its config warnings — not by reading the
   // schema, which says nothing about it. Hence openWithWildcard() below: this
   // module never writes "open" without the wildcard that makes it mean open.
+  //
+  // Two questions again, and fusing them is the same defect the group axis
+  // had: `dmMode`/`dmAllowFrom` below say what Empyralis's policy MEANS, and
+  // `writeDm` decides what of that the channel will actually accept.
+  let dmMode: "open" | "allowlist" = "open";
+  let dmAllowFrom: string[] = ["*"];
   const openWithWildcard = (): void => {
-    block.dmPolicy = "open";
-    block.allowFrom = ["*"];
+    dmMode = "open";
+    dmAllowFrom = ["*"];
   };
   switch (policy.dmPolicy.mode) {
     case "open":
@@ -668,8 +846,8 @@ function renderChannel(
       break;
     case "allowlist":
       if (shape.dmPolicyModes.includes("allowlist")) {
-        block.dmPolicy = "allowlist";
-        block.allowFrom = [...policy.dmPolicy.allowlist].sort();
+        dmMode = "allowlist";
+        dmAllowFrom = [...policy.dmPolicy.allowlist].sort();
       } else {
         openWithWildcard();
         widenings.push({
@@ -713,6 +891,65 @@ function renderChannel(
           "else reach Empyralis and are dropped there. Your setting is still enforced.",
       });
       break;
+  }
+
+  // Now express it, or say why it cannot be.
+  const canWriteAllowFrom = canWrite("allowFrom");
+  if (shape.dmPolicyModes.length === 0) {
+    // No `dmPolicy` field at all — clickclack, matrix, googlechat, tlon.
+    // ClickClack is the instructive one: it hardcodes `dmPolicy: "allowlist"`
+    // in its own ingress call and exposes `allowFrom` as the single lever, so
+    // the sender list IS the policy there and writing it is exact rather than
+    // a compromise. We cannot know that from the schema for every channel,
+    // which is why this is recorded rather than assumed.
+    if (canWriteAllowFrom) {
+      block.allowFrom = dmAllowFrom;
+      widenings.push({
+        channelId: policy.channelId,
+        code: "dm_policy_mode_not_expressible_sender_list_only",
+        detail:
+          `OpenClaw's ${policy.channelId} channel has no direct-message policy setting, only a list of allowed ` +
+          "senders, so that list is what gets written and Empyralis applies the rest of your setting itself.",
+      });
+    } else {
+      widenings.push({
+        channelId: policy.channelId,
+        code: "dm_policy_not_expressible_no_lever",
+        detail:
+          `OpenClaw's ${policy.channelId} channel has no direct-message settings Empyralis can write, so it uses ` +
+          "its own defaults and Empyralis applies your direct-message policy itself on every message that reaches " +
+          "it. Your setting is still enforced for anything the agent can see.",
+      });
+    }
+  } else if (!shape.dmPolicyModes.includes(dmMode)) {
+    // Every non-empty dm enum in the pinned build carries "open", so this is
+    // the guard for a build that changes rather than a branch anyone reaches
+    // today. There is no narrower fallback on offer: narrowing is the
+    // direction where messages vanish before Empyralis exists.
+    widenings.push({
+      channelId: policy.channelId,
+      code: "dm_policy_not_expressible_no_lever",
+      detail:
+        `OpenClaw's ${policy.channelId} channel has no "${dmMode}" setting for direct messages, so it uses its own ` +
+        "default and Empyralis applies your direct-message policy itself. Your setting is still enforced for " +
+        "anything the agent can see.",
+    });
+  } else if (!canWriteAllowFrom) {
+    // BOTH modes are meaningless without the sender list. `dmPolicy: "open"`
+    // ALONE MEANS DROP EVERY DM (see above), and `"allowlist"` with no list
+    // means the same thing more obviously. Writing the mode would be strictly
+    // worse than writing nothing.
+    widenings.push({
+      channelId: policy.channelId,
+      code: "dm_policy_open_requires_wildcard_allowlist",
+      detail:
+        `OpenClaw's ${policy.channelId} channel has no list of allowed senders, so its direct-message setting is ` +
+        "left alone rather than set to a value that would silently drop every message. Empyralis applies your " +
+        "direct-message policy itself.",
+    });
+  } else {
+    block.dmPolicy = dmMode;
+    block.allowFrom = dmAllowFrom;
   }
 
   block.enabled = true;
@@ -780,8 +1017,14 @@ export function renderOpenClawConfig(
       channels[policy.channelId] = { enabled: false };
       continue;
     }
-    const rendered = renderChannel(policy, shape);
-    channels[policy.channelId] = rendered.block;
+    const rendered = renderChannel(policy, shape, plan.channelKeySupport);
+    // An EMPTY block is not written as `channels.<id>: {}` — it is left out
+    // altogether. `{}` is not "say nothing about this channel": it is a
+    // present object, and OpenClaw validates it like any other. `channels
+    // .twitch: {}` is refused ("must have required property 'username'"),
+    // which would take the whole push down for a channel we had already
+    // decided not to touch.
+    if (Object.keys(rendered.block).length > 0) channels[policy.channelId] = rendered.block;
     if (rendered.disabled) disabledChannels.push(rendered.disabled);
     widenings.push(...rendered.widenings);
   }

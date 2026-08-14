@@ -97,6 +97,43 @@ const channels = [
     dmPolicy: { mode: "allowlist", allowlist: ["a@example.com"] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: true },
   },
+  // ── The channels this script used to skip, and the cost of skipping them ──
+  //
+  // The five above all declare `dmPolicy` AND `groupPolicy`, so every run of
+  // this script was green while `openclaw config patch` refused the config the
+  // product actually generated:
+  //
+  //   channels.clickclack: invalid config:
+  //   must not have additional properties: "groupPolicy", "dmPolicy"
+  //
+  // and because the push is all-or-nothing, that refused EVERY channel on
+  // EVERY box — Telegram included. A live proof that exercises only the
+  // uniform channels proves the uniform channels.
+  {
+    // NEITHER policy field. `allowFrom` is its only lever.
+    channelId: "clickclack",
+    enabled: true,
+    dmPolicy: { mode: "allowlist", allowlist: ["u_owner"] },
+    groupPolicy: { mode: "open", allowlist: [], requireMention: true },
+  },
+  {
+    // groupPolicy but NO dmPolicy and NO top-level allowFrom — it moved both
+    // under a nested `dm` object this generator does not write.
+    channelId: "matrix",
+    enabled: true,
+    dmPolicy: { mode: "open", allowlist: [] },
+    groupPolicy: { mode: "allowlist", allowlist: ["!room:example.org"], requireMention: true },
+  },
+  {
+    // An `anyOf` whose every branch requires a credential with no default, so
+    // there is no document Empyralis can write for it — not even
+    // `{enabled: false}`, and not even `{}`, which is a present object and is
+    // validated like any other.
+    channelId: "twitch",
+    enabled: true,
+    dmPolicy: { mode: "open", allowlist: [] },
+    groupPolicy: { mode: "open", allowlist: [], requireMention: true },
+  },
 ];
 
 function buildProvisioner() {

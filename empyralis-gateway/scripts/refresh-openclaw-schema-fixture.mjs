@@ -62,6 +62,12 @@ const POLICY_PROPERTIES = [
   "pluginHooks",
   "allowFrom",
   "groupAllowFrom",
+  // `enabled` is policy-bearing in the only sense that matters here: it is a
+  // key the generator WRITES, and `openclaw config patch` refuses a key the
+  // node does not declare. A fixture that drops it cannot express the
+  // difference between "this channel can be switched on" and "writing to this
+  // channel takes the whole box's provisioning down".
+  "enabled",
 ];
 
 // A throwaway HOME rather than `--profile`: a profile still lands under the
@@ -88,16 +94,45 @@ const schema = JSON.parse(
 );
 rmSync(scratchHome, { recursive: true, force: true });
 
+/**
+ * Prunes one node to the policy-bearing properties, keeping the two structural
+ * facts that decide whether a write is ACCEPTED at all:
+ *
+ *   additionalProperties  `false` on almost every channel node, so an
+ *                         undeclared key refuses the patch — and because the
+ *                         push is all-or-nothing, refuses every channel on the
+ *                         box. `synology-chat` is the one that is permissive.
+ *   anyOf / oneOf         `twitch` declares a credential branch and an
+ *                         `accounts` branch. Dropping them left the fixture
+ *                         claiming that channel declares nothing at all.
+ */
+function prune(node) {
+  const kept = {};
+  // `required` names the third structural fact, and it needs its properties
+  // kept alongside it or the fixture cannot express the difference that
+  // matters: thirteen nodes declare a `required` property and validate anyway
+  // because each one carries a `default`, while `twitch` demands credentials
+  // that have none and is refused. Dropping the property would make every
+  // `required` look unsatisfiable and every channel look unconfigurable.
+  const required = Array.isArray(node.required) ? node.required : [];
+  for (const key of [...POLICY_PROPERTIES, ...required]) {
+    if (Object.hasOwn(node.properties ?? {}, key)) kept[key] = node.properties[key];
+  }
+  const pruned = { type: node.type ?? "object", properties: kept };
+  if (required.length > 0) pruned.required = [...required];
+  if (Object.hasOwn(node, "additionalProperties")) pruned.additionalProperties = node.additionalProperties;
+  for (const branchKey of ["anyOf", "oneOf"]) {
+    if (Array.isArray(node[branchKey])) pruned[branchKey] = node[branchKey].map(prune);
+  }
+  return pruned;
+}
+
 const source = schema.properties.channels.properties;
 const properties = {};
 for (const channel of CHANNELS) {
   const node = source[channel];
   if (!node) throw new Error(`channels.${channel} is missing from the installed schema.`);
-  const kept = {};
-  for (const key of POLICY_PROPERTIES) {
-    if (Object.hasOwn(node.properties ?? {}, key)) kept[key] = node.properties[key];
-  }
-  properties[channel] = { type: "object", properties: kept };
+  properties[channel] = prune(node);
 }
 
 mkdirSync(path.dirname(OUT), { recursive: true });

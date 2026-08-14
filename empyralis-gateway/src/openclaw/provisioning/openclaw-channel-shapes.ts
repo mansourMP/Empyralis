@@ -273,6 +273,160 @@ export function auditOpenClawChannelShapes(
   return findings;
 }
 
+// ── Which top-level keys a channel node will actually ACCEPT ──────────────
+//
+// WHY THIS IS A SEPARATE QUESTION FROM THE POLICY SHAPE ABOVE
+// -----------------------------------------------------------
+// `openclaw config patch` VALIDATES, and almost every `channels.<id>` node is
+// `additionalProperties: false`. So a key the node does not declare is not
+// ignored — it refuses the write. And because provisioning pushes the whole
+// document as ONE patch ("every channel, always, never a partial push"), one
+// unacceptable key on one channel refuses EVERY channel on that box.
+//
+// That is not hypothetical. It is what a real provisioning run against a real
+// openclaw@2026.6.10 returned:
+//
+//   openclaw_config_patch_failed
+//   "Config validation failed: channels.clickclack: invalid config:
+//    must not have additional properties: "groupPolicy", "dmPolicy""
+//
+// ClickClack has neither field (it hardcodes `dmPolicy: "allowlist"` /
+// `groupPolicy: "allowlist"` in its own ingress call and exposes only
+// `allowFrom`), and the generator wrote both anyway — so no channel could be
+// provisioned on any box, Telegram included.
+//
+// The POLICY SHAPE above already answers presence for `dmPolicy`,
+// `groupPolicy`, `requireMention`, `groups`/`teams` and `configWrites` — its
+// enums are empty and its booleans false exactly when the field is absent, and
+// auditOpenClawChannelShapes cross-checks every one of those against the
+// installed schema before a single byte is written. What it does NOT carry is
+// `enabled` and `allowFrom`, because the manifest's `policy_shape` has no field
+// for them. Those two are read here, from the installed schema, the same way
+// resolveOpenClawPluginHookFlags and resolveOpenClawChannelToolFlags already
+// read theirs — DISCOVERED, never listed, so a channel added upstream tomorrow
+// is covered without an Empyralis edit.
+//
+// One source per key, deliberately: nothing below re-answers a question the
+// policy shape already answers, so the two can never drift into disagreeing
+// about the same field.
+
+/** The top-level `channels.<id>.*` keys renderOpenClawConfig can write. Used
+ *  to pick a branch out of an `anyOf` node — see below. */
+export const OPENCLAW_CHANNEL_WRITABLE_KEYS: readonly string[] = [
+  "enabled",
+  "dmPolicy",
+  "allowFrom",
+  "groupPolicy",
+  "requireMention",
+  "groups",
+  "teams",
+  "configWrites",
+];
+
+export interface OpenClawChannelKeySupport {
+  readonly channelId: string;
+  /** The keys from OPENCLAW_CHANNEL_WRITABLE_KEYS this node declares. */
+  readonly keys: readonly string[];
+  /** True when the node's `additionalProperties` is anything other than
+   *  `false` — an undeclared key is then accepted rather than refused, so
+   *  there is nothing to withhold. `synology-chat` is the live example
+   *  (`additionalProperties: {}`). */
+  readonly acceptsUndeclaredKeys: boolean;
+}
+
+interface BranchKeySupport {
+  keys: string[];
+  acceptsUndeclaredKeys: boolean;
+  /** False when the branch demands a property provisioning neither writes nor
+   *  can leave to a default — writing ANY key against such a branch refuses
+   *  the whole document. */
+  writable: boolean;
+}
+
+function branchKeySupport(node: unknown): BranchKeySupport {
+  const props = schemaProperties(node);
+  const record = node && typeof node === "object" ? (node as Record<string, unknown>) : {};
+  const keys = OPENCLAW_CHANNEL_WRITABLE_KEYS.filter((key) => Object.hasOwn(props, key));
+
+  // `required` is not academic. Thirteen channel nodes in the pinned build
+  // declare one (feishu names eight properties, whatsapp four), and every
+  // patch validated anyway because each of those carries a `default` that the
+  // merged document picks up. `twitch` is the one that does not:
+  //
+  //   Error: Config validation failed: channels.twitch.username:
+  //          invalid config: must have required property 'username'
+  //
+  // — measured, from the real CLI, while verifying this very fix. So a
+  // required property is satisfiable only if provisioning writes it or OpenClaw
+  // defaults it; anything else makes the branch unusable, and a channel with no
+  // usable branch is one Empyralis cannot configure at all rather than one it
+  // may configure badly.
+  const required = Array.isArray(record.required) ? record.required.map(String) : [];
+  const writable = required.every(
+    (name) =>
+      keys.includes(name) ||
+      Object.hasOwn((props[name] ?? {}) as Record<string, unknown>, "default"),
+  );
+
+  return {
+    keys,
+    // Absent `additionalProperties` defaults to permissive in JSON Schema, but
+    // every channel node in the pinned build states it explicitly. Treating an
+    // ABSENT one as permissive would be the fail-open direction on the exact
+    // question this function exists to answer, so it is treated as `false`
+    // unless the node says otherwise.
+    acceptsUndeclaredKeys: Object.hasOwn(record, "additionalProperties") && record.additionalProperties !== false,
+    writable,
+  };
+}
+
+/**
+ * Which of the writable keys each channel's node will accept.
+ *
+ * `anyOf`/`oneOf` nodes (twitch is the live one: a credential branch and an
+ * `accounts` branch) are resolved by picking the SINGLE branch that declares
+ * the most writable keys, ties broken by declaration order. A union across
+ * branches would be unsound — a document mixing keys from two branches matches
+ * NEITHER and the patch is refused — so exactly one branch has to be chosen,
+ * and the widest is the only choice that cannot lose a lever a narrower branch
+ * would also have given us.
+ */
+export function resolveOpenClawChannelKeySupport(
+  schema: unknown,
+  channelIds: readonly string[],
+): OpenClawChannelKeySupport[] {
+  const channels = schemaProperties(schemaProperties(schema).channels);
+  const support: OpenClawChannelKeySupport[] = [];
+
+  for (const channelId of channelIds) {
+    const node = channels[channelId];
+    // A channel with no node at all contributes its schema only once its
+    // plugin is installed. renderOpenClawConfig already leaves those off via
+    // the missing-policy-shape path; nothing to say here.
+    if (!node) continue;
+    const record = node as Record<string, unknown>;
+    const branches = Array.isArray(record.anyOf)
+      ? record.anyOf
+      : Array.isArray(record.oneOf)
+        ? record.oneOf
+        : undefined;
+
+    const candidates = (branches ?? [node]).map(branchKeySupport).filter((candidate) => candidate.writable);
+    // No usable branch: say so by declaring nothing writable, which
+    // renderOpenClawConfig reports as `channel_not_configurable` and leaves
+    // alone. `twitch` is the live case — both of its branches demand
+    // credentials, so there is no document Empyralis can write for it at all.
+    const best =
+      candidates.length === 0
+        ? { keys: [], acceptsUndeclaredKeys: false, writable: false }
+        : candidates.reduce((widest, candidate) => (candidate.keys.length > widest.keys.length ? candidate : widest));
+
+    support.push({ channelId, keys: best.keys, acceptsUndeclaredKeys: best.acceptsUndeclaredKeys });
+  }
+
+  return support;
+}
+
 /**
  * Every `channels.<id>.pluginHooks.<flag>` boolean the installed schema
  * declares for the given channels. Provisioning sets all of them to true —
