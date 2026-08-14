@@ -264,6 +264,7 @@ async function buildClient() {
   await client.connect({ gatewayId: "gw-1", deviceId: "dev-1" } as any, runtimeMetadata);
   return {
     client,
+    scope,
     outboxEnqueued,
     restoreFetch: () => {
       globalThis.fetch = originalFetch;
@@ -324,6 +325,16 @@ test("concurrent publishEvent calls never write the same seq twice", async () =>
       sentEventFrames.map((frame) => (frame.payload as any).message.external_message_id),
       ["msg-1", "msg-2", "msg-3"],
     );
+
+    // connect() starts HeartbeatLoop with a non-unref'd setTimeout (correct
+    // for a real long-lived gateway process -- production wants this timer
+    // to hold the process open). It is only ever cleared by disconnect(),
+    // same as every other ws-client-*.test.ts harness that calls connect()
+    // (see ws-client-socket-error.test.ts). Skipping this teardown doesn't
+    // fail an assertion -- it leaves the process holding a real, pending
+    // Timeout with nothing left to observe it, so `node --test` never
+    // decides the run is over and hangs forever after the checkmark prints.
+    await harness.client.disconnect(harness.scope as any);
   } finally {
     harness.restoreFetch();
   }
