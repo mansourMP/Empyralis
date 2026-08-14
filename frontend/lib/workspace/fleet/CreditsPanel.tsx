@@ -5,6 +5,7 @@ import { Coins } from "lucide-react";
 
 import { useCreditBalance, useCreditUsageHistory, startCreditTopUp, type CreditUsageHistoryItem } from "./credit-balance";
 import { MultiSeriesChart, type ChartSeries } from "./fleet-sparkline";
+import { FleetSurfaceError } from "./fleet-states";
 
 const TOP_UP_PRESETS_USD = [5, 10, 25];
 
@@ -45,7 +46,13 @@ function categoryForItem(item: CreditUsageHistoryItem): "AI chat" | "Hardware" |
 
 export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
   const { balance, loading: balanceLoading, error: balanceError } = useCreditBalance(workspaceId);
-  const { history, loading: historyLoading } = useCreditUsageHistory(workspaceId, 200);
+  // `error` was already returned by this hook and simply never read here —
+  // this component genuinely could not tell "spent nothing" from "the fetch
+  // failed" because it had discarded the one field that says which. Both
+  // rendered as "No credit usage yet" on a screen whose whole job is to show
+  // money — a customer who WAS charged had no way to tell their history
+  // failed to load versus actually being unbilled.
+  const { history, loading: historyLoading, error: historyError, refresh: refreshHistory } = useCreditUsageHistory(workspaceId, 200);
 
   const [amountUsd, setAmountUsd] = useState<number>(10);
   const [topUpState, setTopUpState] = useState<"idle" | "starting" | "not_configured" | "error">("idle");
@@ -174,7 +181,17 @@ export function CreditsPanel({ workspaceId }: { workspaceId: string }) {
 
       <div className="fleet-usage-chart-block" style={{ marginTop: "var(--space-5)" }}>
         <div className="fleet-usage-chart-title">Credits used · last 14d</div>
-        {!historyLoading && !hasAnyDebit ? (
+        {!historyLoading && historyError ? (
+          // "Empty" and "could not load" are different facts and must never
+          // share a screen — sharpest on a billing surface, where the wrong
+          // one reads as "you weren't charged" when the truth is "we don't
+          // know yet."
+          <FleetSurfaceError
+            title="Couldn't load usage history"
+            message={historyError}
+            onRetry={() => { void refreshHistory(); }}
+          />
+        ) : !historyLoading && !hasAnyDebit ? (
           <div className="fleet-empty" style={{ marginTop: "var(--space-3)" }}>
             <div className="fleet-empty-icon">
               <Coins size={20} strokeWidth={1.75} />
