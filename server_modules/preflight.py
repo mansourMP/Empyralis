@@ -1536,6 +1536,138 @@ async def _check_platform_google_operator_credentials() -> None:
     )
 
 
+def _platform_email_provider_check_skipped() -> bool:
+    return (
+        str(os.getenv("EMPYRALIS_SKIP_PLATFORM_EMAIL_PROVIDER_CHECK") or "").strip().lower()
+        in {"1", "true", "yes"}
+    )
+
+
+async def _check_platform_email_provider_key() -> None:
+    """MAN-343: EMAIL_PROVIDER_API_KEY (Resend) was unset on production and
+    nothing said so. Signup mail silently died and the only symptom was
+    customers not receiving a verification code — every other consumer
+    (email_provider_service.send_email) only LOGS the gap, and only at the
+    moment something tries to send, which is exactly the failure mode this
+    codebase's own doctrine keeps warning about: a real capability quietly
+    missing with no loud signal until a customer hits it. Same shape as
+    _check_platform_digitalocean_token / _check_platform_credit_keys above:
+    never blocks startup, only warns loudly, own skip flag. A dead or absent
+    transactional-email key degrades one feature (verification/invite mail),
+    not the whole platform.
+
+    Read the same way email_provider_service._api_key() reads it — bare
+    os.environ, never the secrets broker. This key is not currently
+    broker-routed (workspace-scoped provider credentials are; this is a
+    single platform-wide operator credential), and this check does not
+    invent that registration as a side effect of a preflight pass.
+
+    DEAD vs ABSENT are reported distinctly, per the ticket's own framing —
+    they are different problems with different fixes: an absent key is a
+    deploy/config gap (set the env var), a dead key is a live-account
+    problem (the key was revoked/rotated/expired) that setting a new env
+    var also fixes, but which a human would otherwise only discover from a
+    customer complaint days later, exactly as happened here.
+
+    THE LIVENESS PROBE, AND WHY IT USES delivered@resend.dev RATHER THAN A
+    READ-ONLY GET: Resend API keys carry one of two permission scopes —
+    "full_access" (any resource) or "sending_access" ("can only send
+    emails" — their own docs' exact wording). EMPYRALIS_... email keys
+    should be scoped sending_access, the minimal permission this platform
+    actually needs, per ordinary least-privilege practice. A liveness probe
+    built on a read-only endpoint (GET /domains, GET /api-keys) would be
+    REJECTED for a correctly-scoped sending_access key even though the key
+    is perfectly healthy for its real job — turning the RECOMMENDED minimal
+    scope into a guaranteed false "DEAD KEY" critical on every boot. That
+    is a worse outcome than no probe at all, so a read-only endpoint was
+    deliberately rejected here rather than assumed to work.
+
+    delivered@resend.dev is Resend's own documented address for exercising
+    the real POST /emails send path without delivering to any real inbox —
+    it exercises the exact permission (sending_access) this key is meant to
+    have, so it validates real production keys without requiring anyone to
+    grant broader access than the platform needs, and nothing about it
+    reaches a real person. This still counts as a "send" in Resend's own
+    dashboard/rate-limit accounting, same as the DigitalOcean check above
+    makes a real GET /v2/account call on every boot — a bounded, expected
+    cost of an advisory health check, not a reason to skip having one.
+    """
+    if _platform_email_provider_check_skipped():
+        LOGGER.info(
+            "preflight: platform email provider key check skipped "
+            "(EMPYRALIS_SKIP_PLATFORM_EMAIL_PROVIDER_CHECK set)."
+        )
+        return
+
+    try:
+        from server_modules.runtime_common import http_json_request
+    except Exception as exc:
+        LOGGER.warning(
+            "preflight: could not import dependencies for the platform email provider check: %s", exc
+        )
+        return
+
+    api_key = str(os.environ.get("EMAIL_PROVIDER_API_KEY") or "").strip()
+    if not api_key:
+        LOGGER.critical(
+            "PLATFORM EMAIL PROVIDER KEY ABSENT — EMAIL_PROVIDER_API_KEY is not "
+            "set. No transactional email (signup verification codes, workspace "
+            "invites) can be sent until this is fixed. The only prior symptom "
+            "of this was customers silently not receiving codes — see "
+            "email_provider_service.send_email, which only logs an error at "
+            "send time. Set EMAIL_PROVIDER_API_KEY to a Resend API key. Set "
+            "EMPYRALIS_SKIP_PLATFORM_EMAIL_PROVIDER_CHECK=true to silence this "
+            "check."
+        )
+        return
+
+    from_address = str(
+        os.environ.get("EMAIL_PROVIDER_FROM_ADDRESS") or "Empyralis <onboarding@empyralis.ai>"
+    ).strip()
+
+    try:
+        result = await asyncio.to_thread(
+            http_json_request,
+            "https://api.resend.com/emails",
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            payload={
+                "from": from_address,
+                "to": ["delivered@resend.dev"],
+                "subject": "Empyralis preflight email provider health check",
+                "text": (
+                    "Automated boot-time liveness check (server_modules/preflight.py"
+                    "._check_platform_email_provider_key). delivered@resend.dev never "
+                    "delivers to a real inbox."
+                ),
+            },
+            timeout=10,
+        )
+    except Exception as exc:
+        LOGGER.warning("preflight: Resend liveness check errored (network/transport): %s", exc)
+        return
+
+    status = int(result.get("status") or 0)
+    body = result.get("json") if isinstance(result.get("json"), dict) else {}
+    if status in (200, 201) and body.get("id"):
+        LOGGER.info("preflight: platform email provider key is healthy (Resend accepted a test send).")
+        return
+
+    LOGGER.critical(
+        "PLATFORM EMAIL PROVIDER KEY DEAD — Resend rejected a liveness send "
+        "(status=%s, response=%s). No transactional email (signup verification "
+        "codes, workspace invites) can be sent until this is fixed. This is an "
+        "ops action — rotate or restore the key behind EMAIL_PROVIDER_API_KEY; "
+        "no code change fixes a revoked or expired upstream key. Set "
+        "EMPYRALIS_SKIP_PLATFORM_EMAIL_PROVIDER_CHECK=true to silence this check.",
+        status,
+        body,
+    )
+
+
 async def _check_redis() -> Optional[str]:
     """Return ``None`` if Redis is reachable, or an error string."""
     if _redis_check_skipped():
@@ -1641,6 +1773,13 @@ async def run_preflight_checks() -> List[str]:
     #    preflight check at all before this, so a missing/dead operator
     #    credential was invisible until a customer's own connect attempt.
     await _check_platform_google_operator_credentials()
+
+    # 9. Platform email provider key (Resend, MAN-343) — advisory only, same
+    #    reasoning as steps 6-8: a dead/absent key degrades one feature
+    #    (verification/invite email), not the whole platform. This is the
+    #    check that did not exist when the key went missing in production
+    #    with no signal anywhere until a customer noticed.
+    await _check_platform_email_provider_key()
 
     if errors:
         LOGGER.error("PREFLIGHT FAILED — %d check(s) did not pass.", len(errors))
