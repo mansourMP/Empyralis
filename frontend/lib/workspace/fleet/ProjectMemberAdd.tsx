@@ -61,6 +61,7 @@ import {
   type ProjectInviteStatusItem,
 } from "@/lib/workspace/fleet/project-members-data";
 import { MemberAvatar } from "@/lib/workspace/fleet/MemberAvatarStack";
+import { runMutationWithBestEffortRefresh } from "@/lib/workspace/mutation-outcome";
 
 /** pending / accepted / declined / revoked / a failed send -- five distinct
  *  facts, never collapsed into one "Sent" light (CLAUDE.md: "pending /
@@ -182,18 +183,18 @@ export function ProjectMemberAdd({
     setAddingId(userId);
     setAddError(null);
     try {
-      await addProjectMember(workspaceId, projectId, userId);
-      setAddedIds((prev) => new Set(prev).add(userId));
+      // The member is added the moment addProjectMember() resolves, and the
+      // row above shows it right there — a failure to refresh the
+      // project's member LIST afterward is not the add failing, and
+      // reporting it as "Could not add this member" would contradict the
+      // row this exact render just added.
+      await runMutationWithBestEffortRefresh(async () => {
+        await addProjectMember(workspaceId, projectId, userId);
+        setAddedIds((prev) => new Set(prev).add(userId));
+      }, refreshProjectMembers);
     } catch (e) {
       setAddError(e instanceof Error ? e.message : "Could not add this member.");
-      setAddingId(null);
-      return;
     }
-    // The member is already added and the row above already shows it — a
-    // failure here is only the project's member LIST failing to re-fetch,
-    // not the add failing. Reporting it as "Could not add this member" would
-    // contradict the row this exact render just added. Best-effort only.
-    await refreshProjectMembers().catch(() => {});
     setAddingId(null);
   }
 
@@ -206,19 +207,19 @@ export function ProjectMemberAdd({
     setFreshLink(null);
     setDelivery(null);
     try {
-      const created = await createWorkspaceInvite(workspaceId, clean, role, projectId);
-      setFreshLink(buildWorkspaceInviteJoinUrl(created.token));
-      setDelivery(inviteEmailDelivery(created));
-      setEmail("");
+      // Same reasoning as handleAdd above: the invite is already created
+      // and its link is already on screen the moment createWorkspaceInvite()
+      // resolves — a stale invite-status list must never be reported as
+      // "Could not create this invite."
+      await runMutationWithBestEffortRefresh(async () => {
+        const created = await createWorkspaceInvite(workspaceId, clean, role, projectId);
+        setFreshLink(buildWorkspaceInviteJoinUrl(created.token));
+        setDelivery(inviteEmailDelivery(created));
+        setEmail("");
+      }, inviteStatus.refresh);
     } catch (e2) {
       setInviteError(e2 instanceof Error ? e2.message : "Could not create this invite.");
-      setInviting(false);
-      return;
     }
-    // Same reasoning as handleAdd above: the invite is already created and
-    // its link is already on screen — a stale invite-status list must never
-    // be reported as "Could not create this invite."
-    await inviteStatus.refresh().catch(() => {});
     setInviting(false);
   }
 

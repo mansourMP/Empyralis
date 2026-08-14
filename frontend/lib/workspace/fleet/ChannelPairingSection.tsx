@@ -54,6 +54,7 @@ import { Check, Copy, Link2, Trash2 } from "lucide-react";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { formatDateTime } from "@/lib/workspace/fleet/fleet-presentation";
 import { useOwnWorkspaceRole } from "@/lib/workspace/fleet/members-data";
+import { runMutationWithBestEffortRefresh } from "@/lib/workspace/mutation-outcome";
 
 type ChannelProvider = "telegram" | "whatsapp" | "slack" | "sms" | "wechat_official";
 
@@ -174,23 +175,23 @@ export function ChannelPairingSection({ workspaceId }: { workspaceId: string }) 
     setError(null);
     setFreshIntent(null);
     try {
-      const data = await mutateJson("/api/channel-pairing/intents", "POST", {
-        provider,
-        workspace_id: workspaceId,
-        allow_relink: false,
-        metadata: { source: "settings_connections" },
-      });
-      setFreshIntent((data?.intent as ChannelPairingIntent) ?? null);
+      // The pairing code is already minted (and already on screen,
+      // freshIntent above) the moment the POST resolves — a failure to
+      // refresh the pairing LIST afterward is not the create failing, and
+      // reporting it as "Could not create a pairing code" would contradict
+      // the code this exact render also shows.
+      await runMutationWithBestEffortRefresh(async () => {
+        const data = await mutateJson("/api/channel-pairing/intents", "POST", {
+          provider,
+          workspace_id: workspaceId,
+          allow_relink: false,
+          metadata: { source: "settings_connections" },
+        });
+        setFreshIntent((data?.intent as ChannelPairingIntent) ?? null);
+      }, load);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create a pairing code.");
-      setCreating(false);
-      return;
     }
-    // The pairing code is already minted and already on screen (freshIntent
-    // above) — a failure here is only the pairing LIST failing to re-fetch,
-    // not the create failing. Reporting it as "Could not create a pairing
-    // code" would contradict the code this exact render also shows.
-    await load().catch(() => {});
     setCreating(false);
   }, [provider, workspaceId, load]);
 
@@ -199,18 +200,21 @@ export function ChannelPairingSection({ workspaceId }: { workspaceId: string }) 
       setRevokingId(linkId);
       setError(null);
       try {
-        await mutateJson(`/api/channel-pairing/links/${encodeURIComponent(linkId)}/revoke`, "POST", {
-          confirm: true,
-          reason: "Revoked from workspace Settings → Connections.",
-        });
+        // The revoke already happened the moment the POST resolves — a
+        // failed re-fetch afterward must not be reported as "Could not
+        // revoke this pairing."
+        await runMutationWithBestEffortRefresh(
+          () => mutateJson(`/api/channel-pairing/links/${encodeURIComponent(linkId)}/revoke`, "POST", {
+            confirm: true,
+            reason: "Revoked from workspace Settings → Connections.",
+          }),
+          load,
+        );
       } catch (e) {
         setError(e instanceof Error ? e.message : "Could not revoke this pairing.");
         setRevokingId(null);
         return;
       }
-      // The revoke already happened — a failed re-fetch afterward must not
-      // be reported as "Could not revoke this pairing."
-      await load().catch(() => {});
       setRevokingId(null);
     },
     [load],

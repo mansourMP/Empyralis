@@ -10,6 +10,7 @@ import {
   type CreateWorkspaceInput,
 } from '@/lib/account/account-workspaces-client';
 import { useAccountShell } from '@/lib/shell/account-shell-context';
+import { runMutationWithBestEffortRefresh } from '@/lib/workspace/mutation-outcome';
 import {
   WorkspaceSetupForm,
   createDefaultWorkspaceSetupValues,
@@ -65,7 +66,22 @@ export function NewWorkspacePageClient() {
     setErrorMessage(null);
     let createdWorkspace: Awaited<ReturnType<typeof createWorkspace>>;
     try {
-      createdWorkspace = await createWorkspace(values);
+      // The workspace is already created the moment createWorkspace()
+      // resolves — a failure to refresh the account shell's own membership
+      // list afterward must never be reported as "Workspace could not be
+      // created": that would leave the person on this form believing
+      // nothing happened, and pressing Create again would create a SECOND
+      // real workspace. runMutationWithBestEffortRefresh encodes exactly
+      // that one rule; navigate to the real workspace either way, since its
+      // own route load will pick up the membership regardless of whether
+      // this refresh landed.
+      createdWorkspace = await runMutationWithBestEffortRefresh(
+        () => createWorkspace(values),
+        async () => {
+          const session = await loadAccountShellBootstrap();
+          actions.replaceSession(session);
+        },
+      );
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : 'Workspace could not be created.',
@@ -73,15 +89,6 @@ export function NewWorkspacePageClient() {
       setSubmitting(false);
       return;
     }
-    // The workspace is already created — a failure to refresh the account
-    // shell's own membership list must never be reported as "Workspace
-    // could not be created": that would leave the person on this form
-    // believing nothing happened, and pressing Create again would create a
-    // SECOND real workspace. Best-effort refresh; navigate to the real
-    // workspace either way, since its own route load will pick up the
-    // membership regardless of whether this refresh landed.
-    const session = await loadAccountShellBootstrap().catch(() => null);
-    if (session) actions.replaceSession(session);
     router.replace(createdWorkspace.defaultRoute);
     setSubmitting(false);
   }
