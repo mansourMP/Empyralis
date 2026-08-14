@@ -223,6 +223,16 @@ export function FleetCreateAgentWizard({
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // submitBrain's BYOK branch: the vault credential this attempt already
+  // created, if a LATER step (the provider-profile create, or the
+  // patchAgent that follows) then failed and the person pressed the submit
+  // button again. Without this, the retry would create a SECOND credential
+  // for the same key — every retry of a persistent failure orphaning one
+  // more encrypted API key in the vault with nothing ever referencing it.
+  // Reusing the id makes a retry idempotent instead of additive; cleared the
+  // moment the profile create actually succeeds, since there is nothing
+  // left to reuse.
+  const pendingByokCredentialId = useRef<string | null>(null);
 
   // The provider whose model catalog the Brain step's model picker should
   // show — keep the selected model in sync with it (freeform providers get
@@ -436,23 +446,31 @@ export function FleetCreateAgentWizard({
     try {
       if (providerMode === "byok" && byokKey.trim()) {
         const label = `${providerLabel(byokProvider)} — ${createdAgent?.label || "agent"}`;
-        const credRes = await fleetAuthorizedFetch("/api/credentials/vault", {
-          method: "POST",
-          credentials: "include",
-          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-          body: JSON.stringify({
-            workspace_id: workspaceId,
-            provider: byokProvider,
-            label,
-            mode: "byok",
-            credentials: { api_key: byokKey.trim() },
-          }),
-        });
-        if (!credRes.ok) {
-          const cd = await credRes.json().catch(() => ({}));
-          throw new Error(getErrorMessage(cd, `HTTP ${credRes.status}`));
+        // Reuse a credential a PRIOR attempt in this same wizard session
+        // already created, if the failure that brought the person back here
+        // was in the profile step or later — see pendingByokCredentialId's
+        // own comment. Only create a new one when there is nothing pending.
+        let credentialId = pendingByokCredentialId.current;
+        if (!credentialId) {
+          const credRes = await fleetAuthorizedFetch("/api/credentials/vault", {
+            method: "POST",
+            credentials: "include",
+            headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              workspace_id: workspaceId,
+              provider: byokProvider,
+              label,
+              mode: "byok",
+              credentials: { api_key: byokKey.trim() },
+            }),
+          });
+          if (!credRes.ok) {
+            const cd = await credRes.json().catch(() => ({}));
+            throw new Error(getErrorMessage(cd, `HTTP ${credRes.status}`));
+          }
+          credentialId = (await credRes.json())?.id;
+          pendingByokCredentialId.current = credentialId;
         }
-        const credentialId = (await credRes.json())?.id;
 
         const profileRes = await fleetAuthorizedFetch("/api/providers/profiles", {
           method: "POST",
@@ -468,8 +486,17 @@ export function FleetCreateAgentWizard({
         });
         if (!profileRes.ok) {
           const pd = await profileRes.json().catch(() => ({}));
-          throw new Error(getErrorMessage(pd, `HTTP ${profileRes.status}`));
+          // The credential itself IS saved (either just now, or by a prior
+          // attempt this retry is reusing) — say so, rather than a flat
+          // failure that implies nothing happened and invites a retry that
+          // would otherwise mint a second, orphaned credential.
+          throw new Error(
+            `Your API key was saved, but could not be assigned to this agent yet: ${getErrorMessage(pd, `HTTP ${profileRes.status}`)}`,
+          );
         }
+        // The profile now references the credential — nothing left to
+        // reuse on a future, unrelated retry.
+        pendingByokCredentialId.current = null;
       }
       if (providerMode === "byok") {
         await patchAgent(agentId, { model_config: { mode: "byok_api", provider: byokProvider, model: selectedModel.trim() || undefined } });
