@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { GatewayLLMRuntime, LLM_GENERATE_CAPABILITY } from "../llm/runtime";
+import { GatewayLLMRuntime, LLM_GENERATE_CAPABILITY, LLM_MODELS_LIST_CAPABILITY } from "../llm/runtime";
 import { CliRunError } from "../llm/cli-runner";
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 
@@ -129,11 +129,12 @@ test("llm.generate surfaces a non-200 Ollama response as an error, never a silen
   );
 });
 
-test("supportsCapability only matches llm.generate", () => {
+test("supportsCapability matches exactly llm.generate and llm.models.list, nothing else", () => {
   const runtime = new GatewayLLMRuntime();
   assert.equal(runtime.supportsCapability("llm.generate"), true);
+  assert.equal(runtime.supportsCapability(LLM_MODELS_LIST_CAPABILITY), true);
   assert.equal(runtime.supportsCapability("shell.execute"), false);
-  assert.deepEqual(runtime.requestedCapabilities(), ["llm.generate"]);
+  assert.deepEqual(runtime.requestedCapabilities(), ["llm.generate", "llm.models.list"]);
 });
 
 // ── cli_subscription (Phase 3): claude_code / codex via the injected cliRunner ──
@@ -407,4 +408,73 @@ test("llm.generate: an Ollama failure never invalidates the CLI readiness cache 
   });
   await assert.rejects(() => runtime.handleCapabilityInvoke(makeInvokeFrame({ prompt: "hi" })));
   assert.equal(calls, 0);
+});
+
+// ── llm.models.list (URGENT fix, 2026-08-14) ────────────────────────────────
+// The live bug this closes: a hand-typed model catalog offered "gpt-5.4",
+// which OpenAI had already retired from Codex's own account-scoped catalog.
+// This capability is the honest replacement — ask the CLI, never guess.
+
+test("llm.models.list: codex runtime calls the injected listModels impl and relays its result", async () => {
+  let calls = 0;
+  const runtime = new GatewayLLMRuntime({
+    codexModelsListImpl: async () => {
+      calls += 1;
+      return {
+        authMethod: "chatgpt",
+        models: [
+          { id: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", description: "Balanced.", hidden: false, isDefault: true },
+          { id: "codex-auto-review", displayName: "Codex Auto Review", description: "Internal.", hidden: true, isDefault: false },
+        ],
+      };
+    },
+  });
+  const result = await runtime.handleCapabilityInvoke(
+    makeInvokeFrame({ runtime: "codex" }, { capability_id: LLM_MODELS_LIST_CAPABILITY }),
+  );
+  assert.equal(calls, 1);
+  assert.equal(result.supported, true);
+  assert.equal(result.auth_method, "chatgpt");
+  const models = result.models as Array<Record<string, unknown>>;
+  assert.equal(models.length, 2);
+  assert.equal(models[0].id, "gpt-5.6-terra");
+  assert.equal(models[0].is_default, true);
+  assert.equal(models[1].hidden, true);
+});
+
+test("llm.models.list: a runtime with no verified live catalog gets an honest supported:false, never a guess", async () => {
+  let calls = 0;
+  const runtime = new GatewayLLMRuntime({
+    codexModelsListImpl: async () => {
+      calls += 1;
+      return { authMethod: null, models: [] };
+    },
+  });
+  for (const rt of ["claude_code", "grok_build", "cursor_cli", "ollama", ""]) {
+    const result = await runtime.handleCapabilityInvoke(
+      makeInvokeFrame({ runtime: rt }, { capability_id: LLM_MODELS_LIST_CAPABILITY }),
+    );
+    assert.equal(result.supported, false);
+    assert.deepEqual(result.models, []);
+  }
+  // Never spawned codex for a runtime it can't answer for.
+  assert.equal(calls, 0);
+});
+
+test("llm.models.list: a genuine CLI failure (not installed/authenticated/timeout) propagates as a real error, not a swallowed empty list", async () => {
+  const runtime = new GatewayLLMRuntime({
+    codexModelsListImpl: async () => {
+      throw new CliRunError("not_authenticated", "Codex reported an authentication failure");
+    },
+  });
+  await assert.rejects(
+    () => runtime.handleCapabilityInvoke(makeInvokeFrame({ runtime: "codex" }, { capability_id: LLM_MODELS_LIST_CAPABILITY })),
+    (err: unknown) => err instanceof CliRunError && err.kind === "not_authenticated",
+  );
+});
+
+test("llm.models.list is advertised alongside llm.generate", () => {
+  const runtime = new GatewayLLMRuntime();
+  assert.ok(runtime.requestedCapabilities().includes(LLM_MODELS_LIST_CAPABILITY));
+  assert.ok(runtime.supportsCapability(LLM_MODELS_LIST_CAPABILITY));
 });
