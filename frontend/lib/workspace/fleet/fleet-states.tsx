@@ -157,12 +157,14 @@ export function FleetBoardSkeleton({ label = "Loading" }: { label?: string }) {
  * (ScheduleSection, ToolsTab, CapabilitiesTab). These three previously fell
  * back to `FleetRowsSkeleton`, an icon+2-line ACTIVITY-feed row shape (no
  * left icon exists on a toggle row, and a toggle row's real trailing
- * content — a switch or a Cancel button — was never reserved), which is
+ * content — a switch or a button — was never reserved), which is
  * FleetRowsSkeleton's own documented ORIGINAL shape drifting into callers
  * it was never built for (see that component's doc comment). `trailing`
- * matches the two real shapes on this surface: `"switch"` (ToolsTab/
- * CapabilitiesTab's `.fleet-toggle`) and `"button"` (ScheduleSection's
- * Cancel button).
+ * matches the two real shapes on this surface: `"switch"`
+ * (CapabilitiesTab's `.fleet-toggle`) and `"button"` (ScheduleSection's
+ * Cancel button, ToolsTab's Customer Access grant/revoke badge — 2026-08-14:
+ * there is no more per-agent Tools enable/disable switch, so ToolsTab moved
+ * off `"switch"`).
  */
 export function FleetToggleRowsSkeleton({
   rows = 4,

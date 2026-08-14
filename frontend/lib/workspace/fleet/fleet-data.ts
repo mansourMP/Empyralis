@@ -538,21 +538,25 @@ export type FleetConnector = {
   configured: boolean;
 };
 
+// 2026-08-14 (CLAUDE.md, founder decision): no more per-agent Tools
+// enable/disable checklist, so this type carries no `enabled` field —
+// every listed tool is already available to the agent itself. What's left
+// is Authority Mandate (Part 10) — Customer access, a WHO boundary, not a
+// WHAT-is-switchable one.
 export type FleetTool = {
   id: string;
   label: string;
   description: string;
   action_class: string;
-  enabled: boolean;
-  // Authority Mandate (Part 10) — Customer access. audience_safe is the
-  // platform's own manifest default (informational, never toggleable);
-  // mandate_granted reflects this owner's mandate.audience_tools list.
+  // audience_safe is the platform's own manifest default (informational,
+  // never toggleable); mandate_granted reflects this owner's
+  // mandate.audience_tools list.
   audience_safe: boolean;
   mandate_granted: boolean;
   // Truth Map B1 — connector id (e.g. "google_workspace") this tool's real
-  // executor is bound behind, or null if the toggle alone is sufficient.
-  // Toggling `enabled` above does nothing for a connector-required tool
-  // until that connector is connected.
+  // executor is bound behind, or null if none. Granting customer access
+  // does nothing for a connector-required tool until that connector is
+  // connected.
   requires_connector: string | null;
 };
 
@@ -681,9 +685,13 @@ export function useFleetProjectConnectors(workspaceId: string, projectId: string
   return { projectConnectors, loading, refresh };
 }
 
+// 2026-08-14 (CLAUDE.md, founder decision): no more per-agent Tools
+// enable/disable checklist, so this fetches the agent's Customer Access
+// (Authority Mandate) catalog only — no `coreTools` bucket any more, since
+// there is no longer a distinction between "core, always on" and
+// "toggleable" tools. Every tool is always on for the agent itself.
 export function useFleetAgentTools(workspaceId: string, agentId: string | null) {
   const [tools, setTools] = useState<FleetTool[]>([]);
-  const [coreTools, setCoreTools] = useState<string[]>([]);
   const [isMaster, setIsMaster] = useState(false);
   const [loading, setLoading] = useState(false);
   // See useFleetAgentChannels' identical guard above — same agentId-switch
@@ -693,7 +701,7 @@ export function useFleetAgentTools(workspaceId: string, agentId: string | null) 
   const refresh = useCallback(async () => {
     abortRef.current?.abort();
     abortRef.current = null;
-    if (!agentId) { setTools([]); setCoreTools([]); return; }
+    if (!agentId) { setTools([]); return; }
     const controller = new AbortController();
     abortRef.current = controller;
     setLoading(true);
@@ -705,10 +713,9 @@ export function useFleetAgentTools(workspaceId: string, agentId: string | null) 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setTools(data.tools || []);
-      setCoreTools(data.core_tools || []);
       setIsMaster(Boolean(data.is_master));
     } catch (e) {
-      if (!(e instanceof Error && e.name === "AbortError")) { setTools([]); setCoreTools([]); }
+      if (!(e instanceof Error && e.name === "AbortError")) { setTools([]); }
     } finally {
       if (abortRef.current === controller) setLoading(false);
     }
@@ -719,7 +726,7 @@ export function useFleetAgentTools(workspaceId: string, agentId: string | null) 
     return () => { abortRef.current?.abort(); };
   }, [refresh]);
 
-  return { tools, coreTools, isMaster, loading, refresh };
+  return { tools, isMaster, loading, refresh };
 }
 
 // ── Capabilities (image/video generation, TTS/STT) ──────────────────────────
