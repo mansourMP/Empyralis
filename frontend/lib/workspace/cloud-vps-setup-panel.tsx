@@ -1,6 +1,7 @@
 'use client';
 
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
+import { MutateNetworkError } from "@/lib/workspace/mutation-outcome";
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Check, ExternalLink, X } from 'lucide-react';
@@ -25,15 +26,14 @@ import {
 // same CSRF handling, no dependency on a context fleet doesn't provide. See
 // FleetAgentDetail.tsx's LegacyMemoryTab comment for the same trade-off made
 // elsewhere in the fleet rewrite.
-/** Thrown only when the request itself never produced a response (fetch()
- *  rejected — offline, a dropped connection, a timeout). A genuinely
- *  different fact from the server answering with a non-2xx status: see
- *  createServer() below, the reason this exists — POST /hardware/vps/
- *  provision commits a real, billed droplet-provisioning record and starts
- *  the real background lifecycle task BEFORE it returns (that route's own
- *  docstring), so a rejected fetch here does NOT mean nothing happened. */
-class RequestNetworkError extends Error {}
-
+//
+// createServer() below is the reason MutateNetworkError matters here:
+// POST /hardware/vps/provision commits a real, billed droplet-provisioning
+// record and starts the real background lifecycle task BEFORE it returns
+// (that route's own docstring), so a rejected fetch does NOT mean nothing
+// happened — see lib/workspace/mutation-outcome.ts for the shared class and
+// the pattern (this was one of two independent hand-written copies of it
+// that motivated moving it there).
 async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const method = String(init.method || 'GET');
   const headers = buildCookieAuthHeaders(method, { accept: 'application/json', ...(init.headers as Record<string, string> | undefined) });
@@ -41,7 +41,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
   try {
     response = await fleetAuthorizedFetch(path, { ...init, headers, credentials: 'include' });
   } catch (e) {
-    throw new RequestNetworkError(e instanceof Error ? e.message : 'Network request failed.');
+    throw new MutateNetworkError(e instanceof Error ? e.message : 'Network request failed.');
   }
   if (!response.ok) {
     // Surface the backend's own detail message when there is one (e.g. "This
@@ -64,7 +64,7 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
 
 /** Best-effort lookup for a droplet this exact panel already provisioned,
  *  used only after createServer()'s POST fails with NO response at all —
- *  see RequestNetworkError above. Matches by provider/region/size and a
+ *  see MutateNetworkError's own doc comment. Matches by provider/region/size and a
  *  created_at at or after the attempt's own start time (a small negative
  *  grace window absorbs clock skew between browser and server); returns the
  *  newest such record, since GET /hardware/vps already returns newest-first.
@@ -1387,14 +1387,14 @@ export function CloudVpsSetupPanel({
       // POST /hardware/vps/provision commits a real, billed droplet-
       // provisioning record and starts the real background lifecycle task
       // BEFORE it returns (that route's own docstring) — so a request that
-      // never produced a RESPONSE (RequestNetworkError; a definitive
+      // never produced a RESPONSE (MutateNetworkError; a definitive
       // rejection from the server, like a quota or credential error, is a
       // different, reliable fact and skips this) does not mean nothing
       // happened. Check for the record this exact attempt would have
       // gotten a vps_id for before ever telling the customer it failed —
       // the natural next action on that screen is retrying, which would
       // otherwise provision a SECOND real, billed droplet.
-      if (provisionError instanceof RequestNetworkError) {
+      if (provisionError instanceof MutateNetworkError) {
         const recovered = await findJustCreatedVps(
           workspaceId,
           selectedProvider,
