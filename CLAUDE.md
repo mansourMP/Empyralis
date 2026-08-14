@@ -2524,6 +2524,16 @@ tab, read the console.
   *different* agent's uncommitted work. This happened 2026-07-31 and was caught
   only because the agent inspected what it popped. To revert temporarily, use
   `git diff > /tmp/x.patch` + `git checkout --`, then `git apply`.
+
+  **Second, sharper reason, found 2026-08-14: `git stash` during a merge
+  silently clears `MERGE_HEAD`.** The subsequent `git commit` then produces a
+  single-parent commit carrying the right CONTENT but the wrong PARENTAGE — so
+  git has no record that the merged branch was ever incorporated, and every
+  later merge re-hits the identical conflicts forever. Diagnosed after a branch
+  conflicted twice against a `main` it had demonstrably already merged; the
+  tell is `git log -1 --format=%P` returning ONE hash where a merge should
+  return two. The fix is to redo the merge without stashing. This one bites
+  even with no other agent running, so it is not only a concurrency rule.
 - Never weaken a test assertion to make it pass. A green suite that asserts
   nothing is worse than a red one.
 - Never commit `frontend/next-env.d.ts` or `frontend/tsconfig.json` — a dev
