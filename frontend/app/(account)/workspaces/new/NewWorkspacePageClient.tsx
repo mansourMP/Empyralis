@@ -63,18 +63,27 @@ export function NewWorkspacePageClient() {
   async function handleSubmit(values: CreateWorkspaceInput) {
     setSubmitting(true);
     setErrorMessage(null);
+    let createdWorkspace: Awaited<ReturnType<typeof createWorkspace>>;
     try {
-      const createdWorkspace = await createWorkspace(values);
-      const session = await loadAccountShellBootstrap();
-      actions.replaceSession(session);
-      router.replace(createdWorkspace.defaultRoute);
+      createdWorkspace = await createWorkspace(values);
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : 'Workspace could not be created.',
       );
-    } finally {
       setSubmitting(false);
+      return;
     }
+    // The workspace is already created — a failure to refresh the account
+    // shell's own membership list must never be reported as "Workspace
+    // could not be created": that would leave the person on this form
+    // believing nothing happened, and pressing Create again would create a
+    // SECOND real workspace. Best-effort refresh; navigate to the real
+    // workspace either way, since its own route load will pick up the
+    // membership regardless of whether this refresh landed.
+    const session = await loadAccountShellBootstrap().catch(() => null);
+    if (session) actions.replaceSession(session);
+    router.replace(createdWorkspace.defaultRoute);
+    setSubmitting(false);
   }
 
   return (

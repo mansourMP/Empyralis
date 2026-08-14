@@ -270,6 +270,37 @@ export function FleetCreateAgentWizard({
     }
   }
 
+  /** Looks for an agent this exact wizard session already created, by exact
+   *  name + (when picked) project match, among the workspace's most
+   *  recently created agents. Used only after the create-agent POST fails
+   *  with no response at all (see submitPlacement below) — the backend
+   *  commits the new agent row and returns in one straight-through path
+   *  (verified: fleet_create_agent_route has no compensating rollback), so
+   *  a dropped connection after that commit leaves the browser believing
+   *  nothing happened while a real agent already exists. Retrying blind
+   *  would create a SECOND real agent. Returns null on any read failure —
+   *  this is a safety net, not a new failure mode of its own. */
+  async function findLikelyAlreadyCreatedAgent(
+    name: string,
+    projectId: string,
+  ): Promise<{ agent_id: string; project_id: string } | null> {
+    try {
+      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, { credentials: "include" });
+      if (!res.ok) return null;
+      const data = await res.json().catch(() => ({}));
+      const agents: FleetAgent[] = Array.isArray(data?.agents) ? data.agents : [];
+      const clean = name.trim();
+      const match = agents.find((a) => {
+        if ((a.label || "").trim() !== clean) return false;
+        return !projectId || a.project_id === projectId;
+      });
+      if (!match) return null;
+      return { agent_id: match.agent_id, project_id: match.project_id || projectId };
+    } catch {
+      return null;
+    }
+  }
+
   // Step 1 (Placement) → creates the agent on first commit (the name and
   // project shown on this step, capability_preset standard), then always
   // (re)patches hardware_access/preferred_gateway_id to match the current
@@ -287,22 +318,39 @@ export function FleetCreateAgentWizard({
       let projId = resolvedProjectId;
       if (!id) {
         const chosenProjectId = projectChoice && projectChoice !== NEW_PROJECT ? projectChoice : "";
-        const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
-          method: "POST",
-          credentials: "include",
-          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-          body: JSON.stringify({
-            name: agentName.trim(),
-            capability_preset: "standard",
-            project_id: chosenProjectId,
-            purpose_preset: purposePreset,
-            audience: audienceForPreset(purposePreset),
-          }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
-        id = String(data.agent_id || "");
-        projId = String(data.project_id || initialProjectId || "");
+        let created: { agent_id: string; project_id: string } | null = null;
+        try {
+          const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents`, {
+            method: "POST",
+            credentials: "include",
+            headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+            body: JSON.stringify({
+              name: agentName.trim(),
+              capability_preset: "standard",
+              project_id: chosenProjectId,
+              purpose_preset: purposePreset,
+              audience: audienceForPreset(purposePreset),
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
+          created = {
+            agent_id: String(data.agent_id || ""),
+            project_id: String(data.project_id || initialProjectId || ""),
+          };
+        } catch (createErr) {
+          // fleet_create_agent_route commits the new agent row and returns
+          // in one straight-through path with no compensating rollback —
+          // so a dropped connection AFTER that commit looks identical here
+          // to the request never having reached the server at all. Before
+          // ever reporting failure (and letting a retry create a SECOND
+          // real agent), check whether the agent this exact call would have
+          // created already exists.
+          created = await findLikelyAlreadyCreatedAgent(agentName, chosenProjectId);
+          if (!created) throw createErr;
+        }
+        id = created.agent_id;
+        projId = created.project_id || initialProjectId || "";
         setAgentId(id);
         setResolvedProjectId(projId);
       }
