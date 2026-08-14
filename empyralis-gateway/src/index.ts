@@ -19,8 +19,11 @@ import type { GatewayRuntimeMetadata } from "./runtime/runtime-metadata";
 import { GatewayCapabilityRouter } from "./supervisor/capability-router";
 import { GatewayRegistrationError } from "./cloud/registration-failure";
 import { WhatsAppPersonalRuntime } from "./channels/whatsapp/runtime";
+import { WHATSAPP_PERSONAL_CHANNEL_KEY } from "./channels/whatsapp/session-store";
 import { TelegramPersonalRuntime } from "./channels/telegram/runtime";
+import { TELEGRAM_PERSONAL_CHANNEL_KEY } from "./channels/telegram/session-store";
 import { PersonalChannelRuntimeRegistry } from "./channels/personal-runtime";
+import { activeFirstPartyPersonalChannels } from "./openclaw/transport-ownership";
 import {
   LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS,
   LocalBridgePersonalChannelRuntime,
@@ -475,13 +478,29 @@ async function main(): Promise<void> {
         },
       })
     : null;
+  // Every first-party personal-channel candidate this box COULD run, each
+  // paired with its own channel_key and a lazily-evaluated constructor (so
+  // filtering below never constructs a runtime this box shouldn't start).
+  // activeFirstPartyPersonalChannels() is the ONE gate all of them go
+  // through — see openclaw/transport-ownership.ts's doc for the full chain
+  // this reads through (channel_lane_contract_service.OPENCLAW_TRANSPORT_
+  // OWNERSHIP, generated-openclaw-channels.ts, ultimately
+  // OPENCLAW_CUT_OVER_CHANNEL_IDS). While that constant is empty (true
+  // today), every candidate below passes the filter unchanged — a strict
+  // no-op, proven by __tests__/first-party-transport-ownership-gate.test.ts.
+  // A future cutover needs no new gateway code: only the registry flip and
+  // a regenerate.
+  const firstPartyPersonalChannelCandidates: Array<{ channelKey: string; build: () => PersonalChannelRuntime }> = [
+    { channelKey: WHATSAPP_PERSONAL_CHANNEL_KEY, build: () => new WhatsAppPersonalRuntime(db) },
+    { channelKey: TELEGRAM_PERSONAL_CHANNEL_KEY, build: () => new TelegramPersonalRuntime(db) },
+    ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((bridgeConfig) => ({
+      channelKey: bridgeConfig.channelKey,
+      build: () => buildLocalBridgeChannelRuntime(bridgeConfig, db),
+    })),
+  ];
   const personalChannelRuntimes = new PersonalChannelRuntimeRegistry([
     ...(config.personalChannelsEnabled
-      ? [
-          new WhatsAppPersonalRuntime(db),
-          new TelegramPersonalRuntime(db),
-          ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((bridgeConfig) => buildLocalBridgeChannelRuntime(bridgeConfig, db)),
-        ]
+      ? activeFirstPartyPersonalChannels(firstPartyPersonalChannelCandidates).map((candidate) => candidate.build())
       : []),
     ...(openclawBridgeToken
       ? buildOpenClawPersonalChannelRuntimes(openclawGatewayClient, (messageType, payload) =>
