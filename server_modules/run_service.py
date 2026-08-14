@@ -6642,6 +6642,58 @@ def create_run_from_prepared_request(
     }
 
 
+async def _ensure_durable_turn_thread_row(
+    *,
+    turn_request: AgentTurnRequest,
+    thread_id: str,
+    current_user: Any,
+) -> Optional[str]:
+    """Guarantee `thread_id` has an agent_threads row, or report that it does not.
+
+    Returns the thread id when the row is known to exist, and ``None`` when it
+    could not be created — because ``agent_traces.thread_id`` is a foreign key,
+    and handing ``start_trace`` an id with no row costs the ENTIRE trace (the FK
+    violation is caught by start_trace's own except and becomes a silent
+    ``None``), while handing it ``NULL`` costs only the thread LINK. Losing the
+    link is a smaller, honest degradation than losing the record.
+
+    Failure is swallowed rather than raised on purpose: a durable run must never
+    die because its observability row could not be prepared. It is logged, so
+    "the trace is unlinked" is never a fact only the database knows.
+    """
+    from server_modules import thread_service
+
+    try:
+        await thread_service.ensure_master_thread(
+            thread_id=thread_id,
+            tenant_id=str(turn_request.tenant_id or "").strip() or "default",
+            workspace_id=str(turn_request.workspace_id or "").strip() or "default",
+            owner_user_id=(
+                str(
+                    (current_user.get("user_id") if isinstance(current_user, dict) else None)
+                    or getattr(current_user, "user_id", "")
+                    or ""
+                ).strip()
+                or str(getattr(getattr(turn_request, "actor", None), "id", "") or "").strip()
+                or None
+            ),
+            channel=str(getattr(turn_request, "channel", "") or "").strip() or "runs",
+            title=thread_service.build_default_thread_title(str(turn_request.message or "")),
+            metadata={"source": "execute_durable_turn_request"},
+        )
+        return thread_id
+    except Exception as exc:  # noqa: BLE001 - degradation, never a run failure
+        LOGGER.warning(
+            "Durable turn could not ensure its thread row; the trace will be recorded unlinked.",
+            exc_info=exc,
+            extra={
+                "thread_id": thread_id,
+                "workspace_id": str(turn_request.workspace_id or "").strip(),
+            },
+        )
+        return None
+
+
 async def execute_durable_turn_request(
     *,
     turn_request: AgentTurnRequest,
@@ -6655,10 +6707,31 @@ async def execute_durable_turn_request(
     req = build_durable_turn_execution_request(turn_request, base_request=base_request)
     created_trace_context = False
     if trace_context is None:
+        # agent_traces.thread_id is a FK into agent_threads, so the row has
+        # to exist before the trace is written — the same precondition
+        # agent_turn.py satisfies with ensure_master_thread immediately
+        # before its own start_trace. This path (POST /runs/start ->
+        # turn_ingress_service.start_run_start) has no ensure of its own, so
+        # it does one here.
+        #
+        # The old `turn_request.thread_id or turn_request.session_id`
+        # fallback is gone deliberately: a session id is not a thread id and
+        # never has a row in agent_threads, so that branch could only ever
+        # raise ForeignKeyViolationError inside start_trace's own except and
+        # lose the whole trace in silence. No thread -> NULL thread_id (the
+        # column is nullable), which is an honest unlinked trace rather than
+        # a dangling reference.
+        _durable_thread_id = str(getattr(turn_request, "thread_id", "") or "").strip() or None
+        if _durable_thread_id:
+            _durable_thread_id = await _ensure_durable_turn_thread_row(
+                turn_request=turn_request,
+                thread_id=_durable_thread_id,
+                current_user=current_user,
+            )
         trace_context = await agent_trace_service.start_trace(
             workspace_id=str(turn_request.workspace_id or "").strip() or "default",
             tenant_id=str(turn_request.tenant_id or "").strip() or "default",
-            thread_id=str(turn_request.thread_id or turn_request.session_id or "").strip() or None,
+            thread_id=_durable_thread_id,
             run_id=None,
             surface=_trace_surface_for_channel(turn_request.channel),
             runtime_target=_trace_runtime_target_for_turn_request(turn_request),

@@ -3797,14 +3797,30 @@ async def _run_sage_action_loop_v3(
     # MAN-310 Phase 2: Empyralis's own stable per-conversation identity
     # (handle_sage_chat's own `thread_id` param — NOT `trace_id` above,
     # which is a fresh uuid4 minted for every single call and therefore
-    # useless as a key for anything that must survive across turns). Only
-    # consulted on the claude_agent_sdk_bridge.ENGINE_ID branch, to look up
-    # / persist a resumable SDK session id keyed to THIS conversation — see
-    # _sdk_engine_session_lookup below. Empty (default) = every existing caller
-    # that doesn't pass it: the SDK branch simply never resumes, folding
-    # full history every turn exactly as before this parameter existed. The
-    # legacy branch never reads this parameter at all.
-    conversation_thread_id: str = "",
+    # useless as a key for anything that must survive across turns).
+    # Consulted in TWO places: the claude_agent_sdk_bridge.ENGINE_ID branch,
+    # to look up / persist a resumable SDK session id keyed to THIS
+    # conversation (see _sdk_engine_session_lookup below), and the
+    # start_trace call below, whose `thread_id` is a FOREIGN KEY into
+    # agent_threads.
+    #
+    # REQUIRED, no default, deliberately. It used to default to "" while the
+    # start_trace call below passed the module constant SAGE_THREAD_ID
+    # ("sage-main") instead of this value — a scope id supplied by a
+    # constant rather than by the caller, i.e. exactly the shape CLAUDE.md
+    # calls "a scope column with a default is a loaded gun". Every real turn
+    # runs on a per-agent thread (thread_agent_ainstall_*), so the literal
+    # "sage-main" row does not exist in agent_threads and every single
+    # start_trace on this path died on agent_traces_thread_id_fkey — caught
+    # by start_trace's own except and returned as None, so the turn
+    # succeeded and its whole trace (the transparency record the product
+    # shows the customer) was silently lost. _handle_sage_chat_unguarded
+    # calls thread_service.ensure_master_thread(thread_id=thread_id) before
+    # it ever reaches this function, so the value passed here is the one id
+    # whose row is guaranteed to exist. A caller with genuinely no thread
+    # passes "" and gets an UNLINKED trace (thread_id is nullable), which is
+    # honest; it never gets an id that does not exist.
+    conversation_thread_id: str,
 ) -> dict[str, Any] | None:
     # Phase 4B: when agent_install_id is set this turn runs as that specialist —
     # its tool whitelist, tool-call executor identity, and mid-turn memory
@@ -4118,7 +4134,15 @@ async def _run_sage_action_loop_v3(
         tenant_id=tenant_id or "default",
         root_agent_id=SAGE_MAIN_AGENT_ID,
         surface="sage",
-        thread_id=SAGE_THREAD_ID,
+        # agent_traces.thread_id is a FK into agent_threads. This is the
+        # thread _handle_sage_chat_unguarded already ensured exists
+        # (thread_service.ensure_master_thread, same variable) — NOT the
+        # module constant SAGE_THREAD_ID, which named a row that does not
+        # exist in any real workspace and made every trace on this path die
+        # on agent_traces_thread_id_fkey inside start_trace's own except.
+        # Empty -> NULL: the column is nullable, so an unlinked trace is the
+        # honest degradation; an id with no row is not.
+        thread_id=str(conversation_thread_id or "").strip() or None,
         run_id=None,
         runtime_target=None,
         provider=provider,

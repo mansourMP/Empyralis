@@ -1176,6 +1176,54 @@ family stay unscoped ON PURPOSE (the explicit `POST .../messages` route has
 no `agent_id` and must share one idempotency namespace with auto-replies) —
 that one is uniform, not a mismatch, so do not "finish the job".
 
+**A module CONSTANT standing in for a caller-supplied scope is the same
+loaded gun as a defaulted parameter, and it cost every Sage-path turn its
+entire trace.** Observed live 2026-08-14, backend log, on a turn that
+returned 200 and rendered its reply normally:
+
+```
+asyncpg ForeignKeyViolationError: agent_traces_thread_id_fkey
+DETAIL:  Key (thread_id)=(sage-main) is not present in table "agent_threads".
+```
+
+`agent_traces.thread_id` is an FK into `agent_threads`. `agent_turn.py`
+calls `thread_service.ensure_master_thread(thread_id=resolved_thread_id)`
+and then traces THAT id — its traces insert fine.
+`sage_agent_runtime_service._run_sage_action_loop_v3` instead passed the
+module constant `SAGE_THREAD_ID = "sage-main"`, while the real,
+already-ensured thread id was sitting in its own `conversation_thread_id`
+parameter one line away. Real workspaces hold per-agent rows
+(`thread_agent_ainstall_*`); no literal `sage-main` row exists, so EVERY
+trace on that path violated the FK, was caught by `start_trace`'s own
+`except` and returned as `None`. The turn succeeded, the reply persisted,
+and the trace — the transparency record the product shows the customer:
+tool calls, plan steps, browser actions — was silently gone.
+
+```
+agent_turn.py           ensure_master_thread(t) ─▶ start_trace(thread_id=t)   ✓
+sage_agent_runtime      ensure_master_thread(t) ─▶ start_trace(thread_id=
+                        (one frame up)                SAGE_THREAD_ID)         ✗ FK
+run_service (durable)   (no ensure at all)     ─▶ start_trace(thread_id=
+                                                    thread_id or SESSION_ID)  ✗ FK
+```
+
+Three rules. **A trace's thread id must be an id whose row the caller
+guaranteed, or NULL** — the column is nullable, so an unlinked trace is the
+honest degradation; a dangling id costs the whole record because the FK
+violation is swallowed. **A session id is not a thread id** — `run_service.
+execute_durable_turn_request`'s `thread_id or session_id` fallback could
+only ever FK-fail, so that path (POST /runs/start, no ensure of its own)
+now ensures the row and passes NULL when it has none. And **a swallowed
+failure must name what it lost**: this survived because `_log_failure` said
+"start_trace failed" at WARNING with no workspace, thread or surface — one
+permanently broken code path was indistinguishable from database noise. It
+now logs at ERROR carrying all of them, and still never raises (a lost
+trace may not kill a working turn). `conversation_thread_id` is now
+REQUIRED on `_run_sage_action_loop_v3`; guarded by
+`server_modules/tests/test_agent_trace_thread_fk.py`, which asserts
+behaviourally AND with an AST check that the constant is not re-substituted
+— re-substituting it type-checks, runs, and is silent.
+
 **A stand-in left in `sys.modules` becomes production's `server` forever.**
 Eight modules late-bind `server` with `if _server is not None: return` and
 cache it; `external_write_safety` additionally copies its whole namespace

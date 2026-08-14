@@ -1792,6 +1792,7 @@ class SageActionLoopKillSwitchTests(unittest.TestCase):
             system_prompt="",
             prior_messages=[],
             agent_install_id=agent_install_id,
+            conversation_thread_id="thread-1",
         ))
 
     def test_agent_stopped_refuses_before_any_work(self):

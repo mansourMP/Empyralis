@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import uuid
 
 from server_modules import control_plane_repository, failure_policy_service
-from server_modules.error_contracts import OBSERVABILITY_FAILURE, SEVERITY_WARNING
+from server_modules.error_contracts import OBSERVABILITY_FAILURE, SEVERITY_ERROR, SEVERITY_WARNING
 
 
 LOGGER = logging.getLogger(__name__)
@@ -162,17 +162,28 @@ def _build_event_envelope(
     }
 
 
-def _log_failure(operation: str, exc: Exception) -> None:
+def _log_failure(
+    operation: str,
+    exc: Exception,
+    *,
+    message: Optional[str] = None,
+    severity: str = SEVERITY_WARNING,
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
+    metadata: Dict[str, Any] = {"operation": str(operation or "").strip() or None}
+    for key, value in (context or {}).items():
+        normalized = str(value or "").strip()
+        metadata[key] = normalized or None
     failure_policy_service.log_degraded_operation(
         logger=LOGGER,
         code=f"agent_trace_{str(operation or 'operation').strip().lower()}_failed",
-        message=f"Agent trace service failed during {operation}.",
+        message=message or f"Agent trace service failed during {operation}.",
         error_class=OBSERVABILITY_FAILURE,
         degraded_component="agent_trace_service",
-        severity=SEVERITY_WARNING,
+        severity=severity,
         retryable=False,
         status_code=500,
-        metadata={"operation": str(operation or "").strip() or None},
+        metadata=metadata,
         exc=exc,
     )
 
@@ -254,7 +265,34 @@ async def start_trace(
             root_agent_id=str(trace.get("root_agent_id") or root_agent_id or "").strip(),
         )
     except Exception as exc:
-        _log_failure("start_trace", exc)
+        # ERROR, not WARNING, and it names WHAT WAS LOST. This is the whole
+        # transparency record for one turn — every tool call, plan step and
+        # browser action the customer is supposed to be able to see — going
+        # missing while the turn itself succeeds and reports nothing. It
+        # stayed invisible for as long as it did precisely because the old
+        # generic warning said only "start_trace failed" — not for which
+        # workspace, thread or surface — so nobody could tell one
+        # permanently-broken code path from transient database noise.
+        #
+        # It still does not RAISE, deliberately: a lost trace must never kill
+        # a working turn.
+        _log_failure(
+            "start_trace",
+            exc,
+            message=(
+                "Agent trace was NOT created; this turn's trace (tools, plan, browser "
+                "activity) will be missing from the customer-visible record."
+            ),
+            severity=SEVERITY_ERROR,
+            context={
+                "workspace_id": workspace_id,
+                "tenant_id": tenant_id,
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "surface": surface,
+                "root_agent_id": root_agent_id,
+            },
+        )
         return None
 
 
