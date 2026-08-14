@@ -218,8 +218,37 @@ PROVIDER_UNREACHABLE = PlatformEvent(
 TOOLS_LIMITED_NO_REPLY = PlatformEvent(
     code="tools_limited_no_reply",
     title="Limited by current tool settings",
-    detail="This agent doesn't have every tool turned on, which may be why nothing came back. An owner can enable more under Tools.",
-    channel_text="This agent doesn't have every tool turned on, which may be why nothing came back. An owner can enable more under Tools.",
+    # 2026-08-14 fix: this substitution now only fires when
+    # sage_agent_runtime_service has positively identified a genuine
+    # tool-capability policy block (see _classify_sage_no_reply_outcome) —
+    # a KNOWN fact at that point, not a guess, so the copy states it rather
+    # than hedging with "may be why".
+    detail="This agent doesn't have every tool turned on, which is why nothing came back. An owner can enable more under Tools.",
+    channel_text="This agent doesn't have every tool turned on, which is why nothing came back. An owner can enable more under Tools.",
+    severity="warning",
+)
+
+# 2026-08-14: sibling to TOOLS_LIMITED_NO_REPLY and GENERIC_ERROR for a turn
+# that ran and produced no reply for a reason the runtime cannot positively
+# name. Before this existed, sage_agent_runtime_service._run_sage_action_
+# loop_v3 treated ANY non-empty `blocked_tools` entry as proof the cause was
+# disabled tools — but blocked_tools is also where claude_agent_sdk_bridge
+# (the production-default engine, provider-general — DeepSeek's Anthropic-
+# compatible endpoint included) records provider/execution failures
+# (auth/billing/rate-limit/server errors, a raw SDK ResultMessage subtype
+# like "error_max_turns", or its own bookkeeping anomalies: a foreign tool
+# call, an orphan tool result) that have nothing to do with an agent's tool
+# settings. Firing TOOLS_LIMITED_NO_REPLY for those told the customer to go
+# fix a setting that was never the cause — a fabricated, unverified
+# diagnosis dressed as guidance. This event is the honest alternative: the
+# turn ran, nothing came back, the cause is not known from here — with a
+# real, actionable next step (retry; the Work tab, which is a real surface
+# reachable from this same chat) instead of a guess.
+SAGE_TURN_NO_REPLY_UNKNOWN = PlatformEvent(
+    code="sage_turn_no_reply_unknown",
+    title="No reply came back",
+    detail="This turn ran and produced no reply. The cause is not known from here — check the Work tab for what happened, or try again.",
+    channel_text="This turn ran and produced no reply. The cause is not known from here — check the Work tab for what happened, or try again.",
     severity="warning",
 )
 

@@ -49,7 +49,7 @@ from server_modules.conversation_memory_facade_service import (
     ConversationMemoryPersistRequest,
     persist_interaction,
 )
-from server_modules.platform_event import GENERIC_ERROR, TOOLS_LIMITED_NO_REPLY
+from server_modules.platform_event import GENERIC_ERROR, TOOLS_LIMITED_NO_REPLY, SAGE_TURN_NO_REPLY_UNKNOWN
 from server_modules.conversation_memory_policy import (
     DIRECT_CHAT_PROFILE,
     MemoryPolicyProfile,
@@ -3302,6 +3302,78 @@ def _normalize_direct_action_approvals(final_payload: dict[str, Any]) -> list[di
     return normalized
 
 
+# blocked_tools is populated by SEVERAL structurally different producers,
+# and only one shape is a genuine tool-capability policy decision. Traced
+# end to end 2026-08-14 (a founder-reported turn on the DeepSeek/Flash
+# platform-credits tier returned no reply and was told "This agent doesn't
+# have every tool turned on"):
+#
+#   claude_agent_sdk_bridge.py (the production-default engine, MAN-310 —
+#   provider-general, DeepSeek's Anthropic-compatible endpoint included):
+#     - AssistantMessage.error (auth/billing/rate-limit/server/unknown) is
+#       ALWAYS folded to the code "provider_generation_failed"
+#       (claude_agent_sdk_bridge._PROVIDER_GENERATION_FAILED_CODE).
+#     - ResultMessage.is_error passes the raw SDK subtype through verbatim
+#       (e.g. "error_max_turns", "error_during_execution") when it names a
+#       real failure, and falls back to "provider_generation_failed" when
+#       the subtype is "success"/"" (an API failure that still reports
+#       subtype="success" per the SDK's own api_error_status docstring).
+#     - "foreign_tool_call" / "orphan_tool_result"
+#       (claude_agent_sdk_bridge._FOREIGN_TOOL_TRACE_CODE /
+#       _ORPHAN_TOOL_RESULT_TRACE_CODE): SDK-bridge bookkeeping anomalies (a
+#       call to an unregistered tool, an unmatched tool result) — not a
+#       policy decision either.
+#   This module's own _collect_sage_operator_loop_v3_events "trace.failed"
+#   branch falls back to "operator_loop_failed" for a code-less trace.failed
+#   event, and its final_error catch-all folds ANY leftover
+#   final_payload["error"] in here too.
+#
+# None of the above is "a tool was disabled by this agent's own capability
+# policy". A genuine tool-capability denial
+# (direct_tool_execution_service.py's broker-guard / specialist-not-bound
+# checks) raises DURING tool execution and lands in `tool_calls` as a failed
+# entry instead — never in `blocked_tools` today. So this allowlist is
+# EMPTY on purpose: nothing currently emits a blocked_tools entry that is
+# positively a policy decision. If a future producer starts recording one,
+# it should get its own recognizable code and be added HERE explicitly —
+# the honest default for anything not in this allowlist is "we don't know
+# why", never "tools are the cause".
+_SAGE_BLOCKED_TOOLS_POLICY_CODES: frozenset[str] = frozenset()
+
+
+def _classify_sage_no_reply_outcome(blocked_tools: list[dict[str, Any]]) -> str:
+    """Classify a no-natural-language-reply turn's `blocked_tools` list.
+
+    Returns "policy_blocked" only when blocked_tools is non-empty AND every
+    readable entry code is in the (currently empty) allowlist above — the
+    honest-by-default direction: one entry this function cannot positively
+    identify as a tool-capability decision is enough to withhold the
+    tools-settings claim for the WHOLE turn. Returns "turn_failure" for any
+    other non-empty blocked_tools (including a provider/execution failure,
+    an SDK bookkeeping anomaly, or a code this function has never seen), and
+    "none" when blocked_tools is empty.
+
+    See TOOLS_LIMITED_NO_REPLY / SAGE_TURN_NO_REPLY_UNKNOWN in
+    platform_event.py for the two outcomes this decides between.
+    """
+    if not blocked_tools:
+        return "none"
+    saw_policy_code = False
+    for entry in blocked_tools:
+        if not isinstance(entry, dict):
+            continue
+        code = _coerce_text(entry.get("name")).strip().lower()
+        if code and code in _SAGE_BLOCKED_TOOLS_POLICY_CODES:
+            saw_policy_code = True
+            continue
+        # Anything not in the explicit policy allowlist — a known failure
+        # code, an unrecognized code, or an entry with no code at all —
+        # means this turn's blocked_tools cannot be trusted as "tools are
+        # the cause". One such entry is enough to classify the whole turn.
+        return "turn_failure"
+    return "policy_blocked" if saw_policy_code else "turn_failure"
+
+
 def _collect_sage_operator_loop_v3_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     final_payload: dict[str, Any] = {}
     tool_calls_by_id: dict[str, dict[str, Any]] = {}
@@ -4134,15 +4206,23 @@ async def _run_sage_action_loop_v3(
     )
     if not reply and not has_any_tool_activity:
         return None
-    # 2026-07-09 first-run integrity fix: a turn that ends with nothing
-    # substantive to say (empty, or the bare catch-all) while at least one
-    # tool got blocked by policy must say so — the Inbox already logs
-    # "Tools blocked by policy"; this surfaces the same fact where the
-    # customer is actually looking. Only fires on the true silence/generic
-    # case (not on a specific, already-honest error from classify_error)
-    # so it never overrides a more precise message with a vaguer one.
-    if collected.get("blocked_tools") and (not reply or reply.strip() == GENERIC_ERROR.channel_text):
-        reply = TOOLS_LIMITED_NO_REPLY.channel_text
+    # 2026-07-09 first-run integrity fix, corrected 2026-08-14: a turn that
+    # ends with nothing substantive to say (empty, or the bare catch-all)
+    # while blocked_tools is non-empty must say SOMETHING honest — but
+    # blocked_tools is not always "a tool got blocked by policy". See
+    # _classify_sage_no_reply_outcome's own comment: on the production-
+    # default engine it is also where provider/execution failures and SDK
+    # bookkeeping anomalies land, and the original fix here treated all of
+    # those as proof the cause was disabled tools. Only fires on the true
+    # silence/generic case (not on a specific, already-honest error from
+    # classify_error) so it never overrides a more precise message with a
+    # vaguer one.
+    if not reply or reply.strip() == GENERIC_ERROR.channel_text:
+        _no_reply_outcome = _classify_sage_no_reply_outcome(collected.get("blocked_tools") or [])
+        if _no_reply_outcome == "policy_blocked":
+            reply = TOOLS_LIMITED_NO_REPLY.channel_text
+        elif _no_reply_outcome == "turn_failure":
+            reply = SAGE_TURN_NO_REPLY_UNKNOWN.channel_text
     return {
         "message": reply,
         "error": _coerce_text(final_payload.get("error")) or None,
