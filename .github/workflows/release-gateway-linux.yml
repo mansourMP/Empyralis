@@ -143,6 +143,40 @@ jobs:
 
       # Re-runs the exact extraction both consumers perform, so a layout
       # regression fails here rather than silently on a customer droplet.
+      #
+      # COMPLETENESS GATE (follow-up to the 2026-08-13 gateway-artifact-
+      # staleness incident documented in the `push:` trigger comment above).
+      # That incident shipped for 15 days because this step only ever
+      # checked dist/index.js — the bundle's entry point loads fine even
+      # when a whole feature directory (dist/openclaw/provisioning/, the
+      # OpenClaw channel-transport installer) is missing entirely, so a
+      # stale "latest" tarball built before that directory existed passed
+      # this gate on every run.
+      #
+      # The required-paths set below is DERIVED from
+      # scripts/install-agent-computer.sh itself (a grep for the literal
+      # `gateway/dist/**/*.js` paths that script opens with `-f` —
+      # install_channel_transport at install-agent-computer.sh:392-430
+      # needs openclaw-install-plan-cli.js, its Node-version read at line
+      # 344 needs openclaw-version.js), never hand-copied into this
+      # workflow. CLAUDE.md's standing rule: the expected set and the
+      # actual set must come from different sources, or a check can only
+      # ever confirm itself. Here "expected" comes from a grep of the
+      # installer's own source and "actual" comes from extracting the
+      # tarball this job just built — two independent reads, so a file the
+      # installer starts requiring tomorrow is covered automatically,
+      # without anyone editing this workflow. A plain hand-written literal
+      # list here would be exactly the "channel list copied into a third
+      # place" shape CLAUDE.md already flags elsewhere as a defect once it
+      # can drift from its source in the same language.
+      #
+      # The canary checks below exist because a DERIVED check can go blind
+      # in its own way: if scripts/install-agent-computer.sh is ever
+      # rewritten in a style this grep doesn't match, the derived list
+      # silently becomes empty (or drops the one file this gate exists
+      # for) and the step would otherwise pass vacuously. Fail loudly on
+      # that distinction — "the grep broke" vs "the archive is missing a
+      # file" — rather than let the first one masquerade as the second.
       - name: Verify archive matches what the installer expects
         run: |
           set -euo pipefail
@@ -154,6 +188,34 @@ jobs:
             || { echo "archive is missing dist/index.js at the installer-expected path" >&2; exit 1; }
           test -f "$VERIFY/empyralis-gateway/package.json"
           test -d "$VERIFY/empyralis-gateway/node_modules"
+
+          mapfile -t REQUIRED_PATHS < <(
+            grep -oE 'gateway/dist/[A-Za-z0-9/_.-]+\.(js|json)' scripts/install-agent-computer.sh \
+              | sed 's#^gateway/##' \
+              | sort -u
+          )
+
+          if [[ "${#REQUIRED_PATHS[@]}" -eq 0 ]]; then
+            echo "derived zero required paths from scripts/install-agent-computer.sh — the extraction pattern in this workflow no longer matches that script; fix the grep in release-gateway-linux.yml before trusting this gate" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "${REQUIRED_PATHS[@]}" | grep -qx 'dist/openclaw/provisioning/openclaw-install-plan-cli.js'; then
+            echo "derived required-paths list no longer includes dist/openclaw/provisioning/openclaw-install-plan-cli.js — the grep pattern in release-gateway-linux.yml drifted from install-agent-computer.sh's own style; fix it before trusting this gate" >&2
+            exit 1
+          fi
+
+          missing=0
+          for rel in "${REQUIRED_PATHS[@]}"; do
+            if [[ ! -f "$VERIFY/empyralis-gateway/$rel" ]]; then
+              echo "MISSING: $rel" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -eq 1 ]]; then
+            echo >&2
+            echo "archive is missing one or more files scripts/install-agent-computer.sh requires by path — install_channel_transport (install-agent-computer.sh:392-430) needs dist/openclaw/provisioning/openclaw-install-plan-cli.js, and its Node-version read (install-agent-computer.sh:344) needs dist/openclaw/provisioning/openclaw-version.js. This is the exact shape of the 2026-08-13 gateway-artifact-staleness incident (dist/index.js present, a whole feature directory absent) — refusing to publish a tarball an Agent Computer cannot fully install channels from." >&2
+            exit 1
+          fi
 
       # Best-effort: GitHub's attestation storage isn't available for
       # user-owned private repos on the current plan ("Feature not available
