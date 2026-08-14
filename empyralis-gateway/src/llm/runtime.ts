@@ -1,6 +1,6 @@
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload } from "../protocol/types";
 import { runCliSubscription, CliRunError, type CliRunResult, type CliSubscriptionRuntime } from "./cli-runner";
-import { sharedCodexAppServer, codexAppServerEnabled } from "./codex-app-server";
+import { sharedCodexAppServer, codexAppServerEnabled, type CodexModelListResult } from "./codex-app-server";
 import { sharedClaudeCliPrewarmPool, claudeCliPrewarmEnabled } from "./claude-cli-prewarm";
 import { invalidatePassiveInventoryCache } from "../health/service-inventory";
 
@@ -19,8 +19,26 @@ import { invalidatePassiveInventoryCache } from "../health/service-inventory";
 // the environment it's spawned in, never handed to the Gateway.
 
 export const LLM_GENERATE_CAPABILITY = "llm.generate";
+// BYO-subscription model-matrix fix: the ONLY honest way to know which
+// models a cli_subscription runtime can actually run is to ask that
+// runtime's own CLI, at the moment of asking — codex's `model/list` RPC
+// scopes the answer by whatever auth mode/plan is actually logged in on
+// this box (see codex-app-server.ts's listModels doc comment). A picker or
+// save-time check built on a hand-typed list rots the moment the provider
+// renames/retires a model, which is exactly the live bug this exists to
+// stop recurring. Metadata only — no prompt, no inference, nothing billed.
+export const LLM_MODELS_LIST_CAPABILITY = "llm.models.list";
 
-const SUPPORTED_CAPABILITIES = [LLM_GENERATE_CAPABILITY];
+const SUPPORTED_CAPABILITIES = [LLM_GENERATE_CAPABILITY, LLM_MODELS_LIST_CAPABILITY];
+
+/** Runtimes this Gateway can enumerate a live model catalog for. Codex is
+ *  the only one with a proven, non-inference introspection RPC (verified
+ *  live against codex 0.144.1's `model/list` — see codex-app-server.ts).
+ *  claude_code/grok_build/cursor_cli have no equivalent verified here yet;
+ *  handleCapabilityInvoke returns an honest "not available" result for
+ *  them rather than guessing, per this fix's own rule against fabricating
+ *  a list. */
+const MODEL_LIST_CAPABLE_RUNTIMES = new Set(["codex"]);
 
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const DEFAULT_MODEL = "llama3.2";
@@ -79,6 +97,9 @@ export interface GatewayLLMRuntimeConfig {
    *  heartbeat re-probes instead of serving up-to-60s-old install/auth data.
    *  See generateViaCli's catch block for exactly which failures qualify. */
   invalidateReadinessCache?: () => void;
+  /** Injectable for tests. Defaults to the shared codex app-server daemon's
+   *  own listModels(). */
+  codexModelsListImpl?: () => Promise<CodexModelListResult>;
 }
 
 function requireObject(value: unknown, message: string): Record<string, unknown> {
@@ -203,6 +224,7 @@ export class GatewayLLMRuntime {
   // capability router/runtimes have a circular construction order).
   // Undefined until wired, and safely a no-op if it never is.
   private publishChunk?: (payload: { request_id: string; delta: string }) => Promise<void>;
+  private readonly codexModelsListImpl: () => Promise<CodexModelListResult>;
 
   constructor(config: GatewayLLMRuntimeConfig = {}) {
     this.ollamaBaseUrl = (
@@ -214,6 +236,7 @@ export class GatewayLLMRuntime {
     this.defaultTimeoutMs = config.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.cliRunner = config.cliRunner ?? runCliSubscription;
     this.invalidateReadinessCache = config.invalidateReadinessCache ?? invalidatePassiveInventoryCache;
+    this.codexModelsListImpl = config.codexModelsListImpl ?? (() => sharedCodexAppServer().listModels());
   }
 
   /** Wires the ability to stream partial-text `tool.invoke.chunk` events for
@@ -238,6 +261,10 @@ export class GatewayLLMRuntime {
   ): Promise<Record<string, unknown>> {
     const payload = frame.payload;
     const capabilityId = token(payload.capability_id);
+    if (capabilityId === LLM_MODELS_LIST_CAPABILITY) {
+      const args = requireObject(payload.arguments ?? {}, "arguments must be an object.");
+      return this.listModelsForRuntime(token(args.runtime) || "");
+    }
     if (capabilityId !== LLM_GENERATE_CAPABILITY) {
       throw new Error(`Unsupported llm_runtime capability: ${capabilityId || "unknown"}`);
     }
@@ -283,6 +310,36 @@ export class GatewayLLMRuntime {
     throw new Error(
       `llm.generate runtime "${runtime}" is not supported on this Gateway (expected "ollama", "claude_code", "codex", "grok_build", or "cursor_cli").`,
     );
+  }
+
+  /** llm.models.list — see LLM_MODELS_LIST_CAPABILITY's own comment. Never
+   *  throws for "this runtime has no live catalog" (that's an honest,
+   *  structured `supported: false`, not a failure) — only a genuine CLI
+   *  failure (not installed/not authenticated/crash/timeout) throws, the
+   *  same CliRunError shape llm.generate already produces, so the control
+   *  plane's existing cli_subscription error handling covers this for free. */
+  private async listModelsForRuntime(runtime: string): Promise<Record<string, unknown>> {
+    if (!MODEL_LIST_CAPABLE_RUNTIMES.has(runtime)) {
+      return {
+        supported: false,
+        reason: runtime
+          ? `This Gateway has no live model catalog for runtime "${runtime}" — no verified, non-inference way to ask it exists yet.`
+          : "runtime is required.",
+        models: [],
+      };
+    }
+    const result = await this.codexModelsListImpl();
+    return {
+      supported: true,
+      auth_method: result.authMethod,
+      models: result.models.map((m) => ({
+        id: m.id,
+        display_name: m.displayName,
+        description: m.description,
+        hidden: m.hidden,
+        is_default: m.isDefault,
+      })),
+    };
   }
 
   private async generateViaOllama(params: {
