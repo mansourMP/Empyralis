@@ -476,7 +476,8 @@ export function FleetAgentDetail({
     return () => { cancelled = true; };
   }, [workspaceId, agentId, costPeriod]);
 
-  const connectedChannels = channels.filter((c) => isChannelConnected(c, slackChannelBinding, telegramBotConnected)).length;
+  const connectedChannelRows = channels.filter((c) => isChannelConnected(c, slackChannelBinding, telegramBotConnected));
+  const connectedChannels = connectedChannelRows.length;
   const connectedConnectors = connectors.filter((c: any) => c?.connected).length;
   // Lives in the permanent properties column now, so it's computed once
   // here rather than per-tab — every tab shows the same placement/role,
@@ -487,6 +488,54 @@ export function FleetAgentDetail({
   // Fleet agents never update (see docs/PLATFORM-MAP.md Part 22, Hardware).
   const { gateways } = useWorkspaceGateways(workspaceId);
   const placement = resolveHardwarePlacement(agent?.hardware_access, agent?.preferred_gateway_id, gateways, agent?.model_config);
+  // Separate honest facts for the Sessions panel's top region (2026-08-14,
+  // founder: "this agent is online, this MacBook is online, the gateway is
+  // online, the OpenClaw side is online for channels, and which channels
+  // this agent is in" — five distinct claims, never collapsed into one
+  // light). "This agent" is the existing Status row below (deriveAgentStatus
+  // — the BRAIN's honest turn-readiness). Everything from here down is about
+  // the MACHINE this agent's tools run on, computed from the SAME resolution
+  // resolveHardwarePlacement already does (brain-bound gateway_binding wins
+  // over tool hardware_access — see that function's own doc comment) so this
+  // can never name a different box than Placement does.
+  const boundGatewayId = (() => {
+    if (hardwarePlacementIsBrainBound(agent?.model_config)) {
+      return String(agent?.model_config?.gateway_binding || "").trim();
+    }
+    return String(agent?.preferred_gateway_id || "").trim();
+  })();
+  const boundGateway = boundGatewayId ? gateways.find((g) => gatewayId(g) === boundGatewayId) || null : null;
+  // "This computer" / "Gateway" split — connectionPresentation already
+  // distinguishes raw reachability from execution readiness in its LABEL
+  // ("Online — tools unavailable" for execution_blocked, per the hardware
+  // badge honesty fix this file's own CLAUDE.md documents), but a single
+  // string is still one light. boundGateway is null both when nothing is
+  // paired (cloud agent — nothing to report, row omitted entirely below)
+  // and when a preferred/bound id no longer resolves to a real registration
+  // (disconnected/deleted box) — connectionPresentation(null) is never
+  // called; the row is simply absent rather than guessing a tone for a box
+  // that isn't there.
+  const computerPresentation = boundGateway ? connectionPresentation(boundGateway) : null;
+  const rawGatewayConnectionStatus = boundGateway
+    ? `${boundGateway.connection_status || boundGateway.status || ""}`.toLowerCase()
+    : "";
+  // OpenClaw is a per-CHANNEL surface (useGatewayPersonalChannelSurfaces),
+  // not a single flag on the gateway — only fetched when this agent both has
+  // a bound box AND has at least one gateway-requiring channel connected, so
+  // an agent with no local-bridge/OpenClaw channel never pays for a poll
+  // whose answer it has no row to show. `items.length === 0` while `loading`
+  // is genuinely unknown (nothing observed yet); once loaded, "connected" is
+  // true only when at least one surface reports it — anything else (no
+  // surfaces, none connected) reads as "not confirmed" rather than a
+  // fabricated red, matching this hook's own "never invent a connected
+  // state" doctrine (see its module comment).
+  const gatewayRequiringChannelConnected = channels.some(
+    (c) => c.requiresGateway && isChannelConnected(c, slackChannelBinding, telegramBotConnected),
+  );
+  const openClawSurfaces = useGatewayPersonalChannelSurfaces(
+    boundGateway && gatewayRequiringChannelConnected ? boundGatewayId : null,
+  );
+  const openClawConnected = openClawSurfaces.items.some((item) => item.health?.connected === true);
   // deriveAgentStatus (needs `gateways`, hence computed here rather than up
   // top): a cli_subscription agent whose bound CLI isn't signed in reads
   // "Needs sign-in", never a false "Ready" — the header must never claim an
@@ -628,6 +677,59 @@ export function FleetAgentDetail({
     <PanelSection title="Properties">
       <PanelRow label="Status" value={<StatusChip tone={status.tone} label={status.label} />} />
       <PanelRow label="Placement" value={placement.label} tone={HARDWARE_PLACEMENT_PANEL_TONE[placement.tone]} />
+      {/* Separate honest facts (2026-08-14) — "this agent", "this MacBook",
+          "the gateway" and "OpenClaw" are four different claims and must
+          never collapse into Placement's one light. Rendered only when
+          there IS a paired computer (boundGateway); a cloud-only agent has
+          nothing here to report, and a row with nothing knowable to say is
+          worse than no row (CLAUDE.md's "no dead controls" — the same law,
+          applied to a status line instead of a button). */}
+      {computerPresentation && (
+        <PanelRow
+          label="This computer"
+          value={computerPresentation.label}
+          tone={computerPresentation.tone === "online" ? "online" : "offline"}
+          hint={boundGateway ? gatewayLabel(boundGateway) : undefined}
+        />
+      )}
+      {/* "Gateway" is execution readiness, not reachability — the same
+          execution_blocked distinction the Hardware badge already makes
+          (gateway-box-picker.tsx's connectionPresentation: "the WSS session
+          and heartbeat are genuinely fine... but shell.execute would fail
+          on this box right now"). Only rendered when it says something
+          "This computer" doesn't already: a box that isn't even reachable
+          has no separate execution claim to make. */}
+      {boundGateway && rawGatewayConnectionStatus === "online" && (
+        <PanelRow label="Gateway" value="Online" tone="online" />
+      )}
+      {boundGateway && rawGatewayConnectionStatus === "execution_blocked" && (
+        <PanelRow label="Gateway" value="Tools unavailable" tone="offline" />
+      )}
+      {/* OpenClaw is a per-channel surface, not one flag — see
+          useGatewayPersonalChannelSurfaces. Only asked about at all when
+          this agent has a gateway-requiring channel actually connected;
+          "Checking…"/"Unknown" are real, distinct states from "Offline" —
+          never guess green, and never report red for "haven't heard yet". */}
+      {boundGateway && gatewayRequiringChannelConnected && (
+        <PanelRow
+          label="OpenClaw"
+          value={
+            openClawSurfaces.loading
+              ? "Checking…"
+              : openClawSurfaces.items.length === 0
+                ? "Unknown"
+                : openClawConnected
+                  ? "Online"
+                  : "Offline"
+          }
+          tone={
+            !openClawSurfaces.loading && openClawSurfaces.items.length > 0
+              ? (openClawConnected ? "online" : "offline")
+              : "muted"
+          }
+          hint="Whether this computer's channel transport (Signal, iMessage, WeChat, and other connected channels) is reachable right now."
+        />
+      )}
       {/* Model row removed (founder: "model picking some shit like this must
           not be on the right side, we already moved it to the bottom") —
           model selection now lives in the composer at the bottom of Chat,
@@ -663,7 +765,13 @@ export function FleetAgentDetail({
           that's visible on every tab. Configure > Channels/Connectors is
           still the place to go connect one; this panel just stops
           announcing "0" for something not yet set up. */}
-      {connectedChannels > 0 && <PanelRow label="Channels" value={connectedChannels} />}
+      {/* Names, not a bare count (2026-08-14) — "which channels this agent
+          is in" is the founder's own phrasing, and a count answers a
+          different question. Configure > Channels is still where you go to
+          change any of this; this row is a fact, not a control. */}
+      {connectedChannels > 0 && (
+        <PanelRow label="Channels" value={connectedChannelRows.map((c) => c.label).join(", ")} />
+      )}
       {connectedConnectors > 0 && <PanelRow label="Connectors" value={connectedConnectors} />}
       {/* Cost lives at the bottom, and stays off the panel entirely for an
           agent that hasn't spent anything this period — a freshly created
@@ -3964,8 +4072,12 @@ import {
 } from "./fleet-provider-constants";
 import {
   GatewayBoxPicker,
+  connectionPresentation,
   deriveAgentStatus,
+  gatewayId,
+  gatewayLabel,
   gatewayRuntimeReady,
+  hardwarePlacementIsBrainBound,
   resolveHardwarePlacement,
   useWorkspaceGateways,
   type FleetGateway,
