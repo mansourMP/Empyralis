@@ -1224,6 +1224,67 @@ REQUIRED on `_run_sage_action_loop_v3`; guarded by
 behaviourally AND with an AST check that the constant is not re-substituted
 — re-substituting it type-checks, runs, and is silent.
 
+**Recording a trace and SHOWING it are two different features, and the
+second one was never wired. A web turn opened TWO traces and the assistant
+turn carried neither.** Found 2026-08-15, immediately downstream of the fix
+above: with traces finally recording, the Work tab still said *"Showing
+message history — detailed step tracking isn't available for this
+conversation"* on every conversation. Its own header comment states the
+contract — the assistant turn that closes out a trace carries that trace's
+id in `metadata.trace_id`, and the tab resolves `GET /api/agent-traces/{id}`
+from it — and `agent_turns.metadata->>'trace_id'` was NULL on every row in
+a live database.
+
+```
+POST /api/turn  (sync + stream, i.e. every web chat)
+  turn_ingress_service.start_turn ─▶ STREAM builder, never agent_turn()'s own
+                                     persistence branch
+  agent_turn.py  start_trace ─▶ surface=web  ─▶ _bind_trace_id_to_turn_result
+                                                  binds onto {"kind":"direct_
+                                                  chat_stream","producer":…}
+                                                  ← a dict nothing persists
+                 …and hands trace_context to execute_direct_chat_turn_request,
+                   which ACCEPTS it and never uses it  ← 2 events, provider NULL
+  handle_sage_chat ─▶ _run_sage_action_loop_v3
+                 start_trace ─▶ surface=sage ─▶ tool.started / search.query /
+                                                tool.result / plan.item.updated
+                                                ← THE trace, id published nowhere
+```
+
+So the binder, the trace that holds the steps, and the two writers of the
+assistant row were three different places. Fixed by publishing the id from
+the code that OWNS the trace: `_run_sage_action_loop_v3` returns
+`agent_trace_id` and the action-loop writer in `_handle_sage_chat_unguarded`
+stamps it. Deliberately not called `trace_id` — in that module `trace_id` is
+a per-call correlation uuid that has never been a row in `agent_traces`, and
+writing THAT would point the tab at a 404, which looks exactly like a fix.
+
+Three rules. **A trace is only real once something can NAME it** — "the
+events are in the database" is not the feature; the id has to reach the row
+the reader starts from. **Two writers of one row via `metadata =
+agent_turns.metadata || EXCLUDED.metadata` is load-bearing here** (the sage
+runtime contributes model/billing, `runtime_runs_api._persist_final_direct_
+chat_assistant_turn` contributes `result_metadata`) — check which writer
+holds the fact before adding a third path to carry it. And **the SDK
+engine, the production default, never finished a trace at all**: only the
+legacy engine's callee (`direct_chat_generation_service._finish_trace`) did,
+so every row had `finished_at = NULL` — invisible until the tab could
+resolve one, and then a *new* lie, since WorkTab reads `!finished_at` as
+"still running" (a permanent "Working" pill, plus an SSE poll that only
+closes on `trace.completed`). The loop now closes its own trace on the SDK
+branch only. Guarded by
+`server_modules/tests/test_assistant_turn_carries_trace_id.py`; verified by
+reading the database after real DeepSeek turns, not by reading the code.
+
+Still open, same feature, NOT fixed here: the `surface=web` trace is a
+duplicate shell on every web turn — `agent_turn.py` opens it before routing
+resolves anything (hence its NULL `provider`/`model`, which is a symptom of
+the orphan, not a separate bug) and the callee ignores the context. The
+honest repair is ONE trace per turn — thread that `trace_context` down
+through `execute_sage_turn`/`handle_sage_chat` so the runtime reuses it
+instead of opening its own — which is a four-signature change and needs the
+provider/model to be filled in at routing time rather than at open time.
+
 **A stand-in left in `sys.modules` becomes production's `server` forever.**
 Eight modules late-bind `server` with `if _server is not None: return` and
 cache it; `external_write_safety` additionally copies its whole namespace

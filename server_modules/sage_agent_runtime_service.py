@@ -6,6 +6,7 @@ import os
 import asyncio
 import json
 import re
+import time as _time_module
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -4258,9 +4259,43 @@ async def _run_sage_action_loop_v3(
             )
         return list(generation_event_sink.wrap_generation_with_sink(_gen))
 
+    _trace_started_monotonic = _time_module.monotonic()
     stream_events = await asyncio.to_thread(_collect_stream_events)
     collected = _collect_sage_operator_loop_v3_events(stream_events)
     final_payload = collected["final_payload"]
+
+    async def _finish_sdk_engine_trace(outcome: str) -> None:
+        """Close the trace this loop opened — SDK-engine turns ONLY.
+
+        The legacy branch's own callee already finishes the SAME
+        trace_context (direct_chat_generation_service's `_finish_trace` call
+        sites, which resolve a more precise outcome than this can), so
+        finishing it here too would overwrite their verdict with a coarser
+        one. The SDK branch — the production default — has no finisher at
+        all, which is why every trace in a live database has
+        `finished_at = NULL`.
+
+        That is not cosmetic. WorkTab.tsx reads `!trace.finished_at` as
+        "still running": it shows a "Working" pill on a turn that ended
+        minutes ago and holds an SSE poll open against the database
+        indefinitely. `trace.completed` is also what makes the stream
+        generator return (`_terminal_trace_event`), so an unfinished trace
+        is a connection that never closes.
+        """
+        if trace_context is None or _selected_engine != claude_agent_sdk_bridge.ENGINE_ID:
+            return
+        duration_ms = int(max(0.0, _time_module.monotonic() - _trace_started_monotonic) * 1000)
+        try:
+            await agent_trace_service.emit_trace_completed(trace_context, duration_ms, None)
+        except Exception:
+            pass
+        try:
+            await agent_trace_service.finish_trace(
+                trace_context, outcome=outcome, final_message_id=None
+            )
+        except Exception:
+            pass
+
     if _selected_engine == claude_agent_sdk_bridge.ENGINE_ID:
         # Write back whatever session id this turn ended on (resumed or
         # freshly minted — claude_agent_sdk_bridge always includes one; see
@@ -4301,6 +4336,10 @@ async def _run_sage_action_loop_v3(
         collected.get("tool_calls") or collected.get("blocked_tools") or collected.get("approvals_required")
     )
     if not reply and not has_any_tool_activity:
+        # Nothing to say and nothing done — the caller regenerates on a
+        # different path that never sees this trace, so close it here rather
+        # than leaving a trace that reads as "still running" forever.
+        await _finish_sdk_engine_trace("partial")
         return None
     # 2026-07-09 first-run integrity fix, corrected 2026-08-14 (twice: first
     # to stop guessing "disabled tools" for a provider/execution failure,
@@ -4313,6 +4352,9 @@ async def _run_sage_action_loop_v3(
     # more precise message with a vaguer one.
     if (not reply or reply.strip() == GENERIC_ERROR.channel_text) and collected.get("blocked_tools"):
         reply = SAGE_TURN_NO_REPLY_UNKNOWN.channel_text
+    await _finish_sdk_engine_trace(
+        "partial" if _coerce_text(final_payload.get("error")) else "success"
+    )
     return {
         "message": reply,
         "error": _coerce_text(final_payload.get("error")) or None,
@@ -4328,6 +4370,17 @@ async def _run_sage_action_loop_v3(
         "trace_events": collected["trace_events"],
         "tool_progress_messages": collected.get("tool_progress_messages", []),
         "media": list(session_ctx.get("pending_outbound_media") or []),
+        # The `agent_traces.id` of the trace THIS loop opened above and emitted
+        # every tool/plan/browser event into — i.e. the row the Work tab renders.
+        # Deliberately NOT named `trace_id`: in this module `trace_id` is a
+        # per-call correlation uuid (see handle_sage_chat's own
+        # `trace_id = str(uuid.uuid4())`) that is not, and has never been, a row
+        # in agent_traces. Two different ids, so two different names — writing
+        # the correlation uuid into agent_turns.metadata.trace_id would point the
+        # Work tab at a trace that does not exist, which is worse than the empty
+        # value it had. Empty when start_trace failed (it never raises), which is
+        # the honest "this turn produced no trace" value.
+        "agent_trace_id": str(getattr(trace_context, "trace_id", "") or "").strip(),
     }
 
 
@@ -6358,6 +6411,9 @@ async def _handle_sage_chat_unguarded(
     if action_result is not None:
         if "sage_action_loop" not in used_context:
             used_context.append("sage_action_loop")
+        # The real agent_traces row this turn produced — see _run_sage_action_
+        # loop_v3's own "agent_trace_id" comment for why it is not `trace_id`.
+        _agent_trace_id = str(action_result.get("agent_trace_id") or "").strip()
         reply, action_reply_guard_metadata = _guard_sage_visible_reply(action_result.get("message"))
         # Synthesize a user-facing message when the action loop ran tools/blocks/approvals
         # but produced no natural-language reply (the model may emit only structured output).
@@ -6738,6 +6794,17 @@ async def _handle_sage_chat_unguarded(
                         "request_id": (request_id or None),
                         "model": requested_model or None,
                         **_sdk_model_billing_context,
+                        # The transparency contract WorkTab.tsx documents in
+                        # its own header: the assistant turn that closes out a
+                        # trace carries that trace's id, and the tab resolves
+                        # GET /api/agent-traces/{id} from it. Stamped HERE
+                        # because this is the writer that actually holds the
+                        # trace — the loop above created it and every tool/
+                        # plan/browser event went into it. Omitted (never
+                        # written empty) when this turn produced no trace, so
+                        # "no trace" stays distinguishable from "a trace id
+                        # that resolves to nothing".
+                        **({"trace_id": _agent_trace_id} if _agent_trace_id else {}),
                     },
                 )
         except Exception:
