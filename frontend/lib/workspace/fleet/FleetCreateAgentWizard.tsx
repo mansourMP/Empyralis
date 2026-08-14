@@ -22,6 +22,7 @@ import {
   normalizeCliRuntime,
   type CliSubscriptionRuntime,
 } from "./fleet-provider-constants";
+import { useCodexModelCatalog, visibleCodexModels } from "./fleet-model-config";
 import { useFleetAgentChannels, useFleetProjects, type FleetAgent } from "./fleet-data";
 import { GatewayBoxPicker, RUNTIME_LABELS } from "./gateway-box-picker";
 import { ChannelsTab } from "./FleetAgentDetail";
@@ -251,6 +252,24 @@ export function FleetCreateAgentWizard({
     setSelectedModel(FREEFORM_MODEL_PROVIDERS.has(activeModelProvider) ? "" : defaultModelForProvider(activeModelProvider));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeModelProvider]);
+  // URGENT fix (2026-08-14): same live-catalog fix as FleetAgentDetail.tsx's
+  // Model tab — ask the picked computer's own Codex CLI what it can
+  // actually run, rather than trusting the hand-typed MODELS_BY_PROVIDER
+  // mirror. See fleet-model-config.ts's useCodexModelCatalog doc comment.
+  const wizardCliRuntime = normalizeCliRuntime(runtimeForProvider(subscriptionProvider));
+  const codexModelCatalog = useCodexModelCatalog(workspaceId, gatewayBinding, wizardCliRuntime);
+  useEffect(() => {
+    if (providerMode !== "subscription" || subscriptionProvider !== "openai-codex") return;
+    if (!codexModelCatalog.loaded || !codexModelCatalog.supported) return;
+    const live = visibleCodexModels(codexModelCatalog);
+    if (!live || live.length === 0) return;
+    const stillMatchesStaticSeed = selectedModel === defaultModelForProvider(subscriptionProvider);
+    const alreadyLiveValid = live.some((m) => m.id === selectedModel);
+    if (stillMatchesStaticSeed && !alreadyLiveValid) {
+      setSelectedModel(live.find((m) => m.isDefault)?.id || live[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerMode, subscriptionProvider, codexModelCatalog]);
 
   // How many channels are already live — decides whether step 3's forward
   // button reads "Next" (something real happened) or "Skip for now".
@@ -946,19 +965,39 @@ export function FleetCreateAgentWizard({
                       {providerLabel(subscriptionProvider)} has no published model-id catalog — enter one only if you know it accepts it.
                     </p>
                   </>
-                ) : (
-                  <>
-                    <label className="fleet-wizard-label">Model</label>
-                    <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => setSelectedModel(e.currentTarget.value)}>
-                      {modelsForProvider(subscriptionProvider).map((m) => (
-                        <option key={m} value={m}>{isRecommendedModel(subscriptionProvider, m) ? `${m} (Recommended)` : m}</option>
-                      ))}
-                    </select>
-                    {isLargeModel(subscriptionProvider, selectedModel) && (
-                      <p className="fleet-channel-expand-error" style={{ margin: "4px 0 0" }}>{LARGE_MODEL_WARNING}</p>
-                    )}
-                  </>
-                )
+                ) : (() => {
+                  // URGENT fix (2026-08-14): show the picked computer's real,
+                  // live Codex model list when available (see
+                  // useCodexModelCatalog's doc comment) instead of the static
+                  // MODELS_BY_PROVIDER mirror — that mirror already contains
+                  // ids OpenAI has retired.
+                  const liveModels = subscriptionProvider === "openai-codex" ? visibleCodexModels(codexModelCatalog) : null;
+                  const wizardOptions = liveModels
+                    ? liveModels.map((m) => ({ id: m.id, label: m.isDefault ? `${m.displayName} (Recommended)` : m.displayName }))
+                    : modelsForProvider(subscriptionProvider).map((m) => ({
+                        id: m,
+                        label: isRecommendedModel(subscriptionProvider, m) ? `${m} (Recommended)` : m,
+                      }));
+                  const showStaleNote = subscriptionProvider === "openai-codex" && !liveModels;
+                  return (
+                    <>
+                      <label className="fleet-wizard-label">Model</label>
+                      <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => setSelectedModel(e.currentTarget.value)}>
+                        {wizardOptions.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                      </select>
+                      {showStaleNote && (
+                        <p className="fleet-wizard-hint">
+                          {gatewayBinding
+                            ? "Couldn't check this computer's actual Codex models right now — this list may include models that have since been renamed or retired."
+                            : "Pick a computer above to see this account's real, currently-usable Codex models."}
+                        </p>
+                      )}
+                      {isLargeModel(subscriptionProvider, selectedModel) && (
+                        <p className="fleet-channel-expand-error" style={{ margin: "4px 0 0" }}>{LARGE_MODEL_WARNING}</p>
+                      )}
+                    </>
+                  );
+                })()
               )}
               {providerMode === "local" && (
                 <>

@@ -39,6 +39,31 @@ export interface CodexAppServerParams {
   timeoutMs: number;
 }
 
+/** One entry from codex app-server's own `model/list` RPC — the account's
+ *  REAL, currently-usable model catalog (already scoped by whatever auth
+ *  mode/plan this box's Codex is logged in under; the server computes this
+ *  itself, we just relay it). Field names match the protocol's own `Model`
+ *  type (see codex app-server generate-ts's v2/Model.ts) minus the parts we
+ *  don't use (reasoning-effort options, service tiers, upgrade metadata) —
+ *  never hand-typed, always this shape or nothing. */
+export interface CodexModelListEntry {
+  id: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+}
+
+export interface CodexModelListResult {
+  /** "apikey" | "chatgpt" | "chatgptAuthTokens" | "headers" | "agentIdentity"
+   *  | "personalAccessToken" | "bedrockApiKey" | null (not authenticated /
+   *  unknown) — codex's own AuthMode, verbatim, never our own guess. */
+  authMethod: string | null;
+  models: CodexModelListEntry[];
+}
+
+const MODEL_LIST_TIMEOUT_MS = 15_000;
+
 /** Called with each streamed text delta as the model generates (Phase 2). */
 export type CodexDeltaSink = (delta: string) => void;
 
@@ -359,6 +384,42 @@ export class CodexAppServerDaemon {
         this.scheduleIdleReap();
       }
     }
+  }
+
+  /** The account's REAL model catalog + auth mode, straight from codex's own
+   *  `getAuthStatus` + `model/list` RPCs — never a hand-typed list. This is
+   *  the fix for the live bug this module's own daemon caused: an agent
+   *  configured with a model id that codex has since retired (their catalog
+   *  moves — "gpt-5.4" existed when this product's own picker was built and
+   *  is gone from a live `model/list` response today, replaced by
+   *  gpt-5.6-terra/luna) got a raw provider JSON error instead of a working
+   *  turn or an honest refusal. Querying this list is metadata, not
+   *  inference — no prompt is sent, nothing is billed, and it's safe to call
+   *  as often as the caller needs (still routed through the shared warm
+   *  daemon so it never double-spawns against a live turn).
+   *
+   *  `includeHidden: true` because the caller (fleet_configure_agent's
+   *  save-time validation) needs to know about a model that's real but
+   *  deliberately absent from the default picker, not just the ones meant
+   *  for a dropdown — `hidden` on each entry is exactly that distinction,
+   *  so nothing here has to reinvent it. */
+  async listModels(): Promise<CodexModelListResult> {
+    await this.ensureReady();
+    const authRes = await this.request("getAuthStatus", { includeToken: false, refreshToken: false }, MODEL_LIST_TIMEOUT_MS);
+    const authMethod = typeof authRes.authMethod === "string" ? authRes.authMethod : null;
+    const modelsRes = await this.request("model/list", { includeHidden: true }, MODEL_LIST_TIMEOUT_MS);
+    const data = Array.isArray(modelsRes.data) ? modelsRes.data : [];
+    const models: CodexModelListEntry[] = data
+      .filter((m): m is Record<string, unknown> => !!m && typeof m === "object")
+      .map((m) => ({
+        id: String(m.id || m.model || ""),
+        displayName: String(m.displayName || m.id || m.model || ""),
+        description: String(m.description || ""),
+        hidden: Boolean(m.hidden),
+        isDefault: Boolean(m.isDefault),
+      }))
+      .filter((m) => m.id);
+    return { authMethod, models };
   }
 }
 

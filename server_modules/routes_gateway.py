@@ -54,6 +54,7 @@ from server_modules.runtime_common import require_api_key
 from server_modules import (
     agent_computer_profile_service,
     cli_setup_service,
+    codex_model_catalog_service,
     dedicated_workstation_setup_service,
     execution_mode_policy,
     gateway_browser_service,
@@ -4161,6 +4162,35 @@ async def run_gateway_registration_doctor(
             actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
         )
     except gateway_doctor_service.GatewayDoctorError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/gateway/registrations/{gateway_id}/llm/models")
+async def get_gateway_llm_models(
+    gateway_id: str,
+    runtime: str = Query(default="codex"),
+    workspace_id: Optional[str] = Query(default=None),
+    current_user=Depends(require_api_key),
+):
+    """Live model catalog for one cli_subscription runtime on one paired
+    Gateway (URGENT fix, 2026-08-14 — see codex_model_catalog_service.py's
+    own module docstring for why a hand-typed model list is the bug here,
+    not the fix). "viewer" is enough — this is a read-only introspection
+    call, same trust level as GET .../doctor."""
+    _registration, resolved_workspace_id = _accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        workspace_id=workspace_id,
+        minimum_role="viewer",
+    )
+    try:
+        return await codex_model_catalog_service.fetch_codex_model_catalog(
+            gateway_id=gateway_id,
+            workspace_id=resolved_workspace_id,
+            runtime=runtime,
+            actor_id=str((current_user or {}).get("user_id") or "").strip() or None,
+        )
+    except codex_model_catalog_service.CodexModelCatalogError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 

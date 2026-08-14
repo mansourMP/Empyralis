@@ -4090,6 +4090,8 @@ import {
   PLATFORM_CREDITS_TIER_OPTIONS,
   PLATFORM_CREDITS_MODEL_BY_TIER,
   platformCreditsTierForModel,
+  useCodexModelCatalog,
+  visibleCodexModels,
 } from "./fleet-model-config";
 
 /** Label for a <select> model option — appends "(Recommended)" to the
@@ -4305,6 +4307,14 @@ function ModelTab({
     !gatewayBinding.trim() && agentProject?.default_gateway_id
       ? agentProject.default_gateway_label || agentProject.default_gateway_id
       : null;
+  // URGENT fix (2026-08-14): ask the box that will actually run this
+  // agent's turns what its Codex CLI can really run, rather than trusting
+  // the hand-typed MODELS_BY_PROVIDER mirror — see fleet-model-config.ts's
+  // own doc comment on useCodexModelCatalog for why. Effective gateway id
+  // matches inheritedGatewayLabel's own fallback above (explicit binding,
+  // else the project default) so this never queries the wrong box.
+  const effectiveGatewayId = gatewayBinding.trim() || agentProject?.default_gateway_id || "";
+  const codexModelCatalog = useCodexModelCatalog(workspaceId, effectiveGatewayId, cliRuntime);
   const [selectedModel, setSelectedModel] = useState<string>(() =>
     seedSelectedModel(resolveDisplayMode(config), config.provider || "", config.model || ""),
   );
@@ -4326,6 +4336,24 @@ function ModelTab({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
+  // URGENT fix (2026-08-14): once the live Codex catalog loads, correct an
+  // UNTOUCHED default that has since rotted (the exact live bug — a stale
+  // static default sat in the <select> as a real value that no longer
+  // matches any option). Only fires when the current value is still
+  // EXACTLY the static seed and genuinely absent from the live list —
+  // never overwrites a value the owner (or the agent's own saved config)
+  // actually chose, live-valid or not; save-time validation is what catches
+  // that case honestly instead of silently swapping it out from under them.
+  useEffect(() => {
+    if (provider !== "openai-codex" || !codexModelCatalog.loaded || !codexModelCatalog.supported) return;
+    const live = visibleCodexModels(codexModelCatalog);
+    if (!live || live.length === 0) return;
+    const stillMatchesStaticSeed = selectedModel === defaultModelForProvider(provider);
+    const alreadyLiveValid = live.some((m) => m.id === selectedModel);
+    if (stillMatchesStaticSeed && !alreadyLiveValid) {
+      setSelectedModel(live.find((m) => m.isDefault)?.id || live[0].id);
+    }
+  }, [provider, codexModelCatalog, selectedModel]);
   // Every field above is seeded from `config` via a useState INITIALIZER,
   // which only runs on the component's very first render. That's fine when
   // `agent` is already loaded by the time this tab mounts (the common path:
@@ -4677,15 +4705,35 @@ function ModelTab({
                 {RUNTIME_LABELS[cliRuntime]} has no published model-id catalog — enter one only if you know it accepts it.
               </p>
             </>
-          ) : (
-            <>
-              <label className="fleet-wizard-label">Model</label>
-              <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
-                {modelsForProvider(provider).map((m) => <option key={m} value={m}>{modelOptionLabel(provider, m)}</option>)}
-              </select>
-              <ModelSizeWarning provider={provider} model={selectedModel} />
-            </>
-          )}
+          ) : (() => {
+            // URGENT fix (2026-08-14): for Codex, show what the paired box's
+            // OWN CLI reports it can actually run right now, not the static
+            // MODELS_BY_PROVIDER mirror — that mirror is exactly what let
+            // "gpt-5.4" (retired by OpenAI, unusable under this account's
+            // auth mode) sit in this list looking like a normal choice. See
+            // useCodexModelCatalog's doc comment in fleet-model-config.ts.
+            const liveModels = provider === "openai-codex" ? visibleCodexModels(codexModelCatalog) : null;
+            const options = liveModels
+              ? liveModels.map((m) => ({ id: m.id, label: m.isDefault ? `${m.displayName} (Recommended)` : m.displayName }))
+              : modelsForProvider(provider).map((m) => ({ id: m, label: modelOptionLabel(provider, m) }));
+            const showStaleNote = provider === "openai-codex" && !liveModels;
+            return (
+              <>
+                <label className="fleet-wizard-label">Model</label>
+                <select className="fleet-wizard-input" value={selectedModel} onChange={(e) => { setSelectedModel(e.currentTarget.value); setSaved(false); }}>
+                  {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                </select>
+                {showStaleNote && (
+                  <p className="fleet-channel-expand-hint">
+                    {effectiveGatewayId
+                      ? "Couldn't check this computer's actual Codex models right now — this list may include models that have since been renamed or retired."
+                      : "Pick a computer below to see this account's real, currently-usable Codex models."}
+                  </p>
+                )}
+                <ModelSizeWarning provider={provider} model={selectedModel} />
+              </>
+            );
+          })()}
           {renderCliReasoningEffortPicker()}
           <div className="fleet-detail-section-title" style={{ marginTop: 16 }}>Brain runs on</div>
           <GatewayBoxPicker

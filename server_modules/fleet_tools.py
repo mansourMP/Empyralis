@@ -1634,6 +1634,50 @@ async def fleet_configure_agent(
                         )
                     return {"ok": False, "error": _msg}
 
+                # URGENT fix (2026-08-14): a stale/mistyped/retired Codex
+                # model id used to save silently and only fail mid-turn with
+                # a raw provider error ("The 'gpt-5.4' model is not
+                # supported when using Codex with a ChatGPT account") — the
+                # exact live bug this closes. Validated against codex's OWN
+                # live model/list (codex_model_catalog_service.py), never a
+                # hand-typed list — CLAUDE.md's standing rule for
+                # platform_credits/byok_api's `model` field, extended here
+                # to the one cli_subscription runtime with a proven,
+                # non-inference way to ask. A round-trip failure (Gateway
+                # hiccup, timeout) fails OPEN — this is advisory, not the
+                # authority on whether the box itself is reachable — so a
+                # transient check failure never blocks an otherwise-valid
+                # save. Only fires when installed+authenticated (above) and
+                # a model was actually given; empty model ("CLI default")
+                # is deliberately never validated here — see cli-runner.ts's
+                # "never fabricate a model name" convention.
+                if _runtime == "codex" and model_value:
+                    from server_modules import codex_model_catalog_service
+
+                    try:
+                        _catalog = await codex_model_catalog_service.fetch_codex_model_catalog(
+                            gateway_id=_gateway_id,
+                            workspace_id=workspace_id,
+                            runtime=_runtime,
+                            actor_id=actor_id,
+                        )
+                    except codex_model_catalog_service.CodexModelCatalogError:
+                        _catalog = None
+                    if _catalog is not None and _catalog.get("supported"):
+                        _known_ids = codex_model_catalog_service.model_ids_in_catalog(_catalog)
+                        if _known_ids and model_value not in _known_ids:
+                            _visible = [
+                                m["id"] for m in _catalog.get("models") or []
+                                if isinstance(m, dict) and not m.get("hidden")
+                            ]
+                            return {
+                                "ok": False,
+                                "error": (
+                                    f"'{model_value}' isn't a Codex model this account can use right now"
+                                    + (f" — try one of: {', '.join(_visible)}." if _visible else "."))
+                                ,
+                            }
+
     try:
         bundle = await repo.get_workspace_agent_install_bundle(
             agent_id,
