@@ -486,7 +486,28 @@ async def provision_openclaw_gateway(
     says, what the effective config reads back as, and what
     `openclaw security audit` reported. Re-deriving any of that cloud-side
     would be inventing a second opinion about a machine we cannot see.
+
+    Enforces personal_channels_service.assert_agent_placed_on_gateway before
+    building or pushing anything — the same execution-locality gate the
+    WhatsApp/Telegram/iMessage personal-channel functions all call, applied
+    here too so a caller cannot provision an agent's OpenClaw-transported
+    channels onto a gateway that agent was never placed on, even though this
+    module already composes multi-agent-per-box policy correctly for agents
+    that ARE legitimately sharing gateway_id (see build_openclaw_channel_
+    policies's own docstring — that composition is unaffected by this guard,
+    since it only ever runs with the CALLING agent's own gateway_id).
     """
+    try:
+        await personal_channels_service.assert_agent_placed_on_gateway(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            gateway_id=gateway_id,
+        )
+    except personal_channels_service.AgentNotPlacedOnGatewayError as exc:
+        raise OpenClawProvisioningError(
+            str(exc), status_code=403, reason_code="agent_not_placed_on_gateway",
+        ) from exc
     run_id = f"openclaw-provision-{uuid4().hex[:12]}"
     channels = await build_openclaw_channel_policies(
         tenant_id=tenant_id,
@@ -610,6 +631,26 @@ async def reconcile_openclaw_policy_best_effort(
             "message": str(exc),
         }
     except OpenClawProvisioningError as exc:
+        if exc.reason_code == "agent_not_placed_on_gateway":
+            # A FOURTH, permanent outcome — never the same bucket as
+            # "unreachable". An offline box resolves itself the moment it
+            # reconnects; this will not, because the mismatch is between
+            # this agent's own placement and the gateway_id the caller
+            # passed, and re-trying the identical call changes nothing.
+            # Collapsing the two would tell an owner to "just wait" for a
+            # setting that can never take effect on its own.
+            _logger.info(
+                "openclaw provisioning reconcile refused (agent not placed on gateway) "
+                "for gateway_id=%s channel=%s agent_id=%s",
+                gateway_id,
+                channel_key,
+                agent_id,
+            )
+            return {
+                "status": "wrong_hardware",
+                "channel_key": channel_key,
+                "message": str(exc),
+            }
         _logger.info(
             "openclaw provisioning reconcile skipped for gateway_id=%s channel=%s: %s",
             gateway_id,

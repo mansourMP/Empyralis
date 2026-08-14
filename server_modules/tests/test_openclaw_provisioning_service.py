@@ -78,6 +78,24 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _stub_agent_placement(monkeypatch, *, agent_id: str, gateway_id: str, label: str | None = None):
+    """Stub personal_channels_service.assert_agent_placed_on_gateway's own
+    dependency (agent_registry_repository.get_workspace_agent_install_bundle)
+    so a test that isn't ABOUT placement can provision as if agent_id were
+    genuinely placed on gateway_id -- the same role _stub_gateway_sharing
+    plays for the sharing/conflict tests below, but for the placement guard
+    provision_openclaw_gateway now calls before anything else."""
+
+    async def fake_bundle(install_id, *, tenant_id=None, workspace_id=None):
+        assert install_id == agent_id
+        return {"id": agent_id, "label": label or agent_id, "metadata": {"preferred_gateway_id": gateway_id}}
+
+    monkeypatch.setattr(
+        "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+        fake_bundle,
+    )
+
+
 def test_policy_payload_is_read_through_the_live_gate_loaders(monkeypatch):
     """Not through a second reader.
 
@@ -150,6 +168,7 @@ def test_provision_dispatches_the_capability_with_the_policy_and_trusts_the_box(
         "execute_tool_via_gateway",
         fake_execute,
     )
+    _stub_agent_placement(monkeypatch, agent_id="a", gateway_id="gw-1")
 
     result = _run(
         openclaw_provisioning_service.provision_openclaw_gateway(
@@ -229,6 +248,7 @@ def test_reconcile_reports_agent_conflict_as_its_own_distinct_outcome(monkeypatc
         monkeypatch, installs=installs,
         bindings_by_agent={"agent-a": ["openclaw_feishu"], "agent-b": ["openclaw_feishu"]},
     )
+    _stub_agent_placement(monkeypatch, agent_id="agent-a", gateway_id="gw-conflict")
 
     result = _run(
         openclaw_provisioning_service.reconcile_openclaw_policy_best_effort(
@@ -509,6 +529,7 @@ def test_provision_openclaw_gateway_threads_gateway_id_into_the_conflict_check(m
         monkeypatch, installs=installs,
         bindings_by_agent={"agent-a": ["openclaw_feishu"], "agent-b": ["openclaw_feishu"]},
     )
+    _stub_agent_placement(monkeypatch, agent_id="agent-a", gateway_id="gw-wired")
 
     async def should_not_run(**kwargs):  # pragma: no cover - must never execute
         raise AssertionError("gateway_execution_service must not be reached on a refused conflict")
