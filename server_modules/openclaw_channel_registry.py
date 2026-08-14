@@ -219,7 +219,44 @@ if len(CHANNELS_BY_ID) != len(CHANNELS):
 # being retired in the same change. Adding an id here without deleting the
 # first-party implementation is the two-live-implementations bug; the guard in
 # `resolve_transport_ownership` cannot see that, so it is stated here.
-OPENCLAW_CUT_OVER_CHANNEL_IDS: frozenset[str] = frozenset()
+#
+# 2026-08-14 full channel cutover, founder's explicit order ("remove the
+# entire old channels... whatever comes with the new gateway, everything must
+# be wired"). Cut over the five PERSONAL-GATEWAY-LANE platforms whose
+# first-party implementation this OpenClaw transport genuinely supersedes —
+# each one already required a paired Agent Computer before this change, so
+# nothing about the hardware requirement moves:
+#   whatsapp  - pairing (QR link), first-party Baileys retired same change.
+#   signal    - pairing (signal-cli), first-party local-bridge retired.
+#   imessage  - pairing (imsg/BlueBubbles), first-party local-bridge retired.
+#   openclaw-weixin - plugin_absent today (external @tencent-weixin plugin,
+#             pinned 2.4.3 — installs on demand), first-party retired.
+#   telegram  - credential (Bot API) ONLY on the pinned build; there is no
+#             personal-account credential shape upstream at all. Cutting this
+#             over is a deliberate CONVERSION from an account channel
+#             (gramjs, ban-risk, retired) to a bot channel — not a like-for-
+#             like swap. See CLAUDE.md's Telegram entry for the honesty
+#             consequence on the setup surface.
+#
+# Deliberately EXCLUDED, and not merely deferred: discord, slack, sms. All
+# three are STUDIO BUSINESS CONNECTOR channels (STUDIO_CONNECTOR_RUNTIME_LANE
+# in channel_lane_contract_service, not PERSONAL_GATEWAY_RUNTIME_LANE) — their
+# existing first-party implementations are cloud-only bot/webhook connectors
+# that need no Agent Computer at all. OpenClaw is a hardware-bound transport
+# by construction (it runs ON the customer's own machine); cutting these three
+# over would force every Discord/Slack/SMS-using agent to acquire and pair
+# hardware it does not need today, for a channel that already works. That is
+# a functional regression, not "OpenClaw genuinely supporting" the channel in
+# a way that improves on today's implementation — the founder's "whatever
+# OpenClaw carries, we carry" is about the personal-messaging lane this whole
+# transport was built for, not about collapsing a deliberately hardware-free
+# business-connector lane into a hardware-bound one. discord_personal (the
+# personal-lane Discord entry) is ALSO cloud_connector/bot-token-backed for
+# the same Discord-ToS-forbids-self-bots reason, so it carries the identical
+# argument and stays first-party too.
+OPENCLAW_CUT_OVER_CHANNEL_IDS: frozenset[str] = frozenset(
+    {"whatsapp", "signal", "imessage", "openclaw-weixin", "telegram"}
+)
 
 # Where OpenClaw's id and Empyralis's platform token spell the same platform
 # differently. Everything else matches by identity, so this stays tiny by

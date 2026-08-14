@@ -9,7 +9,6 @@ import {
   type GatewayDoctorContext,
 } from "../health/gateway-doctor";
 import type { PassiveInventorySnapshot } from "../health/service-inventory";
-import type { PersonalChannelHealthSnapshot, PersonalChannelRuntime } from "../channels/personal-runtime";
 import { GatewayCapabilityRouter } from "../supervisor/capability-router";
 import { PersonalChannelRuntimeRegistry } from "../channels/personal-runtime";
 import type { GatewayRequestEnvelope, GatewayToolInvokePayload, GatewayToolInterruptPayload } from "../protocol/types";
@@ -365,53 +364,10 @@ test("default checks: cli_subscription passes if either CLI is ready, otherwise 
   assert.equal(untracked.status, "skip");
 });
 
-test("default checks: personal_channel_imessage skips when not configured, passes when connected, fails with plain language otherwise", async () => {
-  const checks = buildDefaultGatewayDoctorChecks();
-  const check = checks.find((c) => c.id === "personal_channel_imessage")!;
-
-  const notConfigured = await check.detect(makeContext());
-  assert.equal(notConfigured.status, "skip");
-
-  function fakeRuntime(snapshot: PersonalChannelHealthSnapshot | null): GatewayDoctorContext["personalChannelRuntimes"] {
-    return {
-      runtimeForChannel: (channelKey: string) => {
-        if (channelKey !== "imessage_personal") return undefined;
-        return {
-          getHealthSnapshot: async () => snapshot as PersonalChannelHealthSnapshot,
-        } as unknown as PersonalChannelRuntime;
-      },
-    };
-  }
-
-  const connected = await check.detect(
-    makeContext({
-      personalChannelRuntimes: fakeRuntime({
-        channelKey: "imessage_personal",
-        provider: "bluebubbles_local_bridge",
-        status: "connected",
-        running: true,
-        connected: true,
-        issues: [],
-      }),
-    }),
-  );
-  assert.equal(connected.status, "pass");
-
-  const fdaRequired = await check.detect(
-    makeContext({
-      personalChannelRuntimes: fakeRuntime({
-        channelKey: "imessage_personal",
-        provider: "bluebubbles_local_bridge",
-        status: "unavailable",
-        running: true,
-        connected: false,
-        issues: ["imessage_personal_full_disk_access_required"],
-      }),
-    }),
-  );
-  assert.equal(fdaRequired.status, "fail");
-  assert.match(fdaRequired.detail, /Full Disk Access/);
-});
+// personal_channel_imessage was retired 2026-08-14 (full OpenClaw channel
+// cutover) alongside ImsgIMessagePersonalChannelRuntime itself — see
+// gateway-doctor.ts's Check 4 comment. No replacement test: there is nothing
+// left on the gateway for a doctor check to probe.
 
 test("default checks: supervisor_presence passes under systemd/launchd, warns when unsupervised", async () => {
   const checks = buildDefaultGatewayDoctorChecks();

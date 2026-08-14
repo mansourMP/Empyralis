@@ -82,13 +82,18 @@ export type ChannelDoor = {
  *  carry them as hand-copied literals, i.e. a check transcribing its
  *  expectations from the thing it checks. Every id here is also a key of
  *  CHANNEL_DOORS below, which is now assertable rather than merely true. */
+// 2026-08-14 full OpenClaw channel cutover: whatsapp_personal, signal_personal
+// and imessage_personal are DELETED from this grid entirely — their
+// first-party gateway runtimes are gone, and the live replacements
+// (openclaw_whatsapp, openclaw_signal, openclaw_imessage) now appear
+// automatically in the DERIVED OpenClaw grid below (groupTransportedChannels),
+// exactly like every other transported platform. Telegram stays, but see its
+// CHANNEL_DOORS entry below — its "full_account" door is deleted too, so it
+// is now single-door ("direct" mode) rather than a picker.
 export const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
   { label: "Telegram", id: "sage_telegram_hosted" },
   { label: "Slack", id: "slack" },
   { label: "Discord", id: "discord_bot" },
-  { label: "WhatsApp", id: "whatsapp_personal" },
-  { label: "Signal", id: "signal_personal" },
-  { label: "iMessage", id: "imessage_personal" },
   { label: "WeChat / WeCom", id: "wechat_official" },
 ];
 
@@ -98,26 +103,25 @@ export const CHANNEL_GRID_PLATFORMS: { label: string; id: string }[] = [
  *  THIS agent's own preferred_gateway_id (see ChannelsTab's `agentGatewayId`),
  *  never to a workspace-wide/Sage-routed session. */
 export const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
+  // 2026-08-14 full OpenClaw channel cutover: Telegram's "full_account" door
+  // (real MTProto/gramjs session, phone+code+2FA, the same account-ban risk
+  // the door's own consequence text warned about) is DELETED along with the
+  // first-party gramjs runtime it opened. OpenClaw's pinned build has no
+  // personal-account credential shape for Telegram at all — bot-only is now
+  // the ONLY way to connect Telegram, not a choice, so a single real door
+  // means planDoors() resolves this card to "direct" mode automatically:
+  // the card opens straight into Chatbot setup, no picker, nothing to
+  // choose between. That absence IS the honest statement that Telegram runs
+  // as a bot here — see this door's own body text.
   sage_telegram_hosted: [
     {
       key: "byo_bot",
       label: "Chatbot",
-      body: "People message a separate bot you create. This agent never touches your own Telegram account.",
+      body: "This agent runs as a Telegram bot — people message a bot you create, never your own Telegram account. Telegram's own platform has no way to connect a real personal account to an automated agent, so this is the only way to connect Telegram here.",
       real: true,
       consequence: {
         tone: "safe",
         text: "Your own account can't be banned. Bots can't read every message in a group.",
-      },
-    },
-    {
-      key: "full_account",
-      label: "Full account",
-      body: "The agent signs in as you — phone, code, and 2FA if enabled — and sees exactly what you see.",
-      real: true,
-      requiresHardware: true,
-      consequence: {
-        tone: "risk",
-        text: "Telegram can ban your number for automated use.",
       },
     },
   ],
@@ -137,37 +141,14 @@ export const CHANNEL_DOORS: Record<string, ChannelDoor[]> = {
       real: true,
     },
   ],
-  whatsapp_personal: [
-    {
-      key: "full_account",
-      label: "Full account",
-      body: "The agent signs in as you — scan a QR code or use a pairing code — and sees exactly what you see.",
-      real: true,
-      requiresHardware: true,
-      consequence: {
-        tone: "risk",
-        text: "WhatsApp can ban your number for automated use.",
-      },
-    },
-  ],
-  signal_personal: [
-    {
-      key: "full_account",
-      label: "Full account",
-      body: "This agent's own Signal, via a signal-cli bridge on its computer. Requires a real signal-cli install — no cloud path.",
-      real: true,
-      requiresHardware: true,
-    },
-  ],
-  imessage_personal: [
-    {
-      key: "full_account",
-      label: "Full account",
-      body: "This agent's own iMessage, via imsg — a small CLI that talks to Messages.app on the Mac it runs on.",
-      real: true,
-      requiresHardware: true,
-    },
-  ],
+  // whatsapp_personal, signal_personal and imessage_personal DELETED
+  // 2026-08-14 (full OpenClaw channel cutover) — their first-party doors
+  // (Baileys QR pairing, the signal-cli/BlueBubbles local bridges) are gone.
+  // The live replacements are openclaw_whatsapp/openclaw_signal/
+  // openclaw_imessage, which appear in the DERIVED OpenClaw grid below with
+  // their own "pairing" door via transportedDoorBody — the identical QR/
+  // bridge-linked shape these first-party doors used to describe, now
+  // generated from OpenClaw's own manifest rather than authored by hand here.
   wechat_official: [
     {
       key: "app_credential_pair",

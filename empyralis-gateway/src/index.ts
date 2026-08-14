@@ -18,19 +18,7 @@ import type { GatewayRuntimeMetadata } from "./runtime/runtime-metadata";
 // The Rust empyralis-supervisor daemon is no longer part of the Empyralis product.
 import { GatewayCapabilityRouter } from "./supervisor/capability-router";
 import { GatewayRegistrationError } from "./cloud/registration-failure";
-import { WhatsAppPersonalRuntime } from "./channels/whatsapp/runtime";
-import { WHATSAPP_PERSONAL_CHANNEL_KEY } from "./channels/whatsapp/session-store";
-import { TelegramPersonalRuntime } from "./channels/telegram/runtime";
-import { TELEGRAM_PERSONAL_CHANNEL_KEY } from "./channels/telegram/session-store";
 import { PersonalChannelRuntimeRegistry } from "./channels/personal-runtime";
-import { activeFirstPartyPersonalChannels } from "./openclaw/transport-ownership";
-import {
-  LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS,
-  LocalBridgePersonalChannelRuntime,
-  type LocalBridgeRuntimeConfig,
-} from "./channels/local-bridge-runtime";
-import { ImsgIMessagePersonalChannelRuntime } from "./channels/imsg-imessage-runtime";
-import type { PersonalChannelRuntime } from "./channels/personal-runtime";
 import { GatewayBrowserWorker } from "./browser/worker";
 import { GatewayBrowserRuntime } from "./browser/runtime";
 import { GatewayShellRuntime } from "./shell/runtime";
@@ -393,27 +381,6 @@ export async function attemptGatewayPairing(params: {
   }
 }
 
-/** Selects the iMessage transport for the "imessage_personal" local-bridge
- *  config: the in-process imsg RPC runtime by default (no separate process
- *  to run — see channels/imsg-imessage-runtime.ts), or the legacy
- *  BlueBubbles-over-HTTP runtime when a deployment already has
- *  EMPYRALIS_IMESSAGE_BRIDGE_URL configured, so an existing BlueBubbles
- *  Agent Computer bridge setup keeps working unchanged after this upgrade.
- *  Every other local-bridge channel (Signal, WeChat) is untouched. */
-function buildLocalBridgeChannelRuntime(
-  bridgeConfig: LocalBridgeRuntimeConfig,
-  db: GatewayStateDb,
-): PersonalChannelRuntime {
-  if (bridgeConfig.channelKey === "imessage_personal") {
-    const legacyBlueBubblesUrl = String(process.env.EMPYRALIS_IMESSAGE_BRIDGE_URL || "").trim();
-    if (legacyBlueBubblesUrl) {
-      return new LocalBridgePersonalChannelRuntime(bridgeConfig);
-    }
-    return new ImsgIMessagePersonalChannelRuntime(bridgeConfig, { db });
-  }
-  return new LocalBridgePersonalChannelRuntime(bridgeConfig);
-}
-
 async function main(): Promise<void> {
   const config = loadGatewayConfig();
   // Single-use hand-off from whichever process (gateway.self_update or
@@ -478,30 +445,19 @@ async function main(): Promise<void> {
         },
       })
     : null;
-  // Every first-party personal-channel candidate this box COULD run, each
-  // paired with its own channel_key and a lazily-evaluated constructor (so
-  // filtering below never constructs a runtime this box shouldn't start).
-  // activeFirstPartyPersonalChannels() is the ONE gate all of them go
-  // through — see openclaw/transport-ownership.ts's doc for the full chain
-  // this reads through (channel_lane_contract_service.OPENCLAW_TRANSPORT_
-  // OWNERSHIP, generated-openclaw-channels.ts, ultimately
-  // OPENCLAW_CUT_OVER_CHANNEL_IDS). While that constant is empty (true
-  // today), every candidate below passes the filter unchanged — a strict
-  // no-op, proven by __tests__/first-party-transport-ownership-gate.test.ts.
-  // A future cutover needs no new gateway code: only the registry flip and
-  // a regenerate.
-  const firstPartyPersonalChannelCandidates: Array<{ channelKey: string; build: () => PersonalChannelRuntime }> = [
-    { channelKey: WHATSAPP_PERSONAL_CHANNEL_KEY, build: () => new WhatsAppPersonalRuntime(db) },
-    { channelKey: TELEGRAM_PERSONAL_CHANNEL_KEY, build: () => new TelegramPersonalRuntime(db) },
-    ...LOCAL_BRIDGE_PERSONAL_CHANNEL_CONFIGS.map((bridgeConfig) => ({
-      channelKey: bridgeConfig.channelKey,
-      build: () => buildLocalBridgeChannelRuntime(bridgeConfig, db),
-    })),
-  ];
+  // 2026-08-14 full OpenClaw channel cutover: every first-party personal-
+  // gateway runtime (WhatsApp/Baileys, Telegram/gramjs, and the Signal/
+  // iMessage/WeChat local-bridge family) is deleted in this change —
+  // OPENCLAW_CUT_OVER_CHANNEL_IDS now covers all five, so
+  // activeFirstPartyPersonalChannels()/transport-ownership.ts had nothing
+  // left to filter and were removed with them (see git history to recover
+  // either if a NEW first-party personal-gateway channel is ever built).
+  // Every personal-gateway channel this box can run now comes from the
+  // OpenClaw transport below. discord_personal stays first-party but is not
+  // a gateway-constructed runtime at all (bot-token/cloud_connector — see
+  // channel_lane_contract_service.py's PERSONAL_CHANNEL_SPECS), so it has no
+  // entry here either.
   const personalChannelRuntimes = new PersonalChannelRuntimeRegistry([
-    ...(config.personalChannelsEnabled
-      ? activeFirstPartyPersonalChannels(firstPartyPersonalChannelCandidates).map((candidate) => candidate.build())
-      : []),
     ...(openclawBridgeToken
       ? buildOpenClawPersonalChannelRuntimes(openclawGatewayClient, (messageType, payload) =>
           journal.append("outbound", messageType, payload),

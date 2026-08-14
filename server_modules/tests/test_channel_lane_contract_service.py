@@ -25,8 +25,11 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         self.assertTrue(webhook_paths.issubset(connector_paths))
 
     def test_build_personal_runtime_context_blocks_studio_session_fields(self) -> None:
+        # whatsapp_personal (the first-party Baileys channel) was deleted
+        # 2026-08-14 (full OpenClaw channel cutover); openclaw_whatsapp is its
+        # live replacement and exercises the identical contract.
         runtime_context = service.build_personal_gateway_runtime_context(
-            surface_channel="whatsapp_personal",
+            surface_channel="openclaw_whatsapp",
             workspace_id="workspace-1",
             gateway_id="gateway-1",
             remote_jid="user-1",
@@ -45,7 +48,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
 
     def test_personal_provider_contract_rejects_connector_provider(self) -> None:
         with self.assertRaisesRegex(ValueError, "mismatched personal provider"):
-            service.assert_personal_gateway_channel("whatsapp_personal", "twilio_whatsapp")
+            service.assert_personal_gateway_channel("openclaw_whatsapp", "twilio_whatsapp")
 
     def test_studio_webhook_contract_rejects_personal_route_path(self) -> None:
         with self.assertRaisesRegex(ValueError, "outside the Studio connector lane"):
@@ -55,12 +58,16 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         full_personal_catalog = service.personal_channel_catalog()
         studio_catalog = service.studio_channel_catalog()
 
-        # The catalog is now the first-party channels followed by the DERIVED
-        # OpenClaw-transported ones. The first-party half is still asserted
-        # exactly, order included — that order is the product's priority
-        # order. The derived half is asserted by its contract instead of by a
-        # list that would have to be re-typed every time OpenClaw ships a
-        # channel, which is the defect this split exists to remove.
+        # 2026-08-14 full OpenClaw channel cutover: telegram_personal,
+        # whatsapp_personal, signal_personal, imessage_personal and
+        # wechat_personal (the entire first-party local-bridge/Baileys/
+        # gramjs family) are DELETED — their live replacements are
+        # openclaw_telegram/openclaw_whatsapp/openclaw_signal/
+        # openclaw_imessage/openclaw_openclaw-weixin, all now ACTIVE (not
+        # superseded) OpenClaw channels. discord_personal is the only
+        # first-party personal channel left — see PERSONAL_CHANNEL_SPECS's
+        # own comment on why (cloud_connector, no Agent Computer needed,
+        # not a platform this hardware-bound transport would improve on).
         personal_catalog = [
             entry
             for entry in full_personal_catalog
@@ -74,7 +81,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
 
         self.assertEqual(
             [entry["channel_key"] for entry in personal_catalog],
-            ["telegram_personal", "whatsapp_personal", "signal_personal", "imessage_personal", "wechat_personal", "discord_personal"],
+            ["discord_personal"],
         )
         self.assertEqual(
             [entry["channel_key"] for entry in full_personal_catalog[: len(personal_catalog)]],
@@ -90,6 +97,10 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
             [entry["channel_key"] for entry in openclaw_catalog],
             [channel.channel_key for channel in service.OPENCLAW_ACTIVE_CHANNELS],
         )
+        # whatsapp/telegram/signal/imessage/openclaw-weixin are now among the
+        # active (cut-over) channels — proof the cutover actually moved them.
+        active_ids = {channel.id for channel in service.OPENCLAW_ACTIVE_CHANNELS}
+        self.assertTrue({"whatsapp", "telegram", "signal", "imessage", "openclaw-weixin"}.issubset(active_ids))
         # Every transported channel is "preview" — a property of the
         # transport, not a per-channel judgement, so there is no list to keep
         # honest. Nothing here has been driven with real credentials yet
@@ -107,18 +118,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
             & {channel.id for channel in service.OPENCLAW_SUPERSEDED_CHANNELS}
         )
 
-        self.assertEqual(
-            [entry["stage"] for entry in personal_catalog],
-            # Signal, iMessage, and WeChat are all first-class,
-            # owner-connectable local-bridge gateway channels like
-            # Telegram/WhatsApp — none are "coming soon". Signal's catalog
-            # entry previously said "planned"/live_capable=false here while
-            # its handler, gateway runtime, and signal-cli bridge were
-            # already fully wired — that mismatch (not any real capability
-            # gap) is what made Signal read as disabled everywhere this
-            # roadmap feeds; see get_gateway_personal_channel_surfaces.
-            ["live", "live", "live", "live", "live", "live"],
-        )
+        self.assertEqual([entry["stage"] for entry in personal_catalog], ["live"])
         self.assertTrue(
             all(
                 entry["runtime_lane"] == service.PERSONAL_GATEWAY_RUNTIME_LANE
@@ -129,10 +129,7 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
                 if entry["channel_key"] != "discord_personal"
             )
         )
-        self.assertEqual(
-            [entry["live_capable"] for entry in personal_catalog],
-            ["true", "true", "true", "true", "true", "true"],
-        )
+        self.assertEqual([entry["live_capable"] for entry in personal_catalog], ["true"])
 
         self.assertEqual(
             [entry["channel_key"] for entry in studio_catalog],
@@ -173,18 +170,20 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         catalog = service.platform_channel_catalog()
         by_key = {entry["channel_key"]: entry for entry in catalog}
 
-        # 26 first-party entries, plus one per channel the pinned OpenClaw
-        # carries — ALL of them, including the ones a first-party runtime
-        # still owns, so the UI can show "carried by the transport, superseded
-        # here" rather than leaving them invisible. Counted from the derived
-        # set rather than re-typed, but the first-party 26 stays exact.
+        # 21 first-party entries (26 minus the 5 deleted 2026-08-14: telegram_
+        # personal, whatsapp_personal, signal_personal, imessage_personal,
+        # wechat_personal), plus one per channel the pinned OpenClaw carries —
+        # ALL of them, including the ones a first-party runtime still owns, so
+        # the UI can show "carried by the transport, superseded here" rather
+        # than leaving them invisible. Counted from the derived set rather
+        # than re-typed, but the first-party 21 stays exact.
         openclaw_entries = [
             entry
             for entry in catalog
             if entry["provider"] == service.OPENCLAW_TRANSPORT_PROVIDER
         ]
         self.assertTrue(openclaw_entries)
-        self.assertEqual(len(catalog) - len(openclaw_entries), 26)
+        self.assertEqual(len(catalog) - len(openclaw_entries), 21)
         self.assertEqual(
             len(openclaw_entries), len(service.openclaw_channel_registry.CHANNELS)
         )
@@ -199,34 +198,33 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         self.assertEqual(by_key["sms_twilio"]["product_surface"], "business_channel")
         self.assertEqual(by_key["telegram_bot"]["binding_channel_key"], "telegram")
         self.assertEqual(by_key["telegram_bot"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
-        self.assertEqual(by_key["telegram_personal"]["runtime_lane"], service.PERSONAL_GATEWAY_RUNTIME_LANE)
-        self.assertTrue(by_key["telegram_personal"]["requires_agent_computer"])
-        self.assertEqual(by_key["telegram_personal"]["surface_kind"], "messaging_channel")
-        self.assertEqual(by_key["telegram_personal"]["product_surface"], "personal_messaging")
-        self.assertEqual(by_key["telegram_personal"]["navigation_group"], "personal_messaging")
-        self.assertEqual(by_key["telegram_personal"]["ownership_boundary"], "agent_computer")
-        self.assertEqual(by_key["whatsapp_personal"]["surface_support"], ["sage"])
-        self.assertEqual(by_key["signal_personal"]["status"], "agent_computer_bridge")
-        self.assertTrue(by_key["signal_personal"]["live_capable"])
-        self.assertTrue(by_key["signal_personal"]["launch_allowed"])
-        # Signal, iMessage, and WeChat are all shipped, owner-connectable
-        # gateway channels (like Telegram/WhatsApp) — live_capable/
-        # launch_allowed are true for all three. The "agent_computer_bridge"
-        # status (not "agent_computer_only") is the honest bit that
-        # survives: each requires a real bridge process on the agent's own
-        # gateway (signal-cli for Signal; BlueBubbles on a Mac for iMessage;
-        # a best-effort local WeChat session bridge for WeChat) rather than
-        # a cloud path — a deployment that hasn't configured that bridge's
-        # env vars still reads "not configured" via the bridge's own health
-        # check, not this catalog flag.
-        self.assertEqual(by_key["imessage_personal"]["provider"], "bluebubbles_local_bridge")
-        self.assertEqual(by_key["imessage_personal"]["status"], "agent_computer_bridge")
-        self.assertTrue(by_key["imessage_personal"]["live_capable"])
-        self.assertTrue(by_key["imessage_personal"]["launch_allowed"])
-        self.assertEqual(by_key["wechat_personal"]["provider"], "wechat_local_bridge")
-        self.assertEqual(by_key["wechat_personal"]["status"], "agent_computer_bridge")
-        self.assertTrue(by_key["wechat_personal"]["live_capable"])
-        self.assertTrue(by_key["wechat_personal"]["launch_allowed"])
+        # telegram_personal/whatsapp_personal/signal_personal/imessage_personal/
+        # wechat_personal DELETED 2026-08-14 (full OpenClaw channel cutover);
+        # their live replacements are openclaw_telegram/openclaw_whatsapp/
+        # openclaw_signal/openclaw_imessage/openclaw_openclaw-weixin, which
+        # share the exact same PERSONAL_GATEWAY_RUNTIME_LANE/requires_agent_
+        # computer/taxonomy shape (they always required an Agent Computer,
+        # cutover or not).
+        self.assertEqual(by_key["openclaw_telegram"]["runtime_lane"], service.PERSONAL_GATEWAY_RUNTIME_LANE)
+        self.assertTrue(by_key["openclaw_telegram"]["requires_agent_computer"])
+        self.assertEqual(by_key["openclaw_telegram"]["surface_kind"], "messaging_channel")
+        self.assertEqual(by_key["openclaw_telegram"]["product_surface"], "personal_messaging")
+        self.assertEqual(by_key["openclaw_telegram"]["navigation_group"], "personal_messaging")
+        self.assertEqual(by_key["openclaw_telegram"]["ownership_boundary"], "agent_computer")
+        self.assertEqual(by_key["openclaw_whatsapp"]["surface_support"], ["sage"])
+        self.assertTrue(by_key["openclaw_whatsapp"]["live_capable"])
+        self.assertTrue(by_key["openclaw_signal"]["live_capable"])
+        self.assertTrue(by_key["openclaw_imessage"]["live_capable"])
+        self.assertTrue(by_key["openclaw_openclaw-weixin"]["live_capable"])
+        # None of the five is launchable from this catalog directly — an
+        # OpenClaw channel is credentialed inside OpenClaw on the owner's own
+        # machine, so a "Connect" button here would be a dead control.
+        for cut_over_key in (
+            "openclaw_telegram", "openclaw_whatsapp", "openclaw_signal",
+            "openclaw_imessage", "openclaw_openclaw-weixin",
+        ):
+            self.assertFalse(by_key[cut_over_key]["launch_allowed"])
+            self.assertEqual(by_key[cut_over_key]["status"], "openclaw_transport")
         self.assertEqual(by_key["apple_messages_business"]["provider"], "apple_messages_business_msp")
         self.assertEqual(by_key["apple_messages_business"]["runtime_lane"], service.STUDIO_CONNECTOR_RUNTIME_LANE)
         self.assertEqual(by_key["apple_messages_business"]["product_surface"], "business_channel")
@@ -263,35 +261,33 @@ class ChannelLaneContractServiceTests(unittest.TestCase):
         self.assertTrue({"voice_wake", "mobile_nodes", "plugin_marketplace"}.issubset(reserved))
 
     def test_reserved_personal_specs_stay_on_personal_gateway_lane(self) -> None:
-        # signal_personal is not part of this ruling and stays pre-existing
-        # here; imessage_personal and wechat_personal are the two channels
-        # this contract promotes to first-class/live_capable.
-        for channel_key, provider in (
-            ("signal_personal", "signal_local_bridge"),
-            ("imessage_personal", "bluebubbles_local_bridge"),
-            ("wechat_personal", "wechat_local_bridge"),
-        ):
-            spec = service.assert_personal_gateway_channel(channel_key, provider)
+        # signal_personal/imessage_personal/wechat_personal (the first-party
+        # local-bridge family) DELETED 2026-08-14 (full OpenClaw channel
+        # cutover). Their live replacements — openclaw_signal/openclaw_
+        # imessage/openclaw_openclaw-weixin — carry the identical contract:
+        # PERSONAL_GATEWAY_RUNTIME_LANE, DIRECT_CHAT_MEMORY_SURFACE,
+        # live_capable "true".
+        for channel_key in ("openclaw_signal", "openclaw_imessage", "openclaw_openclaw-weixin"):
+            spec = service.assert_personal_gateway_channel(channel_key, service.OPENCLAW_TRANSPORT_PROVIDER)
 
             self.assertEqual(spec["runtime_lane"], service.PERSONAL_GATEWAY_RUNTIME_LANE)
             self.assertEqual(spec["memory_surface"], service.DIRECT_CHAT_MEMORY_SURFACE)
             self.assertEqual(spec["live_capable"], "true")
 
     def test_agent_computer_bridge_channels_pass_personal_preflight(self) -> None:
-        """iMessage and WeChat are shipped, full-account gateway channels —
-        like Telegram/WhatsApp, they pass preflight with launch_allowed=True.
-        (Signal also currently passes here; that predates and is independent
-        of this iMessage/WeChat ruling.)"""
-        for channel_key in ("signal_personal", "imessage_personal", "wechat_personal"):
+        """The five platforms cut over 2026-08-14 (whatsapp/telegram/signal/
+        imessage/openclaw-weixin) are all live_capable, so they pass
+        preflight — same contract the first-party channels they replaced
+        satisfied."""
+        for channel_key in (
+            "openclaw_whatsapp", "openclaw_telegram", "openclaw_signal",
+            "openclaw_imessage", "openclaw_openclaw-weixin",
+        ):
             preflight = service.personal_bridge_preflight(channel_key)
 
             self.assertEqual(preflight["status"], "pass")
             self.assertTrue(preflight["launch_allowed"])
             self.assertEqual(preflight["reason"], "live_personal_gateway_runtime")
-
-        telegram_preflight = service.personal_bridge_preflight("telegram_personal")
-        self.assertEqual(telegram_preflight["status"], "pass")
-        self.assertTrue(telegram_preflight["launch_allowed"])
 
 
 if __name__ == "__main__":

@@ -282,55 +282,15 @@ const CLI_SUBSCRIPTION_CHECK: GatewayDoctorCheck = {
 };
 
 // ---------------------------------------------------------------------------
-// Check 4: personal-channel / iMessage readiness. Reuses the exact same
-// staged probe (bridges/imsg-imessage-client.ts's probeImsgIMessageStaged)
-// that ImsgIMessagePersonalChannelRuntime.getHealthSnapshot() already runs
-// for the heartbeat and for the setup panel's "Re-check" button — going
-// through getHealthSnapshot() rather than reaching around it keeps this
-// doctor check and the setup panel reporting identically, from one code
-// path, instead of a second copy of the staged-probe interpretation logic.
-function imsgIssuePhrase(issue: string | undefined): string {
-  if (!issue) {
-    return "iMessage isn't reachable right now.";
-  }
-  if (issue.endsWith("_imsg_not_installed")) {
-    return "The iMessage helper (imsg) isn't installed on this computer yet.";
-  }
-  if (issue.endsWith("_imsg_rpc_unsupported")) {
-    return "The installed iMessage helper is too old to work with this computer.";
-  }
-  if (issue.endsWith("_full_disk_access_required")) {
-    return "This computer needs Full Disk Access granted to Messages — open System Settings > Privacy & Security > Full Disk Access and enable it.";
-  }
-  return "iMessage isn't reachable right now.";
-}
-
-const PERSONAL_CHANNEL_IMESSAGE_CHECK: GatewayDoctorCheck = {
-  id: "personal_channel_imessage",
-  label: "iMessage",
-  async detect(ctx) {
-    const runtime = ctx.personalChannelRuntimes?.runtimeForChannel("imessage_personal");
-    if (!runtime) {
-      return { status: "skip", detail: "iMessage isn't configured on this computer." };
-    }
-    const snapshot = await runtime.getHealthSnapshot?.();
-    if (!snapshot) {
-      return { status: "warn", detail: "iMessage status couldn't be read." };
-    }
-    if (snapshot.connected) {
-      return { status: "pass", detail: "iMessage is connected and ready." };
-    }
-    return { status: "fail", detail: imsgIssuePhrase(snapshot.issues?.[0]) };
-  },
-  // No repair here: an install action already exists as its own explicit,
-  // user-triggered capability (channel.imessage.personal.install ->
-  // runImsgHomebrewInstall(), channels/imsg-imessage-runtime.ts:163-171) with
-  // its own long timeout (up to 280s, personal_channels_service.py) — running
-  // a Homebrew install unattended inside a doctor pass would make an already
-  // slow, occasionally-interactive step invisible and unbounded. Full Disk
-  // Access cannot be granted programmatically at all (macOS System Settings,
-  // by design). Report-only, with the exact fix in plain language above.
-};
+// Check 4 (RETIRED 2026-08-14, full OpenClaw channel cutover): personal-
+// channel / iMessage readiness used to reuse the staged probe on
+// ImsgIMessagePersonalChannelRuntime. That runtime, its bridge client, and
+// the whole first-party local-bridge family are deleted in the same change
+// (imessage_personal is now carried by the OpenClaw transport as
+// openclaw_imessage) — there is nothing left for this check to probe.
+// Removed rather than left to permanently report "skip", which is the same
+// "declared but never wired" shape CLAUDE.md warns about, just backwards: a
+// check that can never again observe anything other than absence.
 
 // ---------------------------------------------------------------------------
 // Check 5: supervisor presence. detect() first asks detectGatewaySupervisor()
@@ -404,7 +364,6 @@ export function buildDefaultGatewayDoctorChecks(): GatewayDoctorCheck[] {
     CLOUD_CONNECTION_CHECK,
     CAPABILITY_READINESS_CHECK,
     CLI_SUBSCRIPTION_CHECK,
-    PERSONAL_CHANNEL_IMESSAGE_CHECK,
     SUPERVISOR_PRESENCE_CHECK,
   ];
 }

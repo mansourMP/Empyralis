@@ -48,8 +48,12 @@ from server_modules import personal_channels_service, personal_channels_reposito
 
 GATEWAY_ID = "gw-scope-1"
 AGENT_ID = "agent-scope-1"
-CHANNEL_KEY = "signal_personal"
-PROVIDER = "signal_local_bridge"
+# signal_personal/signal_local_bridge (the first-party local-bridge
+# channel/provider) DELETED 2026-08-14 (full OpenClaw channel cutover);
+# openclaw_signal/openclaw is its live replacement and exercises the
+# identical scoped-write contract this file tests.
+CHANNEL_KEY = "openclaw_signal"
+PROVIDER = "openclaw"
 EXTERNAL_MESSAGE_ID = "sig-scope-1"
 
 _ALLOW_DISPATCH_DECISION = {

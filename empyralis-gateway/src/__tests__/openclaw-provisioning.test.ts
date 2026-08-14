@@ -476,9 +476,15 @@ test("channel shape table matches the pinned schema fixture, and finds drift whe
 test("plugin hook suppression is discovered from the schema, not assumed to be WhatsApp-only", () => {
   const schema = JSON.parse(fs.readFileSync(fixturePath(), "utf8"));
 
-  // None of the five transported channels declares pluginHooks today.
-  assert.deepEqual(resolveOpenClawPluginHookFlags(schema, [...OPENCLAW_TRANSPORT_CHANNEL_IDS]).enable, []);
-  // WhatsApp does, and would be handled the moment it is transported.
+  // 2026-08-14 full OpenClaw channel cutover: WhatsApp is now IN
+  // OPENCLAW_TRANSPORT_CHANNEL_IDS (OPENCLAW_CUT_OVER_CHANNEL_IDS covers it),
+  // so the real transported set now surfaces exactly the one plugin hook
+  // WhatsApp's schema declares — this is the discovery mechanism actually
+  // doing its job on the real active set, not a regression.
+  assert.deepEqual(resolveOpenClawPluginHookFlags(schema, [...OPENCLAW_TRANSPORT_CHANNEL_IDS]).enable, [
+    { channelId: "whatsapp", flag: "messageReceived" },
+  ]);
+  // WhatsApp does, and is handled now that it is transported.
   assert.deepEqual(resolveOpenClawPluginHookFlags(schema, ["whatsapp"]).enable, [
     { channelId: "whatsapp", flag: "messageReceived" },
   ]);
@@ -603,8 +609,13 @@ test("policy payload parsing is fail-closed on every axis", () => {
       .errors.length,
     1,
   );
+  // "discord" is a real OpenClaw channel id but NOT a transported one — it
+  // stays first-party (see OPENCLAW_CUT_OVER_CHANNEL_IDS's own comment on
+  // why Studio business-connector channels were excluded from the 2026-08-14
+  // cutover) — so this is still the right example of "channel not in
+  // OPENCLAW_TRANSPORT_CHANNEL_IDS", now that telegram itself IS transported.
   assert.equal(
-    parseChannelPolicies([{ channel_id: "telegram", dm_policy: { mode: "open" }, group_policy: { mode: "open" } }])
+    parseChannelPolicies([{ channel_id: "discord", dm_policy: { mode: "open" }, group_policy: { mode: "open" } }])
       .errors.length,
     1,
   );

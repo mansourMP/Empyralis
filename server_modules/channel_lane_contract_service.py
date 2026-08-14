@@ -11,42 +11,21 @@ DIRECT_CHAT_MEMORY_SURFACE = "direct_chat"
 
 PERSONAL_ROUTE_PREFIX = "/personal-channels/"
 
+# 2026-08-14 full OpenClaw channel cutover: whatsapp_personal, telegram_personal,
+# signal_personal, imessage_personal and wechat_personal are DELETED from this
+# dict, not merely superseded — their first-party gateway runtimes (Baileys,
+# gramjs, and the local-bridge family) are deleted in the same change, so
+# leaving these keys declared here would be exactly the "declared but nothing
+# serves it" dishonesty CLAUDE.md warns about: a customer would see a setup
+# panel for a channel that can never again connect. The live replacements
+# (openclaw_whatsapp, openclaw_telegram, openclaw_signal, openclaw_imessage,
+# openclaw_openclaw-weixin) are added below via OPENCLAW_PERSONAL_CHANNEL_SPECS,
+# derived from OPENCLAW_CUT_OVER_CHANNEL_IDS — see openclaw_channel_registry.py.
+# discord_personal stays: it is a cloud_connector (bot-token) channel with no
+# Agent Computer runtime at all, not a platform OpenClaw's hardware-bound
+# transport would improve on — see that module's own comment on why discord/
+# slack/sms were deliberately excluded from the cutover.
 PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
-    "whatsapp_personal": {
-        "provider": "whatsapp_baileys",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
-        "stage": "live",
-        "live_capable": "true",
-    },
-    "telegram_personal": {
-        "provider": "telegram_gramjs",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
-        "stage": "live",
-        "live_capable": "true",
-    },
-    "signal_personal": {
-        "provider": "signal_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
-        "stage": "live",
-        "live_capable": "true",
-    },
-    "imessage_personal": {
-        "provider": "bluebubbles_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
-        "stage": "live",
-        "live_capable": "true",
-    },
-    "wechat_personal": {
-        "provider": "wechat_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
-        "stage": "live",
-        "live_capable": "true",
-    },
     "discord_personal": {
         "provider": "discord_bot",
         "runtime_lane": "cloud_connector",  # Uses bot token, not user-account session (Discord ToS prohibits self-bots)
@@ -85,75 +64,11 @@ OPENCLAW_TRANSPORT_PROVIDER = "openclaw"
 # — the personal lane and the Studio lane — and the Studio one is defined after
 # this point. Search for OPENCLAW_TRANSPORT_OWNERSHIP.
 
+# 2026-08-14 full OpenClaw channel cutover: telegram_personal, whatsapp_personal,
+# signal_personal, imessage_personal and wechat_personal are DELETED (not
+# superseded-and-kept) — see PERSONAL_CHANNEL_SPECS's comment above for why.
+# discord_personal stays for the same reason it stays there.
 PERSONAL_CHANNEL_ROADMAP: tuple[Dict[str, str], ...] = (
-    {
-        "channel_key": "telegram_personal",
-        "label": "Telegram",
-        "provider": "telegram_gramjs",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "stage": "live",
-        "live_capable": "true",
-        "family": "personal",
-        "session_owner": "paired_gateway",
-    },
-    {
-        "channel_key": "whatsapp_personal",
-        "label": "WhatsApp",
-        "provider": "whatsapp_baileys",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "stage": "live",
-        "live_capable": "true",
-        "family": "personal",
-        "session_owner": "paired_gateway",
-    },
-    {
-        "channel_key": "signal_personal",
-        "label": "Signal",
-        "provider": "signal_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        # Live local-bridge channel, same family as iMessage/WeChat below —
-        # matches PERSONAL_CHANNEL_SPECS's signal_personal entry above and
-        # CHANNEL_PLATFORM_CATALOG's signal_personal entry further down.
-        # Previously "planned"/false here (while iMessage/WeChat were
-        # "live"/true) made get_gateway_personal_channel_surfaces compute
-        # live_capable=False for Signal even though the backend handler
-        # (_handle_local_bridge_gateway_channel_inbound), the gateway
-        # runtime (LocalBridgePersonalChannelRuntime), and the signal-cli
-        # bridge were all already fully wired — the same as iMessage/WeChat.
-        # A deployment that hasn't configured EMPYRALIS_SIGNAL_BRIDGE_URL
-        # still honestly reads "not configured" via the bridge health check,
-        # not this catalog flag.
-        "stage": "live",
-        "live_capable": "true",
-        "family": "personal",
-        "session_owner": "paired_gateway",
-    },
-    {
-        "channel_key": "imessage_personal",
-        "label": "iMessage",
-        "provider": "bluebubbles_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        # Full-account gateway channel like Telegram/WhatsApp: owner-connectable
-        # and launch-allowed, via a real Mac running BlueBubbles Server as this
-        # agent's gateway. There is no cloud path — a Mac is required.
-        "stage": "live",
-        "live_capable": "true",
-        "family": "personal",
-        "session_owner": "paired_gateway",
-    },
-    {
-        "channel_key": "wechat_personal",
-        "label": "WeChat",
-        "provider": "wechat_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        # Full-account gateway channel like Telegram/WhatsApp: owner-connectable
-        # and launch-allowed, via a real WeChat session on this agent's gateway.
-        # WeChat has no official API, so this bridge is best-effort.
-        "stage": "live",
-        "live_capable": "true",
-        "family": "personal",
-        "session_owner": "paired_gateway",
-    },
     {
         "channel_key": "discord_personal",
         "label": "Discord",
@@ -735,40 +650,11 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "surface_support": ["studio"],
         "capabilities": ["comments", "direct_messages"],
     },
-    {
-        "channel_key": "telegram_personal",
-        "binding_channel_key": "telegram_personal",
-        "label": "Telegram Personal through Agent Computer",
-        "provider": "telegram_gramjs",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "category": "personal_runtime",
-        "stage": "live",
-        "status": "agent_computer_only",
-        "live_capable": True,
-        "launch_allowed": False,
-        "requires_agent_computer": True,
-        "account_provider": "telegram_personal",
-        "connector_id": None,
-        "surface_support": ["sage"],
-        "capabilities": ["inbound", "outbound", "personal_session"],
-    },
-    {
-        "channel_key": "whatsapp_personal",
-        "binding_channel_key": "whatsapp_personal",
-        "label": "WhatsApp Personal through Agent Computer",
-        "provider": "whatsapp_baileys",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "category": "personal_runtime",
-        "stage": "live",
-        "status": "agent_computer_only",
-        "live_capable": True,
-        "launch_allowed": False,
-        "requires_agent_computer": True,
-        "account_provider": "whatsapp_personal",
-        "connector_id": None,
-        "surface_support": ["sage"],
-        "capabilities": ["inbound", "outbound", "personal_session"],
-    },
+    # telegram_personal (gramjs) and whatsapp_personal (Baileys) DELETED
+    # 2026-08-14 (full OpenClaw channel cutover) — see PERSONAL_CHANNEL_SPECS's
+    # comment above. The live replacements are openclaw_telegram/
+    # openclaw_whatsapp, added to this same tuple below via
+    # OPENCLAW_CHANNEL_PLATFORM_CATALOG.
     {
         "channel_key": "discord_personal",
         "binding_channel_key": "discord_personal",
@@ -788,73 +674,12 @@ CHANNEL_PLATFORM_CATALOG: tuple[Dict[str, Any], ...] = (
         "surface_support": ["sage"],
         "capabilities": ["inbound", "outbound", "personal_dm"],
     },
-    {
-        "channel_key": "signal_personal",
-        "binding_channel_key": "signal_personal",
-        "label": "Signal Personal through Agent Computer",
-        "provider": "signal_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "category": "personal_runtime",
-        "stage": "live",
-        # "agent_computer_bridge" (not "agent_computer_only") — the same
-        # honest distinction from Telegram/WhatsApp that iMessage/WeChat
-        # below already use: this needs a real signal-cli bridge running on
-        # hardware the user controls, not a cloud path.
-        "status": "agent_computer_bridge",
-        # live_capable/launch_allowed were False here (iMessage/WeChat below
-        # are both True) — that mismatch, not any real capability gap, is
-        # what made Signal disappear from get_gateway_personal_channel_surfaces
-        # and any other reader of this catalog. The signal-cli bridge
-        # (empyralis-gateway/src/bridges/signal-cli-bridge.ts) and its
-        # gateway runtime wiring are as real as BlueBubbles's/WeChat's.
-        "live_capable": True,
-        "launch_allowed": True,
-        "requires_agent_computer": True,
-        "account_provider": "signal_personal",
-        "connector_id": None,
-        "surface_support": ["sage"],
-        "capabilities": ["manifest", "health", "inbound", "outbound", "text"],
-    },
-    {
-        "channel_key": "imessage_personal",
-        "binding_channel_key": "imessage_personal",
-        "label": "iMessage Personal through Agent Computer",
-        "provider": "bluebubbles_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "category": "personal_runtime",
-        "stage": "live",
-        # "agent_computer_bridge" (not "agent_computer_only") is the honest
-        # distinction from Telegram/WhatsApp: this needs a real Mac running
-        # BlueBubbles Server as the bridge — there is no cloud path.
-        "status": "agent_computer_bridge",
-        "live_capable": True,
-        "launch_allowed": True,
-        "requires_agent_computer": True,
-        "account_provider": "imessage_personal",
-        "connector_id": None,
-        "surface_support": ["sage"],
-        "capabilities": ["manifest", "health", "inbound", "outbound", "text"],
-    },
-    {
-        "channel_key": "wechat_personal",
-        "binding_channel_key": "wechat_personal",
-        "label": "WeChat Personal through Agent Computer",
-        "provider": "wechat_local_bridge",
-        "runtime_lane": PERSONAL_GATEWAY_RUNTIME_LANE,
-        "category": "personal_runtime",
-        "stage": "live",
-        # "agent_computer_bridge" (not "agent_computer_only") is the honest
-        # distinction from Telegram/WhatsApp: WeChat has no official API, so
-        # this runs through a best-effort local bridge on the agent's gateway.
-        "status": "agent_computer_bridge",
-        "live_capable": True,
-        "launch_allowed": True,
-        "requires_agent_computer": True,
-        "account_provider": "wechat_personal",
-        "connector_id": None,
-        "surface_support": ["sage"],
-        "capabilities": ["manifest", "health", "inbound", "outbound", "text"],
-    },
+    # signal_personal, imessage_personal, wechat_personal (the first-party
+    # local-bridge family) DELETED 2026-08-14 (full OpenClaw channel
+    # cutover) — see PERSONAL_CHANNEL_SPECS's comment above. The live
+    # replacements are openclaw_signal/openclaw_imessage/openclaw_openclaw-
+    # weixin, added to this same tuple below via
+    # OPENCLAW_CHANNEL_PLATFORM_CATALOG.
 )
 
 

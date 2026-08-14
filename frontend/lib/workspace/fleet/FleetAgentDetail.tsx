@@ -1720,7 +1720,6 @@ function ChatTab({
 
 // ── Channels ────────────────────────────────────────────────────────────────
 
-import { IMessageSetupPanel } from "./IMessageSetupPanel";
 import {
   CredentialForm,
   GroupAllowlistForm,
@@ -1741,12 +1740,14 @@ import {
   type ChannelDoor,
 } from "./channel-doors";
 import { compareChannelsByPopularity } from "./channel-popularity";
-import { PersonalChannelConnectPanel } from "./PersonalChannelConnectPanel";
+// PersonalChannelConnectPanel and IMessageSetupPanel imports DELETED
+// 2026-08-14 (full OpenClaw channel cutover) — their only call sites (the
+// Telegram full_account door, WhatsApp/Signal/iMessage's first-party cards)
+// are deleted in the same change; see channel-doors.ts.
 import {
   isPersonalChannelStatusActive,
   useGatewayPersonalChannelSurfaces,
   usePersonalChannelStatus,
-  type GatewayPersonalChannelSurfaceItem,
   type PersonalChannelKey,
 } from "./personal-channel-pairing";
 
@@ -1763,76 +1764,11 @@ import {
 // pure data + pure functions precisely so channel-doors.test.ts can drive the
 // REAL doors instead of re-typing their strings as pinned literals.
 
-// Local-bridge channels (Signal and iMessage today; WeChat has no bridge to
-// check at all) have no in-app pairing step — the bridge runs on hardware
-// the user configures themselves. This shows the REAL health snapshot for
-// one channel_key on one gateway; there is no client-invented "connected"
-// state, and no button that claims to "connect" anything.
-//
-// iMessage is the one exception as of the imsg-based setup panel
-// (IMessageSetupPanel.tsx) — it has its own no-gateway copy inline, since
-// unlike Signal/WeChat its setup (installing imsg, checking Full Disk
-// Access) genuinely does happen in-app once a gateway exists.
-const LOCAL_BRIDGE_NO_GATEWAY_HINT: Record<string, string> = {
-  signal_personal: "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at a signal-cli bridge.",
-};
-
-//
-// TAKES THE SURFACES AS PROPS. IT DOES NOT FETCH.
-// ----------------------------------------------
-// This used to call useGatewayPersonalChannelSurfaces itself, which meant a
-// fresh request with `loading: true` on every MOUNT — i.e. every time the
-// customer clicked the Signal card. Against an unreachable box that is a 2-3
-// second spinner between the click and anything appearing, while a transported
-// card opened instantly on state the tab already had. ChannelsTab now holds
-// the one subscription for the whole tab and hands the result down, so a card
-// opens with what is already known and the shared poll refreshes underneath.
-// The honest "state unknown" rendering is untouched: an unreachable box still
-// produces no item, and that still reads as not connected with the reason.
-function LocalBridgeChannelStatus({
-  channelKey,
-  gatewayId,
-  items,
-  loading,
-}: {
-  channelKey: string;
-  gatewayId: string | null;
-  items: GatewayPersonalChannelSurfaceItem[];
-  loading: boolean;
-}) {
-  if (!gatewayId) {
-    return (
-      <p className="fleet-channel-expand-hint">
-        {LOCAL_BRIDGE_NO_GATEWAY_HINT[channelKey] || "This agent has no computer of its own yet — set one up on the Hardware tab first, then point it at this channel's local bridge."}
-      </p>
-    );
-  }
-  if (loading) {
-    // A bare 14px spinner reserved no height, so the panel visibly grew the
-    // instant the fetch resolved into either `.fleet-channel-expand-success`
-    // (icon+1 line) or up to three stacked `.fleet-channel-expand-hint`
-    // lines — which of those it resolves to isn't knowable ahead of time, so
-    // this reserves ONE hint-shaped line, the minimum either real state
-    // renders (the success state is also one line tall).
-    return <p className="fleet-channel-expand-hint"><span className="fleet-skeleton-bar" style={{ width: "70%", height: 13 }} /></p>;
-  }
-
-  const item = items.find((i) => i.channel_key === channelKey) || null;
-  if (item?.connected) {
-    return (
-      <div className="fleet-channel-expand-success">
-        <Check size={16} strokeWidth={2} /> Connected{item.connected_identity ? ` — ${item.connected_identity}` : ""}
-      </div>
-    );
-  }
-  return (
-    <>
-      <p className="fleet-channel-expand-hint">{item?.detail || "This channel runs through a local bridge on this agent's own gateway."}</p>
-      <p className="fleet-channel-expand-hint">{item?.next_step || "Configure the bridge on this agent's gateway, then this status updates on its own."}</p>
-      <p className="fleet-channel-expand-hint" style={{ color: "var(--text-tertiary)" }}>{item?.status_label || "Not connected yet"}</p>
-    </>
-  );
-}
+// LOCAL_BRIDGE_NO_GATEWAY_HINT and LocalBridgeChannelStatus (the Signal
+// first-party health-check panel) DELETED 2026-08-14 (full OpenClaw channel
+// cutover) — signal_personal's first-party runtime is gone, and
+// openclaw_signal's status now renders through the generic OpenClaw channel
+// panel (OpenClawChannelsPanel.tsx / ChannelCardPanel), not this one-off.
 
 /** The door that was chosen, kept on screen while its setup runs.
  *
@@ -1932,13 +1868,12 @@ export function ChannelsTab({
   // transport is structurally box-only, so a cloud-only agent has nothing here
   // to show, not a spinner that never resolves.
   const openclaw = useOpenClawChannelSetup(agentGatewayId, agentId);
-  // ONE subscription to the local-bridge surfaces for the whole tab, started
-  // when the tab opens rather than when a card is clicked. Every card that
-  // needs it reads from here (LocalBridgeChannelStatus takes it as props;
-  // IMessageSetupPanel's own call now hits the same shared store), so opening
-  // a first-party channel costs no request and shows no spinner — the fix for
-  // "clicking Signal takes 2-3 seconds while a transported card is instant".
-  const localBridge = useGatewayPersonalChannelSurfaces(agentGatewayId);
+  // The shared local-bridge surfaces subscription (localBridge) that used to
+  // live here — read by LocalBridgeChannelStatus and IMessageSetupPanel —
+  // was deleted 2026-08-14 (full OpenClaw channel cutover) along with both
+  // of those components; nothing in this file needs
+  // useGatewayPersonalChannelSurfaces a second time (openclaw's own call
+  // above already covers the transported grid).
   // Which transported PLATFORM's panel is open, held as its base channel_key
   // (not the entry object) so an open panel re-reads the LIVE row after a
   // provision or a credential save instead of showing a snapshot from click
@@ -3052,64 +2987,17 @@ export function ChannelsTab({
                 </div>
               )}
 
-              {/* Telegram / WhatsApp: full-account (real MTProto / Baileys session),
-                   bound to this agent's own gateway via agentGatewayId — not
-                   Sage's workspace-wide Connect tab. */}
-              {activePlatform.id === "sage_telegram_hosted" && setupDoorKey === "full_account" && (
-                <div style={{ marginTop: 12 }}>
-                  <PersonalChannelConnectPanel
-                    workspaceId={workspaceId}
-                    channelKey="telegram_personal"
-                    label="Telegram"
-                    agentGatewayId={agentGatewayId}
-                    agentId={agentId}
-                    onConnected={handleChannelsChanged}
-                    onDone={() => setExpanded(null)}
-                  />
-                </div>
-              )}
-              {activePlatform.id === "whatsapp_personal" && setupDoorKey === "full_account" && (
-                <div style={{ marginTop: 12 }}>
-                  <PersonalChannelConnectPanel
-                    workspaceId={workspaceId}
-                    channelKey="whatsapp_personal"
-                    label="WhatsApp"
-                    agentGatewayId={agentGatewayId}
-                    agentId={agentId}
-                    onConnected={handleChannelsChanged}
-                    onDone={() => setExpanded(null)}
-                  />
-                </div>
-              )}
-
-              {/* Signal: same local-bridge shape as iMessage — no phone/code/QR
-                   step of its own, the bridge (signal-cli) lives on hardware the
-                   user runs themselves, configured via env vars on this agent's
-                   gateway. The only honest thing to show is real bridge health,
-                   not a fake "connect" button. */}
-              {activePlatform.id === "signal_personal" && setupDoorKey === "full_account" && (
-                <div style={{ marginTop: 12 }}>
-                  <LocalBridgeChannelStatus
-                    channelKey="signal_personal"
-                    gatewayId={agentGatewayId}
-                    items={localBridge.items}
-                    loading={localBridge.loading}
-                  />
-                </div>
-              )}
-
-              {/* iMessage: unlike Signal/WeChat, setup genuinely happens in-app —
-                   imsg runs on this agent's own gateway Mac, and the gateway's
-                   layered probe (binary / rpc / Full Disk Access / private API)
-                   is surfaced live with inline fixes and a Re-check button. The
-                   one truly manual step is Full Disk Access, which macOS will
-                   not let any process grant to itself — see
-                   IMessageSetupPanel.tsx. */}
-              {activePlatform.id === "imessage_personal" && setupDoorKey === "full_account" && (
-                <div style={{ marginTop: 12 }}>
-                  <IMessageSetupPanel gatewayId={agentGatewayId} />
-                </div>
-              )}
+              {/* Telegram's "full_account" door, WhatsApp/Signal/iMessage's
+                   first-party cards, and the panels they opened
+                   (PersonalChannelConnectPanel's telegram_personal/
+                   whatsapp_personal branches, LocalBridgeChannelStatus for
+                   signal_personal, IMessageSetupPanel) were all DELETED
+                   2026-08-14 (full OpenClaw channel cutover) along with the
+                   gramjs/Baileys/local-bridge runtimes they configured.
+                   WhatsApp/Signal/iMessage now appear only in the derived
+                   OpenClaw grid; Telegram is single-door (Chatbot only), so
+                   this activePlatform/setupDoorKey combination can no longer
+                   occur — see channel-doors.ts's CHANNEL_DOORS comment. */}
 
               {/* WeChat Official Account / WeCom: BYO AppID+AppSecret (or
                    CorpID+CorpSecret+AgentId) — bidirectional, unlike the

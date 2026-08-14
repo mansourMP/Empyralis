@@ -145,9 +145,13 @@ class OpenClawLaneContractTests(unittest.TestCase):
     def test_an_unlisted_openclaw_channel_fails_loudly(self) -> None:
         # A channel Empyralis already runs first-party must NOT silently
         # gain a second, ungated lane — it waits for its step-6 cut-over.
+        # openclaw_telegram was this example until 2026-08-14's full cutover
+        # moved it to the active/listed side; openclaw_discord is still
+        # superseded (Discord stays first-party — see
+        # openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS's comment).
         with self.assertRaises(ValueError):
             channel_lane_contract_service.assert_personal_gateway_channel(
-                "openclaw_telegram", OPENCLAW_PROVIDER
+                "openclaw_discord", OPENCLAW_PROVIDER
             )
 
     def test_a_mismatched_provider_fails_loudly(self) -> None:
@@ -167,9 +171,23 @@ class OpenClawLaneContractTests(unittest.TestCase):
         self.assertIsInstance(handler, service._OpenClawPersonalChannelHandler)
         self.assertEqual(handler.channel_key, OPENCLAW_CHANNEL_KEY)
         self.assertEqual(handler.provider, OPENCLAW_PROVIDER)
-        # And a real local-bridge channel still gets the plain handler.
-        signal_handler = service._handler_registry.get("signal_personal")
-        self.assertNotIsInstance(signal_handler, service._OpenClawPersonalChannelHandler)
+        # 2026-08-14 full OpenClaw channel cutover: signal_personal (the
+        # first-party local-bridge channel that used to get the plain
+        # _LocalBridgePersonalChannelHandler here) is deleted — every key in
+        # LOCAL_BRIDGE_PERSONAL_CHANNELS is now an OpenClaw channel, so every
+        # handler the registry loop produces from it IS an
+        # _OpenClawPersonalChannelHandler. Asserted for the platform this
+        # test used to single out (openclaw_signal, signal's replacement)
+        # and for the whole set, so the "no first-party local-bridge
+        # handlers remain" fact is structural, not implied by one example.
+        signal_handler = service._handler_registry.get("openclaw_signal")
+        self.assertIsInstance(signal_handler, service._OpenClawPersonalChannelHandler)
+        for channel_key in service.LOCAL_BRIDGE_PERSONAL_CHANNELS:
+            self.assertIsInstance(
+                service._handler_registry.get(channel_key),
+                service._OpenClawPersonalChannelHandler,
+                f"{channel_key} should be OpenClaw-handled post-cutover",
+            )
 
     def test_the_gate_two_three_write_lever_covers_openclaw_channels(self) -> None:
         """The only thing that can ever open this path is the owner's own

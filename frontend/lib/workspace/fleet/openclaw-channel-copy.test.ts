@@ -549,33 +549,32 @@ assert((channelDoorHardwareNote("missing") || "").trim().length > 0, "the missin
 assert((channelDoorHardwareNote("ready") || "").trim().length > 0, "the satisfied-hardware note says something");
 assert(channelDoorHardwareNote("not-required") === null, "a door needing no computer renders no hardware note");
 
-// Telegram is the one channel with a genuine two-door choice today, and the
-// two doors carry OPPOSITE consequences — that asymmetry is the product
-// fact the picker exists to show, and the reason the founder's own account
-// was previously banned. Asserted structurally (the tones differ, one names
-// a ban) rather than as a pinned sentence, so rewording the copy is free
-// and dropping the fact is not.
-const telegramDoors: ChannelDoor[] = planChannelDoors("sage_telegram_hosted").doors;
-assert(telegramDoors.length >= 2, "Telegram has a real two-door choice");
-assert(
-  new Set(telegramDoors.map((d) => d.consequence?.tone)).size === telegramDoors.length,
-  "Telegram's doors must differ in consequence TONE — two doors reading the same way is not a choice",
-);
-const telegramFullAccount = telegramDoors.find((d) => d.key === "full_account");
-assert(!!telegramFullAccount?.requiresHardware, "Telegram's full-account door declares its hardware requirement");
-assert(
-  /ban/i.test(telegramFullAccount?.consequence?.text || ""),
-  "Telegram's full-account door names the ban risk ON THE DOOR — never in a warning after a code has been sent",
-);
-assert(
-  telegramFullAccount?.consequence?.tone === "risk",
-  "Telegram's full-account door is toned as a risk",
-);
+// 2026-08-14 full OpenClaw channel cutover: Telegram's "full_account" door
+// (real MTProto/gramjs session — the one that got the founder's own account
+// banned) is DELETED along with the first-party gramjs runtime it opened.
+// OpenClaw's pinned build has no personal-account credential shape for
+// Telegram at all, so bot-only is now the ONLY way in — not a choice. The
+// picker is gone with it: one real door means planDoors() resolves this
+// card to "direct" mode, and the honest statement that Telegram runs as a
+// bot here lives in the remaining door's own body text, asserted below.
+const telegramDoorPlan = planChannelDoors("sage_telegram_hosted");
+const telegramDoors: ChannelDoor[] = telegramDoorPlan.doors;
+assert(telegramDoorPlan.mode === "direct", "Telegram is single-door (direct mode) now that full_account is gone");
+assert(telegramDoors.length === 1, "Telegram has exactly one real door left");
 const telegramChatbot = telegramDoors.find((d) => d.key === "byo_bot");
+assert(!!telegramChatbot, "Telegram's remaining door is the chatbot");
 assert(telegramChatbot?.consequence?.tone === "safe", "Telegram's chatbot door is toned as the safe one");
 assert(
   !telegramChatbot?.requiresHardware,
-  "Telegram's chatbot door needs no computer — that difference is half the choice",
+  "Telegram's chatbot door needs no computer",
+);
+assert(
+  /runs as a Telegram bot/i.test(telegramChatbot?.body || ""),
+  "Telegram's door body plainly states it runs as a bot, not a personal account",
+);
+assert(
+  !telegramDoors.some((d) => d.key === "full_account"),
+  "Telegram's full_account door must not exist — it would route to the deleted gramjs runtime",
 );
 
 // Every door that signs in AS the owner must name its consequence. This is

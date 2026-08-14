@@ -124,95 +124,25 @@ def test_blank_agent_id_is_a_no_op_matching_the_pre_existing_unscoped_path():
     )
 
 
-# ── A continued: the four personal-channel write entrypoints ──────────────
+# ── A continued (WhatsApp/Telegram/iMessage-specific write entrypoints) ────
+#
+# configure_whatsapp_personal_gateway, configure_telegram_personal_gateway,
+# recheck_imessage_personal_gateway and install_imessage_imsg_gateway — the
+# four functions this section used to test the placement guard through —
+# were DELETED 2026-08-14 (full OpenClaw channel cutover) along with the
+# Baileys/gramjs/imsg-RPC runtimes they configured. WhatsApp, Telegram and
+# iMessage are now OpenClaw-transported, with no first-party Empyralis
+# write entrypoint of their own — configuration happens inside OpenClaw
+# itself. The placement guard these tests exercised, assert_agent_placed_on_
+# gateway, is still tested directly above (section A) and through the path
+# every personal channel now actually configures through,
+# provision_openclaw_gateway, below.
 
 
 def _registration(**overrides) -> Dict[str, Any]:
     base = {"gateway_id": "gw-2", "tenant_id": "t", "workspace_id": "w", "user_id": "u"}
     base.update(overrides)
     return base
-
-
-def test_configure_whatsapp_refuses_on_the_wrong_gateway_and_never_dispatches():
-    exploding = AsyncMock(side_effect=AssertionError("must not reach the gateway on a placement mismatch"))
-    with (
-        _patch_bundle("agent-a", preferred_gateway_id="gw-1"),
-        patch.object(personal_channels_service.gateway_execution_service, "execute_tool_via_gateway", exploding),
-    ):
-        with pytest.raises(personal_channels_service.AgentNotPlacedOnGatewayError):
-            _run(
-                personal_channels_service.configure_whatsapp_personal_gateway(
-                    gateway_id="gw-2", registration=_registration(), phone_number="15550000000", agent_id="agent-a",
-                )
-            )
-    exploding.assert_not_awaited()
-
-
-def test_configure_telegram_refuses_on_the_wrong_gateway_and_never_dispatches():
-    exploding = AsyncMock(side_effect=AssertionError("must not reach the gateway on a placement mismatch"))
-    with (
-        _patch_bundle("agent-a", preferred_gateway_id="gw-1"),
-        patch.object(personal_channels_service.gateway_execution_service, "execute_tool_via_gateway", exploding),
-    ):
-        with pytest.raises(personal_channels_service.AgentNotPlacedOnGatewayError):
-            _run(
-                personal_channels_service.configure_telegram_personal_gateway(
-                    gateway_id="gw-2", registration=_registration(), api_id=1, api_hash="h", agent_id="agent-a",
-                )
-            )
-    exploding.assert_not_awaited()
-
-
-def test_recheck_imessage_refuses_on_the_wrong_gateway_and_never_dispatches():
-    exploding = AsyncMock(side_effect=AssertionError("must not reach the gateway on a placement mismatch"))
-    with (
-        _patch_bundle("agent-a", preferred_gateway_id="gw-1"),
-        patch.object(personal_channels_service.gateway_execution_service, "execute_tool_via_gateway", exploding),
-    ):
-        with pytest.raises(personal_channels_service.AgentNotPlacedOnGatewayError):
-            _run(
-                personal_channels_service.recheck_imessage_personal_gateway(
-                    gateway_id="gw-2", registration=_registration(), agent_id="agent-a",
-                )
-            )
-    exploding.assert_not_awaited()
-
-
-def test_install_imessage_refuses_on_the_wrong_gateway_and_never_dispatches():
-    exploding = AsyncMock(side_effect=AssertionError("must not reach the gateway on a placement mismatch"))
-    with (
-        _patch_bundle("agent-a", preferred_gateway_id="gw-1"),
-        patch.object(personal_channels_service.gateway_execution_service, "execute_tool_via_gateway", exploding),
-    ):
-        with pytest.raises(personal_channels_service.AgentNotPlacedOnGatewayError):
-            _run(
-                personal_channels_service.install_imessage_imsg_gateway(
-                    gateway_id="gw-2", registration=_registration(), agent_id="agent-a",
-                )
-            )
-    exploding.assert_not_awaited()
-
-
-def test_configure_whatsapp_succeeds_when_placement_matches():
-    """The positive case, proven end to end: same agent, same gateway as its
-    own preferred_gateway_id -- the write proceeds exactly as before this
-    guard existed."""
-
-    async def fake_execute(**kwargs):
-        return {"result": {"status": "connecting"}}
-
-    with (
-        _patch_bundle("agent-a", preferred_gateway_id="gw-1"),
-        patch.object(personal_channels_service.gateway_execution_service, "execute_tool_via_gateway", fake_execute),
-        patch.object(personal_channels_service, "_enforce_personal_gateway_config_decision", return_value=None),
-    ):
-        result = _run(
-            personal_channels_service.configure_whatsapp_personal_gateway(
-                gateway_id="gw-1", registration=_registration(gateway_id="gw-1"),
-                phone_number="15550000000", agent_id="agent-a",
-            )
-        )
-    assert result["gateway_id"] == "gw-1"
 
 
 # ── A continued: the OpenClaw provisioning entrypoint ──────────────────────
@@ -323,77 +253,34 @@ def test_two_agents_sharing_one_gateway_can_each_provision_their_own_channel():
 # ── C. moving hardware acts on the OLD box's channels, honestly ───────────
 
 
-def test_handle_agent_hardware_relocated_disconnects_a_live_whatsapp_claim_on_the_old_box():
-    disconnect_called: Dict[str, Any] = {}
-
-    async def fake_disconnect(*, gateway_id, registration, agent_id):
-        disconnect_called["gateway_id"] = gateway_id
-        disconnect_called["agent_id"] = agent_id
-        return {"status": "disconnected"}
-
-    with (
-        patch.object(
-            personal_channels_service.gateway_state_repository,
-            "get_gateway_registration",
-            return_value={"gateway_id": "gw-old", "tenant_id": "t", "workspace_id": "w"},
-        ),
-        patch.object(
-            personal_channels_service,
-            "_personal_channel_state",
-            side_effect=lambda gw, ck: {"status": "connected"} if ck == "whatsapp_personal" else None,
-        ),
-        patch.object(
-            personal_channels_service,
-            "_resolve_agent_id_for_inbound",
-            side_effect=lambda gw, ck: "agent-a" if ck == "whatsapp_personal" else "",
-        ),
-        patch.object(personal_channels_service, "disconnect_whatsapp_personal_gateway", fake_disconnect),
-        patch.object(
-            personal_channels_service,
-            "agents_sharing_gateway",
-            new=AsyncMock(return_value=[]),
-        ),
-    ):
-        report = _run(
-            personal_channels_service.handle_agent_hardware_relocated(
-                tenant_id="t", workspace_id="w", agent_id="agent-a",
-                old_gateway_id="gw-old", new_gateway_id="gw-new",
-            )
-        )
-    assert disconnect_called == {"gateway_id": "gw-old", "agent_id": "agent-a"}
-    assert "whatsapp_personal" in report["released_channels"]
-    assert report["old_gateway_id"] == "gw-old"
-    assert report["new_gateway_id"] == "gw-new"
-    assert report["notes"], "a relocation must always say what it did, never return silently"
+# test_handle_agent_hardware_relocated_disconnects_a_live_whatsapp_claim_on_
+# the_old_box DELETED 2026-08-14 (full OpenClaw channel cutover):
+# disconnect_whatsapp_personal_gateway and the WhatsApp/Telegram-specific
+# disconnect loop it tested inside handle_agent_hardware_relocated are both
+# gone — WhatsApp/Telegram are OpenClaw-transported now and fall entirely
+# under the re-provisioning path the tests below already cover.
 
 
 def test_handle_agent_hardware_relocated_never_touches_another_agents_session():
-    """The claimant on the old gateway is a DIFFERENT agent -- this must be
-    left alone. Proven by making disconnect explode if it's ever called."""
-    exploding = AsyncMock(side_effect=AssertionError("must not disconnect another agent's session"))
+    """The claimant on the old gateway is a DIFFERENT agent -- re-provisioning
+    must still list that other agent as remaining, never explode or drop
+    them."""
     with (
         patch.object(
             personal_channels_service.gateway_state_repository,
             "get_gateway_registration",
             return_value={"gateway_id": "gw-old", "tenant_id": "t", "workspace_id": "w"},
         ),
-        patch.object(
-            personal_channels_service,
-            "_personal_channel_state",
-            return_value={"status": "connected"},
-        ),
-        patch.object(
-            personal_channels_service,
-            "_resolve_agent_id_for_inbound",
-            return_value="agent-b",  # NOT the agent that moved
-        ),
-        patch.object(personal_channels_service, "disconnect_whatsapp_personal_gateway", exploding),
-        patch.object(personal_channels_service, "disconnect_telegram_personal_gateway", exploding),
         patch.object(
             personal_channels_service,
             "agents_sharing_gateway",
             new=AsyncMock(return_value=["agent-b"]),
         ),
+        patch.object(
+            openclaw_provisioning_service,
+            "provision_openclaw_gateway",
+            new=AsyncMock(return_value={"status": "provisioned"}),
+        ) as provision_mock,
     ):
         report = _run(
             personal_channels_service.handle_agent_hardware_relocated(
@@ -402,7 +289,8 @@ def test_handle_agent_hardware_relocated_never_touches_another_agents_session():
             )
         )
     assert report["released_channels"] == []
-    exploding.assert_not_awaited()
+    provision_mock.assert_awaited_once()
+    assert provision_mock.await_args.kwargs.get("agent_id") == "agent-b"
 
 
 def test_handle_agent_hardware_relocated_reprovisions_the_old_box_for_a_remaining_agent():

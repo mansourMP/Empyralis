@@ -256,40 +256,40 @@ class OpenClawOverlapResolutionTests(unittest.TestCase):
                 | {item["channel_key"] for item in channel_lane_contract_service.STUDIO_CHANNEL_ROADMAP},
             )
 
-    def test_the_seven_platforms_we_already_own_are_all_resolved(self) -> None:
-        """Named explicitly because the consequence of missing one is a
-        duplicate reply to a real person, and the derivation is only as good as
-        the alias map it leans on for the cases where the two products spell a
-        platform differently (`wechat` vs their `openclaw-weixin`)."""
+    def test_the_eight_platforms_we_overlap_resolve_correctly_post_cutover(self) -> None:
+        """2026-08-14 full OpenClaw channel cutover. Of the 8 platforms that
+        overlap an existing Empyralis implementation, 5 are now OpenClaw-owned
+        (their first-party runtime is deleted in the same change) and 3 stay
+        first-party because they are Studio business-connector channels with
+        no Agent Computer requirement today — see
+        openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS's own comment
+        for why forcing discord/slack/sms onto a hardware-bound transport
+        would be a regression, not an improvement."""
+        active = {channel.id for channel in channel_lane_contract_service.OPENCLAW_ACTIVE_CHANNELS}
         superseded = {
             channel.id for channel in channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS
         }
         self.assertEqual(
-            superseded,
-            {
-                "telegram",
-                "whatsapp",
-                "signal",
-                "imessage",
-                "slack",
-                "sms",
-                "openclaw-weixin",  # consumer WeChat; `wecom` is WeChat Work, a different product
-                "discord",  # Empyralis has discord_personal + discord_bot
-            },
+            active & {"telegram", "whatsapp", "signal", "imessage", "openclaw-weixin", "discord", "slack", "sms"},
+            {"telegram", "whatsapp", "signal", "imessage", "openclaw-weixin"},
         )
+        self.assertEqual(superseded, {"discord", "slack", "sms"})
         # WeChat Work is NOT the same product as consumer WeChat and is not
         # superseded by anything of ours.
-        self.assertIn("wecom", {c.id for c in channel_lane_contract_service.OPENCLAW_ACTIVE_CHANNELS})
+        self.assertIn("wecom", active)
 
-    def test_cut_over_list_is_empty_until_a_channel_is_proven_live(self) -> None:
+    def test_cut_over_list_names_exactly_the_five_platforms_retired_2026_08_14(self) -> None:
         """CHANNEL-ADOPTION-PLAN.md step 6: port -> verify -> swap -> delete.
 
-        Moving an id into OPENCLAW_CUT_OVER_CHANNEL_IDS is the swap. Nothing
-        has been driven with real credentials yet (step 5), so it is empty —
-        and if it stops being empty, the first-party implementation for that
-        platform must be gone in the same change.
+        Moving an id into OPENCLAW_CUT_OVER_CHANNEL_IDS is the swap, and the
+        first-party implementation for every id in it must be gone in the
+        same change — asserted here structurally (no first-party owner left)
+        rather than merely by the commit message.
         """
-        self.assertEqual(openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS, frozenset())
+        self.assertEqual(
+            openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS,
+            frozenset({"whatsapp", "signal", "imessage", "openclaw-weixin", "telegram"}),
+        )
         for channel_id in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS:
             owner = channel_lane_contract_service._OPENCLAW_FIRST_PARTY_OWNER_BY_ID.get(channel_id)
             self.assertIsNone(
