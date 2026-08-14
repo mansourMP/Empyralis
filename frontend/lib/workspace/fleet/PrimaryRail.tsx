@@ -6,11 +6,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSelectedLayoutSegment } from "next/navigation";
 import {
+  ArrowLeft,
   BarChart3,
-  Bot,
   ChevronRight,
-  FileText,
-  ListChecks,
   LogOut,
   Moon,
   PanelLeftClose,
@@ -18,7 +16,6 @@ import {
   Search,
   Settings,
   Sun,
-  type LucideIcon,
 } from "lucide-react";
 
 import { logout } from "@/lib/auth/auth-client";
@@ -26,8 +23,11 @@ import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
+import { AgentSigil, StatusDot } from "./fleet-indicators";
+import { rememberLastViewedAgent } from "./AgentsList";
 import { planAgentCountShape } from "./agent-count-shape";
 import { visibleRailItems } from "./primary-rail-nav";
+import { activeProjectIdFromPathname } from "./primary-rail-project-mode";
 import { FleetHelpButton } from "./FleetHelpButton";
 import { SageLauncher } from "./SageLauncher";
 import { CreditBalanceChip } from "./CreditBalanceChip";
@@ -54,20 +54,18 @@ import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
 
-// Finishing project-as-spine (CLAUDE.md, 2026-08-13 — "it should be
-// possible to open a project in the rail and reach its Tasks, Documents and
-// Agents from there"): the projects subnav above already listed every
-// project; it never went one level deeper into a project's own sections.
-// These three mirror ProjectDetailPage's own three views exactly (same
-// segments, same default-to-tasks rule) — only the currently ACTIVE
-// project shows them, nested directly beneath its own row, so opening a
-// project and reaching its work is one rail, not a rail plus a second tab
-// strip once you land.
-const PROJECT_SECTIONS: { key: "tasks" | "documents" | "agents"; label: string; segment: string; icon: LucideIcon }[] = [
-  { key: "tasks", label: "Tasks", segment: "tasks", icon: ListChecks },
-  { key: "documents", label: "Documents", segment: "documents", icon: FileText },
-  { key: "agents", label: "Agents", segment: "agents", icon: Bot },
-];
+// SUPERSEDED, 2026-08-14 — the rail used to nest an open project's own
+// Tasks/Documents/Agents SECTIONS beneath its row (see git history for the
+// PROJECT_SECTIONS table this replaced). The founder looked at that shipped
+// nesting against his own live screenshot and asked for two modes instead of
+// one rail that grows a branch: opening a project swaps the rail's nav
+// content entirely — Inbox and Projects gone, that project's AGENT NAMES in
+// their place, one Back control at the top. See
+// primary-rail-project-mode.ts for the pure boundary check
+// (activeProjectIdFromPathname) and the "project mode" render branch below.
+// Tasks/Documents are still reached exactly as before — the project's own
+// tab strip at its bare index (ProjectDetailPage) — this only changes what
+// the RAIL shows, never what the project page itself renders.
 
 // 4 decimals, matching AgentsList/billing/project detail's cost formatters —
 // real per-turn costs are fractions of a cent, and this line sits directly
@@ -287,23 +285,29 @@ export function PrimaryRail({
 
   const projectsExpanded = sections?.projects ?? true;
 
-  // "/w/{ws}/projects/{id}[/...]" → {id}, so the matching rail row highlights
-  // whether you're on the project's own page or one of its agents' pages.
-  const activeProjectId = useMemo(() => {
-    const m = pathname.match(/\/projects\/([^/]+)/);
+  // The rail's two-mode switch (2026-08-14) — see primary-rail-project-mode.ts.
+  // Any route under /projects/{id}, including a specific agent's own chat
+  // page, puts the rail in project mode.
+  const activeProjectId = useMemo(() => activeProjectIdFromPathname(pathname), [pathname]);
+  const projectMode = Boolean(activeProjectId);
+  const activeProject = useMemo(
+    () => projects.find((p) => p.id === activeProjectId) || null,
+    [projects, activeProjectId],
+  );
+  // The open project's own agents, in project mode — same filter
+  // agents/layout.tsx already applies for the compact ProjectAgentsRail this
+  // supersedes at the primary-rail level (that component's own doc comment
+  // now points here). `agents` above already excludes the Operator install.
+  const projectAgents = useMemo(
+    () => (activeProjectId ? agents.filter((a) => (a.project_id || "").trim() === activeProjectId) : []),
+    [agents, activeProjectId],
+  );
+  // "…/agents/{agentId}/…" → {agentId}, so the row for whichever agent's own
+  // page is open highlights — same match ProjectAgentsRail.tsx already uses.
+  const activeAgentId = useMemo(() => {
+    const m = pathname.match(/\/agents\/([^/]+)/);
     return m ? decodeURIComponent(m[1]) : null;
   }, [pathname]);
-  // Which of the active project's own three sections is open — mirrors
-  // ProjectDetailPage's own `view` derivation (pathname-matched, bare and
-  // /tasks both read as "tasks", its default landing view). Only meaningful
-  // for whichever project activeProjectId names; every other project's
-  // subitem just links to its own bare page, same as before this existed.
-  const activeProjectSection: "tasks" | "documents" | "agents" | null = useMemo(() => {
-    if (!activeProjectId) return null;
-    if (pathname.includes("/documents")) return "documents";
-    if (pathname.includes("/agents")) return "agents";
-    return "tasks";
-  }, [activeProjectId, pathname]);
   const segment = useSelectedLayoutSegment();
 
   // Footer pulse — the exact same status tones the Agents table itself
@@ -473,107 +477,143 @@ export function PrimaryRail({
         )}
       </div>
 
-      <nav className="fleet-rail-nav">
-        {railItems.map((item, idx) => {
-          const Icon = item.icon;
-          const active = segment === item.segment;
-          const focused = focusIdx === idx;
-          const isProjects = item.key === "projects";
-          const isInbox = item.key === "inbox";
-          const showProjectsSubnav = isProjects && !effectiveCollapsed && projects.length > 0;
-          const expanded = projectsExpanded;
-          const showToggle = showProjectsSubnav;
-          return (
-            <div key={item.key} className="fleet-rail-nav-group">
-              <div className="fleet-rail-item-row">
-                {/* Real <a href> (MAN-145 item 6), not a router.push() button —
-                    a plain left-click still behaves exactly like the old
-                    onClick (Next's Link does a client-side transition, same
-                    as router.push), but ⌘/Ctrl-click, middle-click, and
-                    right-click now get real browser behaviour for free,
-                    since they're native <a> semantics Link doesn't override.
-                    That's also why this is safe against the in-app tab strip
-                    (FleetTabs.tsx): its modifier-click interception is
-                    explicitly scoped to `.fleet-shell-main` and skips the
-                    rail on purpose ("the rail keeps native browser
-                    behaviour" — see FleetTabs.tsx's resolveHref) — there is
-                    nothing here for it to conflict with. */}
-                <Link
-                  href={railHrefFor(item)}
-                  title={effectiveCollapsed ? item.label : undefined}
-                  aria-label={item.label}
-                  aria-current={active ? "page" : undefined}
-                  className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
-                >
-                  <span className="fleet-rail-item-icon">
-                    <Icon size={RAIL_ICON} strokeWidth={1.75} />
-                  </span>
-                  {!effectiveCollapsed && <span className="fleet-rail-item-label">{item.label}</span>}
-                  {!effectiveCollapsed && isInbox && inboxUnreadCount > 0 ? (
-                    <span className="fleet-rail-item-count">{inboxUnreadLabel}</span>
-                  ) : !effectiveCollapsed ? (
-                    <kbd className="fleet-rail-item-chord" aria-hidden="true">G {item.chord.toUpperCase()}</kbd>
-                  ) : null}
-                </Link>
-                {showToggle && (
-                  <button
-                    type="button"
-                    className={`fleet-rail-subnav-toggle${expanded ? " is-expanded" : ""}`}
-                    onClick={() => onToggleSection?.("projects")}
-                    aria-expanded={expanded}
-                    aria-label={expanded ? `Collapse ${item.label.toLowerCase()}` : `Expand ${item.label.toLowerCase()}`}
+      {projectMode ? (
+        // ── Project mode ──────────────────────────────────────────────────
+        // Founder: opening a project switches the rail ENTIRELY. Inbox and
+        // Projects are gone; this project's agent names take their place;
+        // one Back control at the top returns to normal (Inbox + Projects)
+        // mode. Back links at the projects LIST (not workspace home) — the
+        // instant the pathname no longer carries /projects/{id}, activeProjectId
+        // goes null and this branch stops rendering on its own; nothing here
+        // "closes" project mode, the URL leaving it is what does.
+        <nav className="fleet-rail-nav fleet-rail-nav--project" aria-label={activeProject ? `${activeProject.name} agents` : "Project agents"}>
+          <Link
+            href={hrefFor("projects")}
+            className="fleet-rail-item fleet-rail-back"
+            aria-label="Back to Inbox and Projects"
+            title={effectiveCollapsed ? "Back" : undefined}
+          >
+            <span className="fleet-rail-item-icon">
+              <ArrowLeft size={RAIL_ICON} strokeWidth={1.75} />
+            </span>
+            {!effectiveCollapsed && <span className="fleet-rail-item-label">Back</span>}
+          </Link>
+
+          {!effectiveCollapsed && (
+            <Link href={hrefFor(`projects/${encodeURIComponent(activeProjectId || "")}`)} className="fleet-rail-project-header">
+              <ProjectIcon icon={activeProject?.icon} tint={activeProject?.tint} size={20} glyphSize={12} />
+              <span className="fleet-rail-project-header-name">{activeProject?.name || "Project"}</span>
+            </Link>
+          )}
+
+          <div className="fleet-agents-rail-list fleet-rail-project-agents">
+            {projectAgents.length === 0 ? (
+              !effectiveCollapsed && <div className="fleet-rail-project-agents-empty">No agents in this project yet.</div>
+            ) : (
+              projectAgents.map((a) => {
+                const active = a.agent_id === activeAgentId;
+                const tone = deriveStatus(a.hardware_status || "unknown", Boolean(a.stopped?.active), Boolean(a.current_run_id)).tone;
+                return (
+                  <Link
+                    key={a.agent_id}
+                    href={hrefFor(`projects/${encodeURIComponent(activeProjectId || "")}/agents/${encodeURIComponent(a.agent_id)}/chat`)}
+                    aria-current={active ? "page" : undefined}
+                    title={effectiveCollapsed ? (a.label || "Unnamed agent") : undefined}
+                    className={`fleet-agents-rail-row${active ? " fleet-agents-rail-row--active" : ""}`}
+                    onClick={() => rememberLastViewedAgent(a.agent_id)}
                   >
-                    <ChevronRight size={13} strokeWidth={2} />
-                  </button>
-                )}
-              </div>
-              {showProjectsSubnav && projectsExpanded && (
-                <div className="fleet-rail-subnav">
-                  {projects.map((p) => {
-                    const projectActive = activeProjectId === p.id;
-                    const projectHref = `${hrefFor("projects")}/${encodeURIComponent(p.id)}`;
-                    return (
-                      <div key={p.id} className="fleet-rail-subnav-project">
+                    <AgentSigil seed={a.agent_id} size={20} />
+                    {!effectiveCollapsed && <span className="fleet-agents-rail-row-label">{a.label || "Unnamed agent"}</span>}
+                    {!effectiveCollapsed && <StatusDot tone={tone} size={7} />}
+                  </Link>
+                );
+              })
+            )}
+          </div>
+        </nav>
+      ) : (
+        // ── Normal mode: Inbox + Projects ────────────────────────────────
+        <nav className="fleet-rail-nav">
+          {railItems.map((item, idx) => {
+            const Icon = item.icon;
+            const active = segment === item.segment;
+            const focused = focusIdx === idx;
+            const isProjects = item.key === "projects";
+            const isInbox = item.key === "inbox";
+            const showProjectsSubnav = isProjects && !effectiveCollapsed && projects.length > 0;
+            const expanded = projectsExpanded;
+            const showToggle = showProjectsSubnav;
+            return (
+              <div key={item.key} className="fleet-rail-nav-group">
+                <div className="fleet-rail-item-row">
+                  {/* Real <a href> (MAN-145 item 6), not a router.push() button —
+                      a plain left-click still behaves exactly like the old
+                      onClick (Next's Link does a client-side transition, same
+                      as router.push), but ⌘/Ctrl-click, middle-click, and
+                      right-click now get real browser behaviour for free,
+                      since they're native <a> semantics Link doesn't override.
+                      That's also why this is safe against the in-app tab strip
+                      (FleetTabs.tsx): its modifier-click interception is
+                      explicitly scoped to `.fleet-shell-main` and skips the
+                      rail on purpose ("the rail keeps native browser
+                      behaviour" — see FleetTabs.tsx's resolveHref) — there is
+                      nothing here for it to conflict with. */}
+                  <Link
+                    href={railHrefFor(item)}
+                    title={effectiveCollapsed ? item.label : undefined}
+                    aria-label={item.label}
+                    aria-current={active ? "page" : undefined}
+                    className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
+                  >
+                    <span className="fleet-rail-item-icon">
+                      <Icon size={RAIL_ICON} strokeWidth={1.75} />
+                    </span>
+                    {!effectiveCollapsed && <span className="fleet-rail-item-label">{item.label}</span>}
+                    {!effectiveCollapsed && isInbox && inboxUnreadCount > 0 ? (
+                      <span className="fleet-rail-item-count">{inboxUnreadLabel}</span>
+                    ) : !effectiveCollapsed ? (
+                      <kbd className="fleet-rail-item-chord" aria-hidden="true">G {item.chord.toUpperCase()}</kbd>
+                    ) : null}
+                  </Link>
+                  {showToggle && (
+                    <button
+                      type="button"
+                      className={`fleet-rail-subnav-toggle${expanded ? " is-expanded" : ""}`}
+                      onClick={() => onToggleSection?.("projects")}
+                      aria-expanded={expanded}
+                      aria-label={expanded ? `Collapse ${item.label.toLowerCase()}` : `Expand ${item.label.toLowerCase()}`}
+                    >
+                      <ChevronRight size={13} strokeWidth={2} />
+                    </button>
+                  )}
+                </div>
+                {/* Every project is a plain link now — drilling into one
+                    switches the rail to project mode above rather than
+                    expanding a nested section list inline (see
+                    primary-rail-project-mode.ts's module comment for what
+                    this replaced and why). */}
+                {showProjectsSubnav && projectsExpanded && (
+                  <div className="fleet-rail-subnav">
+                    {projects.map((p) => {
+                      const projectHref = `${hrefFor("projects")}/${encodeURIComponent(p.id)}`;
+                      return (
                         <Link
+                          key={p.id}
                           href={projectHref}
-                          className={`fleet-rail-subitem${projectActive ? " fleet-rail-subitem--active" : ""}`}
+                          className="fleet-rail-subitem"
                         >
                           <ProjectIcon icon={p.icon} tint={p.tint} size={18} glyphSize={11} />
                           <span className="fleet-rail-subitem-label">{p.name}</span>
                         </Link>
-                        {/* Only the ACTIVE project's sections render — a
-                            second toggle per project would be one click too
-                            many for what's already a two-click reach
-                            (rail → project → section); being inside a
-                            project is what earns it this row. */}
-                        {projectActive && (
-                          <div className="fleet-rail-subsubnav">
-                            {PROJECT_SECTIONS.map((section) => {
-                              const SectionIcon = section.icon;
-                              const sectionActive = activeProjectSection === section.key;
-                              return (
-                                <Link
-                                  key={section.key}
-                                  href={`${projectHref}/${section.segment}`}
-                                  className={`fleet-rail-subsubitem${sectionActive ? " fleet-rail-subsubitem--active" : ""}`}
-                                  aria-current={sectionActive ? "page" : undefined}
-                                >
-                                  <SectionIcon size={13} strokeWidth={1.75} />
-                                  <span className="fleet-rail-subsubitem-label">{section.label}</span>
-                                </Link>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </nav>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </nav>
+      )}
 
       {/* Ask AI — moved here (2026-07) from a floating bottom-right corner
           spot that, on mobile, sat directly on top of the chat composer's

@@ -6410,31 +6410,42 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-rail-subitem-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fleet-rail-subitem-count { font-size: var(--text-2xs); color: var(--text-muted); }
 
-/* One project's own Tasks/Documents/Agents, nested beneath its subitem row
-   — only the ACTIVE project renders these (see PrimaryRail.tsx). Same
-   family as .fleet-rail-subitem, one step further indented and a size
-   down, since this is a third nav depth (rail → project → section). */
-.fleet-rail-subnav-project { display: flex; flex-direction: column; }
-.fleet-rail-subsubnav {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding-left: 20px;
-  margin: 1px 0 2px;
-}
-.fleet-rail-subsubitem {
+/* ── Rail project mode (2026-08-14) ───────────────────────────────────────
+   The rail's second mode — opening a project replaces Inbox+Projects with
+   Back, the project's own identity, and its agent list. See PrimaryRail.tsx
+   and primary-rail-project-mode.ts. Rows reuse .fleet-agents-rail-row
+   byte-for-byte (same visual language as the compact per-project rail this
+   supersedes at the primary-rail level), so only the three elements unique
+   to this mode — the Back row, the project header, and the empty note —
+   need their own rules here. */
+.fleet-rail-nav--project { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.fleet-rail-back { flex-shrink: 0; }
+.fleet-rail-project-header {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 4px 10px;
+  gap: 8px;
+  flex-shrink: 0;
+  margin: var(--space-2) var(--space-2) 0;
+  padding: 6px 8px;
   border-radius: var(--radius-control);
-  color: var(--text-muted);
+  color: var(--text-primary);
   text-decoration: none;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+.fleet-rail-project-header:hover { background: var(--rail-active); }
+.fleet-rail-project-header-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-rail-project-agents { flex: 1; min-height: 0; overflow-y: auto; }
+.fleet-rail-project-agents-empty {
+  padding: var(--space-3) var(--space-4);
+  color: var(--text-muted);
   font-size: var(--text-xs);
 }
-.fleet-rail-subsubitem:hover { background: var(--rail-active); color: var(--text-primary); }
-.fleet-rail-subsubitem--active { background: var(--rail-active); color: var(--text-primary); font-weight: var(--weight-medium); }
-.fleet-rail-subsubitem-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Phase 7B: agent-detail tab content ───────────────────────────────────── */
 .fleet-detail-pad { padding: var(--space-5); overflow-y: auto; height: 100%; }
