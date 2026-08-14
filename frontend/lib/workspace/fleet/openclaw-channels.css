@@ -173,6 +173,60 @@
   gap: var(--space-2);
 }
 
+/* ── Group allowlist (the require_mention gate) ──────────────────────── */
+/* Reuses .openclaw-form-note / .fleet-wizard-input / .fleet-btn — this is
+   not a second form system, only a second USE of the one above. The only
+   genuinely new shape is the removable chip list for allowed groups. */
+
+.openclaw-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: var(--space-2) 0;
+}
+
+.openclaw-group-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-inset);
+  font-size: var(--text-xs);
+}
+
+.openclaw-group-chip-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.openclaw-group-chip-remove {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 var(--space-1);
+  line-height: 1.4;
+  font-size: var(--text-base, 15px);
+}
+
+.openclaw-group-chip-remove:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.openclaw-group-add {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.openclaw-group-add input {
+  flex: 1;
+}
+
 .openclaw-spin {
   animation: openclaw-spin var(--dur-3, 200ms) linear infinite;
   animation-duration: 900ms;

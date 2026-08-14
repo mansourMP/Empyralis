@@ -224,6 +224,94 @@ class LocalBridgeIdentityResolutionTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_slow_path_narrows_by_channel_binding_when_two_agents_share_the_box(self) -> None:
+        """The regression this build fixes: two agents legitimately sharing
+        one box (agent-a on this channel, agent-b on something else
+        entirely) used to make the slow path treat EVERY shared-box channel
+        as permanently ambiguous, because the old check only asked "how many
+        agents prefer this gateway" and never "which of them actually use
+        this channel". Adding agent-b to the box must not break agent-a's
+        already-working channel.
+
+        agent_bindings_repository.list_agent_channel_bindings is mocked per
+        candidate agent_id: agent-a has an enabled binding for THIS
+        channel_key, agent-b has none. Narrowing must land on agent-a alone."""
+        installs = [
+            _fake_install(id="agent-a", preferred_gateway_id="gw-shared"),
+            _fake_install(id="agent-b", preferred_gateway_id="gw-shared"),
+        ]
+
+        async def fake_bindings(*, tenant_id, workspace_id, agent_install_id, enabled_only):
+            assert enabled_only is True
+            if agent_install_id == "agent-a":
+                return [{"key": "signal_personal"}]
+            return [{"key": "discord"}]  # agent-b uses a completely different channel
+
+        with (
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=installs),
+            ),
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_channel_bindings",
+                new=AsyncMock(side_effect=fake_bindings),
+            ),
+        ):
+            resolved = await personal_channels_service._resolve_local_bridge_agent_id(
+                gateway_id="gw-shared", channel_key="signal_personal",
+                registration={"tenant_id": "tenant-identity", "workspace_id": "ws-identity"},
+            )
+        self.assertEqual(resolved, "agent-a")
+        # And the claim was persisted, so the NEXT message on this
+        # gateway+channel hits the fast path instead of re-running this
+        # lookup (same contract as the exactly-one-preferred-gateway case).
+        self.assertEqual(
+            personal_channels_service._resolve_agent_id_for_inbound("gw-shared", "signal_personal"),
+            "agent-a",
+        )
+
+    async def test_slow_path_stays_ambiguous_when_two_agents_both_bind_the_same_channel(self) -> None:
+        """The genuine conflict case, NOT a false positive from box-sharing:
+        two different agents both hold an enabled binding for the SAME
+        channel_key. OpenClaw's own config schema has no way to express two
+        accounts on one channel node (verified against the pinned build's
+        `openclaw config schema` -- every channel is a single credential),
+        so this must still fail closed exactly like the pre-existing
+        multi-match case, not be narrowed away."""
+        installs = [
+            _fake_install(id="agent-a", preferred_gateway_id="gw-conflict"),
+            _fake_install(id="agent-b", preferred_gateway_id="gw-conflict"),
+        ]
+
+        async def fake_bindings(*, tenant_id, workspace_id, agent_install_id, enabled_only):
+            return [{"key": "signal_personal"}]  # both agents claim it
+
+        with (
+            patch(
+                "server_modules.agent_registry_repository.list_workspace_agent_installs",
+                new=AsyncMock(return_value=installs),
+            ),
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_channel_bindings",
+                new=AsyncMock(side_effect=fake_bindings),
+            ),
+        ):
+            resolved = await personal_channels_service._resolve_local_bridge_agent_id(
+                gateway_id="gw-conflict", channel_key="signal_personal",
+                registration={"tenant_id": "tenant-identity", "workspace_id": "ws-identity"},
+            )
+        self.assertEqual(resolved, personal_channels_repository.LEGACY_UNSCOPED_AGENT_ID)
+        self.assertIsNone(
+            personal_channels_repository.get_local_bridge_state(
+                "gw-conflict", channel_key="signal_personal", agent_id="agent-a",
+            )
+        )
+        self.assertIsNone(
+            personal_channels_repository.get_local_bridge_state(
+                "gw-conflict", channel_key="signal_personal", agent_id="agent-b",
+            )
+        )
+
     async def test_slow_path_ignores_a_disabled_agent_installs_preferred_gateway_id(self) -> None:
         installs = [_fake_install(id="agent-disabled", enabled=False, preferred_gateway_id="gw-identity-3")]
         with patch(
