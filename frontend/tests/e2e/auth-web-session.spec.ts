@@ -22,6 +22,60 @@ test.describe('browser auth session', () => {
     await expect(page).not.toHaveURL(/\/login$/);
   });
 
+  // MAN-343: found live on production — signup rendered "Couldn't create the
+  // account — Email or password was not accepted." and created the account
+  // anyway (real workspace, real verification email delivered). Root cause:
+  // signup/page.tsx's handleSubmit used to wrap BOTH signup() and the
+  // post-signup awaitBrowserAuthReady() readiness poll in one try/catch, so
+  // a hiccup in the poll -- which runs only AFTER the account already
+  // exists and its session cookies are already set on signup()'s own
+  // response -- was reported identically to signup() itself failing.
+  // Forcing every /api/auth/account-shell call to 401 reproduces exactly
+  // that poll failure deterministically (no dependency on real network
+  // timing), while the underlying POST /api/auth/signup is untouched and
+  // must still succeed for real.
+  test('a failed post-signup readiness poll never reports the signup itself as failed', async ({ page }) => {
+    const signupEmail = `owner+manfail+${Date.now()}@example.com`;
+    let signupResponseOk: boolean | null = null;
+
+    await page.route('**/api/auth/account-shell', async (route) => {
+      await route.fulfill({
+        status: 401,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'not ready yet' }),
+      });
+    });
+
+    page.on('response', (response) => {
+      if (response.url().includes('/api/auth/signup') && response.request().method() === 'POST') {
+        signupResponseOk = response.ok();
+      }
+    });
+
+    await page.goto('/signup');
+    await page.getByLabel('Name').fill('Owner Man343');
+    await page.getByLabel('Email').fill(signupEmail);
+    await page.getByLabel('Password').fill('password-123');
+    await page.getByRole('button', { name: /create account/i }).click();
+
+    // The real, network-observed signup response must have succeeded --
+    // this is not a test that merely asserts the UI stayed quiet while the
+    // account silently failed to be created.
+    await expect.poll(() => signupResponseOk).toBe(true);
+
+    // The account-shell poll is failing on every attempt (forced above), so
+    // if the old single-catch behavior regressed, the error banner would
+    // appear here. It must not, no matter how long the poll keeps failing.
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(page.getByText(/couldn.t create the account/i)).toHaveCount(0);
+
+    // The account is real, so the flow must still move the person forward
+    // to the verification screen rather than stranding them on a signup
+    // form claiming nothing happened.
+    await page.waitForURL(/\/verify-email(?:[/?#]|$)/);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+
   test('login establishes a browser session that survives reload', async ({ page }) => {
     await page.goto('/login?channel_attribution=tg-login-token');
     const loginRequest = page.waitForRequest((request) => (
