@@ -76,8 +76,15 @@ export default async function WorkspaceRouteLayout({
     <FleetShell
       workspaceId={resolvedWorkspaceId}
       shellSlot={null}
-      ownerName={bootstrap.account.displayName || bootstrap.account.email}
-      ownerEmail={bootstrap.account.email}
+      // ownerDisplayName is a real display name or nothing — it must never
+      // fall back to the account email here. bootstrap.account.email is
+      // already XOR-obfuscated (see ssr-safe-email.ts); PrimaryRail decodes
+      // it client-side, after hydration, via useRevealedEmail, and uses it
+      // as the name fallback there instead. Folding email into ownerName at
+      // this server boundary would bake the obfuscated form straight into
+      // visible rail text before that decode ever runs.
+      ownerDisplayName={bootstrap.account.displayName || undefined}
+      ownerEmailObfuscated={bootstrap.account.email}
       ownerRole={bootstrap.membership.role}
     >
       {children}

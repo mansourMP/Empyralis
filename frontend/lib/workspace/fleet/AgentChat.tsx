@@ -8,6 +8,7 @@ import { usePathname } from "next/navigation";
 import { ArrowUp, Check, ChevronDown, Loader2, Paperclip, X, type LucideIcon } from "lucide-react";
 
 import { useAccountShell } from "@/lib/shell/account-shell-context";
+import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { ChatMessage, type WorkstationChatMessageRecord } from "@/lib/workspace/chat-message";
 import { ContextUsageRail, type ContextUsagePayload } from "./ContextUsageRail";
@@ -802,6 +803,9 @@ export function AgentChat({
 }) {
   const { state } = useAccountShell();
   const account = state.account;
+  // account.email is XOR-obfuscated (see ssr-safe-email.ts) — this is the
+  // only real address recovery for it in this component.
+  const revealedAccountEmail = useRevealedEmail(account?.email);
   // /api/sessions and /api/turn validate the client-supplied tenant_id
   // actually owns workspace_id (403 otherwise) — unlike the fleet/* endpoints,
   // which resolve tenant server-side and ignore whatever the client sends.
@@ -852,8 +856,8 @@ export function AgentChat({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const actor = useMemo(() => (
-    account ? { type: "user", id: account.id, display_name: account.displayName || account.email } : null
-  ), [account]);
+    account ? { type: "user", id: account.id, display_name: account.displayName || revealedAccountEmail || "" } : null
+  ), [account, revealedAccountEmail]);
 
   const loadThread = useCallback(async () => {
     try {

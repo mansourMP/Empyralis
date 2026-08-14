@@ -1,4 +1,5 @@
 import type { AccountShellBootstrap } from '@/lib/shell/account-shell-store';
+import { obfuscateEmailForSsr } from '@/lib/shell/ssr-safe-email';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -29,7 +30,11 @@ export function parseAccountShellPayload(payload: unknown): AccountShellBootstra
   return {
     account: {
       id: requireString(payload.account.id, 'account.id'),
-      email: requireString(payload.account.email, 'account.email'),
+      // Obfuscated here, at the one place this payload is parsed server-side
+      // — see ssr-safe-email.ts. This value crosses into a Client Component
+      // prop (AccountShellProvider's `initialSession`) on every page, so it
+      // must never be plaintext by the time it leaves this function.
+      email: obfuscateEmailForSsr(requireString(payload.account.email, 'account.email')),
       displayName:
         typeof payload.account.displayName === 'string' ? payload.account.displayName : null,
     },

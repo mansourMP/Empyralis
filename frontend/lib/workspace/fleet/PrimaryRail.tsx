@@ -20,6 +20,7 @@ import {
 
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
+import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
 import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
@@ -102,8 +103,8 @@ const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
  */
 export function PrimaryRail({
   workspaceId,
-  ownerName = "Owner",
-  ownerEmail = "",
+  ownerDisplayName,
+  ownerEmailObfuscated = "",
   ownerRole = "Owner",
   collapsed,
   onToggleCollapsed,
@@ -118,8 +119,10 @@ export function PrimaryRail({
   onCloseSage,
 }: {
   workspaceId: string;
-  ownerName?: string;
-  ownerEmail?: string;
+  ownerDisplayName?: string;
+  // XOR-obfuscated, not display-ready — see ssr-safe-email.ts. Decoded
+  // below, client-side only, via useRevealedEmail.
+  ownerEmailObfuscated?: string;
   ownerRole?: string;
   collapsed: boolean;
   onToggleCollapsed: () => void;
@@ -654,8 +657,8 @@ export function PrimaryRail({
 
       <AccountMenu
         workspaceId={workspaceId}
-        ownerName={ownerName}
-        ownerEmail={ownerEmail}
+        ownerDisplayName={ownerDisplayName}
+        ownerEmailObfuscated={ownerEmailObfuscated}
         ownerRole={ownerRole}
         collapsed={effectiveCollapsed}
         theme={theme}
@@ -669,22 +672,31 @@ export function PrimaryRail({
 
 function AccountMenu({
   workspaceId,
-  ownerName,
-  ownerEmail,
+  ownerDisplayName,
+  ownerEmailObfuscated,
   ownerRole,
   collapsed,
   theme,
   onToggleTheme,
 }: {
   workspaceId: string;
-  ownerName: string;
-  ownerEmail: string;
+  ownerDisplayName?: string;
+  ownerEmailObfuscated: string;
   ownerRole: string;
   collapsed: boolean;
   theme: FleetTheme;
   onToggleTheme: () => void;
 }) {
   const { actions: accountShellActions } = useAccountShell();
+  // 2026-08-14 — ownerEmailObfuscated is never display-ready (see
+  // ssr-safe-email.ts); this is the one decode point for the rail's owner
+  // row. It resolves to null until a post-hydration effect runs, so every
+  // text derived from it below must have a safe non-email fallback for
+  // that window — ownerRole ("Owner"/"Member"/…), never blank, never the
+  // obfuscated string itself.
+  const resolvedOwnerEmail = useRevealedEmail(ownerEmailObfuscated);
+  const ownerNameText = ownerDisplayName || resolvedOwnerEmail || ownerRole;
+  const ownerRoleLineText = resolvedOwnerEmail || ownerRole;
   const [open, setOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -775,14 +787,14 @@ function AccountMenu({
         // Same unnamed-button pattern as the rail's other icon+text controls
         // (MAN-145 item 5) — found while re-verifying the a11y tree after
         // that pass, not in the original list, but the identical bug.
-        aria-label={`Account menu — ${ownerName}`}
+        aria-label={`Account menu — ${ownerNameText}`}
         onClick={() => { setOpen((v) => !v); setError(null); }}
       >
-        <div className="fleet-rail-owner-avatar">{(ownerName || "O").charAt(0).toUpperCase()}</div>
+        <div className="fleet-rail-owner-avatar">{(ownerNameText || "O").charAt(0).toUpperCase()}</div>
         {!collapsed && (
           <div className="fleet-rail-owner-text">
-            <div className="fleet-rail-owner-name">{ownerName}</div>
-            <div className="fleet-rail-owner-role">{ownerEmail || ownerRole}</div>
+            <div className="fleet-rail-owner-name">{ownerNameText}</div>
+            <div className="fleet-rail-owner-role">{ownerRoleLineText}</div>
           </div>
         )}
       </button>

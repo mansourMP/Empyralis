@@ -1,5 +1,10 @@
+import { obfuscateEmailForSsr } from '@/lib/shell/ssr-safe-email';
+
 export type WorkspaceBootstrapAccount = {
   id: string;
+  // Deliberately holds the XOR-obfuscated form once parsed below, never the
+  // plaintext address — see ssr-safe-email.ts. This crosses into a Client
+  // Component prop (FleetShell's ownerEmail) on every workspace page.
   email: string;
   displayName?: string | null;
 };
@@ -207,7 +212,7 @@ export function parseWorkspaceBootstrapPayload(payload: unknown): WorkspaceBoots
   return {
     account: {
       id: requireString(account.id, 'account.id'),
-      email: requireString(account.email, 'account.email'),
+      email: obfuscateEmailForSsr(requireString(account.email, 'account.email')),
       displayName: typeof account.displayName === 'string' ? account.displayName : null,
     },
     workspace: {

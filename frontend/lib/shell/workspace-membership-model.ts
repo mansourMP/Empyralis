@@ -2,6 +2,9 @@ export type WorkspaceRole = 'viewer' | 'member' | 'owner';
 
 export type AccountRecord = {
   id: string;
+  // XOR-obfuscated, never plaintext, from the moment this record is parsed
+  // server-side (see ssr-safe-email.ts) — recover the real address with
+  // useRevealedEmail(), client-side only, never by reading this directly.
   email: string;
   displayName?: string | null;
 };
