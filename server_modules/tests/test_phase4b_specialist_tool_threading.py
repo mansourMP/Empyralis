@@ -3,8 +3,11 @@
 Proves the four guarantees of threading agent_install_id through the Sage
 action loop into the tool-execution context:
 
-  1. A specialist's toolset = core tools + exactly its bound connectors/tools
-     (Phase 2 bindings); Sage (no acting install) is unrestricted.
+  1. A specialist's toolset = core tools + the always-on judgment tools with
+     no real integration behind them + exactly its bound connectors (Phase 2
+     bindings) — there is no more per-tool enable/disable checklist
+     (2026-08-14, CLAUDE.md, founder decision). Sage (no acting install) is
+     unrestricted.
   2. A mid-turn memory tool WRITE lands in the acting install's namespace,
      both directions; Sage writes under the default (None) namespace.
   3. A specialist calling a tool it isn't bound to gets a clean denial that
@@ -82,7 +85,11 @@ class SpecialistToolsetTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sage._specialist_tool_allowed("discord_bot__send", ts))
 
     async def test_toolset_fail_safe_is_core_only(self):
-        # If the binding lookups blow up, the specialist is restricted to core.
+        # If the binding lookups blow up, the specialist is restricted to
+        # core + the always-on judgment tools (2026-08-14: neither depends
+        # on external data, so neither needs to fail safe) — anything that
+        # DOES depend on external data (a real connector binding) still
+        # fails safe to denied.
         with (
             patch(
                 "server_modules.agent_bindings_repository.list_agent_connector_bindings",
@@ -97,9 +104,104 @@ class SpecialistToolsetTests(unittest.IsolatedAsyncioTestCase):
                 workspace_id="ws-1", tenant_id="t1", agent_install_id="install-support"
             )
         self.assertEqual(ts["connectors"], set())
-        self.assertEqual(ts["tools"], set())
+        self.assertEqual(ts["tools"], sage._UNGATED_JUDGMENT_TOOL_NAMES)
         self.assertFalse(sage._specialist_tool_allowed("slack__post", ts))
         self.assertTrue(sage._specialist_tool_allowed("memory_write", ts))  # core survives
+        # No-integration judgment tools survive a total lookup failure too —
+        # they never depended on the failed lookups in the first place.
+        self.assertTrue(sage._specialist_tool_allowed("shell__exec", ts))
+        self.assertTrue(sage._specialist_tool_allowed("browser__navigate", ts))
+        # google_workspace-gated tools DO depend on the (failed) connector
+        # lookup, so they fail safe to denied, same as any other connector
+        # tool.
+        self.assertFalse(sage._specialist_tool_allowed("email-access", ts))
+
+    async def test_no_per_agent_tools_checklist_judgment_tools_always_allowed(self):
+        """2026-08-14 (CLAUDE.md, founder decision): shell/browser/file/
+        memory-manager/inventory have no per-agent enable switch left at
+        all — a specialist gets them regardless of tool_toggles, including
+        an explicit False (there is no more "disable this" for these five)."""
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value={"tool_toggles": {
+                    "shell__exec": False, "browser__navigate": False,
+                    "file__read": False, "memory_update": False,
+                    "inventory-tool": False,
+                }}),
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="t1", agent_install_id="install-support"
+            )
+        for name in sage._UNGATED_JUDGMENT_TOOL_NAMES:
+            self.assertTrue(sage._specialist_tool_allowed(name, ts), name)
+
+    async def test_google_workspace_gated_tools_follow_the_real_connector_binding(self):
+        """email-access/calendar-access/task-runner/crm-notes have no "__"
+        in their enforcement id, so the generic connector-prefix check can't
+        reach them — _resolve_specialist_toolset grants them explicitly, on
+        the SAME connectors set every other connector tool uses. No toggle
+        involved either way."""
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[{"key": "google_workspace"}]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value={"tool_toggles": {}}),
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="t1", agent_install_id="install-support"
+            )
+        for name in ("email-access", "calendar-access", "task-runner", "crm-notes"):
+            self.assertTrue(sage._specialist_tool_allowed(name, ts), name)
+
+    async def test_google_workspace_gated_tools_denied_without_the_connector(self):
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),  # no google_workspace binding
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value={"tool_toggles": {
+                    # An explicit True no longer matters — only a real
+                    # binding does.
+                    "email-access": True,
+                }}),
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="t1", agent_install_id="install-support"
+            )
+        self.assertFalse(sage._specialist_tool_allowed("email-access", ts))
+
+    async def test_core_tool_explicit_false_no_longer_disables_it(self):
+        """Pre-2026-08-14 an explicit False in tool_toggles for a core tool
+        (Web Search, Memory read/write/update) was authoritative and denied
+        it. That switch is gone — the value is now ignored entirely."""
+        with (
+            patch(
+                "server_modules.agent_bindings_repository.list_agent_connector_bindings",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "server_modules.agent_registry_repository.get_workspace_agent_install_bundle",
+                new=AsyncMock(return_value={"tool_toggles": {"web__search": False, "memory_write": False}}),
+            ),
+        ):
+            ts = await sage._resolve_specialist_toolset(
+                workspace_id="ws-1", tenant_id="t1", agent_install_id="install-support"
+            )
+        self.assertTrue(sage._specialist_tool_allowed("web__search", ts))
+        self.assertTrue(sage._specialist_tool_allowed("memory_write", ts))
 
     async def test_sage_path_returns_none(self):
         self.assertIsNone(

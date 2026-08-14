@@ -2079,9 +2079,11 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
             connector_id="fleet",
             action_id="configure_agent",
             description=(
-                "Update an agent's configuration: enabled tools, connectors, "
-                "channel bindings, hardware access, subagents toggle, model config, "
-                "or instructions. Requires operator role."
+                "Update an agent's configuration: connectors, channel bindings, "
+                "hardware access, subagents toggle, model config, or instructions. "
+                "There is no per-tool enable/disable switch — an agent has every "
+                "tool the platform provides, gated only by a real connector "
+                "binding or a resolved capability. Requires operator role."
             ),
             parameters={
                 "type": "object",
@@ -2090,11 +2092,10 @@ def _builtin_tool_descriptors() -> List[ToolDescriptor]:
                     "patch": {
                         "type": "object",
                         "description": (
-                            "Fields to update. Supported keys: enabled_tools (list of tool ids), "
+                            "Fields to update. Supported keys: "
                             "connectors (list of connector ids), channel_bindings (object), "
                             "subagents_enabled (bool), hardware_access (none|gateway|vps|all), "
-                            "instructions (string), model_config (object with mode/provider/model), "
-                            "tool_toggles (object of {tool_id: bool})."
+                            "instructions (string), model_config (object with mode/provider/model)."
                         ),
                     },
                 },
@@ -2802,7 +2803,7 @@ def first_non_empty_line(text: str) -> str:
 
 def tool_descriptor_for_name(tool_name: str) -> ToolDescriptor | None:
     """Look up a local/builtin ToolDescriptor by its literal tool-call name —
-    the same canonical enforcement id the Tools tab and tool_toggles key by
+    the same canonical enforcement id the Tools tab keys mandate grants by
     (skill_registry.enforcement_tool_name). For callers outside the dispatch
     path (e.g. fleet_get_agent_tools) that need manifest fields like
     audience_safe without executing anything. Returns None for connector/MCP

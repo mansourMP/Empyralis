@@ -63,7 +63,7 @@ class PlatformEventSuppressionRegistryTests(unittest.TestCase):
             platform_event.SERVICE_RATE_LIMITED,
             platform_event.PROVIDER_UNREACHABLE,
             platform_event.NO_AI_PROVIDER,
-            platform_event.TOOLS_LIMITED_NO_REPLY,
+            platform_event.SAGE_TURN_NO_REPLY_UNKNOWN,
         ):
             with self.subTest(code=event.code):
                 self.assertTrue(platform_event.is_channel_suppressed_text(event.channel_text))
@@ -216,7 +216,7 @@ class DispatchSageReplyChannelSilenceTests(unittest.TestCase):
 
     def test_status_text_smuggled_as_successful_message_produces_zero_channel_send(self) -> None:
         """The actual live bug: handle_sage_chat's final return always sets
-        error=None, so a cli_subscription failure / TOOLS_LIMITED_NO_REPLY /
+        error=None, so a cli_subscription failure / SAGE_TURN_NO_REPLY_UNKNOWN /
         GENERIC_ERROR string can arrive as a "successful" message with no
         error attached. Must still be suppressed."""
         transport = self._run(

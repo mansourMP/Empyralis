@@ -62,10 +62,13 @@ async def test_unauthenticated_request_to_formerly_open_write_route_is_rejected(
     """fleet_configure_agent_route (PATCH .../fleet/agents/{agent_id}) used to
     have no Depends(get_current_user) at all -- any request, session or not,
     reached fleet_configure_agent and could rewrite ANY agent's config
-    (model/BYOK credentials, enabled_tools, channel_bindings). A request with
+    (model/BYOK credentials, connectors, channel_bindings). A request with
     no session cookie, Authorization header, or X-API-Key must now get a real
     401 from FastAPI's own dependency resolution, before the handler body
-    (or enforce_workspace_access) ever runs."""
+    (or enforce_workspace_access) ever runs. The exact patch body below is
+    incidental -- the auth dependency rejects the request before any patch
+    key is ever inspected, so its content doesn't need to be a currently
+    valid key."""
     monkeypatch.setenv("ORION_AUTH_REQUIRED", "1")
     monkeypatch.delenv("EMPYRALIS_DEPLOY_ENV", raising=False)
     monkeypatch.delenv("ORION_ENV", raising=False)

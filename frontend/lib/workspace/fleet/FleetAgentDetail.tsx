@@ -32,8 +32,8 @@ import {
   Square,
   SquarePen,
   Trash2,
+  Users,
   Wand2,
-  Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -171,7 +171,7 @@ const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "work", label: "Work", icon: Inbox },
   { id: "channels", label: "Channels", icon: Radio },
   { id: "connectors", label: "Connectors", icon: Plug },
-  { id: "tools", label: "Tools", icon: Wrench },
+  { id: "tools", label: "Tools", icon: Users },
   { id: "capabilities", label: "Capabilities", icon: Wand2 },
   { id: "hardware", label: "Hardware", icon: Cpu },
   { id: "memory", label: "Memory", icon: Brain },
@@ -554,10 +554,13 @@ export function FleetAgentDetail({
   // Truth Map B1 (mirrors ToolsTab's identical requiredConnector/
   // connectorMissing check): a tool bound behind requires_connector does
   // nothing until that connector is actually connected, so it shouldn't
-  // count toward "customer access" just because it's enabled+granted.
+  // count toward "customer access" just because it's granted. 2026-08-14:
+  // there is no more per-agent enable/disable checklist — every listed
+  // tool is already available to the agent itself, so this is purely a
+  // WHO (audience/mandate) count now, not a WHO-and-WHAT one.
   const connectorById = new Map(connectors.map((c) => [c.id, c]));
   const customerAccessCount = agentTools.filter((t) => {
-    if (!(t.enabled && (t.audience_safe || t.mandate_granted))) return false;
+    if (!(t.audience_safe || t.mandate_granted)) return false;
     const requiredConnector = t.requires_connector ? connectorById.get(t.requires_connector) : undefined;
     const connectorMissing = Boolean(t.requires_connector) && !requiredConnector?.connected;
     return !connectorMissing;
@@ -3284,17 +3287,27 @@ function Disclosure({
 }
 
 // ── Tools ───────────────────────────────────────────────────────────────────
+//
+// 2026-08-14 (CLAUDE.md, founder decision): there is no more per-agent Tools
+// enable/disable checklist. "Agent is going to use whatever is provided to
+// it... agent decides, agent uses" — the same reasoning Claude Code uses for
+// its own terminal. An agent's own tool availability is no longer something
+// an owner switches on this screen at all.
+//
+// What remains here, and is a genuinely different, preserved feature: WHO
+// may trigger an already-available tool when this agent is messaged by
+// someone OUTSIDE the workspace (Authority Mandate, Part 10). That is a
+// security boundary, not a capability checklist, so it keeps its own tab.
 
 function ToolCustomerAccess({
   tool, busy, onGrant, onRevoke,
 }: { tool: FleetTool; busy: boolean; onGrant: () => void; onRevoke: () => void }) {
-  const muted = !tool.enabled;
   if (tool.audience_safe) {
     return (
       <span
-        className={`fleet-badge${muted ? " fleet-badge--muted" : ""}`}
+        className="fleet-badge"
         style={{ marginLeft: 0 }}
-        title={muted ? "Enabled required to run" : "The platform marks this tool safe for anyone to trigger."}
+        title="The platform marks this tool safe for anyone to trigger."
       >
         Safe by default
       </span>
@@ -3304,11 +3317,11 @@ function ToolCustomerAccess({
     return (
       <button
         type="button"
-        className={`fleet-badge fleet-badge--lock fleet-badge--action${muted ? " fleet-badge--muted" : ""}`}
+        className="fleet-badge fleet-badge--lock fleet-badge--action"
         style={{ marginLeft: 0 }}
         disabled={busy}
         onClick={onRevoke}
-        title={muted ? "Enabled required to run — click to revoke customer access" : "Customers can trigger this. Click to revoke."}
+        title="Customers can trigger this. Click to revoke."
       >
         Granted by you
       </button>
@@ -3331,37 +3344,16 @@ function ToolCustomerAccess({
 function ToolsTab({
   workspaceId, agentId, agent, onChat,
 }: { workspaceId: string; agentId: string; agent: FleetAgent | null; onChat: () => void }) {
-  const { tools, coreTools, isMaster, loading, refresh } = useFleetAgentTools(workspaceId, agentId);
+  const { tools, isMaster, loading, refresh } = useFleetAgentTools(workspaceId, agentId);
   // Truth Map B1: a handful of tools (Calendar/Task Runner/Email/CRM) are
-  // real but execution_mode="manual" with no direct executor — the toggle
-  // above does nothing until the connector named in requires_connector is
-  // actually connected. Cross-referencing the same connector list the
-  // Connectors tab already fetches, so this stays accurate if a deployment
-  // configures Google Workspace OAuth later.
+  // real but execution_mode="manual" with no direct executor — granting
+  // customer access to one does nothing until the connector named in
+  // requires_connector is actually connected. Cross-referencing the same
+  // connector list the Connectors tab already fetches, so this stays
+  // accurate if a deployment configures Google Workspace OAuth later.
   const { connectors: toolConnectors, loading: connectorsLoading } = useFleetAgentConnectors(workspaceId, agentId);
-  const [pending, setPending] = useState<string | null>(null);
   const [mandateBusy, setMandateBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  async function toggle(toolId: string, next: boolean) {
-    setPending(toolId);
-    setError(null);
-    try {
-      const res = await fleetAuthorizedFetch(`/api/w/${encodeURIComponent(workspaceId)}/fleet/agents/${encodeURIComponent(agentId)}`, {
-        method: "PATCH",
-        credentials: "include",
-        headers: buildCookieAuthHeaders("PATCH", { "Content-Type": "application/json" }),
-        body: JSON.stringify({ patch: { tool_toggles: { [toolId]: next } } }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.ok === false) throw new Error(getErrorMessage(data, `HTTP ${res.status}`));
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not update this tool.");
-    } finally {
-      setPending(null);
-    }
-  }
 
   async function setMandate(toolId: string, grant: boolean) {
     setMandateBusy(toolId);
@@ -3389,24 +3381,22 @@ function ToolsTab({
   }
 
   if (loading || connectorsLoading) {
-    return <FleetToggleRowsSkeleton rows={6} trailing="switch" label="Loading tools" />;
+    return <FleetToggleRowsSkeleton rows={6} trailing="button" label="Loading tools" />;
   }
 
   const connectorById = new Map(toolConnectors.map((c) => [c.id, c]));
 
-  if (tools.length === 0 && coreTools.length === 0) {
+  if (tools.length === 0) {
     return (
       <EmptyState
-        icon={Wrench}
-        title="No tools available"
+        icon={Users}
+        title="No tools to grant"
         body="Ask AI to configure tools for this agent."
         action="Chat to configure"
         onAction={onChat}
       />
     );
   }
-
-  const enabledCount = tools.filter((t) => t.enabled).length;
 
   return (
     <div className="fleet-config">
@@ -3417,8 +3407,8 @@ function ToolsTab({
           tool row wears one of these three badges, so what "customer" vs
           "owner" access means is shown at the point of use, not read once
           and forgotten above the fold. The `hint` tooltip on the Properties
-          panel's "Customer access" row (this file, PanelRow) still carries
-          the one-sentence version for whoever hovers it. */}
+          panel's "Tools" row (this file, PanelRow) still carries the
+          one-sentence version for whoever hovers it. */}
       <div
         className="fleet-subtitle"
         style={{ marginTop: 0, marginBottom: 12, display: "flex", flexWrap: "wrap", gap: "6px 16px", alignItems: "center" }}
@@ -3435,16 +3425,14 @@ function ToolsTab({
       </div>
       {isMaster ? (
         <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-          This is the operator agent — it has unrestricted tool access, not gated by these toggles.
+          This is the operator agent — it has no customer-facing surface, so there is nothing here to grant.
         </p>
       ) : (
-        <>
-          <div className="fleet-detail-section-title" style={{ marginTop: 0 }}>
-            {enabledCount} of {tools.length} tools enabled
-          </div>
-        </>
+        <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
+          The agent already has every tool below. This only controls whether someone messaging it from OUTSIDE your workspace can trigger it — you keep full access regardless.
+        </p>
       )}
-      {tools.map((t) => {
+      {!isMaster && tools.map((t) => {
         const requiredConnector = t.requires_connector ? connectorById.get(t.requires_connector) : undefined;
         const connectorMissing = Boolean(t.requires_connector) && !requiredConnector?.connected;
         return (
@@ -3452,45 +3440,20 @@ function ToolsTab({
           <div style={{ minWidth: 0 }}>
             <div className="fleet-toggle-row-label">{t.label}</div>
             {t.description && <div className="fleet-toggle-row-desc">{t.description}</div>}
-            {!connectorMissing && !t.enabled && (t.audience_safe || t.mandate_granted) && (
-              <div className="fleet-toggle-row-desc">Enabled required to run</div>
+            {connectorMissing && (t.audience_safe || t.mandate_granted) && (
+              <div className="fleet-toggle-row-desc">Connect the required account to actually run this</div>
             )}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-            {!isMaster && (
-              <ToolCustomerAccess
-                tool={t}
-                busy={mandateBusy === t.id}
-                onGrant={() => setMandate(t.id, true)}
-                onRevoke={() => setMandate(t.id, false)}
-              />
-            )}
-            <button
-              type="button"
-              role="switch"
-              aria-checked={t.enabled}
-              aria-label={`${t.enabled ? "Disable" : "Enable"} ${t.label}`}
-              className={`fleet-toggle${t.enabled ? " is-on" : ""}`}
-              disabled={isMaster || pending === t.id}
-              onClick={() => toggle(t.id, !t.enabled)}
-            />
-          </div>
+          <ToolCustomerAccess
+            tool={t}
+            busy={mandateBusy === t.id}
+            onGrant={() => setMandate(t.id, true)}
+            onRevoke={() => setMandate(t.id, false)}
+          />
         </div>
         );
       })}
       {error && <p className="fleet-channel-expand-error">{error}</p>}
-      {coreTools.length > 0 && (
-        <Disclosure label={`${coreTools.length} core ${coreTools.length === 1 ? "tool" : "tools"} — always on`}>
-          <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
-            Plumbing every agent needs to function — there&apos;s no toggle for these because there&apos;s nothing to turn off. Anything with its own real toggle is listed above instead.
-          </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {coreTools.map((name) => (
-              <span key={name} className="fleet-badge" style={{ marginLeft: 0 }}>{name}</span>
-            ))}
-          </div>
-        </Disclosure>
-      )}
     </div>
   );
 }
