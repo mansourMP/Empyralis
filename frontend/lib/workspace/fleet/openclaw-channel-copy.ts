@@ -199,7 +199,13 @@ export type Remediation =
    *  a real control, because there is now a real flow behind it. Distinct from
    *  `elsewhere`, which is the honest no-control state for a channel that
    *  genuinely can only be linked by hand on the computer. */
-  | { kind: "link"; label: string; detail: string }
+  /** `qrKnown`: the box has CONFIRMED this channel owns OpenClaw's QR seam.
+   *  False means we are offering the control to find out — the channel is not
+   *  enabled yet, so its link shape is genuinely unknown. The card face must
+   *  not promise a QR in that case: iMessage links off a local database and
+   *  Signal off a device pairing, and telling their card "Scan a code" sends
+   *  the customer looking for a square that will never appear. */
+  | { kind: "link"; label: string; detail: string; qrKnown: boolean }
   | { kind: "elsewhere"; detail: string }
   | { kind: "unknown"; detail: string }
   | { kind: "needs_hardware"; detail: string }
@@ -246,7 +252,16 @@ export function channelCardPill(remediation: Remediation): ChannelCardPill {
       // "Scan a code" and not "Link on the device": on this card the linking
       // happens HERE, and the face has to say which of the two it is or the
       // pill is telling the customer to go somewhere they do not need to go.
-      return { label: "Scan a code", tone: "setup" };
+      //
+      // But ONLY when the box has confirmed the QR seam. Until a pairing
+      // channel is enabled OpenClaw does not report its link shape, and
+      // promising "Scan a code" there sent iMessage and Signal customers
+      // looking for a square that does not exist — iMessage links off a
+      // local database, Signal off a device pairing. Unknown says "Set up",
+      // the same neutral word the install state already uses.
+      return remediation.qrKnown
+        ? { label: "Scan a code", tone: "setup" }
+        : { label: "Set up", tone: "setup" };
     case "elsewhere":
       return { label: "Link on the device", tone: "locked" };
     case "needs_hardware":
@@ -315,6 +330,7 @@ export function remediationFor(
         // channel's own instruction and arrives with the code itself.
         label: observed?.accounts.length ? "Link again" : "Show code",
         detail: "",
+        qrKnown: true,
       };
     }
     if (method === "unknown_link") {
@@ -323,7 +339,7 @@ export function remediationFor(
       // enables it and asks — which is the only way to find out, and is also
       // exactly what the owner wants to happen. One control, no sentence
       // about mechanism, and no guess about which pairing channels can QR.
-      return { kind: "link", label: "Set up", detail: "" };
+      return { kind: "link", label: "Set up", detail: "", qrKnown: false };
     }
     return {
       kind: "elsewhere",

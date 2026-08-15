@@ -46,7 +46,7 @@ const REMEDIATIONS: Remediation[] = [
   { kind: "unknown", detail: "x" },
   { kind: "install", label: "Set up", detail: "" },
   { kind: "credential", label: "Add credential", detail: "x" },
-  { kind: "link", label: "Show code", detail: "" },
+  { kind: "link", label: "Show code", detail: "", qrKnown: true },
   { kind: "enable", label: "Turn on", detail: "" },
   { kind: "elsewhere", detail: "x" },
   { kind: "ready", detail: "x" },
@@ -174,7 +174,7 @@ assert(
   planChannelSetupFlow({
     doorPlan: ONE_DOOR,
     doorChosen: true,
-    remediation: { kind: "link", label: "Set up", detail: "" },
+    remediation: { kind: "link", label: "Set up", detail: "", qrKnown: false },
     connectMethod: "unknown_link",
     editingSettings: false,
   }).connect === "unknown_link",
