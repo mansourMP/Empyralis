@@ -6572,17 +6572,62 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-work-msg-body { font-size: var(--text-sm); color: var(--text-primary); }
 .fleet-work-msg-time { font-size: var(--text-2xs); color: var(--text-muted); margin-top: 4px; }
 
-/* Markdown-lite (WorkTab message bodies) — bold/italic/code/links/lists,
-   restrained: no headings/tables/blockquotes, this is a chat bubble. */
+/* Markdown-lite — the compact class family lib/workspace/markdown-lite.tsx
+   emits for chat turns, task descriptions and conversation transcripts.
+   Same renderer as project documents, restrained presentation: this is a
+   bubble, not a reading column. Chat additionally overrides these under
+   .app-chat-message in lib/ui/chrome.css, which is global — this copy is
+   what the fleet surfaces (WorkTab, TaskDetailView, ConversationsView) get. */
 .fleet-md-p { margin: 0 0 8px; white-space: pre-wrap; }
 .fleet-md-p:last-child { margin-bottom: 0; }
 .fleet-md-list { margin: 0 0 8px; padding-left: 18px; }
 .fleet-md-list:last-child { margin-bottom: 0; }
 .fleet-md-list li { margin-bottom: 2px; }
+.fleet-md-list .fleet-md-list { margin: 2px 0 0; padding-left: 16px; }
 .fleet-md-code {
   padding: 1px 5px; border-radius: 4px; background: var(--bg-inset);
   font-family: var(--app-font-mono, ui-monospace, monospace); font-size: 0.9em;
 }
+.fleet-md-heading {
+  margin: 16px 0 6px; font-weight: var(--weight-semibold, 600);
+  line-height: 1.35; color: var(--text-primary);
+}
+.fleet-md-heading:first-child { margin-top: 0; }
+h1.fleet-md-heading { font-size: 17px; }
+h2.fleet-md-heading { font-size: 15px; }
+h3.fleet-md-heading { font-size: 14px; }
+h4.fleet-md-heading, h5.fleet-md-heading, h6.fleet-md-heading { font-size: 13px; }
+/* The <pre> owns overflow-x so a long line scrolls in its own lane, and
+   `white-space: pre` overrides any pre-wrap an ancestor bubble sets. */
+.fleet-md-pre {
+  margin: 0 0 8px; padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius-card); background: var(--bg-inset); overflow-x: auto;
+}
+.fleet-md-pre:last-child { margin-bottom: 0; }
+.fleet-md-pre code {
+  display: block; font-family: var(--app-font-mono, ui-monospace, monospace);
+  font-size: 12.5px; line-height: 1.55; color: var(--text-primary); white-space: pre;
+}
+.fleet-md-quote {
+  margin: 0 0 8px; padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--border-strong); color: var(--text-muted);
+}
+.fleet-md-quote:last-child { margin-bottom: 0; }
+.fleet-md-table-wrap { margin: 0 0 8px; overflow-x: auto; }
+.fleet-md-table-wrap:last-child { margin-bottom: 0; }
+.fleet-md-table {
+  width: 100%; min-width: max-content; border-collapse: collapse;
+  font-size: 13px; white-space: normal;
+}
+.fleet-md-table th, .fleet-md-table td {
+  padding: 6px 10px; text-align: left; border: 1px solid var(--border); vertical-align: top;
+}
+.fleet-md-table th {
+  color: var(--text-primary); font-weight: var(--weight-semibold, 600);
+  background: var(--bg-inset); white-space: nowrap;
+}
+.fleet-md-table td { color: var(--text-secondary); }
+.fleet-md-hr { margin: 16px 0; border: none; border-top: 1px solid var(--border); }
 .fleet-work-empty {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: var(--space-2); height: 100%; padding: var(--space-8);

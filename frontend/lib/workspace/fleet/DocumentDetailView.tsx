@@ -105,7 +105,7 @@ import {
   duplicateDocumentTitle,
   type FleetDocument,
 } from "./documents-data";
-import { MarkdownLite } from "./markdown-lite";
+import { MarkdownLite } from "@/lib/workspace/markdown-lite";
 import { timeAgo } from "./fleet-presentation";
 import { DocumentHistory } from "./DocumentHistory";
 import { HeaderAction } from "./Breadcrumbs";

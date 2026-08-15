@@ -51,24 +51,57 @@ function splitFrontmatter(raw: string): { meta: string | null; body: string } {
   return { meta: meta || null, body };
 }
 
+/** Flattens a (possibly nested) parsed list back to the flat item list this
+ *  preview has always rendered — .fleet-memory-preview-list has no nested
+ *  variant, and a memory file's indented sub-bullets read fine as siblings
+ *  here. The shared renderer keeps the nesting; this surface doesn't use it. */
+function flattenListItems(items: { text: string; children?: { items: { text: string; children?: unknown }[] }[] }[]): string[] {
+  const out: string[] = [];
+  for (const item of items) {
+    out.push(item.text);
+    for (const child of item.children ?? []) {
+      out.push(...flattenListItems(child.items as never));
+    }
+  }
+  return out;
+}
+
 function parseMemoryBlocks(raw: string): MemBlock[] {
   const { meta, body } = splitFrontmatter(raw);
   const blocks: MemBlock[] = [];
   if (meta) blocks.push({ type: "meta", text: meta });
+  // parseMarkdownLiteBlocks is the app's ONE markdown block parser (see
+  // lib/workspace/markdown-lite.tsx) — this tab maps its block tree onto its
+  // own three-level preview presentation rather than re-parsing the text a
+  // second way. Constructs the memory preview has no design for (fenced
+  // code, tables, rules) fall through to a plain paragraph of their own
+  // text, which is exactly what this surface showed before headings and
+  // tables were parsed at all.
   for (const b of parseMarkdownLiteBlocks(body)) {
-    if (b.type === "ul" || b.type === "ol") {
-      blocks.push({ type: b.type, items: b.items || [] });
-      continue;
-    }
-    const text = b.text || "";
-    // Only a single-line block can be a heading — a multi-line paragraph that
-    // happens to start with "#" (rare, but possible in freeform topic notes)
-    // stays a paragraph rather than swallowing its own continuation lines.
-    const h = !text.includes("\n") ? /^(#{1,3})\s+(.*)$/.exec(text.trim()) : null;
-    if (h) {
-      blocks.push({ type: (`h${h[1].length}` as "h1" | "h2" | "h3"), text: h[2].trim() });
-    } else if (text) {
-      blocks.push({ type: "p", text });
+    switch (b.kind) {
+      case "list":
+        blocks.push({ type: b.ordered ? "ol" : "ul", items: flattenListItems(b.items) });
+        break;
+      case "heading":
+        blocks.push({ type: (`h${Math.min(b.level, 3)}` as "h1" | "h2" | "h3"), text: b.text.trim() });
+        break;
+      case "code":
+        if (b.code) blocks.push({ type: "p", text: b.code });
+        break;
+      case "table":
+        blocks.push({ type: "p", text: [b.header, ...b.rows].map((row) => row.join(" · ")).join("\n") });
+        break;
+      case "hr":
+        blocks.push({ type: "p", text: "---" });
+        break;
+      case "quote":
+      case "paragraph": {
+        const text = b.lines.join("\n");
+        if (text) blocks.push({ type: "p", text });
+        break;
+      }
+      default:
+        break;
     }
   }
   return blocks;

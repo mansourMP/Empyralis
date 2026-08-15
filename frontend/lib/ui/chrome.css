@@ -4480,10 +4480,13 @@ a.app-chat-message__attachment-chip:hover {
   color: var(--text-primary);
 }
 
-/* Markdown-lite (see lib/workspace/markdown-lite.tsx): bold/italic/code/
-   links/lists inside a chat bubble. Defined here (not only in fleet-theme.css,
-   which the live chat surface doesn't always have loaded) so the same four
-   classes resolve correctly wherever ChatMessage renders. */
+/* Markdown-lite (see lib/workspace/markdown-lite.tsx): the full compact
+   block set — headings, lists, fenced code, tables, quotes, rules — inside a
+   chat bubble. Defined here (not only in fleet-theme.css, which the live chat
+   surface doesn't always have loaded, and NOT in document-detail.css, which
+   is imported by the document page alone and so is absent on this route) so
+   every class the renderer can emit resolves wherever ChatMessage renders.
+   A class here with no rule is an element that silently renders unstyled. */
 .app-chat-message .fleet-md-p {
   margin: 0 0 8px;
 }
@@ -4513,6 +4516,103 @@ a.app-chat-message__attachment-chip:hover {
 }
 .app-chat-message .fleet-link:hover {
   text-decoration: underline;
+}
+
+/* Headings. A chat turn is an <article>, so the renderer keeps the author's
+   own levels (h1..h6) rather than demoting them the way a document body
+   does; the sizes below stay inside a bubble's scale so an h1 reads as a
+   section title, not a page title. */
+.app-chat-message .fleet-md-heading {
+  margin: 18px 0 8px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+.app-chat-message .fleet-md-heading:first-child {
+  margin-top: 0;
+}
+.app-chat-message h1.fleet-md-heading { font-size: 19px; }
+.app-chat-message h2.fleet-md-heading { font-size: 17px; }
+.app-chat-message h3.fleet-md-heading { font-size: 15px; }
+.app-chat-message h4.fleet-md-heading,
+.app-chat-message h5.fleet-md-heading,
+.app-chat-message h6.fleet-md-heading { font-size: 14px; }
+
+.app-chat-message .fleet-md-list .fleet-md-list {
+  margin: 2px 0 0;
+  padding-left: 16px;
+}
+
+/* Fenced code. The <pre> — not the page — owns overflow-x, so a long line
+   scrolls in its own lane; `white-space: pre` overrides the pre-wrap the
+   bubble sets on everything else, which would otherwise re-wrap code. */
+.app-chat-message .fleet-md-pre {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border-default);
+  border-radius: 8px;
+  background: var(--app-surface-2);
+  overflow-x: auto;
+}
+.app-chat-message .fleet-md-pre:last-child {
+  margin-bottom: 0;
+}
+.app-chat-message .fleet-md-pre code {
+  display: block;
+  font-family: var(--app-font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre;
+}
+
+.app-chat-message .fleet-md-quote {
+  margin: 0 0 10px;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--app-border-default);
+  color: var(--text-secondary);
+}
+.app-chat-message .fleet-md-quote:last-child {
+  margin-bottom: 0;
+}
+
+/* Tables: the wrapper owns overflow-x for the same reason .fleet-md-pre
+   does — a wide table must never make the page scroll sideways. */
+.app-chat-message .fleet-md-table-wrap {
+  margin: 0 0 10px;
+  overflow-x: auto;
+}
+.app-chat-message .fleet-md-table-wrap:last-child {
+  margin-bottom: 0;
+}
+.app-chat-message .fleet-md-table {
+  width: 100%;
+  min-width: max-content;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  white-space: normal;
+}
+.app-chat-message .fleet-md-table th,
+.app-chat-message .fleet-md-table td {
+  padding: 6px 11px;
+  text-align: left;
+  border: 1px solid var(--app-border-default);
+  vertical-align: top;
+}
+.app-chat-message .fleet-md-table th {
+  color: var(--text-primary);
+  font-weight: 600;
+  background: var(--app-surface-2);
+  white-space: nowrap;
+}
+.app-chat-message .fleet-md-table td {
+  color: var(--text-secondary);
+}
+
+.app-chat-message .fleet-md-hr {
+  margin: 16px 0;
+  border: none;
+  border-top: 1px solid var(--app-border-default);
 }
 
 .app-chat-message[data-chat-role='user'] {
