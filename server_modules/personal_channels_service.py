@@ -3378,12 +3378,50 @@ def sync_gateway_personal_channel_state(
     docstring)."""
     personal_channels = payload.get("personal_channels") if isinstance(payload.get("personal_channels"), dict) else {}
     synced_state: Optional[Dict[str, Any]] = None
+
+    # A BOX MAY REPORT A CHANNEL THIS BUILD NO LONGER CARRIES, AND THAT IS
+    # NOT AN ERROR — it is the ordinary state of a fleet mid-rollout.
+    #
+    # This runs on EVERY `gateway.state.update` frame
+    # (gateway_protocol_service.py:2960). The 2026-08-14 cutover retired the
+    # first-party whatsapp_personal / telegram_personal lanes, but a gateway
+    # installed before it keeps advertising them in its state payload until
+    # it takes an update — and `assert_personal_gateway_channel` RAISES on a
+    # key the lane contract no longer knows. Observed on production minutes
+    # after this deploy, on a real customer box:
+    #
+    #   sync_gateway_personal_channel_state
+    #     -> assert_personal_gateway_channel("whatsapp_personal")
+    #     -> ValueError: Channel lane contract rejected non-personal channel
+    #
+    # An old box must never be able to raise inside the frame handler for
+    # every state update it sends. The contract assertion is still the right
+    # gate for a key we intend to WRITE; it is the wrong response to a key
+    # somebody else merely mentioned. Skip what this build does not carry,
+    # and say so once per key rather than silently — a channel quietly
+    # vanishing from sync is exactly the kind of thing this file's own
+    # history says takes weeks to notice.
+    def _carried(channel_key: str) -> bool:
+        try:
+            channel_lane_contract_service.assert_personal_gateway_channel(
+                channel_key,
+                str((personal_channels.get(channel_key) or {}).get("provider") or "").strip() or None,
+            )
+            return True
+        except Exception:
+            _logger.info(
+                "gateway state update mentions channel %s, which this build no longer carries — skipping its sync (gateway_id=%s)",
+                channel_key,
+                gateway_id,
+            )
+            return False
+
     whatsapp_state = (
         personal_channels.get(WHATSAPP_PERSONAL_CHANNEL_KEY)
         if isinstance(personal_channels.get(WHATSAPP_PERSONAL_CHANNEL_KEY), dict)
         else {}
     )
-    if whatsapp_state:
+    if whatsapp_state and _carried(WHATSAPP_PERSONAL_CHANNEL_KEY):
         whatsapp_spec = channel_lane_contract_service.assert_personal_gateway_channel(
             WHATSAPP_PERSONAL_CHANNEL_KEY,
             str(whatsapp_state.get("provider") or WHATSAPP_PERSONAL_PROVIDER).strip() or WHATSAPP_PERSONAL_PROVIDER,
@@ -3429,7 +3467,7 @@ def sync_gateway_personal_channel_state(
         if isinstance(personal_channels.get(TELEGRAM_PERSONAL_CHANNEL_KEY), dict)
         else {}
     )
-    if telegram_state:
+    if telegram_state and _carried(TELEGRAM_PERSONAL_CHANNEL_KEY):
         telegram_spec = channel_lane_contract_service.assert_personal_gateway_channel(
             TELEGRAM_PERSONAL_CHANNEL_KEY,
             str(telegram_state.get("provider") or TELEGRAM_PERSONAL_PROVIDER).strip() or TELEGRAM_PERSONAL_PROVIDER,
