@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -6694,6 +6694,67 @@ async def _ensure_durable_turn_thread_row(
         return None
 
 
+async def _ensure_durable_turn_provider(
+    turn_request: AgentTurnRequest,
+    *,
+    base_request: Optional[Any] = None,
+) -> AgentTurnRequest:
+    """Resolve the workspace's provider for a durable turn that carries none.
+
+    A durable run REQUIRES an explicit provider — `runs_execution` raises
+    `_honest_no_provider_error` rather than guessing, which is right. But the
+    web chat surface never sends one: the platform resolves the workspace's
+    single provider server-side (`_resolve_cloud_provider`, "ONE AI ROAD"),
+    and only the direct-chat branch was doing that resolution.
+
+    So the moment `_promote_turn_request_to_primary_engine_path` decided a
+    message "looks like a task" and swapped the engine underneath it, the
+    provider stopped being resolved by anyone:
+
+        browser sends no provider   (correct — it is not the browser's to pick)
+          -> promoted to durable_run on task markers
+          -> context_hints.provider empty, metadata.provider empty
+          -> "No AI provider is configured for this run", 3 attempts, all fail
+          -> an EMPTY assistant turn, and canned copy blaming the customer's
+             hardware for a routing bug
+
+    Same family as the engine-swap billing bug in CLAUDE.md: a second engine
+    behind one dispatch seam inherited the return contract and dropped what
+    the old branch's callee was quietly supplying. Resolved HERE rather than
+    in the sync promotion builder because this is the first async frame that
+    knows the workspace, and resolution needs the control plane.
+
+    Deliberately does not invent a fallback: if the workspace's provider
+    cannot be resolved (blocked, exhausted, misconfigured) the resolver's own
+    hard stop carries the real reason, which is strictly better than the
+    generic "the initiator must set a provider".
+    """
+    if _hint_text(getattr(base_request, "provider", None)):
+        return turn_request
+    if _hint_text(turn_request.context_hints.get("provider")):
+        return turn_request
+    if _hint_text(_metadata_dict(turn_request.context_hints.get("metadata")).get("provider")):
+        return turn_request
+
+    workspace_id = str(turn_request.workspace_id or "").strip() or "default"
+    from server_modules import sage_agent_runtime_service as _sage_runtime
+
+    provider, _credentials = await _sage_runtime._resolve_cloud_provider(workspace_id)
+    provider = str(provider or "").strip()
+    if not provider:
+        return turn_request
+
+    context_hints = dict(turn_request.context_hints or {})
+    context_hints["provider"] = provider
+    metadata = dict(_metadata_dict(context_hints.get("metadata")))
+    metadata.setdefault("provider", provider)
+    # Recorded so a run's own row says where its provider came from — a
+    # resolved provider and a caller-supplied one must stay tellable apart.
+    metadata.setdefault("provider_source", "workspace_resolved")
+    context_hints["metadata"] = metadata
+    return replace(turn_request, context_hints=context_hints)
+
+
 async def execute_durable_turn_request(
     *,
     turn_request: AgentTurnRequest,
@@ -6704,6 +6765,7 @@ async def execute_durable_turn_request(
 ) -> Dict[str, Any]:
     # Canonical durable execution should run from AgentTurnRequest-derived state directly.
     # RunStartRequest remains a compatibility input at the edges, not the primary internal shape here.
+    turn_request = await _ensure_durable_turn_provider(turn_request, base_request=base_request)
     req = build_durable_turn_execution_request(turn_request, base_request=base_request)
     created_trace_context = False
     if trace_context is None:
