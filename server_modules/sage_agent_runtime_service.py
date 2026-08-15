@@ -5813,6 +5813,19 @@ async def _handle_sage_chat_unguarded(
             workspace_id=normalized_workspace_id,
             owner_user_id=actor_user_id or "sage",
             channel="sage",
+            # WHICH AGENT OWNS THIS CONVERSATION. Omitting it left the column
+            # NULL, and `GET /api/threads?agent_id=...` filters on exactly
+            # that column — so a customer's entire channel history was
+            # durably stored and returned by nothing. agent_turn.py's own
+            # ensure_master_thread call has always passed this; the channel
+            # path never did.
+            #
+            # `_spec_install_id` is the specialist resolved for this turn
+            # (line ~5349, same function). Empty means the turn genuinely IS
+            # the workspace master, and NULL is then the honest value —
+            # ensure_master_thread must not be handed a fabricated owner
+            # just to make a row appear in a list.
+            master_agent_install_id=_spec_install_id or None,
         )
         thread_record = await thread_service.get_thread(
             thread_id,

@@ -3827,6 +3827,11 @@ async def _deliver_local_bridge_personal_reply(
             is_group=is_group,
             chat_label=chat_label,
             was_addressed=was_addressed,
+            # The agent this conversation belongs to, already resolved above by
+            # _resolve_local_bridge_agent_id. Without it the turn runs as the
+            # workspace master and lands in the shared "sage-main" thread, so
+            # the conversation is invisible to GET /api/threads?agent_id=...
+            agent_id=agent_id,
         )
         # ABSOLUTE RULE: no hardcoded platform status/error message may EVER
         # be sent into a channel (DM or group). resolve_channel_reply_outcome

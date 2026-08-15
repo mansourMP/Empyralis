@@ -320,14 +320,52 @@ async def _execute_channel_turn_with_envelope(
     if normalized_agent_id:
         from server_modules.specialist_runtime_context import resolve_specialist_runtime_context
 
+        # RESOLVE THE TENANT FROM THE WORKSPACE. This used to pass the literal
+        # "default", and that one string cost the channel surface its identity.
+        #
+        # The install bundle is looked up per tenant, so on any real workspace
+        # the lookup missed and resolve_specialist_runtime_context returned
+        # None — not an exception, so the `except` below never saw it and
+        # nothing was logged. Measured on the live rig:
+        #
+        #   tenant_id="default"              -> bundle NOT FOUND
+        #   tenant_id="tenant_16e2cda8c709"  -> bundle FOUND
+        #
+        # A None specialist means "this turn is the workspace master (Sage)",
+        # so every channel turn for every bound agent ran as generic Sage and,
+        # in sage_turn_adapter, fell past the per-(agent, sender) thread branch
+        # into get_active_thread's "sage-main". Consequences, all observed:
+        # the agent answered as Sage rather than as itself, every channel
+        # conversation for every agent piled into ONE shared thread row with
+        # no master_agent_install_id, and GET /api/threads?agent_id=... — which
+        # filters by agent — could not return it, so a customer's entire
+        # Telegram history was saved and invisible in the product.
+        #
+        # This is the failure CLAUDE.md already names for user records:
+        # a tenant is resolved FROM THE WORKSPACE, never assumed. The same
+        # rule applies to a literal.
+        from server_modules import control_plane_repository as _cpr
+
+        resolved_tenant_id = (await _cpr.resolve_tenant_id_for_workspace(workspace_id)) or "default"
         try:
             specialist_context = await resolve_specialist_runtime_context(
                 workspace_id=workspace_id,
-                tenant_id="default",
+                tenant_id=resolved_tenant_id,
                 active_agent_install_id=normalized_agent_id,
             )
         except Exception:
             specialist_context = None  # fail safe to Sage — same contract as execute_sage_turn_for_channel
+        if specialist_context is None:
+            # Never silent again: a dropped specialist downgrades the agent to
+            # Sage and orphans the thread, and the old code could not tell
+            # "resolved to master" from "lookup missed".
+            _logger.warning(
+                "personal-channel turn: no specialist context for agent_id=%s workspace=%s tenant=%s — "
+                "this turn will run as the workspace master and use the shared thread.",
+                normalized_agent_id,
+                workspace_id,
+                resolved_tenant_id,
+            )
 
     # Serialize per (workspace, personal-channel thread) so only ONE turn
     # executes at a time for a given DM/group — the SAME protection
@@ -806,6 +844,25 @@ async def build_personal_channel_reply_async(
     is_group: bool = False,
     chat_label: Optional[str] = None,
     was_addressed: Optional[bool] = None,
+    # WHICH AGENT THIS TURN IS FOR. Its absence is why every OpenClaw
+    # conversation was answered by generic Sage in one shared thread.
+    #
+    # This is the single builder every channel on the transport goes
+    # through, and it had no way to say which agent the message was for —
+    # so `_build_unified_sage_personal_reply_async` always saw "", skipped
+    # specialist resolution entirely, and sage_turn_adapter fell past its
+    # per-(agent, sender) thread branch into get_active_thread's
+    # "sage-main". Measured, not inferred: the caller resolves a real
+    # agent_id (that is what `_resolve_local_bridge_agent_id` exists for)
+    # and then had nowhere to put it.
+    #
+    # What it cost: every channel conversation for every agent in the
+    # workspace accumulated in ONE `agent_threads` row with a NULL
+    # master_agent_install_id, so `GET /api/threads?agent_id=...` — which
+    # filters by agent — returned none of it. A customer's entire Telegram
+    # history was durably saved and completely invisible in the product,
+    # and the agent they had configured answered as Sage instead of itself.
+    agent_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -823,6 +880,7 @@ async def build_personal_channel_reply_async(
             is_group=is_group,
             chat_label=chat_label,
             was_addressed=was_addressed,
+            agent_id=agent_id,
         )
         return unified
     except Exception as _exc:
