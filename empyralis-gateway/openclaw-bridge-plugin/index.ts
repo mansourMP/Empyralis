@@ -48,14 +48,64 @@ function log(message: string): void {
   console.log(`[${PLUGIN_ID}] ${message}`);
 }
 
+/**
+ * MODULE scope, not `register()` scope, and that distinction cost a real
+ * customer message.
+ *
+ * The queue used to be a `let` inside `register(api)`, so every handler read
+ * the closure of the registration that installed it. Observed live on
+ * 2026-08-15 with a real Telegram message from the owner's own account:
+ *
+ *   [telegram] Inbound message telegram:1932934047 -> @…Bot (direct, 62 chars)
+ *   [empyralis-bridge] message_received arrived before gateway_start finished;
+ *                      dropping one inbound event (channel=telegram)
+ *
+ * — seven minutes AFTER `gateway_start` had run and logged. A single
+ * registration cannot produce that ordering, so the `message_received`
+ * handler was reading a different closure than the `gateway_start` that
+ * built the queue.
+ *
+ * Module scope makes the queue shared by construction, so a second
+ * registration (whatever produces it — load path plus an entry, a reload, a
+ * future host change) can no longer see a null one.
+ */
+let sharedQueue: BoundedRetryQueue<EmpyralisInboundPayload> | null = null;
+
+/** Build the queue if it does not exist yet, and return it.
+ *
+ *  Idempotent and safe to call from either hook: the point is that an
+ *  inbound message must NEVER be dropped because of plugin load order. The
+ *  old code logged "this should never happen" and threw the message away —
+ *  a customer's message lost to an ordering assumption, with the loss
+ *  visible only in a log nobody reads. There is a durable file-backed queue
+ *  here; the correct response to "the queue is not up yet" is to bring it
+ *  up, not to discard the thing it exists to protect. */
+function ensureQueue(ctx: { workspaceDir?: string }): BoundedRetryQueue<EmpyralisInboundPayload> {
+  if (sharedQueue) return sharedQueue;
+  const config = loadBridgeConfig(
+    process.env,
+    ctx.workspaceDir
+      ? path.join(ctx.workspaceDir, "empyralis-bridge")
+      : path.join(os.tmpdir(), "empyralis-bridge"),
+  );
+  sharedQueue = new BoundedRetryQueue<EmpyralisInboundPayload>({
+    filePath: config.queueFilePath,
+    maxItems: config.queueMaxItems,
+    maxAttempts: config.queueMaxAttempts,
+    minBackoffMs: config.queueMinBackoffMs,
+    maxBackoffMs: config.queueMaxBackoffMs,
+    send: (payload) => forwardInboundEvent(config, payload),
+    log,
+  });
+  return sharedQueue;
+}
+
 export default definePluginEntry({
   id: PLUGIN_ID,
   name: "Empyralis Bridge",
   description:
     "Forwards inbound channel messages to Empyralis and suppresses OpenClaw's own (intentionally credential-less) agent replies.",
   register(api) {
-    let queue: BoundedRetryQueue<EmpyralisInboundPayload> | null = null;
-
     api.on(
       "gateway_start",
       async (_event, ctx: PluginHookGatewayContext) => {
@@ -63,15 +113,7 @@ export default definePluginEntry({
           process.env,
           ctx.workspaceDir ? path.join(ctx.workspaceDir, "empyralis-bridge") : path.join(os.tmpdir(), "empyralis-bridge"),
         );
-        queue = new BoundedRetryQueue<EmpyralisInboundPayload>({
-          filePath: config.queueFilePath,
-          maxItems: config.queueMaxItems,
-          maxAttempts: config.queueMaxAttempts,
-          minBackoffMs: config.queueMinBackoffMs,
-          maxBackoffMs: config.queueMaxBackoffMs,
-          send: (payload) => forwardInboundEvent(config, payload),
-          log,
-        });
+        const queue = ensureQueue(ctx);
         await queue.load();
         queue.start(config.queueFlushIntervalMs);
         log(
@@ -83,7 +125,7 @@ export default definePluginEntry({
     );
 
     api.on("gateway_stop", async () => {
-      queue?.stop();
+      sharedQueue?.stop();
       log("gateway_stop: queue flush loop stopped");
     });
 
@@ -124,17 +166,21 @@ export default definePluginEntry({
       "message_received",
       async (event: PluginHookMessageReceivedEvent, ctx: PluginHookMessageContext) => {
         const payload = mapInboundEvent(event, ctx);
+        // Bring the queue up rather than discarding the message. The old
+        // code logged "this should never happen" and dropped it — and then
+        // it happened, on a real message, seven minutes after gateway_start
+        // had already run (see the sharedQueue comment above). A message the
+        // customer sent is the one thing here that cannot be recreated; the
+        // queue can. Recovering costs one lazy construction, and the durable
+        // file-backed queue then carries the message exactly as it would
+        // have if the ordering had held.
+        let queue = sharedQueue;
         if (!queue) {
-          // gateway_start has not completed yet. This should not happen in
-          // practice (activation.onStartup runs gateway_start first) but if
-          // it ever does, do not silently drop the message — log loudly.
-          // There is nowhere durable to put it without a queue, so it is
-          // lost; that loss is visible in the gateway's own log, not
-          // invisible.
           log(
-            `message_received arrived before gateway_start finished; dropping one inbound event (channel=${ctx.channelId ?? "unknown"}). This should never happen — investigate plugin load order if it does.`,
+            `message_received arrived before gateway_start finished (channel=${ctx.channelId ?? "unknown"}); starting the queue now rather than dropping the message.`,
           );
-          return;
+          queue = ensureQueue(ctx as unknown as { workspaceDir?: string });
+          await queue.load();
         }
         await queue.enqueue(payload);
       },

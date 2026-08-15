@@ -704,6 +704,198 @@ export function DmAllowlistForm({
   );
 }
 
+/** WHICH identity on this channel is the OWNER — the deliberate owner action
+ *  that makes owner authority reachable from a channel at all.
+ *
+ *  Sits beside DmAllowlistForm and is emphatically NOT part of it. The
+ *  allowlist answers "who may message this agent"; this answers "who IS the
+ *  owner", and they are different facts with very different consequences —
+ *  the allowlist is a list the owner grows to admit other people, so reading
+ *  it as owner identity would hand shell and hardware authority to every one
+ *  of them the moment they were admitted. They are two controls, on two
+ *  routes, storing two things, on purpose.
+ *
+ *  WHY IT HAS TO BE TYPED, rather than picked or inferred. Nothing may derive
+ *  the owner from an inbound message's own sender fields: the per-message
+ *  state sync used to do exactly that and silently replaced the owner with
+ *  whichever stranger had most recently texted (see
+ *  personal_channels_service._resolve_linked_identity_for_sync). And there is
+ *  no list to pick from for the same reason the allowlist has none —
+ *  gate-before-model means an unadmitted message is refused before it is ever
+ *  recorded, so no history exists.
+ *
+ *  ONE FIELD, TWO STATES, and the empty one is not an error: an agent with no
+ *  owner on a channel is a legitimate configuration (an audience-facing
+ *  agent), so this states what is true rather than nagging. Clearing is a
+ *  first-class action — a mistaken link that could never be undone would be
+ *  worse than no link at all. */
+type OwnerIdentityState = {
+  senderId: string | null;
+};
+
+export function OwnerIdentityForm({
+  gatewayId,
+  agentId,
+  channelKey,
+  channelLabel,
+}: {
+  gatewayId: string;
+  agentId: string;
+  channelKey: string;
+  channelLabel: string;
+}) {
+  const [owner, setOwner] = useState<OwnerIdentityState | null>(null);
+  const [loading, setLoading] = useState(true);
+  // "loaded, and nobody is linked" and "the read failed" are different facts
+  // and never share a message — the same rule the two allowlist forms follow.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+
+  const url = `/api/personal-channels/${encodeURIComponent(channelKey)}/gateways/${encodeURIComponent(gatewayId)}/owner-identity?agent_id=${encodeURIComponent(agentId)}`;
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fleetAuthorizedFetch(url, {
+        credentials: "include",
+        headers: buildCookieAuthHeaders("GET"),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setOwner({ senderId: body?.sender_id ? String(body.sender_id) : null });
+        setLoadFailed(false);
+      } else {
+        setLoadFailed(true);
+      }
+    } catch {
+      setLoadFailed(true);
+    } finally {
+      setLoading(false);
+    }
+  }, [url]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useCallback(
+    async (nextSenderId: string) => {
+      setSaving(true);
+      setError(null);
+      try {
+        const res = await fleetAuthorizedFetch(url, {
+          method: "PUT",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("PUT", { "Content-Type": "application/json" }),
+          body: JSON.stringify({ sender_id: nextSenderId }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(getErrorMessage(body, `Could not save (${res.status}).`));
+          return;
+        }
+        // Read the SERVER's answer rather than echoing the draft: it
+        // canonicalizes the id on the way in, so echoing would show the
+        // owner something different from what actually decides authority.
+        setOwner({ senderId: body?.sender_id ? String(body.sender_id) : null });
+        setDraft("");
+      } catch {
+        setError("Could not save this just now — nothing changed, so it is safe to try again.");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [url],
+  );
+
+  if (loading) {
+    return (
+      <p className="fleet-subtitle" style={{ marginTop: "var(--space-4)" }}>
+        Reading who this agent treats as you…
+      </p>
+    );
+  }
+
+  if (loadFailed) {
+    return (
+      <div style={{ marginTop: "var(--space-4)" }}>
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>Could not read who this agent treats as you.</span>
+        </div>
+        <button type="button" className="fleet-btn" onClick={() => void load()}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  const linked = owner?.senderId ?? null;
+
+  return (
+    <div
+      style={{ marginTop: "var(--space-4)", paddingTop: "var(--space-4)", borderTop: "1px solid var(--border)" }}
+    >
+      {error ? (
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      <p className="openclaw-form-note" style={{ marginTop: 0 }}>
+        {linked
+          ? `Messages from this ${channelLabel} ID are treated as coming from you, so this agent will run commands and use your computer for them. Everyone else is served, not obeyed.`
+          : `This agent does not know which ${channelLabel} ID is yours, so it treats every message as coming from someone else — it will answer, but it will not run commands or use your computer. Add your own ${channelLabel} ID to change that.`}
+      </p>
+
+      {linked ? (
+        <div className="openclaw-group-list">
+          <div className="openclaw-group-chip">
+            <span className="openclaw-group-chip-id">{linked}</span>
+            <button
+              type="button"
+              className="openclaw-group-chip-remove"
+              disabled={saving}
+              aria-label={`Remove ${linked}`}
+              onClick={() => void save("")}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="openclaw-group-add">
+          <input
+            className="fleet-wizard-input"
+            type="text"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={`Your ${channelLabel} ID`}
+            aria-label={`Your ${channelLabel} ID`}
+            value={draft}
+            disabled={saving}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && draft.trim()) void save(draft.trim());
+            }}
+          />
+          <button
+            type="button"
+            className="fleet-btn"
+            disabled={saving || !draft.trim()}
+            onClick={() => void save(draft.trim())}
+          >
+            {saving ? "Saving…" : "This is me"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** The one provisioning refusal an owner can hit from THIS form, translated.
  *
  *  Matched on the CHECK ID (`dm.scope_main_multiuser`), which is a stable

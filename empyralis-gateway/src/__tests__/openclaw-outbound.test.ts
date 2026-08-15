@@ -67,7 +67,7 @@ test("a well-formed outbound payload maps to message.action send params", () => 
   assert.equal(mapped.request.channel, "line");
   assert.equal(mapped.request.action, "send");
   assert.equal(mapped.request.idempotencyKey, "openclaw_line:M-7");
-  assert.equal(mapped.request.params.target, "C-999");
+  assert.equal(mapped.request.params.to, "C-999");
   assert.equal(mapped.request.params.message, "On it — I filed that as MAN-401.");
   // Never invent a reply target or a thread.
   assert.equal("replyTo" in mapped.request.params, false);
@@ -507,7 +507,7 @@ test("the client completes OpenClaw's challenge/connect handshake and invokes me
     const outcome = await client.sendMessageAction({
       channel: "line",
       action: "send",
-      params: { target: "C-999", message: "hello" },
+      params: { to: "C-999", message: "hello" },
       idempotencyKey: "k-1",
     });
     assert.equal(outcome.status, "delivered");
@@ -528,7 +528,7 @@ test("the client completes OpenClaw's challenge/connect handshake and invokes me
     assert.equal(action?.channel, "line");
     assert.equal(action?.action, "send");
     assert.equal(action?.idempotencyKey, "k-1");
-    assert.deepEqual(action?.params, { target: "C-999", message: "hello" });
+    assert.deepEqual(action?.params, { to: "C-999", message: "hello" });
   } finally {
     await client.stop();
     await gateway.close();
@@ -550,7 +550,7 @@ test("a permanent rejection from message.action is returned structurally and nev
     const outcome = await client.sendMessageAction({
       channel: "line",
       action: "send",
-      params: { target: "C-999", message: "hello" },
+      params: { to: "C-999", message: "hello" },
       idempotencyKey: "k-2",
     });
     assert.equal(outcome.status, "rejected");
@@ -582,7 +582,7 @@ test("a transient failure is retried under the SAME idempotency key, then succee
     const outcome = await client.sendMessageAction({
       channel: "line",
       action: "send",
-      params: { target: "C-999", message: "hello" },
+      params: { to: "C-999", message: "hello" },
       idempotencyKey: "k-3",
     });
     assert.equal(outcome.status, "delivered");
@@ -607,7 +607,7 @@ test("a rejected token never yields a session, and a send reports it rather than
     const outcome = await client.sendMessageAction({
       channel: "line",
       action: "send",
-      params: { target: "C-999", message: "hello" },
+      params: { to: "C-999", message: "hello" },
       idempotencyKey: "k-4",
     });
     assert.equal(outcome.status, "transient");
@@ -655,7 +655,7 @@ test("a retryAfterMs longer than one in-band wait STOPS the retry instead of ret
     const outcome = await client.sendMessageAction({
       channel: "line",
       action: "send",
-      params: { target: "C-999", message: "hello" },
+      params: { to: "C-999", message: "hello" },
       idempotencyKey: "k-backoff-long",
     });
     const elapsed = Date.now() - startedAt;
@@ -699,7 +699,7 @@ test("a retryAfterMs within budget is honoured as a FLOOR, not shortened to our 
     const outcome = await client.sendMessageAction({
       channel: "line",
       action: "send",
-      params: { target: "C-999", message: "hello" },
+      params: { to: "C-999", message: "hello" },
       idempotencyKey: "k-backoff-floor",
     });
     const elapsed = Date.now() - startedAt;
@@ -733,7 +733,7 @@ test("with no retryAfterMs the client still uses its own capped backoff and all 
     const outcome = await client.sendMessageAction({
       channel: "line",
       action: "send",
-      params: { target: "C-999", message: "hello" },
+      params: { to: "C-999", message: "hello" },
       idempotencyKey: "k-backoff-none",
     });
     assert.equal(outcome.status, "transient");
@@ -769,4 +769,34 @@ test("the client source contains no downward clamp of a server-supplied backoff"
     /Math\.max\(\s*requested\s*\?\?\s*0\s*,\s*selfBackoff\s*\)/.test(body),
     "the retry wait must be the MAXIMUM of the asked-for backoff and our own",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The destination param name is OpenClaw's, not ours.
+//
+// `target` was sent for months. It type-checked, every unit test above
+// asserted it, and it failed only against the live binary — three refusals
+// per reply and then a drop:
+//
+//   openclaw.outbound.attempt_failed  code=UNAVAILABLE
+//                                     detail="ToolInputError: to required"
+//
+// The turn had run, the model had answered, the answer was persisted, and
+// the person got silence. `target` is a real param name elsewhere in their
+// action surface, which is why it looked right.
+//
+// Pinned here against their own resolution order, read out of
+// dist/message-action-runner-*.js:
+//
+//   readStringParam(actionParams, "to") ?? readStringParam(actionParams, "channelId")
+//
+// A unit test cannot reach the binary, so this asserts the SHAPE the binary
+// requires and says where that requirement was read from. If OpenClaw ever
+// renames it, this fails loudly instead of a customer's reply vanishing.
+test("the send action addresses with `to` — never `target`, which OpenClaw's send never reads", () => {
+  const mapped = mapOpenClawOutboundPayload(outboundFrame().payload);
+  assert.equal(mapped.ok, true);
+  if (!mapped.ok) return;
+  assert.equal(mapped.request.params.to, "C-999");
+  assert.equal("target" in mapped.request.params, false, "`target` is not read by OpenClaw's send action");
 });

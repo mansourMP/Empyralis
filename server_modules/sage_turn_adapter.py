@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from server_modules.channel_adapter import (
+    ChannelOrigin,
     NormalizedSageTurn,
     normalize_sage_inbound,
 )
@@ -37,6 +38,45 @@ from server_modules.sage_agent_runtime_contract import (
     normalize_sage_mode,
     normalize_sage_surface,
 )
+
+
+def _channel_origin_for_turn(turn: Any, resolved_channel_origin: str) -> str:
+    """The channel key handle_sage_chat should actually see — a plain string,
+    and the REAL one.
+
+    Two separate defects lived on the single line this replaces
+    (`channel_origin=turn.channel_origin`), and both are silent:
+
+      1. `NormalizedSageTurn.channel_origin` is a ChannelOrigin MEMBER, and
+         handle_sage_chat's parameter is a `str` it later does
+         `str(...).strip().lower()` on. For a `class X(str, Enum)` on Python
+         3.11+ that yields "channelorigin.telegram_hosted", not
+         "telegram_hosted" — so every downstream comparison against a real
+         channel key failed for EVERY channel, not just the new ones.
+      2. ChannelOrigin is a hand-written enum whose members are the
+         first-party channel keys. The 2026-08-14 cutover moved every live
+         channel onto `openclaw_*`, none of which are members, so
+         ChannelOrigin.coerce collapses all 24 of them to UNKNOWN and the
+         real key — which normalize_sage_inbound was handed and did not
+         keep — is gone by the time anything asks which channel this was.
+
+    Together they are why sage_agent_runtime_service._resolve_channel_sender_class
+    could never match a channel binding, so an owner recognised by the DM
+    gate arrived at the turn as "audience" and had every tool stripped.
+
+    A known member yields its VALUE; anything the enum does not know keeps
+    the raw key the caller actually resolved. Deliberately not "teach the
+    enum about OpenClaw": that enum is a hand-maintained channel list, which
+    is precisely the shape this codebase has already had to derive away
+    twice on this same channel set — and rebuilding it dynamically would
+    change a type dozens of call sites depend on. Not losing the string is
+    the smaller and more durable fix.
+    """
+    origin = getattr(turn, "channel_origin", None)
+    value = str(getattr(origin, "value", origin) or "").strip()
+    if value and value != ChannelOrigin.UNKNOWN.value:
+        return value
+    return str(resolved_channel_origin or "").strip()
 
 
 def _coerce_text(value: Any) -> str:
@@ -289,7 +329,7 @@ async def execute_sage_turn(
         mode=turn.mode,
         current_user=turn.current_user,
         attachments=turn.attachments if turn.attachments else None,
-        channel_origin=turn.channel_origin,
+        channel_origin=_channel_origin_for_turn(turn, resolved_channel_origin),
         sender_name=turn.channel_sender_name or None,
         sender_id=turn.channel_sender_id or None,
         thread_id=resolved_thread_id,

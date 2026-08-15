@@ -649,7 +649,25 @@ def upsert_local_bridge_state(
 ) -> Dict[str, Any]:
     """Signal/iMessage/WeChat-personal twin of upsert_whatsapp_state /
     upsert_telegram_state — same shallow-merge-metadata, same
-    ON CONFLICT(gateway_id, channel_key, agent_id) upsert shape."""
+    ON CONFLICT(gateway_id, channel_key, agent_id) upsert shape.
+
+    ONE deliberate deviation from those two twins: `linked_identity` is
+    PRESERVED when the caller passes None, and cleared only on an explicit
+    empty string. The WhatsApp/Telegram tables overwrite their own
+    linked_jid/linked_user_id unconditionally and rely on the service layer
+    to guard (personal_channels_service._resolve_linked_identity_for_sync's
+    docstring records what that cost the first time nobody did). This table
+    cannot use that posture, because its ONLY per-message writer —
+    _resolve_local_bridge_agent_id, which re-upserts `status="linked"` on
+    every inbound message that hits the slow path — has no identity to
+    offer and never will: it answers "which agent owns this channel", not
+    "who is the owner on it". Overwriting from there would erase the owner
+    link on the next message after it was established, so a preserve-on-None
+    default is what makes the column durable rather than a value with a
+    half-life of one message. None means "I have nothing to say about the
+    owner's identity"; "" means "clear it" and is only ever passed by the
+    owner-facing clear action.
+    """
     now_iso = _utc_now_iso()
     normalized_agent_id = _norm_agent_id(agent_id)
     with _DB_LOCK:
@@ -669,6 +687,15 @@ def upsert_local_bridge_state(
             )
             merged_metadata = dict(existing_metadata or {})
             merged_metadata.update(dict(metadata or {}))
+            # See the docstring: None preserves, "" clears, a value sets.
+            if linked_identity is None:
+                resolved_linked_identity = (
+                    (str(existing_row["linked_identity"] or "").strip() or None)
+                    if existing_row is not None
+                    else None
+                )
+            else:
+                resolved_linked_identity = str(linked_identity).strip() or None
             connection.execute(
                 """
                 INSERT INTO personal_channel_local_bridge_states (
@@ -696,7 +723,7 @@ def upsert_local_bridge_state(
                     str(user_id or "").strip(),
                     str(provider or "").strip(),
                     str(status or "").strip() or "idle",
-                    str(linked_identity or "").strip() or None,
+                    resolved_linked_identity,
                     str(connected_at or "").strip() or None,
                     now_iso,
                     _json_dumps(merged_metadata),

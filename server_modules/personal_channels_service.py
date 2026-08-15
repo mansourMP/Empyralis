@@ -427,6 +427,42 @@ class _LocalBridgePersonalChannelHandler(PersonalChannelHandler):
 # "group" because OpenClaw did not say. Stable token, matched nowhere by
 # prose (CLAUDE.md: match on codes, never on wording).
 OPENCLAW_GROUPNESS_ASSUMED = "openclaw_groupness_unknown_assumed_group"
+OPENCLAW_GROUPNESS_DERIVED_DIRECT = "openclaw_groupness_derived_direct_from_identity"
+
+
+def _openclaw_identity_tail(value: Any) -> str:
+    """The bare id out of an addressing string, however it is namespaced.
+
+    `remote_jid` arrives channel-prefixed ("telegram:1932934047") while
+    `sender_jid` does not ("1932934047"), and other channels on this lane use
+    their own separators ("@", "/"). Comparing the raw strings would answer
+    "no" for every DM on every channel, which is exactly the bug this exists
+    to close, so compare the trailing identifier instead.
+    """
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    for separator in (":", "@", "/"):
+        if separator in text:
+            text = text.rsplit(separator, 1)[-1]
+    return text.strip()
+
+
+def _openclaw_message_is_direct(message: Dict[str, Any]) -> bool:
+    """True only when the conversation IS the sender — i.e. a direct message.
+
+    Returns False on anything unproven (either id missing, or they differ),
+    so the caller keeps its fail-closed assumed-group default. This can only
+    ever move a message from "assumed group" to "known DM", never the
+    reverse, which is what makes it safe to consult before the gates.
+    """
+
+    chat = _openclaw_identity_tail(message.get("remote_jid"))
+    sender = _openclaw_identity_tail(message.get("sender_jid"))
+    if not chat or not sender:
+        return False
+    return chat == sender
 
 
 def normalize_openclaw_gate_facts(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -476,8 +512,41 @@ def normalize_openclaw_gate_facts(message: Dict[str, Any]) -> Dict[str, Any]:
     """
     normalized = dict(message)
     if normalized.get("is_group") is None:
-        normalized["is_group"] = True
-        normalized["openclaw_groupness"] = OPENCLAW_GROUPNESS_ASSUMED
+        # One structural exception to "unknown means group", and it can only
+        # ever prove the DM direction — never turn a group into a DM.
+        #
+        # The payload carries BOTH the conversation and the sender:
+        #
+        #   remote_jid  "telegram:1932934047"   the chat this arrived in
+        #   sender_jid  "1932934047"            who sent it
+        #
+        # In a DM those are the same identity. In a group they cannot be:
+        # the chat is the group and the sender is one participant of it
+        # (Telegram group ids are negative, user ids positive; the same
+        # split holds for every channel on this lane, where a group's
+        # conversation id is the group's own).
+        #
+        # So an EQUAL pair is positive evidence of a direct message, not an
+        # absence of evidence — which is the whole reason the assumed-group
+        # default exists. An unequal or unparseable pair changes nothing and
+        # still falls through to the strict side below.
+        #
+        # This is structural, not textual: it reads two identifiers, never
+        # message content, so it does not touch the rule the docstring sets
+        # out about never synthesizing a mention.
+        #
+        # It matters because without it a DM is undeliverable on this
+        # transport, permanently: group-ness is unknown for EVERY OpenClaw
+        # message, so every DM was routed to Gate 2, denied by an empty
+        # group allowlist, and dropped as `group_policy_denied`. Observed
+        # live 2026-08-15 on a real Telegram DM from the workspace owner —
+        # OpenClaw's own log said "(direct)" on the very same message.
+        if _openclaw_message_is_direct(normalized):
+            normalized["is_group"] = False
+            normalized["openclaw_groupness"] = OPENCLAW_GROUPNESS_DERIVED_DIRECT
+        else:
+            normalized["is_group"] = True
+            normalized["openclaw_groupness"] = OPENCLAW_GROUPNESS_ASSUMED
     else:
         normalized["is_group"] = bool(normalized["is_group"])
     # Absent stays absent: mention_gating_service.mention_facts_from_message
@@ -1343,16 +1412,225 @@ async def update_agent_dm_policy_config(
 
 def _channel_owner_linked_id(*, channel_key: str, state: Optional[Dict[str, Any]]) -> str:
     """The owner's own identity on this channel, as last established by a
-    real login/connect event — see _resolve_linked_identity_for_sync's
-    docstring for why this is NEVER derived from an inbound message's own
-    sender fields."""
+    real login/connect event or a deliberate owner action — see
+    _resolve_linked_identity_for_sync's docstring for why this is NEVER
+    derived from an inbound message's own sender fields.
+
+    The local-bridge branch was MISSING until 2026-08-15, and its absence is
+    why owner authority was unreachable from every live channel in the
+    product. This function branched on exactly the two first-party keys, and
+    the 2026-08-14 cutover moved every channel onto `openclaw_*` — which
+    LOCAL_BRIDGE_PERSONAL_CHANNELS carries — so it returned "" for every real
+    message:
+
+        _channel_owner_linked_id -> ""            no linked identity possible
+          -> _is_owner_message False              (is_self_chat is hardcoded
+                                                   False on this transport by
+                                                   design, so it is the only
+                                                   remaining owner route)
+          -> "[Telegram · DM · from <name> — NOT your owner]" on every turn
+          -> _resolve_channel_sender_class -> "audience" -> no shell/hardware
+
+    The column it reads has existed since the local-bridge table was created
+    (personal_channel_local_bridge_states.linked_identity, keyed by exactly
+    the (gateway_id, channel_key, agent_id) tuple this fact belongs to, and
+    already the third source list_owner_linked_channel_identities_for_workspace
+    reads for the turn's own tool-authority decision) — nothing wrote it and
+    nothing read it. Wiring the read here rather than inventing a parallel
+    store keeps ONE answer to "who is the owner on this channel", which is
+    the property sage_agent_runtime_service._resolve_channel_sender_class's
+    docstring is emphatic about not splitting in two.
+
+    Deliberately NOT the dm_policy allowlist: "may message this agent" and
+    "IS the owner" are different facts, and reading the allowlist here would
+    silently promote every allowlisted sender to owner authority.
+    """
     if not isinstance(state, dict):
         return ""
     if channel_key == WHATSAPP_PERSONAL_CHANNEL_KEY:
         return str(state.get("linked_jid") or "").strip()
     if channel_key == TELEGRAM_PERSONAL_CHANNEL_KEY:
         return str(state.get("linked_user_id") or "").strip()
+    if channel_key in LOCAL_BRIDGE_PERSONAL_CHANNELS:
+        return str(state.get("linked_identity") or "").strip()
     return ""
+
+
+def _channel_prefixed_identity_tail(*, channel_key: str, value: Any) -> str:
+    """`value` with THIS channel's own transport prefix removed, and nothing
+    else removed.
+
+    The lane addresses one person two ways in one payload — `remote_jid`
+    arrives channel-prefixed ("telegram:1932934047") while `sender_jid` does
+    not ("1932934047") — so a sender id that fell back to `remote_jid` would
+    never equal a stored bare identity, and the owner would be a stranger on
+    exactly the channels where sender_jid happens to be absent.
+
+    Strips ONLY the channel's own id followed by a colon, resolved from the
+    pinned manifest, never an arbitrary separator. That distinction is the
+    whole point: a general "take everything after the last colon" rule would
+    make an attacker-supplied `"anything:1932934047"` canonicalize to the
+    owner's own id, i.e. it would hand owner authority to whoever can put a
+    colon in a sender field. A prefix the registry itself names cannot be
+    chosen by a sender. Unknown/unprefixed values come back unchanged.
+
+    Resolved through `channel_for_key`, NOT `openclaw_channel_id`: the latter
+    RAISES for a channel this transport does not carry, and the two live
+    callers both legitimately see such keys — the DM gate still runs for the
+    first-party keys, and _resolve_channel_sender_class sees every
+    channel_origin in the product. A raise there is not a loud failure, it is
+    a silent one: that call site fails closed to "audience", so an owner on a
+    hosted channel would have been downgraded with nothing said.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    channel = openclaw_channel_registry.channel_for_key(str(channel_key or "").strip())
+    channel_id = str(getattr(channel, "id", "") or "").strip()
+    if not channel_id:
+        return text
+    prefix = f"{channel_id}:"
+    if text.lower().startswith(prefix.lower()):
+        return text[len(prefix):].strip()
+    return text
+
+
+class UnsupportedOwnerIdentityChannelError(ValueError):
+    """`channel_key` is a real channel, but not one this identity can be
+    established on. A distinct type for the same reason
+    UnsupportedDmPolicyModeError is one: "that channel does not exist" and
+    "that channel establishes its owner some other way" are different facts
+    with different remedies."""
+
+
+# Channel keys an owner identity can be set on. The local-bridge family,
+# which LOCAL_BRIDGE_PERSONAL_CHANNELS.update() folds every
+# OpenClaw-transported channel into — i.e. every channel that is live today.
+#
+# DERIVED from the same map DM_POLICY_CHANNEL_KEYS / GROUP_POLICY_CHANNEL_KEYS
+# read, never a fourth hand-written channel list: a channel OpenClaw adds
+# tomorrow must not need an edit here, and this module has already learned
+# what a transcribed copy costs (see the LOCAL_BRIDGE channel-map note in
+# routes_personal_channels.py).
+#
+# WhatsApp/Telegram Personal are absent because their own identity is
+# established by their login/connect event (linked_jid / linked_user_id),
+# not by an owner typing it — and both keys are retired anyway. A write path
+# for a fact something else already owns is exactly the "two answers to one
+# question" shape this build exists to close.
+OWNER_IDENTITY_CHANNEL_KEYS = frozenset(LOCAL_BRIDGE_PERSONAL_CHANNELS.keys())
+
+
+def get_personal_channel_owner_identity(
+    *, gateway_id: str, channel_key: str, agent_id: str,
+) -> Dict[str, Any]:
+    """Read side of the owner link, for the owner's own settings screen.
+
+    Returns ``{"sender_id": str|None, "channel_key": str, "agent_id": str}``.
+    Reads the SAME column _channel_owner_linked_id reads at gate time, so
+    what the screen shows and what the gate uses cannot drift.
+    """
+    normalized_channel_key = str(channel_key or "").strip().lower()
+    normalized_agent_id = str(agent_id or "").strip()
+    state = personal_channels_repository.get_local_bridge_state(
+        str(gateway_id or "").strip(),
+        channel_key=normalized_channel_key,
+        agent_id=normalized_agent_id,
+    )
+    return {
+        "channel_key": normalized_channel_key,
+        "agent_id": normalized_agent_id,
+        "sender_id": _channel_owner_linked_id(
+            channel_key=normalized_channel_key, state=state
+        )
+        or None,
+    }
+
+
+def set_personal_channel_owner_identity(
+    *,
+    registration: Dict[str, Any],
+    gateway_id: str,
+    channel_key: str,
+    agent_id: str,
+    sender_id: Optional[str],
+) -> Dict[str, Any]:
+    """Establish (or clear, on an empty sender_id) which identity on this
+    channel is the OWNER, for this one agent.
+
+    This is the deliberate owner action the whole owner route hangs off, and
+    it is the ONLY writer of the column. It exists as a separate action
+    rather than a per-message inference for the reason
+    _resolve_linked_identity_for_sync's docstring records at length: the old
+    per-message sync passed the inbound message's own sender field straight
+    into the linked-identity column, so the owner's identity was silently
+    replaced by whichever stranger had most recently texted. An identity
+    that any inbound message can rewrite is not an identity.
+
+    It is also deliberately NOT the dm_policy allowlist, and must never be
+    folded into it. "May message this agent" and "IS the owner" are
+    different facts: the allowlist is a list the owner grows to admit other
+    people, and reading it as owner identity would promote every one of them
+    to shell/hardware authority the moment they were admitted.
+
+    Scoped to (gateway_id, channel_key, agent_id) — per AGENT, not per box.
+    Two agents sharing one Agent Computer have two rows, so establishing an
+    owner on one never grants it on the other.
+
+    Raises UnsupportedOwnerIdentityChannelError for a channel whose owner
+    identity is established elsewhere, and ValueError for a missing agent_id
+    (this fact has no meaning unscoped — writing it under
+    LEGACY_UNSCOPED_AGENT_ID would attach an owner to a sentinel row that
+    _resolve_local_bridge_agent_id can hand to any agent).
+    """
+    normalized_channel_key = str(channel_key or "").strip().lower()
+    if normalized_channel_key not in OWNER_IDENTITY_CHANNEL_KEYS:
+        raise UnsupportedOwnerIdentityChannelError(
+            "This channel signs in as the owner directly, so there is nothing to set here."
+        )
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        raise ValueError(
+            "Choose which agent this is for — an owner is established for one agent on one channel."
+        )
+    normalized_gateway_id = str(gateway_id or "").strip()
+    # Canonicalized on the way IN, once, so the stored value and every
+    # comparison against it are already in the same shape — rather than
+    # canonicalizing at each read and hoping every future reader remembers.
+    resolved_sender_id = _channel_prefixed_identity_tail(
+        channel_key=normalized_channel_key, value=sender_id
+    )
+    existing = personal_channels_repository.get_local_bridge_state(
+        normalized_gateway_id, channel_key=normalized_channel_key, agent_id=normalized_agent_id,
+    )
+    personal_channels_repository.upsert_local_bridge_state(
+        gateway_id=normalized_gateway_id,
+        tenant_id=str(registration.get("tenant_id") or "default").strip() or "default",
+        workspace_id=str(registration.get("workspace_id") or "default").strip() or "default",
+        user_id=str(registration.get("user_id") or "").strip(),
+        channel_key=normalized_channel_key,
+        agent_id=normalized_agent_id,
+        provider=str(
+            (existing or {}).get("provider")
+            or LOCAL_BRIDGE_PERSONAL_CHANNELS.get(normalized_channel_key, {}).get(
+                "provider", normalized_channel_key
+            )
+        ).strip(),
+        # Preserve whatever the connection actually is. This action says who
+        # the owner is; it does not claim the channel connected.
+        status=str((existing or {}).get("status") or "connecting").strip() or "connecting",
+        connected_at=str((existing or {}).get("connected_at") or "").strip() or None,
+        # "" clears, a value sets — never None here, which the repository
+        # reads as "I have nothing to say", i.e. a clear would silently be a
+        # no-op and the screen would report a removal that did not happen.
+        linked_identity=resolved_sender_id,
+        metadata={"owner_identity_source": "owner_action"},
+    )
+    return get_personal_channel_owner_identity(
+        gateway_id=normalized_gateway_id,
+        channel_key=normalized_channel_key,
+        agent_id=normalized_agent_id,
+    )
 
 
 def _resolve_linked_identity_for_sync(*, current_value: Optional[str], preserved_value: str) -> Optional[str]:
@@ -1422,10 +1700,22 @@ def _is_owner_message(
         return False
     from server_modules.triage_service import resolve_sender_identity
 
+    # Canonicalize BOTH sides through the same channel-prefix rule before
+    # the one comparison, rather than adding a second, looser comparison
+    # beside it — resolve_sender_identity is an exact string equality, and
+    # two answers to "is this the owner" is precisely the shape CLAUDE.md
+    # records as having produced a silent owner downgrade once already.
     identity = resolve_sender_identity(
-        sender_id=sender_id,
+        sender_id=_channel_prefixed_identity_tail(channel_key=channel_key, value=sender_id),
         channel_origin=channel_key,
-        channel_bindings=[{"channel_type": channel_key, "linked_user_id": linked}],
+        channel_bindings=[
+            {
+                "channel_type": channel_key,
+                "linked_user_id": _channel_prefixed_identity_tail(
+                    channel_key=channel_key, value=linked
+                ),
+            }
+        ],
     )
     return identity == "owner"
 
@@ -3776,22 +4066,35 @@ async def _handle_local_bridge_gateway_channel_inbound(
     )
     # ── dmPolicy gate ── MUST run before any reply (including a
     # control-command reply) is generated. See _enforce_dm_policy's
-    # docstring. existing_state stays None: local-bridge channels don't
-    # populate an equivalent of WhatsApp's linked_jid, so
-    # _channel_owner_linked_id already returns "" for them regardless — only
-    # message["is_self_chat"] can establish is_owner here, exactly as
-    # before. When agent_id is still unresolved (see the comment above),
-    # this evaluates through _unresolved_identity_dm_policy_config's
-    # hardcoded owner_only with no owner signal available, i.e. every
-    # sender is blocked — strictly SAFER than the pre-dmPolicy behavior
-    # (reply to everyone, unconditionally), never worse.
+    # docstring.
+    #
+    # existing_state used to be hardcoded None here, with a comment saying
+    # local-bridge channels populate no equivalent of WhatsApp's linked_jid
+    # so _channel_owner_linked_id returns "" regardless. That was true and
+    # it was half the bug: is_self_chat is hardcoded False on the OpenClaw
+    # transport ON PURPOSE (normalize_openclaw_gate_facts — a forged one
+    # would bypass both gates), so with the state never loaded there was no
+    # remaining route by which ANY sender on ANY live channel could be the
+    # owner. Loading the row is the other half of the fix; the column it
+    # reads is only ever written by a deliberate owner action.
+    #
+    # Scoped to the SAME (gateway_id, channel_key, agent_id) tuple the row
+    # was claimed under a few lines above — never a gateway-wide read, or a
+    # second agent on the same box would inherit the first agent's owner.
+    # When agent_id is still unresolved (see the comment above), this
+    # evaluates through _unresolved_identity_dm_policy_config's hardcoded
+    # owner_only with no owner signal available, i.e. every sender is
+    # blocked — strictly SAFER than the pre-dmPolicy behavior (reply to
+    # everyone, unconditionally), never worse.
     dm_decision = await _enforce_dm_policy(
         registration=registration,
         channel_key=channel_key,
         agent_id=agent_id,
         message=message,
         remote_jid=remote_jid,
-        existing_state=None,
+        existing_state=personal_channels_repository.get_local_bridge_state(
+            str(gateway_id or "").strip(), channel_key=channel_key, agent_id=agent_id,
+        ),
         label=label,
     )
     if not dm_decision["allowed"]:

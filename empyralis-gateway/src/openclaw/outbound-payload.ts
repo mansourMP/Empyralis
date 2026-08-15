@@ -139,7 +139,29 @@ export function mapOpenClawOutboundPayload(
     };
   }
 
-  const params: Record<string, unknown> = { target, message: text };
+  // `to`, NOT `target`. Read out of their shipped bundle rather than
+  // inferred: dist/message-action-runner-jQYM2Orj.js resolves the
+  // destination as
+  //
+  //   readStringParam(actionParams, "to") ?? readStringParam(actionParams, "channelId")
+  //
+  // and never consults `target` for the `send` action at all. `target` IS a
+  // real param name elsewhere in their surface, which is exactly why this
+  // was wrong in a way that type-checked, passed every unit test, and only
+  // failed against the live binary.
+  //
+  // What it cost, observed 2026-08-15 on a real Telegram DM: every reply
+  // Empyralis authored was refused three times and then dropped —
+  //
+  //   openclaw.outbound.attempt_failed  code=UNAVAILABLE
+  //                                     detail="ToolInputError: to required"
+  //   openclaw.outbound.failed          outcome=transient
+  //
+  // The turn ran, the model answered, the answer was persisted, and the
+  // person got silence. Classified transient (correctly — that is what
+  // UNAVAILABLE means on their wire), so it retried and failed identically
+  // every time; a permanent input error wearing a retryable code.
+  const params: Record<string, unknown> = { to: target, message: text };
 
   // `replyTo` is OpenClaw's own param name for a native quoted reply
   // (`dist/message-action-runner-*.js` reads `readStringParam(actionParams,

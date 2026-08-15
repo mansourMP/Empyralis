@@ -1724,6 +1724,7 @@ import {
   CredentialForm,
   DmAllowlistForm,
   GroupAllowlistForm,
+  OwnerIdentityForm,
   StateChip,
   useOpenClawChannelSetup,
 } from "./OpenClawChannelsPanel";
@@ -2703,6 +2704,23 @@ export function ChannelsTab({
                                 channelLabel={openclawDetail.entry.label}
                               />
                               <GroupAllowlistForm
+                                gatewayId={agentGatewayId}
+                                agentId={agentId}
+                                channelKey={openclawDetail.entry.channel_key}
+                                channelLabel={openclawDetail.entry.label}
+                              />
+                              {/* Last, because it is the only one of the
+                                  three that changes what an admitted message
+                                  is ALLOWED TO DO rather than who gets
+                                  admitted — and because it only becomes
+                                  actionable once the owner has admitted
+                                  themselves above. Deliberately not folded
+                                  into the DM list it sits under: "may
+                                  message this agent" and "IS the owner" are
+                                  different facts, and one control for both
+                                  would promote every allowed sender to shell
+                                  and hardware authority. */}
+                              <OwnerIdentityForm
                                 gatewayId={agentGatewayId}
                                 agentId={agentId}
                                 channelKey={openclawDetail.entry.channel_key}

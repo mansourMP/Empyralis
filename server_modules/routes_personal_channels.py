@@ -64,6 +64,16 @@ class DmPolicyPairingApprovalRequest(BaseModel):
     code: Optional[str] = None
 
 
+class OwnerIdentityUpdateRequest(BaseModel):
+    """Body for PUT .../owner-identity. `sender_id` is the owner's own id on
+    that channel — the same id the platform puts on their messages. Empty or
+    omitted CLEARS the link, which is why it is Optional rather than
+    required: "there is no owner on this channel" has to be expressible, or
+    a mistaken link could never be undone."""
+
+    sender_id: Optional[str] = None
+
+
 # DERIVED from the service's own map, never re-declared here.
 #
 # This used to be a third hardcoded copy of the local-bridge channel list
@@ -743,6 +753,131 @@ async def approve_personal_channel_dm_pairing(
         "dm_policy": updated,
         "openclaw_provisioning": provisioning,
     }
+
+
+@router.get("/personal-channels/{channel_key}/gateways/{gateway_id}/owner-identity")
+async def get_personal_channel_owner_identity(
+    request: Request,
+    channel_key: str,
+    gateway_id: str,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """Which identity on this channel this agent treats as its OWNER.
+
+    "viewer", matching GET .../dm-policy — it reports a configuration, and
+    the value is an id the owner themselves supplied."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    normalized_channel_key, _registration = _dm_policy_registration_or_404(
+        channel_key=channel_key,
+        gateway_id=gateway_id,
+        current_user=current_user,
+        minimum_role="viewer",
+    )
+    return {
+        **personal_channels_service.get_personal_channel_owner_identity(
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            agent_id=str(agent_id or "").strip(),
+        ),
+        "settable": normalized_channel_key
+        in personal_channels_service.OWNER_IDENTITY_CHANNEL_KEYS,
+    }
+
+
+@router.put("/personal-channels/{channel_key}/gateways/{gateway_id}/owner-identity")
+async def set_personal_channel_owner_identity(
+    request: Request,
+    channel_key: str,
+    gateway_id: str,
+    body: OwnerIdentityUpdateRequest,
+    current_user=Depends(require_api_key),
+    agent_id: Optional[str] = None,
+):
+    """The deliberate owner action that makes owner authority reachable from
+    a channel at all.
+
+    "member", matching PATCH .../dm-policy: like the DM allowlist this
+    decides how the agent treats a sender — but note it decides more, so it
+    gets the same bar and no less. An empty sender_id clears the link.
+
+    Deliberately its OWN route rather than a field on the dm-policy PATCH:
+    the allowlist answers "who may message this agent" and this answers "who
+    IS the owner", and one body carrying both invites exactly the collapse
+    that would promote an allowlisted stranger to shell and hardware
+    authority.
+
+    It does NOT reconcile OpenClaw afterwards (unlike the dm/group policy
+    writes above), because it changes nothing OpenClaw's own config can
+    express — their gate decides who reaches us; this decides what authority
+    a message carries once it has."""
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    normalized_channel_key, registration = _dm_policy_registration_or_404(
+        channel_key=channel_key,
+        gateway_id=gateway_id,
+        current_user=current_user,
+        minimum_role="member",
+    )
+    normalized_agent_id = str(agent_id or "").strip()
+    try:
+        result = personal_channels_service.set_personal_channel_owner_identity(
+            registration=registration,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            agent_id=normalized_agent_id,
+            sender_id=body.sender_id,
+        )
+    except personal_channels_service.UnsupportedOwnerIdentityChannelError as exc:
+        # 422, not 400, for the same reason the dm-policy mode refusal is:
+        # the request is well-formed, it is this channel that establishes
+        # its owner elsewhere. str(exc) is already the owner-facing sentence.
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.owner_identity.configure",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            detail=detail,
+            metadata={"agent_id": normalized_agent_id},
+        )
+        raise HTTPException(status_code=422, detail=detail)
+    except ValueError as exc:
+        detail = str(exc)
+        _emit_personal_channel_audit(
+            action="personal_channel.owner_identity.configure",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_channel_key,
+            detail=detail,
+            metadata={"agent_id": normalized_agent_id},
+        )
+        raise HTTPException(status_code=400, detail=detail)
+    # Set and cleared are different facts and get different audit lines —
+    # "the owner link changed" would leave an auditor unable to tell a grant
+    # of shell/hardware authority from a revocation of it. The sender id
+    # itself is NOT put in the audit metadata: it is the very value that
+    # decides authority, and an audit trail is the wrong place to copy it to.
+    linked = bool(result.get("sender_id"))
+    _emit_personal_channel_audit(
+        action="personal_channel.owner_identity.configure",
+        status="success",
+        registration=registration,
+        current_user=current_user,
+        gateway_id=gateway_id,
+        channel_key=normalized_channel_key,
+        detail=(
+            "An owner identity was set for this agent on this channel — messages from it now carry "
+            "owner authority."
+            if linked
+            else "The owner identity for this agent on this channel was cleared."
+        ),
+        metadata={"agent_id": normalized_agent_id, "linked": linked},
+    )
+    return {**result, "settable": True}
 
 
 async def _reconcile_openclaw_after_policy_change(

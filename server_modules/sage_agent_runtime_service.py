@@ -5263,18 +5263,46 @@ async def _resolve_channel_sender_class(
         from server_modules.personal_channels_repository import (
             list_owner_linked_channel_identities_for_workspace,
         )
+        from server_modules.personal_channels_service import (
+            _channel_prefixed_identity_tail,
+        )
 
+        # Both sides through the SAME channel-prefix canonicalizer the DM
+        # gate already uses, because resolve_sender_identity is an exact
+        # string equality and this lane addresses one person two ways.
+        #
+        # This is not theoretical: personal_channel_sage_bridge_service
+        # passes `channel_sender_id=remote_jid`, which on the OpenClaw
+        # transport is the CONVERSATION id ("telegram:1932934047") while the
+        # stored identity is the bare sender ("1932934047"). So a sender the
+        # DM gate had just recognised as the owner arrived here as a
+        # stranger, and this function fell through to "audience" — which
+        # strips EVERY tool (see _direct_tool_bundle's audience filter), so
+        # the agent could not run a shell command for its own owner and said
+        # so. Observed live 2026-08-15, on a turn whose own envelope header
+        # already read "your owner".
+        #
+        # Canonicalizing here rather than changing what the bridge passes:
+        # `remote_jid` is also the personal-channel thread key
+        # (sage_turn_adapter's thread resolution, and the per-thread turn
+        # lock), so repointing it is a separate change with its own blast
+        # radius. Fixing the COMPARISON is what this bug is.
         linked_by_channel = list_owner_linked_channel_identities_for_workspace(workspace_id)
         bindings: list[dict[str, Any]] = [
             {
                 "channel_type": str(channel_key or "").strip().lower(),
-                "linked_user_id": str(linked_id or "").strip(),
+                "linked_user_id": _channel_prefixed_identity_tail(
+                    channel_key=str(channel_key or "").strip().lower(),
+                    value=str(linked_id or "").strip(),
+                ),
             }
             for channel_key, linked_id in linked_by_channel.items()
             if str(channel_key or "").strip() and str(linked_id or "").strip()
         ]
         return resolve_sender_identity(
-            sender_id=sender_id,
+            sender_id=_channel_prefixed_identity_tail(
+                channel_key=channel_origin, value=sender_id
+            ),
             channel_origin=channel_origin,
             channel_bindings=bindings,
             audience_enabled=True,  # Phase U2: channels are audience-facing by default
