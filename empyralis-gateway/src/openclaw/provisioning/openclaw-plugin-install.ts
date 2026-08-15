@@ -275,20 +275,6 @@ interface LiveInstallState {
   channelInstalled: Map<string, boolean>;
   /** pluginId -> resolved `<name>@<version>` from their install registry. */
   installRecords: Map<string, string>;
-  /**
-   * pluginId -> the spec the install was REQUESTED with.
-   *
-   * Kept alongside `installRecords` because the two are not always both
-   * present, and which one exists depends on where the plugin came from:
-   * an npm install records `resolvedName`/`resolvedVersion` (their installer
-   * resolves host compatibility and may pick a different version, so the
-   * RESOLVED value is the only honest pin), while a `clawhub:` install
-   * records only `spec` — measured on a real box, and the reason a
-   * successful ClawHub install first read back as "no install record" and
-   * refused. A ClawHub spec already carries an exact `@version`, so it is a
-   * sound pin on its own; an unversioned spec is not, and is ignored.
-   */
-  requestedSpecs: Map<string, string>;
 }
 
 function parseChannelsList(raw: unknown): Map<string, boolean> {
@@ -298,29 +284,6 @@ function parseChannelsList(raw: unknown): Map<string, boolean> {
   for (const [channelId, value] of Object.entries(chat as Record<string, unknown>)) {
     const installed = value && typeof value === "object" ? (value as Record<string, unknown>).installed : undefined;
     out.set(String(channelId).toLowerCase(), installed === true);
-  }
-  return out;
-}
-
-/** The spec each install was requested with, for the ClawHub case above. */
-function parseRequestedSpecs(raw: unknown): Map<string, string> {
-  const out = new Map<string, string>();
-  const persisted = raw && typeof raw === "object" ? (raw as Record<string, unknown>).persisted : undefined;
-  const records =
-    persisted && typeof persisted === "object"
-      ? (persisted as Record<string, unknown>).installRecords
-      : undefined;
-  if (!records || typeof records !== "object") return out;
-  for (const [pluginId, value] of Object.entries(records as Record<string, unknown>)) {
-    if (!value || typeof value !== "object") continue;
-    const spec = (value as Record<string, unknown>).spec;
-    if (typeof spec !== "string" || !spec.trim()) continue;
-    // Only an EXPLICITLY versioned spec is a pin. A floating one would let
-    // two boxes provisioned a month apart run different code while both
-    // reporting the same "pinned" value.
-    const trimmed = spec.trim();
-    const versioned = /@[^@/]+$/.test(trimmed.replace(/^clawhub:/, ""));
-    if (versioned) out.set(String(pluginId).toLowerCase(), trimmed);
   }
   return out;
 }
@@ -357,7 +320,6 @@ async function readLiveInstallState(cli: OpenClawCli): Promise<LiveInstallState 
     return {
       channelInstalled: parseChannelsList(JSON.parse(channels.stdout)),
       installRecords: parseInstallRecords(JSON.parse(registry.stdout)),
-      requestedSpecs: parseRequestedSpecs(JSON.parse(registry.stdout)),
     };
   } catch {
     return undefined;
@@ -579,150 +541,5 @@ export async function ensureChannelPluginsInstalled(
     resolvedPins[pluginId] = liveSpec;
   }
 
-  return { states, resolvedPins };
-}
-
-// ── Registry channel plugins ──────────────────────────────────────────────
-//
-// Everything above installs a plugin for a channel the pinned build already
-// knows about, keyed by CHANNEL id. The registry offers are keyed by npm
-// PACKAGE instead, because their channel id does not exist until the plugin
-// has been installed and loaded — see the manifest generator's source 8.
-//
-// So this is a second entry point, not a second mechanism: same CLI, same
-// `--pin`, same "an exit code is a claim, not evidence" read-back, same
-// refusal codes. The one thing it cannot assert is `channels list` reporting
-// a specific channel id as installed — it does not know which id to look
-// for — so it asserts the INSTALL RECORD instead, which is keyed by plugin
-// id and is the thing their own installer writes.
-
-export interface OpenClawRegistryPluginState {
-  readonly npmPackage: string;
-  readonly installSpec: string;
-  pluginId: string;
-  installed: boolean;
-  resolvedSpec?: string;
-  action: "already-installed" | "installed" | "adopted";
-  /** Channel ids that appeared on the box only after this pass ran. This is
-   *  the ONLY place a registry plugin's real channel id can be learned, and
-   *  it is observed, never derived from the package name. */
-  revealedChannelIds: string[];
-}
-
-export interface EnsureRegistryPluginsOptions {
-  cli: OpenClawCli;
-  /** npm specs to acquire, already checked against the derived manifest by
-   *  the cloud. A spec that did not come out of source 8 never reaches here. */
-  installSpecs: readonly { npmPackage: string; installSpec: string; pluginId: string }[];
-  record?: (messageType: string, payload: Record<string, unknown>) => Promise<unknown>;
-}
-
-export interface OpenClawRegistryPluginOutcome {
-  readonly states: OpenClawRegistryPluginState[];
-  readonly resolvedPins: Record<string, string>;
-  readonly refusal?: { code: OpenClawPluginRefusalCode; detail: string };
-}
-
-export async function ensureRegistryPluginsInstalled(
-  options: EnsureRegistryPluginsOptions,
-): Promise<OpenClawRegistryPluginOutcome> {
-  const states: OpenClawRegistryPluginState[] = [];
-  const resolvedPins: Record<string, string> = {};
-  if (options.installSpecs.length === 0) return { states, resolvedPins };
-
-  const refuse = (
-    code: OpenClawPluginRefusalCode,
-    detail: string,
-  ): OpenClawRegistryPluginOutcome => ({ states, resolvedPins, refusal: { code, detail } });
-
-  let live = await readLiveInstallState(options.cli);
-  if (!live) {
-    return refuse(
-      "openclaw_plugin_state_unreadable",
-      "Could not read `openclaw channels list --all --json` / `plugins registry --json`, so " +
-        "whether a plugin is already installed is unknown. Installing blind would re-download " +
-        "and then fail on their \"plugin already exists\" error.",
-    );
-  }
-  const channelsBefore = new Set(live.channelInstalled.keys());
-  let installedAnything = false;
-
-  for (const spec of options.installSpecs) {
-    const pluginId = spec.pluginId.toLowerCase();
-    const recorded = live.installRecords.get(pluginId) ?? live.requestedSpecs.get(pluginId);
-    if (recorded) {
-      // Already there. Their installer RE-DOWNLOADS and then exits 1 on a
-      // second install of the same plugin, so the skip is gated on read state
-      // and shells out to nothing.
-      states.push({
-        npmPackage: spec.npmPackage,
-        installSpec: spec.installSpec,
-        pluginId,
-        installed: true,
-        resolvedSpec: recorded,
-        action: "already-installed",
-        revealedChannelIds: [],
-      });
-      resolvedPins[pluginId] = recorded;
-      continue;
-    }
-    const install = await options.cli.run(["plugins", "install", spec.installSpec, "--pin"], {
-      timeoutMs: INSTALL_TIMEOUT_MS,
-    });
-    if (install.code !== 0) {
-      return refuse(
-        "openclaw_plugin_install_failed",
-        `${spec.npmPackage}: \`openclaw plugins install ${spec.installSpec}\` exited ${install.code}. ` +
-          `OpenClaw said: ${install.stderr.trim() || install.stdout.trim() || "(no output)"}`,
-      );
-    }
-    installedAnything = true;
-    states.push({
-      npmPackage: spec.npmPackage,
-      installSpec: spec.installSpec,
-      pluginId,
-      installed: false,
-      action: "installed",
-      revealedChannelIds: [],
-    });
-    await options.record?.("openclaw.provision.registry_plugin_installed", {
-      npm_package: spec.npmPackage,
-      install_spec: spec.installSpec,
-      plugin_id: pluginId,
-      cli_output: install.stdout.trim().slice(0, 2000),
-    });
-  }
-
-  if (!installedAnything) return { states, resolvedPins };
-
-  live = await readLiveInstallState(options.cli);
-  if (!live) {
-    return refuse(
-      "openclaw_plugin_state_unreadable",
-      "The plugin install(s) reported success, but OpenClaw's own install state could not be " +
-        "read back afterwards, so the result is a claim rather than a fact.",
-    );
-  }
-  const revealed = [...live.channelInstalled.keys()].filter((id) => !channelsBefore.has(id));
-  for (const state of states) {
-    if (state.action === "already-installed") continue;
-    const resolved =
-      live.installRecords.get(state.pluginId) ?? live.requestedSpecs.get(state.pluginId);
-    if (!resolved) {
-      return refuse(
-        "openclaw_plugin_not_loaded",
-        `${state.npmPackage}: the install reported success, but OpenClaw's plugin registry carries ` +
-          "no install record for it, so it would not load. That is indistinguishable at send time " +
-          "from a channel that was never installed.",
-      );
-    }
-    state.installed = true;
-    state.resolvedSpec = resolved;
-    // Reported on every freshly-installed plugin in this pass rather than
-    // attributed to one: with several installed together, which new channel
-    // came from which package is not something this seam can honestly claim.
-    state.revealedChannelIds = revealed;
-    resolvedPins[state.pluginId] = resolved;
-  }
   return { states, resolvedPins };
 }

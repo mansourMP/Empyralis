@@ -60,11 +60,8 @@ import {
   remediationFor,
   OPENCLAW_CAPABILITY_MISSING_BANNER_TEXT,
   OPENCLAW_UNREACHABLE_BANNER_TEXT,
-  registryChannelPill,
-  registrySourceFor,
   type OpenClawChannelCatalogEntry,
   type OpenClawObservedChannel,
-  type OpenClawRegistryChannelPlugin,
 } from "./openclaw-channel-copy";
 import {
   CHANNEL_DOORS,
@@ -1219,117 +1216,6 @@ for (const channel of manifest.channels as unknown as ManifestChannelFields[]) {
     { name: "legacyToken", secret: true, type: "string" },
   ] as never);
   assert(primary.length === 1 && advanced.length === 0, "an unflagged field defaults to primary");
-}
-
-// --- Registry channel plugins ------------------------------------------
-//
-// The channels OpenClaw's plugin registry publishes that its pinned build does
-// not bundle. Driven off the REAL manifest and the REAL copy functions, same
-// discipline as everything above: the expected set and the actual set come
-// from different places.
-
-type ManifestRegistryPlugin = OpenClawRegistryChannelPlugin;
-const registryPlugins = ((manifest as unknown as {
-  registry_channel_plugins?: ManifestRegistryPlugin[];
-}).registry_channel_plugins ?? []) as ManifestRegistryPlugin[];
-
-assert(registryPlugins.length > 0, "the manifest carries registry channel plugins at all");
-
-// The whole point of adopting their transport: community plugins are carried,
-// not filtered out. A test that only ever saw official ones would pass just as
-// happily against the curated subset this feature exists to remove.
-{
-  const community = registryPlugins.filter((plugin) => !plugin.trust.is_official);
-  assert(community.length > 0, "community channel plugins are carried, not filtered out");
-}
-
-// The word "OpenClaw" must not reach the screen through this surface either —
-// same standing instruction as the rest of this file, applied to the copy the
-// registry cards render.
-for (const plugin of registryPlugins) {
-  const source = registrySourceFor(plugin);
-  assertNoOpenClaw(source.label, `${plugin.npm_package}: trust label`);
-  // `detail` deliberately MAY name OpenClaw's scanner — that is a fact about
-  // whose scanner flagged it, and anonymising it would make the sentence
-  // meaningless. The face label is what must stay clean.
-}
-
-// A trust label is two words at most: it sits in a 4-across grid, not a
-// paragraph.
-for (const plugin of registryPlugins) {
-  const { label } = registrySourceFor(plugin);
-  assert(
-    label.trim().split(/\s+/).length <= 2,
-    `${plugin.npm_package}: trust label "${label}" fits a card face`,
-  );
-}
-
-// Trust is STATED, never used to gate. Every plugin gets a label, and an
-// official one and a community one both resolve to a real, non-empty detail
-// sentence — there is no branch anywhere that withholds the install.
-for (const plugin of registryPlugins) {
-  const source = registrySourceFor(plugin);
-  assert(Boolean(source.label), `${plugin.npm_package}: has a trust label`);
-  assert(Boolean(source.detail), `${plugin.npm_package}: has a trust detail`);
-}
-
-// An official plugin and a community one must not read identically — the whole
-// reason trust is surfaced is that they are different risks.
-{
-  const official = registryPlugins.find((plugin) => plugin.trust.is_official);
-  const community = registryPlugins.find((plugin) => !plugin.trust.is_official);
-  if (official && community) {
-    assert(
-      registrySourceFor(official).label !== registrySourceFor(community).label,
-      "official and community plugins carry different trust labels",
-    );
-  }
-}
-
-// Their scanner's own verdict is passed through rather than hidden. A flagged
-// package must say so — and must still be installable, which is asserted by the
-// pill below resolving to "Set up" exactly like any other.
-{
-  const flagged = registryPlugins.find(
-    (plugin) => plugin.trust.scan_status && plugin.trust.scan_status.toLowerCase() !== "clean",
-  );
-  if (flagged) {
-    assert(
-      registrySourceFor(flagged).detail.toLowerCase().includes(flagged.trust.scan_status!.toLowerCase()),
-      `${flagged.npm_package}: a flagged package says so`,
-    );
-    assert(
-      registryChannelPill({ hasGateway: true, installed: false }).label === "Set up",
-      "a flagged package is still installable — trust is stated, never a gate",
-    );
-  }
-}
-
-// Three states, and none of them is a credential state: a plugin that is not
-// installed has no schema, so there is nothing to be missing.
-{
-  assert(
-    registryChannelPill({ hasGateway: false, installed: false }).label === "Needs Gateway",
-    "no computer -> Needs Gateway",
-  );
-  assert(
-    registryChannelPill({ hasGateway: true, installed: false }).label === "Set up",
-    "a computer, not installed -> Set up",
-  );
-  assert(
-    registryChannelPill({ hasGateway: true, installed: true }).label === "Ready",
-    "installed -> Ready",
-  );
-}
-
-// No registry offer may claim a channel id — see the Python-side guard for the
-// full reasoning. Asserted here too because this is the data the UI keys on.
-for (const plugin of registryPlugins) {
-  assert(plugin.channel_key === null, `${plugin.npm_package}: carries no channel_key`);
-  assert(
-    plugin.connect_method === "plugin_absent",
-    `${plugin.npm_package}: is honest that its fields are unknowable`,
-  );
 }
 
 // --- Summary ---

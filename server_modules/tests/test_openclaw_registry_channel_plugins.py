@@ -129,14 +129,12 @@ def test_every_registry_plugin_records_how_it_was_confirmed():
 
 
 def test_npm_spec_is_pinned_to_a_version():
-    """A bare `<name>@<version>` resolves against npm and fails for a package
-    published only to ClawHub — measured, not assumed. And "newest compatible"
-    moves, so two boxes provisioned a month apart would
+    """"Newest compatible" moves, so two boxes provisioned a month apart would
     silently run different code — the same reason every other install spec in
     this manifest is pinned."""
     for plugin in openclaw_channel_registry.registry_channel_plugins():
-        assert plugin.install_spec.startswith("clawhub:"), plugin.install_spec
-        assert plugin.install_spec.endswith(plugin.version), plugin.install_spec
+        assert "@" in plugin.npm_spec.lstrip("@"), plugin.npm_spec
+        assert plugin.npm_spec.endswith(plugin.version), plugin.npm_spec
 
 
 # ── The install allowlist ────────────────────────────────────────────────
@@ -158,12 +156,12 @@ def test_install_specs_resolve_a_known_package_to_its_pinned_spec():
     plugin = openclaw_channel_registry.registry_channel_plugin_for_package("telegram-userbot")
     assert specs[0] == {
         "npm_package": "telegram-userbot",
-        "install_spec": plugin.install_spec,
+        "npm_spec": plugin.npm_spec,
         "plugin_id": plugin.plugin_id,
     }
     # The caller's string is never forwarded verbatim — the manifest's own
     # pinned spec is, which is what makes two boxes run the same code.
-    assert specs[0]["install_spec"] != "telegram-userbot"
+    assert specs[0]["npm_spec"] != "telegram-userbot"
 
 
 def test_install_specs_deduplicate_and_tolerate_blanks():

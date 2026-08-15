@@ -26,7 +26,6 @@ import {
   Plug,
   Radio,
   RefreshCw,
-  Search,
   Settings,
   Smartphone,
   Sparkles,
@@ -1882,11 +1881,6 @@ export function ChannelsTab({
   // provision or a credential save instead of showing a snapshot from click
   // time.
   const [openclawDetailKey, setOpenclawDetailKey] = useState<string | null>(null);
-  /** The registry channel plugin whose panel is open, by npm package — these
-   *  have no channel_key to key on. Mutually exclusive with
-   *  `openclawDetailKey`: one panel is open at a time, whichever card opened it. */
-  const [openclawRegistryKey, setOpenclawRegistryKey] = useState<string | null>(null);
-  const [channelQuery, setChannelQuery] = useState("");
   // Which VARIANT of that platform is being set up — the transported half of
   // the same door pick the first-party panel makes with `selectedDoor`.
   const [openclawDoorKey, setOpenclawDoorKey] = useState<string | null>(null);
@@ -2406,59 +2400,7 @@ export function ChannelsTab({
   // hold) but it is a PREFIX, never a membership test: a channel the transport
   // ships tomorrow is simply unranked and lands at the bottom in alphabetical
   // order, with no code change. See channel-popularity.ts.
-  // ── Registry channel plugins ────────────────────────────────────────────
-  //
-  // The channels OpenClaw's plugin registry publishes that its pinned build
-  // does not bundle. They are cards in the SAME grid, not a second section:
-  // "there is only one thing which is channels", and a separate "more
-  // channels" shelf would be exactly the curated-subset framing this surface
-  // has already been corrected for twice.
-  //
-  // They sort to the bottom for free — `compareChannelsByPopularity` ranks a
-  // known handful and leaves everything else alphabetical after it, so
-  // WhatsApp still opens the grid and a community plugin with nine installs
-  // does not, without anyone filtering by trust.
-  const registryCards: UnifiedChannelCard[] = openclaw.registryRows.map((row) => ({
-    key: `openclawpkg:${row.plugin.npm_package}`,
-    label: row.plugin.label,
-    // Same reduction every other card uses. A registry plugin usually has no
-    // obtainable mark, so most fall through to the neutral monogram tile —
-    // which is correct, and never a guessed or hand-drawn logo.
-    iconSrc: channelIconSrc(row.plugin.plugin_id),
-    pill: row.pill,
-    // The trust word rides on the face, beside the status pill, because it is
-    // the one thing that differs between two otherwise identical offers. The
-    // reasoning behind it lives in the panel.
-    waysNote: row.source.label,
-    disabled: false,
-    active: openclawRegistryKey === row.plugin.npm_package,
-    open: () => {
-      setOpenclawRegistryKey(row.plugin.npm_package);
-      setOpenclawDetailKey(null);
-      setOpenclawDoorKey(null);
-    },
-  }));
-
-  const allChannelCards = [...legacyCards, ...openclawCards, ...registryCards].sort(
-    compareChannelsByPopularity,
-  );
-  // A search box, not a category filter. With every channel OpenClaw carries
-  // now on one grid, finding "Rocket.Chat" by scrolling is the problem —
-  // deciding which channels deserve to be shown is not, and must not become
-  // one. Matches the label and the package, so a customer who knows either
-  // gets there.
-  const channelQueryNeedle = channelQuery.trim().toLowerCase();
-  const unifiedChannelCards = channelQueryNeedle
-    ? allChannelCards.filter(
-        (card) =>
-          card.label.toLowerCase().includes(channelQueryNeedle) ||
-          card.key.toLowerCase().includes(channelQueryNeedle),
-      )
-    : allChannelCards;
-
-  const openclawRegistryRow = openclawRegistryKey
-    ? openclaw.registryRows.find((row) => row.plugin.npm_package === openclawRegistryKey) || null
-    : null;
+  const unifiedChannelCards = [...legacyCards, ...openclawCards].sort(compareChannelsByPopularity);
 
   // The transported PLATFORM whose panel is open, re-resolved from the live row
   // set on every render rather than captured at click time — provisioning and
@@ -2550,17 +2492,6 @@ export function ChannelsTab({
         </div>
       ) : null}
 
-      <label className="fleet-channel-search">
-        <Search size={14} aria-hidden />
-        <input
-          type="search"
-          value={channelQuery}
-          onChange={(event) => setChannelQuery(event.target.value)}
-          placeholder={`Search ${allChannelCards.length} channels`}
-          aria-label="Search channels"
-        />
-      </label>
-
       <div className="fleet-channel-grid">
         {unifiedChannelCards.map((card) => (
           <button
@@ -2606,117 +2537,6 @@ export function ChannelsTab({
           differently-shaped modal. This is where the three states live — all
           three, never collapsed — beside the one sentence that says what to do
           and the one control that does it. */}
-      {/* A REGISTRY channel plugin's panel. The same shell every other card
-          opens, so a registry channel and a bundled one behave identically —
-          but with one control instead of a setup form, because a plugin that
-          is not installed has no config schema and therefore no fields. A
-          credential form here would be a control that submits into nothing. */}
-      {openclawRegistryRow ? (
-        <div
-          className="fleet-detail-backdrop"
-          onClick={() => setOpenclawRegistryKey(null)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") {
-              e.stopPropagation();
-              setOpenclawRegistryKey(null);
-            }
-          }}
-        >
-          <div
-            className="fleet-channel-banner"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="registry-detail-heading"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="fleet-channel-banner-header">
-              <span className="fleet-channel-banner-icon">
-                {channelIconSrc(openclawRegistryRow.plugin.plugin_id) ? (
-                  <img
-                    src={channelIconSrc(openclawRegistryRow.plugin.plugin_id) ?? undefined}
-                    alt=""
-                    width={24}
-                    height={24}
-                  />
-                ) : (
-                  openclawRegistryRow.plugin.label.charAt(0)
-                )}
-              </span>
-              <span className="fleet-channel-banner-title" id="registry-detail-heading">
-                {openclawRegistryRow.plugin.label}
-              </span>
-              <button
-                type="button"
-                className="fleet-detail-close fleet-detail-close--inline"
-                onClick={() => setOpenclawRegistryKey(null)}
-                aria-label="Close"
-              >
-                <X size={16} strokeWidth={2} />
-              </button>
-            </div>
-
-            <div className="fleet-channel-banner-body">
-              <div className="fleet-channel-state-row">
-                <StateChip
-                  ok={openclawRegistryRow.installed}
-                  on="On this computer"
-                  off="Not on this computer"
-                />
-                {/* Who wrote it, stated rather than judged. Never a filter and
-                    never a gate — the install button below is identical on an
-                    official plugin and a community one. */}
-                <StateChip
-                  ok={openclawRegistryRow.source.tone === "connected"}
-                  on={openclawRegistryRow.source.label}
-                  off={openclawRegistryRow.source.label}
-                />
-              </div>
-
-              {openclawRegistryRow.plugin.summary ? (
-                <p className="fleet-channel-banner-detail">{openclawRegistryRow.plugin.summary}</p>
-              ) : null}
-              <p className="fleet-channel-banner-detail fleet-channel-banner-detail--quiet">
-                {openclawRegistryRow.source.detail}
-              </p>
-
-              {!agentGatewayId ? (
-                <p className="fleet-channel-banner-detail">
-                  This channel runs on an Agent Computer. Connect one to use it.
-                </p>
-              ) : openclawRegistryRow.installed ? (
-                <p className="fleet-channel-banner-detail">
-                  Ready on this computer. It will appear with its own settings once this
-                  computer reports the channel it added.
-                </p>
-              ) : (
-                <button
-                  type="button"
-                  className="fleet-btn fleet-btn--accent-fill"
-                  disabled={
-                    openclaw.setupStateFor(`pkg:${openclawRegistryRow.plugin.npm_package}`) !== "idle"
-                  }
-                  onClick={() =>
-                    openclaw.requestPluginSetup(openclawRegistryRow.plugin.npm_package)
-                  }
-                >
-                  {openclaw.setupStateFor(`pkg:${openclawRegistryRow.plugin.npm_package}`) ===
-                  "working" ? (
-                    <>
-                      <Loader2 size={14} className="fleet-spin" /> Setting up
-                    </>
-                  ) : openclaw.setupStateFor(`pkg:${openclawRegistryRow.plugin.npm_package}`) ===
-                    "queued" ? (
-                    "Waiting"
-                  ) : (
-                    "Set up"
-                  )}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {openclawPlatform ? (
         <div
           className="fleet-detail-backdrop"

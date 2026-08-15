@@ -78,30 +78,15 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
 import { runMutationWithBestEffortRefresh } from "@/lib/workspace/mutation-outcome";
 import {
-  registryChannelPill,
-  registrySourceFor,
   remediationFor,
   splitCredentialFields,
   type OpenClawChannelCatalogEntry,
   type OpenClawCredentialField,
   type OpenClawObservedChannel,
-  type OpenClawRegistryChannelPlugin,
-  type OpenClawRegistrySource,
   type Remediation,
 } from "./openclaw-channel-copy";
 
 import "./openclaw-channels.css";
-
-/** Namespaces a registry package inside the shared setup queue. Chosen so it
- *  can never collide with a real `openclaw_*` channel_key. */
-const REGISTRY_QUEUE_PREFIX = "pkg:";
-
-export type OpenClawRegistryRow = {
-  plugin: OpenClawRegistryChannelPlugin;
-  installed: boolean;
-  source: OpenClawRegistrySource;
-  pill: { label: string; tone: "connected" | "setup" | "locked" | "gateway" };
-};
 
 export type {
   OpenClawCredentialField,
@@ -113,10 +98,6 @@ export type {
 type SetupResponse = {
   openclaw_version?: string;
   channels?: OpenClawChannelCatalogEntry[];
-  // Channel plugins OpenClaw's registry publishes that its pinned build does
-  // not bundle. A separate key from `channels` on purpose: these have no
-  // channel id and therefore no setup form — see openclaw-channel-copy.ts.
-  registry_channel_plugins?: OpenClawRegistryChannelPlugin[];
   observed?: { status?: string; channels?: OpenClawObservedChannel[]; refusal?: { detail?: string } | null } | null;
   observed_error?: string | null;
   // The STRUCTURED reason behind observed_error above (e.g.
@@ -182,13 +163,6 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
    *  page: several fired at once are several installer processes on ONE box. */
   const [setupQueue, setSetupQueue] = useState<string[]>([]);
   const runningRef = useRef<string | null>(null);
-  /** npm packages this box has confirmed installed, learned from the
-   *  provision response's `registry_plugins[].installed` — which the gateway
-   *  only sets after reading OpenClaw's own install registry back. Held in a
-   *  ref rather than state because the verify loop reads it inside a closure
-   *  that must not be torn down and restarted on every poll. */
-  const installedPackagesRef = useRef<Set<string>>(new Set());
-  const [installedPackages, setInstalledPackages] = useState<Set<string>>(new Set());
 
   const load = useCallback(
     async (opts?: { silent?: boolean }): Promise<SetupResponse | null> => {
@@ -229,9 +203,9 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
    *  was asked for and re-asserts policy — and it HIDES NOTHING, because every
    *  row re-reads its own three states straight afterwards. */
   const provision = useCallback(
-    async (installChannels: string[], installPlugins: string[] = []) => {
+    async (installChannels: string[]) => {
       if (!gatewayId) return;
-      setBusy(installChannels[0] ?? installPlugins[0] ?? "__all__");
+      setBusy(installChannels[0] ?? "__all__");
       try {
         const res = await fleetAuthorizedFetch(
           `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/provision?agent_id=${encodeURIComponent(agentId)}`,
@@ -239,13 +213,7 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
             method: "POST",
             credentials: "include",
             headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
-            body: JSON.stringify({
-              install_channels: installChannels,
-              // npm package names, never channel_keys. The backend checks each
-              // against the derived manifest before it can reach
-              // `openclaw plugins install` on the box.
-              install_plugins: installPlugins,
-            }),
+            body: JSON.stringify({ install_channels: installChannels }),
           },
         );
         const body = await res.json().catch(() => ({}));
@@ -254,24 +222,6 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
         } else {
           const refusal = body?.openclaw_provisioning?.refusal;
           setError(refusal ? `${refusal.code}: ${refusal.detail}` : null);
-          // Record what the BOX said is installed, never what was asked for.
-          // `installed` is set on the gateway only after reading OpenClaw's
-          // own install registry back, so this is the device's answer rather
-          // than an echo of the request.
-          const reported = body?.openclaw_provisioning?.registry_plugins;
-          if (Array.isArray(reported)) {
-            const confirmed = reported
-              .filter((row: { installed?: boolean }) => row?.installed === true)
-              .map((row: { npm_package?: string }) => String(row?.npm_package ?? ""))
-              .filter(Boolean);
-            if (confirmed.length > 0) {
-              installedPackagesRef.current = new Set([
-                ...installedPackagesRef.current,
-                ...confirmed,
-              ]);
-              setInstalledPackages(new Set(installedPackagesRef.current));
-            }
-          }
         }
       } catch {
         setError("Could not reach this computer.");
@@ -293,16 +243,6 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
     setSetupQueue((queue) => (queue.includes(channelKey) ? queue : [...queue, channelKey]));
   }, []);
 
-  /** A registry channel plugin joins the SAME queue, under a `pkg:` prefix.
-   *  One queue, not two: the reason it exists is that two installs at once are
-   *  two package installs on one machine, and that is just as true when one of
-   *  them came from the registry. The prefix is what tells the effect below
-   *  which half of the provision payload the entry belongs in. */
-  const requestPluginSetup = useCallback((npmPackage: string) => {
-    const token = `${REGISTRY_QUEUE_PREFIX}${npmPackage}`;
-    setSetupQueue((queue) => (queue.includes(token) ? queue : [...queue, token]));
-  }, []);
-
   const activeSetup = setupQueue[0] ?? null;
 
   useEffect(() => {
@@ -311,14 +251,8 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
     runningRef.current = activeSetup;
     let cancelled = false;
     void (async () => {
-      const registryPackage = activeSetup.startsWith(REGISTRY_QUEUE_PREFIX)
-        ? activeSetup.slice(REGISTRY_QUEUE_PREFIX.length)
-        : null;
       try {
-        await provision(
-          registryPackage ? [] : [activeSetup],
-          registryPackage ? [registryPackage] : [],
-        );
+        await provision([activeSetup]);
         // VERIFY, don't declare. The provisioning call returning is not the
         // same fact as the box reporting the channel installed, so this keeps
         // reading the device's own state until it catches up (or gives up
@@ -326,20 +260,10 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
         const startedAt = Date.now();
         while (!cancelled && Date.now() - startedAt < SETUP_VERIFY_TIMEOUT_MS) {
           const body = await load({ silent: true });
-          if (registryPackage) {
-            // A registry plugin has no channel id to look for in `observed`,
-            // so the box's own INSTALL RECORD is what gets verified — the same
-            // fact `ensureRegistryPluginsInstalled` refuses on. It arrives on
-            // the provision response, not the catalog read, because the
-            // catalog cannot name a channel that did not exist when the
-            // manifest was generated.
-            if (installedPackagesRef.current.has(registryPackage)) break;
-          } else {
-            const observedRow = (body?.observed?.channels ?? []).find(
-              (row) => row.channel_key === activeSetup,
-            );
-            if (observedRow?.installed) break;
-          }
+          const observedRow = (body?.observed?.channels ?? []).find(
+            (row) => row.channel_key === activeSetup,
+          );
+          if (observedRow?.installed) break;
           await new Promise((resolve) => setTimeout(resolve, SETUP_VERIFY_POLL_MS));
         }
       } finally {
@@ -387,27 +311,9 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
     .filter((row) => row.remediation.kind === "install" || row.remediation.kind === "enable")
     .map((row) => row.entry.channel_key);
 
-  /** The registry offers, joined with what this box has confirmed installed.
-   *  One row per plugin, in the same shape the resolved-channel rows use, so
-   *  the grid can render both through one path. */
-  const registryRows: OpenClawRegistryRow[] = useMemo(() => {
-    const offers = data?.registry_channel_plugins ?? [];
-    return offers.map((plugin) => {
-      const installed = installedPackages.has(plugin.npm_package);
-      return {
-        plugin,
-        installed,
-        source: registrySourceFor(plugin),
-        pill: registryChannelPill({ hasGateway: Boolean(gatewayId), installed }),
-      };
-    });
-  }, [data?.registry_channel_plugins, installedPackages, gatewayId]);
-
   return {
     loading,
     error,
-    registryRows,
-    requestPluginSetup,
     observedError: data?.observed_error ?? null,
     observedErrorCode: data?.observed_error_code ?? null,
     busy,

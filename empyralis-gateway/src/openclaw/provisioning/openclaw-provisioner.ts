@@ -125,9 +125,7 @@ import {
 } from "./openclaw-config-plan";
 import {
   ensureChannelPluginsInstalled,
-  ensureRegistryPluginsInstalled,
   type OpenClawChannelPluginState,
-  type OpenClawRegistryPluginState,
   type OpenClawPluginRefusalCode,
 } from "./openclaw-plugin-install";
 import { resolveOpenClawNodeVersion, withOpenClawNodeOnPath } from "./openclaw-node-runtime";
@@ -282,7 +280,6 @@ export interface OpenClawProvisionResult {
    * send that still fails can only be the latter.
    */
   channelPlugins: OpenClawChannelPluginState[];
-  registryPlugins: OpenClawRegistryPluginState[];
   /** Model-provider credential env vars found in this process's environment
    *  and therefore withheld from OpenClaw. Names only, never values. */
   strippedCredentialEnvNames: string[];
@@ -614,7 +611,6 @@ export class OpenClawProvisioner {
       lockdownViolations: [],
       auditFindings: [],
       channelPlugins: [],
-      registryPlugins: [],
       strippedCredentialEnvNames,
       runtimeInstall,
     };
@@ -660,25 +656,6 @@ export class OpenClawProvisioner {
     base.channelPlugins = pluginOutcome.states;
     if (pluginOutcome.refusal) {
       return this.refuse(base, pluginOutcome.refusal.code, pluginOutcome.refusal.detail);
-    }
-
-    // ── 1b. Acquire the REGISTRY channel plugins ────────────────────────
-    //
-    // Same moment in the sequence and for the same three reasons as 1a: a
-    // registry plugin contributes a `channels.<id>` schema node too, it is
-    // third-party code the security audit below must see loaded, and its own
-    // compatibility floor was checked against the pinned version already.
-    // Kept as a separate call rather than folded into 1a because the two are
-    // keyed differently — 1a by channel id, this by npm package, since a
-    // registry plugin's channel id is not knowable until it is installed.
-    const registryOutcome = await ensureRegistryPluginsInstalled({
-      cli: this.options.cli,
-      installSpecs: this.options.plan.registryPlugins ?? [],
-      record: this.options.record,
-    });
-    base.registryPlugins = registryOutcome.states;
-    if (registryOutcome.refusal) {
-      return this.refuse(base, registryOutcome.refusal.code, registryOutcome.refusal.detail);
     }
 
     // ── 2. The installed schema still has the shape the mapping assumes ──
