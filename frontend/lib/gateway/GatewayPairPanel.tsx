@@ -5,6 +5,13 @@ import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fet
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, Copy, Loader2 } from "lucide-react";
 import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
+import {
+  normalizePairingPlatform,
+  pairingPlatformSupported,
+  pairingSetup,
+  pairingUnsupportedReason,
+  type PairingPlatformId,
+} from "./pairing-command";
 
 export type GatewayRegistrationRecord = Record<string, unknown> & {
   gateway_id?: string | null;
@@ -49,47 +56,12 @@ type PairingIntent = {
   platform?: string | null;
 };
 
-function detectPlatform(): string {
+function detectPlatform(): PairingPlatformId {
   if (typeof navigator === "undefined") return "macos";
   const source = `${navigator.platform || ""} ${navigator.userAgent || ""}`.toLowerCase();
   if (source.includes("win")) return "windows";
   if (source.includes("linux")) return "linux";
   return "macos";
-}
-
-/** fullAccess only ever adds a line — never changes any line above it — so a
- *  default (sandbox) pairing's command is byte-for-byte what it always was.
- *  The exported var here is the box operator's LOCAL half of the full_access
- *  opt-in (see empyralis-gateway/src/config.ts's shellFullAccessLocallyEnabled
- *  doc comment); the pairing intent request carries the other, server half
- *  (runtime_access_mode/autonomous_agent_setup_warning_acknowledged, set in
- *  handleGenerate below from this same fullAccess flag) — both are required
- *  before any call actually runs unsandboxed. */
-export function pairingCommand(token: string, displayName: string, workspaceId: string, fullAccess: boolean): string {
-  if (!token) return "Pairing token unavailable";
-  const name = displayName.trim() || "My device";
-  const lines = [
-    `export EMPYRALIS_GATEWAY_PAIRING_TOKEN=${JSON.stringify(token)}`,
-    `export EMPYRALIS_GATEWAY_DISPLAY_NAME=${JSON.stringify(name)}`,
-    `export EMPYRALIS_WORKSPACE_ID=${JSON.stringify(workspaceId)}`,
-  ];
-  if (fullAccess) {
-    lines.push(`export EMPYRALIS_GATEWAY_SHELL_FULL_ACCESS_ENABLED=true`);
-  }
-  // https://get.empyralis.com does not resolve — no such domain was ever
-  // provisioned. The real installer (the exact same prebuilt-artifact script
-  // the DigitalOcean cloud-init and "connect via SSH" paths both already use
-  // — see vps_provisioning_service.agent_installer_url() /
-  // routes_gateway._remote_agent_computer_setup_command()) is served at
-  // empyralis.ai. Piped to `sudo -E bash`, not `sh`: install-agent-
-  // computer.sh opens with `set -Eeuo pipefail`, which /bin/sh is dash on
-  // Ubuntu and rejects outright (see this repo's own "MUST be bash, not sh"
-  // lesson, already paid for once in the cloud-init generator) — and the
-  // installer requires root (`sudo`), which a plain `curl | sh` never had at
-  // all. `-E` carries the `export` lines above across the sudo boundary,
-  // the same reason the SSH remote-setup command uses `VAR=val sudo -E bash`.
-  lines.push(`curl -fsSL https://empyralis.ai/install/agent-computer.sh | sudo -E bash`);
-  return lines.join("\n");
 }
 
 async function fetchGatewayIds(workspaceId: string): Promise<Set<string>> {
@@ -142,7 +114,9 @@ export function GatewayPairPanel({
   renderPostPairNext?: (gateway: GatewayRegistrationRecord) => React.ReactNode;
 }) {
   const [displayName, setDisplayName] = useState("My device");
-  const [platform, setPlatform] = useState(defaultPlatform || "macos");
+  const [platform, setPlatform] = useState<PairingPlatformId>(
+    normalizePairingPlatform(defaultPlatform),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [intent, setIntent] = useState<PairingIntent | null>(null);
@@ -229,15 +203,37 @@ export function GatewayPairPanel({
 
   const handleCopy = useCallback(async () => {
     if (!intent?.pairing_token) return;
-    const command = pairingCommand(intent.pairing_token, displayName, workspaceId, fullAccessAck);
+    const setup = pairingSetup(intent.pairing_token, displayName, workspaceId, fullAccessAck, platform);
+    if (setup.kind !== "command") return;
     try {
-      await navigator.clipboard.writeText(command);
+      await navigator.clipboard.writeText(setup.command);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
       setError("Could not copy — select and copy the command manually.");
     }
-  }, [intent, displayName, workspaceId, fullAccessAck]);
+  }, [intent, displayName, workspaceId, fullAccessAck, platform]);
+
+  // A platform with no installer never reaches the "generate a token" step:
+  // minting a pairing intent nobody can use is a dead control one level down
+  // from the button, and it would leave a real, expiring token dangling in
+  // the workspace for a computer that was never going to connect.
+  const platformSupported = pairingPlatformSupported(platform);
+
+  // Resolved once, so the block on screen and the block the Copy button puts
+  // on the clipboard can never disagree. Each of the three outcomes says what
+  // actually happened rather than sharing one message: a real command, "this
+  // platform has no path", or "the token did not come back" — the last of
+  // which is a backend problem to retry, not a platform to give up on.
+  const setup = intent
+    ? pairingSetup(intent.pairing_token || "", displayName, workspaceId, fullAccessAck, platform)
+    : null;
+  const commandText =
+    setup?.kind === "command"
+      ? setup.command
+      : setup?.kind === "unsupported"
+        ? setup.reason
+        : "Pairing token unavailable — try generating the command again.";
 
   if (paired) {
     const postPair = renderPostPairNext?.(paired);
@@ -278,18 +274,25 @@ export function GatewayPairPanel({
             </label>
             <label className="gw-pair-panel-field">
               <span>Platform</span>
-              <select value={platform} onChange={(e) => setPlatform(e.currentTarget.value)}>
+              <select
+                value={platform}
+                onChange={(e) => setPlatform(normalizePairingPlatform(e.currentTarget.value))}
+              >
                 <option value="macos">macOS</option>
                 <option value="windows">Windows</option>
                 <option value="linux">Linux</option>
               </select>
             </label>
           </div>
+          {!platformSupported && (
+            <p className="gw-pair-panel-hint">{pairingUnsupportedReason(platform)}</p>
+          )}
           {/* full_access opt-in. Unchecked by default — sandbox (Docker) is
               the floor for every pairing unless the owner deliberately asks
               for more. Checking this box is itself the explicit
               acknowledgment: its own label states plainly what full_access
               does, so nothing about it is a passive default. */}
+          {platformSupported && (
           <label className="gw-pair-panel-fullaccess-toggle">
             <input
               type="checkbox"
@@ -298,7 +301,8 @@ export function GatewayPairPanel({
             />
             <span>Run with full access to this computer (advanced, no sandbox)</span>
           </label>
-          {fullAccessAck && (
+          )}
+          {platformSupported && fullAccessAck && (
             <p className="gw-pair-panel-fullaccess-warning">
               <AlertTriangle size={14} strokeWidth={2} />
               <span>
@@ -309,10 +313,15 @@ export function GatewayPairPanel({
               </span>
             </p>
           )}
-          <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={handleGenerate} disabled={busy}>
-            {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
-            {busy ? "Generating…" : "Generate pairing command"}
-          </button>
+          {/* Not rendered at all on a platform with no installer — a control
+              whose own caption admits it does nothing is a design bug, not a
+              caption (CLAUDE.md, "no dead controls"). */}
+          {platformSupported && (
+            <button type="button" className="fleet-btn fleet-btn--accent-fill" onClick={handleGenerate} disabled={busy}>
+              {busy ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : null}
+              {busy ? "Generating…" : "Generate pairing command"}
+            </button>
+          )}
           {error && <p className="gw-pair-panel-error">{error}</p>}
         </>
       ) : (
@@ -321,7 +330,7 @@ export function GatewayPairPanel({
             Run this on the computer you want to connect, then wait — this updates automatically once it's paired.
           </p>
           <pre className="gw-pair-panel-command">
-            <code>{pairingCommand(intent.pairing_token || "", displayName, workspaceId, fullAccessAck)}</code>
+            <code>{commandText}</code>
           </pre>
           <div className="gw-pair-panel-row">
             <button type="button" className="fleet-btn" onClick={handleCopy}>

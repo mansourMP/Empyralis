@@ -86,6 +86,12 @@ GATEWAY_WS_SAFE_SUBPROTOCOL = "empyralis.gateway.v1"
 GATEWAY_WS_TOKEN_SUBPROTOCOL_PREFIX = "empyralis.gateway.session."
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _AGENT_COMPUTER_INSTALLER_PATH = _REPO_ROOT / "scripts" / "install-agent-computer.sh"
+# The macOS sibling. A SEPARATE script rather than one script that branches on
+# `uname`, because the two share almost nothing that matters: root vs. no root,
+# apt vs. no package manager, a system service user vs. the logged-in person,
+# systemd vs. launchd. A single file with two of everything is how a change
+# meant for one platform silently lands on the other.
+_AGENT_COMPUTER_MACOS_INSTALLER_PATH = _REPO_ROOT / "scripts" / "install-agent-computer-macos.sh"
 
 
 def _utc_now_iso() -> str:
@@ -1761,6 +1767,23 @@ async def get_agent_computer_bootstrap_installer() -> PlainTextResponse:
         raise HTTPException(status_code=404, detail="Agent Computer installer is not available")
     return PlainTextResponse(
         _AGENT_COMPUTER_INSTALLER_PATH.read_text(encoding="utf-8"),
+        media_type="text/plain",
+    )
+
+
+@router.get("/hardware/bootstrap/install-macos.sh", response_class=PlainTextResponse)
+async def get_agent_computer_macos_bootstrap_installer() -> PlainTextResponse:
+    """The macOS installer, served exactly like its Ubuntu sibling above.
+
+    Read off disk on every request, no caching of any kind — the same posture
+    the Linux route takes, and for the same reason: the only staleness this
+    surface has ever suffered came from Cloudflare's edge, not from here (see
+    vps_provisioning_service.agent_installer_url()'s content-hash cache-buster).
+    """
+    if not _AGENT_COMPUTER_MACOS_INSTALLER_PATH.exists():
+        raise HTTPException(status_code=404, detail="Agent Computer installer is not available")
+    return PlainTextResponse(
+        _AGENT_COMPUTER_MACOS_INSTALLER_PATH.read_text(encoding="utf-8"),
         media_type="text/plain",
     )
 
