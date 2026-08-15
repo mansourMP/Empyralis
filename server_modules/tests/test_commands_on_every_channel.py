@@ -47,9 +47,26 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-from server_modules import personal_channels_service, personal_channels_repository
+from server_modules import (
+    openclaw_channel_registry,
+    personal_channels_service,
+    personal_channels_repository,
+)
+
+
+def _cut_over_channel_keys():
+    """The five platforms the OpenClaw cutover moved onto the transport
+    (WhatsApp, Telegram, Signal, iMessage, Weixin), from the registry's own
+    id set rather than typed here -- a hardcoded `signal_personal` is what
+    let this file keep "passing" against a channel nothing routes."""
+    return tuple(
+        sorted(
+            f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}{channel_id}"
+            for channel_id in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS
+        )
+    )
 
 
 _ALLOW_DISPATCH_DECISION = {
@@ -96,9 +113,17 @@ def _patch_agent_install_store(store: "_FakeAgentInstallStore"):
 
 
 class LocalBridgeCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
-    """Signal and an OpenClaw-transported channel (both routed through
+    """Every personal channel (all routed through
     _handle_local_bridge_gateway_channel_inbound -> _deliver_local_bridge_
-    personal_reply) must execute /commands, not chat about them."""
+    personal_reply) must execute /commands, not chat about them.
+
+    RETARGETED 2026-08-15. This class drove the hardcoded `signal_personal`,
+    a key commit 6b2baf97e (the full OpenClaw cutover, 2026-08-14) removed --
+    the lane contract rejected it on every call. The keys now come from the
+    registry, and the two command cases run for all five cut-over channels
+    rather than for Signal alone, absorbing the coverage of the two classes
+    this file used to carry beside it (see the note at the end of the file).
+    """
 
     GATEWAY_ID = "gw-cmd-local-1"
     AGENT_ID = "agent-cmd-local-1"
@@ -207,56 +232,69 @@ class LocalBridgeCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
             )
         return result, dispatch_command_mock, dispatch_mock, reply_builder_mock
 
-    async def test_signal_help_command_executes_and_dispatches(self) -> None:
-        result, dispatch_command_mock, dispatch_mock, reply_builder_mock = await self._run(
-            channel_key="signal_personal",
-            provider="signal_local_bridge",
-            label="Signal",
-            text="/help",
-            external_message_id="sig-cmd-help-1",
-            command_reply="Available commands: /help /compact /new ...",
-        )
+    def test_cut_over_channel_keys_are_all_live(self) -> None:
+        keys = _cut_over_channel_keys()
+        self.assertTrue(keys)
+        for channel_key in keys:
+            self.assertIn(channel_key, personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS)
 
-        # The registry was actually reached, with the real command text.
-        dispatch_command_mock.assert_awaited_once()
-        self.assertEqual(dispatch_command_mock.call_args.kwargs["command"], "/help")
-        self.assertEqual(dispatch_command_mock.call_args.kwargs["channel_origin"], "signal_personal")
+    async def test_help_command_executes_and_dispatches_on_every_cut_over_channel(self) -> None:
+        for channel_key in _cut_over_channel_keys():
+            with self.subTest(channel_key=channel_key):
+                spec = personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]
+                result, dispatch_command_mock, dispatch_mock, reply_builder_mock = await self._run(
+                    channel_key=channel_key,
+                    provider=str(spec["provider"]),
+                    label=str(spec["label"]),
+                    text="/help",
+                    external_message_id=f"{channel_key}-cmd-help-1",
+                    command_reply="Available commands: /help /compact /new ...",
+                )
 
-        # Its reply was durably dispatched — not just written to a DB row
-        # and abandoned (the pre-fix WhatsApp bug).
-        dispatch_mock.assert_awaited_once()
-        self.assertEqual(
-            dispatch_mock.call_args.kwargs["text"],
-            "Available commands: /help /compact /new ...",
-        )
-        self.assertEqual(dispatch_mock.call_args.kwargs["channel_key"], "signal_personal")
+                # The registry was actually reached, with the real command text.
+                dispatch_command_mock.assert_awaited_once()
+                self.assertEqual(dispatch_command_mock.call_args.kwargs["command"], "/help")
+                self.assertEqual(dispatch_command_mock.call_args.kwargs["channel_origin"], channel_key)
 
-        # A command never triggers an ordinary LLM turn alongside it.
-        reply_builder_mock.assert_not_awaited()
+                # Its reply was durably dispatched — not just written to a DB
+                # row and abandoned (the pre-fix WhatsApp bug, which is why
+                # this is an await-count assertion and not "something happened").
+                dispatch_mock.assert_awaited_once()
+                self.assertEqual(
+                    dispatch_mock.call_args.kwargs["text"],
+                    "Available commands: /help /compact /new ...",
+                )
+                self.assertEqual(dispatch_mock.call_args.kwargs["channel_key"], channel_key)
 
-        self.assertEqual(result["outbound"]["status"], "delivered")
-        self.assertTrue(result.get("command_handled"))
+                # A command never triggers an ordinary LLM turn alongside it.
+                reply_builder_mock.assert_not_awaited()
 
-    async def test_signal_compact_command_executes_and_dispatches(self) -> None:
+                self.assertEqual(result["outbound"]["status"], "delivered")
+                self.assertTrue(result.get("command_handled"))
+
+    async def test_compact_command_executes_and_dispatches_on_every_cut_over_channel(self) -> None:
         """/compact is state-changing (it mutates thread history), unlike
         /help — proving the wiring generalizes past a read-only command."""
-        result, dispatch_command_mock, dispatch_mock, reply_builder_mock = await self._run(
-            channel_key="signal_personal",
-            provider="signal_local_bridge",
-            label="Signal",
-            text="/compact",
-            external_message_id="sig-cmd-compact-1",
-            command_reply="Conversation compacted.",
-        )
+        for channel_key in _cut_over_channel_keys():
+            with self.subTest(channel_key=channel_key):
+                spec = personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]
+                result, dispatch_command_mock, dispatch_mock, reply_builder_mock = await self._run(
+                    channel_key=channel_key,
+                    provider=str(spec["provider"]),
+                    label=str(spec["label"]),
+                    text="/compact",
+                    external_message_id=f"{channel_key}-cmd-compact-1",
+                    command_reply="Conversation compacted.",
+                )
 
-        dispatch_command_mock.assert_awaited_once()
-        self.assertEqual(dispatch_command_mock.call_args.kwargs["command"], "/compact")
+                dispatch_command_mock.assert_awaited_once()
+                self.assertEqual(dispatch_command_mock.call_args.kwargs["command"], "/compact")
 
-        dispatch_mock.assert_awaited_once()
-        self.assertEqual(dispatch_mock.call_args.kwargs["text"], "Conversation compacted.")
+                dispatch_mock.assert_awaited_once()
+                self.assertEqual(dispatch_mock.call_args.kwargs["text"], "Conversation compacted.")
 
-        reply_builder_mock.assert_not_awaited()
-        self.assertEqual(result["outbound"]["status"], "delivered")
+                reply_builder_mock.assert_not_awaited()
+                self.assertEqual(result["outbound"]["status"], "delivered")
 
     async def test_openclaw_channel_help_command_executes_and_dispatches(self) -> None:
         """The whole point of routing OpenClaw channels through the SAME
@@ -287,11 +325,14 @@ class LocalBridgeCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
         """The same idempotency contract every other reply on this path
         gets: a redelivered inbound event (this transport is at-least-once
         end to end) must not run the command, or send its reply, twice."""
-        self._claim(channel_key="signal_personal", provider="signal_local_bridge")
+        channel_key = _cut_over_channel_keys()[0]
+        provider = str(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]["provider"])
+        label = str(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]["label"])
+        self._claim(channel_key=channel_key, provider=provider)
         dispatch_command_mock = AsyncMock(return_value="Available commands: ...")
         outbound_dispatch_mock = AsyncMock(return_value={"external_message_id": "signal-out-1"})
         payload = self._payload(
-            external_message_id="sig-cmd-redelivery-1", text="/help", provider="signal_local_bridge",
+            external_message_id=f"{channel_key}-cmd-redelivery-1", text="/help", provider=provider,
         )
         with (
             _patch_agent_install_store(self.store),
@@ -316,9 +357,9 @@ class LocalBridgeCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
                     gateway_id=self.GATEWAY_ID,
                     registration=self.registration,
                     payload=payload,
-                    channel_key="signal_personal",
-                    provider="signal_local_bridge",
-                    label="Signal",
+                    channel_key=channel_key,
+                    provider=provider,
+                    label=label,
                 )
 
         self.assertEqual(dispatch_command_mock.await_count, 1, "a redelivery must not re-run the command")
@@ -326,234 +367,44 @@ class LocalBridgeCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["outbound"]["status"], "delivered")
 
 
-class TelegramPersonalCommandDispatchTests(unittest.IsolatedAsyncioTestCase):
-    """Telegram-personal (the QR-paired handler,
-    _handle_telegram_gateway_channel_inbound) must also execute /commands —
-    it built its reply inline via personal_channel_sage_bridge_service.
-    build_telegram_personal_reply and never dispatched a command at all."""
-
-    GATEWAY_ID = "gw-cmd-tg-1"
-
-    def setUp(self) -> None:
-        global personal_channels_service, personal_channels_repository
-        personal_channels_service = importlib.import_module("server_modules.personal_channels_service")
-        personal_channels_repository = importlib.import_module("server_modules.personal_channels_repository")
-
-        self.tmpdir = tempfile.TemporaryDirectory()
-        db_path = Path(self.tmpdir.name) / "personal-channels.sqlite3"
-        personal_channels_repository.init_personal_channels_db(db_path)
-        self.db_patcher = patch.object(personal_channels_repository, "PERSONAL_CHANNELS_DB_FILE", db_path)
-        self.db_patcher.start()
-
-        self.registration = {
-            "gateway_id": self.GATEWAY_ID,
-            "workspace_id": "ws-cmd-tg",
-            "tenant_id": "tenant-cmd-tg",
-            "device_trust_state": "trusted",
-            "active_session_id": "sess-1",
-        }
-        # Establish "123456789" as this channel's own linked owner identity
-        # (self-chat), exactly as test_personal_channels_service_natural_
-        # reply.py does, so the inbound message below is recognized by the
-        # REAL dmPolicy gate as the owner rather than tripping owner_only's
-        # default-deny.
-        personal_channels_repository.upsert_telegram_state(
-            gateway_id=self.GATEWAY_ID,
-            tenant_id="tenant-cmd-tg",
-            workspace_id="ws-cmd-tg",
-            user_id="",
-            channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-            agent_id="",
-            provider=personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-            status="connected",
-            linked_user_id="123456789",
-        )
-
-    def tearDown(self) -> None:
-        self.db_patcher.stop()
-        self.tmpdir.cleanup()
-
-    def _payload(self, *, external_message_id: str, text: str) -> Dict[str, Any]:
-        return {
-            "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-            "message": {
-                "external_message_id": external_message_id,
-                "remote_jid": "123456789",
-                "sender_jid": "123456789",
-                "push_name": "Mansur",
-                "text": text,
-                "from_me": False,
-                # Satisfies the pre-existing, unrelated control-command
-                # gate — see this module's docstring.
-                "sender_role": "owner",
-            },
-        }
-
-    async def _run(self, *, text: str, external_message_id: str, command_reply: str):
-        dispatch_command_mock = AsyncMock(return_value=command_reply)
-        outbound_dispatch_mock = AsyncMock(return_value={"external_message_id": "tg-cmd-out-1"})
-        # build_telegram_personal_reply is called SYNCHRONOUSLY (no await) in
-        # personal_channels_service — a plain Mock, not AsyncMock, matches
-        # its real call shape.
-        reply_builder_mock = MagicMock(return_value={"text": "I would have chatted about it.", "source": "sage"})
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch("server_modules.sage_command_dispatcher.dispatch_command", new=dispatch_command_mock),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
-                ".build_telegram_personal_reply",
-                new=reply_builder_mock,
-            ),
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=outbound_dispatch_mock,
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id=self.GATEWAY_ID,
-                registration=self.registration,
-                payload=self._payload(external_message_id=external_message_id, text=text),
-            )
-        return result, dispatch_command_mock, dispatch_mock, reply_builder_mock
-
-    async def test_telegram_help_command_executes_and_dispatches(self) -> None:
-        result, dispatch_command_mock, dispatch_mock, reply_builder_mock = await self._run(
-            text="/help",
-            external_message_id="tg-cmd-help-1",
-            command_reply="Available commands: /help /compact /new ...",
-        )
-
-        dispatch_command_mock.assert_awaited_once()
-        self.assertEqual(dispatch_command_mock.call_args.kwargs["command"], "/help")
-        self.assertEqual(dispatch_command_mock.call_args.kwargs["channel_origin"], "telegram_personal")
-
-        dispatch_mock.assert_awaited_once()
-        self.assertEqual(
-            dispatch_mock.call_args.kwargs["text"],
-            "Available commands: /help /compact /new ...",
-        )
-        self.assertEqual(dispatch_mock.call_args.kwargs["channel_key"], "telegram_personal")
-
-        reply_builder_mock.assert_not_called()
-        self.assertEqual(result["outbound"]["status"], "delivered")
-        self.assertTrue(result.get("command_handled"))
-
-    async def test_telegram_compact_command_executes_and_dispatches(self) -> None:
-        result, dispatch_command_mock, dispatch_mock, reply_builder_mock = await self._run(
-            text="/compact",
-            external_message_id="tg-cmd-compact-1",
-            command_reply="Conversation compacted.",
-        )
-
-        dispatch_command_mock.assert_awaited_once()
-        self.assertEqual(dispatch_command_mock.call_args.kwargs["command"], "/compact")
-
-        dispatch_mock.assert_awaited_once()
-        self.assertEqual(dispatch_mock.call_args.kwargs["text"], "Conversation compacted.")
-
-        reply_builder_mock.assert_not_called()
-        self.assertEqual(result["outbound"]["status"], "delivered")
-
-    async def test_redelivery_of_a_command_never_re_dispatches(self) -> None:
-        dispatch_command_mock = AsyncMock(return_value="Available commands: ...")
-        outbound_dispatch_mock = AsyncMock(return_value={"external_message_id": "tg-out-1"})
-        payload = self._payload(external_message_id="tg-cmd-redelivery-1", text="/help")
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch("server_modules.sage_command_dispatcher.dispatch_command", new=dispatch_command_mock),
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=outbound_dispatch_mock,
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            for _ in range(2):
-                result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                    gateway_id=self.GATEWAY_ID,
-                    registration=self.registration,
-                    payload=payload,
-                )
-
-        self.assertEqual(dispatch_command_mock.await_count, 1, "a redelivery must not re-run the command")
-        self.assertEqual(dispatch_mock.await_count, 1, "a redelivery must not re-send the command's reply")
-        self.assertEqual(result["outbound"]["status"], "delivered")
-
-
-class WhatsAppCommandDispatchActuallySendsTests(unittest.IsolatedAsyncioTestCase):
-    """WhatsApp already reached dispatch_command before this change, but its
-    own inline block had the OTHER bug this fix must not reintroduce: it
-    wrote the command's reply into the outbound table and returned
-    immediately, WITHOUT ever calling gateway_protocol_service.dispatch_
-    channel_outbound. The reply was created and left "pending" forever —
-    nothing ever actually sent it to WhatsApp. Routing WhatsApp through the
-    same _dispatch_personal_channel_command waist as the other two channels
-    is what fixes this too; assert the fix, not just the reachability."""
-
-    def setUp(self) -> None:
-        global personal_channels_service, personal_channels_repository
-        personal_channels_service = importlib.import_module("server_modules.personal_channels_service")
-        personal_channels_repository = importlib.import_module("server_modules.personal_channels_repository")
-
-        self.tmpdir = tempfile.TemporaryDirectory()
-        db_path = Path(self.tmpdir.name) / "personal-channels.sqlite3"
-        personal_channels_repository.init_personal_channels_db(db_path)
-        self.db_patcher = patch.object(personal_channels_repository, "PERSONAL_CHANNELS_DB_FILE", db_path)
-        self.db_patcher.start()
-
-    def tearDown(self) -> None:
-        self.db_patcher.stop()
-        self.tmpdir.cleanup()
-
-    async def test_whatsapp_command_reply_is_actually_dispatched_not_just_written(self) -> None:
-        dispatch_command_mock = AsyncMock(return_value="Available commands: /help /compact /new ...")
-        outbound_dispatch_mock = AsyncMock(return_value={"external_message_id": "wa-cmd-out-1"})
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch("server_modules.sage_command_dispatcher.dispatch_command", new=dispatch_command_mock),
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=outbound_dispatch_mock,
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await personal_channels_service._deliver_whatsapp_personal_reply(
-                gateway_id="gw-cmd-wa-1",
-                registration={
-                    "gateway_id": "gw-cmd-wa-1",
-                    "workspace_id": "default",
-                    "tenant_id": "tenant-cmd-wa",
-                    "device_trust_state": "trusted",
-                    "active_session_id": "sess-1",
-                },
-                inbound={"external_message_id": "wa-cmd-1", "remote_jid": "15551234567@s.whatsapp.net"},
-                remote_jid="15551234567@s.whatsapp.net",
-                external_message_id="wa-cmd-1",
-                text="/help",
-                push_name="Mansur",
-                duplicate=False,
-                agent_id="agent-cmd-wa-1",
-            )
-
-        # THE bug: pre-fix, the outbound row was created and mark_inbound_
-        # processed was called, then the function returned — dispatch_
-        # channel_outbound was never reached, so this assertion is exactly
-        # what would have failed against the pre-fix WhatsApp branch.
-        dispatch_mock.assert_awaited_once()
-        self.assertEqual(dispatch_mock.call_args.kwargs["text"], "Available commands: /help /compact /new ...")
-        self.assertEqual(result["outbound"]["status"], "delivered")
+# TelegramPersonalCommandDispatchTests and
+# WhatsAppCommandDispatchActuallySendsTests DELETED 2026-08-15.
+#
+# The first drove _handle_telegram_gateway_channel_inbound and the second
+# _deliver_whatsapp_personal_reply; commit 6b2baf97e (the full OpenClaw
+# cutover, 2026-08-14) deleted both functions along with the gramjs/Baileys
+# runtimes they served, so both classes raised AttributeError from the moment
+# it landed.
+#
+# Neither is retargeted as its own class, because doing so would produce two
+# byte-for-byte copies of LocalBridgeCommandDispatchTests with a different
+# channel key: Telegram and WhatsApp now enter through exactly the
+# _handle_local_bridge_gateway_channel_inbound ->
+# _deliver_local_bridge_personal_reply -> _dispatch_personal_channel_command
+# chain that class already drives. The chain is what this file exists to
+# protect (ONE shared waist instead of a per-channel copy that grows its own
+# bug), so the honest replacement is to run the existing tests for every
+# cut-over channel -- which they now do.
+#
+# Both classes' specific subjects survive in that parameterized form:
+#   * "Telegram-personal executes /commands rather than chatting about them"
+#     -- test_help_command / test_compact_command, subTest openclaw_telegram.
+#   * "WhatsApp's command reply is ACTUALLY dispatched, not just written to
+#     the outbound row and abandoned" -- the same tests' await-count
+#     assertion on dispatch_channel_outbound, subTest openclaw_whatsapp.
+#   * redelivery idempotency for both -- test_redelivery_of_a_command_never_
+#     re_dispatches.
+#
+# One difference in technique, and it is not a weakening: the Telegram class
+# established its owner through upsert_telegram_state's linked_user_id and
+# let the REAL dmPolicy gate resolve it. That is impossible on the surviving
+# path -- _handle_local_bridge_gateway_channel_inbound passes
+# existing_state=None to the gate on purpose (see its own comment), because
+# no local-bridge channel has a linked-identity table. _enforce_dm_policy is
+# therefore mocked to an explicit allowed-owner decision, exactly as
+# LocalBridgeCommandDispatchTests already did before this change and for the
+# reason it already recorded. dmPolicy's own behaviour is covered in
+# test_personal_channels_dm_policy.py.
 
 
 if __name__ == "__main__":

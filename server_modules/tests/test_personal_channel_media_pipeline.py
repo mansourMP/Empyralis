@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, patch
 
 from server_modules import (
     gateway_protocol_service,
+    openclaw_channel_registry,
     personal_channel_media_store_service,
     personal_channel_transcription_service,
     workspace_context,
@@ -389,11 +390,26 @@ class TranscriptionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"], "empty_audio_payload")
 
 
+def _cut_over_channel_key(platform: str) -> str:
+    """One cut-over platform's live channel key, from the registry rather than
+    typed: `whatsapp_personal` is a key the OpenClaw cutover deleted."""
+    assert platform in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS, platform
+    return f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}{platform}"
+
+
 class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
     """Full round-trip through personal_channels_service's live inbound
     handler: a fake channel.inbound event with a voice `media` item ->
     fetch -> transcribe -> "[Voice message]: ..." spliced into the text
-    handed to the reply builder."""
+    handed to the reply builder.
+
+    RETARGETED 2026-08-15 from _handle_whatsapp_gateway_channel_inbound, which
+    commit 6b2baf97e (the full OpenClaw cutover, 2026-08-14) deleted, onto
+    _handle_local_bridge_gateway_channel_inbound -- the handler WhatsApp now
+    actually enters through, and the one every other personal channel shares,
+    so the media pipeline is proven on the live path rather than on a deleted
+    WhatsApp-specific one. The agent claim moves from upsert_whatsapp_state to
+    upsert_local_bridge_state for the same reason."""
 
     def setUp(self) -> None:
         global personal_channels_service, personal_channels_repository
@@ -424,19 +440,20 @@ class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
         }
 
         # Claim the channel for a real agent_id first — the media store
-        # requires one (see its module docstring); a real deployment
-        # reaches this via configure_whatsapp_personal_gateway's
-        # _claim_agent_channel_state before any message ever arrives.
-        personal_channels_repository.upsert_whatsapp_state(
+        # requires one (see its module docstring). This is the same row
+        # _resolve_local_bridge_agent_id's own preferred_gateway_id lookup
+        # writes, so the identity resolution under test is the real one.
+        self.channel_key = _cut_over_channel_key("whatsapp")
+        self.spec = personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[self.channel_key]
+        personal_channels_repository.upsert_local_bridge_state(
             gateway_id="gw-media-1",
             tenant_id="tenant-1",
             workspace_id="default",
             user_id="",
-            channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
+            channel_key=self.channel_key,
             agent_id="agent-media-1",
-            provider=personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
-            status="connected",
-            linked_jid="15550001111@s.whatsapp.net",
+            provider=str(self.spec["provider"]),
+            status="linked",
         )
 
     def tearDown(self) -> None:
@@ -474,8 +491,9 @@ class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
-                return_value={"text": "Got it, I will call the plumber.", "source": "sage"},
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                ".build_personal_channel_reply_async",
+                new=AsyncMock(return_value={"text": "Got it, I will call the plumber.", "source": "sage"}),
             ) as build_reply_mock,
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
@@ -484,12 +502,13 @@ class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
                 gateway_id="gw-media-1",
                 registration=self.registration,
+                channel_key=self.channel_key,
+                provider=str(self.spec["provider"]),
+                label=str(self.spec["label"]),
                 payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
                     "message": {
                         "external_message_id": "wa-voice-1",
                         "remote_jid": "15550001111@s.whatsapp.net",
@@ -511,7 +530,7 @@ class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
                     },
                 },
             )
-        build_reply_mock.assert_called_once()
+        build_reply_mock.assert_awaited_once()
         sent_text = build_reply_mock.call_args.kwargs["text"]
         self.assertIn("[Voice message]: please call the plumber tomorrow", sent_text)
         self.assertFalse(result.get("blocked", False))
@@ -535,8 +554,9 @@ class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=fetched_payload),
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
-                return_value={"text": "Nice photo!", "source": "sage"},
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                ".build_personal_channel_reply_async",
+                new=AsyncMock(return_value={"text": "Nice photo!", "source": "sage"}),
             ) as build_reply_mock,
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
@@ -545,12 +565,13 @@ class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
         ):
-            await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
+            await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
                 gateway_id="gw-media-1",
                 registration=self.registration,
+                channel_key=self.channel_key,
+                provider=str(self.spec["provider"]),
+                label=str(self.spec["label"]),
                 payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
                     "message": {
                         "external_message_id": "wa-image-1",
                         "remote_jid": "15550001111@s.whatsapp.net",
@@ -571,7 +592,7 @@ class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
                     },
                 },
             )
-        build_reply_mock.assert_called_once()
+        build_reply_mock.assert_awaited_once()
         attachments = build_reply_mock.call_args.kwargs["attachments"]
         self.assertEqual(len(attachments), 1)
         self.assertEqual(attachments[0]["content_type"], "image/jpeg")
@@ -596,12 +617,13 @@ class InboundMediaEndToEndTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
                 gateway_id="gw-media-1",
                 registration=self.registration,
+                channel_key=self.channel_key,
+                provider=str(self.spec["provider"]),
+                label=str(self.spec["label"]),
                 payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
                     "message": {
                         "external_message_id": "wa-stranger-media-1",
                         "remote_jid": "919999999999@s.whatsapp.net",

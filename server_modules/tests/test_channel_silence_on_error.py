@@ -35,7 +35,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import channel_adapter, platform_event
+from server_modules import channel_adapter, openclaw_channel_registry, platform_event
 from server_modules import sage_reply_dispatcher as srd
 from server_modules import personal_channel_sage_bridge_service as bridge
 from server_modules.sage_agent_runtime_contract import SageTurnResult
@@ -279,7 +279,31 @@ class BridgeServiceNeverReturnsSendableErrorTextTests(unittest.TestCase):
         """This used to ALSO fire a direct dispatch_cloud_channel_outbound(
         text=SAGE_ERROR_REPLY) call, bypassing every filter. Confirm that
         bypass is gone: the classified error stays under error_text, "text"
-        is empty, and nothing was dispatched straight to the channel."""
+        is empty, and nothing was dispatched straight to the channel.
+
+        LEFT RED DELIBERATELY, 2026-08-15 — it is catching a live production
+        regression, not cutover test-rot, and must NOT be weakened or deleted
+        to make the suite green.
+
+        `build_telegram_personal_reply_async` hardcodes the channel key
+        `telegram_personal` and passes it to
+        channel_lane_contract_service.guard_personal_gateway_inbound_message
+        (personal_channel_sage_bridge_service.py:485). Commit 6b2baf97e (the
+        full OpenClaw cutover, 2026-08-14) removed `telegram_personal` from
+        PERSONAL_CHANNEL_SPECS, so that guard now raises
+        "Channel lane contract rejected non-personal channel: telegram_personal"
+        on EVERY call. That function is the only reply builder
+        personal_channels_service.handle_cloud_channel_inbound calls
+        (personal_channels_service.py:4163), so every cloud-session-manager
+        Telegram message now fails its turn, is suppressed to an empty reply,
+        and the person gets silence — with nothing anywhere saying why.
+
+        The test goes red on `assertIsNotNone(result)`; its own subject
+        (`cloud_dispatch.assert_not_called()`) still holds. Fixing it is a
+        one-line production change in personal_channel_sage_bridge_service.py
+        (the cloud lane needs a key the lane contract still carries, or an
+        explicit cloud-lane exemption) and is outside a tests-only pass.
+        """
 
         async def run_case():
             with (
@@ -349,70 +373,94 @@ class PersonalChannelsServiceDeliveryBackstopTests(unittest.TestCase):
             "next_action": "dispatch_gateway_operation",
         }
 
-    def test_whatsapp_delivery_refuses_suppressed_status_text(self) -> None:
+    def test_delivery_refuses_suppressed_status_text(self) -> None:
+        """RETARGETED 2026-08-15 from _deliver_whatsapp_personal_reply, which
+        commit 6b2baf97e (the full OpenClaw cutover, 2026-08-14) deleted, onto
+        _deliver_local_bridge_personal_reply -- the delivery function WhatsApp
+        and every other personal channel now share. Driven for all five
+        cut-over channels rather than WhatsApp alone; the channel keys come
+        from the registry so a rename fails here instead of leaving this
+        backstop asserted against a channel nothing routes."""
         from server_modules import personal_channels_service as pcs
 
         registration = {
             "gateway_id": "gw-1", "workspace_id": "default", "tenant_id": "tenant-1",
             "device_trust_state": "trusted", "active_session_id": "sess-1",
         }
-        inbound = {"external_message_id": "msg-1", "remote_jid": "15551234567"}
 
-        async def run_case():
-            with (
-                patch.object(
-                    pcs.rust_runtime_kernel_client, "run_runtime_kernel_enforced",
-                    return_value=self._allow_decision("protocol_route"),
-                ),
-                patch.object(pcs.personal_channels_repository, "get_whatsapp_state", return_value=None),
-                patch.object(pcs, "dispatch_command", new=AsyncMock(return_value=None), create=True),
-                patch(
-                    "server_modules.sage_command_dispatcher.dispatch_command",
-                    new=AsyncMock(return_value=None),
-                ),
-                patch.object(
-                    pcs.personal_channel_sage_bridge_service, "build_whatsapp_personal_reply",
-                    # Simulates a regression upstream: a hardcoded status
-                    # string leaking into "text" as if it were a real reply.
-                    return_value={"text": platform_event.GENERIC_ERROR.channel_text, "source": "test"},
-                ),
-                patch.object(
-                    pcs.personal_channels_repository, "mark_inbound_processed",
-                    return_value=inbound,
-                ) as mark_processed,
-                patch.object(
-                    pcs.personal_channels_repository, "create_or_get_outbound_message",
-                    side_effect=AssertionError("must never queue a suppressed status string for delivery"),
-                ) as create_outbound,
-            ):
-                result = await pcs._deliver_whatsapp_personal_reply(
-                    gateway_id="gw-1",
-                    registration=registration,
-                    inbound=inbound,
-                    remote_jid="15551234567",
-                    external_message_id="msg-1",
-                    text="hi",
-                    push_name=None,
-                    duplicate=False,
-                )
-            create_outbound.assert_not_called()
-            # STRENGTHENED (fix/silent-message-drop). This used to assert
-            # mark_inbound_processed WAS called — i.e. that a status string
-            # smuggled in as a reply got recorded under the
-            # `whatsapp_personal:noreply:` marker, the durable "the agent was
-            # asked and DELIBERATELY said nothing" record and the only thing
-            # the redelivery guard reads. The turn plainly did not choose
-            # silence, so writing that marker recorded a message the platform
-            # failed to answer as answered AND cancelled the at-least-once
-            # retry that was its last chance. Suppression is unchanged (the
-            # text still never leaves); what changed is that the message is
-            # no longer thrown away with it. See
-            # test_channel_undelivered_not_silence.py.
-            mark_processed.assert_not_called()
-            return result
+        cut_over_keys = sorted(
+            f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}{channel_id}"
+            for channel_id in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS
+        )
+        self.assertTrue(cut_over_keys)
 
-        result = asyncio.run(run_case())
-        self.assertIsNone(result["outbound"])
+        for channel_key in cut_over_keys:
+            with self.subTest(channel_key=channel_key):
+                spec = pcs.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]
+                inbound = {"external_message_id": f"{channel_key}-msg-1", "remote_jid": "15551234567"}
+
+                async def run_case():
+                    with (
+                        patch.object(
+                            pcs.rust_runtime_kernel_client, "run_runtime_kernel_enforced",
+                            return_value=self._allow_decision("protocol_route"),
+                        ),
+                        patch(
+                            "server_modules.sage_command_dispatcher.dispatch_command",
+                            new=AsyncMock(return_value=None),
+                        ),
+                        patch.object(
+                            pcs.personal_channel_sage_bridge_service, "build_personal_channel_reply_async",
+                            # Simulates a regression upstream: a hardcoded
+                            # status string leaking into "text" as if it were
+                            # a real reply.
+                            new=AsyncMock(
+                                return_value={"text": platform_event.GENERIC_ERROR.channel_text, "source": "test"}
+                            ),
+                        ),
+                        patch.object(
+                            pcs.personal_channels_repository, "mark_inbound_processed",
+                            return_value=inbound,
+                        ) as mark_processed,
+                        patch.object(
+                            pcs.personal_channels_repository, "create_or_get_outbound_message",
+                            side_effect=AssertionError("must never queue a suppressed status string for delivery"),
+                        ) as create_outbound,
+                        patch.object(pcs.security_audit_service, "emit_security_audit_event"),
+                    ):
+                        result = await pcs._deliver_local_bridge_personal_reply(
+                            gateway_id="gw-1",
+                            registration=registration,
+                            inbound=inbound,
+                            remote_jid="15551234567",
+                            external_message_id=inbound["external_message_id"],
+                            text="hi",
+                            push_name=None,
+                            duplicate=False,
+                            channel_key=channel_key,
+                            provider=str(spec["provider"]),
+                            label=str(spec["label"]),
+                            agent_id="agent-backstop-1",
+                        )
+                    create_outbound.assert_not_called()
+                    # STRENGTHENED (fix/silent-message-drop). This used to
+                    # assert mark_inbound_processed WAS called -- i.e. that a
+                    # status string smuggled in as a reply got recorded under
+                    # the `<channel>:noreply:` marker, the durable "the agent
+                    # was asked and DELIBERATELY said nothing" record and the
+                    # only thing the redelivery guard reads. The turn plainly
+                    # did not choose silence, so writing that marker recorded
+                    # a message the platform failed to answer as answered AND
+                    # cancelled the at-least-once retry that was its last
+                    # chance. Suppression is unchanged (the text still never
+                    # leaves); what changed is that the message is no longer
+                    # thrown away with it. See
+                    # test_channel_undelivered_not_silence.py.
+                    mark_processed.assert_not_called()
+                    return result
+
+                result = asyncio.run(run_case())
+                self.assertIsNone(result["outbound"])
 
 
 if __name__ == "__main__":

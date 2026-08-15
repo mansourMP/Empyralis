@@ -26,7 +26,19 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, patch
 
-from server_modules import personal_channels_service, personal_channels_repository
+from server_modules import (
+    openclaw_channel_registry,
+    personal_channels_service,
+    personal_channels_repository,
+)
+
+
+def _cut_over_channel_key(platform: str) -> str:
+    """One cut-over platform's live channel key, from the registry rather
+    than typed: `signal_personal` is a key the OpenClaw cutover deleted, and
+    a dead key here silently tests a channel nothing routes."""
+    assert platform in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS, platform
+    return f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}{platform}"
 
 
 _ALLOW_DISPATCH_DECISION = {
@@ -164,7 +176,7 @@ class DmPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         (tested below) needed the WhatsApp/Telegram carve-out."""
         decision = await personal_channels_service._enforce_dm_policy(
             registration=self.registration,
-            channel_key="signal_personal",
+            channel_key=_cut_over_channel_key("signal"),
             agent_id="",
             message={"sender_jid": "+15551234567", "is_self_chat": True},
             remote_jid="+15551234567",
@@ -491,7 +503,27 @@ class DmPolicyInboundIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     )
                 self.assertTrue(result.get("blocked"), f"{channel_key} stranger should be blocked, not auto-replied to")
                 self.assertIsNone(result.get("outbound"))
-                self.assertEqual(result["policy"]["mode"], "owner_only")
+                # The fail-closed mode is per LANE, not one global constant,
+                # and the OpenClaw cutover moved every channel in this loop
+                # onto the transported lane. owner_only is not expressible
+                # there (it renders as OpenClaw's own `open`, the opposite of
+                # what this fallback means), so that lane fails closed as an
+                # EMPTY allowlist instead -- strictly fewer senders admitted
+                # than owner_only, never more. See
+                # _unresolved_identity_dm_policy_config's own docstring.
+                #
+                # The expected mode is decided by the channel key's own
+                # transport prefix (a registry fact) rather than by asking the
+                # function under test, so this cannot degrade into confirming
+                # whatever the code happens to return. The allowlist emptiness
+                # is asserted too: "allowlist" alone would be satisfied by a
+                # populated one, which would admit senders.
+                policy = result["policy"]
+                if channel_key.startswith(openclaw_channel_registry.CHANNEL_KEY_PREFIX):
+                    self.assertEqual(policy["mode"], "allowlist", channel_key)
+                    self.assertEqual(list(policy.get("allowlist") or []), [], channel_key)
+                else:
+                    self.assertEqual(policy["mode"], "owner_only", channel_key)
 
     async def test_local_bridge_self_chat_message_passes_the_gate_even_with_from_me_true(self) -> None:
         """Mirrors test_telegram_self_chat_message_passes_the_gate_even_with_from_me_true

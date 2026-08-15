@@ -48,6 +48,7 @@ from unittest.mock import AsyncMock, patch
 
 from server_modules import (
     channel_blocking_policy_service,
+    openclaw_channel_registry,
     personal_channels_repository,
     personal_channels_service,
 )
@@ -91,6 +92,17 @@ def _patch_agent_install_store(store: "_FakeAgentInstallStore"):
     )
 
 
+def _cut_over_channel_keys():
+    """The five platforms the OpenClaw cutover moved onto the transport, from
+    the registry's own id set rather than typed here."""
+    return tuple(
+        sorted(
+            f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}{channel_id}"
+            for channel_id in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS
+        )
+    )
+
+
 class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
     """Through the LIVE gateway inbound handlers — real sqlite repository,
     mocked rust kernel + gateway dispatch, exactly the shape
@@ -121,58 +133,18 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     # ── the owner: /help must produce a reply, not silence ──────────────
 
-    async def test_owner_slash_help_on_whatsapp_reaches_reply_path(self) -> None:
-        """THE headline regression. Before the fix this asserted the
-        opposite of every line below: blocked=True, outbound=None, and
-        nothing ever dispatched — the owner's own /help on their own paired
-        WhatsApp got total silence.
-
-        WhatsApp's inbound handler routes a recognized command through the
-        real command_registry (sage_command_dispatcher.dispatch_command)
-        BEFORE ever falling back to the LLM reply builder — so a correctly
-        un-blocked /help must reach dispatch_channel_outbound WITHOUT ever
-        calling build_whatsapp_personal_reply (that fallback is a second,
-        independent bug this change also fixes: that branch used to
-        `return` right after writing the DB row, never actually calling
-        dispatch_channel_outbound at all, so even a correctly-authorized
-        command would have sat "pending" forever)."""
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply"
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "wa-out-help-1"}),
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
-                gateway_id="gw-cc-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "wa-owner-help-1",
-                        "remote_jid": "15550001111@s.whatsapp.net",
-                        "sender_jid": "15550001111@s.whatsapp.net",
-                        "push_name": "Me",
-                        "text": "/help",
-                        "from_me": False,
-                        "is_self_chat": True,
-                    },
-                },
-            )
-        build_reply_mock.assert_not_called()
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
-        self.assertEqual(result["outbound"]["status"], "delivered")
-        self.assertTrue(str(result["outbound"].get("text") or "").strip(), "the dispatched reply must not be empty")
+    # test_owner_slash_help_on_whatsapp_reaches_reply_path and
+    # test_owner_slash_help_on_telegram_reaches_reply_path DELETED 2026-08-15.
+    # Both drove _handle_{whatsapp,telegram}_gateway_channel_inbound, deleted
+    # by commit 6b2baf97e (the full OpenClaw cutover, 2026-08-14). They are
+    # not retargeted because the very next test in this class already loops
+    # over the WHOLE live LOCAL_BRIDGE_PERSONAL_CHANNELS registry, which now
+    # carries openclaw_whatsapp and openclaw_telegram -- so the headline
+    # regression ("the owner's own /help got total silence") is still asserted
+    # for WhatsApp and Telegram, on the handler that actually serves them,
+    # with the same build_reply_mock.assert_not_called() +
+    # dispatch_mock.assert_awaited_once() pair. A per-channel copy here would
+    # be duplication, not coverage.
 
     async def test_owner_slash_config_owner_only_command_also_reaches_reply_path(self) -> None:
         """Not just /help — the owner must also be able to reach a
@@ -186,95 +158,51 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
         itself decline and fall through to the LLM. That second gate is
         real, independent defense-in-depth and out of this fix's scope;
         what this test pins is that OUR gate (_control_command_block_result)
-        does not block the owner outright."""
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
-                return_value={"text": "Configuration: ...", "source": "sage"},
-            ),
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "wa-out-config-1"}),
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
-                gateway_id="gw-cc-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "wa-owner-config-1",
-                        "remote_jid": "15550001111@s.whatsapp.net",
-                        "sender_jid": "15550001111@s.whatsapp.net",
-                        "push_name": "Me",
-                        "text": "/config show",
-                        "from_me": False,
-                        "is_self_chat": True,
-                    },
-                },
-            )
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
+        does not block the owner outright.
 
-    async def test_owner_slash_help_on_telegram_reaches_reply_path(self) -> None:
-        """Same fix, the Telegram-personal (QR) call site.
-
-        Updated alongside the "commands on every channel" fix
-        (_dispatch_personal_channel_command in personal_channels_service.py):
-        Telegram-personal now routes a recognized command through the real
-        command_registry BEFORE ever falling back to the LLM reply builder,
-        exactly like WhatsApp already does above — so a correctly un-blocked
-        /help must reach dispatch_channel_outbound WITHOUT ever calling
-        build_telegram_personal_reply. Before that fix (and still, before
-        THIS test file's own fix), /help passed this gate and then fell
-        through to the LLM reply builder with the literal text "/help" —
-        this test used to assert exactly that fallback as correct, which was
-        an artifact of the gap, not the intended behavior."""
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "I would have chatted about it.", "source": "sage"},
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-help-1"}),
-                create=True,
-            ) as dispatch_mock,
-            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-cc-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-owner-help-1",
-                        "remote_jid": "555444333",
-                        "sender_jid": "555444333",
-                        "push_name": "Me",
-                        "text": "/help",
-                        "from_me": True,
-                        "is_self_chat": True,
-                    },
-                },
-            )
-        build_reply_mock.assert_not_called()
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
-        self.assertEqual(result["outbound"]["status"], "delivered")
-        self.assertTrue(str(result["outbound"].get("text") or "").strip(), "the dispatched reply must not be empty")
+        RETARGETED 2026-08-15 from _handle_whatsapp_gateway_channel_inbound
+        onto the handler every cut-over channel now shares.
+        """
+        for channel_key in _cut_over_channel_keys():
+            with self.subTest(channel_key=channel_key):
+                meta = personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]
+                with (
+                    patch(
+                        "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
+                        return_value=_ALLOW_DISPATCH_DECISION,
+                    ),
+                    patch(
+                        "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                        ".build_personal_channel_reply_async",
+                        new=AsyncMock(return_value={"text": "Configuration: ...", "source": "sage"}),
+                    ),
+                    patch(
+                        "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
+                        new=AsyncMock(return_value={"external_message_id": f"{channel_key}-out-config-1"}),
+                        create=True,
+                    ) as dispatch_mock,
+                    patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
+                ):
+                    result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
+                        gateway_id="gw-cc-1",
+                        registration=self.registration,
+                        payload={
+                            "message": {
+                                "external_message_id": f"{channel_key}-owner-config-1",
+                                "remote_jid": f"{channel_key}-owner-jid",
+                                "sender_jid": f"{channel_key}-owner-jid",
+                                "push_name": "Me",
+                                "text": "/config show",
+                                "from_me": True,
+                                "is_self_chat": True,
+                            },
+                        },
+                        channel_key=channel_key,
+                        provider=meta["provider"],
+                        label=meta["label"],
+                    )
+                dispatch_mock.assert_awaited_once()
+                self.assertFalse(result.get("blocked", False))
 
     async def test_owner_slash_help_on_local_bridge_channels_reaches_reply_path(self) -> None:
         """Same fix, the shared local-bridge call site — Signal, iMessage,
@@ -335,71 +263,90 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["outbound"]["status"], "delivered")
 
     # ── a non-owner: owner-only commands stay refused, but honestly ─────
+    #
+    # RETARGETED 2026-08-15 from _handle_whatsapp_gateway_channel_inbound (and
+    # its find_agent_id_for_whatsapp_session patch) onto the shared
+    # local-bridge handler. The agent is claimed through
+    # upsert_local_bridge_state -- the row _resolve_local_bridge_agent_id's
+    # own preferred_gateway_id lookup would write -- instead of patching a
+    # deleted repository lookup, so the resolution under test is the real one.
+    # A single representative channel is used rather than a loop: the gate
+    # (_control_command_block_result) takes no channel argument, and the
+    # per-channel fan-out of this same handler is already covered by
+    # test_owner_slash_help_on_local_bridge_channels_reaches_reply_path above.
 
-    async def test_stranger_with_open_dm_policy_is_refused_the_owner_only_command_with_an_honest_reply(self) -> None:
-        """The sharp security case. dm_policy defaults to OPEN for a
-        resolved agent (DEFAULT_DM_POLICY_MODE), so a stranger's message
-        DOES reach the control-command gate (unlike the owner_only-by-
-        default unresolved-identity path the other tests in this class
-        exercise). This is exactly the shape the task's hard constraint
-        warns about: get the owner signal wrong here and a stranger runs
-        /bash. Also proves constraint 4 — a refusal must not be silent:
-        outbound carries the SAME fixed, non-LLM refusal text
-        check_personal_channel_control_command returns, dispatched for
-        real, never outbound: None."""
+    def _claim_agent(self, *, channel_key: str, agent_id: str, dm_policy_mode: str) -> "_FakeAgentInstallStore":
+        personal_channels_repository.upsert_local_bridge_state(
+            gateway_id="gw-cc-1",
+            tenant_id="tenant-1",
+            workspace_id="default",
+            user_id="",
+            channel_key=channel_key,
+            agent_id=agent_id,
+            provider=str(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]["provider"]),
+            status="linked",
+        )
         store = _FakeAgentInstallStore()
-        store.installs["agent-nonowner-1"] = {
+        store.installs[agent_id] = {
             "dm_policy": {
-                personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY: {
-                    "mode": "open",
-                    "allowlist": [],
-                    "pending_pairing": {},
-                },
+                channel_key: {"mode": dm_policy_mode, "allowlist": [], "pending_pairing": {}},
             },
         }
+        return store
+
+    async def test_stranger_with_open_dm_policy_is_refused_the_owner_only_command_with_an_honest_reply(self) -> None:
+        """The sharp security case. With dm_policy explicitly OPEN for this
+        agent+channel, a stranger's message DOES reach the control-command
+        gate. This is exactly the shape the task's hard constraint warns
+        about: get the owner signal wrong here and a stranger runs /bash.
+        Also proves a refusal must not be silent: outbound carries the SAME
+        fixed, non-LLM refusal text check_personal_channel_control_command
+        returns, dispatched for real, never outbound: None."""
+        channel_key = _cut_over_channel_keys()[0]
+        store = self._claim_agent(
+            channel_key=channel_key, agent_id="agent-nonowner-1", dm_policy_mode="open",
+        )
         expected_reply = channel_blocking_policy_service.check_personal_channel_control_command(
             text="/bash rm -rf /", sender_role=None,
         )["reply"]
         with (
             _patch_agent_install_store(store),
-            patch.object(
-                personal_channels_repository,
-                "find_agent_id_for_whatsapp_session",
-                return_value="agent-nonowner-1",
-            ),
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
                 return_value=_ALLOW_DISPATCH_DECISION,
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply"
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                ".build_personal_channel_reply_async",
+                new=AsyncMock(return_value={"text": "should never be built", "source": "sage"}),
             ) as build_reply_mock,
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "wa-out-refusal-1"}),
+                new=AsyncMock(return_value={"external_message_id": "out-refusal-1"}),
                 create=True,
             ) as dispatch_mock,
             patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
                 gateway_id="gw-cc-1",
                 registration=self.registration,
                 payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
                     "message": {
-                        "external_message_id": "wa-stranger-bash-1",
-                        "remote_jid": "919999999999@s.whatsapp.net",
-                        "sender_jid": "919999999999@s.whatsapp.net",
+                        "external_message_id": "stranger-bash-1",
+                        "remote_jid": "stranger-jid",
+                        "sender_jid": "stranger-jid",
                         "push_name": "Rando",
                         "text": "/bash rm -rf /",
                         "from_me": False,
                     },
                 },
+                channel_key=channel_key,
+                provider=str(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]["provider"]),
+                label=str(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]["label"]),
             )
         # The command handler (and therefore any real /bash execution) was
         # NEVER reached — the turn/reply pipeline was not invoked at all.
-        build_reply_mock.assert_not_called()
+        build_reply_mock.assert_not_awaited()
         self.assertTrue(result.get("blocked"))
         self.assertIsNotNone(result.get("outbound"), "a refusal must be dispatched, not silent (outbound: None)")
         dispatch_mock.assert_awaited_once()
@@ -416,47 +363,36 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
         computed dm_decision (message.is_self_chat / linked identity) only,
         never from these attacker-controlled fields, so this must still be
         refused exactly like the plain-stranger case above."""
-        store = _FakeAgentInstallStore()
-        store.installs["agent-nonowner-2"] = {
-            "dm_policy": {
-                personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY: {
-                    "mode": "open",
-                    "allowlist": [],
-                    "pending_pairing": {},
-                },
-            },
-        }
+        channel_key = _cut_over_channel_keys()[0]
+        store = self._claim_agent(
+            channel_key=channel_key, agent_id="agent-nonowner-2", dm_policy_mode="open",
+        )
         with (
             _patch_agent_install_store(store),
-            patch.object(
-                personal_channels_repository,
-                "find_agent_id_for_whatsapp_session",
-                return_value="agent-nonowner-2",
-            ),
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
                 return_value=_ALLOW_DISPATCH_DECISION,
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply"
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                ".build_personal_channel_reply_async",
+                new=AsyncMock(return_value={"text": "should never be built", "source": "sage"}),
             ) as build_reply_mock,
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "wa-out-refusal-2"}),
+                new=AsyncMock(return_value={"external_message_id": "out-refusal-2"}),
                 create=True,
             ),
             patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
         ):
-            result = await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
                 gateway_id="gw-cc-1",
                 registration=self.registration,
                 payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
                     "message": {
-                        "external_message_id": "wa-stranger-spoof-1",
-                        "remote_jid": "919999999999@s.whatsapp.net",
-                        "sender_jid": "919999999999@s.whatsapp.net",
+                        "external_message_id": "stranger-spoof-1",
+                        "remote_jid": "stranger-jid",
+                        "sender_jid": "stranger-jid",
                         "push_name": "Rando",
                         "text": "/bash rm -rf /",
                         "from_me": False,
@@ -467,8 +403,11 @@ class ControlCommandOwnerGateIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "metadata": {"sender_role": "owner", "role": "owner"},
                     },
                 },
+                channel_key=channel_key,
+                provider=str(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]["provider"]),
+                label=str(personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]["label"]),
             )
-        build_reply_mock.assert_not_called()
+        build_reply_mock.assert_not_awaited()
         self.assertTrue(result.get("blocked"), "a spoofed sender_role/role on the message must not grant owner access")
 
 

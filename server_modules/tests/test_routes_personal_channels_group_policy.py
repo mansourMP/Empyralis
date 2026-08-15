@@ -181,7 +181,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
 
     def test_patch_persists_and_get_reflects_it(self) -> None:
         response = self.client.patch(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": "agent-owner-a"},
             json={"mode": "allowlist", "allowlist": ["-100555", "-100777"], "require_mention": True},
         )
@@ -193,12 +193,12 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
 
         # Proves an ACTUAL write happened against the underlying store, not
         # just a 200 with a fabricated response body.
-        persisted = self.store.installs["agent-owner-a"]["group_policy"]["telegram_personal"]
+        persisted = self.store.installs["agent-owner-a"]["group_policy"]["openclaw_telegram"]
         self.assertEqual(persisted["mode"], "allowlist")
         self.assertEqual(sorted(persisted["allowlist"]), ["-100555", "-100777"])
 
         get_response = self.client.get(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": "agent-owner-a"},
         )
         self.assertEqual(get_response.status_code, 200, get_response.text)
@@ -209,7 +209,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
         the DEFAULT_GROUP_POLICY_MODE/DEFAULT_REQUIRE_MENTION flip is live
         end-to-end through the route, not just at the unit level."""
         response = self.client.get(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": "agent-owner-a"},
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -220,7 +220,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
 
     def test_patch_rejects_an_invalid_mode_with_400_and_does_not_write_anything(self) -> None:
         response = self.client.patch(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": "agent-owner-a"},
             json={"mode": "totally-not-a-real-mode"},
         )
@@ -229,7 +229,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
 
     def test_patch_requires_agent_id(self) -> None:
         response = self.client.patch(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             json={"mode": "allowlist"},
         )
         self.assertEqual(response.status_code, 400)
@@ -243,14 +243,24 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
 
     def test_local_bridge_channel_key_is_accepted_by_the_route_but_persist_fails_for_unresolved_identity(self) -> None:
-        """signal_personal/imessage_personal/wechat_personal ARE valid
-        group_policy channel keys (GROUP_POLICY_CHANNEL_KEYS), but their
-        agent identity is permanently unresolved (see
-        _unresolved_identity_group_policy_config's docstring) so a write
-        attempted with the LEGACY_UNSCOPED_AGENT_ID (empty string) must
-        fail with a real error, never silently succeed."""
+        """The local-bridge channel keys ARE valid group_policy channel keys
+        (GROUP_POLICY_CHANNEL_KEYS), but a write attempted with the
+        LEGACY_UNSCOPED_AGENT_ID (empty string) must fail with a real error,
+        never silently succeed.
+
+        RETARGETED 2026-08-15: every URL in this file named a key commit
+        6b2baf97e (the full OpenClaw cutover, 2026-08-14) deleted. This test
+        was the only one that failed loudly (404 instead of 400) because its
+        key left GROUP_POLICY_CHANNEL_KEYS; the `telegram_personal` ones went
+        on passing because that key is STILL in GROUP_POLICY_CHANNEL_KEYS
+        (personal_channels_service.py builds it as
+        {WHATSAPP_PERSONAL_CHANNEL_KEY, TELEGRAM_PERSONAL_CHANNEL_KEY,
+        *LOCAL_BRIDGE_PERSONAL_CHANNELS}) even though no handler, catalog
+        entry or lane spec carries it any more — so the route happily accepted
+        and persisted policy for a channel nothing routes. All keys here now
+        come from the live registry."""
         response = self.client.patch(
-            f"/api/personal-channels/signal_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_signal/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": ""},
             json={"mode": "allowlist"},
         )
@@ -262,7 +272,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
         granted access to ws-a, which owns self.gateway_id."""
         self._active_user = self._attacker_user_b()
         response = self.client.patch(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": "agent-owner-a"},
             json={"mode": "open", "require_mention": False},
         )
@@ -274,7 +284,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
     def test_cross_tenant_user_cannot_read_another_workspaces_gateway_config(self) -> None:
         self._active_user = self._attacker_user_b()
         response = self.client.get(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": "agent-owner-a"},
         )
         self.assertEqual(response.status_code, 403, response.text)
@@ -285,7 +295,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
         account (owner_user_id == "user-a", not "user-a-colleague")."""
         self._active_user = self._same_workspace_other_user()
         response = self.client.patch(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": "agent-owner-a"},
             json={"mode": "open", "require_mention": False},
         )
@@ -294,7 +304,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
 
     def test_patch_against_an_unknown_gateway_id_is_404(self) -> None:
         response = self.client.patch(
-            "/api/personal-channels/telegram_personal/gateways/gateway_does_not_exist/group-policy",
+            "/api/personal-channels/openclaw_telegram/gateways/gateway_does_not_exist/group-policy",
             params={"agent_id": "agent-owner-a"},
             json={"mode": "allowlist"},
         )
@@ -302,7 +312,7 @@ class RoutesPersonalChannelsGroupPolicyTests(unittest.TestCase):
 
     def test_patch_against_agent_with_no_install_bundle_is_404(self) -> None:
         response = self.client.patch(
-            f"/api/personal-channels/telegram_personal/gateways/{self.gateway_id}/group-policy",
+            f"/api/personal-channels/openclaw_telegram/gateways/{self.gateway_id}/group-policy",
             params={"agent_id": "agent-that-does-not-exist-in-this-workspace"},
             json={"mode": "allowlist"},
         )

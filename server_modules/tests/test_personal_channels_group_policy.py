@@ -31,7 +31,21 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, patch
 
-from server_modules import mention_gating_service, personal_channels_service, personal_channels_repository
+from server_modules import (
+    mention_gating_service,
+    openclaw_channel_registry,
+    personal_channels_service,
+    personal_channels_repository,
+)
+
+
+def _cut_over_channel_key(platform: str) -> str:
+    """One cut-over platform's live channel key. Resolved through the
+    registry rather than typed: the keys this file used to name
+    (`signal_personal`, `telegram_personal`) were deleted by the OpenClaw
+    cutover, and a dead key here silently tests nothing."""
+    assert platform in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS, platform
+    return f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}{platform}"
 
 
 _ALLOW_DISPATCH_DECISION = {
@@ -73,19 +87,29 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         self.registration = {"tenant_id": "tenant-1", "workspace_id": "ws-1"}
 
     async def test_default_is_open_and_lets_an_unaddressed_group_message_through(self) -> None:
-        """UNCHANGED, out of this build's scope: WhatsApp/Telegram Personal's
-        own "Sage's legacy Connect tab" case -- a channel bound
-        workspace-wide rather than to one specific agent
-        (PersonalChannelConnectPanel.tsx's agentGatewayId===undefined path) --
-        still resolves through _unresolved_identity_group_policy_config's
-        non-local-bridge branch and keeps its pre-existing open/
-        no-mention-check behavior. See that function's own docstring for why
-        this is deliberately NOT the same fallback local-bridge channels now
-        get (test_unresolved_local_bridge_identity_fails_closed_and_denies_a_group_message
-        below)."""
+        """The NON-local-bridge branch of
+        _unresolved_identity_group_policy_config: a channel with an
+        unresolved agent identity that is not in
+        LOCAL_BRIDGE_PERSONAL_CHANNELS keeps the pre-existing open/
+        no-mention-check behavior, deliberately NOT the fail-closed fallback
+        local-bridge channels get
+        (test_unresolved_local_bridge_identity_fails_closed_and_denies_a_group_message
+        below).
+
+        RETARGETED 2026-08-15. This used to name whatsapp_personal, whose
+        whole point here was that it took the non-local-bridge branch. Commit
+        6b2baf97e (the full OpenClaw cutover, 2026-08-14) moved WhatsApp and
+        Telegram onto the transport, i.e. INTO LOCAL_BRIDGE_PERSONAL_CHANNELS,
+        so that key now takes the other branch and asserts the opposite thing.
+        discord_personal is the only first-party personal channel the cutover
+        left, and is therefore the one live key that still reaches this
+        branch -- asserted below rather than assumed, so if it ever moves too
+        this test says so instead of silently testing the wrong branch."""
+        channel_key = "discord_personal"
+        self.assertNotIn(channel_key, personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS)
         decision = await personal_channels_service._enforce_group_policy(
             registration=self.registration,
-            channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
+            channel_key=channel_key,
             agent_id="",
             message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
             remote_jid="120363-group@g.us",
@@ -110,7 +134,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         test right above)."""
         decision = await personal_channels_service._enforce_group_policy(
             registration=self.registration,
-            channel_key="signal_personal",
+            channel_key=_cut_over_channel_key("signal"),
             agent_id="",
             message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
             remote_jid="group:family",
@@ -123,7 +147,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_direct_message_always_bypasses_regardless_of_config(self) -> None:
         decision = await personal_channels_service._enforce_group_policy(
             registration=self.registration,
-            channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
+            channel_key=_cut_over_channel_key("whatsapp"),
             agent_id="",
             message={"is_group": False, "is_mentioned": False, "is_reply_to_sage": False},
             remote_jid="stranger@s.whatsapp.net",
@@ -139,7 +163,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         _enforce_group_policy's own docstring)."""
         decision = await personal_channels_service._enforce_group_policy(
             registration=self.registration,
-            channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
+            channel_key=_cut_over_channel_key("whatsapp"),
             agent_id="",
             message={"is_group": True, "is_self_chat": True, "is_mentioned": False, "is_reply_to_sage": False},
             remote_jid="15550001111@s.whatsapp.net",
@@ -150,7 +174,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         store = _FakeAgentInstallStore()
         store.installs["agent-1"] = {
             "group_policy": {
-                personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY: {
+                _cut_over_channel_key("telegram"): {
                     "mode": "open", "allowlist": [], "require_mention": True,
                 }
             }
@@ -158,21 +182,21 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         with _patch_agent_install_store(store):
             blocked = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+                channel_key=_cut_over_channel_key("telegram"),
                 agent_id="agent-1",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
                 remote_jid="-100555",
             )
             mentioned = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+                channel_key=_cut_over_channel_key("telegram"),
                 agent_id="agent-1",
                 message={"is_group": True, "is_mentioned": True, "is_reply_to_sage": False},
                 remote_jid="-100555",
             )
             replied = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+                channel_key=_cut_over_channel_key("telegram"),
                 agent_id="agent-1",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": True},
                 remote_jid="-100555",
@@ -186,7 +210,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         store = _FakeAgentInstallStore()
         store.installs["agent-2"] = {
             "group_policy": {
-                personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY: {
+                _cut_over_channel_key("telegram"): {
                     "mode": "disabled", "allowlist": [], "require_mention": False,
                 }
             }
@@ -194,7 +218,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         with _patch_agent_install_store(store):
             decision = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+                channel_key=_cut_over_channel_key("telegram"),
                 agent_id="agent-2",
                 # Even an explicit @mention must not save it -- disabled
                 # means disabled, independent of the mention axis.
@@ -208,7 +232,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         store = _FakeAgentInstallStore()
         store.installs["agent-3"] = {
             "group_policy": {
-                personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY: {
+                _cut_over_channel_key("telegram"): {
                     "mode": "allowlist", "allowlist": ["-100555"], "require_mention": False,
                 }
             }
@@ -216,14 +240,14 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         with _patch_agent_install_store(store):
             allowed = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+                channel_key=_cut_over_channel_key("telegram"),
                 agent_id="agent-3",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
                 remote_jid="-100555",
             )
             blocked = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+                channel_key=_cut_over_channel_key("telegram"),
                 agent_id="agent-3",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
                 remote_jid="-100999",
@@ -239,7 +263,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         store = _FakeAgentInstallStore()
         store.installs["agent-4"] = {
             "group_policy": {
-                personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY: {
+                _cut_over_channel_key("telegram"): {
                     "mode": "allowlist", "allowlist": ["-100555"], "require_mention": True,
                 }
             }
@@ -247,7 +271,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         with _patch_agent_install_store(store):
             decision = await personal_channels_service._enforce_group_policy(
                 registration=self.registration,
-                channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
+                channel_key=_cut_over_channel_key("telegram"),
                 agent_id="agent-4",
                 message={"is_group": True, "is_mentioned": False, "is_reply_to_sage": False},
                 remote_jid="-100555",
@@ -269,7 +293,7 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         no longer the PERMANENT case for local-bridge channels, but still a
         real, reachable case whenever resolution genuinely can't land) now
         fails CLOSED: disabled, require_mention=True. This channel_key is
-        deliberately still signal_personal here -- proving the fallback is
+        deliberately still a local-bridge channel key here -- proving the fallback is
         keyed on the identity itself (agent_id=="") being unresolved, not
         on which channel_key it's paired with.
 
@@ -281,10 +305,11 @@ class GroupPolicyGateUnitTests(unittest.IsolatedAsyncioTestCase):
         the SAME values, but for a different reason (a configurable, if
         unconfigured, default -- not a fail-closed dead end)."""
         unresolved_identity_default = await personal_channels_service._load_agent_group_policy_config(
-            tenant_id="t", workspace_id="w", agent_id="", channel_key="signal_personal",
+            tenant_id="t", workspace_id="w", agent_id="", channel_key=_cut_over_channel_key("signal"),
         )
         resolved_but_uninstalled_default = await personal_channels_service._load_agent_group_policy_config(
-            tenant_id="t", workspace_id="w", agent_id="never-installed-agent", channel_key="telegram_personal",
+            tenant_id="t", workspace_id="w", agent_id="never-installed-agent",
+            channel_key=_cut_over_channel_key("telegram"),
         )
         self.assertEqual(unresolved_identity_default["mode"], "disabled")
         self.assertTrue(unresolved_identity_default["require_mention"])
@@ -393,10 +418,18 @@ class RequireMentionRestoresOldGateIntegrationTests(unittest.IsolatedAsyncioTest
             "device_trust_state": "trusted",
             "active_session_id": "sess-1",
         }
+        # RETARGETED 2026-08-15: driven through
+        # _handle_local_bridge_gateway_channel_inbound with Telegram's live
+        # (transported) key, since _handle_telegram_gateway_channel_inbound was
+        # deleted by commit 6b2baf97e -- the full OpenClaw cutover, 2026-08-14.
+        # The gate under test (_enforce_group_policy + require_mention) is the
+        # same one, on the handler that actually serves Telegram now.
+        self.channel_key = _cut_over_channel_key("telegram")
+        self.spec = personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[self.channel_key]
         self.store = _FakeAgentInstallStore()
         self.store.installs["agent-req-mention"] = {
             "group_policy": {
-                personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY: {
+                self.channel_key: {
                     "mode": "open", "allowlist": [], "require_mention": True,
                 }
             }
@@ -418,7 +451,9 @@ class RequireMentionRestoresOldGateIntegrationTests(unittest.IsolatedAsyncioTest
                 return_value=_ALLOW_DISPATCH_DECISION,
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply"
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                ".build_personal_channel_reply_async",
+                new=AsyncMock(return_value={"text": "should never be built", "source": "sage"}),
             ) as build_reply_mock,
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
@@ -426,12 +461,13 @@ class RequireMentionRestoresOldGateIntegrationTests(unittest.IsolatedAsyncioTest
                 create=True,
             ),
         ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
                 gateway_id="gw-req-mention-1",
                 registration=self.registration,
+                channel_key=self.channel_key,
+                provider=str(self.spec["provider"]),
+                label=str(self.spec["label"]),
                 payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
                     "message": {
                         "external_message_id": "tg-reqmention-1",
                         "remote_jid": "-100777",
@@ -445,7 +481,7 @@ class RequireMentionRestoresOldGateIntegrationTests(unittest.IsolatedAsyncioTest
                     },
                 },
             )
-        build_reply_mock.assert_not_called()
+        build_reply_mock.assert_not_awaited()
         self.assertTrue(result.get("ignored"))
         self.assertEqual(result.get("reason"), "group_no_mention")
 
@@ -468,8 +504,9 @@ class RequireMentionRestoresOldGateIntegrationTests(unittest.IsolatedAsyncioTest
                 }),
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "Dinner's at 7.", "source": "sage"},
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                ".build_personal_channel_reply_async",
+                new=AsyncMock(return_value={"text": "Dinner's at 7.", "source": "sage"}),
             ) as build_reply_mock,
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
@@ -477,12 +514,13 @@ class RequireMentionRestoresOldGateIntegrationTests(unittest.IsolatedAsyncioTest
                 create=True,
             ) as dispatch_mock,
         ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
                 gateway_id="gw-req-mention-1",
                 registration=self.registration,
+                channel_key=self.channel_key,
+                provider=str(self.spec["provider"]),
+                label=str(self.spec["label"]),
                 payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
                     "message": {
                         "external_message_id": "tg-reqmention-2",
                         "remote_jid": "-100777",
@@ -496,7 +534,7 @@ class RequireMentionRestoresOldGateIntegrationTests(unittest.IsolatedAsyncioTest
                     },
                 },
             )
-        build_reply_mock.assert_called_once()
+        build_reply_mock.assert_awaited_once()
         dispatch_mock.assert_awaited_once()
         self.assertFalse(result.get("blocked", False))
 

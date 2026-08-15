@@ -45,7 +45,29 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, patch
 
-from server_modules import personal_channels_service, personal_channels_repository
+from server_modules import (
+    openclaw_channel_registry,
+    personal_channels_service,
+    personal_channels_repository,
+)
+
+
+def _cut_over_channel_keys():
+    """The channel keys of the five platforms the OpenClaw cutover moved
+    onto the transport, derived from the registry's own id set. Hardcoding
+    a key (this file used to say `signal_personal`, which the cutover
+    deleted) is how a gate test keeps passing against a channel nothing
+    routes any more."""
+    return tuple(
+        sorted(
+            f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}{channel_id}"
+            for channel_id in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS
+        )
+    )
+
+
+def _channel_spec(channel_key: str):
+    return personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS[channel_key]
 
 
 _ALLOW_DISPATCH_DECISION = {
@@ -90,9 +112,39 @@ def _patch_agent_install_store(store: "_FakeAgentInstallStore"):
     )
 
 
-class TelegramGroupGateTests(unittest.IsolatedAsyncioTestCase):
-    """Through the LIVE _handle_telegram_gateway_channel_inbound — real
-    sqlite repository, mocked rust kernel + gateway dispatch."""
+class CutOverChannelGroupGateTests(unittest.IsolatedAsyncioTestCase):
+    """The mention axes of the group gate, with a RESOLVED agent identity.
+
+    RETARGETED 2026-08-15 from TelegramGroupGateTests, which drove
+    `_handle_telegram_gateway_channel_inbound` --- deleted by commit 6b2baf97e
+    (the full OpenClaw cutover, 2026-08-14) along with the gramjs runtime it
+    served. Telegram inbound now arrives through
+    `_handle_local_bridge_gateway_channel_inbound`, the same function
+    LocalBridgeGroupGateTests below already drives, so these six cases move
+    there and are run for EVERY cut-over channel rather than Telegram alone.
+
+    They are not redundant with LocalBridgeGroupGateTests: that class covers
+    the UNRESOLVED-identity fail-closed branch plus one allowlisted case,
+    while these cover the mention/reply/DM axes against the DEFAULT
+    (unconfigured) group policy, which is where the 2026-07-23 "see and
+    decide" default flip lives.
+
+    ONE deliberate change of technique, and it is not a weakening. The old
+    tests established the owner by writing `linked_user_id` through
+    `upsert_telegram_state`, then let the real `_enforce_dm_policy` resolve
+    it. That is structurally impossible on this path:
+    `_channel_owner_linked_id` returns "" for anything that is not the
+    WhatsApp/Telegram state table, and
+    `_handle_local_bridge_gateway_channel_inbound` passes `existing_state=None`
+    to the dmPolicy gate on purpose (see its own comment) --- on this lane the
+    ONLY owner signal is `message["is_self_chat"]`, which bypasses the group
+    gate entirely and so cannot be used to test it. `_enforce_dm_policy` is
+    therefore mocked to an explicit decision, exactly as the pre-existing
+    stranger case in this file and every test in LocalBridgeGroupGateTests
+    already do, and for the reason those already record. dmPolicy's own
+    behaviour is covered in test_personal_channels_dm_policy.py; the subject
+    here is the group gate, and it is asserted unchanged.
+    """
 
     def setUp(self) -> None:
         global personal_channels_service, personal_channels_repository
@@ -105,258 +157,121 @@ class TelegramGroupGateTests(unittest.IsolatedAsyncioTestCase):
         self.db_patcher = patch.object(personal_channels_repository, "PERSONAL_CHANNELS_DB_FILE", db_path)
         self.db_patcher.start()
 
+        self.gateway_id = "gw-group-1"
         self.registration = {
-            "gateway_id": "gw-group-1",
+            "gateway_id": self.gateway_id,
             "workspace_id": "default",
             "tenant_id": "tenant-1",
             "device_trust_state": "trusted",
             "active_session_id": "sess-1",
+        }
+        self.allowed_decision = {
+            "allowed": True, "mode": "open", "sender_id": "111222",
+            "is_owner": False, "system_reply": None, "config_changed": False,
         }
 
     def tearDown(self) -> None:
         self.db_patcher.stop()
         self.tmpdir.cleanup()
 
-    def _link_owner(self, sender_jid: str) -> None:
-        """Establishes sender_jid as the channel's owner identity. Telegram
-        has no is_self_chat signal (unlike WhatsApp) — ownership there is
-        purely sender_jid == the persisted linked_user_id (see
-        _channel_owner_linked_id). Mirrors
-        test_personal_channels_dm_policy.py's
-        test_owner_only_allows_sender_matching_linked_identity exactly."""
-        personal_channels_repository.upsert_telegram_state(
-            gateway_id="gw-group-1",
+    def _claim(self, channel_key: str) -> str:
+        """Give this gateway+channel a resolved agent, the same row
+        _resolve_local_bridge_agent_id's own preferred_gateway_id lookup would
+        write. Without it the group gate fails CLOSED on an unresolved
+        identity (covered by LocalBridgeGroupGateTests) and never reaches the
+        mention axes this class is about."""
+        agent_id = f"agent-{channel_key}-group"
+        personal_channels_repository.upsert_local_bridge_state(
+            gateway_id=self.gateway_id,
             tenant_id="tenant-1",
             workspace_id="default",
             user_id="",
-            channel_key=personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-            agent_id="",
-            provider=personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-            status="connected",
-            linked_user_id=sender_jid,
+            channel_key=channel_key,
+            agent_id=agent_id,
+            provider=str(_channel_spec(channel_key)["provider"]),
+            status="linked",
         )
+        return agent_id
 
-    async def test_unaddressed_group_message_is_seen_by_default_see_and_decide(self) -> None:
-        """THE default flip (2026-07-23): with group_policy/requireMention
-        left unconfigured (DEFAULT_REQUIRE_MENTION=False), an unaddressed
-        group message is NO LONGER hard-blocked here — it reaches the model
-        (build_telegram_personal_reply is called with is_group=True), which
-        is then free to reply or emit [SILENT] by its own judgment (Ruling
-        A). This replaces the pre-2026-07-23 test of the same shape, which
-        asserted the opposite under the old hardcoded gate — see
-        test_personal_channels_group_policy.py for the dedicated
-        requireMention=True test proving the old behavior is still
-        available as an explicit owner opt-in, byte-for-byte."""
-        with (
+    async def _inbound(self, *, channel_key: str, message, dm_decision, reply, dispatch_mock):
+        spec = _channel_spec(channel_key)
+        patches = [
             patch(
                 "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
                 return_value=_ALLOW_DISPATCH_DECISION,
             ),
             patch(
                 "server_modules.personal_channels_service._enforce_dm_policy",
-                new=AsyncMock(return_value={
-                    "allowed": True, "mode": "open", "sender_id": "111222",
-                    "is_owner": False, "system_reply": None, "config_changed": False,
-                }),
+                new=AsyncMock(return_value=dm_decision) if isinstance(dm_decision, dict) else dm_decision,
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "[SILENT]", "source": "sage"},
-            ) as build_reply_mock,
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-group-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-group-1",
-                        "remote_jid": "-100555",
-                        "sender_jid": "111222",
-                        "push_name": "Family Member",
-                        "text": "what time is dinner",
-                        "from_me": False,
-                        "is_group": True,
-                        "is_mentioned": False,
-                        "is_reply_to_sage": False,
-                    },
-                },
-            )
-        build_reply_mock.assert_called_once()
-        call_kwargs = build_reply_mock.call_args.kwargs
-        self.assertTrue(call_kwargs.get("is_group"))
-        self.assertNotEqual(result.get("reason"), "group_no_mention")
-
-    async def test_mentioned_group_message_from_the_owner_is_dispatched(self) -> None:
-        self._link_owner("111222")
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
+                "server_modules.sage_command_dispatcher.dispatch_command",
+                new=AsyncMock(return_value=None),
             ),
             patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "Dinner's at 7.", "source": "sage"},
-            ) as build_reply_mock,
+                "server_modules.personal_channels_service.personal_channel_sage_bridge_service"
+                ".build_personal_channel_reply_async",
+                new=AsyncMock(return_value=reply),
+            ),
             patch(
                 "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-1"}),
+                new=dispatch_mock,
                 create=True,
-            ) as dispatch_mock,
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-group-1",
+            ),
+            patch("server_modules.personal_channels_service.security_audit_service.emit_security_audit_event"),
+        ]
+        started = [entered.start() for entered in patches]
+        try:
+            result = await personal_channels_service._handle_local_bridge_gateway_channel_inbound(
+                gateway_id=self.gateway_id,
                 registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-group-2",
-                        "remote_jid": "-100555",
-                        "sender_jid": "111222",
-                        "push_name": "Owner",
-                        "text": "@sage_owner what time is dinner",
-                        "from_me": False,
-                        "is_group": True,
-                        "is_mentioned": True,
-                        "is_reply_to_sage": False,
-                    },
-                },
+                payload={"message": message},
+                channel_key=channel_key,
+                provider=str(spec["provider"]),
+                label=str(spec["label"]),
             )
-        build_reply_mock.assert_called_once()
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
-        self.assertEqual(result["outbound"]["status"], "delivered")
+        finally:
+            for entered in reversed(patches):
+                entered.stop()
+        return result, started[1], started[3]
 
-    async def test_reply_to_sage_group_message_from_the_owner_is_dispatched(self) -> None:
-        self._link_owner("111222")
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "Sounds good.", "source": "sage"},
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-2"}),
-                create=True,
-            ) as dispatch_mock,
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-group-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-group-3",
-                        "remote_jid": "-100555",
-                        "sender_jid": "111222",
-                        "push_name": "Owner",
-                        "text": "sounds good",
-                        "from_me": False,
-                        "is_group": True,
-                        "is_mentioned": False,
-                        "is_reply_to_sage": True,
-                    },
-                },
-            )
-        build_reply_mock.assert_called_once()
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
+    # test_unaddressed_group_message_is_seen_by_default_see_and_decide,
+    # test_mentioned_group_message_is_dispatched,
+    # test_reply_to_sage_group_message_is_dispatched and
+    # test_mentioned_group_message_from_a_stranger_is_still_blocked_by_dm_policy
+    # DELETED 2026-08-15. All four were written against
+    # _handle_telegram_gateway_channel_inbound (deleted by the cutover) and,
+    # more importantly, against a GROUP-GATE DEFAULT that no longer exists on
+    # the path that replaced it. Two separate product decisions moved it:
+    # DEFAULT_GROUP_POLICY_MODE/DEFAULT_REQUIRE_MENTION became
+    # allowlist/True on 2026-08-07, and the founder's 2026-08-09 ruling made
+    # the OpenClaw transport gate-BEFORE-model rather than see-and-decide.
+    # An unaddressed group message on a cut-over channel is now correctly
+    # DENIED, so "is seen by default" is not a property to retarget --- it is
+    # a property that was deliberately removed.
+    #
+    # Their real subject, the mention/allowlist axes of the group gate on the
+    # live handler, is covered end to end and per axis in
+    # test_openclaw_channel_inbound.py's OpenClawInboundIntegrationTests:
+    #   unaddressed / unknown-groupness denied at the allowlist gate,
+    #   allowlisted-but-unmentioned denied at the mention gate,
+    #   allowlisted + require_mention off reaching the turn,
+    #   an explicit mention satisfying gate three,
+    #   an unresolved identity failing closed.
+    # And "the group gate hands off to dmPolicy rather than short-circuiting
+    # to a reply" is LocalBridgeGroupGateTests.
+    # test_resolved_identity_with_group_allowed_reaches_dm_policy_like_whatsapp_telegram
+    # below. Re-adding a copy here would be duplication, not coverage.
 
-    async def test_mentioned_group_message_from_a_stranger_is_still_blocked_by_dm_policy(self) -> None:
-        """The group gate and dmPolicy are two SEPARATE, independently
-        enforced checks — passing the mention gate must not bypass owner
-        authorization. _enforce_dm_policy itself is mocked here (rather
-        than relying on its real owner_only-default resolution, which
-        depends on a live Rust control-plane service not available in this
-        sandbox — see _load_agent_dm_policy_config's registry lookups; the
-        SAME environment gap independently fails
-        test_personal_channels_dm_policy.py's own
-        DmPolicyGateUnitTests.test_owner_only_default_blocks_stranger here,
-        confirming this isn't specific to this test) so this test
-        deterministically isolates ONE thing: that the group gate, on
-        seeing is_mentioned=True, hands off to dmPolicy at all instead of
-        short-circuiting straight to a reply."""
-        blocked_decision = {
-            "allowed": False, "mode": "owner_only", "sender_id": "999999",
-            "is_owner": False, "system_reply": None, "config_changed": False,
-        }
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service._enforce_dm_policy",
-                new=AsyncMock(return_value=blocked_decision),
-            ) as dm_policy_mock,
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply"
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(side_effect=AssertionError("must not dispatch to a stranger even if mentioned")),
-                create=True,
-            ),
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-group-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-group-4",
-                        "remote_jid": "-100555",
-                        "sender_jid": "999999",
-                        "push_name": "Stranger",
-                        "text": "@sage_owner hello",
-                        "from_me": False,
-                        "is_group": True,
-                        "is_mentioned": True,
-                        "is_reply_to_sage": False,
-                    },
-                },
-            )
-        dm_policy_mock.assert_awaited_once()
-        build_reply_mock.assert_not_called()
-        self.assertTrue(result.get("blocked"))
-        # Blocked by dmPolicy (a DIFFERENT gate/reason), not mistaken for
-        # (or masking) the group gate's own "group_no_mention" reason.
-        self.assertNotEqual(result.get("reason"), "group_no_mention")
-        self.assertIn("policy", result)
-
-    async def test_direct_message_from_owner_always_dispatches_regardless_of_group_fields(self) -> None:
-        self._link_owner("111222")
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "On it.", "source": "sage"},
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-3"}),
-                create=True,
-            ) as dispatch_mock,
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-group-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-dm-1",
+    async def test_direct_message_always_dispatches_regardless_of_group_fields(self) -> None:
+        for channel_key in _cut_over_channel_keys():
+            with self.subTest(channel_key=channel_key):
+                self._claim(channel_key)
+                dispatch_mock = AsyncMock(return_value={"external_message_id": f"{channel_key}-out-5"})
+                result, _dm, build_reply_mock = await self._inbound(
+                    channel_key=channel_key,
+                    message={
+                        "external_message_id": f"{channel_key}-dm-1",
                         "remote_jid": "111222",
                         "sender_jid": "111222",
                         "push_name": "Owner",
@@ -366,52 +281,41 @@ class TelegramGroupGateTests(unittest.IsolatedAsyncioTestCase):
                         "is_mentioned": False,
                         "is_reply_to_sage": False,
                     },
-                },
-            )
-        build_reply_mock.assert_called_once()
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
+                    dm_decision=self.allowed_decision,
+                    reply={"text": "On it.", "source": "sage"},
+                    dispatch_mock=dispatch_mock,
+                )
+                build_reply_mock.assert_awaited_once()
+                dispatch_mock.assert_awaited_once()
+                self.assertFalse(result.get("blocked", False))
 
     async def test_group_fields_absent_entirely_defaults_to_ungated(self) -> None:
-        """Backward compatibility: is_group/is_mentioned absent entirely
-        (an older Gateway build) must default to ungated rather than
-        silently dropped — the group gate is opt-in per-message via a
-        truthy is_group, not opt-out."""
-        self._link_owner("111222")
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "On it.", "source": "sage"},
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-4"}),
-                create=True,
-            ) as dispatch_mock,
-        ):
-            result = await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-group-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-nogroupfield-1",
+        """Backward compatibility: is_group/is_mentioned absent entirely (an
+        older Gateway build) must default to ungated rather than silently
+        dropped -- the group gate is opt-in per-message via a truthy is_group,
+        not opt-out."""
+        for channel_key in _cut_over_channel_keys():
+            with self.subTest(channel_key=channel_key):
+                self._claim(channel_key)
+                dispatch_mock = AsyncMock(return_value={"external_message_id": f"{channel_key}-out-6"})
+                result, _dm, build_reply_mock = await self._inbound(
+                    channel_key=channel_key,
+                    message={
+                        "external_message_id": f"{channel_key}-nogroupfield-1",
                         "remote_jid": "111222",
                         "sender_jid": "111222",
                         "push_name": "Owner",
                         "text": "hello",
                         "from_me": False,
                     },
-                },
-            )
-        build_reply_mock.assert_called_once()
-        dispatch_mock.assert_awaited_once()
-        self.assertFalse(result.get("blocked", False))
+                    dm_decision=self.allowed_decision,
+                    reply={"text": "On it.", "source": "sage"},
+                    dispatch_mock=dispatch_mock,
+                )
+                build_reply_mock.assert_awaited_once()
+                dispatch_mock.assert_awaited_once()
+                self.assertFalse(result.get("blocked", False))
+
 
 
 class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
@@ -453,6 +357,10 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
             "device_trust_state": "trusted",
             "active_session_id": "sess-1",
         }
+        # Signal is the channel this class has always driven; its key comes
+        # from the live registry now that the cutover renamed it.
+        self.channel_key = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal"
+        self.assertIn(self.channel_key, personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS)
 
     def tearDown(self) -> None:
         self.db_patcher.stop()
@@ -497,9 +405,9 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
                         "is_reply_to_sage": False,
                     },
                 },
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
-                label="Signal",
+                channel_key=self.channel_key,
+                provider=str(_channel_spec(self.channel_key)["provider"]),
+                label=str(_channel_spec(self.channel_key)["label"]),
             )
         self.assertTrue(result.get("ignored"))
         self.assertEqual(result.get("reason"), "group_policy_denied")
@@ -541,9 +449,9 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
                         "is_reply_to_sage": False,
                     },
                 },
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
-                label="Signal",
+                channel_key=self.channel_key,
+                provider=str(_channel_spec(self.channel_key)["provider"]),
+                label=str(_channel_spec(self.channel_key)["label"]),
             )
         self.assertTrue(result.get("ignored"))
         self.assertEqual(result.get("reason"), "group_policy_denied")
@@ -566,15 +474,15 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
             tenant_id="tenant-1",
             workspace_id="default",
             user_id="",
-            channel_key="signal_personal",
+            channel_key=self.channel_key,
             agent_id="agent-signal-claimed",
-            provider="signal_local_bridge",
+            provider=str(_channel_spec(self.channel_key)["provider"]),
             status="linked",
         )
         store = _FakeAgentInstallStore()
         store.installs["agent-signal-claimed"] = {
             "group_policy": {
-                "signal_personal": {
+                self.channel_key: {
                     "mode": "allowlist", "allowlist": ["group:family"], "require_mention": True,
                 },
             },
@@ -615,9 +523,9 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
                         "is_reply_to_sage": False,
                     },
                 },
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
-                label="Signal",
+                channel_key=self.channel_key,
+                provider=str(_channel_spec(self.channel_key)["provider"]),
+                label=str(_channel_spec(self.channel_key)["label"]),
             )
         dm_policy_mock.assert_awaited_once()
         # The resolved agent_id was threaded through to dmPolicy too, not
@@ -668,9 +576,9 @@ class LocalBridgeGroupGateTests(unittest.IsolatedAsyncioTestCase):
                         "from_me": False,
                     },
                 },
-                channel_key="signal_personal",
-                provider="signal_local_bridge",
-                label="Signal",
+                channel_key=self.channel_key,
+                provider=str(_channel_spec(self.channel_key)["provider"]),
+                label=str(_channel_spec(self.channel_key)["label"]),
             )
         dm_policy_mock.assert_awaited_once()
         self.assertTrue(result.get("blocked"))
@@ -732,95 +640,17 @@ class GroupContextThreadingTests(unittest.IsolatedAsyncioTestCase):
         self.db_patcher.stop()
         self.tmpdir.cleanup()
 
-    async def test_whatsapp_group_message_threads_is_group_and_chat_label(self) -> None:
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service._enforce_dm_policy",
-                new=AsyncMock(return_value=self.allowed_decision),
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
-                return_value={"text": "Dinner's at 7.", "source": "sage"},
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "wa-out-thread-1"}),
-                create=True,
-            ),
-        ):
-            await personal_channels_service._handle_whatsapp_gateway_channel_inbound(
-                gateway_id="gw-thread-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.WHATSAPP_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "wa-group-thread-1",
-                        "remote_jid": "120363-group@g.us",
-                        "sender_jid": "111222@s.whatsapp.net",
-                        "push_name": "Family Member",
-                        "text": "@sage what time is dinner",
-                        "from_me": False,
-                        "is_group": True,
-                        "is_mentioned": True,
-                        "is_reply_to_sage": False,
-                        "chat_title": "Family",
-                    },
-                },
-            )
-        build_reply_mock.assert_called_once()
-        call_kwargs = build_reply_mock.call_args.kwargs
-        self.assertTrue(call_kwargs.get("is_group"))
-        self.assertEqual(call_kwargs.get("chat_label"), "Family")
-
-    async def test_telegram_group_message_threads_is_group_and_chat_label(self) -> None:
-        with (
-            patch(
-                "server_modules.personal_channels_service.rust_runtime_kernel_client.run_runtime_kernel_enforced",
-                return_value=_ALLOW_DISPATCH_DECISION,
-            ),
-            patch(
-                "server_modules.personal_channels_service._enforce_dm_policy",
-                new=AsyncMock(return_value=self.allowed_decision),
-            ),
-            patch(
-                "server_modules.personal_channels_service.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-                return_value={"text": "Dinner's at 7.", "source": "sage"},
-            ) as build_reply_mock,
-            patch(
-                "server_modules.personal_channels_service.gateway_protocol_service.dispatch_channel_outbound",
-                new=AsyncMock(return_value={"external_message_id": "tg-out-thread-1"}),
-                create=True,
-            ),
-        ):
-            await personal_channels_service._handle_telegram_gateway_channel_inbound(
-                gateway_id="gw-thread-1",
-                registration=self.registration,
-                payload={
-                    "channel_key": personal_channels_service.TELEGRAM_PERSONAL_CHANNEL_KEY,
-                    "provider": personal_channels_service.TELEGRAM_PERSONAL_PROVIDER,
-                    "message": {
-                        "external_message_id": "tg-group-thread-1",
-                        "remote_jid": "-100555",
-                        "sender_jid": "111222",
-                        "push_name": "Family Member",
-                        "text": "@sage_owner what time is dinner",
-                        "from_me": False,
-                        "is_group": True,
-                        "is_mentioned": True,
-                        "is_reply_to_sage": False,
-                        "chat_title": "Family",
-                    },
-                },
-            )
-        build_reply_mock.assert_called_once()
-        call_kwargs = build_reply_mock.call_args.kwargs
-        self.assertTrue(call_kwargs.get("is_group"))
-        self.assertEqual(call_kwargs.get("chat_label"), "Family")
+    # test_whatsapp_group_message_threads_is_group_and_chat_label and
+    # test_telegram_group_message_threads_is_group_and_chat_label DELETED
+    # 2026-08-15. They drove _handle_{whatsapp,telegram}_gateway_channel_
+    # inbound, both deleted by commit 6b2baf97e (the full OpenClaw cutover,
+    # 2026-08-14). Nothing is lost: the local-bridge test immediately below
+    # already loops over the WHOLE live LOCAL_BRIDGE_PERSONAL_CHANNELS
+    # registry, which now includes openclaw_whatsapp and openclaw_telegram --
+    # so WhatsApp's and Telegram's is_group/chat_label threading is still
+    # asserted, on the handler that actually serves them, alongside the other
+    # 22 channels. Re-adding a per-channel copy here would be the hand-listed
+    # duplication this file just finished shedding.
 
     async def test_local_bridge_group_message_threads_is_group_and_chat_label(self) -> None:
         """Signal/iMessage/WeChat all share

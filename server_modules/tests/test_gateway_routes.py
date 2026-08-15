@@ -23,7 +23,9 @@ from server_modules import (
     gateway_registry_service,
     kill_switch_gate,
     gateway_state_repository,
+    openclaw_channel_registry,
     personal_channels_repository,
+    personal_channels_service,
     routes_gateway,
     routes_personal_channels,
     rust_runtime_kernel_client,
@@ -1659,163 +1661,39 @@ class GatewayRoutesTests(unittest.TestCase):
         metadata = dict((latest_session or {}).get("metadata") or {})
         self.assertEqual(metadata.get("disconnect_reason"), "gateway_frame_replayed")
 
-    @patch(
-        "server_modules.personal_channels_service.gateway_execution_service.execute_tool_via_gateway",
-        new_callable=AsyncMock,
-    )
-    @patch("server_modules.personal_channels_service._enforce_personal_gateway_config_decision")
-    @patch("server_modules.routes_personal_channels.security_audit_service.emit_security_audit_event")
-    def test_configure_telegram_personal_gateway_emits_credential_audit(
-        self,
-        audit_mock,
-        _gate_mock,
-        execute_tool_mock: AsyncMock,
-    ) -> None:
-        registration_payload = self._register_gateway()
-        gateway_id = registration_payload["gateway"]["gateway_id"]
-        execute_tool_mock.return_value = {
-            "gateway_id": gateway_id,
-            "result": {
-                "status": "updated",
-                "reconnect_requested": True,
-                "config": {
-                    "has_api_id": True,
-                    "has_api_hash": True,
-                    "has_phone_number": True,
-                },
-                "state": {
-                    "status": "code_required",
-                    "login_hint": "******1234",
-                },
-            },
-        }
-
-        response = self.client.post(
-            f"/api/personal-channels/telegram/gateways/{gateway_id}/setup",
-            json={
-                "api_id": 123456,
-                "api_hash": "hash-123",
-                "phone_number": "+8618657105303",
-            },
-        )
-
-        self.assertEqual(response.status_code, 200)
-        metadata = audit_mock.call_args.kwargs["metadata"]
-        self.assertEqual(metadata["action_class"], "credential_change")
-        self.assertEqual(metadata["risk_level"], "high")
-        self.assertEqual(metadata["governance_boundary"], "paired_gateway")
-        self.assertFalse(metadata["requires_approval"])
-        self.assertFalse(metadata["external_side_effect"])
+    # test_configure_telegram_personal_gateway_emits_credential_audit,
+    # test_configure_telegram_personal_gateway_dispatches_config_capability and
+    # test_configure_whatsapp_personal_gateway_dispatches_config_capability
+    # DELETED 2026-08-15. They POSTed to
+    # /api/personal-channels/{telegram,whatsapp}/gateways/{id}/setup and
+    # asserted on personal_channels_service.configure_*_personal_gateway's
+    # dispatched capability id. Commit 6b2baf97e (the full OpenClaw cutover,
+    # 2026-08-14) deleted both routes AND both service functions along with
+    # the gramjs/Baileys runtimes that consumed the credentials, so all three
+    # raised AttributeError on their own @patch decorators from the moment it
+    # landed. There is no equivalent to retarget them onto: a channel
+    # credential is no longer POSTed to a first-party setup route at all --
+    # it is written straight through to OpenClaw on the owner's own box via
+    # PUT /personal-channels/openclaw/gateways/{id}/channels/{key}/credential,
+    # a pass-through the cloud never stores, already covered end to end by
+    # test_routes_personal_channels_openclaw_provision.py.
+    #
+    # FINDING: their three
+    # @patch("...personal_channels_service._enforce_personal_gateway_config_decision")
+    # decorators went with them, and they were that function's ONLY
+    # references anywhere in the repo -- its only production callers were the
+    # deleted configure_*_personal_gateway pair. It is now zero-caller dead
+    # code (personal_channels_service.py:174, ~80 lines wrapping a Rust
+    # gateway-service decision). Deleting it is a production change and is
+    # deliberately not done here; it is named so the next person does not
+    # mistake it for a live gate.
 
     @patch(
-        "server_modules.personal_channels_service.gateway_execution_service.execute_tool_via_gateway",
-        new_callable=AsyncMock,
-    )
-    @patch("server_modules.personal_channels_service._enforce_personal_gateway_config_decision")
-    def test_configure_telegram_personal_gateway_dispatches_config_capability(self, _gate_mock, execute_tool_mock: AsyncMock) -> None:
-        registration_payload = self._register_gateway()
-        gateway_id = registration_payload["gateway"]["gateway_id"]
-        execute_tool_mock.return_value = {
-            "gateway_id": gateway_id,
-            "result": {
-                "status": "updated",
-                "reconnect_requested": True,
-                "config": {
-                    "has_api_id": True,
-                    "has_api_hash": True,
-                    "has_phone_number": True,
-                },
-                "state": {
-                    "status": "code_required",
-                    "login_hint": "******1234",
-                },
-            },
-        }
-
-        response = self.client.post(
-            f"/api/personal-channels/telegram/gateways/{gateway_id}/setup",
-            json={
-                "api_id": 123456,
-                "api_hash": "hash-123",
-                "phone_number": "+8618657105303",
-                "login_code": "12345",
-            },
-        )
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["gateway_id"], gateway_id)
-        self.assertEqual(payload["channel_key"], "telegram_personal")
-        self.assertEqual(payload["status"], "updated")
-        self.assertEqual(payload["state"]["status"], "code_required")
-        self.assertEqual(
-            execute_tool_mock.await_args.kwargs["capability_id"],
-            "channel.telegram.personal.configure",
-        )
-        self.assertEqual(
-            execute_tool_mock.await_args.kwargs["arguments"],
-            {
-                "api_id": 123456,
-                "api_hash": "hash-123",
-                "phone_number": "+8618657105303",
-                "login_code": "12345",
-            },
-        )
-
-    @patch(
-        "server_modules.personal_channels_service.gateway_execution_service.execute_tool_via_gateway",
-        new_callable=AsyncMock,
-    )
-    @patch("server_modules.personal_channels_service._enforce_personal_gateway_config_decision")
-    def test_configure_whatsapp_personal_gateway_dispatches_config_capability(self, _gate_mock, execute_tool_mock: AsyncMock) -> None:
-        registration_payload = self._register_gateway()
-        gateway_id = registration_payload["gateway"]["gateway_id"]
-        execute_tool_mock.return_value = {
-            "gateway_id": gateway_id,
-            "result": {
-                "status": "updated",
-                "reconnect_requested": True,
-                "config": {
-                    "has_phone_number": True,
-                },
-                "state": {
-                    "status": "pairing_code_required",
-                    "login_hint": "*******5303",
-                    "pairing_code": "K6YNWTTP",
-                },
-            },
-        }
-
-        response = self.client.post(
-            f"/api/personal-channels/whatsapp/gateways/{gateway_id}/setup",
-            json={
-                "phone_number": "8618657105303",
-            },
-        )
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["gateway_id"], gateway_id)
-        self.assertEqual(payload["channel_key"], "whatsapp_personal")
-        self.assertEqual(payload["status"], "updated")
-        self.assertEqual(payload["state"]["pairing_code"], "K6YNWTTP")
-        self.assertEqual(
-            execute_tool_mock.await_args.kwargs["capability_id"],
-            "channel.whatsapp.personal.configure",
-        )
-        self.assertEqual(
-            execute_tool_mock.await_args.kwargs["arguments"],
-            {
-                "phone_number": "8618657105303",
-            },
-        )
-
-    @patch(
-        "server_modules.personal_channels_service.send_whatsapp_personal_message",
+        "server_modules.personal_channels_service.send_local_bridge_personal_message",
         new_callable=AsyncMock,
     )
     @patch("server_modules.routes_personal_channels.security_audit_service.emit_security_audit_event")
-    def test_send_whatsapp_personal_message_dispatches_directly_no_approval_detour(
+    def test_manual_send_dispatches_directly_no_approval_detour(
         self,
         audit_mock,
         send_message_mock: AsyncMock,
@@ -1823,155 +1701,137 @@ class GatewayRoutesTests(unittest.TestCase):
         """A manual send must reach the real dispatch path -- it used to get
         permanently stuck at an approval_required 202 because the approval
         gate never read back its own (always-true) auto-approval result, and
-        nothing ever called the resume-after-approval function. See
-        send_whatsapp_personal_message in personal_channels_service.py, which
-        already kill-switch-gates this before it ever reaches here."""
+        nothing ever called the resume-after-approval function.
+
+        RETARGETED 2026-08-15 from the deleted per-channel WhatsApp and
+        Telegram versions of this test (POST /personal-channels/whatsapp/...
+        and .../telegram/..., both 404 since the cutover) onto the ONE generic
+        route that survived. The channel key is taken from the live registry
+        rather than typed, and every cut-over channel is driven, so the
+        property is now asserted for five channels instead of two -- and a key
+        the registry stops carrying fails here instead of quietly testing a
+        route nothing reaches.
+        """
         registration_payload = self._register_gateway()
         gateway_id = registration_payload["gateway"]["gateway_id"]
-        send_message_mock.return_value = {
-            "gateway_id": gateway_id,
-            "channel_key": "whatsapp_personal",
-            "status": "sent",
-        }
 
-        response = self.client.post(
-            f"/api/personal-channels/whatsapp/gateways/{gateway_id}/messages",
-            json={
-                "remote_jid": "8618657105303@s.whatsapp.net",
-                "text": "hello from sage",
-                "idempotency_key": "test-send-1",
-            },
+        cut_over_keys = sorted(
+            f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}{channel_id}"
+            for channel_id in openclaw_channel_registry.OPENCLAW_CUT_OVER_CHANNEL_IDS
         )
+        self.assertTrue(cut_over_keys)
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["status"], "sent")
-        send_message_mock.assert_awaited_once()
-        self.assertEqual(send_message_mock.await_args.kwargs["remote_jid"], "8618657105303@s.whatsapp.net")
-        self.assertEqual(send_message_mock.await_args.kwargs["text"], "hello from sage")
-        metadata = audit_mock.call_args.kwargs["metadata"]
-        self.assertEqual(metadata["text_length"], len("hello from sage"))
-        self.assertEqual(audit_mock.call_args.kwargs["status"], "success")
+        for channel_key in cut_over_keys:
+            with self.subTest(channel_key=channel_key):
+                self.assertIn(
+                    channel_key,
+                    personal_channels_service.LOCAL_BRIDGE_PERSONAL_CHANNELS,
+                    f"{channel_key} is not a live personal channel",
+                )
+                send_message_mock.reset_mock()
+                audit_mock.reset_mock()
+                send_message_mock.return_value = {
+                    "gateway_id": gateway_id,
+                    "channel_key": channel_key,
+                    "status": "sent",
+                }
 
-    @patch(
-        "server_modules.personal_channels_service.send_telegram_personal_message",
-        new_callable=AsyncMock,
-    )
-    def test_send_telegram_personal_message_dispatches_directly_no_approval_detour(
-        self,
-        send_message_mock: AsyncMock,
-    ) -> None:
-        registration_payload = self._register_gateway()
-        gateway_id = registration_payload["gateway"]["gateway_id"]
-        send_message_mock.return_value = {
-            "gateway_id": gateway_id,
-            "channel_key": "telegram_personal",
-            "status": "sent",
-        }
+                response = self.client.post(
+                    f"/api/personal-channels/{channel_key}/gateways/{gateway_id}/messages",
+                    json={
+                        "remote_jid": "contact-1",
+                        "text": "hello from sage",
+                        "idempotency_key": f"test-send-{channel_key}",
+                    },
+                )
 
-        response = self.client.post(
-            f"/api/personal-channels/telegram/gateways/{gateway_id}/messages",
-            json={
-                "remote_jid": "telegram-user-1",
-                "text": "hello from sage",
-                "idempotency_key": "test-send-tg-1",
-            },
-        )
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertEqual(payload["status"], "sent")
-        send_message_mock.assert_awaited_once()
-        self.assertEqual(send_message_mock.await_args.kwargs["remote_jid"], "telegram-user-1")
+                self.assertEqual(response.status_code, 200, response.text)
+                payload = response.json()
+                self.assertEqual(payload["status"], "sent")
+                send_message_mock.assert_awaited_once()
+                self.assertEqual(send_message_mock.await_args.kwargs["remote_jid"], "contact-1")
+                self.assertEqual(send_message_mock.await_args.kwargs["text"], "hello from sage")
+                self.assertEqual(send_message_mock.await_args.kwargs["channel_key"], channel_key)
+                metadata = audit_mock.call_args.kwargs["metadata"]
+                self.assertEqual(metadata["text_length"], len("hello from sage"))
+                self.assertEqual(audit_mock.call_args.kwargs["status"], "success")
 
     def test_personal_gateway_channel_surfaces_project_live_and_reserved_channels(self) -> None:
+        """RETARGETED 2026-08-15. This test used to seed its manifests under
+        `telegram_personal` / `signal_personal` and assert the endpoint's
+        first-party half equalled a hand-typed six-key set. Commit 6b2baf97e
+        (the full OpenClaw cutover, 2026-08-14) removed five of those six from
+        the catalog, so the endpoint stopped listing them and the seeded
+        manifests matched nothing at all -- a test that asserted a channel
+        list is exactly the thing the cutover was always going to invalidate.
+
+        The manifests are now seeded under keys taken from the LIVE catalog,
+        and the assertions below hold the same three properties they always
+        did: the endpoint reports every catalog channel, it reports the right
+        transport descriptor per channel, and it redacts a secret carried on
+        an advertised manifest.
+
+        One property is genuinely gone rather than moved: `connected_identity`
+        was read via personal_channels_service._personal_channel_state, which
+        only ever branched on the WhatsApp/Telegram state tables, so no live
+        channel can produce it any more. It is not asserted here because there
+        is nothing left that can satisfy it.
+        """
         registration_payload = self._register_gateway_with_mode(gateway_id="gateway-channel-surfaces")
         gateway_id = registration_payload["gateway"]["gateway_id"]
+
+        # A real transported key and the one surviving first-party key, both
+        # resolved from the live catalog rather than typed, so a rename shows
+        # up here as a KeyError on a named channel instead of an endpoint that
+        # silently reports one fewer row.
+        catalog_keys = {item["channel_key"] for item in channel_lane_contract_service.personal_channel_catalog()}
+        transported_key = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal"
+        self.assertIn(transported_key, catalog_keys)
+        self.assertIn("discord_personal", catalog_keys)
+
         gateway_state_repository.update_gateway_registration_state(
             gateway_id=gateway_id,
             metadata={
                 "personal_channel_manifests": [
                     {
-                        "channel_key": "telegram_personal",
-                        "label": "Telegram Personal",
-                        "provider": "telegram_gramjs",
+                        "channel_key": transported_key,
+                        "label": "Signal",
+                        "provider": "openclaw",
                         "runtime_lane": "personal_gateway",
                         "stage": "live",
                         "status": "connected",
                         "live_capable": True,
                         "capabilities": ["inbound", "outbound", "text"],
-                    },
-                    {
-                        "channel_key": "signal_personal",
-                        "label": "Signal Personal",
-                        "provider": "signal_local_bridge",
-                        "stage": "live",
-                        "status": "not_configured",
-                        "live_capable": True,
                         "api_token": "sk-super-secret-token",
                     },
                 ],
                 "personal_channel_health": [
                     {
-                        "channel_key": "telegram_personal",
-                        "provider": "telegram_gramjs",
+                        "channel_key": transported_key,
+                        "provider": "openclaw",
                         "status": "connected",
                         "running": True,
                         "connected": True,
                     },
-                    {
-                        "channel_key": "signal_personal",
-                        "provider": "signal_local_bridge",
-                        "status": "not_configured",
-                        "running": False,
-                        "connected": False,
-                    },
                 ],
             },
-        )
-        personal_channels_repository.upsert_telegram_state(
-            gateway_id=gateway_id,
-            tenant_id="default",
-            workspace_id="default",
-            user_id="owner-1",
-            channel_key="telegram_personal",
-            provider="telegram_gramjs",
-            status="connected",
-            linked_username="mansur",
-            connected_at="2026-05-25T00:00:00Z",
         )
 
         response = self.client.get(f"/api/personal-channels/gateways/{gateway_id}/channels")
 
         self.assertEqual(response.status_code, 200)
         by_key = {item["channel_key"]: item for item in response.json()["items"]}
-        # discord_personal joined the catalog in 95ab504e5 ("channel
-        # unification hardening ... Discord DM fix"), three weeks after this
-        # test was written -- a real, deliberately shipped platform channel
-        # (see channel_lane_contract_service.py's personal_channel_catalog
-        # and the discord_personal wiring in channel_adapter.py,
-        # connectors_actions.py, personal_channel_sage_bridge_service.py),
-        # not a regression. The surfaces endpoint iterates the live catalog,
-        # so the expected set has to track it.
-        #
-        # The OpenClaw-transported channels joined this endpoint when the
-        # channel set stopped being hand-listed and started being derived from
-        # a pinned OpenClaw manifest. Before that they were in
-        # PERSONAL_CHANNEL_SPECS but in NEITHER catalog, so this endpoint --
-        # which iterates personal_channel_catalog() -- never listed one: wired
-        # end to end and invisible.
+        # The endpoint iterates personal_channel_catalog(), so every catalog
+        # channel must appear -- no silent per-channel filtering.
+        self.assertEqual(set(by_key), catalog_keys)
+
         openclaw_keys = {key for key in by_key if by_key[key]["provider"] == "openclaw"}
-        self.assertEqual(
-            set(by_key) - openclaw_keys,
-            {
-                "telegram_personal",
-                "whatsapp_personal",
-                "signal_personal",
-                "imessage_personal",
-                "wechat_personal",
-                "discord_personal",
-            },
-        )
+        # discord_personal is the ONLY first-party personal channel left after
+        # the cutover. Typed out rather than derived on purpose: this half is
+        # the guard against the endpoint quietly gaining or losing a
+        # first-party channel, and deriving it from the same catalog the
+        # endpoint reads would make it agree with itself.
+        self.assertEqual(set(by_key) - openclaw_keys, {"discord_personal"})
         # Derived, so asserted against the derivation rather than re-typed --
         # but never allowed to be empty, which would let this endpoint quietly
         # stop reporting an entire transport.
@@ -1984,43 +1844,40 @@ class GatewayRoutesTests(unittest.TestCase):
             },
         )
         # "available through the transport, not yet proven live": every one is
-        # stage=preview, and proven_live is an OBSERVED fact -- this gateway
-        # reports no OpenClaw connection -- never a declared one.
+        # stage=preview, and proven_live is an OBSERVED fact (connected AND
+        # running on THIS gateway) rather than a declared one. Asserted in
+        # both directions off the one channel this gateway actually reports a
+        # live connection for -- a single blanket assertFalse would pass just
+        # as happily against a proven_live that had been hardcoded off.
         for key in openclaw_keys:
             self.assertEqual(by_key[key]["stage"], "preview")
-            self.assertFalse(by_key[key]["proven_live"])
+            self.assertEqual(
+                by_key[key]["proven_live"],
+                key == transported_key,
+                f"proven_live must be observed per channel, not blanket-set ({key})",
+            )
             self.assertEqual(by_key[key]["transport"]["kind"], "openclaw")
             self.assertEqual(
                 by_key[key]["transport"]["openclaw_channel_id"],
-                key.removeprefix("openclaw_"),
+                key.removeprefix(openclaw_channel_registry.CHANNEL_KEY_PREFIX),
             )
-        # A platform Empyralis still implements first-party is never offered
-        # twice: no `openclaw_telegram` beside `telegram_personal`.
-        self.assertNotIn("openclaw_telegram", by_key)
-        self.assertNotIn("openclaw_whatsapp", by_key)
-        self.assertNotIn("openclaw_signal", by_key)
-        self.assertEqual(by_key["telegram_personal"]["transport"]["kind"], "first_party")
+        self.assertEqual(by_key["discord_personal"]["transport"]["kind"], "first_party")
 
-        self.assertTrue(by_key["telegram_personal"]["connected"])
-        self.assertTrue(by_key["telegram_personal"]["running"])
-        self.assertEqual(by_key["telegram_personal"]["connected_identity"], "mansur")
-        self.assertEqual(by_key["signal_personal"]["status"], "not_configured")
+        # A platform is never offered twice. Before the cutover that meant
+        # `openclaw_telegram` had to be ABSENT beside `telegram_personal`;
+        # after it, the direction is reversed -- the transported key is the
+        # live one and the first-party key must be gone entirely.
+        for superseded in ("telegram_personal", "whatsapp_personal", "signal_personal",
+                           "imessage_personal", "wechat_personal"):
+            self.assertNotIn(superseded, by_key)
+
+        self.assertTrue(by_key[transported_key]["connected"])
+        self.assertTrue(by_key[transported_key]["running"])
+        self.assertEqual(by_key[transported_key]["status"], "connected")
         # live_capable = catalog_live_capable AND advertised(manifest)_live_capable
-        # (get_gateway_personal_channel_surfaces). This used to assert False
-        # here because PERSONAL_CHANNEL_ROADMAP's signal_personal catalog
-        # entry said live_capable=False even though the backend handler,
-        # gateway runtime, and signal-cli bridge were already fully wired --
-        # 01941336e ("re-enable Signal as a first-class personal channel,
-        # close OpenClaw parity gaps") fixed that catalog flag to True
-        # (see channel_lane_contract_service.py's inline note on the
-        # signal_personal roadmap entry). The manifest here already claims
-        # live_capable=True, so with the catalog now agreeing, the correct
-        # computed value is True.
-        self.assertTrue(by_key["signal_personal"]["live_capable"])
-        self.assertEqual(by_key["signal_personal"]["manifest"]["api_token"], "[redacted]")
-        self.assertEqual(by_key["imessage_personal"]["status"], "agent_computer_bridge")
-        self.assertEqual(by_key["wechat_personal"]["status"], "agent_computer_bridge")
-
+        # (get_gateway_personal_channel_surfaces).
+        self.assertTrue(by_key[transported_key]["live_capable"])
+        self.assertEqual(by_key[transported_key]["manifest"]["api_token"], "[redacted]")
     def test_rotate_token_rejects_stale_gateway_token(self) -> None:
         registration_payload = self._register_gateway()
         gateway_id = registration_payload["gateway"]["gateway_id"]
@@ -2429,657 +2286,31 @@ class GatewayRoutesTests(unittest.TestCase):
         self.assertIn("tool.interrupt", event_types)
         self.assertIn("tool.interrupt.result", event_types)
 
-    def test_whatsapp_personal_channel_state_reply_reconnect_and_dedupe(self) -> None:
-        registration_payload = self._register_gateway(
-            capabilities=["screen.read", "system.presence", "channel.whatsapp.personal"]
-        )
-        gateway_id = registration_payload["gateway"]["gateway_id"]
-        gateway_token = registration_payload["gateway_token"]
-
-        session_response = self.client.post(
-            "/api/gateway/sessions",
-            json={"gateway_id": gateway_id, "gateway_token": gateway_token},
-        )
-        self.assertEqual(session_response.status_code, 200)
-        session_payload = session_response.json()
-        ws_path = (
-            f"/api/gateway/ws?gateway_id={gateway_id}"
-            f"&session_token={session_payload['session_token']}"
-        )
-
-        # ed9c2cdd6 ("dmPolicy sender gate + server-side media pipeline",
-        # landed months after this test was written) made _enforce_dm_policy
-        # run before any reply is generated, including in the identity-less
-        # fallback this test hits (no real agent install is registered for
-        # this gateway, so _resolve_agent_id_for_inbound returns
-        # LEGACY_UNSCOPED_AGENT_ID and _load_agent_dm_policy_config always
-        # returns hardcoded owner_only for that case -- see
-        # _unresolved_identity_dm_policy_config's docstring for why that's
-        # deliberately not configurable). The inbound message below is from
-        # "user-1@s.whatsapp.net" / "User One", a stranger relative to the
-        # linked_jid "me@s.whatsapp.net" set up by the connected state below,
-        # so without this it is now correctly, silently dropped by the gate
-        # before ever reaching build_whatsapp_personal_reply. That gate is
-        # orthogonal to what this test covers (state sync / reply delivery /
-        # reconnect / dedupe), so it's bypassed the same way the reply
-        # generation below already is mocked out.
-        with patch(
-            "server_modules.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
-            return_value={"text": "Sage reply from cloud", "source": "test_bridge"},
-        ), patch(
-            "server_modules.personal_channels_service._enforce_dm_policy",
-            new=AsyncMock(
-                return_value={
-                    "allowed": True,
-                    "mode": "open",
-                    "sender_id": "user-1@s.whatsapp.net",
-                    "is_owner": False,
-                    "system_reply": None,
-                    "config_changed": False,
-                }
-            ),
-        ):
-            with self.client.websocket_connect(ws_path) as websocket:
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-connect-wa-1",
-                        "type": "gateway.connect",
-                        "ts": "2026-04-22T12:30:00Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "protocol_version": "v1alpha2",
-                            "gateway_version": "0.1.0",
-                            "device_metadata": {"hostname": "mansur-mac"},
-                            "requested_capabilities": ["channel.whatsapp.personal"],
-                            "journal_cursor": 0,
-                            "checkpoint_cursor": 0,
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-                websocket.receive_json()
-
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-state-wa-qr",
-                        "type": "gateway.state.update",
-                        "ts": "2026-04-22T12:30:01Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "journal_cursor": 1,
-                            "checkpoint_cursor": 1,
-                            "personal_channels": {
-                                "whatsapp_personal": {
-                                    "provider": "whatsapp_baileys",
-                                    "status": "qr_required",
-                                    "qr_code": "qr-test-123",
-                                    "retryable": True,
-                                }
-                            },
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-
-                qr_view = self.client.get(f"/api/personal-channels/whatsapp/gateways/{gateway_id}")
-                self.assertEqual(qr_view.status_code, 200)
-                qr_payload = qr_view.json()
-                self.assertEqual(qr_payload["state"]["status"], "qr_required")
-                self.assertEqual(qr_payload["state"]["qr_code"], "qr-test-123")
-
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-state-wa-pairing",
-                        "type": "gateway.state.update",
-                        "ts": "2026-04-22T12:30:01.500Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "journal_cursor": 2,
-                            "checkpoint_cursor": 2,
-                            "personal_channels": {
-                                "whatsapp_personal": {
-                                    "provider": "whatsapp_baileys",
-                                    "status": "pairing_code_required",
-                                    "login_hint": "*******1234",
-                                    "pairing_code": "ABCD1234",
-                                    "pairing_code_generated_at": "2026-04-22T12:30:01.500Z",
-                                    "retryable": True,
-                                }
-                            },
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-
-                pairing_view = self.client.get(f"/api/personal-channels/whatsapp/gateways/{gateway_id}")
-                self.assertEqual(pairing_view.status_code, 200)
-                pairing_payload = pairing_view.json()
-                self.assertEqual(pairing_payload["state"]["status"], "pairing_code_required")
-                self.assertEqual(pairing_payload["state"]["metadata"]["login_hint"], "*******1234")
-                self.assertEqual(pairing_payload["state"]["metadata"]["pairing_code"], "ABCD1234")
-
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-state-wa-connected",
-                        "type": "gateway.state.update",
-                        "ts": "2026-04-22T12:30:02Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "journal_cursor": 3,
-                            "checkpoint_cursor": 3,
-                            "personal_channels": {
-                                "whatsapp_personal": {
-                                    "provider": "whatsapp_baileys",
-                                    "status": "connected",
-                                    "linked_jid": "me@s.whatsapp.net",
-                                    "linked_name": "Mansur",
-                                    "connected_at": "2026-04-22T12:30:02Z",
-                                    "retryable": True,
-                                }
-                            },
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-
-                connected_view = self.client.get(f"/api/personal-channels/whatsapp/gateways/{gateway_id}")
-                self.assertEqual(connected_view.status_code, 200)
-                connected_payload = connected_view.json()
-                self.assertEqual(connected_payload["state"]["status"], "connected")
-                self.assertEqual(connected_payload["state"]["linked_jid"], "me@s.whatsapp.net")
-
-                websocket.send_json(
-                    {
-                        "kind": "event",
-                        "type": "channel.inbound",
-                        "seq": 7,
-                        "ack": 2,
-                        "ts": "2026-04-22T12:30:03Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "channel_key": "whatsapp_personal",
-                            "provider": "whatsapp_baileys",
-                            "message": {
-                                "external_message_id": "wamid.inbound.1",
-                                "remote_jid": "user-1@s.whatsapp.net",
-                                "sender_jid": "user-1@s.whatsapp.net",
-                                "push_name": "User One",
-                                "text": "Hello from WhatsApp",
-                                "received_at": "2026-04-22T12:30:03Z",
-                                "from_me": False,
-                            },
-                        },
-                    }
-                )
-                pending_payload = None
-                for _ in range(20):
-                    pending_view = self.client.get(f"/api/personal-channels/whatsapp/gateways/{gateway_id}")
-                    self.assertEqual(pending_view.status_code, 200)
-                    candidate_payload = pending_view.json()
-                    if (
-                        candidate_payload["recent_messages"]["outbound"]
-                        and candidate_payload["recent_messages"]["outbound"][0]["status"] == "pending"
-                    ):
-                        pending_payload = candidate_payload
-                        break
-                    time.sleep(0.1)
-                self.assertIsNotNone(
-                    pending_payload,
-                    [
-                        {
-                            "type": event["message_type"],
-                            "direction": event["direction"],
-                            "payload": event.get("payload"),
-                        }
-                        for event in gateway_state_repository.list_gateway_events(gateway_id)
-                        if event["message_type"].startswith("channel.")
-                    ],
-                )
-                self.assertEqual(len(pending_payload["recent_messages"]["inbound"]), 1)
-                self.assertEqual(len(pending_payload["recent_messages"]["outbound"]), 1)
-                pending_outbound = pending_payload["recent_messages"]["outbound"][0]
-                self.assertEqual(pending_outbound["remote_jid"], "user-1@s.whatsapp.net")
-                self.assertEqual(pending_outbound["text"], "Sage reply from cloud")
-                self.assertEqual(pending_outbound["status"], "pending")
-
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-disconnect-wa-1",
-                        "type": "gateway.disconnect",
-                        "ts": "2026-04-22T12:30:05Z",
-                        "scope": session_payload["scope"],
-                        "payload": {"reason": "reconnect_for_dedupe"},
-                    }
-                )
-                disconnect_ack = websocket.receive_json()
-                if not disconnect_ack.get("ok"):
-                    disconnect_ack = websocket.receive_json()
-                self.assertTrue(disconnect_ack["ok"])
-
-        reconnect_session_response = self.client.post(
-            "/api/gateway/sessions",
-            json={"gateway_id": gateway_id, "gateway_token": gateway_token},
-        )
-        self.assertEqual(reconnect_session_response.status_code, 200)
-        reconnect_session = reconnect_session_response.json()
-        reconnect_path = (
-            f"/api/gateway/ws?gateway_id={gateway_id}"
-            f"&session_token={reconnect_session['session_token']}"
-        )
-
-        with patch(
-            "server_modules.personal_channel_sage_bridge_service.build_whatsapp_personal_reply",
-            return_value={"text": "Sage reply from cloud", "source": "test_bridge"},
-        ), patch(
-            "server_modules.personal_channels_service._enforce_dm_policy",
-            new=AsyncMock(
-                return_value={
-                    "allowed": True,
-                    "mode": "open",
-                    "sender_id": "user-1@s.whatsapp.net",
-                    "is_owner": False,
-                    "system_reply": None,
-                    "config_changed": False,
-                }
-            ),
-        ):
-            with self.client.websocket_connect(reconnect_path) as websocket:
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-connect-wa-2",
-                        "type": "gateway.connect",
-                        "ts": "2026-04-22T12:31:00Z",
-                        "scope": reconnect_session["scope"],
-                        "payload": {
-                            "protocol_version": "v1alpha2",
-                            "gateway_version": "0.1.0",
-                            "device_metadata": {"hostname": "mansur-mac"},
-                            "requested_capabilities": ["channel.whatsapp.personal"],
-                            "journal_cursor": 2,
-                            "checkpoint_cursor": 2,
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-                websocket.receive_json()
-
-                websocket.send_json(
-                    {
-                        "kind": "event",
-                        "type": "channel.inbound",
-                        "seq": 8,
-                        "ack": 2,
-                        "ts": "2026-04-22T12:31:01Z",
-                        "scope": reconnect_session["scope"],
-                        "payload": {
-                            "channel_key": "whatsapp_personal",
-                            "provider": "whatsapp_baileys",
-                            "message": {
-                                "external_message_id": "wamid.inbound.1",
-                                "remote_jid": "user-1@s.whatsapp.net",
-                                "sender_jid": "user-1@s.whatsapp.net",
-                                "push_name": "User One",
-                                "text": "Hello from WhatsApp",
-                                "received_at": "2026-04-22T12:31:01Z",
-                                "from_me": False,
-                            },
-                        },
-                    }
-                )
-                time.sleep(0.15)
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-disconnect-wa-2",
-                        "type": "gateway.disconnect",
-                        "ts": "2026-04-22T12:31:02Z",
-                        "scope": reconnect_session["scope"],
-                        "payload": {"reason": "dedupe_verified"},
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-
-        view_after_reconnect = self.client.get(f"/api/personal-channels/whatsapp/gateways/{gateway_id}")
-        self.assertEqual(view_after_reconnect.status_code, 200)
-        reconnect_payload = view_after_reconnect.json()
-        self.assertEqual(len(reconnect_payload["recent_messages"]["inbound"]), 1)
-        self.assertEqual(len(reconnect_payload["recent_messages"]["outbound"]), 1)
-
-        all_events = gateway_state_repository.list_gateway_events(gateway_id)
-        outbound_request_events = [
-            event
-            for event in all_events
-            if event["message_type"] == "channel.outbound" and event["direction"] == "outbound"
-        ]
-        outbound_result_events = [
-            event
-            for event in all_events
-            if event["message_type"] == "channel.outbound.result" and event["direction"] == "inbound"
-        ]
-        self.assertEqual(len(outbound_request_events), 0)
-        self.assertEqual(len(outbound_result_events), 0)
-
-    def test_telegram_personal_channel_state_reply_reconnect_and_dedupe(self) -> None:
-        registration_payload = self._register_gateway(
-            capabilities=["screen.read", "system.presence", "channel.telegram.personal"]
-        )
-        gateway_id = registration_payload["gateway"]["gateway_id"]
-        gateway_token = registration_payload["gateway_token"]
-
-        session_response = self.client.post(
-            "/api/gateway/sessions",
-            json={"gateway_id": gateway_id, "gateway_token": gateway_token},
-        )
-        self.assertEqual(session_response.status_code, 200)
-        session_payload = session_response.json()
-        ws_path = (
-            f"/api/gateway/ws?gateway_id={gateway_id}"
-            f"&session_token={session_payload['session_token']}"
-        )
-
-        # ed9c2cdd6 ("dmPolicy sender gate + server-side media pipeline",
-        # landed months after this test was written) made _enforce_dm_policy
-        # run before any reply is generated, including in the identity-less
-        # fallback this test hits (no real agent install is registered for
-        # this gateway, so _resolve_agent_id_for_inbound returns
-        # LEGACY_UNSCOPED_AGENT_ID and _load_agent_dm_policy_config always
-        # returns hardcoded owner_only for that case -- see
-        # _unresolved_identity_dm_policy_config's docstring for why that's
-        # deliberately not configurable). The inbound message below is from
-        # "telegram-user-1" / "User One", a stranger relative to the
-        # linked_user_id "123456" set up by the connected state below, so
-        # without this it is now correctly, silently dropped by the gate
-        # before ever reaching build_telegram_personal_reply. That gate is
-        # orthogonal to what this test covers (state sync / reply delivery /
-        # reconnect / dedupe), so it's bypassed the same way the reply
-        # generation below already is mocked out.
-        with patch(
-            "server_modules.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-            return_value={"text": "Sage reply from Telegram cloud", "source": "test_bridge"},
-        ), patch(
-            "server_modules.personal_channels_service._enforce_dm_policy",
-            new=AsyncMock(
-                return_value={
-                    "allowed": True,
-                    "mode": "open",
-                    "sender_id": "telegram-user-1",
-                    "is_owner": False,
-                    "system_reply": None,
-                    "config_changed": False,
-                }
-            ),
-        ):
-            with self.client.websocket_connect(ws_path) as websocket:
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-connect-tg-1",
-                        "type": "gateway.connect",
-                        "ts": "2026-04-22T13:30:00Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "protocol_version": "v1alpha2",
-                            "gateway_version": "0.1.0",
-                            "device_metadata": {"hostname": "mansur-mac"},
-                            "requested_capabilities": ["channel.telegram.personal"],
-                            "journal_cursor": 0,
-                            "checkpoint_cursor": 0,
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-                websocket.receive_json()
-
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-state-tg-code",
-                        "type": "gateway.state.update",
-                        "ts": "2026-04-22T13:30:01Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "journal_cursor": 1,
-                            "checkpoint_cursor": 1,
-                            "personal_channels": {
-                                "telegram_personal": {
-                                    "provider": "telegram_gramjs",
-                                    "status": "code_required",
-                                    "login_hint": "******1234",
-                                    "retryable": False,
-                                }
-                            },
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-
-                login_view = self.client.get(f"/api/personal-channels/telegram/gateways/{gateway_id}")
-                self.assertEqual(login_view.status_code, 200)
-                login_payload = login_view.json()
-                self.assertEqual(login_payload["state"]["status"], "code_required")
-                self.assertEqual(login_payload["state"]["login_hint"], "******1234")
-
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-state-tg-connected",
-                        "type": "gateway.state.update",
-                        "ts": "2026-04-22T13:30:02Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "journal_cursor": 2,
-                            "checkpoint_cursor": 2,
-                            "personal_channels": {
-                                "telegram_personal": {
-                                    "provider": "telegram_gramjs",
-                                    "status": "connected",
-                                    "linked_user_id": "123456",
-                                    "linked_username": "mansur",
-                                    "linked_name": "Mansur",
-                                    "connected_at": "2026-04-22T13:30:02Z",
-                                    "retryable": True,
-                                }
-                            },
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-
-                connected_view = self.client.get(f"/api/personal-channels/telegram/gateways/{gateway_id}")
-                self.assertEqual(connected_view.status_code, 200)
-                connected_payload = connected_view.json()
-                self.assertEqual(connected_payload["state"]["status"], "connected")
-                self.assertEqual(connected_payload["state"]["linked_username"], "mansur")
-
-                websocket.send_json(
-                    {
-                        "kind": "event",
-                        "type": "channel.inbound",
-                        "seq": 9,
-                        "ack": 2,
-                        "ts": "2026-04-22T13:30:03Z",
-                        "scope": session_payload["scope"],
-                        "payload": {
-                            "channel_key": "telegram_personal",
-                            "provider": "telegram_gramjs",
-                            "message": {
-                                "external_message_id": "tg.inbound.1",
-                                "remote_jid": "telegram-user-1",
-                                "sender_jid": "telegram-user-1",
-                                "push_name": "User One",
-                                "text": "Hello from Telegram",
-                                "received_at": "2026-04-22T13:30:03Z",
-                                "from_me": False,
-                            },
-                        },
-                    }
-                )
-                pending_payload = None
-                for _ in range(20):
-                    pending_view = self.client.get(f"/api/personal-channels/telegram/gateways/{gateway_id}")
-                    self.assertEqual(pending_view.status_code, 200)
-                    candidate_payload = pending_view.json()
-                    if (
-                        candidate_payload["recent_messages"]["outbound"]
-                        and candidate_payload["recent_messages"]["outbound"][0]["status"] == "pending"
-                    ):
-                        pending_payload = candidate_payload
-                        break
-                    time.sleep(0.1)
-                self.assertIsNotNone(
-                    pending_payload,
-                    [
-                        {
-                            "type": event["message_type"],
-                            "direction": event["direction"],
-                            "payload": event.get("payload"),
-                        }
-                        for event in gateway_state_repository.list_gateway_events(gateway_id)
-                        if event["message_type"].startswith("channel.")
-                    ],
-                )
-                self.assertEqual(len(pending_payload["recent_messages"]["inbound"]), 1)
-                self.assertEqual(len(pending_payload["recent_messages"]["outbound"]), 1)
-                pending_outbound = pending_payload["recent_messages"]["outbound"][0]
-                self.assertEqual(pending_outbound["remote_jid"], "telegram-user-1")
-                self.assertEqual(pending_outbound["text"], "Sage reply from Telegram cloud")
-                self.assertEqual(pending_outbound["status"], "pending")
-
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-disconnect-tg-1",
-                        "type": "gateway.disconnect",
-                        "ts": "2026-04-22T13:30:05Z",
-                        "scope": session_payload["scope"],
-                        "payload": {"reason": "reconnect_for_dedupe"},
-                    }
-                )
-                disconnect_ack = websocket.receive_json()
-                if not disconnect_ack.get("ok"):
-                    disconnect_ack = websocket.receive_json()
-                self.assertTrue(disconnect_ack["ok"])
-
-        reconnect_session_response = self.client.post(
-            "/api/gateway/sessions",
-            json={"gateway_id": gateway_id, "gateway_token": gateway_token},
-        )
-        self.assertEqual(reconnect_session_response.status_code, 200)
-        reconnect_session = reconnect_session_response.json()
-        reconnect_path = (
-            f"/api/gateway/ws?gateway_id={gateway_id}"
-            f"&session_token={reconnect_session['session_token']}"
-        )
-
-        with patch(
-            "server_modules.personal_channel_sage_bridge_service.build_telegram_personal_reply",
-            return_value={"text": "Sage reply from Telegram cloud", "source": "test_bridge"},
-        ), patch(
-            "server_modules.personal_channels_service._enforce_dm_policy",
-            new=AsyncMock(
-                return_value={
-                    "allowed": True,
-                    "mode": "open",
-                    "sender_id": "telegram-user-1",
-                    "is_owner": False,
-                    "system_reply": None,
-                    "config_changed": False,
-                }
-            ),
-        ):
-            with self.client.websocket_connect(reconnect_path) as websocket:
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-connect-tg-2",
-                        "type": "gateway.connect",
-                        "ts": "2026-04-22T13:31:00Z",
-                        "scope": reconnect_session["scope"],
-                        "payload": {
-                            "protocol_version": "v1alpha2",
-                            "gateway_version": "0.1.0",
-                            "device_metadata": {"hostname": "mansur-mac"},
-                            "requested_capabilities": ["channel.telegram.personal"],
-                            "journal_cursor": 2,
-                            "checkpoint_cursor": 2,
-                        },
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-                websocket.receive_json()
-                websocket.receive_json()
-
-                websocket.send_json(
-                    {
-                        "kind": "event",
-                        "type": "channel.inbound",
-                        "seq": 10,
-                        "ack": 2,
-                        "ts": "2026-04-22T13:31:01Z",
-                        "scope": reconnect_session["scope"],
-                        "payload": {
-                            "channel_key": "telegram_personal",
-                            "provider": "telegram_gramjs",
-                            "message": {
-                                "external_message_id": "tg.inbound.1",
-                                "remote_jid": "telegram-user-1",
-                                "sender_jid": "telegram-user-1",
-                                "push_name": "User One",
-                                "text": "Hello from Telegram",
-                                "received_at": "2026-04-22T13:31:01Z",
-                                "from_me": False,
-                            },
-                        },
-                    }
-                )
-                time.sleep(0.15)
-                websocket.send_json(
-                    {
-                        "kind": "request",
-                        "id": "req-disconnect-tg-2",
-                        "type": "gateway.disconnect",
-                        "ts": "2026-04-22T13:31:02Z",
-                        "scope": reconnect_session["scope"],
-                        "payload": {"reason": "dedupe_verified"},
-                    }
-                )
-                self.assertTrue(websocket.receive_json()["ok"])
-
-        view_after_reconnect = self.client.get(f"/api/personal-channels/telegram/gateways/{gateway_id}")
-        self.assertEqual(view_after_reconnect.status_code, 200)
-        reconnect_payload = view_after_reconnect.json()
-        self.assertEqual(len(reconnect_payload["recent_messages"]["inbound"]), 1)
-        self.assertEqual(len(reconnect_payload["recent_messages"]["outbound"]), 1)
-
-        all_events = gateway_state_repository.list_gateway_events(gateway_id)
-        outbound_request_events = [
-            event
-            for event in all_events
-            if event["message_type"] == "channel.outbound" and event["direction"] == "outbound"
-            and event["payload"].get("payload", {}).get("channel_key") == "telegram_personal"
-        ]
-        outbound_result_events = [
-            event
-            for event in all_events
-            if event["message_type"] == "channel.outbound.result" and event["direction"] == "inbound"
-            and event["payload"].get("payload", {}).get("channel_key") == "telegram_personal"
-        ]
-        self.assertEqual(len(outbound_request_events), 0)
-        self.assertEqual(len(outbound_result_events), 0)
+    # test_whatsapp_personal_channel_state_reply_reconnect_and_dedupe and
+    # test_telegram_personal_channel_state_reply_reconnect_and_dedupe DELETED
+    # 2026-08-15. Every assertion in both (~650 lines) read its state back
+    # through GET /api/personal-channels/{whatsapp,telegram}/gateways/{id},
+    # i.e. personal_channels_service.get_{whatsapp,telegram}_gateway_view --
+    # route and function both deleted by commit 6b2baf97e (the full OpenClaw
+    # cutover, 2026-08-14), so both tests failed on 404 != 200 at their first
+    # read. There is no generic replacement for that view: the surviving
+    # personal-channel routes carry no per-gateway channel-state endpoint at
+    # all, because the QR / pairing-code / linked-account lifecycle these
+    # tests drove now happens inside OpenClaw on the owner's own box and
+    # never round-trips through us.
+    #
+    # The properties they covered other than the view itself all survive,
+    # each on the path that actually serves those channels now:
+    #   * channel.inbound over the real gateway WebSocket, and a channel the
+    #     gateway never advertised being refused -- test_openclaw_channel_inbound.py
+    #     (OpenClawInboundIntegrationTests).
+    #   * reply dispatch + the redelivery/dedupe guard, including the
+    #     "silence is a decision" marker a redelivery must not re-ask --
+    #     test_local_bridge_inbound_processed_scope.py and
+    #     test_commands_on_every_channel.py's
+    #     test_redelivery_of_a_command_never_re_dispatches.
+    #   * gateway.state.update / reconnect / journal replay --
+    #     test_pair_register_connect_heartbeat_and_reconnect above.
 
 
     def test_gateway_websocket_rejects_oversized_frame(self) -> None:
