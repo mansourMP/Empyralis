@@ -62,14 +62,19 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, patch
 
-from server_modules import channel_lane_contract_service, personal_channels_service
+from server_modules import openclaw_channel_registry, personal_channels_service
 
-# The one channel in DM_POLICY_CHANNEL_KEYS that is NOT on the OpenClaw
-# transport — i.e. what "the first-party lane" means after the 2026-08-14
-# cutover. Taken from the lane contract's own constant rather than typed, so
-# it cannot go on naming a key the gate no longer reads (which is exactly what
-# whatsapp_personal, the name these tests used to carry, had become).
-_FIRST_PARTY_CHANNEL_KEY = channel_lane_contract_service.CLOUD_SESSION_TELEGRAM_CHANNEL_KEY
+# A channel in DM_POLICY_CHANNEL_KEYS, taken from the registry rather than
+# typed, so it cannot go on naming a key the gate no longer reads.
+#
+# This constant has now been repointed twice, and the arc is the point:
+# whatsapp_personal (dropped by the 2026-08-14 OpenClaw cutover) -> the
+# cloud-session lane's telegram_personal, briefly "the one non-OpenClaw
+# personal channel a real message still crosses _enforce_dm_policy on" ->
+# nothing, because that lane was deleted on 2026-08-15. DM_POLICY_CHANNEL_KEYS
+# is now EXACTLY the OpenClaw-transported set, with no first-party member at
+# all, which is the cutover's intended end state finally reached.
+_DM_POLICY_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -315,32 +320,70 @@ class DmPolicyWriteWrapperTests(unittest.IsolatedAsyncioTestCase):
         must never buy an unhandled exception."""
         self.assertTrue(issubclass(personal_channels_service.UnsupportedDmPolicyModeError, ValueError))
 
-    async def test_first_party_channel_still_accepts_every_mode(self) -> None:
-        """RETARGETED 2026-08-15 from WHATSAPP_PERSONAL_CHANNEL_KEY. Its
-        subject is "the NON-OpenClaw lane still accepts every mode", and
-        whatsapp_personal stopped being a lane that day: the OpenClaw cutover
-        deleted its runtime, and DM_POLICY_CHANNEL_KEYS dropped it so the
-        route stops persisting policy no gate will ever read. The
-        cloud-session lane (cloud-session-manager, gramjs Telegram) is the
-        one non-OpenClaw personal channel a real message still crosses
-        _enforce_dm_policy on, so it is what this assertion is actually
-        about."""
-        store = _FakeAgentInstallStore()
-        store.installs["ainstall_x"] = {}
+    async def test_every_mode_is_either_accepted_or_refused_never_silently_dropped(self) -> None:
+        """Partition DM_POLICY_MODES against the write path: a mode the
+        transport can carry is ACCEPTED and normalizes its allowlist, and
+        every other mode is REFUSED. Both halves, one loop, so no mode can
+        fall through unasserted.
+
+        THIS TEST HAS BEEN RETARGETED TWICE AND ITS SUBJECT CHANGED ON THE
+        SECOND ONE — worth stating, because the change is the fact.
+
+        It began as "the FIRST-PARTY lane still accepts every mode": the
+        exemption existed because DEFAULT_DM_POLICY_MODE = open is a
+        deliberate first-party decision the OpenClaw audit rejects, so the
+        two lanes genuinely diverged and the divergence needed pinning. That
+        exemption named whatsapp_personal, then telegram_personal, and both
+        stopped being lanes a real message crosses — the second on
+        2026-08-15 with the cloud-session lane's deletion.
+
+        DM_POLICY_CHANNEL_KEYS now has NO first-party member at all, so there
+        is no channel left that accepts every mode and asserting one would be
+        asserting a lane that does not exist. What survives is the wrapper's
+        real contract, which the deleted version only ever showed half of,
+        and it is derived from OPENCLAW_SETTABLE_DM_POLICY_MODES rather than
+        listed here — the day the transport can express another mode, this
+        follows without an edit.
+
+        (test_first_party_lane_is_untouched above still pins the first-party
+        DEFAULT constants themselves. Those are read by
+        _default_dm_policy_mode_for_channel on vestigial keys and must not
+        drift; they are a different question from what the route accepts.)"""
+        settable = set(personal_channels_service.OPENCLAW_SETTABLE_DM_POLICY_MODES)
+        self.assertTrue(settable, "a lane that can express no mode at all has no write path")
+        self.assertTrue(
+            settable < set(personal_channels_service.DM_POLICY_MODES),
+            "if every mode became settable this test would assert nothing about refusal",
+        )
+
         for mode in sorted(personal_channels_service.DM_POLICY_MODES):
             with self.subTest(mode=mode):
-                with _patch_agent_install_store(store):
-                    updated = await personal_channels_service.update_agent_dm_policy_config(
-                        tenant_id="tenant-1",
-                        workspace_id="ws-1",
-                        agent_id="ainstall_x",
-                        channel_key=_FIRST_PARTY_CHANNEL_KEY,
-                        mode=mode,
-                        allowlist=["  15551234567 ", "", "15551234567"],
+                store = _FakeAgentInstallStore()
+                store.installs["ainstall_x"] = {}
+                call = personal_channels_service.update_agent_dm_policy_config(
+                    tenant_id="tenant-1",
+                    workspace_id="ws-1",
+                    agent_id="ainstall_x",
+                    channel_key=_DM_POLICY_CHANNEL_KEY,
+                    mode=mode,
+                    allowlist=["  15551234567 ", "", "15551234567"],
+                )
+                if mode in settable:
+                    with _patch_agent_install_store(store):
+                        updated = await call
+                    self.assertIsNotNone(updated)
+                    self.assertEqual(updated["mode"], mode)
+                    self.assertEqual(updated["allowlist"], ["15551234567"])
+                else:
+                    with _patch_agent_install_store(store):
+                        with self.assertRaises(
+                            personal_channels_service.UnsupportedDmPolicyModeError
+                        ):
+                            await call
+                    self.assertEqual(
+                        store.installs["ainstall_x"], {},
+                        "a refused mode must not have written anything",
                     )
-                self.assertIsNotNone(updated)
-                self.assertEqual(updated["mode"], mode)
-                self.assertEqual(updated["allowlist"], ["15551234567"])
 
     async def test_pending_pairing_survives_an_unrelated_edit(self) -> None:
         """A pending entry is the record that a stranger has ALREADY been
@@ -349,7 +392,7 @@ class DmPolicyWriteWrapperTests(unittest.IsolatedAsyncioTestCase):
         not re-message" contract _enforce_dm_policy's repeat branch exists to
         keep."""
         store = _FakeAgentInstallStore()
-        channel_key = _FIRST_PARTY_CHANNEL_KEY
+        channel_key = _DM_POLICY_CHANNEL_KEY
         store.installs["ainstall_x"] = {
             "dm_policy": {
                 channel_key: {

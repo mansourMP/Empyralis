@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import os
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -71,6 +70,13 @@ gateway_execution_service = _LazyGatewayExecutionService()
 # it is left as a known follow-up rather than risked under this task's own
 # time pressure. Do NOT restore the assert_personal_gateway_channel() derivation
 # for these three; do NOT add a new live caller that could match them.
+#
+# telegram_personal briefly stopped being vestigial: between 2026-08-15's cloud
+# lane fix and its deletion later the same day, the lane contract re-declared
+# the key so `cloud-session-manager/` could keep delivering, which quietly made
+# every branch below reachable again. The cloud lane is gone now and the
+# paragraph above is true of all three again — but note how little it took to
+# invalidate it, and that nothing failed when it did.
 WHATSAPP_PERSONAL_CHANNEL_KEY = "whatsapp_personal"
 WHATSAPP_PERSONAL_PROVIDER = "whatsapp_baileys"
 TELEGRAM_PERSONAL_CHANNEL_KEY = "telegram_personal"
@@ -170,25 +176,22 @@ if set(OPENCLAW_PERSONAL_CHANNELS) != set(channel_lane_contract_service.OPENCLAW
 
 LOCAL_BRIDGE_PERSONAL_CHANNELS.update(OPENCLAW_PERSONAL_CHANNELS)
 
-# ── The cloud-session lane ───────────────────────────────────────────────
+# ── The cloud-session lane: DELETED 2026-08-15 ───────────────────────────
 #
-# The one channel key that arrives over HTTP from `cloud-session-manager/`
-# (a cloud-hosted gramjs Telegram account) rather than from a gateway on the
-# owner's own machine. It is NOT a local-bridge channel and NOT an OpenClaw
-# one: handle_cloud_channel_inbound is its only inbound handler and
-# dispatch_cloud_channel_outbound its only delivery, both HTTP.
+# `CLOUD_SESSION_CHANNEL_KEYS` held exactly one key, `telegram_personal`, put
+# on the wire by `cloud-session-manager/` — a SECOND gramjs Telegram runtime,
+# cloud-hosted, with its own HMAC HTTP relay, that the 2026-08-14 cutover
+# missed because nothing traced it. It was the same retired account channel
+# (the owner's own number, ban-risk) as the on-box twin the cutover did
+# delete, it had no self-serve creation path anywhere in the product, and
+# `CLOUD_SESSION_MANAGER_ENABLED` still defaulted TRUE. Removed whole: the
+# route, the handler, the outbound dispatcher, both proactive callers, the
+# flag and the directory. See channel_lane_contract_service's own
+# PERSONAL_CHANNEL_SPECS comment for the full record.
 #
-# It is a SET, not a bare string, so every policy set below reads as "the
-# cloud-session lane" instead of naming a channel — the moment that lane
-# carries a second channel (or is deleted, which is the founder's open
-# decision), one line here moves and nothing else does. Imported from the
-# lane contract rather than reusing TELEGRAM_PERSONAL_CHANNEL_KEY above,
-# which is a deliberately VESTIGIAL literal for ~15 unreachable legacy
-# branches: reusing it would make a live lane indistinguishable from dead
-# code that merely compiles.
-CLOUD_SESSION_CHANNEL_KEYS = frozenset(
-    {channel_lane_contract_service.CLOUD_SESSION_TELEGRAM_CHANNEL_KEY}
-)
+# The two policy sets below are now exactly LOCAL_BRIDGE_PERSONAL_CHANNELS,
+# which the OPENCLAW_PERSONAL_CHANNELS merge fills — the same shape the
+# whatsapp_personal drop left them in, and for the same reason.
 
 
 def _enforce_personal_gateway_config_decision(
@@ -1224,15 +1227,19 @@ async def approve_dm_policy_pairing_request(
 # the deadlock this set exists to close: a channel the OWNER can write and the
 # GATE never reads. The 2026-08-14 cutover deleted the Baileys runtime, every
 # WhatsApp inbound handler, and the lane spec, and cloud-session-manager has
-# no whatsapp producer at all (`cloud-session-manager/src/` is telegram-only),
+# no whatsapp producer at all (`cloud-session-manager/` was telegram-only, and
+# is itself deleted as of 2026-08-15 — see the note below),
 # so no message can ever carry this key into _enforce_dm_policy again — while
 # the route went on accepting the write and persisting a policy with no
 # reader. A write that silently goes nowhere is worse than a 400: the owner
-# believes they configured something. See CLOUD_SESSION_CHANNEL_KEYS below for
-# why telegram_personal is NOT in the same position.
-DM_POLICY_CHANNEL_KEYS = frozenset(
-    {*CLOUD_SESSION_CHANNEL_KEYS, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
-)
+# believes they configured something.
+#
+# TELEGRAM_PERSONAL_CHANNEL_KEY JOINED IT 2026-08-15, when the cloud-session
+# lane was deleted. Until then it was the one first-party key still in this
+# set, because handle_cloud_channel_inbound genuinely ran _enforce_dm_policy
+# with it. With that handler gone there is no producer of the key left, so it
+# is now in exactly the position whatsapp_personal was.
+DM_POLICY_CHANNEL_KEYS = frozenset(LOCAL_BRIDGE_PERSONAL_CHANNELS.keys())
 
 
 class UnsupportedDmPolicyModeError(ValueError):
@@ -1935,12 +1942,10 @@ async def _persist_agent_group_policy_config(
 # WHATSAPP_PERSONAL_CHANNEL_KEY DROPPED 2026-08-15 — see DM_POLICY_CHANNEL_KEYS
 # above for the full reason. Same defect, mirrored: the owner could write a
 # group policy for a channel that no longer has a handler, a catalog entry or
-# a lane spec, and the write persisted. telegram_personal stays because
-# handle_cloud_channel_inbound genuinely runs _enforce_group_policy with it on
-# every cloud-session message.
-GROUP_POLICY_CHANNEL_KEYS = frozenset(
-    {*CLOUD_SESSION_CHANNEL_KEYS, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
-)
+# a lane spec, and the write persisted. TELEGRAM_PERSONAL_CHANNEL_KEY joined
+# it 2026-08-15 when the cloud-session lane — the last thing running
+# _enforce_group_policy with that key — was deleted.
+GROUP_POLICY_CHANNEL_KEYS = frozenset(LOCAL_BRIDGE_PERSONAL_CHANNELS.keys())
 
 
 async def update_agent_group_policy_config(
@@ -3928,422 +3933,3 @@ async def send_local_bridge_personal_message(
 # meaningless to a Bot API credential) ALL DELETED 2026-08-14 (full
 # OpenClaw channel cutover). Git history has them if a first-party
 # revival is ever needed.
-
-# ── Stage 2: Cloud Session Manager integration ──────────────────
-
-import os
-import hashlib
-import hmac as _hmac_module
-
-_CLOUD_SESSION_MANAGER_URL = os.getenv("CLOUD_SESSION_MANAGER_URL", "http://localhost:3400")
-_CLOUD_SESSION_HMAC_SECRET = os.getenv("CLOUD_SESSION_HMAC_SECRET", os.getenv("API_SECRET", "dev-secret-change-me"))
-_CLOUD_SESSION_MANAGER_ENABLED = os.getenv("CLOUD_SESSION_MANAGER_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
-
-
-async def handle_cloud_channel_inbound(
-    *,
-    session_id: str,
-    channel_key: str,
-    message: Dict[str, Any],
-    workspace_id: str = "default",
-) -> Dict[str, Any]:
-    """Handle inbound message from cloud session manager (Stage 2).
-
-    Follows the same pattern as _handle_telegram_gateway_channel_inbound
-    but dispatches replies via HTTP to the cloud session manager instead of
-    through the Gateway WebSocket.
-
-    Args:
-        session_id: cloud session manager session ID
-        channel_key: must be a CLOUD_SESSION_CHANNEL_KEYS member — today
-            exactly "telegram_personal", which is what
-            cloud-session-manager/src/telegram/hmac.js::buildSignedInbound
-            hardcodes on the wire. This used to document "or whatsapp_personal
-            (accepted but not branched on)", and that was a real hole rather
-            than a harmless leniency: the two gates below read the named
-            channel's OWN dm/group policy, while the reply is ALWAYS built as
-            Telegram, so any other key made this handler enforce one channel's
-            policy and answer as another. cloud-session-manager/src/ is
-            telegram-only, so nothing legitimate ever sent anything else;
-            the check below now says so instead of trusting it.
-        message: {external_message_id, sender_id, sender_name,
-            linked_username, text, received_at, is_group, is_mentioned,
-            is_reply_to_sage} on the live wire today (see the group gate
-            below for how those last three are used; missing/false is
-            treated as "not a group" so any caller predating commit
-            aaadcfdf4, which added them, stays compatible). Never carries
-            is_self_chat or a numeric linked user id — see the dmPolicy
-            gate below for why that specifically is what keeps owner
-            identity unresolvable on this path.
-        workspace_id: workspace UUID from cloud session (defaults to "default" for backward compat)
-    """
-    if not _CLOUD_SESSION_MANAGER_ENABLED:
-        return {"status": "disabled", "reason": "CLOUD_SESSION_MANAGER_ENABLED is false"}
-
-    # A structured refusal, not a raise: this is an HMAC-authed system-to-
-    # system webhook, and a 500 tells the caller nothing it can act on while
-    # looking like our own crash. Refusing here rather than deeper is the
-    # point — the gates below would otherwise read the NAMED channel's policy
-    # and the reply would still be built as Telegram.
-    normalized_channel_key = str(channel_key or "").strip().lower()
-    if normalized_channel_key not in CLOUD_SESSION_CHANNEL_KEYS:
-        return {
-            "status": "unsupported_channel",
-            "reason": "channel_key is not served by the cloud-session lane",
-            "channel_key": normalized_channel_key or None,
-            "session_id": session_id,
-            "supported": sorted(CLOUD_SESSION_CHANNEL_KEYS),
-        }
-    channel_key = normalized_channel_key
-
-    resolved_workspace_id = str(workspace_id or "default").strip() or "default"
-
-    # Validate workspace_id exists before processing
-    if resolved_workspace_id and resolved_workspace_id != "default":
-        try:
-            from server_modules.control_plane_repository import get_workspace_by_id
-            _ws_check = await get_workspace_by_id(resolved_workspace_id)
-            if not _ws_check:
-                _csm_logger = __import__('logging').getLogger(__name__)
-                _csm_logger.error(
-                    "cloud_channel_inbound: invalid workspace_id=%s — message dropped",
-                    resolved_workspace_id,
-                )
-                return {"status": "invalid_workspace", "workspace_id": resolved_workspace_id}
-        except Exception:
-            pass
-
-    external_message_id = str(message.get("external_message_id") or "").strip()
-    remote_jid = str(message.get("sender_id") or "").strip()
-    text = str(message.get("text") or "").strip()
-    push_name = str(message.get("sender_name") or "").strip() or None
-    linked_username = str(message.get("linked_username") or "").strip() or None
-
-    if not external_message_id or not text:
-        raise ValueError("cloud_channel_inbound requires external_message_id and text")
-    if not remote_jid:
-        # sender_id (remote_jid) feeds straight into the Sage bridge's
-        # channel_origin+sender_id sender-classification (mandate hardening
-        # report). A missing sender_id there isn't "unclassifiable" — it's
-        # silently read as no live sender at all, which defaults to owner
-        # tier. Reject rather than let a malformed relay payload buy owner
-        # authority.
-        raise ValueError("cloud_channel_inbound requires a non-empty sender_id")
-
-    # ── Group/mention gate (backend safety net) ──
-    # WIRE REALITY (corrected 2026-08-07 — the paragraph below claiming
-    # is_group/is_mentioned/is_reply_to_sage are never on the wire was true
-    # when written but went stale without being updated): commit aaadcfdf4
-    # ("fix the cloud personal-channel path's group/broadcast/self-chat
-    # gaps", 2026-07-19 — predates this comment's own 2026-07-23 authoring
-    # date) taught cloud-session-manager/src/telegram/hmac.js::buildSignedInbound
-    # to forward is_group / is_mentioned / is_reply_to_sage on the signed
-    # `message` body. The signed body today is {external_message_id,
-    # sender_id, sender_name, linked_username, text, received_at, is_group,
-    # is_mentioned, is_reply_to_sage} — see that function's own doc comment.
-    # So this gate is a genuine, live backend safety net for group/mention
-    # gating today, not a no-op — it engages on this path exactly like it
-    # does for the three Gateway handlers above.
-    #
-    # It still exists as defense-in-depth even though inbound-handler.js
-    # already has its OWN gate that drops an unaddressed group message
-    # before this function is ever called (isGroup && !isMentioned &&
-    # !isReplyToSage -> skip, added in 927d2c7c "add Saved Messages support
-    # + group chat gating", explicitly to prevent "credit drain and
-    # Telegram spam risk from replying to every group message" — the same
-    # prior incident this backend gate exists for): if cloud-session-
-    # manager's JS gate ever regresses, or a future producer of this same
-    # webhook doesn't replicate it, this is what stops an unaddressed group
-    # message from reaching a live agent turn. The cloud-session-manager
-    # path should not be the one ingestion path in this file that trusts a
-    # single upstream gate with zero redundancy.
-    #
-    # Two things NOT on the wire even after aaadcfdf4, both relevant to the
-    # dmPolicy gate right below this one: entities/reply_to_msg_id (so this
-    # side can't independently recompute is_mentioned/is_reply_to_sage, only
-    # trust what inbound-handler.js precomputed) and is_self_chat (see the
-    # dmPolicy gate's own comment for why that absence — not this gate's
-    # concern — is what makes owner identity unresolvable on this path
-    # today). Also still true: an addressed group message's sender_id is
-    # the individual member's JID (not the group's), so a reply would route
-    # to a 1:1 chat with that member, not back into the group (a separate,
-    # pre-existing routing quirk, not a group-gating one).
-    #
-    # Routed through _enforce_group_policy — the same ONE shared resolver
-    # the three Gateway handlers use — instead of its own inline copy
-    # (agent_id="": no per-agent identity resolves on this path, same as
-    # the local-bridge handler, so group_policy/requireMention config falls
-    # back to that resolver's own unresolved-identity default rather than a
-    # per-agent one).
-    group_decision = await _enforce_group_policy(
-        registration={"tenant_id": "default", "workspace_id": resolved_workspace_id},
-        channel_key=channel_key,
-        agent_id="",
-        message=message,
-        remote_jid=remote_jid,
-    )
-    if not group_decision["allowed"]:
-        return {
-            "ignored": True,
-            "reason": group_decision["reason"],
-            "channel_key": channel_key,
-            "session_id": session_id,
-        }
-
-    # Read BEFORE the dmPolicy gate below — mirrors the Gateway handlers'
-    # identical ordering (see _handle_telegram_gateway_channel_inbound).
-    # Will be empty for essentially every cloud session today: no
-    # configure/claim step ever writes a row keyed by this "cloud:<id>"
-    # gateway_id (see _resolve_agent_id_for_inbound's docstring — the fast
-    # path is an indexed lookup only, populated by
-    # _claim_agent_channel_state, which nothing on this path calls). That is
-    # exactly why the fail-closed owner_only fallback below is intentional,
-    # not a bug.
-    existing_state = personal_channels_repository.get_telegram_state(
-        f"cloud:{session_id}", channel_key=channel_key, agent_id="",
-    )
-
-    # ── dmPolicy gate (Gate 1): MUST run before any reply — including a
-    # control-command reply — is generated. See _enforce_dm_policy's
-    # docstring; reused verbatim, same function, same contract as the three
-    # Gateway handlers above. This was the actual defect: this function had
-    # a group gate but NO dm gate at all, so any stranger who messaged the
-    # owner's cloud-hosted Telegram session reached a live agent turn
-    # unconditionally — the exact incident this whole effort exists to
-    # prevent, just on a second, default-enabled ingestion path.
-    #
-    # ENFORCEABILITY ON THIS WIRE: the signed message body this path
-    # receives (cloud-session-manager/src/telegram/hmac.js::buildSignedInbound)
-    # carries sender_id, sender_name, linked_username, text, received_at,
-    # is_group, is_mentioned, is_reply_to_sage — but never is_self_chat, and
-    # never a numeric linked user id (only the linked account's username,
-    # which cannot be compared against a numeric sender_id). Combined with
-    # existing_state above always being empty and agent_id always being ""
-    # on this path (no per-agent identity resolves here — see the group
-    # gate's own comment above), _is_owner_message can never resolve True
-    # here, and _load_agent_dm_policy_config's unresolved-identity fallback
-    # is always owner_only with an empty allowlist. So this gate blocks
-    # EVERY sender on this path today — including the genuine owner's own
-    # self-chat messages — until a real agent_id and an owner-identity
-    # signal (is_self_chat and/or a linked numeric user id on the wire) are
-    # wired for the cloud path. That is the correct fail-closed behavior
-    # for a path that cannot currently authenticate its senders; passing
-    # every sender through as before is exactly the live security gap this
-    # fixes.
-    dm_decision = await _enforce_dm_policy(
-        registration={"tenant_id": "default", "workspace_id": resolved_workspace_id},
-        channel_key=channel_key,
-        agent_id="",
-        message=message,
-        remote_jid=remote_jid,
-        existing_state=existing_state,
-        label="Telegram",
-    )
-    if not dm_decision["allowed"]:
-        _dm_sender_id = str(dm_decision.get("sender_id") or "")
-        _emit_automatic_reply_audit(
-            action=f"personal_channel.{channel_key.split('_', 1)[0]}.dm_policy",
-            status="pairing_challenge" if dm_decision.get("system_reply") else "blocked",
-            registration={"tenant_id": "default", "workspace_id": resolved_workspace_id},
-            gateway_id=f"cloud:{session_id}",
-            channel_key=channel_key,
-            provider="telegram_gramjs",
-            detail=f"Cloud-session inbound message dropped by dmPolicy (mode={dm_decision.get('mode')}).",
-            metadata={
-                "remote_jid": remote_jid,
-                "inbound_external_message_id": external_message_id,
-                "dm_policy_mode": dm_decision.get("mode"),
-                "sender_id_hash": hashlib.sha256(_dm_sender_id.encode("utf-8")).hexdigest()[:16] if _dm_sender_id else None,
-            },
-            idempotency_key=f"personal_channel.dm_policy.cloud:{session_id}:{channel_key}:{external_message_id}",
-        )
-        system_reply = str(dm_decision.get("system_reply") or "").strip()
-        if system_reply:
-            # Same one-time pairing-challenge dispatch as the Gateway path's
-            # _handle_dm_policy_blocked, adapted to this path's HTTP
-            # dispatch (dispatch_cloud_channel_outbound) instead of the
-            # Gateway WebSocket (gateway_protocol_service.dispatch_channel_outbound)
-            # — the two transports don't share a delivery mechanism, only
-            # the policy gate itself, which is fully reused above.
-            await dispatch_cloud_channel_outbound(
-                session_id=session_id,
-                text=system_reply,
-                remote_jid=remote_jid,
-            )
-        return {
-            "ignored": True,
-            "blocked": True,
-            "reason": "dm_policy",
-            "channel_key": channel_key,
-            "session_id": session_id,
-            "policy": {"gate": "dm_policy", **dm_decision},
-        }
-
-    # ── Shared command dispatcher ──
-    from server_modules.sage_command_dispatcher import dispatch_command as _dispatch_cmd
-    _cmd_reply = await _dispatch_cmd(
-        command=text,
-        workspace_id=resolved_workspace_id,
-        thread_id="sage-main",
-        channel_origin="telegram_personal",
-        sender_id=remote_jid or None,
-    )
-    if _cmd_reply is not None:
-        await dispatch_cloud_channel_outbound(
-            session_id=session_id,
-            text=_cmd_reply,
-            remote_jid=remote_jid,
-        )
-        return {"status": "command_handled", "session_id": session_id, "reply_text": _cmd_reply[:200]}
-
-    # Build Sage reply using the existing bridge — same as Gateway path.
-    # is_owner now wired from dm_decision (the dmPolicy gate above, which
-    # this path previously never ran at all — see that gate's own comment).
-    # In practice this still always evaluates to False today: the same
-    # enforceability gap that makes the gate itself fail-closed
-    # (no is_self_chat, no numeric linked user id on this wire, no resolved
-    # agent_id) means _is_owner_message can never return True here either.
-    # Passing the real decision through rather than a hardcoded False is
-    # forward-compatible plumbing for when that gap closes — see HARD
-    # CONSTRAINTS in fix/owner-aware-provenance: uncertain identity must
-    # default to the guarded/external path, never to owner trust, which
-    # dm_decision["is_owner"] already guarantees by construction.
-    #
-    # is_group: the SAME "family group" bug fix as the three Gateway
-    # handlers (see _handle_telegram_gateway_channel_inbound's matching
-    # build_telegram_personal_reply call) — this used to build the reply
-    # with zero group signal even for a message that had ALREADY passed the
-    # is_group/is_mentioned gate above, so the model was never told an
-    # addressed group turn was a group turn at all. Wired from
-    # message.get("is_group"), which commit aaadcfdf4 made a real signal on
-    # this wire (see the group gate's own comment above) — no longer a
-    # forward-compatible no-op. chat_label remains None: cloud-session-
-    # manager's hmac.js still never puts a chat_title/chat label on the
-    # wire, unlike is_group/is_mentioned/is_reply_to_sage.
-    reply = await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
-        workspace_id=resolved_workspace_id,
-        gateway_id=f"cloud:{session_id}",
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        source_event_id=external_message_id,
-        is_owner=bool(dm_decision.get("is_owner")),
-        is_group=bool(message.get("is_group")),
-        chat_label=str(message.get("chat_title") or "").strip() or None,
-        was_addressed=group_decision.get("was_addressed"),
-    )
-
-    # ABSOLUTE RULE: no hardcoded platform status/error message may EVER be
-    # sent into a channel (DM or group) — resolve_channel_reply_outcome
-    # applies filter_channel_outbound_reply internally as the backstop
-    # regardless of what the bridge service returned, and additionally tells
-    # "the agent chose silence" apart from "the turn never completed".
-    #
-    # This path (hosted/cloud) never touches personal_channel_inbound_messages
-    # at all, so there is no no-reply marker to mis-write and no retry to
-    # cancel here — the only thing that changes is that the OWNER now learns
-    # their own agent failed instead of reading as ignoring them, and that the
-    # returned status distinguishes the two for anything reading it.
-    outcome = channel_adapter.resolve_channel_reply_outcome(
-        reply, is_owner=bool(dm_decision.get("is_owner")),
-    )
-    reply_text = outcome.text
-    if not reply_text:
-        return {
-            "status": "undelivered" if outcome.is_undelivered else "no_reply",
-            "session_id": session_id,
-            "external_message_id": external_message_id,
-            "status_code": outcome.status_code or None,
-        }
-
-    # Dispatch the reply to the cloud session manager
-    dispatch_result = await dispatch_cloud_channel_outbound(
-        session_id=session_id,
-        text=reply_text,
-        remote_jid=remote_jid,
-    )
-
-    return {
-        "status": "replied",
-        "session_id": session_id,
-        "external_message_id": external_message_id,
-        "reply_text": reply_text[:200],
-        "dispatch": dispatch_result,
-    }
-
-
-async def dispatch_cloud_channel_outbound(
-    *,
-    session_id: str,
-    text: str,
-    remote_jid: str = "",
-) -> Dict[str, Any]:
-    """Send an outbound reply to the cloud session manager via HTTP (Stage 2).
-
-    The cloud session manager delivers the message through its GramJS client.
-    Request is HMAC-signed for authentication.
-    """
-    if not _CLOUD_SESSION_MANAGER_ENABLED:
-        return {"ok": False, "error": "CLOUD_SESSION_MANAGER_ENABLED is false"}
-
-    import httpx
-    import json as _json
-
-    if not session_id or not text or not text.strip():
-        return {"ok": False, "error": "session_id and text are required"}
-
-    url = f"{_CLOUD_SESSION_MANAGER_URL}/sessions/{session_id}/inbound"
-
-    payload = {
-        "text": text.strip(),
-        "remote_jid": remote_jid or "me",
-    }
-
-    # HMAC sign the request
-    signature = _hmac_module.new(
-        _CLOUD_SESSION_HMAC_SECRET.encode("utf-8"),
-        _json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-Signature": signature,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(url, json=payload, headers=headers)
-            body = response.json() if response.text else {}
-            if response.status_code >= 400:
-                return {"ok": False, "status": response.status_code, "error": body.get("error", "dispatch_failed")}
-            return {"ok": True, "status": response.status_code, "message_id": body.get("message_id")}
-    except Exception as exc:
-        return {"ok": False, "error": f"dispatch_error: {exc}"}
-def resolve_cloud_telegram_session_id() -> Optional[str]:
-    """Resolve the first connected cloud Telegram session ID.
-
-    Queries the cloud-session-manager for all sessions and returns
-    the ID of the first connected session. Used by heartbeat notify
-    to deliver proactive messages via cloud-session-manager.
-
-    Returns None if no connected session exists or cloud-session-manager
-    is unreachable.
-    """
-    if not _CLOUD_SESSION_MANAGER_ENABLED:
-        return None
-    try:
-        import httpx
-        url = f"{_CLOUD_SESSION_MANAGER_URL}/sessions"
-        response = httpx.get(url, timeout=5.0)
-        if response.status_code >= 400:
-            return None
-        body = response.json() if response.text else {}
-        sessions = body.get("sessions") if isinstance(body, dict) else []
-        for session in sessions:
-            if isinstance(session, dict) and session.get("status") == "connected":
-                return str(session.get("sessionId") or "").strip() or None
-        return None
-    except Exception:
-        return None
-

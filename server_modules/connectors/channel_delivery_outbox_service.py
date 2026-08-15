@@ -138,45 +138,13 @@ def _deliver_telegram(event: "OutboxEvent") -> bool:
         result = dispatch.poll_run_terminal_result(run_id, max_reply_chars=registry.max_reply_chars)
         if not bool(result.get("ready")):
             _defer_until_terminal(event, status=str(result.get("status") or "starting"))
-    # Stage 6: Try cloud-session-manager path first (proactive delivery via GramJS)
-    if bool(result.get("ready")):
-        try:
-            import asyncio as _asyncio
-            from server_modules.personal_channels_service import (
-                resolve_cloud_telegram_session_id,
-                dispatch_cloud_channel_outbound,
-            )
-            _cloud_session_id = resolve_cloud_telegram_session_id()
-            if _cloud_session_id:
-                _cloud_notification_text = str(result.get("summary") or direct_notification or "").strip()
-                if _cloud_notification_text:
-                    _asyncio.run(dispatch_cloud_channel_outbound(
-                        session_id=_cloud_session_id,
-                        text=_cloud_notification_text,
-                        remote_jid="me",
-                    ))
-                    # Record a minimal channel event for audit
-                    record_channel_event = registry.record_channel_event
-                    record_channel_event(
-                        channel="telegram",
-                        direction="system",
-                        event_type="run_announce_cloud",
-                        text=_notification_text[:500],
-                        workspace_id=event.workspace_id,
-                        session_key=f"cloud:{_cloud_session_id}",
-                        session_id=f"cloud:{_cloud_session_id}",
-                        run_id=run_id,
-                        action=str(payload.get("action") or "run").strip().lower() or "run",
-                        metadata={
-                            "connector_id": connector_id,
-                            "trace_id": str(event.trace_id or "").strip(),
-                            "cloud_session_id": _cloud_session_id,
-                        },
-                    )
-                    return True
-        except Exception:
-            pass  # Fall through to old path
-
+    # A cloud-session-manager branch used to run HERE, ahead of the bot
+    # delivery below, announcing a finished run through a cloud-hosted gramjs
+    # Telegram ACCOUNT. Deleted 2026-08-15 with the rest of that lane — see
+    # channel_lane_contract_service.PERSONAL_CHANNEL_SPECS. It was already
+    # best-effort (the whole branch sat inside `except Exception: pass` and
+    # fell through to exactly the code below), so removing it changes nothing
+    # a customer sees except that the Telegram BOT now always delivers.
     entry = state_service.get_connector_entry(connector_id)
     secret = registry.resolve_secret(entry)
     profile = registry.resolve_profile(entry)

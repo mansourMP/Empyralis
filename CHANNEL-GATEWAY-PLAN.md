@@ -355,10 +355,16 @@ onto the existing chokepoint.**
   both commented "backend decides now"). So the same unaddressed group
   message is silently dropped on Signal and answered on WhatsApp. Pick one
   posture deliberately.
-- **A second, undocumented producer of Telegram traffic exists**:
+- ~~**A second, undocumented producer of Telegram traffic exists**:
   `cloud-session-manager/src/telegram/` → `handle_cloud_channel_inbound`
   (:3963). It has **no Gate 1 at all** (:4114-4120). Gates 2/3 were recently
-  fixed in its JS layer (`hmac.js:21-33`, `inbound-handler.js:106-155`).
+  fixed in its JS layer (`hmac.js:21-33`, `inbound-handler.js:106-155`).~~
+  **RESOLVED 2026-08-15 by deletion, not by gating.** It was a second gramjs
+  Telegram ACCOUNT runtime — the same ban-risk channel whose on-box twin the
+  2026-08-14 cutover retired — with no self-serve creation path and
+  `CLOUD_SESSION_MANAGER_ENABLED` defaulting TRUE. The whole lane is gone:
+  directory, route, handler, outbound dispatcher, both proactive callers,
+  flag. Do not re-diagnose it.
 - **Two stale comments assert behaviour the code contradicts** — fix or
   delete them while you're here: `personal_channels_service.py:4028-4051`
   (claims the cloud-session gate is "presently a no-op" — it isn't anymore),

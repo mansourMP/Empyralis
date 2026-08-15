@@ -56,6 +56,39 @@ def _build_whatsapp_reply(**kwargs):
     )
 
 
+# RETARGETED 2026-08-15, SAME DAY AND SAME SHAPE, for the Telegram pair.
+# build_telegram_personal_reply / build_telegram_personal_reply_async both
+# hardcoded `telegram_personal`, and the last producer of that key — the
+# cloud-session lane, a second cloud-hosted gramjs Telegram ACCOUNT runtime
+# the 2026-08-14 cutover missed — was deleted the same day, so both builders
+# went with it. The sync one had already had zero production callers and its
+# own docstring named this retarget as the precondition for deleting it.
+#
+# Every assertion below is UNCHANGED. What moves is only the key: from a
+# first-party key nothing can produce to `openclaw_telegram`, the key a real
+# Telegram message actually arrives under now, resolved from the registry so
+# a rename fails here rather than quietly testing nothing.
+_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+
+
+def _build_telegram_reply(**kwargs):
+    """The deleted sync builder's shape, on the live async one."""
+    kwargs.setdefault("fallback_label", "Telegram")
+    return asyncio.run(
+        personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+            surface_channel=_TELEGRAM_CHANNEL_KEY, **kwargs
+        )
+    )
+
+
+async def _build_telegram_reply_async(**kwargs):
+    """The deleted async builder's shape, on the live generic one."""
+    kwargs.setdefault("fallback_label", "Telegram")
+    return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+        surface_channel=_TELEGRAM_CHANNEL_KEY, **kwargs
+    )
+
+
 class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
     def test_telegram_personal_reply_wraps_prompt_injection_before_runtime(self) -> None:
         """The prompt-injection boundary, asserted on the path that actually
@@ -73,7 +106,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         """
         turn_mock = AsyncMock(return_value=SageTurnResult(message="safe reply"))
         with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
-            result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            result = _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="tg-user-1",
@@ -85,7 +118,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
         message = turn_mock.await_args.kwargs["message"]
         self.assertIn("EXTERNAL_UNTRUSTED_CONTENT", message)
         self.assertIn("SANITIZED_EXTERNAL_CONTENT_MARKER", message)
-        self.assertEqual(turn_mock.await_args.kwargs["channel_origin"], "telegram_personal")
+        self.assertEqual(turn_mock.await_args.kwargs["channel_origin"], _TELEGRAM_CHANNEL_KEY)
         self.assertEqual(turn_mock.await_args.kwargs["channel_sender_id"], "tg-user-1")
 
     def test_async_telegram_reply_routes_unified_sage_with_trace(self) -> None:
@@ -99,7 +132,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
                     )
                 ),
             ):
-                return await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
+                return await _build_telegram_reply_async(
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="tg-user-1",
@@ -227,7 +260,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
             "server_modules.sage_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="", media=[self._MEDIA_ITEM])),
         ):
-            result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            result = _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="tg-user-1",
@@ -285,11 +318,11 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         """The banned-account case, stated directly: a group message the agent
         chooses not to answer produces NO reply object at all, so
         personal_channels_service has nothing to dispatch. Same property as
-        above on the other live sync builder (personal_channels_service.py
-        calls build_telegram_personal_reply for every Telegram inbound)."""
+        above, on Telegram instead of WhatsApp — both go through the one
+        builder personal_channels_service actually calls for every inbound."""
         turn_mock = AsyncMock(return_value=SageTurnResult(message=""))
         with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
-            result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            result = _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="tg-group-1",
@@ -362,7 +395,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
-            result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            result = _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="owner-tg-1",
@@ -396,7 +429,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 new=AsyncMock(return_value=SageTurnResult(message="who is this?")),
             ) as turn_mock,
         ):
-            personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="stranger-tg-1",
@@ -459,7 +492,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
-            personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="-100555777",
@@ -495,7 +528,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
-            personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="owner-tg-1",
@@ -530,7 +563,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 new=AsyncMock(return_value=SageTurnResult(message="'Posle' means 'later'.")),
             ) as turn_mock,
         ):
-            personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="-100555777",
@@ -568,7 +601,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 new=AsyncMock(return_value=SageTurnResult(message="who is this?")),
             ) as turn_mock,
         ):
-            personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            _build_telegram_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="stranger-tg-1",
@@ -582,18 +615,18 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         self.assertNotIn("Group-Name", sent_message)
 
     # ── Systemic verification (backend-safety task): the tests above only
-    # ever exercise this rendering through build_telegram_personal_reply.
+    # ever exercise this rendering on ONE channel key.
     # _personal_channel_guard_metadata (non-owner branch) and
     # _build_personal_channel_envelope (both branches) are channel-agnostic
     # — every build_*_personal_reply* entry point funnels through the SAME
-    # _build_unified_sage_personal_reply(_async) — but that makes it a real
-    # risk that one of the OTHER thin wrappers has a typo'd/omitted kwarg
-    # that silently drops the signal before it ever reaches the shared
-    # function. These three prove the actual rendered text/envelope per
-    # remaining channel family: WhatsApp (build_personal_channel_reply_async),
-    # Telegram-cloud (build_telegram_personal_reply_async — the exact async
-    # entry handle_cloud_channel_inbound calls), and local-bridge
-    # (build_personal_channel_reply_async — shared by Signal/iMessage/WeChat).
+    # _build_unified_sage_personal_reply_async — but that makes it a real
+    # risk that a caller has a typo'd/omitted kwarg that silently drops the
+    # signal before it ever reaches the shared function. These three prove
+    # the actual rendered text/envelope per remaining channel family:
+    # WhatsApp, Telegram, and local-bridge (Signal/iMessage/WeChat) — all
+    # now through build_personal_channel_reply_async, since the per-platform
+    # WhatsApp and Telegram builders were deleted 2026-08-15 and it is the
+    # one entry point personal_channels_service actually calls.
 
     def test_whatsapp_group_message_is_told_this_is_a_group_not_a_direct_message(self) -> None:
         """Mirrors test_owner_in_group_is_told_this_is_a_group_not_a_direct_message
@@ -622,21 +655,24 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         self.assertEqual(envelope.chat.title, "Family")
         self.assertIs(envelope.sender.is_owner, True)
 
-    def test_telegram_cloud_async_group_message_is_told_this_is_a_group_not_a_direct_message(self) -> None:
-        """The exact async entry point personal_channels_service.handle_cloud_channel_inbound
-        calls (build_telegram_personal_reply_async) — is_owner is always
-        False there (see handle_cloud_channel_inbound's own comment: no
-        dmPolicy/_is_owner_message equivalent for that path), so this
-        exercises the EXTERNAL/non-owner rendering branch, not the owner
-        one the other two tests here use."""
+    def test_telegram_async_group_message_is_told_this_is_a_group_not_a_direct_message(self) -> None:
+        """is_owner=False, so this exercises the EXTERNAL/non-owner rendering
+        branch rather than the owner one the other two tests here use — the
+        only test in this trio that does.
+
+        RETARGETED 2026-08-15 from build_telegram_personal_reply_async on
+        `telegram_personal`, which was the exact async entry
+        handle_cloud_channel_inbound called. That handler and that key are
+        both gone with the cloud-session lane; the non-owner rendering
+        assertion is unchanged and now made on `openclaw_telegram`."""
         async def run_case():
             with patch(
                 "server_modules.sage_turn_adapter.execute_sage_turn",
                 new=AsyncMock(return_value=SageTurnResult(message="'Posle' means 'later'.")),
             ) as turn_mock:
-                await personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
+                await _build_telegram_reply_async(
                     workspace_id="workspace-1",
-                    gateway_id="cloud:csm-sess-1",
+                    gateway_id="gateway-1",
                     remote_jid="111222",
                     text="Posle",
                     push_name="Aunt Nadia",
@@ -728,7 +764,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="telegram_personal",
+                        surface_channel=_TELEGRAM_CHANNEL_KEY,
                         workspace_id="ws-mem-test",
                         gateway_id="gateway-1",
                         remote_jid="owner-tg-2",
@@ -744,7 +780,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="telegram_personal",
+                        surface_channel=_TELEGRAM_CHANNEL_KEY,
                         workspace_id="ws-mem-test",
                         gateway_id="gateway-1",
                         remote_jid="stranger-tg-2",
@@ -767,7 +803,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 conversation_key=personal_channel_sage_bridge_service._owner_unified_conversation_key(""),
             )
             stranger_turns = agent_conversation_memory.load_recent_turns(
-                workspace_id="ws-mem-test", agent_id="", conversation_key="telegram_personal:stranger-tg-2",
+                workspace_id="ws-mem-test", agent_id="", conversation_key=f"{_TELEGRAM_CHANNEL_KEY}:stranger-tg-2",
             )
 
         owner_user_turn = next(t for t in owner_turns if t["role"] == "user")
@@ -811,7 +847,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="telegram_personal",
+                        surface_channel=_TELEGRAM_CHANNEL_KEY,
                         workspace_id="ws-cross-channel",
                         gateway_id="gateway-1",
                         remote_jid="owner-tg-3",
@@ -860,7 +896,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="telegram_personal",
+                        surface_channel=_TELEGRAM_CHANNEL_KEY,
                         workspace_id="ws-privacy-test",
                         gateway_id="gateway-1",
                         remote_jid="owner-tg-4",
@@ -876,7 +912,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="telegram_personal",
+                        surface_channel=_TELEGRAM_CHANNEL_KEY,
                         workspace_id="ws-privacy-test",
                         gateway_id="gateway-1",
                         remote_jid="stranger-tg-5",
@@ -892,7 +928,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             ) as turn_mock:
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="telegram_personal",
+                        surface_channel=_TELEGRAM_CHANNEL_KEY,
                         workspace_id="ws-privacy-test",
                         gateway_id="gateway-1",
                         remote_jid="stranger-tg-5",

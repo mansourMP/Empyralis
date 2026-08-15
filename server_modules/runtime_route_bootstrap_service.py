@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from server_modules import bounded_scheduler_service
 
@@ -95,8 +95,6 @@ def build_runtime_run_route_bootstrap_callbacks(
     build_heartbeat_notify_callback: Callable[..., Any],
     resolve_workspace_tenant_id: Callable[[str], Any],
     heartbeat_workspace_id: str | None,
-    dispatch_cloud_channel_outbound_fn: Optional[Callable[..., Any]] = None,
-    resolve_cloud_telegram_session_id_fn: Optional[Callable[[], Optional[str]]] = None,
 ) -> RuntimeRunRouteBootstrapCallbacks:
     from server_modules.runtime_lane_queue import enqueue_runtime_lane_work
 
@@ -115,8 +113,6 @@ def build_runtime_run_route_bootstrap_callbacks(
         heartbeat_notify_callback=build_heartbeat_notify_callback(
             handle_telegram_send_message=handle_telegram_send_message,
             workspace_id=heartbeat_workspace_id,
-            dispatch_cloud_channel_outbound_fn=dispatch_cloud_channel_outbound_fn,
-            resolve_cloud_telegram_session_id_fn=resolve_cloud_telegram_session_id_fn,
         ),
     )
 

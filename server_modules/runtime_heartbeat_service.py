@@ -796,8 +796,6 @@ def build_heartbeat_notify_callback(
     *,
     handle_telegram_send_message: Callable[..., Any],
     workspace_id: Optional[str],
-    dispatch_cloud_channel_outbound_fn: Optional[Callable[..., Any]] = None,
-    resolve_cloud_telegram_session_id_fn: Optional[Callable[[], Optional[str]]] = None,
 ) -> Callable[[str], None]:
     scoped_workspace_id = str(workspace_id or "").strip() or None
 
@@ -805,21 +803,13 @@ def build_heartbeat_notify_callback(
         if not scoped_workspace_id:
             return
 
-        # Stage 6: Try cloud-session-manager path first (proactive delivery via GramJS)
-        if callable(resolve_cloud_telegram_session_id_fn) and callable(dispatch_cloud_channel_outbound_fn):
-            try:
-                session_id = resolve_cloud_telegram_session_id_fn()
-                if session_id:
-                    asyncio.run(dispatch_cloud_channel_outbound_fn(
-                        session_id=session_id,
-                        text=message,
-                        remote_jid="me",
-                    ))
-                    return
-            except Exception:
-                pass
-
-        # Fall back to old Telegram bot path
+        # A cloud-session-manager branch used to run FIRST here, delivering a
+        # proactive heartbeat through a cloud-hosted gramjs Telegram ACCOUNT
+        # (the owner's own number). Deleted 2026-08-15 with the rest of that
+        # lane — see channel_lane_contract_service.PERSONAL_CHANNEL_SPECS.
+        # The Telegram BOT path below was always its fallback and is now the
+        # only path, which is the same delivery every other proactive
+        # notification in the product already used.
         try:
             asyncio.run(handle_telegram_send_message(message, workspace_id=scoped_workspace_id))
         except Exception:

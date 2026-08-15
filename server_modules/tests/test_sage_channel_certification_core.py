@@ -21,9 +21,37 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import unittest
 
 from server_modules import connection_catalog_service
+from server_modules import openclaw_channel_registry
 from server_modules import personal_channel_sage_bridge_service
 from server_modules import personal_channels_repository
 from server_modules.sage_agent_runtime_contract import SageTurnResult
+
+
+# RETARGETED 2026-08-15. The two "*_inbound_context" tests below drove
+# personal_channel_sage_bridge_service.build_whatsapp_personal_reply and
+# build_telegram_personal_reply. Both are deleted — WhatsApp's with the
+# 2026-08-14 OpenClaw cutover that removed `whatsapp_personal`, Telegram's
+# with the cloud-session lane on 2026-08-15, which was the last thing
+# producing `telegram_personal`. (The WhatsApp one had been red since its
+# deletion; that sweep updated the other test files and missed this one.)
+#
+# They now drive build_personal_channel_reply_async on the live registry
+# keys, which is the builder personal_channels_service actually calls. Every
+# assertion is unchanged except the expected `channel_origin`, which is the
+# thing that genuinely moved.
+_WHATSAPP_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}whatsapp"
+_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+
+
+def _build_personal_reply(channel_key, label, **kwargs):
+    import asyncio
+
+    return asyncio.run(
+        personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+            surface_channel=channel_key, fallback_label=label, **kwargs
+        )
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +157,7 @@ class TelegramPersonalCertification(unittest.TestCase):
             self.assertEqual(tg["health_status"], "awaiting_code")
 
     def test_telegram_personal_inbound_context(self):
-        """build_telegram_personal_reply creates correct thread context.
+        """A Telegram personal turn creates correct thread context.
 
         Patches sage_turn_adapter.execute_sage_turn directly, not
         execute_sage_turn_for_channel — the bridge now routes through
@@ -145,7 +173,8 @@ class TelegramPersonalCertification(unittest.TestCase):
                 return_value=SageTurnResult(message="hello from Sage", trace_id="trace-1")
             ),
         ) as execute_mock:
-            result = personal_channel_sage_bridge_service.build_telegram_personal_reply(
+            result = _build_personal_reply(
+                _TELEGRAM_CHANNEL_KEY, "Telegram",
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="tg-user-1",
@@ -156,7 +185,7 @@ class TelegramPersonalCertification(unittest.TestCase):
         self.assertEqual(result["text"], "hello from Sage")
         self.assertEqual(result["source"], "sage_turn_adapter")
         kwargs = execute_mock.call_args.kwargs
-        self.assertEqual(kwargs["channel_origin"], "telegram_personal")
+        self.assertEqual(kwargs["channel_origin"], _TELEGRAM_CHANNEL_KEY)
         self.assertEqual(kwargs["workspace_id"], "workspace-1")
         self.assertEqual(kwargs["channel_sender_id"], "tg-user-1")
         self.assertIn("hey Sage", kwargs["message"])
@@ -260,7 +289,7 @@ class WhatsAppPersonalCertification(unittest.TestCase):
             get_state.assert_called_once_with("gw-1", channel_key="whatsapp_personal")
 
     def test_whatsapp_personal_inbound_context(self):
-        """build_whatsapp_personal_reply creates correct thread context.
+        """A WhatsApp personal turn creates correct thread context.
 
         See test_telegram_personal_inbound_context's docstring above for
         why the patch target and kwarg names changed."""
@@ -270,7 +299,8 @@ class WhatsAppPersonalCertification(unittest.TestCase):
                 return_value=SageTurnResult(message="hello from Sage", trace_id="trace-2")
             ),
         ) as execute_mock:
-            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+            result = _build_personal_reply(
+                _WHATSAPP_CHANNEL_KEY, "WhatsApp",
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="15551234567",
@@ -281,7 +311,7 @@ class WhatsAppPersonalCertification(unittest.TestCase):
         self.assertEqual(result["text"], "hello from Sage")
         self.assertEqual(result["source"], "sage_turn_adapter")
         kwargs = execute_mock.call_args.kwargs
-        self.assertEqual(kwargs["channel_origin"], "whatsapp_personal")
+        self.assertEqual(kwargs["channel_origin"], _WHATSAPP_CHANNEL_KEY)
         self.assertEqual(kwargs["workspace_id"], "workspace-1")
         self.assertIn("hey Sage", kwargs["message"])
 

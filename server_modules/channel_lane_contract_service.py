@@ -11,13 +11,6 @@ DIRECT_CHAT_MEMORY_SURFACE = "direct_chat"
 
 PERSONAL_ROUTE_PREFIX = "/personal-channels/"
 
-# The one channel key the cloud session manager puts on the wire, and the one
-# name every module that has to reason about that lane should import rather
-# than retype. See PERSONAL_CHANNEL_SPECS's own comment immediately below for
-# why this survived the 2026-08-14 cutover when its on-box twin did not.
-CLOUD_SESSION_TELEGRAM_CHANNEL_KEY = "telegram_personal"
-CLOUD_SESSION_TELEGRAM_PROVIDER = "telegram_gramjs"
-
 # 2026-08-14 full OpenClaw channel cutover: whatsapp_personal, telegram_personal,
 # signal_personal, imessage_personal and wechat_personal are DELETED from this
 # dict, not merely superseded — their first-party gateway runtimes (Baileys,
@@ -33,64 +26,36 @@ CLOUD_SESSION_TELEGRAM_PROVIDER = "telegram_gramjs"
 # transport would improve on — see that module's own comment on why discord/
 # slack/sms were deliberately excluded from the cutover.
 #
-# CORRECTION, 2026-08-15: the telegram_personal deletion above was OVER-BROAD,
-# and it took the cloud lane down silently for a day. There are TWO gramjs
-# Telegram runtimes in this product, not one. The cutover deleted the ON-BOX
-# one (empyralis-gateway/src/channels/telegram/runtime.ts) — correctly. It did
-# NOT delete the CLOUD one (`cloud-session-manager/`, real gramjs, its own
-# HTTP relay), which is still wired at three live seams and sends this exact
-# channel_key on the wire:
+# TWO gramjs Telegram runtimes existed in this product, not one, and that is
+# the fact that cost a day to rediscover — record it here rather than let the
+# next reader re-derive it:
 #
-#   inbound   POST /personal-channels/cloud/inbound  (HMAC, routes_personal_
-#             channels.py) -> personal_channels_service.handle_cloud_channel_
-#             inbound, whose `channel_key` is hardcoded "telegram_personal" by
-#             cloud-session-manager/src/telegram/hmac.js::buildSignedInbound.
-#   outbound  personal_channels_service.dispatch_cloud_channel_outbound
-#   proactive runtime_heartbeat_service + connectors/channel_delivery_outbox_
-#             service, both via resolve_cloud_telegram_session_id()
+#   ON-BOX   empyralis-gateway/src/channels/telegram/runtime.ts
+#            deleted 2026-08-14 with the rest of the cutover.
+#   CLOUD    cloud-session-manager/ — real gramjs, its own HMAC HTTP relay,
+#            its own inbound route, outbound dispatcher and two proactive
+#            callers. Nothing traced it, so the cutover missed it entirely.
 #
-# Deleting the key while leaving that lane running produced the worst possible
-# split: proactive OUTBOUND still worked, while every INBOUND message died in
-# assert_personal_gateway_channel below, was caught as a generic turn failure,
-# and came back as an empty reply — the person got silence and nothing
-# anywhere said why. So the key is declared again, telling the truth about
-# WHICH runtime serves it.
+# Missing it produced the worst possible split for a day: the cutover removed
+# `telegram_personal` from this dict while the cloud relay went on sending
+# exactly that key, so proactive OUTBOUND still worked while every INBOUND
+# message died in assert_personal_gateway_channel, was caught as a generic
+# turn failure, and came back as an empty reply. The person got silence and
+# nothing anywhere said why. It was briefly re-declared here to stop that
+# bleeding, with the deletion left as the founder's call.
 #
-# It is declared HERE ONLY, and deliberately NOT in PERSONAL_CHANNEL_ROADMAP
-# or CHANNEL_PLATFORM_CATALOG: those two are what the UI reads, and there is
-# no self-serve way to create a cloud session (no frontend caller for
-# cloud-session-manager/src/api/routes.js's creation endpoints), so a setup
-# panel would be exactly the "declared but nothing serves it" dishonesty the
-# comment above rejects. A lane contract answers "may this message be
-# processed"; a catalog answers "may a customer start this". Different
-# questions.
-#
-# NOT openclaw_telegram, and this is not a naming preference: openclaw_telegram
-# is a BOT channel whose replies leave over the gateway WebSocket to a box,
-# while this is the owner's own ACCOUNT whose replies leave over HTTP to the
-# cloud session manager. Routing one through the other would misattribute the
-# identity in the envelope and silently merge two different Telegram threads'
-# conversation memory.
-#
-# THIS IS NOT AN ENDORSEMENT OF THE LANE. The gramjs account channel is
-# ban-risk and the founder retired its on-box twin on purpose; whether the
-# cloud twin should be deleted outright (route + service + heartbeat/outbox
-# callers, one coherent change) is his call, not a side effect of this fix.
-# Until he makes it, the lane runs and reports honestly instead of failing in
-# silence.
+# He made it: DELETED 2026-08-15, the whole lane in one change — the route,
+# the handler, the outbound dispatcher, both proactive callers, the config
+# flag, the `cloud-session-manager/` directory and the two builders that
+# existed only to serve it. It was the same retired gramjs ACCOUNT channel
+# (the owner's own Telegram number, ban-risk) whose on-box twin he retired on
+# purpose, it had no self-serve creation path in the product at all, and
+# `CLOUD_SESSION_MANAGER_ENABLED` still defaulted TRUE. `openclaw_telegram`
+# — a BOT channel over the transport — is the whole Telegram surface now.
 PERSONAL_CHANNEL_SPECS: Dict[str, Dict[str, str]] = {
     "discord_personal": {
         "provider": "discord_bot",
         "runtime_lane": "cloud_connector",  # Uses bot token, not user-account session (Discord ToS prohibits self-bots)
-        "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
-        "stage": "live",
-        "live_capable": "true",
-    },
-    CLOUD_SESSION_TELEGRAM_CHANNEL_KEY: {
-        "provider": CLOUD_SESSION_TELEGRAM_PROVIDER,
-        # cloud_connector, NOT personal_gateway: nothing about this lane runs
-        # on an Agent Computer. Same reasoning as discord_personal above.
-        "runtime_lane": "cloud_connector",
         "memory_surface": DIRECT_CHAT_MEMORY_SURFACE,
         "stage": "live",
         "live_capable": "true",

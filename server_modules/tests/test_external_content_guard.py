@@ -3,7 +3,7 @@ import unittest
 import uuid
 
 from server_modules import external_content_guard as guard
-from server_modules import channel_lane_contract_service
+from server_modules import channel_lane_contract_service, openclaw_channel_registry
 
 
 class ExternalContentGuardTests(unittest.TestCase):
@@ -55,8 +55,17 @@ class ExternalContentGuardTests(unittest.TestCase):
         self.assertEqual(marker_ids, [first.wrapper_id, first.wrapper_id, second.wrapper_id, second.wrapper_id])
 
     def test_personal_channel_lane_helper_adds_source_metadata(self) -> None:
+        """RETARGETED 2026-08-15 from the hardcoded `telegram_personal` /
+        `telegram_gramjs` pair. That key was the cloud-session lane's, deleted
+        with it, so the helper raised here instead of asserting anything about
+        metadata. Both the key and the expected provider now come from the
+        lane contract itself rather than being typed, so this cannot go stale
+        the same way twice."""
+        channel_key = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+        spec = channel_lane_contract_service.assert_personal_gateway_channel(channel_key)
+
         guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
-            surface_channel="telegram_personal",
+            surface_channel=channel_key,
             text="hello",
             sender="user-1",
             source_event_id="msg-1",
@@ -64,9 +73,9 @@ class ExternalContentGuardTests(unittest.TestCase):
 
         self.assertIn("Source: personal_channel", guarded.text)
         self.assertIn("Sender: user-1", guarded.text)
-        self.assertIn("Channel: telegram_personal", guarded.text)
+        self.assertIn(f"Channel: {channel_key}", guarded.text)
         self.assertIn("Source-Event-ID: msg-1", guarded.text)
-        self.assertIn("provider: telegram_gramjs", guarded.text)
+        self.assertIn(f"provider: {spec['provider']}", guarded.text)
 
 
 if __name__ == "__main__":

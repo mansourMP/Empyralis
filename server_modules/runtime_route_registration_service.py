@@ -368,13 +368,6 @@ def register_runtime_run_routes_from_api(
         server_module=server_module,
     )
 
-    _personal_channels = import_module(
-        "server_modules.personal_channels_service",
-        fromlist=["dispatch_cloud_channel_outbound", "resolve_cloud_telegram_session_id"],
-    )
-    _cloud_dispatch_outbound = getattr(_personal_channels, "dispatch_cloud_channel_outbound", None)
-    _cloud_resolve_session = getattr(_personal_channels, "resolve_cloud_telegram_session_id", None)
-
     bootstrap_callbacks = runtime_route_bootstrap_service.build_runtime_run_route_bootstrap_callbacks(
         run_start_request_class=deps.run_start_request_class,
         build_inbound_agent_turn_request=deps.build_inbound_agent_turn_request,
@@ -388,8 +381,6 @@ def register_runtime_run_routes_from_api(
         build_heartbeat_notify_callback=runtime_heartbeat_service.build_heartbeat_notify_callback,
         resolve_workspace_tenant_id=deps.resolve_workspace_tenant_id,
         heartbeat_workspace_id=workspace_id,
-        dispatch_cloud_channel_outbound_fn=_cloud_dispatch_outbound,
-        resolve_cloud_telegram_session_id_fn=_cloud_resolve_session,
     )
 
     heartbeat_scheduler = runtime_route_bootstrap_service.ensure_runtime_run_route_bootstrap(

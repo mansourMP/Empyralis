@@ -1032,8 +1032,10 @@ shape, and neither protects a path.
 **A mock protects a seam, not a path.** `test_genuinely_silent_turn_still_returns_none`
 patched `execute_sage_turn`, got its `None`, and passed for months — while
 the code AFTER that seam ran a second, unmocked LLM turn. The sync
-`build_whatsapp_personal_reply` / `build_telegram_personal_reply` (both live:
-`personal_channels_service.py:2775` and `:3277`) treated the unified path's
+`build_whatsapp_personal_reply` / `build_telegram_personal_reply` (live at
+the time at `personal_channels_service.py:2775` and `:3277`; **both DELETED
+2026-08-15** — see the cloud-session-lane entry below, and do not go looking
+for them) treated the unified path's
 `None` as "nothing to send, try harder" and fell through to the legacy
 no-tools `_build_personal_reply`, which re-asked the model with no mention
 gate, no envelope and no group context — asked "hello" it answered "Hello!
@@ -1045,6 +1047,62 @@ an ABSENCE must also assert the call count, or it cannot tell "nothing
 happened" from "something else happened". And when a mocked path still
 reaches a provider, the path has moved out from under the patch — find where
 it goes now before re-pointing the mock, because the move is usually the bug.
+
+**THERE WERE TWO GRAMJS TELEGRAM RUNTIMES, NOT ONE. That is the fact that
+cost a day, and it is the reason the 2026-08-14 channel cutover shipped
+half-done.** Everyone — the cutover's author, the agents that reviewed it,
+this file — reasoned about "the gramjs Telegram runtime", singular. There
+were two, they shared nothing, and only one was traced:
+
+```
+ON-BOX   empyralis-gateway/src/channels/telegram/runtime.ts
+         reached from the Agent Computer, over the gateway WebSocket.
+         DELETED 2026-08-14 with the rest of the cutover.  ✓ traced
+
+CLOUD    cloud-session-manager/          ← nothing pointed at it from the
+         real gramjs, own HMAC HTTP relay,  gateway tree, so a grep that
+         own inbound route, own outbound    started from the gateway found
+         dispatcher, 2 proactive callers    nothing. Survived untouched.
+```
+
+Deleting the key while leaving that lane running produced the worst split
+available: proactive OUTBOUND still worked, while every INBOUND message died
+in `assert_personal_gateway_channel`, was swallowed as a generic turn
+failure, and came back as an empty reply. The person got silence and nothing
+anywhere said why. It ran that way for a day.
+
+**The lane is now DELETED WHOLE (2026-08-15), which is the founder's call and
+not a side effect of the fix**: `cloud-session-manager/`, `POST
+/personal-channels/cloud/inbound`, `handle_cloud_channel_inbound`,
+`dispatch_cloud_channel_outbound`, `resolve_cloud_telegram_session_id` and
+its two proactive callers (`runtime_heartbeat_service`,
+`connectors/channel_delivery_outbox_service` — both already had the Telegram
+BOT path as their fallback, which is now simply the only path), the
+`CLOUD_SESSION_MANAGER_ENABLED` flag, and the two builders that existed only
+to serve it (`build_telegram_personal_reply_async` and its sync twin, plus
+the sync `_build_unified_sage_personal_reply` wrapper whose only caller that
+was). `openclaw_telegram` — a BOT channel over the transport — is the whole
+Telegram surface now.
+
+It qualified on the cutover's own terms, not on judgement: the cutover
+commit describes moving Telegram as "a deliberate CONVERSION from an account
+channel (gramjs, ban-risk, retired)", and this WAS that account channel — the
+owner's own number, the thing that gets a real person banned. It had no
+self-serve creation path anywhere in the product (its session-creation
+endpoints had zero frontend callers, which is *why* nobody noticed), and
+`CLOUD_SESSION_MANAGER_ENABLED` still defaulted **TRUE**.
+
+Three rules follow, and the first is the expensive one. **"The X runtime" is
+a claim about cardinality, and nothing checks it** — before deleting or
+cutting over a runtime, grep for the PROTOCOL library (`gramjs`, `baileys`,
+`signal-cli`) across the whole repo, not for the module you already know
+about; a second implementation in another language, in a directory the first
+one never imports, is invisible to every trace that starts from the first.
+**A dormant seam left behind by a cutover is not neutral, it is the next
+outage**: this one kept a default-enabled ingestion route alive for a
+deleted product decision. And **a component with no self-serve creation path
+is evidence, not reassurance** — it means nothing will tell you when it
+breaks, and nobody will be looking.
 
 **"Nothing to send" is THREE facts, and collapsing them threw away
 customers' messages.** Third instance of "silence is a decision" being

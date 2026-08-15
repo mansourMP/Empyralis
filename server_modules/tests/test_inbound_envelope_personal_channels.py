@@ -31,10 +31,25 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from server_modules import agent_conversation_memory
+from server_modules import agent_conversation_memory, openclaw_channel_registry
 from server_modules import personal_channel_sage_bridge_service as bridge
 from server_modules.command_registry import ProcessedMessage
 from server_modules.inbound_envelope import SurfaceKind
+
+
+# The live Telegram key, from the registry. See _NON_OWNER_BRANCH_REGRESSION
+# below for why the per-platform builder these tests used to call is gone.
+_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+
+
+def _telegram_reply_async(**kwargs):
+    """The deleted build_telegram_personal_reply_async's shape, on the live
+    generic builder."""
+    kwargs.setdefault("fallback_label", "Telegram")
+    return bridge.build_personal_channel_reply_async(
+        surface_channel=_TELEGRAM_CHANNEL_KEY, **kwargs
+    )
+
 
 
 def _run(coro):
@@ -52,7 +67,7 @@ class PersonalChannelEnvelopeConstructionTests(unittest.TestCase):
     def test_owner_self_chat_is_owner_self_chat_surface(self) -> None:
         """(a) owner self-chat -> OWNER_SELF_CHAT + is_owner True."""
         envelope = bridge._build_personal_channel_envelope(
-            surface_channel="telegram_personal",
+            surface_channel=_TELEGRAM_CHANNEL_KEY,
             remote_jid="owner-tg-1",
             sender_id="owner-tg-1",
             push_name="Mansur",
@@ -64,7 +79,7 @@ class PersonalChannelEnvelopeConstructionTests(unittest.TestCase):
         self.assertIs(envelope.sender.is_owner, True)
         self.assertEqual(envelope.sender.display_name, "Mansur")
         self.assertEqual(envelope.sender.id, "owner-tg-1")
-        self.assertEqual(envelope.platform, "telegram_personal")
+        self.assertEqual(envelope.platform, _TELEGRAM_CHANNEL_KEY)
         self.assertIsNone(envelope.addressed)
 
     def test_group_message_from_non_owner_is_group_surface(self) -> None:
@@ -74,7 +89,7 @@ class PersonalChannelEnvelopeConstructionTests(unittest.TestCase):
         — see that function's docstring) — explicitly passed, not a
         hardcode this function makes on its own (see the next test)."""
         envelope = bridge._build_personal_channel_envelope(
-            surface_channel="telegram_personal",
+            surface_channel=_TELEGRAM_CHANNEL_KEY,
             remote_jid="-100555777",
             sender_id="aunt-nadia-id",
             push_name="Aunt Nadia",
@@ -104,7 +119,7 @@ class PersonalChannelEnvelopeConstructionTests(unittest.TestCase):
         didn't resolve/pass a real fact at all, so the model is never told
         "you were addressed directly" for a message that was not."""
         not_addressed = bridge._build_personal_channel_envelope(
-            surface_channel="telegram_personal",
+            surface_channel=_TELEGRAM_CHANNEL_KEY,
             remote_jid="-100555777",
             sender_id="aunt-nadia-id",
             push_name="Aunt Nadia",
@@ -116,7 +131,7 @@ class PersonalChannelEnvelopeConstructionTests(unittest.TestCase):
         self.assertIs(not_addressed.addressed, False)
 
         unresolved = bridge._build_personal_channel_envelope(
-            surface_channel="telegram_personal",
+            surface_channel=_TELEGRAM_CHANNEL_KEY,
             remote_jid="-100555777",
             sender_id="aunt-nadia-id",
             push_name="Aunt Nadia",
@@ -282,26 +297,27 @@ class _EnvelopeEndToEndTestCase(unittest.TestCase):
         self._tmpdir.cleanup()
 
 
-_CLOUD_TELEGRAM_LANE_REGRESSION = """WAS RED 2026-08-15, FIXED THE SAME DAY. These two are the cloud-session
-lane's only regression witnesses on the NON-OWNER branch — keep them
-distinguishable from the owner-branch cases beside them.
+_NON_OWNER_BRANCH_REGRESSION = """These two are this file's only witnesses on the NON-OWNER branch — keep
+them distinguishable from the owner-branch cases beside them.
 
-`personal_channel_sage_bridge_service.build_telegram_personal_reply_async`
-hands its hardcoded `telegram_personal` to
-channel_lane_contract_service.guard_personal_gateway_inbound_message on its
-non-owner branch only. The 2026-08-14 OpenClaw cutover removed that key from
-PERSONAL_CHANNEL_SPECS while `cloud-session-manager/` went on sending it, so
-the guard raised on every call. That builder is the only one
-personal_channels_service.handle_cloud_channel_inbound calls, and that
-handler's own comment records that is_owner "still always evaluates to False
-today" on the cloud wire — so the broken branch was the one EVERY cloud
-Telegram message took: turn failed, reply suppressed to empty, person got
-silence with nothing anywhere saying why.
+The builder hands its channel key to channel_lane_contract_service.
+guard_personal_gateway_inbound_message on its non-owner branch ONLY, so a key
+the lane contract does not carry raises here and nowhere else: the turn
+fails, the reply is suppressed to empty, and the person gets silence with
+nothing anywhere saying why.
 
-The owner-branch tests in this file passed throughout, which is exactly why
-it was invisible. Fixed by declaring the cloud-session lane in the lane
-contract (it is served by a live runtime, just not the deleted on-box one) —
-see PERSONAL_CHANNEL_SPECS's own comment for why NOT `openclaw_telegram`.
+That is not hypothetical. On 2026-08-15 these two were RED for exactly that
+reason. build_telegram_personal_reply_async hardcoded `telegram_personal`;
+the 2026-08-14 OpenClaw cutover had removed that key while a second,
+cloud-hosted gramjs Telegram runtime (`cloud-session-manager/`) went on
+sending it, and that lane's handler always passed is_owner=False — so the
+broken branch was the one EVERY message on it took. The owner-branch tests
+in this file passed throughout, which is exactly why it was invisible.
+
+RETARGETED the same day: the cloud lane was deleted whole and both Telegram
+builders with it, so these now drive build_personal_channel_reply_async on
+`openclaw_telegram` — a key a real Telegram message can arrive under, taken
+from the registry rather than typed.
 """
 
 
@@ -314,7 +330,7 @@ class EnvelopeHeaderReachesHandleSageChatTests(_EnvelopeEndToEndTestCase):
             new=AsyncMock(return_value={"message": "sure thing"}),
         ) as handle_mock:
             result = _run(
-                bridge.build_telegram_personal_reply_async(
+                _telegram_reply_async(
                     workspace_id="workspace-envelope-1",
                     gateway_id="gateway-1",
                     remote_jid="owner-tg-1",
@@ -338,13 +354,13 @@ class EnvelopeHeaderReachesHandleSageChatTests(_EnvelopeEndToEndTestCase):
         self.assertNotIn("(owner) ·", sent_message)
 
     def test_group_message_header_states_group_and_not_owner(self) -> None:
-        __doc__ = _CLOUD_TELEGRAM_LANE_REGRESSION  # noqa: F841
+        __doc__ = _NON_OWNER_BRANCH_REGRESSION  # noqa: F841
         with patch(
             "server_modules.sage_agent_runtime_service.handle_sage_chat",
             new=AsyncMock(return_value={"message": "'Posle' means 'later'."}),
         ) as handle_mock:
             result = _run(
-                bridge.build_telegram_personal_reply_async(
+                _telegram_reply_async(
                     workspace_id="workspace-envelope-2",
                     gateway_id="gateway-1",
                     remote_jid="-100555777",
@@ -371,7 +387,7 @@ class EnvelopeCommandGateTests(_EnvelopeEndToEndTestCase):
     (envelope_allows_owner_commands), not model reasoning."""
 
     def test_group_slash_command_is_not_dispatched_as_a_command(self) -> None:
-        __doc__ = _CLOUD_TELEGRAM_LANE_REGRESSION  # noqa: F841
+        __doc__ = _NON_OWNER_BRANCH_REGRESSION  # noqa: F841
         with (
             patch(
                 "server_modules.command_registry.process_message", new=AsyncMock()
@@ -385,7 +401,7 @@ class EnvelopeCommandGateTests(_EnvelopeEndToEndTestCase):
             ) as handle_mock,
         ):
             _run(
-                bridge.build_telegram_personal_reply_async(
+                _telegram_reply_async(
                     workspace_id="workspace-envelope-3",
                     gateway_id="gateway-1",
                     remote_jid="-100555777",
@@ -415,7 +431,7 @@ class EnvelopeCommandGateTests(_EnvelopeEndToEndTestCase):
             ),
         ) as proc_mock:
             result = _run(
-                bridge.build_telegram_personal_reply_async(
+                _telegram_reply_async(
                     workspace_id="workspace-envelope-4",
                     gateway_id="gateway-1",
                     remote_jid="owner-tg-1",

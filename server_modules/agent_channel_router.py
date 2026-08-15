@@ -22,7 +22,9 @@ function personal_channels_service.py already implements and is the one
 actually wired to live traffic (gateway_protocol_service.py ->
 personal_channels_service.handle_gateway_channel_inbound;
 routes_personal_channels.py -> personal_channels_service.
-handle_cloud_channel_inbound). That second implementation was never called
+handle_cloud_channel_inbound — the latter deleted 2026-08-15 with the
+cloud-session lane, so the gateway entry is the only one left). That second
+implementation was never called
 by anything: confirmed via a full-repo grep for every symbol in it (every
 handler, every helper, the module-level constants, the lazy
 gateway_protocol_service wrapper, and the file's own independent

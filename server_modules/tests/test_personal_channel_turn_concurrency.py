@@ -8,10 +8,11 @@ _execute_channel_turn_with_envelope called execute_sage_turn directly, with
 no lock anywhere in the file.
 
 _execute_channel_turn_with_envelope is the one chokepoint every personal-
-channel reply crosses before calling execute_sage_turn (build_telegram_
-personal_reply(_async), build_discord_personal_reply_async, and build_
-personal_channel_reply_async all funnel through
-_build_unified_sage_personal_reply_async into it), so these tests prove the
+channel reply crosses before calling execute_sage_turn (build_discord_
+personal_reply_async and build_personal_channel_reply_async both funnel
+through _build_unified_sage_personal_reply_async into it — the per-platform
+WhatsApp and Telegram builders that used to sit beside them are deleted, see
+the retarget notes below), so these tests prove the
 fix at that one seam rather than per public entry point.
 
 Deliberately per-thread, not global: MAN-318 measured 8 fully concurrent
@@ -35,6 +36,22 @@ from server_modules.sage_agent_runtime_contract import SageTurnResult
 # channel nothing routes.
 _WHATSAPP_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}whatsapp"
 
+# SAME RETARGET, SAME DAY, for build_telegram_personal_reply_async — deleted
+# with the cloud-session lane, the only thing that still produced
+# `telegram_personal`. The serialization proof itself is unchanged: it is a
+# property of _execute_channel_turn_with_envelope's per-thread lock, not of
+# any one channel, so it is now asserted on the key a real Telegram message
+# can actually arrive under.
+_TELEGRAM_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}telegram"
+
+
+def _telegram_reply(**kwargs):
+    """The deleted per-platform builder's shape, on the live generic one."""
+    kwargs.setdefault("fallback_label", "Telegram")
+    return personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+        surface_channel=_TELEGRAM_CHANNEL_KEY, **kwargs
+    )
+
 
 class PersonalChannelTurnSerializationTests(unittest.TestCase):
     def test_two_concurrent_messages_on_the_same_thread_never_overlap(self) -> None:
@@ -54,14 +71,14 @@ class PersonalChannelTurnSerializationTests(unittest.TestCase):
 
         async def run_case():
             await asyncio.gather(
-                personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
+                _telegram_reply(
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="tg-user-1",
                     text="first",
                     push_name="User",
                 ),
-                personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
+                _telegram_reply(
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="tg-user-1",
@@ -105,14 +122,14 @@ class PersonalChannelTurnSerializationTests(unittest.TestCase):
 
         async def run_case():
             await asyncio.gather(
-                personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
+                _telegram_reply(
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="tg-user-1",
                     text="a",
                     push_name="User",
                 ),
-                personal_channel_sage_bridge_service.build_telegram_personal_reply_async(
+                _telegram_reply(
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="tg-user-2",

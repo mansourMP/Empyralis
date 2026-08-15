@@ -1,5 +1,4 @@
 from __future__ import annotations
-import os
 
 from copy import deepcopy
 from typing import Any, Dict, Iterable, Optional
@@ -227,8 +226,20 @@ _CATALOG: tuple[Dict[str, Any], ...] = (
         surfaces=("sage", "agent_computer"),
         setup_kind="phone_code_2fa",
         launch_status=LAUNCH_LIVE,
-        description="Personal Telegram account through the selected Agent Computer or cloud session manager.",
-        requires_gateway=not os.environ.get("CLOUD_SESSION_MANAGER_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on"),
+        description="Personal Telegram account through the selected Agent Computer.",
+        # `requires_gateway` used to be computed as `not CLOUD_SESSION_MANAGER_
+        # ENABLED` — i.e. False by default, because a cloud-hosted gramjs
+        # relay could serve this channel with no Agent Computer at all. That
+        # lane was deleted 2026-08-15 (see channel_lane_contract_service.
+        # PERSONAL_CHANNEL_SPECS), so the flag is gone and this is True like
+        # every other personal-channel entry beside it.
+        #
+        # NOTE, and it is not this change's to fix: this entry and its four
+        # siblings below (whatsapp/signal/imessage/wechat _personal) all
+        # describe FIRST-PARTY runtimes the 2026-08-14 cutover deleted. This
+        # catalog was not swept then and still is not — removing one of five
+        # here would leave a worse inconsistency than leaving all five.
+        requires_gateway=True,
         supports_inbound=True,
         supports_outbound=True,
         media_support=_media(text=True, images=True, files=True, voice=True),

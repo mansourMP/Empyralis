@@ -686,90 +686,14 @@ async def _build_unified_sage_personal_reply_async(
     return None
 
 
-def _build_unified_sage_personal_reply(
-    *,
-    surface_channel: str,
-    workspace_id: str,
-    gateway_id: str,
-    remote_jid: str,
-    text: str,
-    push_name: Optional[str] = None,
-    sender_id: str = "",
-    fallback_label: str,
-    source_event_id: Optional[str] = None,
-    agent_id: str = "",
-    attachments: Optional[List[dict]] = None,
-    is_owner: bool = False,
-    is_group: bool = False,
-    chat_label: Optional[str] = None,
-    was_addressed: Optional[bool] = None,
-) -> Optional[Dict[str, Any]]:
-    import asyncio
-    import threading
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(
-            _build_unified_sage_personal_reply_async(
-                surface_channel=surface_channel,
-                workspace_id=workspace_id,
-                gateway_id=gateway_id,
-                remote_jid=remote_jid,
-                text=text,
-                push_name=push_name,
-                sender_id=sender_id,
-                fallback_label=fallback_label,
-                source_event_id=source_event_id,
-                agent_id=agent_id,
-                attachments=attachments,
-                is_owner=is_owner,
-                is_group=is_group,
-                chat_label=chat_label,
-                was_addressed=was_addressed,
-            )
-        )
-
-    holder: dict[str, Any] = {"result": None, "error": None}
-
-    def _runner() -> None:
-        try:
-            holder["result"] = asyncio.run(
-                _build_unified_sage_personal_reply_async(
-                    surface_channel=surface_channel,
-                    workspace_id=workspace_id,
-                    gateway_id=gateway_id,
-                    remote_jid=remote_jid,
-                    text=text,
-                    push_name=push_name,
-                    sender_id=sender_id,
-                    fallback_label=fallback_label,
-                    source_event_id=source_event_id,
-                    agent_id=agent_id,
-                    attachments=attachments,
-                    is_owner=is_owner,
-                    is_group=is_group,
-                    chat_label=chat_label,
-                    was_addressed=was_addressed,
-                )
-            )
-        except Exception as exc:
-            holder["error"] = exc
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    thread.join()
-    if holder["error"] is not None:
-        raise holder["error"]
-    return holder["result"]
-
-
 # build_whatsapp_personal_reply_async / build_whatsapp_personal_reply DELETED
 # 2026-08-15. Both hardcoded `surface_channel="whatsapp_personal"`, a key the
 # 2026-08-14 OpenClaw cutover removed from the lane contract along with the
 # Baileys runtime, every WhatsApp inbound handler and the catalog entry — and
-# `cloud-session-manager/src/` is telegram-only, so nothing anywhere can
-# produce that key. They had ZERO callers and were fully unit-tested: exactly
+# `cloud-session-manager/`, the one other producer of a first-party personal
+# key at the time, was telegram-only (and is itself deleted as of 2026-08-15,
+# see the note below), so nothing anywhere can produce that key. They had
+# ZERO callers and were fully unit-tested: exactly
 # the "built, tested, and never wired" shape CLAUDE.md names as this
 # codebase's most common defect, one step worse than usual because the key
 # they were wired to no longer exists. Their real subject — a WhatsApp turn
@@ -783,62 +707,28 @@ def _build_unified_sage_personal_reply(
 # this transport was adopted to stop writing.
 
 
-async def build_telegram_personal_reply_async(
-    *,
-    workspace_id: str,
-    gateway_id: str,
-    remote_jid: str,
-    text: str,
-    push_name: Optional[str] = None,
-    sender_id: str = "",
-    source_event_id: Optional[str] = None,
-    is_owner: bool = False,
-    is_group: bool = False,
-    chat_label: Optional[str] = None,
-    was_addressed: Optional[bool] = None,
-) -> Optional[Dict[str, Any]]:
-    try:
-        unified = await _build_unified_sage_personal_reply_async(
-            surface_channel="telegram_personal",
-            workspace_id=workspace_id,
-            gateway_id=gateway_id,
-            remote_jid=remote_jid,
-            text=text,
-            push_name=push_name,
-            sender_id=sender_id,
-            fallback_label="Telegram",
-            source_event_id=source_event_id,
-            is_owner=is_owner,
-            is_group=is_group,
-            chat_label=chat_label,
-            was_addressed=was_addressed,
-        )
-        return unified
-    except Exception as _exc:
-        # ABSOLUTE RULE: no hardcoded status/error message may EVER be sent
-        # into a channel. This used to also fire a direct cloud-session
-        # dispatch of SAGE_ERROR_REPLY — that bypassed every reply object
-        # and every filter and sent a canned string straight into the
-        # channel (DM or group). Log + surface on the dashboard/activity
-        # feed instead; the channel gets nothing sendable.
-        #
-        # RETURN THE FAILED DICT, NEVER None — fixed 2026-08-15, and it is
-        # the same "silence is a decision, never a failure" bug this module's
-        # own _build_error_reply_dict docstring was written about, surviving
-        # one line below it. This branch BUILT the failed result (carrying
-        # channel_adapter.DELIVERY_FAILED_KEY) and then threw it away, and
-        # channel_adapter.resolve_channel_reply_outcome(None) can only ever
-        # classify None as SILENT — "the agent was asked and chose not to
-        # answer". So every crashed turn on this lane was recorded as a
-        # deliberate silence: handle_cloud_channel_inbound returned
-        # "no_reply" instead of "undelivered", and the owner's own agent read
-        # as ignoring them. Returning the dict is what makes the three-way
-        # deliver / silent / undelivered split actually reachable here, which
-        # is the whole reason that split exists. A genuine None from the
-        # unified path above (the agent ran and chose silence) still returns
-        # as None, unchanged — that is the fact this must stay able to tell
-        # apart.
-        return _build_error_reply_dict(_exc, workspace_id)
+# build_telegram_personal_reply_async / build_telegram_personal_reply DELETED
+# 2026-08-15, together with the sync `_build_unified_sage_personal_reply`
+# wrapper above whose only caller the second one was.
+#
+# Both hardcoded `surface_channel="telegram_personal"`, and the ONLY thing
+# that still produced that key was the cloud-session lane — a second,
+# cloud-hosted gramjs Telegram ACCOUNT runtime (`cloud-session-manager/`) the
+# 2026-08-14 OpenClaw cutover missed because nothing traced it. That lane was
+# deleted whole on 2026-08-15 (route, handler, outbound dispatcher, both
+# proactive callers, config flag, directory), so these two are in exactly the
+# position their WhatsApp twins were in above: pointed at a key nothing can
+# produce.
+#
+# The sync one had ALREADY had zero production callers before that, and its
+# own docstring said to delete it together with the sync unified wrapper once
+# the ~20 tests driving the unified path through it were retargeted onto the
+# async builder. They have been.
+#
+# Deleted rather than repointed at `openclaw_telegram`, same reasoning as the
+# WhatsApp pair: a per-platform builder IS the thing the generic builder
+# replaced, and `build_personal_channel_reply_async` is what
+# personal_channels_service actually calls for every OpenClaw channel.
 
 
 async def build_discord_personal_reply_async(
@@ -872,7 +762,8 @@ async def build_discord_personal_reply_async(
 
     was_addressed: no live caller resolves this for Discord yet either
     (no group_policy/mention-gating equivalent wired up for Discord) — see
-    build_telegram_personal_reply's docstring for the contract once one is.
+    _build_personal_channel_envelope's docstring for the contract once one is
+    (it used to point at build_telegram_personal_reply, deleted 2026-08-15).
     """
     try:
         unified = await _build_unified_sage_personal_reply_async(
@@ -940,82 +831,3 @@ async def build_personal_channel_reply_async(
             surface_channel, workspace_id, _exc
         )
         return _build_error_reply_dict(_exc, workspace_id)
-
-
-def build_telegram_personal_reply(
-    *,
-    workspace_id: str,
-    gateway_id: str,
-    remote_jid: str,
-    text: str,
-    push_name: Optional[str] = None,
-    sender_id: str = "",
-    source_event_id: Optional[str] = None,
-    agent_id: str = "",
-    attachments: Optional[List[dict]] = None,
-    is_owner: bool = False,
-    is_group: bool = False,
-    chat_label: Optional[str] = None,
-    was_addressed: Optional[bool] = None,
-) -> Optional[Dict[str, Any]]:
-    """Build a reply for a Telegram personal DM — as the specialist agent_id
-    names (see _execute_channel_turn_with_envelope), or as Sage when agent_id
-    is empty.
-
-    ZERO PRODUCTION CALLERS as of 2026-08-15, and kept anyway — unlike its
-    WhatsApp twin, deleted above, this one points at a key a live runtime
-    still serves (the cloud-session lane; see channel_lane_contract_service.
-    CLOUD_SESSION_TELEGRAM_CHANNEL_KEY). The live cloud path is async and
-    calls build_telegram_personal_reply_async, so this sync entry point is
-    unused surface, not a dead-key hazard. Delete it — together with
-    _build_unified_sage_personal_reply, whose only remaining caller it is —
-    when the ~20 tests in test_personal_channel_sage_bridge_service.py that
-    drive the unified path through it are retargeted onto the async builder.
-
-    attachments: media-pipeline attachments (image/file kinds) already
-    resolved+stored by personal_channel_media_store_service.
-
-    sender_id: the specific participant's jid (differs from remote_jid inside
-    a group) — see _build_personal_channel_envelope's docstring; falls back to
-    remote_jid when omitted.
-
-    is_owner: caller-resolved via personal_channels_service._is_owner_message
-    (self-chat, or sender matching this channel's linked owner id) — see
-    _build_unified_sage_personal_reply_async's docstring for the full
-    contract. Defaults to False (guarded/external), matching every other
-    build_*_personal_reply* entry point.
-
-    is_group / chat_label: caller-resolved group signal + human-readable
-    chat/group label — see _build_unified_sage_personal_reply_async's
-    docstring for the owner-unified-memory contract they feed.
-
-    was_addressed: caller-resolved (personal_channels_service.
-    _enforce_group_policy's own "was_addressed" result) real "was this group
-    message actually addressed" fact — see _build_personal_channel_envelope's
-    docstring for why this must never be a blanket True. None for a non-group
-    turn (not applicable).
-    """
-    # SILENCE IS A DECISION, NOT A FAILURE — see the module docstring note.
-    # None from the unified path means the agent ran and chose to say nothing;
-    # it is returned as-is. This used to fall through to a second, tool-less
-    # LLM turn (_build_personal_reply) that re-asked the model with no gating
-    # context at all, so "stay quiet" came back as "Hello! How can I help you
-    # today?" — an unprompted outbound message, in a group chat, from a turn
-    # that had already decided not to speak.
-    return _build_unified_sage_personal_reply(
-        surface_channel="telegram_personal",
-        workspace_id=workspace_id,
-        gateway_id=gateway_id,
-        remote_jid=remote_jid,
-        text=text,
-        push_name=push_name,
-        sender_id=sender_id,
-        fallback_label="Telegram",
-        source_event_id=source_event_id,
-        agent_id=agent_id,
-        attachments=attachments,
-        is_owner=is_owner,
-        is_group=is_group,
-        chat_label=chat_label,
-        was_addressed=was_addressed,
-    )
