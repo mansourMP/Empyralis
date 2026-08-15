@@ -2839,12 +2839,39 @@ async def workspace_connection_summary(
 
     # A binding row and an OpenClaw key can describe the SAME channel, so the
     # two signals are unioned by channel_key rather than added.
+    #
+    # And a binding row for a channel that NO LONGER EXISTS counts for
+    # nothing. The founder's real workspace carried four enabled
+    # `telegram_personal` rows — the deleted first-party lane — and the strip
+    # summed them into "5 channels connected" for channels that cannot carry
+    # a message. A row nothing can read is not a connection; it is litter the
+    # cutover left behind, and the counter must not launder it into a fact.
+    # "Still exists" is decided by the code that CARRIES the channel, never by
+    # this catalog — this catalog still lists `telegram_personal`, which the
+    # sync path itself logs as "this build no longer carries". Personal-lane
+    # keys are validated against channel_lane_contract_service's spec map (the
+    # same authority `_carried()` uses at the sync seam); business-lane keys
+    # (slack, discord_bot — cloud channels with no gateway) stay validated
+    # against their own lane's catalog, which is still their authority.
+    try:
+        from server_modules import channel_lane_contract_service as _lanes
+
+        _specs = _lanes.PERSONAL_CHANNEL_SPECS
+        carried_personal = {str(k) for k in (_specs.keys() if isinstance(_specs, dict) else _specs)}
+    except Exception:
+        carried_personal = set()
+    live_channel_keys = carried_personal | {
+        _token(item.get("id"))
+        for item in catalog_items(surface="sage")
+        if _token(item.get("lane")) == LANE_STUDIO_BUSINESS_CHANNEL
+    }
     bound_keys = {
         str((row or {}).get("channel_key") or (row or {}).get("channel") or "").strip()
         for row in (channel_bindings or [])
     }
     bound_keys.discard("")
-    channels_connected = len(bound_keys | openclaw_channels) or len(channel_bindings)
+    bound_keys &= live_channel_keys
+    channels_connected = len(bound_keys | openclaw_channels)
 
     return {
         "connectors": {"connected": len(connector_bindings), "total": connector_total},
