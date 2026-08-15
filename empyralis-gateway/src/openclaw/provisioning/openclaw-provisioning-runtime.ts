@@ -73,7 +73,10 @@ export interface OpenClawProvisioningRuntimeOptions {
   homeDir?: string;
   record?: (messageType: string, payload: Record<string, unknown>) => Promise<unknown>;
   /** Test seam: replaces the whole provisioning run. */
-  runProvision?: (channels: EmpyralisChannelPolicy[]) => Promise<OpenClawProvisionResult>;
+  runProvision?: (
+    channels: EmpyralisChannelPolicy[],
+    registryPlugins?: readonly { npmPackage: string; installSpec: string; pluginId: string }[],
+  ) => Promise<OpenClawProvisionResult>;
 }
 
 /**
@@ -86,6 +89,46 @@ export interface OpenClawProvisioningRuntimeOptions {
  * personal_channels_service.DEFAULT_REQUIRE_MENTION, and being the safe side
  * of the one axis Empyralis cannot re-enforce itself.
  */
+/**
+ * Validates the cloud's REGISTRY plugin list — the channel plugins that come
+ * from OpenClaw's plugin registry rather than its bundled catalog.
+ *
+ * Fail-closed like `parseChannelPolicies`: an entry missing any of the three
+ * fields is an error, never a partially-formed install. There is no channel
+ * id to validate against here on purpose — a registry plugin's channel id is
+ * not knowable until it is installed, so the cloud's own derived manifest is
+ * the allowlist and this only checks the shape it sent.
+ */
+export function parseRegistryPluginSpecs(raw: unknown): {
+  registryPlugins: { npmPackage: string; installSpec: string; pluginId: string }[];
+  errors: string[];
+} {
+  const errors: string[] = [];
+  const registryPlugins: { npmPackage: string; installSpec: string; pluginId: string }[] = [];
+  if (raw === undefined || raw === null) return { registryPlugins, errors };
+  if (!Array.isArray(raw)) {
+    return { registryPlugins, errors: ["`registry_plugins` must be an array."] };
+  }
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") {
+      errors.push("A registry plugin entry was not an object.");
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const npmPackage = String(record.npm_package ?? "").trim();
+    const installSpec = String(record.install_spec ?? "").trim();
+    const pluginId = String(record.plugin_id ?? "").trim().toLowerCase();
+    if (!npmPackage || !installSpec || !pluginId) {
+      errors.push(
+        `Registry plugin entry is missing npm_package/install_spec/plugin_id: ${JSON.stringify(entry)}`,
+      );
+      continue;
+    }
+    registryPlugins.push({ npmPackage, installSpec, pluginId });
+  }
+  return { registryPlugins, errors };
+}
+
 export function parseChannelPolicies(raw: unknown): {
   channels: EmpyralisChannelPolicy[];
   errors: string[];
@@ -167,21 +210,30 @@ export class OpenClawProvisioningRuntime {
     }
     const args = frame.payload?.arguments ?? {};
     const parsed = parseChannelPolicies((args as Record<string, unknown>).channels);
-    if (parsed.errors.length > 0) {
+    const parsedRegistry = parseRegistryPluginSpecs(
+      (args as Record<string, unknown>).registry_plugins,
+    );
+    if (parsed.errors.length > 0 || parsedRegistry.errors.length > 0) {
       // Never provision from a partially-understood policy: a channel we
       // silently skipped would keep whatever policy the last run left, which
       // is the stale-artifact failure this whole step exists to prevent.
       return {
         capability_id: OPENCLAW_PROVISION_CAPABILITY,
         status: "refused",
-        refusal: { code: "openclaw_policy_payload_invalid", detail: parsed.errors.join(" ") },
+        refusal: {
+          code: "openclaw_policy_payload_invalid",
+          detail: [...parsed.errors, ...parsedRegistry.errors].join(" "),
+        },
       };
     }
-    const result = await this.runProvision(parsed.channels);
+    const result = await this.runProvision(parsed.channels, parsedRegistry.registryPlugins);
     return { capability_id: OPENCLAW_PROVISION_CAPABILITY, pinned_version: OPENCLAW_PINNED_VERSION, ...serialize(result) };
   }
 
-  private buildProvisioner(channels: EmpyralisChannelPolicy[]): OpenClawProvisioner {
+  private buildProvisioner(
+    channels: EmpyralisChannelPolicy[],
+    registryPlugins?: readonly { npmPackage: string; installSpec: string; pluginId: string }[],
+  ): OpenClawProvisioner {
     const env = this.options.env ?? process.env;
     const platform = this.options.platform ?? process.platform;
     const homeDir = this.options.homeDir ?? os.homedir();
@@ -199,6 +251,7 @@ export class OpenClawProvisioningRuntime {
         profileStateDir: openClawProfileStateDir(this.options.profile, homeDir),
         bridgePluginPath: this.options.bridgePluginPath,
         channels,
+        registryPlugins,
       },
       secrets: { gatewayToken: this.options.gatewayToken },
       bridgeToken: this.options.bridgeToken,
@@ -222,9 +275,12 @@ export class OpenClawProvisioningRuntime {
     });
   }
 
-  async runProvision(channels: EmpyralisChannelPolicy[]): Promise<OpenClawProvisionResult> {
-    if (this.options.runProvision) return this.options.runProvision(channels);
-    return this.buildProvisioner(channels).provision();
+  async runProvision(
+    channels: EmpyralisChannelPolicy[],
+    registryPlugins?: readonly { npmPackage: string; installSpec: string; pluginId: string }[],
+  ): Promise<OpenClawProvisionResult> {
+    if (this.options.runProvision) return this.options.runProvision(channels, registryPlugins);
+    return this.buildProvisioner(channels, registryPlugins).provision();
   }
 
   /**
@@ -337,6 +393,19 @@ function serialize(result: OpenClawProvisionResult): Record<string, unknown> {
       installed: state.installed,
       resolved_spec: state.resolvedSpec ?? null,
       action: state.action,
+    })),
+    // The registry half of the same question, keyed by npm package because a
+    // registry plugin has no channel id until it is installed.
+    // `revealed_channel_ids` is the ONLY place that id can be learned, and it
+    // is observed off the box, never derived from the package name.
+    registry_plugins: result.registryPlugins.map((state) => ({
+      npm_package: state.npmPackage,
+      install_spec: state.installSpec,
+      plugin_id: state.pluginId,
+      installed: state.installed,
+      resolved_spec: state.resolvedSpec ?? null,
+      action: state.action,
+      revealed_channel_ids: state.revealedChannelIds,
     })),
     audit_findings: result.auditFindings.map((finding) => ({
       check_id: finding.checkId,

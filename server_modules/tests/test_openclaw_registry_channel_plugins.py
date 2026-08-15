@@ -128,13 +128,20 @@ def test_every_registry_plugin_records_how_it_was_confirmed():
         assert plugin.confirmed_by, plugin.npm_package
 
 
-def test_npm_spec_is_pinned_to_a_version():
+def test_install_spec_is_pinned_to_a_version():
     """"Newest compatible" moves, so two boxes provisioned a month apart would
     silently run different code — the same reason every other install spec in
-    this manifest is pinned."""
+    this manifest is pinned.
+
+    A registry offer carries `install_spec`, NOT the `npm_spec` a carried
+    channel's `plugin_install` block carries. They are different facts about
+    different things — a registry offer resolves through the clawhub registry
+    the manifest read it from, an official channel plugin through npm — and
+    collapsing the two names would let a lookup silently reach the wrong one.
+    """
     for plugin in openclaw_channel_registry.registry_channel_plugins():
-        assert "@" in plugin.npm_spec.lstrip("@"), plugin.npm_spec
-        assert plugin.npm_spec.endswith(plugin.version), plugin.npm_spec
+        assert "@" in plugin.install_spec.lstrip("@"), plugin.install_spec
+        assert plugin.install_spec.endswith(plugin.version), plugin.install_spec
 
 
 # ── The install allowlist ────────────────────────────────────────────────
@@ -156,12 +163,12 @@ def test_install_specs_resolve_a_known_package_to_its_pinned_spec():
     plugin = openclaw_channel_registry.registry_channel_plugin_for_package("telegram-userbot")
     assert specs[0] == {
         "npm_package": "telegram-userbot",
-        "npm_spec": plugin.npm_spec,
+        "install_spec": plugin.install_spec,
         "plugin_id": plugin.plugin_id,
     }
     # The caller's string is never forwarded verbatim — the manifest's own
     # pinned spec is, which is what makes two boxes run the same code.
-    assert specs[0]["npm_spec"] != "telegram-userbot"
+    assert specs[0]["install_spec"] != "telegram-userbot"
 
 
 def test_install_specs_deduplicate_and_tolerate_blanks():

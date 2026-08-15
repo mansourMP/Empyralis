@@ -280,6 +280,28 @@ export interface OpenClawProvisioningPlan {
    *  plugin in `plugins.allow`, so the instance's plugin inventory is an
    *  explicit list rather than whatever happens to be on disk. */
   installedChannelPluginIds?: readonly string[];
+  /**
+   * Channel plugins to acquire from OpenClaw's PLUGIN REGISTRY rather than
+   * from its bundled catalog — the channels a bare install has never heard of.
+   *
+   * Keyed by npm package rather than by channel id, because a registry
+   * plugin's channel id does not exist until it has been installed and
+   * loaded: a third-party plugin registers its channel at runtime, and the id
+   * it claims is demonstrably not its package name. So there is no
+   * `EmpyralisChannelPolicy` to hang this off — a policy for `channels.<id>`
+   * cannot be written for an id nobody knows yet. Policy for these arrives on
+   * the NEXT provisioning run, once the channel has appeared on the box and
+   * the manifest carries it as a resolved channel.
+   *
+   * Every spec here was checked against the derived manifest by the cloud
+   * (`openclaw_channel_registry.is_registry_channel_package`), so this is
+   * never an arbitrary npm package a caller talked the box into fetching.
+   */
+  registryPlugins?: readonly {
+    npmPackage: string;
+    installSpec: string;
+    pluginId: string;
+  }[];
 }
 
 /** Secrets are passed separately from the plan so the plan itself can be

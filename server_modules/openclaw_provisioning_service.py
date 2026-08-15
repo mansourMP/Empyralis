@@ -465,6 +465,41 @@ async def build_openclaw_channel_policies(
     return policies
 
 
+def build_registry_plugin_specs(
+    install_registry_packages: Optional[List[str]],
+) -> List[Dict[str, str]]:
+    """The registry plugins this run should acquire, as the gateway wants them.
+
+    The derived manifest is the ALLOWLIST, not a lookup of convenience: a
+    package name that did not come out of source 8 is dropped here rather than
+    forwarded, because the value ends up as the argument to
+    `openclaw plugins install` on a customer's own machine. Silently dropping
+    is right for an unknown name — the caller asked for something that is not
+    a channel plugin we offer, and there is nothing to install — while a name
+    we DO know produces its pinned spec, never a floating package name.
+    """
+    if not install_registry_packages:
+        return []
+    specs: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in install_registry_packages:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        plugin = openclaw_channel_registry.registry_channel_plugin_for_package(name)
+        if plugin is None:
+            continue
+        seen.add(name)
+        specs.append(
+            {
+                "npm_package": plugin.npm_package,
+                "install_spec": plugin.install_spec,
+                "plugin_id": plugin.plugin_id,
+            }
+        )
+    return specs
+
+
 async def provision_openclaw_gateway(
     *,
     gateway_id: str,
@@ -473,6 +508,7 @@ async def provision_openclaw_gateway(
     agent_id: str,
     actor_id: Optional[str] = None,
     install_channel_keys: Optional[List[str]] = None,
+    install_registry_packages: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Push the current policy to the box and return its verbatim result.
 
@@ -516,11 +552,12 @@ async def provision_openclaw_gateway(
         gateway_id=gateway_id,
         install_channel_keys=install_channel_keys,
     )
+    registry_plugins = build_registry_plugin_specs(install_registry_packages)
     try:
         execution = await gateway_execution_service.execute_tool_via_gateway(
             gateway_id=gateway_id,
             capability_id=OPENCLAW_PROVISION_CAPABILITY,
-            arguments={"channels": channels},
+            arguments={"channels": channels, "registry_plugins": registry_plugins},
             run_id=run_id,
             trace_id=run_id,
             workspace_id=workspace_id,

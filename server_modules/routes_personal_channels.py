@@ -957,6 +957,11 @@ class OpenClawProvisionRequest(BaseModel):
     """
 
     install_channels: Optional[List[str]] = None
+    # npm PACKAGE names, not channel_keys — a registry channel plugin has no
+    # channel id until it is installed. Validated against the derived manifest
+    # in openclaw_provisioning_service.build_registry_plugin_specs, so an
+    # unknown name can never reach `openclaw plugins install` on the box.
+    install_plugins: Optional[List[str]] = None
 
 
 @router.post("/personal-channels/openclaw/gateways/{gateway_id}/provision")
@@ -999,6 +1004,9 @@ async def provision_openclaw_transport(
             agent_id=normalized_agent_id,
             actor_id=str(current_user.get("id") or "") or None,
             install_channel_keys=list(payload.install_channels or []) if payload else None,
+            install_registry_packages=(
+                list(payload.install_plugins or []) if payload else None
+            ),
         )
     except openclaw_provisioning_service.OpenClawProvisioningError as exc:
         _emit_personal_channel_audit(
@@ -1110,6 +1118,14 @@ async def get_openclaw_channel_catalog(
     return {
         "openclaw_version": openclaw_channel_registry.OPENCLAW_VERSION,
         "channels": catalog,
+        # The channels OpenClaw's plugin REGISTRY publishes that the pinned
+        # build does not bundle. Same route, separate key: they are offers to
+        # install rather than channels with a known id, and collapsing the two
+        # lists would make a card that cannot take a credential look like one
+        # that can.
+        "registry_channel_plugins": (
+            openclaw_channel_setup_service.openclaw_registry_channel_plugin_catalog()
+        ),
         "already_available_channels": already_available_channels,
     }
 
@@ -1171,6 +1187,13 @@ async def get_openclaw_channel_setup(
         "gateway_id": gateway_id,
         "openclaw_version": openclaw_channel_registry.OPENCLAW_VERSION,
         "channels": catalog,
+        # Same key the gateway-less catalog route returns, so the grid renders
+        # identically whether or not a box is bound. Their INSTALLED state
+        # comes from `observed` below like everything else — this half is only
+        # the offer.
+        "registry_channel_plugins": (
+            openclaw_channel_setup_service.openclaw_registry_channel_plugin_catalog()
+        ),
         "observed": observed,
         "observed_error": observed_error,
         "observed_error_code": observed_error_code,
