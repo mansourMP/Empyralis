@@ -3,6 +3,7 @@
 import { fleetAuthorizedFetch } from "@/lib/workspace/fleet/fleet-authorized-fetch";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
 import { Bot, Calendar, Zap } from "lucide-react";
@@ -28,6 +29,7 @@ import { DocumentsList } from "@/lib/workspace/fleet/DocumentsList";
 import { DocumentComposer } from "@/lib/workspace/fleet/DocumentComposer";
 import { MemberAvatarStack } from "@/lib/workspace/fleet/MemberAvatarStack";
 import { ProjectMemberAdd } from "@/lib/workspace/fleet/ProjectMemberAdd";
+import { ProjectPeople } from "@/lib/workspace/fleet/ProjectPeople";
 import { ProjectSettings } from "@/lib/workspace/fleet/ProjectSettings";
 import { useBreadcrumbLabel, useBreadcrumbIcon, useBreadcrumbBadge, HeaderAction } from "@/lib/workspace/fleet/Breadcrumbs";
 import { breadcrumbCount, formatDate, formatNumber } from "@/lib/workspace/fleet/fleet-presentation";
@@ -172,7 +174,7 @@ export default function ProjectDetailPage() {
   // as a prop rather than fetched a second time there (GET
   // /workspaces/{id}/members) -- see MemberAvatarStack.tsx's own doc
   // comment on why that used to be a redundant round trip.
-  const { members, loading: membersLoading } = useWorkspaceMembers(workspaceId);
+  const { members, loading: membersLoading, error: membersError } = useWorkspaceMembers(workspaceId);
   // This project's own project_memberships rows -- likewise the ONE fetch
   // of GET /fleet/projects/{id}/members for this page, shared by
   // deriveCanWriteProject below and passed down to ProjectMemberAdd. Used
@@ -180,7 +182,7 @@ export default function ProjectDetailPage() {
   // ProjectMemberAdd's own) hitting the same endpoint on every load --
   // browser-measured ~250-400ms each, doubling both requests and backend
   // load for no reason.
-  const { members: projectMembers, loading: projectMembersLoading, refresh: refreshProjectMembers } =
+  const { members: projectMembers, loading: projectMembersLoading, error: projectMembersError, refresh: refreshProjectMembers } =
     useProjectMembers(workspaceId, projectId);
   // include_archived: this list exists here only to resolve THIS project by
   // id, and an archived one still has a reachable detail route (get_project
@@ -223,18 +225,27 @@ export default function ProjectDetailPage() {
   // list and the command palette both link to) falls through to it below —
   // because it's the surface a reader opens a project to act on daily; the
   // roster/activity Overview used to show is one click away on Agents.
-  const view: "agents" | "tasks" | "documents" =
+  //
+  // PEOPLE joined them on 2026-08-15, as the fourth peer. Founder's framing:
+  // a teammate and an agent belong in the same place, so People sits beside
+  // Agents rather than living off in workspace Settings. It is the same
+  // `project_memberships` data the toolbar's own "+" already reads and
+  // writes (ProjectMemberAdd) — a tab, not a second members surface; see
+  // ProjectPeople.tsx.
+  const view: "agents" | "tasks" | "documents" | "people" =
     pathname === `${projectBase}/agents`
       ? "agents"
       : pathname === `${projectBase}/documents`
         ? "documents"
-        : "tasks";
+        : pathname === `${projectBase}/people`
+          ? "people"
+          : "tasks";
   // router.replace, not .push — same choice the agent detail page's own
   // sub-tabs already made (AgentDetailPage's onTabChange, one directory up).
   // Collapses Agents→Tasks→Documents clicks onto one history entry, so the
   // browser's own back button steps out of the project in one press instead
   // of walking back through every sub-tab click first.
-  const viewHref = (v: "agents" | "tasks" | "documents") => `${projectBase}/${v}`;
+  const viewHref = (v: "agents" | "tasks" | "documents" | "people") => `${projectBase}/${v}`;
   // TWO shapes of the same tasks, plus the options that reshape them.
   //
   // This used to be a three-way switch — Board | Grouped | List — and that
@@ -566,18 +577,35 @@ export default function ProjectDetailPage() {
           topbar is where the earlier mobile header-overlap bug came from, and
           this row is already proven reachable at 375px. */}
       <div className="fleet-content-toolbar">
+        {/* ORDER IS THE FOUNDER'S OWN SKETCH: Tasks · Documents · Agents ·
+            People. Tasks leads because it is both the default landing view
+            (the bare `${projectBase}` URL falls through to it) and the
+            surface a project is opened to act on daily; Agents and People
+            sit adjacent because a teammate and an agent belong in the same
+            place. It used to read Agents · Tasks · Documents, which put the
+            default view second.
+
+            REAL LINKS, not buttons (CLAUDE.md: "primary navigation is real
+            links, so cmd-click and middle-click work"). These were
+            `router.replace` buttons — tolerable while the rail also offered
+            a way in, and not tolerable now that this strip is THE way to
+            reach a project's four sections. `replace` keeps the original,
+            deliberate history behaviour on a plain click (Agents→Tasks→
+            Documents collapses to one entry, so browser-back steps out of
+            the project rather than walking every tab click) while
+            ⌘/middle-click get native browser semantics for free. */}
         <div className="fleet-segmented" role="tablist" aria-label="Project view">
-          {(["agents", "tasks", "documents"] as const).map((v) => (
-            <button
+          {(["tasks", "documents", "agents", "people"] as const).map((v) => (
+            <Link
               key={v}
-              type="button"
+              href={viewHref(v)}
+              replace
               role="tab"
               aria-selected={view === v}
               className={`fleet-segmented-btn${view === v ? " fleet-segmented-btn--active" : ""}`}
-              onClick={() => router.replace(viewHref(v))}
             >
-              {v === "agents" ? "Agents" : v === "tasks" ? "Tasks" : "Documents"}
-            </button>
+              {v === "agents" ? "Agents" : v === "tasks" ? "Tasks" : v === "documents" ? "Documents" : "People"}
+            </Link>
           ))}
         </div>
         {/* Trails the view/layout switches, LEFT of centre — the people on a
@@ -784,6 +812,17 @@ export default function ProjectDetailPage() {
             ) : (
               <DocumentsList documents={documents} hrefFor={documentHref} />
             )
+          ) : view === "people" ? (
+            // Both lists are already in flight for this page (the toolbar's
+            // avatar stack and its "+" read them), so this tab is a render,
+            // not a fetch. Adding somebody stays the toolbar's "+" directly
+            // above — one control, where it already was.
+            <ProjectPeople
+              workspaceMembers={members}
+              projectMembers={projectMembers}
+              loading={membersLoading || projectMembersLoading}
+              error={membersError || projectMembersError}
+            />
           ) : loading && inProject.length === 0 ? (
             <div className="fleet-project-agents-placeholder" aria-busy="true">Loading…</div>
           ) : agentsError && inProject.length === 0 ? (

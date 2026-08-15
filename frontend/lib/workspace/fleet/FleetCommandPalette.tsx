@@ -17,6 +17,7 @@ import {
   FolderPlus,
   Inbox,
   LayoutGrid,
+  ListChecks,
   MessageSquare,
   MessagesSquare,
   Moon,
@@ -210,6 +211,11 @@ export function FleetCommandPalette({
     // there is none in the rail.
     const goToActions: Action[] = [
       { id: "go-inbox", label: "Inbox", group: "Go to", icon: Inbox, run: () => go(`${base}/inbox`) },
+      // Same rail order, and present for the same reason every other rail
+      // destination is here: a surface reachable from the rail must also be
+      // reachable from ⌘K, or the palette quietly becomes an incomplete map
+      // of the app.
+      { id: "go-my-work", label: "My work", group: "Go to", icon: ListChecks, run: () => go(`${base}/my-work`) },
       { id: "go-projects", label: "Projects", group: "Go to", icon: FolderKanban, run: () => go(`${base}/projects`) },
       { id: "go-settings", label: "Settings", group: "Go to", icon: Settings, run: () => go(`${base}/settings`) },
       { id: "go-hardware", label: "Hardware", hint: "in settings", group: "Go to", icon: Cpu, run: () => go(`${base}/hardware`) },

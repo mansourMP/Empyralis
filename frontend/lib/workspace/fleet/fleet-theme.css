@@ -6410,42 +6410,46 @@ button.fleet-list-row:hover { background: var(--bg-card-hover); border-color: va
 .fleet-rail-subitem-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fleet-rail-subitem-count { font-size: var(--text-2xs); color: var(--text-muted); }
 
-/* ── Rail project mode (2026-08-14) ───────────────────────────────────────
-   The rail's second mode — opening a project replaces Inbox+Projects with
-   Back, the project's own identity, and its agent list. See PrimaryRail.tsx
-   and primary-rail-project-mode.ts. Rows reuse .fleet-agents-rail-row
-   byte-for-byte (same visual language as the compact per-project rail this
-   supersedes at the primary-rail level), so only the three elements unique
-   to this mode — the Back row, the project header, and the empty note —
-   need their own rules here. */
-.fleet-rail-nav--project { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-.fleet-rail-back { flex-shrink: 0; }
-.fleet-rail-project-header {
+/* ── Rail pinned footer + flat project list (2026-08-15) ──────────────────
+   The rail's project-mode block used to live here — the 2026-08-14 shape
+   where opening a project replaced Inbox+Projects with a Back row, the
+   project's identity, and its agent list. That shell is gone (see
+   primary-rail-nav.ts's header for all three shapes and why this one is
+   flat), so its CSS went with it rather than being left for the next author
+   to rebuild against. */
+
+/* Settings, pinned below the scrolling nav and above the Ask AI/controls/
+   account cluster. Its own region rather than the last row of .fleet-rail-nav
+   precisely so a workspace with forty projects can never scroll it off the
+   bottom. No margin-top:auto here — .fleet-rail-utility below already owns
+   that, and a second one would fight it for the slack. */
+.fleet-rail-nav-pinned {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 2px;
   flex-shrink: 0;
-  margin: var(--space-2) var(--space-2) 0;
-  padding: 6px 8px;
-  border-radius: var(--radius-control);
-  color: var(--text-primary);
-  text-decoration: none;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
+  padding-top: 4px;
 }
-.fleet-rail-project-header:hover { background: var(--rail-active); }
-.fleet-rail-project-header-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+
+/* "+ New project", last row of the flat project list. Deliberately styled as
+   a SUBITEM, not a button: it belongs to the list it appends to, and it is a
+   real <a> (?new=1, the hand-off projects/page.tsx already consumes) so
+   ⌘-click behaves like every other navigation here. Muted until hover — the
+   Projects page's own "New project" is that view's one accent action, and
+   two accent-filled buttons in one view is a bug. */
+.fleet-rail-subitem--new { color: var(--text-muted); }
+.fleet-rail-subitem--new:hover { color: var(--text-primary); }
+.fleet-rail-subitem-newicon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Matches ProjectIcon's own 18px box on the rows above, so the label
+     column lines up exactly rather than sitting a few px off. */
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
 }
-.fleet-rail-project-agents { flex: 1; min-height: 0; overflow-y: auto; }
-.fleet-rail-project-agents-empty {
-  padding: var(--space-3) var(--space-4);
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
+
 
 /* ── Phase 7B: agent-detail tab content ───────────────────────────────────── */
 .fleet-detail-pad { padding: var(--space-5); overflow-y: auto; height: 100%; }
@@ -11886,3 +11890,105 @@ h2.fleet-sage-console-title {
   .fleet-agent-glist-cell-preview,
   .fleet-agent-glist-cell-text { display: none; }
 }
+
+/* ── My work (2026-08-15) ─────────────────────────────────────────────────
+   "What is assigned to me, across every project" — the one genuinely new
+   destination in the flat rail (see primary-rail-nav.ts). Two titled
+   sections, each grouped by the project a row belongs to, both rendering the
+   SAME TasksList the project board draws, so no row styling lives here: this
+   block is spacing and headings only. */
+.fleet-mywork { padding: var(--space-4) var(--space-5) var(--space-6); }
+
+.fleet-mywork-section + .fleet-mywork-section { margin-top: var(--space-6); }
+
+.fleet-mywork-section-head { margin-bottom: var(--space-3); }
+
+/* A real h2 (the page's h1 is the breadcrumb's current crumb) — sized as a
+   section title rather than a page title, matching .fleet-detail-section-title
+   elsewhere. */
+.fleet-mywork-section-head h2 {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+
+.fleet-mywork-section-count {
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* The one sentence on this page, and it is load-bearing: without it the
+   second table reads as more work the reader owes rather than work their
+   agents already own. */
+.fleet-mywork-section-note {
+  margin: 2px 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.fleet-mywork-section-empty {
+  margin: 0;
+  padding: var(--space-3) 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* Wide content scrolls inside its own strip. TasksList's real 5-column grid
+   wants ~824px; .fleet-content-main above it is overflow-x:hidden, so without
+   this the Status column is CLIPPED at a narrow viewport with no scrollbar
+   and no way to reach it (measured live before this was added). The page body
+   itself never scrolls sideways. */
+.fleet-mywork-table { overflow-x: auto; }
+
+/* Which project a row belongs to — the one fact a cross-project list needs
+   that a project's own board never does, so it rides above each group
+   instead of forking TasksList to grow a column. */
+.fleet-mywork-group + .fleet-mywork-group { margin-top: var(--space-4); }
+.fleet-mywork-group-label {
+  margin-bottom: 4px;
+  font-size: var(--text-2xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* Done work stays reachable but never leads. Quiet by construction: an
+   ownership list that opens on finished items answers yesterday's question. */
+.fleet-mywork-donetoggle {
+  margin-top: var(--space-5);
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.fleet-mywork-donetoggle:hover { background: var(--rail-active); color: var(--text-primary); }
+
+.fleet-mywork-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  color: var(--text-muted);
+}
+.fleet-mywork-empty h2 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
+}
+.fleet-mywork-empty p {
+  margin: 0;
+  max-width: 44ch;
+  font-size: var(--text-sm);
+}
+.fleet-mywork-empty .fleet-btn { margin-top: var(--space-2); }

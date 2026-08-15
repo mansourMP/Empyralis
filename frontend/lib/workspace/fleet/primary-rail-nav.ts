@@ -1,36 +1,70 @@
-import { FolderKanban, Inbox, type LucideIcon } from "lucide-react";
+import { FolderKanban, Inbox, ListChecks, Settings, type LucideIcon } from "lucide-react";
 
 /**
- * The primary rail's top-level destinations — pulled into its own pure,
+ * The primary rail's destinations — pulled into its own pure,
  * dependency-light module (no next/navigation, no React hooks) so a plain
  * `tsx` test can import the REAL list PrimaryRail.tsx renders instead of
  * re-typing it — the same "expected and actual come from the same place"
  * discipline every other pure-rule module here follows (agent-count-shape.ts,
- * channel-doors.ts).
+ * channel-doors.ts, my-work.ts).
  *
- * PROJECT IS THE SPINE (CLAUDE.md, "an agent belongs to its project and
- * works only there" + the 2026-08-13 navigation decision): Conversations and
- * Agents are GONE from this list, not merely reordered. Both used to be
- * top-level rows aggregating across every project's agents — Conversations
- * listed every agent's channel threads, Agents listed every agent in the
- * workspace — which is exactly the boundary CLAUDE.md's own project-scoping
- * rule says an agent-related surface must not reach past. An agent is now
- * reached by opening the project it lives in and its Agents section there
- * (see project-agents-rail-shape.ts) — never by a workspace-wide list.
+ * THE RAIL IS PLACES YOU GO; THE PAGE IS THINGS YOU DO (founder, 2026-08-15).
+ * That one line settles what belongs here and what does not, and it is the
+ * rule the two previous shapes each broke from a different side:
  *
- * The underlying routes (`/w/{id}/agents`, `/w/{id}/conversations`) are
- * DELIBERATELY still live — several entries in next.config.ts's
- * LEGACY_REDIRECTS point AT `/agents`, and turning it into a redirect target
- * itself risks the exact "a redirect runs ahead of the router and makes a
- * real page unreachable" trap CLAUDE.md documents. They are simply no longer
- * linked from here or from the command palette's "Go to" section — a
- * deliberate choice to leave a working page reachable by URL rather than
- * force a route move neither this change nor its risk profile calls for.
+ *   2026-08-13   the rail NESTED an open project's Tasks/Documents/Agents
+ *                sections under its row. One of a project's three peers
+ *                (Agents) then lived in navigation while the other two lived
+ *                in the page — an asymmetry with no reason behind it, and
+ *                the thing that actually read as broken.
+ *   2026-08-14   the rail SWAPPED ENTIRELY inside a project: Inbox and
+ *                Projects vanished and the project's agent names took over.
+ *                Same asymmetry, louder — agents were now the only thing the
+ *                rail could show about a project, and getting anywhere else
+ *                went through a Back control.
+ *   2026-08-15   FLAT. Inbox · My work · the project list · New project, with
+ *                Settings pinned at the foot. Opening a project changes the
+ *                page, never the rail; Tasks/Documents/Agents/People are that
+ *                page's own tabs, which is where Tasks and Documents already
+ *                lived.
  *
- * Inbox stays: "what needs me" genuinely spans every project, so it is not
- * an aggregation ACROSS the project boundary in the same sense — it is the
- * one surface whose entire job is to look across everything at once.
- * Projects is the spine itself, not an aggregation of agents at all.
+ * NOTHING WAS REMOVED, and that was non-negotiable (founder: "tasks agents
+ * and documents must not disappear — one is the agent layer and the other is
+ * the context layer, which is very crucial"). Every surface the rail used to
+ * reach is still reachable:
+ *   · a project's agents  → its Agents tab, which keeps the compact
+ *                           per-agent rail agents/layout.tsx already renders
+ *                           (ProjectAgentsRail.tsx) — the same list, one
+ *                           level in, beside the pane it drives.
+ *   · Tasks / Documents   → unchanged, the project page's own tabs.
+ *   · Settings            → now a real rail row AND still in the account
+ *                           popover; two doors to one page, neither removed.
+ *
+ * PROJECT IS STILL THE SPINE (CLAUDE.md, "an agent belongs to its project and
+ * works only there"): Conversations and Agents remain GONE as TOP-LEVEL rows.
+ * Both used to aggregate across every project's agents, which is exactly the
+ * boundary that rule says a nav surface must not reach past. Their routes
+ * (`/w/{id}/agents`, `/w/{id}/conversations`) are DELIBERATELY still live —
+ * several entries in next.config.ts's LEGACY_REDIRECTS point AT `/agents`,
+ * and turning it into a redirect target itself risks the exact "a redirect
+ * runs ahead of the router and makes a real page unreachable" trap CLAUDE.md
+ * documents. They are simply not linked from here.
+ *
+ * "My work" is the one genuinely NEW destination, and it is the reason the
+ * rail reads fuller rather than deeper. It answers "what is assigned to me,
+ * across every project" — a question that had no surface at all before:
+ * you opened each project and scanned. Like Inbox, it looks across
+ * everything at once BY DESIGN rather than by accident; unlike Conversations
+ * and Agents it aggregates TASKS (workspace data), not AGENTS, so it does
+ * not reach past the project boundary that rule is about. See my-work.ts for
+ * what lands in it.
+ *
+ * NO ACTIVITY ROW, deliberately. It was floated and dropped in the same
+ * conversation: per-agent activity already exists on the agent's own Work
+ * tab, and CLAUDE.md's "a surface must earn its place" is explicit that an
+ * unused top-level route is the failure mode, not the safe default. Recorded
+ * here rather than left as a silence, so nobody re-derives it as an
+ * oversight.
  */
 export type RailNavItem = {
   key: string;
@@ -38,20 +72,33 @@ export type RailNavItem = {
   segment: string;
   icon: LucideIcon;
   chord: string;
+  /** Where the row sits. "top" rows are the nav list; "footer" rows are
+   *  pinned to the bottom of the rail, above the account block — a place you
+   *  go rarely enough that it must not compete with the daily list, and
+   *  often enough that burying it one popover down was wrong. Keyboard
+   *  navigation (j/k, `g <chord>`) covers BOTH, in this array's order, so a
+   *  pinned row is not a second-class destination. */
+  placement: "top" | "footer";
   /** MAN-317: true for a surface that exists to aggregate AGENTS. With zero
    *  real agents there is nothing to aggregate — every event class the
    *  activity ledger knows about is agent- or gateway-driven, so Inbox hides
    *  itself from the rail at agent-count-shape.ts's "none" mode (see
-   *  visibleRailItems below). Projects is deliberately NOT tagged: it is the
-   *  workspace's own data (CLAUDE.md positioning — "the WORKSPACE is the
-   *  product"), not a view OF the fleet, so it never hides for having zero
-   *  agents. */
+   *  visibleRailItems below).
+   *
+   *  Projects is deliberately NOT tagged: it is the workspace's own data
+   *  (CLAUDE.md positioning — "the WORKSPACE is the product"), not a view OF
+   *  the fleet. Neither is My work, for the same reason one level down — a
+   *  task assigned to a PERSON exists whether or not the workspace has ever
+   *  had an agent, so hiding it at zero agents would hide real work. Neither
+   *  is Settings, which is not an aggregation of anything. */
   aggregatesAgents?: boolean;
 };
 
 export const RAIL_ITEMS: RailNavItem[] = [
-  { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i", aggregatesAgents: true },
-  { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p" },
+  { key: "inbox", label: "Inbox", segment: "inbox", icon: Inbox, chord: "i", placement: "top", aggregatesAgents: true },
+  { key: "my-work", label: "My work", segment: "my-work", icon: ListChecks, chord: "m", placement: "top" },
+  { key: "projects", label: "Projects", segment: "projects", icon: FolderKanban, chord: "p", placement: "top" },
+  { key: "settings", label: "Settings", segment: "settings", icon: Settings, chord: "s", placement: "footer" },
 ];
 
 /** The rail items actually shown — `hideAggregations` true at
@@ -61,4 +108,20 @@ export const RAIL_ITEMS: RailNavItem[] = [
  *  consumer here. */
 export function visibleRailItems(hideAggregations: boolean): RailNavItem[] {
   return hideAggregations ? RAIL_ITEMS.filter((item) => !item.aggregatesAgents) : RAIL_ITEMS;
+}
+
+/** Splits a visible-item list into the two render regions, preserving order
+ *  within each. One function rather than two `.filter()` calls at the call
+ *  site so the component cannot accidentally render a placement it does not
+ *  know about — every item lands in exactly one of the two returned arrays,
+ *  and `top.length + footer.length === items.length` is asserted by the
+ *  test. */
+export function railItemsByPlacement(items: RailNavItem[]): {
+  top: RailNavItem[];
+  footer: RailNavItem[];
+} {
+  return {
+    top: items.filter((item) => item.placement === "top"),
+    footer: items.filter((item) => item.placement === "footer"),
+  };
 }

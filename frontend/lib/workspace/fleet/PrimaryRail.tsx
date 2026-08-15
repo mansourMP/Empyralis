@@ -6,13 +6,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, usePathname, useSelectedLayoutSegment } from "next/navigation";
 import {
-  ArrowLeft,
   BarChart3,
   ChevronRight,
   LogOut,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Search,
   Settings,
   Sun,
@@ -21,13 +21,13 @@ import {
 import { logout } from "@/lib/auth/auth-client";
 import { useAccountShell } from "@/lib/shell/account-shell-context";
 import { useRevealedEmail } from "@/lib/shell/use-revealed-email";
-import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useWorkspaceActivity } from "./fleet-data";
+import { getInboxLastSeenAt, useFleetAgents, useFleetProjects, useFleetWorkspace, useFleetWorkspaceTasks, useWorkspaceActivity } from "./fleet-data";
 import { deriveStatus, findSageAgent } from "./fleet-presentation";
 import { ProjectIcon } from "./fleet-project-identity";
-import { AgentSigil, StatusDot } from "./fleet-indicators";
-import { rememberLastViewedAgent } from "./AgentsList";
 import { planAgentCountShape } from "./agent-count-shape";
-import { visibleRailItems } from "./primary-rail-nav";
+import { myWorkBadgeCount } from "./my-work";
+import { useOwnAccountId } from "./members-data";
+import { railItemsByPlacement, visibleRailItems } from "./primary-rail-nav";
 import { activeProjectIdFromPathname } from "./primary-rail-project-mode";
 import { FleetHelpButton } from "./FleetHelpButton";
 import { SageLauncher } from "./SageLauncher";
@@ -39,34 +39,29 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { RAIL_WIDTH, useResizableWidth } from "./fleet-preferences";
 import type { FleetTheme, FleetSectionKey } from "./fleet-preferences";
 
-// Rail vocabulary lives in primary-rail-nav.ts now — a pure, dependency-light
-// module a plain test can import directly (see primary-rail-nav.test.ts).
-// Project-as-spine nav (CLAUDE.md, 2026-08-13): Conversations and Agents are
-// GONE from the rail, not reordered — both used to aggregate across every
-// project's agents, which is exactly the boundary an agent belonging to its
-// project must not be reached past. An agent now lives inside the project it
-// belongs to; see project-agents-rail-shape.ts for the compact rail that
-// replaces the old flat Agents table there. Hardware left the rail in the
-// 2026-07 repositioning for an unrelated reason (set-once config, not a
-// project-scoping one) and lives in Settings now — the /w/{ws}/hardware
+// Rail vocabulary lives in primary-rail-nav.ts — a pure, dependency-light
+// module a plain test imports directly (primary-rail-nav.test.ts). Read that
+// file's header for the full shape and the two earlier versions it replaces;
+// the one line that decides everything here is the founder's:
+//
+//     THE RAIL IS PLACES YOU GO. THE PAGE IS THINGS YOU DO.
+//
+// So this rail is FLAT and stays flat: Inbox, My work, the project list,
+// "+ New project", with Settings pinned at the foot. Opening a project
+// changes the PAGE — its Tasks/Documents/Agents/People tabs — and never the
+// rail. Nothing was removed to get here (founder: "tasks agents and
+// documents must not disappear"): a project's agents are its Agents tab,
+// which still renders the compact per-agent rail agents/layout.tsx has
+// always drawn beside the pane (ProjectAgentsRail.tsx), and Settings gained
+// a row here while keeping its account-menu entry.
+//
+// Hardware left the rail in the 2026-07 repositioning for an unrelated
+// reason (set-once config) and lives in Settings — the /w/{ws}/hardware
 // route is still live, so every link/bookmark/redirect that pointed at it
 // still resolves.
 
 const RAIL_ICON = 16;
 const CONTROL_ICON = 16;
-
-// SUPERSEDED, 2026-08-14 — the rail used to nest an open project's own
-// Tasks/Documents/Agents SECTIONS beneath its row (see git history for the
-// PROJECT_SECTIONS table this replaced). The founder looked at that shipped
-// nesting against his own live screenshot and asked for two modes instead of
-// one rail that grows a branch: opening a project swaps the rail's nav
-// content entirely — Inbox and Projects gone, that project's AGENT NAMES in
-// their place, one Back control at the top. See
-// primary-rail-project-mode.ts for the pure boundary check
-// (activeProjectIdFromPathname) and the "project mode" render branch below.
-// Tasks/Documents are still reached exactly as before — the project's own
-// tab strip at its bare index (ProjectDetailPage) — this only changes what
-// the RAIL shows, never what the project page itself renders.
 
 // 4 decimals, matching AgentsList/billing/project detail's cost formatters —
 // real per-turn costs are fractions of a cent, and this line sits directly
@@ -89,17 +84,23 @@ const money = (n: number) => (n === 0 ? "—" : `$${n.toFixed(4)}`);
  * line reports the fleet's pulse above the account block. Billing lives in
  * the account menu instead — it's a look-up-occasionally screen, not a nav
  * destination. Keyboard: `j`/`k` move a highlight, Enter opens it; `g` then
- * a section key jumps directly (g i inbox, g p projects) — the Linear
- * muscle-memory model.
+ * a section key jumps directly (g i inbox, g m my work, g p projects,
+ * g s settings) — the Linear muscle-memory model, and it covers the pinned
+ * footer row too so pinning is a position, not a demotion.
  *
  * Conversations and Agents are GONE from this rail (see primary-rail-nav.ts),
  * not merely folded into the Projects sub-list — both used to aggregate
  * across every project's agents, which is exactly the boundary "an agent
  * belongs to its project and works only there" says a nav surface must not
  * reach past. Agents are entities that live INSIDE the project that owns
- * them, reached by opening that project's own Agents section — see
+ * them, reached by opening that project's own Agents tab — see
  * project-agents-rail-shape.ts and ProjectAgentsRail.tsx for the compact
  * list that replaces the old flat, workspace-wide Agents table there.
+ *
+ * COUNTS ARE NON-ZERO ONLY. Inbox and My work each show a number when they
+ * have one and nothing when they don't — a zero badge is noise, and it is
+ * also the one number nobody needs, since an empty surface says so itself
+ * the moment you open it.
  */
 export function PrimaryRail({
   workspaceId,
@@ -258,6 +259,18 @@ export function PrimaryRail({
   const inboxUnreadCount = inboxNewEvents.length;
   const inboxUnreadLabel = inboxUnreadCount >= INBOX_BADGE_LIMIT ? `${INBOX_BADGE_LIMIT}+` : String(inboxUnreadCount);
 
+  // My work's count — the SAME function the page itself partitions with
+  // (my-work.ts), against the SAME workspace-wide fetch, so the badge and
+  // the page can never disagree about what "mine" means. Both readers share
+  // one polled resource (useFleetWorkspaceTasks' cache key), so having the
+  // rail show a number costs no extra request while the page is open.
+  const { tasks: workspaceTasks } = useFleetWorkspaceTasks(workspaceId);
+  const myAccountId = useOwnAccountId();
+  const myWorkCount = useMemo(
+    () => myWorkBadgeCount(workspaceTasks, myAccountId),
+    [workspaceTasks, myAccountId],
+  );
+
   // Sage is the Operator, not a listed worker — the same exclusion every
   // other agent surface (AgentsList, command palette, Projects table) makes.
   const sageAgent = useMemo(() => findSageAgent(allAgents), [allAgents]);
@@ -281,36 +294,38 @@ export function PrimaryRail({
     () => visibleRailItems(agentCountMode === "none"),
     [agentCountMode],
   );
+  // Both render regions, from ONE list — so a placement this component does
+  // not draw cannot be added to primary-rail-nav.ts unnoticed, and the
+  // keyboard list below stays the concatenation of exactly what is on
+  // screen.
+  const { top: topRailItems, footer: footerRailItems } = useMemo(
+    () => railItemsByPlacement(railItems),
+    [railItems],
+  );
   const railHrefFor = useCallback(
     (item: { segment: string }) => `/w/${encodeURIComponent(workspaceId)}/${item.segment}`,
     [workspaceId],
   );
+  const railCountFor = useCallback(
+    (key: string): string | null => {
+      // Non-zero only — a zero badge is noise (see this component's header).
+      if (key === "inbox") return inboxUnreadCount > 0 ? inboxUnreadLabel : null;
+      if (key === "my-work") return myWorkCount > 0 ? String(myWorkCount) : null;
+      return null;
+    },
+    [inboxUnreadCount, inboxUnreadLabel, myWorkCount],
+  );
 
   const projectsExpanded = sections?.projects ?? true;
 
-  // The rail's two-mode switch (2026-08-14) — see primary-rail-project-mode.ts.
-  // Any route under /projects/{id}, including a specific agent's own chat
-  // page, puts the rail in project mode.
+  // Which project row reads as current. This is ALL that is left of the rail
+  // knowing a project is open — the 2026-08-14 "project mode" that swapped
+  // the whole rail for the project's agent names is gone (see
+  // primary-rail-nav.ts's header for the three shapes and why this one is
+  // flat). activeProjectIdFromPathname still answers "am I inside a project"
+  // exactly as before, including from a specific agent's own chat page, so a
+  // reader deep inside a project still sees which one they are in.
   const activeProjectId = useMemo(() => activeProjectIdFromPathname(pathname), [pathname]);
-  const projectMode = Boolean(activeProjectId);
-  const activeProject = useMemo(
-    () => projects.find((p) => p.id === activeProjectId) || null,
-    [projects, activeProjectId],
-  );
-  // The open project's own agents, in project mode — same filter
-  // agents/layout.tsx already applies for the compact ProjectAgentsRail this
-  // supersedes at the primary-rail level (that component's own doc comment
-  // now points here). `agents` above already excludes the Operator install.
-  const projectAgents = useMemo(
-    () => (activeProjectId ? agents.filter((a) => (a.project_id || "").trim() === activeProjectId) : []),
-    [agents, activeProjectId],
-  );
-  // "…/agents/{agentId}/…" → {agentId}, so the row for whichever agent's own
-  // page is open highlights — same match ProjectAgentsRail.tsx already uses.
-  const activeAgentId = useMemo(() => {
-    const m = pathname.match(/\/agents\/([^/]+)/);
-    return m ? decodeURIComponent(m[1]) : null;
-  }, [pathname]);
   const segment = useSelectedLayoutSegment();
 
   // Footer pulse — the exact same status tones the Agents table itself
@@ -480,143 +495,152 @@ export function PrimaryRail({
         )}
       </div>
 
-      {projectMode ? (
-        // ── Project mode ──────────────────────────────────────────────────
-        // Founder: opening a project switches the rail ENTIRELY. Inbox and
-        // Projects are gone; this project's agent names take their place;
-        // one Back control at the top returns to normal (Inbox + Projects)
-        // mode. Back links at the projects LIST (not workspace home) — the
-        // instant the pathname no longer carries /projects/{id}, activeProjectId
-        // goes null and this branch stops rendering on its own; nothing here
-        // "closes" project mode, the URL leaving it is what does.
-        <nav className="fleet-rail-nav fleet-rail-nav--project" aria-label={activeProject ? `${activeProject.name} agents` : "Project agents"}>
-          <Link
-            href={hrefFor("projects")}
-            className="fleet-rail-item fleet-rail-back"
-            aria-label="Back to Inbox and Projects"
-            title={effectiveCollapsed ? "Back" : undefined}
-          >
-            <span className="fleet-rail-item-icon">
-              <ArrowLeft size={RAIL_ICON} strokeWidth={1.75} />
-            </span>
-            {!effectiveCollapsed && <span className="fleet-rail-item-label">Back</span>}
-          </Link>
-
-          {!effectiveCollapsed && (
-            <Link href={hrefFor(`projects/${encodeURIComponent(activeProjectId || "")}`)} className="fleet-rail-project-header">
-              <ProjectIcon icon={activeProject?.icon} tint={activeProject?.tint} size={20} glyphSize={12} />
-              <span className="fleet-rail-project-header-name">{activeProject?.name || "Project"}</span>
-            </Link>
-          )}
-
-          <div className="fleet-agents-rail-list fleet-rail-project-agents">
-            {projectAgents.length === 0 ? (
-              !effectiveCollapsed && <div className="fleet-rail-project-agents-empty">No agents in this project yet.</div>
-            ) : (
-              projectAgents.map((a) => {
-                const active = a.agent_id === activeAgentId;
-                const tone = deriveStatus(a.hardware_status || "unknown", Boolean(a.stopped?.active), Boolean(a.current_run_id)).tone;
-                return (
-                  <Link
-                    key={a.agent_id}
-                    href={hrefFor(`projects/${encodeURIComponent(activeProjectId || "")}/agents/${encodeURIComponent(a.agent_id)}/chat`)}
-                    aria-current={active ? "page" : undefined}
-                    title={effectiveCollapsed ? (a.label || "Unnamed agent") : undefined}
-                    className={`fleet-agents-rail-row${active ? " fleet-agents-rail-row--active" : ""}`}
-                    onClick={() => rememberLastViewedAgent(a.agent_id)}
+      {/* ── The rail, flat ────────────────────────────────────────────────
+          Inbox · My work · Projects (with its own flat, always-flat project
+          list) · "+ New project". No branch: opening a project no longer
+          changes what this renders, only which project row reads as current.
+          See primary-rail-nav.ts's header for the two shapes this replaces
+          and why neither survived contact with the founder's own screen. */}
+      <nav className="fleet-rail-nav">
+        {topRailItems.map((item, idx) => {
+          const Icon = item.icon;
+          const active = segment === item.segment;
+          const focused = focusIdx === idx;
+          const isProjects = item.key === "projects";
+          const count = railCountFor(item.key);
+          const showProjectsSubnav = isProjects && !effectiveCollapsed && projects.length > 0;
+          const expanded = projectsExpanded;
+          return (
+            <div key={item.key} className="fleet-rail-nav-group">
+              <div className="fleet-rail-item-row">
+                {/* Real <a href> (MAN-145 item 6), not a router.push() button —
+                    a plain left-click still behaves exactly like the old
+                    onClick (Next's Link does a client-side transition, same
+                    as router.push), but ⌘/Ctrl-click, middle-click, and
+                    right-click now get real browser behaviour for free,
+                    since they're native <a> semantics Link doesn't override.
+                    That's also why this is safe against the in-app tab strip
+                    (FleetTabs.tsx): its modifier-click interception is
+                    explicitly scoped to `.fleet-shell-main` and skips the
+                    rail on purpose ("the rail keeps native browser
+                    behaviour" — see FleetTabs.tsx's resolveHref) — there is
+                    nothing here for it to conflict with. */}
+                <Link
+                  href={railHrefFor(item)}
+                  title={effectiveCollapsed ? item.label : undefined}
+                  aria-label={item.label}
+                  aria-current={active ? "page" : undefined}
+                  className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
+                >
+                  <span className="fleet-rail-item-icon">
+                    <Icon size={RAIL_ICON} strokeWidth={1.75} />
+                  </span>
+                  {!effectiveCollapsed && <span className="fleet-rail-item-label">{item.label}</span>}
+                  {/* Count and chord share one right-hand slot and never
+                      show at once: a count means there is something to go
+                      look at, which matters more in that moment than a
+                      shortcut reminder. `count` is null unless it is
+                      non-zero (railCountFor), so a quiet surface shows its
+                      chord rather than a "0". */}
+                  {!effectiveCollapsed && count ? (
+                    <span className="fleet-rail-item-count">{count}</span>
+                  ) : !effectiveCollapsed ? (
+                    <kbd className="fleet-rail-item-chord" aria-hidden="true">G {item.chord.toUpperCase()}</kbd>
+                  ) : null}
+                </Link>
+                {showProjectsSubnav && (
+                  <button
+                    type="button"
+                    className={`fleet-rail-subnav-toggle${expanded ? " is-expanded" : ""}`}
+                    onClick={() => onToggleSection?.("projects")}
+                    aria-expanded={expanded}
+                    aria-label={expanded ? `Collapse ${item.label.toLowerCase()}` : `Expand ${item.label.toLowerCase()}`}
                   >
-                    <AgentSigil seed={a.agent_id} size={20} />
-                    {!effectiveCollapsed && <span className="fleet-agents-rail-row-label">{a.label || "Unnamed agent"}</span>}
-                    {!effectiveCollapsed && <StatusDot tone={tone} size={7} />}
-                  </Link>
-                );
-              })
-            )}
-          </div>
-        </nav>
-      ) : (
-        // ── Normal mode: Inbox + Projects ────────────────────────────────
-        <nav className="fleet-rail-nav">
-          {railItems.map((item, idx) => {
-            const Icon = item.icon;
-            const active = segment === item.segment;
-            const focused = focusIdx === idx;
-            const isProjects = item.key === "projects";
-            const isInbox = item.key === "inbox";
-            const showProjectsSubnav = isProjects && !effectiveCollapsed && projects.length > 0;
-            const expanded = projectsExpanded;
-            const showToggle = showProjectsSubnav;
-            return (
-              <div key={item.key} className="fleet-rail-nav-group">
-                <div className="fleet-rail-item-row">
-                  {/* Real <a href> (MAN-145 item 6), not a router.push() button —
-                      a plain left-click still behaves exactly like the old
-                      onClick (Next's Link does a client-side transition, same
-                      as router.push), but ⌘/Ctrl-click, middle-click, and
-                      right-click now get real browser behaviour for free,
-                      since they're native <a> semantics Link doesn't override.
-                      That's also why this is safe against the in-app tab strip
-                      (FleetTabs.tsx): its modifier-click interception is
-                      explicitly scoped to `.fleet-shell-main` and skips the
-                      rail on purpose ("the rail keeps native browser
-                      behaviour" — see FleetTabs.tsx's resolveHref) — there is
-                      nothing here for it to conflict with. */}
-                  <Link
-                    href={railHrefFor(item)}
-                    title={effectiveCollapsed ? item.label : undefined}
-                    aria-label={item.label}
-                    aria-current={active ? "page" : undefined}
-                    className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
-                  >
-                    <span className="fleet-rail-item-icon">
-                      <Icon size={RAIL_ICON} strokeWidth={1.75} />
-                    </span>
-                    {!effectiveCollapsed && <span className="fleet-rail-item-label">{item.label}</span>}
-                    {!effectiveCollapsed && isInbox && inboxUnreadCount > 0 ? (
-                      <span className="fleet-rail-item-count">{inboxUnreadLabel}</span>
-                    ) : !effectiveCollapsed ? (
-                      <kbd className="fleet-rail-item-chord" aria-hidden="true">G {item.chord.toUpperCase()}</kbd>
-                    ) : null}
-                  </Link>
-                  {showToggle && (
-                    <button
-                      type="button"
-                      className={`fleet-rail-subnav-toggle${expanded ? " is-expanded" : ""}`}
-                      onClick={() => onToggleSection?.("projects")}
-                      aria-expanded={expanded}
-                      aria-label={expanded ? `Collapse ${item.label.toLowerCase()}` : `Expand ${item.label.toLowerCase()}`}
-                    >
-                      <ChevronRight size={13} strokeWidth={2} />
-                    </button>
-                  )}
-                </div>
-                {/* Every project is a plain link now — drilling into one
-                    switches the rail to project mode above rather than
-                    expanding a nested section list inline (see
-                    primary-rail-project-mode.ts's module comment for what
-                    this replaced and why). */}
-                {showProjectsSubnav && projectsExpanded && (
-                  <div className="fleet-rail-subnav">
-                    {projects.map((p) => {
-                      const projectHref = `${hrefFor("projects")}/${encodeURIComponent(p.id)}`;
-                      return (
-                        <Link
-                          key={p.id}
-                          href={projectHref}
-                          className="fleet-rail-subitem"
-                        >
-                          <ProjectIcon icon={p.icon} tint={p.tint} size={18} glyphSize={11} />
-                          <span className="fleet-rail-subitem-label">{p.name}</span>
-                        </Link>
-                      );
-                    })}
-                  </div>
+                    <ChevronRight size={13} strokeWidth={2} />
+                  </button>
                 )}
               </div>
+              {/* FLAT. Every project is one row and it has no children —
+                  that asymmetry (Agents in the rail, Tasks and Documents in
+                  the page) is exactly what read as broken. The active row is
+                  marked so a reader deep inside a project still knows which
+                  one they are in; everything ABOUT the project is one click
+                  away in its own tabs. */}
+              {showProjectsSubnav && projectsExpanded && (
+                <div className="fleet-rail-subnav">
+                  {projects.map((p) => {
+                    const projectHref = `${hrefFor("projects")}/${encodeURIComponent(p.id)}`;
+                    const isActiveProject = p.id === activeProjectId;
+                    return (
+                      <Link
+                        key={p.id}
+                        href={projectHref}
+                        aria-current={isActiveProject ? "page" : undefined}
+                        className={`fleet-rail-subitem${isActiveProject ? " fleet-rail-subitem--active" : ""}`}
+                      >
+                        <ProjectIcon icon={p.icon} tint={p.tint} size={18} glyphSize={11} />
+                        <span className="fleet-rail-subitem-label">{p.name}</span>
+                      </Link>
+                    );
+                  })}
+                  {/* A real link, not a button that opens a dialog from the
+                      rail: `?new=1` is the hand-off projects/page.tsx already
+                      consumes (the command palette's own "New project" action
+                      uses the identical URL), so this reuses that one composer
+                      instead of standing up a second one — and being an <a>
+                      means ⌘-click opens the composer in a new tab like any
+                      other navigation. Neutral, never accent-filled: the
+                      Projects page's own "New project" is that view's one
+                      accent action, and two filled buttons in one view is a
+                      bug. */}
+                  <Link href={`${hrefFor("projects")}?new=1`} className="fleet-rail-subitem fleet-rail-subitem--new">
+                    <span className="fleet-rail-subitem-newicon">
+                      <Plus size={13} strokeWidth={2} aria-hidden="true" />
+                    </span>
+                    <span className="fleet-rail-subitem-label">New project</span>
+                  </Link>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </nav>
+
+      {/* Pinned footer destinations — Settings today. Its own region, below
+          the scrolling nav, so a workspace with forty projects never pushes
+          it off the bottom. It is a real rail row AND still a row in the
+          account popover: two doors to one page, neither taken away. */}
+      {footerRailItems.length > 0 && (
+        <nav className="fleet-rail-nav-pinned" aria-label="Settings">
+          {footerRailItems.map((item, i) => {
+            const Icon = item.icon;
+            const active = segment === item.segment;
+            // Continues the SAME index space the j/k handler walks — the
+            // keyboard list is topRailItems concat footerRailItems, so a
+            // pinned row is reachable by keyboard exactly like any other.
+            const focused = focusIdx === topRailItems.length + i;
+            return (
+              <Link
+                key={item.key}
+                href={railHrefFor(item)}
+                title={effectiveCollapsed ? item.label : undefined}
+                aria-label={item.label}
+                aria-current={active ? "page" : undefined}
+                className={`fleet-rail-item${active ? " fleet-rail-item--active" : ""}${focused ? " fleet-rail-item--focus" : ""}`}
+              >
+                <span className="fleet-rail-item-icon">
+                  <Icon size={RAIL_ICON} strokeWidth={1.75} />
+                </span>
+                {!effectiveCollapsed && <span className="fleet-rail-item-label">{item.label}</span>}
+                {!effectiveCollapsed && (
+                  <kbd className="fleet-rail-item-chord" aria-hidden="true">G {item.chord.toUpperCase()}</kbd>
+                )}
+              </Link>
             );
           })}
         </nav>
       )}
+
 
       {/* Ask AI — moved here (2026-07) from a floating bottom-right corner
           spot that, on mobile, sat directly on top of the chat composer's

@@ -148,6 +148,11 @@ export function HeaderAction({ children }: { children: ReactNode }) {
 export const STATIC_LABELS: Record<string, string> = {
   fleet: "Home",
   inbox: "Inbox",
+  // humanize() would render this segment as "My Work" — right words, wrong
+  // capitalization for a product that writes sentence case everywhere else
+  // (see the rail label, which is the same string). Named explicitly so the
+  // two cannot disagree.
+  "my-work": "My work",
   conversations: "Conversations",
   projects: "Projects",
   agents: "Agents",

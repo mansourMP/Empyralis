@@ -1346,6 +1346,43 @@ export function useFleetTasks(workspaceId: string, projectId: string | null) {
   return { tasks, loading, error, refresh };
 }
 
+/** Every task in every project this caller can SEE — the read behind "My
+ *  work" (see my-work.ts for the rule that narrows it to one person).
+ *
+ *  Deliberately the SAME route as useFleetTasks above, with the
+ *  `project_id` filter simply omitted: routes_fleet.fleet_list_tasks already
+ *  has a filter-when-not-scoped branch (`_visible_project_ids`) that returns
+ *  exactly the tasks in projects the caller is a member of, so there was
+ *  nothing to add on the server and no second query to keep in step with the
+ *  first. A new endpoint here would have been a second answer to "what tasks
+ *  may this person see", which is the failure this codebase keeps finding.
+ *
+ *  Its own cache key, and NOT the `:none` one useFleetTasks parks its
+ *  no-project no-op under — sharing that key would let a page rendering
+ *  `useFleetTasks(ws, null)` publish an empty array over this one's real
+ *  results. */
+export function useFleetWorkspaceTasks(workspaceId: string) {
+  const fetcher = useCallback(async (): Promise<FleetTask[]> => {
+    if (!workspaceId) return [];
+    const res = await fleetAuthorizedFetch(
+      `/api/w/${encodeURIComponent(workspaceId)}/fleet/tasks`,
+      { credentials: "include" }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data.tasks) ? (data.tasks as FleetTask[]).map(withNormalizedStatus) : [];
+  }, [workspaceId]);
+
+  const { data: tasks, loading, error, refresh } = useSharedPolledResource<FleetTask[]>(
+    `fleet-tasks:${workspaceId}:workspace`,
+    fetcher,
+    30_000,
+    [],
+  );
+
+  return { tasks, loading, error, refresh };
+}
+
 export async function createFleetTask(
   workspaceId: string,
   input: {
