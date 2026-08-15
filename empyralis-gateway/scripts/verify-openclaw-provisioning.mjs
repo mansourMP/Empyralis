@@ -14,8 +14,20 @@
  *     provider credential, no audit suppressions);
  *   - the owner's policy is actually in force, path by path;
  *   - `openclaw security audit` is clean;
+ *   - a channel the owner has NOT set up renders OFF, carries no policy, and
+ *     therefore produces none of the audit findings that used to refuse the
+ *     whole box;
+ *   - the DM policy/allowlist keys this build would write match the ones each
+ *     channel PLUGIN states for itself (`channels capabilities --json`), which
+ *     is a different source from the config schema they are derived from;
  *   - drift (an out-of-band edit to the generated config) is DETECTED, named,
  *     and corrected on the next run.
+ *
+ * COST: the channels below are marked as set up by their owner, which is what
+ * production sends for a channel somebody actually connected — so this script
+ * now also exercises the CHANNEL PLUGIN INSTALL path, and a first run against
+ * a brand-new profile fetches those packages (minutes, and it needs the npm
+ * registry). Re-runs against the same profile install nothing.
  *
  * WHAT IT DELIBERATELY DOES NOT DO
  *   - it never registers a launchd/systemd job on the machine running it. The
@@ -65,6 +77,7 @@ const channels = [
   {
     channelId: "feishu",
     enabled: true,
+    installPlugin: true,
     dmPolicy: { mode: "allowlist", allowlist: ["ou_owner", "ou_teammate"] },
     // require_mention OFF with an explicit chat allowlist: the case that needs
     // per-chat `groups` entries and must never use a `"*"` wildcard.
@@ -73,12 +86,14 @@ const channels = [
   {
     channelId: "line",
     enabled: true,
+    installPlugin: true,
     dmPolicy: { mode: "pairing", allowlist: [] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: false },
   },
   {
     channelId: "qqbot",
     enabled: true,
+    installPlugin: true,
     dmPolicy: { mode: "owner_only", allowlist: [] },
     groupPolicy: { mode: "allowlist", allowlist: [], requireMention: true },
   },
@@ -88,12 +103,14 @@ const channels = [
     // "reply without being mentioned" cannot be carried. Must fail CLOSED.
     channelId: "zalo",
     enabled: true,
+    installPlugin: true,
     dmPolicy: { mode: "open", allowlist: [] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: false },
   },
   {
     channelId: "msteams",
     enabled: true,
+    installPlugin: true,
     dmPolicy: { mode: "allowlist", allowlist: ["a@example.com"] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: true },
   },
@@ -113,6 +130,7 @@ const channels = [
     // NEITHER policy field. `allowFrom` is its only lever.
     channelId: "clickclack",
     enabled: true,
+    installPlugin: true,
     dmPolicy: { mode: "allowlist", allowlist: ["u_owner"] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: true },
   },
@@ -121,6 +139,7 @@ const channels = [
     // under a nested `dm` object this generator does not write.
     channelId: "matrix",
     enabled: true,
+    installPlugin: true,
     dmPolicy: { mode: "open", allowlist: [] },
     groupPolicy: { mode: "allowlist", allowlist: ["!room:example.org"], requireMention: true },
   },
@@ -131,6 +150,7 @@ const channels = [
     // validated like any other.
     channelId: "twitch",
     enabled: true,
+    installPlugin: true,
     dmPolicy: { mode: "open", allowlist: [] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: true },
   },
@@ -142,6 +162,31 @@ const channels = [
     // `{enabled: false}` for it, believing that was the safe minimum.
     channelId: "openclaw-weixin",
     enabled: true,
+    installPlugin: true,
+    dmPolicy: { mode: "open", allowlist: [] },
+    groupPolicy: { mode: "open", allowlist: [], requireMention: true },
+  },
+  {
+    // THE CHANNEL NOBODY ASKED FOR — and the reason this entry is permanent.
+    //
+    // Its node is the one PERMISSIVE one in the pinned build, so it swallowed
+    // `allowFrom: ["*"]` without complaint while its real sender list
+    // (`allowedUserIds`) stayed empty; its own plugin then reported the
+    // resulting admit-nobody state to `openclaw security audit` as CRITICAL,
+    // and the all-or-nothing push turned that into a total refusal — measured
+    // live, on the founder's Mac, with a real Telegram bot token sitting in
+    // the config the refusal threw away:
+    //
+    //   openclaw_security_audit_not_clean
+    //   channels.synology-chat.warning.3 [critical]
+    //
+    // `installPlugin: false` is the whole point: nobody has set this channel
+    // up, so it must render OFF, and an OFF channel is one their audit skips
+    // entirely (`if (!enabled) continue`, audit-channel.collect.runtime).
+    // Both halves are asserted after RUN 1.
+    channelId: "synology-chat",
+    enabled: true,
+    installPlugin: false,
     dmPolicy: { mode: "open", allowlist: [] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: true },
   },
@@ -210,6 +255,101 @@ function summarize(label, result) {
 const first = await buildProvisioner().provision();
 summarize("RUN 1 — first provisioning", first);
 if (first.status !== "provisioned") process.exit(1);
+
+// ── A channel nobody set up is OFF, and its audit findings are gone ────────
+{
+  const cli = new OpenClawCli({ profile, env: process.env });
+  const read = await cli.run(["config", "get", "channels", "--json"], { timeoutMs: 30_000 });
+  const effective = read.code === 0 ? JSON.parse(read.stdout) : {};
+  const synology = effective["synology-chat"] ?? {};
+  console.log(`\n── the untouched channel ──\n  channels.synology-chat  ${JSON.stringify(synology)}`);
+  if (synology.enabled !== false) {
+    console.error("\nFAIL: a channel the owner never set up was left switched on.");
+    process.exit(1);
+  }
+  // THE WRITE THAT PRODUCED THE CRITICAL, checked where it can actually be
+  // observed. `openclaw config patch` MERGES and never deletes, so a value a
+  // PREVIOUS build wrote stays in the effective config forever — asserting its
+  // absence here would fail on residue rather than on behaviour. What this
+  // build would write is decided by the DM surface it derives from the live
+  // schema, so that is what gets asserted; the residue is reported instead,
+  // because a reader of this output should know it is still on the box.
+  if (Object.hasOwn(synology, "allowFrom")) {
+    console.log(
+      `  NOTE: channels.synology-chat.allowFrom is still ${JSON.stringify(synology.allowFrom)} — left by an ` +
+        "earlier build. `config patch` merges and never deletes, and the channel is off, so it authorizes nothing.",
+    );
+  }
+  const synologyFindings = first.auditFindings.filter((f) => f.checkId.startsWith("channels.synology-chat."));
+  if (synologyFindings.length > 0) {
+    console.error(`\nFAIL: synology-chat still produces audit findings: ${JSON.stringify(synologyFindings)}`);
+    process.exit(1);
+  }
+  if (!first.disabledChannels.some((f) => f.channelId === "synology-chat" && f.code === "channel_not_set_up_by_owner")) {
+    console.error("\nFAIL: the channel was switched off without saying so.");
+    process.exit(1);
+  }
+}
+
+// ── Our DM key derivation vs OPENCLAW'S OWN answer ────────────────────────
+//
+// The derivation reads the installed CONFIG SCHEMA. This reads the same
+// question off PLUGIN METADATA — `channels capabilities --json` makes each
+// plugin state its own `setupWizard.dmPolicy.policyKey` / `.allowFromKey` as
+// fully-qualified config paths. Two independent sources, which is the only
+// thing that makes this more than the generator agreeing with itself: a
+// derivation checked against the document it was derived from can only ever
+// confirm itself (CLAUDE.md's own standing rule).
+//
+// Silent on a channel whose plugin does not state the paths — that is a gap in
+// their metadata, not a disagreement, and a check that treated "they didn't
+// say" as "we're wrong" would fail on nine channels forever.
+{
+  const cli = new OpenClawCli({ profile, env: process.env });
+  const { resolveOpenClawChannelKeySupport } = require("../dist/openclaw/provisioning/openclaw-channel-shapes.js");
+  const schema = await cli.configSchema();
+  const ids = channels.map((channel) => channel.channelId);
+  const derived = new Map(resolveOpenClawChannelKeySupport(schema, ids).map((entry) => [entry.channelId, entry.dm]));
+
+  // The permissive node, against the LIVE schema rather than the fixture: it
+  // declares no sender list, so this build has no key to write there. This is
+  // the fix-1 half, and it is checked here because a residual value from an
+  // earlier build makes the effective config unable to answer it.
+  const synologyDm = derived.get("synology-chat");
+  if (synologyDm && synologyDm.allowlistPath !== null) {
+    console.error(
+      `\nFAIL: this build would write channels.synology-chat.${synologyDm.allowlistPath.join(".")} — a key that ` +
+        "node does not declare. That write is accepted and never read, which is what refused the whole box.",
+    );
+    process.exit(1);
+  }
+
+  const listed = await cli.run(["channels", "capabilities", "--json"], { timeoutMs: 60_000 });
+  const reported = listed.code === 0 ? JSON.parse(listed.stdout).channels ?? [] : [];
+  let compared = 0;
+  for (const entry of reported) {
+    const channelId = entry?.plugin?.id;
+    const stated = entry?.plugin?.setupWizard?.dmPolicy;
+    if (!channelId || !stated || !derived.has(channelId)) continue;
+    const ours = derived.get(channelId);
+    const oursPolicy = ours.policyPath ? `channels.${channelId}.${ours.policyPath.join(".")}` : null;
+    const oursAllow = ours.allowlistPath ? `channels.${channelId}.${ours.allowlistPath.join(".")}` : null;
+    console.log(`  dm keys  ${channelId.padEnd(16)} openclaw=${stated.policyKey} / ${stated.allowFromKey}`);
+    if (oursPolicy !== stated.policyKey || oursAllow !== stated.allowFromKey) {
+      console.error(
+        `\nFAIL: ${channelId} keeps its DM policy at ${stated.policyKey} / ${stated.allowFromKey}, ` +
+          `and this build would write ${oursPolicy} / ${oursAllow}.`,
+      );
+      process.exit(1);
+    }
+    compared += 1;
+  }
+  console.log(`  dm keys  cross-checked ${compared} channel(s) against OpenClaw's own plugin metadata`);
+  if (compared === 0) {
+    console.error("\nFAIL: no channel stated its own DM key paths, so this check asserted nothing.");
+    process.exit(1);
+  }
+}
 
 // Show the unit that WOULD be installed, verbatim.
 const unitPath = first.supervisor?.definition?.unitPath;

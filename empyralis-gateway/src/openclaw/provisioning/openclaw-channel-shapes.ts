@@ -333,6 +333,134 @@ export const OPENCLAW_CHANNEL_WRITABLE_KEYS: readonly string[] = [
   "configWrites",
 ];
 
+// ── Where a channel keeps its DM policy and its SENDER ALLOWLIST ──────────
+//
+// WHY THIS IS DISCOVERED PER CHANNEL RATHER THAN ASSUMED TO BE `allowFrom`
+// ------------------------------------------------------------------------
+// It was assumed, and the assumption cost a real box its whole provisioning
+// run. Measured against a real openclaw@2026.6.10, on the founder's own Mac:
+//
+//   openclaw.provision.refused
+//   openclaw_security_audit_not_clean
+//   channels.synology-chat.warning.3 [critical]
+//     Synology Chat: dmPolicy="allowlist" with empty allowedUserIds blocks all
+//     senders. Add users or set dmPolicy="open" with allowedUserIds=["*"].
+//
+// Synology Chat's sender list is `allowedUserIds`. This module wrote
+// `allowFrom: ["*"]` into it — and the write SUCCEEDED, because that node is
+// the one channel node in the pinned build whose `additionalProperties` is
+// permissive (`{}`), so an undeclared key is accepted rather than refused.
+// Accepted, and then never read: the channel kept its own default
+// (`dmPolicy: "allowlist"` with an empty `allowedUserIds`), which admits
+// nobody, which their audit correctly calls critical — and because the push is
+// all-or-nothing, that one channel refused all of them, Telegram included.
+//
+// THE RULE THAT FOLLOWS, and it is the general one: **a node ACCEPTING a key
+// is not evidence the channel READS it.** `acceptsUndeclaredKeys` answers
+// "will this write be refused", never "will this write do anything", and the
+// second question is the one an authorization setting has to pass. So the DM
+// keys are now taken from what the node DECLARES, and a channel that declares
+// none gets none written — reported as a channel whose direct-message policy
+// Empyralis cannot express, exactly like the other axes that cannot be
+// expressed.
+//
+// THREE SHAPES EXIST IN THE PINNED BUILD, and only the first was handled:
+//
+//   flat     channels.<id>.dmPolicy   + channels.<id>.allowFrom      19 channels
+//   nested   channels.<id>.dm.policy  + channels.<id>.dm.allowFrom   matrix, googlechat
+//   neither  nothing declared at all                                 synology-chat, tlon, …
+//
+// The nested pair is not a different setting, it is the same setting moved one
+// level down — same enum, same array, same `"*"` contract — so it is written
+// where it exists rather than reported as absent, which is what used to happen
+// (both channels landed in `dm_policy_not_expressible_no_lever` and got no DM
+// policy at all).
+//
+// DERIVED, NEVER CHANNEL-LISTED: the table below names KEY paths, not
+// channels, and every entry is checked against the installed schema per
+// channel — the same discipline OPENCLAW_CHANNEL_WRITABLE_KEYS already uses.
+// A channel that moves upstream tomorrow is covered if it moves to a shape
+// listed here and is REPORTED, not guessed at, if it does not.
+//
+// The derivation is cross-checked against a SECOND, INDEPENDENT source in the
+// test suite: `openclaw channels capabilities --json` makes each plugin state
+// its own `setupWizard.dmPolicy.policyKey` / `.allowFromKey` as fully-qualified
+// config paths. That is the plugin's own answer, from plugin metadata rather
+// than from the config schema, so the expected set and the actual set do not
+// come from one place (CLAUDE.md: "a check that derives its own expectations
+// from the thing it checks is blind, and reports 'passed'").
+// ORDER IS OPENCLAW'S OWN PRECEDENCE, not a preference of ours. Four channel
+// nodes in the pinned build declare BOTH shapes (discord, slack — neither
+// transported, both superseded by a first-party runtime — plus the two nested
+// ones, which declare no flat pair), and their resolver breaks the tie
+// explicitly:
+//
+//   dist/bundled-channel-config-schema-*.js
+//   account.dmPolicy ?? account.dm?.policy ?? value.dmPolicy ?? value.dm?.policy
+//
+// i.e. FLAT WINS. Writing the nested pair on a channel that declares both
+// would produce a document OpenClaw reads the other half of — configured, and
+// ignored, which is the same class of defect as writing an undeclared key.
+const OPENCLAW_DM_SURFACE_LOCATIONS: ReadonlyArray<{
+  /** Path segments from `channels.<id>` to the object holding the pair. */
+  readonly container: readonly string[];
+  readonly policyKey: string;
+  readonly allowlistKey: string;
+}> = [
+  { container: [], policyKey: "dmPolicy", allowlistKey: "allowFrom" },
+  { container: ["dm"], policyKey: "policy", allowlistKey: "allowFrom" },
+];
+
+/**
+ * Where ONE channel keeps its direct-message policy, as its own installed
+ * schema declares it. Paths are segments relative to `channels.<id>`.
+ *
+ * `null` on either path means the channel has no such field — not that it has
+ * one somewhere we did not look. Writing an authorization setting into a key
+ * a channel does not read produces a config that looks configured and
+ * authorizes nothing, which is strictly worse than writing nothing and saying
+ * so.
+ */
+export interface OpenClawChannelDmSurface {
+  readonly policyPath: readonly string[] | null;
+  /** The enum at `policyPath`. Empty exactly when `policyPath` is null. */
+  readonly policyModes: readonly string[];
+  readonly allowlistPath: readonly string[] | null;
+}
+
+const NO_DM_SURFACE: OpenClawChannelDmSurface = Object.freeze({
+  policyPath: null,
+  policyModes: [],
+  allowlistPath: null,
+});
+
+/** True for a schema node that declares an array — the shape every one of
+ *  OpenClaw's sender allowlists has. A non-array under an allowlist name is
+ *  something we do not know how to fill, so it does not count as one. */
+function isArrayNode(node: unknown): boolean {
+  return Boolean(node) && typeof node === "object" && (node as Record<string, unknown>).type === "array";
+}
+
+function resolveDmSurface(node: unknown): OpenClawChannelDmSurface {
+  const props = schemaProperties(node);
+  for (const location of OPENCLAW_DM_SURFACE_LOCATIONS) {
+    const container = location.container.length === 0 ? node : props[location.container[0]];
+    if (!container) continue;
+    const containerProps = schemaProperties(container);
+    const policyModes = Object.hasOwn(containerProps, location.policyKey)
+      ? schemaEnumValues(containerProps[location.policyKey]) ?? []
+      : [];
+    const hasAllowlist = isArrayNode(containerProps[location.allowlistKey]);
+    if (policyModes.length === 0 && !hasAllowlist) continue;
+    return {
+      policyPath: policyModes.length > 0 ? [...location.container, location.policyKey] : null,
+      policyModes,
+      allowlistPath: hasAllowlist ? [...location.container, location.allowlistKey] : null,
+    };
+  }
+  return NO_DM_SURFACE;
+}
+
 export interface OpenClawChannelKeySupport {
   readonly channelId: string;
   /**
@@ -377,16 +505,27 @@ export interface OpenClawChannelKeySupport {
   readonly hasConfigNode: boolean;
   /** The keys from OPENCLAW_CHANNEL_WRITABLE_KEYS this node declares. */
   readonly keys: readonly string[];
-  /** True when the node's `additionalProperties` is anything other than
-   *  `false` — an undeclared key is then accepted rather than refused, so
-   *  there is nothing to withhold. `synology-chat` is the live example
-   *  (`additionalProperties: {}`). */
+  /**
+   * True when the node's `additionalProperties` is anything other than
+   * `false` — an undeclared key is then ACCEPTED rather than refused.
+   * `synology-chat` is the live example (`additionalProperties: {}`).
+   *
+   * ACCEPTED IS NOT READ, and conflating the two is what took a real box's
+   * whole provisioning run down (see OPENCLAW_DM_SURFACE_LOCATIONS above).
+   * This flag therefore governs `enabled` ONLY — a switch a permissive node
+   * genuinely honours, verified against a live instance — and never an
+   * authorization setting, whose key must be one the channel DECLARES.
+   */
   readonly acceptsUndeclaredKeys: boolean;
+  /** Where this channel's direct-message policy and sender allowlist live,
+   *  read off its own node. Never assumed to be `allowFrom`. */
+  readonly dm: OpenClawChannelDmSurface;
 }
 
 interface BranchKeySupport {
   keys: string[];
   acceptsUndeclaredKeys: boolean;
+  dm: OpenClawChannelDmSurface;
   /** False when the branch demands a property provisioning neither writes nor
    *  can leave to a default — writing ANY key against such a branch refuses
    *  the whole document. */
@@ -420,6 +559,7 @@ function branchKeySupport(node: unknown): BranchKeySupport {
 
   return {
     keys,
+    dm: resolveDmSurface(node),
     // Absent `additionalProperties` defaults to permissive in JSON Schema, but
     // every channel node in the pinned build states it explicitly. Treating an
     // ABSENT one as permissive would be the fail-open direction on the exact
@@ -456,7 +596,13 @@ export function resolveOpenClawChannelKeySupport(
     // see hasConfigNode's own comment for why this is a different failure from
     // "declared, but nothing writable on it".
     if (!node) {
-      support.push({ channelId, hasConfigNode: false, keys: [], acceptsUndeclaredKeys: false });
+      support.push({
+        channelId,
+        hasConfigNode: false,
+        keys: [],
+        acceptsUndeclaredKeys: false,
+        dm: NO_DM_SURFACE,
+      });
       continue;
     }
     const record = node as Record<string, unknown>;
@@ -471,9 +617,9 @@ export function resolveOpenClawChannelKeySupport(
     // renderOpenClawConfig reports as `channel_not_configurable` and leaves
     // alone. `twitch` is the live case — both of its branches demand
     // credentials, so there is no document Empyralis can write for it at all.
-    const best =
+    const best: BranchKeySupport =
       candidates.length === 0
-        ? { keys: [], acceptsUndeclaredKeys: false, writable: false }
+        ? { keys: [], acceptsUndeclaredKeys: false, writable: false, dm: NO_DM_SURFACE }
         : candidates.reduce((widest, candidate) => (candidate.keys.length > widest.keys.length ? candidate : widest));
 
     support.push({
@@ -481,6 +627,7 @@ export function resolveOpenClawChannelKeySupport(
       hasConfigNode: true,
       keys: best.keys,
       acceptsUndeclaredKeys: best.acceptsUndeclaredKeys,
+      dm: best.dm,
     });
   }
 

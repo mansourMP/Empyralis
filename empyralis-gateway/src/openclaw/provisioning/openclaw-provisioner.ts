@@ -641,8 +641,11 @@ export class OpenClawProvisioner {
     // After the version pin, because `min_host_version` is checked against it.
     const pluginOutcome = await ensureChannelPluginsInstalled({
       cli: this.options.cli,
-      // Report on every channel the plan enables; install only the ones it
-      // asked to install.
+      // REPORTING scope is every channel the plan carries, deliberately wider
+      // than what gets switched on: `channel_plugins[].installed` is how the
+      // product answers "no plugin" separately from "no credential", and a
+      // channel the owner has not set up yet is exactly the one they are about
+      // to ask that question about. INSTALL scope stays opt-in.
       channelIds: this.options.plan.channels
         .filter((channel) => channel.enabled)
         .map((channel) => channel.channelId),

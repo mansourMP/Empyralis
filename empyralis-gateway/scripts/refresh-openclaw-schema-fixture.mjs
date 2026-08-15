@@ -54,6 +54,12 @@ if (CHANNELS.length === 0) {
 }
 const POLICY_PROPERTIES = [
   "dmPolicy",
+  // The NESTED direct-message surface. `channels.matrix` and
+  // `channels.googlechat` keep `policy` and `allowFrom` inside a `dm` object
+  // instead of at the top level, and a fixture that drops it cannot tell
+  // "this channel has no direct-message policy" (which is what the generator
+  // used to conclude about both of them) from "it has one, one level down".
+  "dm",
   "groupPolicy",
   "requireMention",
   "groups",

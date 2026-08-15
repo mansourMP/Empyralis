@@ -19,6 +19,7 @@ import {
   resolveOpenClawChannelKeySupport,
   resolveOpenClawChannelToolFlags,
   resolveOpenClawPluginHookFlags,
+  type OpenClawChannelKeySupport,
 } from "../openclaw/provisioning/openclaw-channel-shapes";
 import {
   canonicalJson,
@@ -57,8 +58,30 @@ import { parseChannelPolicies } from "../openclaw/provisioning/openclaw-provisio
 function policy(overrides: Partial<EmpyralisChannelPolicy> & { channelId: string }): EmpyralisChannelPolicy {
   return {
     enabled: true,
+    // A channel the owner has actually set up — which is what every test
+    // below except the not-set-up ones is about. `installPlugin` is the
+    // cloud's "has a human reached for this channel" fact (see its own doc in
+    // openclaw-config-plan.ts), and a channel without it is now written OFF,
+    // so leaving it out here would quietly turn every policy test into a test
+    // of the off switch.
+    installPlugin: true,
     dmPolicy: { mode: "open", allowlist: [] },
     groupPolicy: { mode: "open", allowlist: [], requireMention: true },
+    ...overrides,
+  };
+}
+
+/** A key-support entry with the DM surface defaulted to the flat pair. The
+ *  tests that build these by hand are about `enabled`/branch selection, not
+ *  about where the DM keys live. */
+function keySupport(
+  overrides: Partial<OpenClawChannelKeySupport> & { channelId: string },
+): OpenClawChannelKeySupport {
+  return {
+    hasConfigNode: true,
+    keys: [],
+    acceptsUndeclaredKeys: false,
+    dm: { policyPath: ["dmPolicy"], policyModes: ["allowlist", "disabled", "open", "pairing"], allowlistPath: ["allowFrom"] },
     ...overrides,
   };
 }
@@ -332,8 +355,14 @@ test("the rendered config only ever writes keys the installed schema declares", 
   // schema fixture rather than off the shape table — a SECOND source, which is
   // the only thing that makes this more than the generator agreeing with
   // itself. It covers `allowFrom` and `enabled` too, which the shape table has
-  // no field for: matrix/googlechat/tlon genuinely reject `allowFrom` (they
-  // moved it under a nested `dm` object), and writing it would refuse the box.
+  // no field for: matrix/googlechat/tlon genuinely reject a top-level
+  // `allowFrom` (the first two moved it under a nested `dm` object), and
+  // writing it would refuse the box.
+  //
+  // It recurses ONE level, because that is where the nested DM pair lives and
+  // `channels.googlechat.dm` is itself `additionalProperties: false`: a
+  // top-level-only check would have called `dm: { policy, allowFrom }` fine no
+  // matter what went inside it.
   const schema = schemaFixture() as any;
   const nodes = schema.properties.channels.properties as Record<string, any>;
   const channelIds = Object.keys(OPENCLAW_CHANNEL_POLICY_SHAPES).filter((id) => nodes[id]);
@@ -357,11 +386,19 @@ test("the rendered config only ever writes keys the installed schema declares", 
     const written = Object.keys(channelBlock(rendered, channelId));
     // A document that mixes keys from two branches matches NEITHER, so the
     // written set has to sit inside ONE branch — not inside their union.
-    const fits = branches.some(
-      (branch) =>
-        branch.additionalProperties !== false ||
-        written.every((key) => Object.hasOwn(branch.properties ?? {}, key)),
-    );
+    const accepts = (branch: any, keys: string[]): boolean =>
+      branch.additionalProperties !== false || keys.every((key) => Object.hasOwn(branch.properties ?? {}, key));
+    const fits = branches.some((branch) => {
+      if (!accepts(branch, written)) return false;
+      // One level down, for the nested DM pair. Same rule, same node kind.
+      for (const [key, value] of Object.entries(channelBlock(rendered, channelId))) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const child = (branch.properties ?? {})[key];
+        if (!child) continue;
+        if (!accepts(child, Object.keys(value as Record<string, unknown>))) return false;
+      }
+      return true;
+    });
     assert.ok(fits, `${channelId}: wrote [${written.join(", ")}] — no single schema branch accepts all of them`);
   }
 });
@@ -393,6 +430,232 @@ test("key support honours additionalProperties, and a required property with no 
   const noDefault = JSON.parse(JSON.stringify(schema));
   delete noDefault.properties.channels.properties.feishu.properties.domain.default;
   assert.deepEqual(resolveOpenClawChannelKeySupport(noDefault, ["feishu"])[0].keys, []);
+});
+
+// ── The Synology Chat refusal (2026-08-15) ────────────────────────────────
+//
+// Live, on the founder's own Mac, against the real openclaw@2026.6.10:
+//
+//   openclaw.provision.refused
+//   openclaw_security_audit_not_clean
+//   channels.synology-chat.warning.3 [critical]
+//     Synology Chat: dmPolicy="allowlist" with empty allowedUserIds blocks all
+//     senders.
+//
+// TWO independent defects produced it, and the tests below hold each one
+// separately because either alone is enough to take a whole box down:
+//   1. the allowlist key was ASSUMED to be `allowFrom` everywhere;
+//   2. a channel nobody had ever touched was rendered `enabled: true`.
+
+test("a permissive node is never handed an allowlist key it does not declare", () => {
+  // `channels.synology-chat` is the one node in the pinned build whose
+  // `additionalProperties` is permissive, so `allowFrom: ["*"]` was ACCEPTED
+  // — and never read, because its sender list is `allowedUserIds`. Accepted is
+  // not read, and an authorization key that is accepted and ignored is a
+  // config that looks configured and admits nobody.
+  const schema = schemaFixture() as any;
+  const support = resolveOpenClawChannelKeySupport(schema, ["synology-chat"]);
+  assert.equal(support[0].acceptsUndeclaredKeys, true, "fixture drifted: synology-chat is the permissive node");
+  assert.equal(support[0].dm.allowlistPath, null, "a permissive node declares no sender list, so none may be written");
+
+  const rendered = renderOpenClawConfig(
+    { ...plan([policy({ channelId: "synology-chat" })]), channelKeySupport: support },
+    { gatewayToken: "t" },
+  );
+  const block = channelBlock(rendered, "synology-chat");
+  assert.equal(Object.hasOwn(block, "allowFrom"), false, "this is the write that produced the CRITICAL finding");
+  assert.equal(Object.hasOwn(block, "allowedUserIds"), false, "guessing a different key is the same defect renamed");
+  // Still switchable — `enabled` on a permissive node IS honoured, verified
+  // against a live instance, and it is the one key that has to keep working
+  // or the channel can never be turned off either.
+  assert.equal(block.enabled, true);
+  // Its group axis is equally absent, and says so separately — the point here
+  // is that the DM axis reports "no lever" rather than quietly writing one.
+  assert.deepEqual(
+    rendered.widenings.filter((f) => f.channelId === "synology-chat").map((f) => f.code).sort(),
+    ["dm_policy_not_expressible_no_lever", "group_policy_not_expressible"],
+  );
+});
+
+test("the DM surface is READ per channel — flat, nested, or declared nowhere", () => {
+  const schema = schemaFixture() as any;
+  const ids = ["telegram", "matrix", "googlechat", "synology-chat", "tlon", "clickclack"];
+  const byId = new Map(resolveOpenClawChannelKeySupport(schema, ids).map((entry) => [entry.channelId, entry.dm]));
+
+  // FLAT — nineteen of them.
+  assert.deepEqual(byId.get("telegram")?.policyPath, ["dmPolicy"]);
+  assert.deepEqual(byId.get("telegram")?.allowlistPath, ["allowFrom"]);
+
+  // NESTED — the third variant, which used to be read as "this channel has no
+  // direct-message policy at all" and got none written.
+  assert.deepEqual(byId.get("matrix")?.policyPath, ["dm", "policy"]);
+  assert.deepEqual(byId.get("matrix")?.allowlistPath, ["dm", "allowFrom"]);
+  assert.deepEqual(byId.get("googlechat")?.policyPath, ["dm", "policy"]);
+  assert.deepEqual([...(byId.get("googlechat")?.policyModes ?? [])].sort(), [
+    "allowlist",
+    "disabled",
+    "open",
+    "pairing",
+  ]);
+
+  // DECLARED NOWHERE — nothing to write, and nothing guessed.
+  assert.deepEqual(byId.get("synology-chat")?.policyPath, null);
+  assert.deepEqual(byId.get("synology-chat")?.allowlistPath, null);
+  assert.deepEqual(byId.get("tlon")?.policyPath, null);
+  assert.deepEqual(byId.get("tlon")?.allowlistPath, null);
+
+  // SENDER LIST ONLY — a real shape of its own: no policy enum, but a list.
+  assert.deepEqual(byId.get("clickclack")?.policyPath, null);
+  assert.deepEqual(byId.get("clickclack")?.allowlistPath, ["allowFrom"]);
+});
+
+test("flat wins over nested, because that is OpenClaw's own precedence", () => {
+  // Their resolver: `value.dmPolicy ?? value.dm?.policy`. Four nodes declare
+  // both; writing the nested half on one of those would be configured-and-
+  // ignored, the same defect the permissive node produced.
+  const schema = {
+    properties: {
+      channels: {
+        properties: {
+          both: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              enabled: { type: "boolean" },
+              dmPolicy: { type: "string", enum: ["open", "allowlist"] },
+              allowFrom: { type: "array", items: { type: "string" } },
+              dm: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  policy: { type: "string", enum: ["open", "allowlist"] },
+                  allowFrom: { type: "array", items: { type: "string" } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const [support] = resolveOpenClawChannelKeySupport(schema, ["both"]);
+  assert.deepEqual(support.dm.policyPath, ["dmPolicy"]);
+  assert.deepEqual(support.dm.allowlistPath, ["allowFrom"]);
+});
+
+test("a channel that keeps its DM policy under `dm` gets it written THERE", () => {
+  const schema = schemaFixture() as any;
+  const support = resolveOpenClawChannelKeySupport(schema, ["googlechat"]);
+  const rendered = renderOpenClawConfig(
+    {
+      ...plan([
+        policy({
+          channelId: "googlechat",
+          dmPolicy: { mode: "allowlist", allowlist: ["users/two", "users/one"] },
+        }),
+      ]),
+      channelKeySupport: support,
+    },
+    { gatewayToken: "t" },
+  );
+  const block = channelBlock(rendered, "googlechat");
+  // Both halves in ONE `dm` object: the second write must merge, not replace.
+  assert.deepEqual(block.dm, { policy: "allowlist", allowFrom: ["users/one", "users/two"] });
+  assert.equal(Object.hasOwn(block, "dmPolicy"), false, "the flat key would be refused by this node");
+  assert.equal(Object.hasOwn(block, "allowFrom"), false);
+  // And it is no longer reported as a channel with no direct-message lever,
+  // because it has one.
+  assert.equal(
+    rendered.widenings.some((f) => f.channelId === "googlechat" && f.code.startsWith("dm_policy_not_expressible")),
+    false,
+  );
+});
+
+test("a channel nobody has set up is written OFF — not omitted, and not left on", () => {
+  const rendered = renderOpenClawConfig(
+    plan([
+      policy({ channelId: "telegram", installPlugin: true }),
+      policy({ channelId: "synology-chat", installPlugin: false }),
+      // Absent entirely: an older stored provisioning record, replayed by the
+      // boot reconcile. "Did a human touch this" reads as no.
+      policy({ channelId: "line", installPlugin: undefined }),
+    ]),
+    { gatewayToken: "t" },
+  );
+
+  assert.equal(channelBlock(rendered, "telegram").enabled, true);
+  // WRITTEN off, not omitted: `openclaw config patch` MERGES, so an omitted
+  // channel keeps whatever a previous run left — which is exactly how a live
+  // box ended up still carrying `synology-chat: {enabled: true}` from a run
+  // that had long since been superseded.
+  assert.deepEqual(channelBlock(rendered, "synology-chat"), { enabled: false });
+  assert.deepEqual(channelBlock(rendered, "line"), { enabled: false });
+  // No policy of any kind goes out for a channel that is off — an inbound
+  // policy nobody chose is the thing this fix exists to stop.
+  assert.deepEqual(Object.keys(channelBlock(rendered, "line")), ["enabled"]);
+
+  assert.deepEqual(
+    rendered.disabledChannels.map((f) => `${f.channelId}:${f.code}`).sort(),
+    ["line:channel_not_set_up_by_owner", "synology-chat:channel_not_set_up_by_owner"],
+  );
+  // Said out loud, in the owner's terms, with the action that turns it on.
+  for (const finding of rendered.disabledChannels) {
+    assert.ok(finding.detail.includes("has not been set up"), finding.detail);
+    assert.equal(/plugin|npm|package|schema|allowFrom/i.test(finding.detail), false, finding.detail);
+  }
+});
+
+test("an owner's own OFF is reported as itself, never as `you never set this up`", () => {
+  // Two different facts, and the finding list is where they are told apart.
+  const rendered = renderOpenClawConfig(
+    plan([policy({ channelId: "telegram", enabled: false, installPlugin: true })]),
+    { gatewayToken: "t" },
+  );
+  assert.deepEqual(channelBlock(rendered, "telegram"), { enabled: false });
+  assert.deepEqual(rendered.disabledChannels, []);
+});
+
+test("one set-up channel among the full manifest set leaves exactly one channel on", () => {
+  // The founder's actual box: a real Telegram bot token, and twenty-three
+  // channels he has never opened. Before this, all twenty-four were rendered
+  // `enabled: true` — and the untouched one with the strictest default
+  // refused the whole push, Telegram included.
+  const schema = schemaFixture() as any;
+  const nodes = schema.properties.channels.properties as Record<string, any>;
+  const channelIds = Object.keys(OPENCLAW_CHANNEL_POLICY_SHAPES).filter((id) => nodes[id]);
+  assert.ok(channelIds.includes("synology-chat") && channelIds.includes("telegram"));
+
+  const rendered = renderOpenClawConfig(
+    {
+      ...plan(
+        channelIds.map((channelId) =>
+          policy({
+            channelId,
+            installPlugin: channelId === "telegram",
+            dmPolicy: { mode: "allowlist", allowlist: ["6820139841"] },
+            groupPolicy: { mode: "disabled", allowlist: [], requireMention: true },
+          }),
+        ),
+      ),
+      channelKeySupport: resolveOpenClawChannelKeySupport(schema, channelIds),
+    },
+    { gatewayToken: "t" },
+  );
+
+  const configured = rendered.config.channels as Record<string, Record<string, unknown>>;
+  const on = Object.entries(configured)
+    .filter(([, block]) => block.enabled === true)
+    .map(([channelId]) => channelId);
+  assert.deepEqual(on, ["telegram"]);
+  assert.deepEqual(configured.telegram.dmPolicy, "allowlist");
+  assert.deepEqual(configured.telegram.allowFrom, ["6820139841"]);
+  // Every other channel is present and OFF, so the merge cannot leave a stale
+  // `enabled: true` behind. `twitch` is the one exception and it has its own
+  // reason (no writable branch at all), asserted in its own test.
+  for (const channelId of channelIds) {
+    if (channelId === "telegram" || channelId === "twitch") continue;
+    assert.deepEqual(configured[channelId], { enabled: false }, channelId);
+  }
 });
 
 test("an anyOf node is resolved to ONE branch, never the union of two", () => {
@@ -431,7 +694,15 @@ test("a channel with no sender list is left on its own default, never on a mode 
   const rendered = renderOpenClawConfig(
     {
       ...plan([policy({ channelId: "telegram" })]),
-      channelKeySupport: [{ channelId: "telegram", hasConfigNode: true, keys: ["enabled", "groupPolicy"], acceptsUndeclaredKeys: false }],
+      // No sender list ANYWHERE on this node: not the flat key, not a nested
+      // `dm` block. The DM surface is what decides this now, not a key list.
+      channelKeySupport: [
+        keySupport({
+          channelId: "telegram",
+          keys: ["enabled", "groupPolicy"],
+          dm: { policyPath: ["dmPolicy"], policyModes: ["allowlist", "open"], allowlistPath: null },
+        }),
+      ],
     },
     { gatewayToken: "t" },
   );
@@ -448,7 +719,7 @@ test("a channel that will not even take `enabled` is left out entirely, not push
   const rendered = renderOpenClawConfig(
     {
       ...plan([policy({ channelId: "telegram" })]),
-      channelKeySupport: [{ channelId: "telegram", hasConfigNode: true, keys: [], acceptsUndeclaredKeys: false }],
+      channelKeySupport: [keySupport({ channelId: "telegram", keys: [] })],
     },
     { gatewayToken: "t" },
   );
@@ -500,8 +771,12 @@ test("a channel whose every schema branch demands credentials is left out, and s
 
 test("a channel with no config namespace on this box is OMITTED, not written as {enabled:false}", () => {
   const support = [
-    { channelId: "openclaw-weixin", hasConfigNode: false, keys: [], acceptsUndeclaredKeys: false },
-    { channelId: "telegram", hasConfigNode: true, keys: ["enabled", "dmPolicy", "allowFrom", "groupPolicy"], acceptsUndeclaredKeys: false },
+    keySupport({
+      channelId: "openclaw-weixin",
+      hasConfigNode: false,
+      dm: { policyPath: null, policyModes: [], allowlistPath: null },
+    }),
+    keySupport({ channelId: "telegram", keys: ["enabled", "dmPolicy", "allowFrom", "groupPolicy"] }),
   ];
   const rendered = renderOpenClawConfig(
     {
@@ -1123,14 +1398,30 @@ function schemaFixture(): unknown {
   return JSON.parse(fs.readFileSync(fixturePath(), "utf8"));
 }
 
+/** The plugin ids a run over these channels ends up with, by default: every
+ *  channel the owner has set up whose plugin is a separate package. Derived
+ *  from the manifest rather than listed, so it tracks what the install pass
+ *  actually does — a channel the owner set up IS a channel whose package this
+ *  box fetches, and `plugins.allow` is generated from the result. */
+function pluginIdsFor(channels: EmpyralisChannelPolicy[]): string[] {
+  const byId = new Map(GENERATED_OPENCLAW_MANIFEST.channels.map((channel) => [channel.id, channel]));
+  return channels
+    .filter((channel) => channel.enabled && channel.installPlugin)
+    .map((channel) => byId.get(channel.channelId)?.plugin_install)
+    .filter((install): install is NonNullable<typeof install> => Boolean(install?.required))
+    .map((install) => install.plugin_id);
+}
+
 /** What the instance reads back as once the generated config is in force.
  *
  * `installedPluginIds` must mirror what the run's install pass will produce,
  * because `plugins.allow` is generated FROM that — a helper that ignored it
- * would make every install scenario report residual drift. */
+ * would make every install scenario report residual drift. It defaults to
+ * what an ordinary successful run produces; the scenarios about a REFUSED or
+ * skipped install pass their own. */
 function effectiveFor(
   channels: EmpyralisChannelPolicy[],
-  installedPluginIds: readonly string[] = [],
+  installedPluginIds: readonly string[] = pluginIdsFor(channels),
 ): Record<string, unknown> {
   const rendered = renderOpenClawConfig(
     {
@@ -1333,6 +1624,10 @@ test("the provisioner hands the renderer the installed schema's key support", as
   assert.equal(Object.hasOwn(matrix, "allowFrom"), false, "matrix has no top-level allowFrom");
   assert.equal(Object.hasOwn(matrix, "dmPolicy"), false);
   assert.equal(matrix.groupPolicy, "open", "the keys it DOES have are still written");
+  // Its DM policy is not ABSENT, it is one level down — and it is written
+  // there. This assertion used to read "matrix has no direct-message lever",
+  // which was the generator's mistake stated as an expectation.
+  assert.deepEqual(matrix.dm, { policy: "open", allowFrom: ["*"] });
 
   const clickclack = patched?.channels.clickclack as Record<string, unknown>;
   assert.equal(Object.hasOwn(clickclack, "dmPolicy"), false);
@@ -1340,9 +1635,16 @@ test("the provisioner hands the renderer the installed schema's key support", as
   assert.deepEqual(clickclack.allowFrom, ["*"], "its one real lever is still pulled");
 
   // And the owner is told, per channel, rather than left to infer it.
+  // ClickClack alone now: matrix's two axes are both expressible on this
+  // build, so there is nothing left to widen for it.
   assert.deepEqual(
     [...new Set(result.widenings.map((finding) => finding.channelId))].sort(),
-    ["clickclack", "matrix"],
+    ["clickclack"],
+  );
+  assert.equal(
+    result.widenings.some((finding) => finding.channelId === "matrix"),
+    false,
+    "a channel whose policy is fully expressible must not be reported as widened",
   );
 });
 
@@ -1852,7 +2154,11 @@ test("plugin install: only what was asked for is fetched; everything else is REP
     version: OPENCLAW_PINNED_VERSION,
     schema: schemaFixture(),
     effective: effectiveFor(
-      [policy({ channelId: "feishu" }), policy({ channelId: "line" }), policy({ channelId: "irc" })],
+      [
+        policy({ channelId: "feishu" }),
+        policy({ channelId: "line", installPlugin: false }),
+        policy({ channelId: "irc" }),
+      ],
       ["feishu"],
     ),
     audit: { findings: [] },
@@ -1861,7 +2167,11 @@ test("plugin install: only what was asked for is fetched; everything else is REP
   const result = await fakeProvisioner(state, {
     plan: plan([
       policy({ channelId: "feishu", installPlugin: true }),
-      policy({ channelId: "line" }),
+      // Nobody has set line up, so nothing is fetched for it AND it is not
+      // switched on — one fact, two consequences. It is still REPORTED on,
+      // which is the half this test is about: reporting scope is every
+      // channel, install scope is opt-in.
+      policy({ channelId: "line", installPlugin: false }),
       policy({ channelId: "irc" }),
     ]),
   }).provision();

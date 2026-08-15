@@ -82,13 +82,25 @@
  * pinned build's twenty-three channel nodes cannot:
  *
  *   clickclack  no dmPolicy, no groupPolicy   allowFrom is the only lever
- *   synology    no dmPolicy, no groupPolicy   (additionalProperties, permissive)
+ *   synology    no dmPolicy, no groupPolicy, and a PERMISSIVE node: it accepts
+ *               every key and declares almost none, so nothing can be told
+ *               from it about which key it reads. See below.
  *   tlon        no dmPolicy, no groupPolicy, no allowFrom
  *   twitch      no writable branch at all     every branch demands a credential
- *   matrix      no dmPolicy, no allowFrom     both moved under a nested `dm`
- *   googlechat  no dmPolicy, no allowFrom     "
+ *   matrix      dmPolicy + allowFrom moved under a nested `dm` object
+ *   googlechat  "
  *   nostr/sms   no groupPolicy
  *   feishu      dmPolicy without "disabled"   a mode outside the enum, same class
+ *
+ * A PERMISSIVE NODE IS THE DANGEROUS ONE, because it does not refuse — it
+ * accepts a key it will never read, which is a config that looks configured
+ * and authorizes nothing. `channels.synology-chat` took `allowFrom: ["*"]`
+ * from this module for weeks while its real sender list (`allowedUserIds`)
+ * stayed empty and its own default admitted nobody; `openclaw security audit`
+ * called that CRITICAL, and the all-or-nothing push turned one untouched
+ * channel into a total refusal for every channel on the box. The DM keys are
+ * therefore taken from what a node DECLARES, never from what it will accept —
+ * ./openclaw-channel-shapes.ts's OPENCLAW_DM_SURFACE_LOCATIONS.
  *
  * Writing a key a node does not declare is not ignored — `openclaw config
  * patch` VALIDATES, almost every node is `additionalProperties: false`, and
@@ -167,26 +179,62 @@ export interface EmpyralisChannelPolicy {
   dmPolicy: EmpyralisDmPolicy;
   groupPolicy: EmpyralisGroupPolicy;
   /**
-   * Whether this box should acquire the channel's PLUGIN, not just its policy.
+   * WHETHER THE OWNER HAS REACHED FOR THIS CHANNEL AT ALL.
    *
-   * Separate from `enabled` on purpose. Policy is written for every channel on
-   * every run — a channel omitted from the config would keep whatever the last
-   * run left, which is the stale-derived-artifact failure provisioning exists
-   * to prevent — but twenty of the twenty-seven channels are separate npm
-   * packages, and installing all of them on every customer's machine to write
-   * a policy nobody asked for is minutes of network per boot and twenty
-   * third-party dependencies running inside an instance that carries their
-   * messages.
+   * Named for its first consumer and now answering two questions, so read the
+   * name as a historical accident rather than as the field's meaning. The
+   * cloud computes it in ONE place —
+   * `openclaw_provisioning_service.channels_in_use()` ∪ an explicit
+   * `install_channels` request — from two signals it documents there: an
+   * ENABLED `agent_channel_bindings` row, or the PRESENCE of a stored
+   * `dm_policy`/`group_policy` key for that channel in the agent's install
+   * metadata (presence, never value, because the loaders normalize a missing
+   * entry into a full default document). Both mean the same thing: a human
+   * touched this channel.
    *
-   * So the two questions are asked separately: "what may this channel do"
-   * (always answered) and "does this box need this channel's code at all"
-   * (answered only for channels the owner has actually reached for). The cloud
-   * decides the second — see openclaw_provisioning_service.py.
+   * CONSUMER 1 — does this box need this channel's third-party npm package.
+   * Twenty of the twenty-seven channels are separate packages, and fetching
+   * all of them onto every customer's machine to write a policy nobody asked
+   * for is minutes of network per boot and twenty third-party dependencies
+   * loaded inside the instance that carries their messages.
    *
-   * Absent/false is NOT "this channel is broken": it is "no plugin here", and
-   * it is reported as exactly that (`OpenClawChannelPluginState.installed`).
+   * CONSUMER 2 — may this channel be switched ON. Added 2026-08-15, after a
+   * channel nobody had ever touched refused an entire box's provisioning:
+   * Synology Chat, with no token, no incoming URL, no binding and no
+   * credential, was rendered `enabled: true` with a DM policy, and its own
+   * plugin then reported the resulting admit-nobody state to
+   * `openclaw security audit` as CRITICAL. The push is all-or-nothing, so one
+   * untouched channel vetoed all twenty-four — Telegram included.
+   *
+   * That was never a Synology-shaped bug. Enabling twenty-three channels a
+   * customer has never heard of is a whole CLASS of it: every one of them is
+   * an inbound surface OpenClaw evaluates, audits, and may refuse over. A
+   * channel the owner has not set up is not enabled, and the class closes.
+   *
+   * FAIL-CLOSED WHEN ABSENT, on both consumers. Undefined means an older
+   * stored provisioning record or a cloud that did not say, and the honest
+   * reading of "did a human touch this" is then no. Off is also the
+   * recoverable direction here: the channel's own panel already shows the
+   * three states with a working "Turn on" button, so nothing is lost that a
+   * click does not restore — whereas fetching a package onto a machine we do
+   * not own is not undoable by a click.
+   *
+   * NOT RENAMED, deliberately: this field is persisted per channel inside
+   * `StoredProvisioningRecord.channels` and replayed by the boot reconcile, so
+   * a rename would read as absent on every record already on disk and take
+   * every configured channel on those boxes dark at once.
    */
   installPlugin?: boolean;
+}
+
+/**
+ * Has the owner actually reached for this channel? The ONE reading of
+ * `installPlugin`'s two-consumer meaning, so "does this box need the package"
+ * and "may this channel be on" can never drift into two different tests of the
+ * same fact.
+ */
+export function openClawChannelIsSetUpByOwner(policy: EmpyralisChannelPolicy): boolean {
+  return policy.installPlugin === true;
 }
 
 export interface OpenClawProvisioningPlan {
@@ -212,18 +260,20 @@ export interface OpenClawProvisioningPlan {
    *  channel plugin's own tool surface is not covered by the global `tools.*`
    *  lockdown, and a transport instance carries no tool authority. */
   channelToolFlags?: Array<{ channelId: string; flag: string }>;
-  /** Which top-level `channels.<id>.*` keys each channel's node will ACCEPT,
-   *  discovered by resolveOpenClawChannelKeySupport from the installed schema.
-   *  Answers `enabled` and `allowFrom` only — every other key this file writes
-   *  is answered by the channel's policy shape, which auditOpenClawChannelShapes
-   *  has already cross-checked against that same schema.
+  /** What each channel's own node on THIS box will accept and actually read,
+   *  discovered by resolveOpenClawChannelKeySupport from the installed schema:
+   *  whether it takes `enabled`, and WHERE it keeps its direct-message policy
+   *  and sender allowlist (flat, nested under `dm`, or nowhere). Every other
+   *  key this file writes is answered by the channel's policy shape, which
+   *  auditOpenClawChannelShapes has already cross-checked against that same
+   *  schema.
    *
-   *  Absent (or missing an entry for a channel) means "assume acceptable",
-   *  which is what this file did before key support existed. The two keys it
-   *  covers are present on every channel in the pinned build EXCEPT
-   *  `allowFrom` on matrix/googlechat/tlon, so a caller that omits it is not
-   *  silently reintroducing the ClickClack refusal — that one is closed by the
-   *  policy shape, which is always available. */
+   *  Absent (or missing an entry for a channel) means "assume acceptable, at
+   *  the flat paths", which is what this file did before key support existed.
+   *  A caller that omits it is not silently reintroducing the ClickClack
+   *  refusal — that one is closed by the policy shape, which is always
+   *  available — but it IS giving up the DM-key discovery, so production
+   *  callers always pass it. */
   channelKeySupport?: readonly OpenClawChannelKeySupport[];
   /** Channel-plugin ids this box has actually installed, from OpenClaw's own
    *  install registry (./openclaw-plugin-install.ts). They join the bridge
@@ -251,6 +301,21 @@ export type OpenClawPolicyFindingCode =
   /** The channel's node will not even accept `enabled`, so provisioning
    *  cannot switch it on or off. Nothing is written for it at all. */
   | "channel_not_configurable"
+  /** The owner has never set this channel up, so it is written OFF rather
+   *  than switched on with a default policy.
+   *
+   *  DISTINCT FROM EVERY OTHER CODE HERE, and the distinction is the point:
+   *  the others say "Empyralis tried and could not". This one says "nobody
+   *  asked", which is the resting state of almost every channel on almost
+   *  every box and is not a fault of the channel, the machine, or the policy.
+   *  Sharing a code with any of them would report a problem where there is
+   *  none — and, worse, would hide the ones that are real inside twenty-odd
+   *  entries that mean nothing.
+   *
+   *  It is reported rather than done silently because an off switch nobody
+   *  can see is how a channel "just stops working"; the owner-facing text is
+   *  the one sentence that names the action that turns it on. */
+  | "channel_not_set_up_by_owner"
   /** This box's OpenClaw has no `channels.<id>` namespace — the channel's
    *  plugin is not installed here, so the ID ITSELF is refused, whatever the
    *  block contains. Distinct from `channel_not_configurable` on purpose:
@@ -639,22 +704,44 @@ interface RenderedChannel {
 }
 
 /**
- * Whether a top-level `channels.<id>.<key>` may be written at all.
+ * Whether `channels.<id>.enabled` may be written at all.
  *
- * ONLY `enabled` and `allowFrom` go through here. Every other key this file
- * writes is gated on the channel's POLICY SHAPE — an empty `dmPolicyModes` IS
- * "this channel has no dmPolicy field", `perChatMapKey: null` IS "no groups
- * map", and auditOpenClawChannelShapes refuses the whole run if the installed
- * schema and that shape ever disagree. Routing those through a second source
- * would be two answers to one question.
+ * ONLY `enabled` goes through here now. `allowFrom` used to as well, and that
+ * was the Synology Chat defect: this function's `acceptsUndeclaredKeys`
+ * escape answers "will the write be refused", and an authorization key needs
+ * "will the write be read" — see OPENCLAW_DM_SURFACE_LOCATIONS in
+ * ./openclaw-channel-shapes.ts, which now answers the DM keys from what the
+ * node DECLARES. `enabled` keeps the escape because a permissive node does
+ * honour it, verified on a live instance.
+ *
+ * Every other key this file writes is gated on the channel's POLICY SHAPE —
+ * `perChatMapKey: null` IS "no groups map", an empty `groupPolicyModes` IS "no
+ * groupPolicy field", and auditOpenClawChannelShapes refuses the whole run if
+ * the installed schema and that shape ever disagree. Routing those through a
+ * second source would be two answers to one question.
  */
-function channelKeyWriter(
+function canWriteChannelEnabled(
   channelId: string,
   keySupport: readonly OpenClawChannelKeySupport[] | undefined,
-): (key: "enabled" | "allowFrom") => boolean {
+): boolean {
   const entry = keySupport?.find((candidate) => candidate.channelId === channelId);
-  if (!entry) return () => true;
-  return (key) => entry.acceptsUndeclaredKeys || entry.keys.includes(key);
+  if (!entry) return true;
+  return entry.acceptsUndeclaredKeys || entry.keys.includes("enabled");
+}
+
+/** Writes a value at a discovered path (`["dmPolicy"]`, `["dm","allowFrom"]`),
+ *  creating and MERGING intermediate objects — matrix and googlechat need
+ *  `policy` and `allowFrom` to land in the same `dm` block, and the second
+ *  write must not replace the first. */
+function setChannelPath(block: Record<string, unknown>, path: readonly string[], value: unknown): void {
+  let cursor = block;
+  for (const segment of path.slice(0, -1)) {
+    const existing = cursor[segment];
+    const next = existing && typeof existing === "object" ? (existing as Record<string, unknown>) : {};
+    cursor[segment] = next;
+    cursor = next;
+  }
+  cursor[path[path.length - 1]] = value;
 }
 
 function renderChannel(
@@ -664,14 +751,13 @@ function renderChannel(
 ): RenderedChannel {
   const widenings: OpenClawPolicyFinding[] = [];
   const block: Record<string, unknown> = {};
-  const canWrite = channelKeyWriter(policy.channelId, keySupport);
 
   // ── Can this channel be switched at all? ────────────────────────────────
   //
   // Before anything else, including the `enabled: false` shortcut: a node that
   // refuses `enabled` refuses `{enabled: false}` just as hard, and one refused
   // key refuses the entire push for every channel on the box.
-  if (!canWrite("enabled")) {
+  if (!canWriteChannelEnabled(policy.channelId, keySupport)) {
     return {
       channelId: policy.channelId,
       block: {},
@@ -689,6 +775,32 @@ function renderChannel(
 
   if (!policy.enabled) {
     return { channelId: policy.channelId, block: { enabled: false }, widenings };
+  }
+
+  // ── Has anyone actually set this channel up? ────────────────────────────
+  //
+  // A channel nobody has touched is written OFF, and is written off rather
+  // than OMITTED: `openclaw config patch` MERGES, so leaving the key out keeps
+  // whatever a previous run left behind — which on the box that produced this
+  // fix meant `synology-chat: {enabled: true, allowFrom: ["*"]}` sitting in a
+  // live config long after the run that wrote it had been superseded. The only
+  // way to turn something off in a merged document is to say so.
+  //
+  // AFTER the explicit `enabled: false` above, so an owner's own off is
+  // reported as itself (no finding) rather than as "you never set this up".
+  if (!openClawChannelIsSetUpByOwner(policy)) {
+    return {
+      channelId: policy.channelId,
+      block: { enabled: false },
+      widenings,
+      disabled: {
+        channelId: policy.channelId,
+        code: "channel_not_set_up_by_owner",
+        detail:
+          `${policy.channelId} is switched off on this computer because it has not been set up yet. Open it under ` +
+          "Channels and connect it, and it will be switched on for you — nothing else needs to happen first.",
+      },
+    };
   }
 
   // ── Axis 1: require_mention. EXACT or fail closed. ─────────────────────
@@ -842,7 +954,26 @@ function renderChannel(
   //
   // Two questions again, and fusing them is the same defect the group axis
   // had: `dmMode`/`dmAllowFrom` below say what Empyralis's policy MEANS, and
-  // `writeDm` decides what of that the channel will actually accept.
+  // `dmSurface` decides WHERE — and whether — the channel can hold it.
+  //
+  // WHERE is not `dmPolicy`/`allowFrom` for every channel, which is the second
+  // half of the Synology Chat fix. The surface is read off the channel's own
+  // installed schema (./openclaw-channel-shapes.ts), covering all three shapes
+  // the pinned build actually has: flat, nested under `dm`, and absent. Its
+  // `policyModes` are the same enum `auditOpenClawChannelShapes` has already
+  // cross-checked against the transcribed shape before a byte is written, so
+  // preferring it here is not a second opinion — it is the same answer, read
+  // one level closer to the machine, and it is the only one of the two that
+  // can see a nested pair at all.
+  //
+  // A caller with no key support (the boot baseline, and every test that does
+  // not supply one) falls back to the transcribed shape and the flat paths,
+  // i.e. exactly the behaviour that existed before this was discovered.
+  const dmSurface = keySupport?.find((entry) => entry.channelId === policy.channelId)?.dm;
+  const dmModes = dmSurface ? dmSurface.policyModes : shape.dmPolicyModes;
+  const dmPolicyPath = dmSurface ? dmSurface.policyPath : ["dmPolicy"];
+  const dmAllowlistPath = dmSurface ? dmSurface.allowlistPath : ["allowFrom"];
+
   let dmMode: "open" | "allowlist" = "open";
   let dmAllowFrom: string[] = ["*"];
   const openWithWildcard = (): void => {
@@ -854,7 +985,7 @@ function renderChannel(
       openWithWildcard();
       break;
     case "allowlist":
-      if (shape.dmPolicyModes.includes("allowlist")) {
+      if (dmModes.includes("allowlist")) {
         dmMode = "allowlist";
         dmAllowFrom = [...policy.dmPolicy.allowlist].sort();
       } else {
@@ -903,16 +1034,16 @@ function renderChannel(
   }
 
   // Now express it, or say why it cannot be.
-  const canWriteAllowFrom = canWrite("allowFrom");
-  if (shape.dmPolicyModes.length === 0) {
-    // No `dmPolicy` field at all — clickclack, matrix, googlechat, tlon.
-    // ClickClack is the instructive one: it hardcodes `dmPolicy: "allowlist"`
-    // in its own ingress call and exposes `allowFrom` as the single lever, so
-    // the sender list IS the policy there and writing it is exact rather than
-    // a compromise. We cannot know that from the schema for every channel,
-    // which is why this is recorded rather than assumed.
-    if (canWriteAllowFrom) {
-      block.allowFrom = dmAllowFrom;
+  if (dmModes.length === 0) {
+    // No DM policy field anywhere on this channel — clickclack, tlon,
+    // synology-chat. ClickClack is the instructive one: it hardcodes
+    // `dmPolicy: "allowlist"` in its own ingress call and exposes `allowFrom`
+    // as the single lever, so the sender list IS the policy there and writing
+    // it is exact rather than a compromise. We cannot know that from the
+    // schema for every channel, which is why this is recorded rather than
+    // assumed.
+    if (dmAllowlistPath) {
+      setChannelPath(block, dmAllowlistPath, dmAllowFrom);
       widenings.push({
         channelId: policy.channelId,
         code: "dm_policy_mode_not_expressible_sender_list_only",
@@ -921,16 +1052,24 @@ function renderChannel(
           "senders, so that list is what gets written and Empyralis applies the rest of your setting itself.",
       });
     } else {
+      // NOT "the node would refuse the key" — synology-chat's node accepts
+      // ANY key (`additionalProperties: {}`) and reads none of the ones this
+      // module knows the names of. It was handed `allowFrom: ["*"]` for
+      // exactly that reason, kept its own admit-nobody default underneath, and
+      // its plugin then failed the whole box's security audit over the result.
+      // Not naming a key is the honest outcome when the channel does not say
+      // which key it reads.
       widenings.push({
         channelId: policy.channelId,
         code: "dm_policy_not_expressible_no_lever",
         detail:
-          `OpenClaw's ${policy.channelId} channel has no direct-message settings Empyralis can write, so it uses ` +
-          "its own defaults and Empyralis applies your direct-message policy itself on every message that reaches " +
-          "it. Your setting is still enforced for anything the agent can see.",
+          `OpenClaw's ${policy.channelId} channel does not say which of its settings holds your allowed senders, so ` +
+          "Empyralis writes none rather than one it would ignore. Empyralis applies your direct-message policy " +
+          "itself on every message that reaches it, and your setting is still enforced for anything the agent " +
+          "can see.",
       });
     }
-  } else if (!shape.dmPolicyModes.includes(dmMode)) {
+  } else if (!dmModes.includes(dmMode)) {
     // Every non-empty dm enum in the pinned build carries "open", so this is
     // the guard for a build that changes rather than a branch anyone reaches
     // today. There is no narrower fallback on offer: narrowing is the
@@ -943,7 +1082,7 @@ function renderChannel(
         "default and Empyralis applies your direct-message policy itself. Your setting is still enforced for " +
         "anything the agent can see.",
     });
-  } else if (!canWriteAllowFrom) {
+  } else if (dmAllowlistPath === null) {
     // BOTH modes are meaningless without the sender list. `dmPolicy: "open"`
     // ALONE MEANS DROP EVERY DM (see above), and `"allowlist"` with no list
     // means the same thing more obviously. Writing the mode would be strictly
@@ -956,9 +1095,11 @@ function renderChannel(
         "left alone rather than set to a value that would silently drop every message. Empyralis applies your " +
         "direct-message policy itself.",
     });
-  } else {
-    block.dmPolicy = dmMode;
-    block.allowFrom = dmAllowFrom;
+  } else if (dmPolicyPath && dmAllowlistPath) {
+    // Both, always, and at the paths this channel declares them: the mode
+    // without the sender list is the "drop every DM" configuration above.
+    setChannelPath(block, dmPolicyPath, dmMode);
+    setChannelPath(block, dmAllowlistPath, dmAllowFrom);
   }
 
   block.enabled = true;

@@ -31,6 +31,39 @@
             "configWrites": {
               "type": "boolean"
             },
+            "dm": {
+              "additionalProperties": false,
+              "properties": {
+                "allowFrom": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "groupChannels": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "groupEnabled": {
+                  "type": "boolean"
+                },
+                "policy": {
+                  "enum": [
+                    "pairing",
+                    "allowlist",
+                    "open",
+                    "disabled"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
             "dmPolicy": {
               "enum": [
                 "pairing",
@@ -264,6 +297,41 @@
           "properties": {
             "configWrites": {
               "type": "boolean"
+            },
+            "dm": {
+              "additionalProperties": false,
+              "properties": {
+                "allowFrom": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "policy": {
+                  "default": "pairing",
+                  "enum": [
+                    "pairing",
+                    "allowlist",
+                    "open",
+                    "disabled"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "policy"
+              ],
+              "type": "object"
             },
             "enabled": {
               "type": "boolean"
@@ -743,6 +811,52 @@
         "matrix": {
           "additionalProperties": false,
           "properties": {
+            "dm": {
+              "additionalProperties": false,
+              "properties": {
+                "allowFrom": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "policy": {
+                  "enum": [
+                    "pairing",
+                    "allowlist",
+                    "open",
+                    "disabled"
+                  ],
+                  "type": "string"
+                },
+                "sessionScope": {
+                  "enum": [
+                    "per-user",
+                    "per-room"
+                  ],
+                  "type": "string"
+                },
+                "threadReplies": {
+                  "enum": [
+                    "off",
+                    "inbound",
+                    "always"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
             "enabled": {
               "type": "boolean"
             },
@@ -1512,6 +1626,73 @@
             },
             "configWrites": {
               "type": "boolean"
+            },
+            "dm": {
+              "additionalProperties": false,
+              "properties": {
+                "allowFrom": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "groupChannels": {
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  },
+                  "type": "array"
+                },
+                "groupEnabled": {
+                  "type": "boolean"
+                },
+                "policy": {
+                  "enum": [
+                    "pairing",
+                    "allowlist",
+                    "open",
+                    "disabled"
+                  ],
+                  "type": "string"
+                },
+                "replyToMode": {
+                  "anyOf": [
+                    {
+                      "const": "off",
+                      "type": "string"
+                    },
+                    {
+                      "const": "first",
+                      "type": "string"
+                    },
+                    {
+                      "const": "all",
+                      "type": "string"
+                    },
+                    {
+                      "const": "batched",
+                      "type": "string"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
             },
             "dmPolicy": {
               "enum": [
