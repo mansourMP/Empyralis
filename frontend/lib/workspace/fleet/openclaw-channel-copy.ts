@@ -112,7 +112,12 @@ export type OpenClawObservedChannel = {
  *  in the pinned build's manifest declares that shape, and inventing a member
  *  nothing produces is how a UI grows a branch that has never once rendered.
  *  See the report for `telegram-userbot`, which would be its first producer. */
-export type ChannelConnectMethod = "paste" | "scan" | "device" | "unknown";
+/** `unknown_link`: a pairing channel whose box has not reported its link
+ *  shape yet, because OpenClaw only exposes that once the channel is enabled.
+ *  Distinct from `unknown` (no plugin at all) and from `device` (the box
+ *  answered, and this one genuinely has no QR flow). Starting the link is
+ *  what resolves it — see connectMethodFor. */
+export type ChannelConnectMethod = "paste" | "scan" | "device" | "unknown" | "unknown_link";
 
 export function connectMethodFor(
   entry: OpenClawChannelCatalogEntry,
@@ -121,8 +126,36 @@ export function connectMethodFor(
   if (entry.connect_method === "plugin_absent") return "unknown";
   if (entry.connect_method === "credential") return "paste";
   // `pairing` splits on what the BOX says, because that is the only place the
-  // answer exists.
-  return observed?.link?.supports_qr_login ? "scan" : "device";
+  // answer exists — but "the box has not said yet" is a THIRD state, and
+  // collapsing it into "device" produced a dead end nobody could escape.
+  //
+  // OpenClaw only registers a channel plugin's provider once the channel is
+  // ENABLED (openclaw-channel-link.ts documents this, confirmed the hard way:
+  // with channels.whatsapp.enabled false, web.login.start answers "web login
+  // provider is not available"). So `observed.link` is null until enabled —
+  // and since 2026-08-15 we deliberately only enable channels the owner has
+  // set up. Linking IS how an owner sets a pairing channel up, so:
+  //
+  //   link null  -> not enabled yet -> the panel showed "there is no token to
+  //                 paste, link it directly from this computer", a dead end
+  //   to escape it you must start the link
+  //   to start the link the button must render
+  //   the button only rendered when link was non-null
+  //
+  // A circular gate, and it is why WhatsApp could never be linked from the UI.
+  // `link_start` calls ensureChannelEnabled first, so pressing the control is
+  // exactly what resolves the unknown. Offer it rather than guessing which
+  // pairing channels can QR — a guess would be a hand-maintained channel list
+  // in disguise, and this file exists to avoid those.
+  // An UNREACHABLE box is not the same as an unenabled channel, and this
+  // distinction is load-bearing: with no `observed` at all we know nothing
+  // and must not offer a control that cannot work — degrade to the honest
+  // device sentence, exactly as before. `observed` present with a null
+  // `link` is the box answering "this channel is not enabled", which is the
+  // state pressing the control resolves.
+  if (!observed) return "device";
+  if (observed.link == null) return "unknown_link";
+  return observed.link.supports_qr_login ? "scan" : "device";
 }
 
 /** "A, B, and C" — the one place this pairing joins a channel-label list, so
@@ -266,7 +299,8 @@ export function remediationFor(
   if (entry.connect_method === "pairing") {
     // Two different situations used to share one dead-end sentence. They are
     // not the same: one of them now has a real flow behind it.
-    if (connectMethodFor(entry, observed) === "scan") {
+    const method = connectMethodFor(entry, observed);
+    if (method === "scan") {
       return {
         kind: "link",
         // The control does the work and says nothing about mechanism — same
@@ -275,6 +309,14 @@ export function remediationFor(
         label: observed?.accounts.length ? "Link again" : "Show code",
         detail: "",
       };
+    }
+    if (method === "unknown_link") {
+      // The box has not been asked yet, because this channel is not enabled
+      // and OpenClaw does not expose a link shape until it is. Pressing this
+      // enables it and asks — which is the only way to find out, and is also
+      // exactly what the owner wants to happen. One control, no sentence
+      // about mechanism, and no guess about which pairing channels can QR.
+      return { kind: "link", label: "Set up", detail: "" };
     }
     return {
       kind: "elsewhere",

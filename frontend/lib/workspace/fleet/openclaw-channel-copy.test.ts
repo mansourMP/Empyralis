@@ -1247,9 +1247,18 @@ for (const channel of manifest.channels as unknown as ManifestChannelFields[]) {
     connectMethodFor(absentEntry, observed()) === "unknown",
     "a channel whose plugin is absent has an unknown connect method, never a guessed one",
   );
+  // CHANGED 2026-08-15, and the old assertion encoded the bug rather than
+  // guarding against it. OpenClaw only exposes a channel's link shape once
+  // the channel is ENABLED, and we deliberately only enable channels the
+  // owner has set up — so `link: null` is "not enabled yet", not "no QR
+  // flow". Calling it `device` rendered "there is no token to paste, link it
+  // directly from this computer" and no control, which made WhatsApp
+  // impossible to link from the UI: the button that enables it only appeared
+  // once it was already enabled. `link_start` runs ensureChannelEnabled
+  // first, so the control resolves exactly this state.
   assert(
-    connectMethodFor(pairingEntry, observed({ link: null })) === "device",
-    "a pairing channel the box reported no link shape for stays a link-on-the-device channel",
+    connectMethodFor(pairingEntry, observed({ link: null })) === "unknown_link",
+    "a pairing channel the box has not reported a link shape for offers to find out, rather than dead-ending",
   );
   assert(
     connectMethodFor(pairingEntry, undefined) === "device",
@@ -1292,7 +1301,16 @@ for (const channel of manifest.channels as unknown as ManifestChannelFields[]) {
     "a QR-capable channel's card face says the linking happens here, not on the device",
   );
 
-  const deviceRemediation = remediationFor(pairingEntry, observed({ link: null }), true, true);
+  // A channel the box ANSWERED about, saying it declares no QR seam, is the
+  // genuine device case and keeps the honest no-control state. Note the
+  // fixture: an explicit link with supports_qr_login false, NOT `link: null`
+  // — that distinction is the whole point of the change above.
+  const deviceRemediation = remediationFor(
+    pairingEntry,
+    observed({ link: { gateway_methods: [], supports_qr_login: false } }),
+    true,
+    true,
+  );
   assert(
     deviceRemediation.kind === "elsewhere",
     "a pairing channel with no QR seam keeps the honest no-control state",
@@ -1300,6 +1318,26 @@ for (const channel of manifest.channels as unknown as ManifestChannelFields[]) {
   assert(
     channelCardPill(deviceRemediation).label === "Link on the device",
     "a genuinely device-linked channel still says so on its face",
+  );
+
+  // And the state that was previously unreachable: the box answered, the
+  // channel is not enabled yet, so the panel offers one control that enables
+  // it and asks. Without this the founder's WhatsApp could not be linked at
+  // all from the UI.
+  const unknownLinkRemediation = remediationFor(pairingEntry, observed({ link: null }), true, true);
+  assert(
+    unknownLinkRemediation.kind === "link",
+    "a pairing channel whose link shape is not known yet offers a control, not a dead end",
+  );
+  // An unreachable box never reaches the pairing branch at all: remediationFor
+  // catches it earlier as `unknown` ("This computer could not be reached, so
+  // its channel state is unknown"), which is the better answer — it names the
+  // real fact instead of describing how the channel would link if we could
+  // ask. Asserted here anyway, because the new unknown_link state must not
+  // start leaking a control onto a box nobody can talk to.
+  assert(
+    remediationFor(pairingEntry, undefined, true, true).kind === "unknown",
+    "an UNREACHABLE box says so — it never offers a control that cannot work",
   );
 
   // A control that cannot work must never render. The whole point of routing
