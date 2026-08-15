@@ -53,7 +53,23 @@ provides a door. Never merge these into one number again.
    `verificationTier`, `scan_status`, install count in plain words —
    shown, never used to filter.
 
-### P1 — every platform has an honest path
+### P0/P1 — DONE. Four commits.
+
+```
+d07a86b7e  registry is 112 doors, not 112 channels   (manifest v2, backend booted again)
+409e59751  no "Scan a code" where there is no code    (iMessage/Signal/Twitch/Synology/Tlon)
+4af7b6117  GOAL.md corrected, including my wrong claim
+828ca2059  succeeding at setup no longer kills the card + the guard
+```
+
+The surface is now swept by a test, not by a person clicking: 24 platforms
+x 6 computer-reported states, wired into `npm run test:unit`. It asserts a
+fresh computer has no dead ends, that succeeding never produces one, that
+the honest unknown stays honest, and that no mechanism word reaches anyone.
+Proven red on the pre-fix code (exactly the 16 real dead ends) and green
+after.
+
+### P1 detail — every platform has an honest path
 
 4. **Swept — mechanically, not by clicking.** All 24 carried platforms x 5
    states a real box can report = 120 outcomes, driven through the REAL
@@ -91,6 +107,17 @@ provides a door. Never merge these into one number again.
    suspicious`, no provenance, 9 installs, publisher `eldaruma`. It takes a
    real Telegram session on the box holding the working bot token.
    Recommendation: derive its shape on a throwaway profile first.
+
+### Still unproven, and I will not claim otherwise
+
+- **No channel plugin was actually installed to test this.** The derivation
+  runs against the real `openclaw config schema` and against a real channel
+  node re-keyed under an absent id — which is exactly what installing does —
+  but never against one genuinely installed. This machine's OpenClaw is
+  YOURS (its config was written by 2026.6.11), and I am not installing
+  third-party code into it without you. End-to-end on a real box is open.
+- Regenerating the manifest always dirties the tree, because clawhub's
+  download counters move. Harmless, noisy.
 
 ### P3 — only if P0–P2 are green
 
