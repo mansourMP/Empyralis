@@ -60,6 +60,10 @@ import type { GeneratedOpenClawCredentialField } from "../generated-openclaw-cha
 import { OPENCLAW_TRANSPORT_CHANNEL_IDS } from "../capabilities";
 import { OpenClawCli, openClawProfileStateDir } from "./openclaw-cli";
 import {
+  deriveOpenClawCredentialShapes,
+  type DerivedOpenClawCredentialShape,
+} from "./openclaw-channel-credential-shape";
+import {
   readChannelLinkShapes,
   projectLinkResponse,
   type ChannelLoginHttpRequest,
@@ -101,12 +105,30 @@ export interface OpenClawCredentialFieldState {
    *  Presence only — the value is never read, and for a secret it is never
    *  even transmitted to this process. */
   readonly set: boolean;
+  /** False for the fields a customer must supply to connect. Carried here as
+   *  well as in the catalog because a LIVE-derived channel has no catalog
+   *  entry to read it from — see `connect_method` below. */
+  readonly advanced: boolean;
+  readonly file_alternative: string | null;
 }
 
 export interface OpenClawChannelSetupState {
   readonly channel_id: string;
   readonly channel_key: string;
   readonly label: string;
+  /**
+   * How this channel connects, AS THIS BOX SEES IT.
+   *
+   * Normally the manifest's own answer. For a channel the manifest calls
+   * `plugin_absent` — its plugin contributed no `channels.<id>` node on the
+   * machine the manifest was generated from — this is re-derived from THIS
+   * box's `openclaw config schema` once the plugin is actually installed here,
+   * and reports `credential`/`pairing` with the real fields.
+   *
+   * The manifest is the pre-install BELIEF; this is the OBSERVATION, and the
+   * observation wins. It stays `plugin_absent` when the installed plugin still
+   * contributes no node — an honest unknown, never a guess.
+   */
   readonly connect_method: string;
   readonly selection_label: string;
   readonly docs_path: string | null;
@@ -189,6 +211,16 @@ export function credentialFieldsForChannel(
   return channel?.credential_shape.fields;
 }
 
+/** True when the MANIFEST admits it cannot describe this channel's form — its
+ *  plugin contributed no `channels.<id>` node to the machine the manifest was
+ *  generated from. The only case in which a live schema read is allowed to
+ *  answer instead. */
+export function manifestCannotDescribeChannel(channelId: string): boolean {
+  const normalized = String(channelId || "").trim().toLowerCase();
+  const channel = GENERATED_OPENCLAW_MANIFEST.channels.find((entry) => entry.id === normalized);
+  return channel?.credential_shape.connect_method === "plugin_absent";
+}
+
 /**
  * Validates a write request into the exact set of config assignments it is
  * allowed to make.
@@ -200,7 +232,18 @@ export function credentialFieldsForChannel(
  * a masked read back at us and we would be writing the literal string
  * `__OPENCLAW_REDACTED__` into a customer's credential).
  */
-export function parseCredentialWrite(raw: unknown): {
+export function parseCredentialWrite(
+  raw: unknown,
+  /**
+   * The fields THIS BOX's schema declares, for a channel the manifest calls
+   * `plugin_absent`. The allowlist is still closed and still comes from
+   * OpenClaw — from the installed schema instead of the pinned one, because
+   * for these four channels the pinned one has nothing to say. Ignored when
+   * the manifest already describes the channel: a live read must never be able
+   * to WIDEN a channel the pinned build already answered for.
+   */
+  liveFields?: readonly GeneratedOpenClawCredentialField[],
+): {
   channelId: string;
   values: Record<string, string>;
   errors: string[];
@@ -208,7 +251,14 @@ export function parseCredentialWrite(raw: unknown): {
   const errors: string[] = [];
   const record = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const channelId = String(record.channel_id ?? "").trim().toLowerCase();
-  const fields = credentialFieldsForChannel(channelId);
+  const manifestFields = credentialFieldsForChannel(channelId);
+  // `plugin_absent`, never merely "no fields": a PAIRING channel's empty list
+  // is the manifest's positive answer that there is nothing to paste, and a
+  // live read must not be able to turn that into a form.
+  const fields =
+    manifestFields && manifestCannotDescribeChannel(channelId) && liveFields && liveFields.length > 0
+      ? liveFields
+      : manifestFields;
   if (!fields) {
     return {
       channelId,
@@ -391,12 +441,15 @@ export class OpenClawChannelSetupRuntime {
       this.readChannelList(),
       this.readChannelConfig(),
     ]);
-    const links = await this.readLinkShapes();
+    const [links, live] = await Promise.all([
+      this.readLinkShapes(),
+      this.readLiveCredentialShapes(listed),
+    ]);
     return {
       capability_id: OPENCLAW_CHANNEL_SETUP_CAPABILITY,
       status: "ok",
       refusal: null,
-      channels: this.projectChannels(listed, effective, links),
+      channels: this.projectChannels(listed, effective, links, live),
       written_fields: [],
       // A completed link writes its own auth state inside OpenClaw and the
       // channel is started by the login handler itself, so nothing here needs
@@ -488,18 +541,31 @@ export class OpenClawChannelSetupRuntime {
       this.readChannelConfig(),
       this.readLinkShapes(),
     ]);
+    const live = await this.readLiveCredentialShapes(listed);
     return {
       capability_id: OPENCLAW_CHANNEL_SETUP_CAPABILITY,
       status: "ok",
       refusal: null,
-      channels: this.projectChannels(listed, effective, links),
+      channels: this.projectChannels(listed, effective, links, live),
       written_fields: [],
       restart_required: false,
     };
   }
 
   async writeCredential(args: Record<string, unknown>): Promise<OpenClawChannelSetupResult> {
-    const parsed = parseCredentialWrite(args);
+    // For a channel the manifest cannot describe, the allowlist the write is
+    // narrowed to comes from this box's own schema — otherwise a form the read
+    // path now renders could never be submitted, which is a dead control with
+    // extra steps. Nothing is read for any other channel.
+    const requestedChannelId = String(
+      (args && typeof args === "object" ? (args as Record<string, unknown>).channel_id : "") ?? "",
+    )
+      .trim()
+      .toLowerCase();
+    const liveFields = manifestCannotDescribeChannel(requestedChannelId)
+      ? (await this.deriveFromLiveSchema([requestedChannelId]))[requestedChannelId]?.fields
+      : undefined;
+    const parsed = parseCredentialWrite(args, liveFields);
     if (parsed.errors.length > 0) {
       return this.refuse("openclaw_channel_credential_invalid", parsed.errors.join(" "));
     }
@@ -550,11 +616,12 @@ export class OpenClawChannelSetupRuntime {
       this.readChannelConfig(),
       this.readLinkShapes(),
     ]);
+    const live = await this.readLiveCredentialShapes(listed);
     return {
       capability_id: OPENCLAW_CHANNEL_SETUP_CAPABILITY,
       status: "ok",
       refusal: null,
-      channels: this.projectChannels(listed, effective, links),
+      channels: this.projectChannels(listed, effective, links, live),
       written_fields: Object.keys(parsed.values).sort(),
       // A credential change is picked up when the supervised unit restarts;
       // this capability, like provisioning, never restarts OpenClaw itself
@@ -607,10 +674,52 @@ export class OpenClawChannelSetupRuntime {
     }
   }
 
+  /**
+   * Which channels this box can answer for that the MANIFEST could not, and
+   * their real fields.
+   *
+   * The gate is deliberately narrow and is checked BEFORE any shell-out:
+   * `config schema` is ~2.5MB and slow, so it is read AT MOST ONCE per call
+   * and only when at least one channel actually needs it. On every box where
+   * none of the four plugin-absent channels is installed — which is every box
+   * today — this makes no CLI call at all.
+   */
+  private async readLiveCredentialShapes(
+    listed: Record<string, ChannelListEntry>,
+  ): Promise<Record<string, DerivedOpenClawCredentialShape>> {
+    const needed = GENERATED_OPENCLAW_MANIFEST.channels
+      .filter(
+        (channel) =>
+          OPENCLAW_TRANSPORT_CHANNEL_IDS.includes(channel.id) &&
+          channel.credential_shape.connect_method === "plugin_absent" &&
+          listed[channel.id]?.installed === true,
+      )
+      .map((channel) => channel.id);
+    if (needed.length === 0) return {};
+    return this.deriveFromLiveSchema(needed);
+  }
+
+  private async deriveFromLiveSchema(
+    channelIds: readonly string[],
+  ): Promise<Record<string, DerivedOpenClawCredentialShape>> {
+    let schema: unknown;
+    try {
+      schema = await this.cli.configSchema();
+    } catch {
+      // A schema read that fails is "we still do not know this channel's
+      // fields", which is exactly the state the manifest already describes.
+      // Never a reason to fail a read that otherwise succeeded.
+      return {};
+    }
+    if (!schema) return {};
+    return deriveOpenClawCredentialShapes(schema, channelIds);
+  }
+
   private projectChannels(
     listed: Record<string, ChannelListEntry>,
     effective: Record<string, Record<string, unknown>>,
     links: Record<string, OpenClawChannelLinkShape> = {},
+    live: Record<string, DerivedOpenClawCredentialShape> = {},
   ): OpenClawChannelSetupState[] {
     const states: OpenClawChannelSetupState[] = [];
     for (const channel of GENERATED_OPENCLAW_MANIFEST.channels) {
@@ -618,10 +727,24 @@ export class OpenClawChannelSetupRuntime {
       const entry = listed[channel.id] ?? {};
       const config = effective[channel.id] ?? {};
       const shape = channel.credential_shape;
-      const fields: OpenClawCredentialFieldState[] = shape.fields.map((field) => ({
+      // The observation wins over the belief, and only ever for the channels
+      // the belief admits it cannot describe — a channel the pinned build
+      // declares a node for is answered by the manifest exactly as before.
+      const observedShape = live[channel.id];
+      const connectMethod = observedShape?.connect_method ?? shape.connect_method;
+      const shapeFields: readonly {
+        name: string;
+        secret: boolean;
+        type: string;
+        advanced: boolean;
+        file_alternative: string | null;
+      }[] = observedShape?.fields ?? shape.fields;
+      const fields: OpenClawCredentialFieldState[] = shapeFields.map((field) => ({
         name: field.name,
         secret: field.secret,
         type: field.type,
+        advanced: field.advanced,
+        file_alternative: field.file_alternative,
         // Presence, never value. For a secret the only thing that ever arrives
         // here is OpenClaw's redaction placeholder.
         set: hasValue(config[field.name]),
@@ -630,7 +753,7 @@ export class OpenClawChannelSetupRuntime {
         channel_id: channel.id,
         channel_key: channel.channel_key,
         label: channel.label,
-        connect_method: shape.connect_method,
+        connect_method: connectMethod,
         selection_label: shape.selection_label,
         docs_path: shape.docs_path,
         installed: entry.installed === true,

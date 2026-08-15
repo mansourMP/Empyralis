@@ -55,6 +55,7 @@ import { join } from "node:path";
 import {
   channelCardPill,
   connectMethodFor,
+  effectiveChannelShape,
   formatChannelList,
   splitCredentialFields,
   openclawObservedErrorBanner,
@@ -1366,6 +1367,134 @@ for (const channel of manifest.channels as unknown as ManifestChannelFields[]) {
       }
     }
   }
+}
+
+// --- THE BOX OUTRANKS THE MANIFEST FOR A CHANNEL THE MANIFEST CANNOT
+//     DESCRIBE (effectiveChannelShape). ------------------------------------
+//
+// Four carried channels contribute their `channels.<id>` config node only once
+// their plugin is installed, and none was installed on the machine the manifest
+// was generated from — so the catalog says `plugin_absent` with no fields. That
+// is right on a fresh box and wrong the moment "Set up" succeeds. Reading the
+// catalog here dead-ended all four AFTER a successful install: pill "Unknown",
+// detail "Setup fields aren't known for this one yet", on a computer that knew.
+
+{
+  const absent = entry({
+    channel_key: "openclaw_wecom",
+    channel_id: "wecom",
+    label: "WeCom",
+    connect_method: "plugin_absent",
+    fields: [],
+    requires_plugin: true,
+    plugin_id: "wecom-openclaw-plugin",
+  });
+
+  // The box has the plugin AND has derived the form from its own schema.
+  const boxKnows = observed({
+    channel_id: "wecom",
+    channel_key: "openclaw_wecom",
+    installed: true,
+    requires_plugin: true,
+    enabled: false,
+    configured: false,
+    connect_method: "credential",
+    fields: [
+      { name: "corpSecret", secret: true, type: "string", set: false, advanced: false },
+      { name: "proxy", secret: false, type: "string", set: false, advanced: true },
+    ],
+  });
+
+  const remediation = remediationFor(absent, boxKnows, true, true);
+  assert(
+    remediation.kind === "credential",
+    `an installed plugin-absent channel whose box reported fields must ask for the credential, got ${remediation.kind}`,
+  );
+  assert(
+    channelCardPill(remediation).label !== "Unknown",
+    "the card face must not still read Unknown once the box has answered",
+  );
+  // "Waiting on" names only what connecting requires. `advanced` now arrives on
+  // the OBSERVED field (the catalog has none to carry it), so an optional proxy
+  // must not be presented as blocking.
+  assert(
+    remediation.kind === "credential" && remediation.detail === "Waiting on corpSecret.",
+    `the sentence must name only the primary field, got ${JSON.stringify((remediation as { detail?: string }).detail)}`,
+  );
+  assert(
+    connectMethodFor(absent, boxKnows) === "paste",
+    "a live-derived credential channel opens a form, not an unknown",
+  );
+
+  // …and the same channel, credential saved and switched on, is READY rather
+  // than permanently unknown.
+  const ready = remediationFor(
+    absent,
+    observed({
+      channel_id: "wecom",
+      channel_key: "openclaw_wecom",
+      installed: true,
+      requires_plugin: true,
+      enabled: true,
+      configured: true,
+      connect_method: "credential",
+      fields: [{ name: "corpSecret", secret: true, type: "string", set: true, advanced: false }],
+    }),
+    true,
+    true,
+  );
+  assert(ready.kind === "ready", `a set-up live-derived channel must read ready, got ${ready.kind}`);
+
+  // THE HONEST UNKNOWN SURVIVES. Plugin installed, and it still contributes no
+  // schema node — the box says so by reporting `plugin_absent` itself. Never a
+  // guessed form, never a guessed QR flow.
+  const stillUnknown = remediationFor(
+    absent,
+    observed({
+      channel_id: "wecom",
+      channel_key: "openclaw_wecom",
+      installed: true,
+      requires_plugin: true,
+      enabled: false,
+      configured: false,
+      connect_method: "plugin_absent",
+      fields: [],
+    }),
+    true,
+    true,
+  );
+  assert(
+    stillUnknown.kind === "unknown",
+    `a channel the box cannot describe either must stay unknown, got ${stillUnknown.kind}`,
+  );
+
+  // A box that predates the derivation sends no `connect_method` at all. It
+  // must read exactly as it did before — an absent field is not an observation.
+  const oldGateway = remediationFor(
+    absent,
+    observed({
+      channel_id: "wecom",
+      channel_key: "openclaw_wecom",
+      installed: true,
+      requires_plugin: true,
+      fields: [],
+    }),
+    true,
+    true,
+  );
+  assert(oldGateway.kind === "unknown", "an older gateway's reply must not be read as an answer");
+
+  // AND THE OBSERVATION MAY NEVER RE-SHAPE A CHANNEL THE MANIFEST DOES
+  // DESCRIBE: a pairing channel stays pairing however the box answers.
+  const pairing = entry({ connect_method: "pairing", fields: [] });
+  const shape = effectiveChannelShape(
+    pairing,
+    observed({ connect_method: "credential", fields: [{ name: "x", secret: true, type: "string", set: false }] }),
+  );
+  assert(
+    shape.connect_method === "pairing" && shape.fields.length === 0,
+    "a box reply must not turn a pairing channel into a form",
+  );
 }
 
 // --- Summary ---

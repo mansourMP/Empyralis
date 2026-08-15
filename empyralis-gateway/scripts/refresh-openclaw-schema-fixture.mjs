@@ -168,3 +168,53 @@ function sortKeys(_key, value) {
 }
 
 console.log(`wrote ${OUT} from openclaw ${version}`);
+
+// ── The SECOND fixture: the same document, UNPRUNED ───────────────────────
+//
+// The prune above keeps the POLICY-bearing properties, which is the right
+// answer for the question that fixture exists to ask ("does a policy still
+// mean what the mapping table says"). It is the wrong answer for the OTHER
+// question the gateway now asks of a live schema: what a channel's CREDENTIAL
+// FORM is (src/openclaw/provisioning/openclaw-channel-credential-shape.ts) —
+// which reads precisely the properties the prune drops, and whose
+// identifier rule is a CROSS-CHANNEL name-frequency measurement, so a fixture
+// missing any channel node would silently change its answer rather than fail.
+//
+// Written from the same single `config schema` read as the pruned one, so the
+// two can never disagree about which OpenClaw they describe. ~240KB — large
+// for a fixture, and cheaper than a derivation nothing holds to the Python
+// generator's answer.
+const UNPRUNED_OUT = path.join(
+  HERE,
+  "..",
+  "src",
+  "__tests__",
+  "fixtures",
+  "openclaw-config-schema.channels.unpruned.json",
+);
+writeFileSync(
+  UNPRUNED_OUT,
+  `${JSON.stringify(
+    {
+      $comment:
+        "GENERATED — do not edit. The `channels` subtree of `openclaw config schema` from openclaw@" +
+        version +
+        ", verbatim. Consumed by the credential-shape derivation test, which must see the properties " +
+        "the policy fixture beside it deliberately prunes. Regenerate with " +
+        "scripts/refresh-openclaw-schema-fixture.mjs when the pin moves.",
+      openclawVersion: version,
+      type: "object",
+      properties: { channels: schema.properties.channels },
+    },
+    // NO `sortKeys` here, unlike the pruned fixture above, and the difference
+    // is load-bearing rather than stylistic: the credential derivation's
+    // primary/advanced split walks a channel node's properties in DECLARATION
+    // ORDER (a credential anchors a group, and the group is the run of fields
+    // declared around it). Sorting the keys silently changes which fields the
+    // form calls primary — measured, on the first attempt at this fixture:
+    // seven extra channels' splits moved. Preserve OpenClaw's own order.
+    undefined,
+    1,
+  )}\n`,
+);
+console.log(`wrote ${UNPRUNED_OUT} from openclaw ${version}`);

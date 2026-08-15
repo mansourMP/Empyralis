@@ -2141,7 +2141,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "agentchatme/agentchat-openclaw",
         "installs": 9,
-        "downloads": 284
+        "downloads": 286
       }
     },
     {
@@ -2173,7 +2173,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "AlexBessarabenko/openclaw-max-plugin",
         "installs": 91,
-        "downloads": 271
+        "downloads": 273
       }
     },
     {
@@ -2207,7 +2207,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "antarien/openclaw-channel-imap",
         "installs": 1,
-        "downloads": 444
+        "downloads": 446
       }
     },
     {
@@ -2237,7 +2237,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "askman-dev/bricks",
         "installs": 0,
-        "downloads": 159
+        "downloads": 161
       }
     },
     {
@@ -2267,7 +2267,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Bauhinia-AI/clawbond-connector",
         "installs": 0,
-        "downloads": 104
+        "downloads": 106
       }
     },
     {
@@ -2301,7 +2301,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "botlearn-ai/botcord",
         "installs": 0,
-        "downloads": 147
+        "downloads": 148
       }
     },
     {
@@ -2331,7 +2331,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "openclaw/openclaw",
         "installs": 8,
-        "downloads": 109
+        "downloads": 111
       }
     },
     {
@@ -2363,7 +2363,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "cecwxf/wtt",
         "installs": 0,
-        "downloads": 150
+        "downloads": 152
       }
     },
     {
@@ -2396,7 +2396,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "optimalAIs/clawhive",
         "installs": 0,
-        "downloads": 34
+        "downloads": 36
       }
     },
     {
@@ -2426,7 +2426,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "comment-io/openclaw-plugin",
         "installs": 0,
-        "downloads": 106
+        "downloads": 107
       }
     },
     {
@@ -2456,7 +2456,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "comment-io/openclaw-plugin",
         "installs": 7,
-        "downloads": 245
+        "downloads": 247
       }
     },
     {
@@ -2490,7 +2490,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "DingTalk-Real-AI/dingtalk-openclaw-connector",
         "installs": 11,
-        "downloads": 3445
+        "downloads": 3447
       }
     },
     {
@@ -2521,7 +2521,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Dj-Shortcut/openclaw-facebook",
         "installs": 8,
-        "downloads": 538
+        "downloads": 540
       }
     },
     {
@@ -2555,7 +2555,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "HankHuang0516/openclaw-channel-eclaw",
         "installs": 0,
-        "downloads": 147
+        "downloads": 149
       }
     },
     {
@@ -2586,7 +2586,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "batchlion/social-management",
         "installs": 0,
-        "downloads": 112
+        "downloads": 114
       }
     },
     {
@@ -2618,7 +2618,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "genspark-ai/openclaw-channel-genteam",
         "installs": 7,
-        "downloads": 129
+        "downloads": 131
       }
     },
     {
@@ -2652,7 +2652,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "gelincloud/miniabc-plugin",
         "installs": 0,
-        "downloads": 67
+        "downloads": 69
       }
     },
     {
@@ -2686,7 +2686,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "JehadurRE/openclaw-apple-mail",
         "installs": 0,
-        "downloads": 90
+        "downloads": 92
       }
     },
     {
@@ -2717,7 +2717,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "jiademin/p2p-weixin-channel",
         "installs": 0,
-        "downloads": 361
+        "downloads": 363
       }
     },
     {
@@ -2747,7 +2747,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "gokapso/openclaw-plugin",
         "installs": 6,
-        "downloads": 279
+        "downloads": 281
       }
     },
     {
@@ -2781,7 +2781,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "kinthaiofficial/openclaw-kinthai",
         "installs": 0,
-        "downloads": 157
+        "downloads": 159
       }
     },
     {
@@ -2811,7 +2811,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://github.com/getname1997/nc-local-im-connector",
         "installs": 0,
-        "downloads": 112
+        "downloads": 114
       }
     },
     {
@@ -2843,7 +2843,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": null,
         "installs": 0,
-        "downloads": 306
+        "downloads": 307
       }
     },
     {
@@ -2876,7 +2876,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "lynn-521/openclaw-napcat",
         "installs": 0,
-        "downloads": 313
+        "downloads": 314
       }
     },
     {
@@ -2910,7 +2910,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "josezuma/emperorclaw",
         "installs": 9,
-        "downloads": 317
+        "downloads": 319
       }
     },
     {
@@ -2942,7 +2942,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "mbelinky/openclaw-channel-twilio-whatsapp",
         "installs": 1,
-        "downloads": 16
+        "downloads": 18
       }
     },
     {
@@ -2973,7 +2973,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "nevis-io/g-channel",
         "installs": 10,
-        "downloads": 540
+        "downloads": 541
       }
     },
     {
@@ -3007,7 +3007,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "ssh://git@g.hz.netease.com:22222/yunxin/im/moltbot-nim",
         "installs": 0,
-        "downloads": 157
+        "downloads": 159
       }
     },
     {
@@ -3035,7 +3035,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "niyazmft/openclaw-zulip-bridge",
         "installs": 3,
-        "downloads": 82
+        "downloads": 84
       }
     },
     {
@@ -3068,7 +3068,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "novoordo-ai/novolens-plugin-openclaw",
         "installs": 9,
-        "downloads": 145
+        "downloads": 147
       }
     },
     {
@@ -3099,7 +3099,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "onewolfxyz/openclaw-lycus",
         "installs": 0,
-        "downloads": 107
+        "downloads": 109
       }
     },
     {
@@ -3131,7 +3131,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "JoshMayerr/openclaw-op-plugin",
         "installs": 8,
-        "downloads": 111
+        "downloads": 113
       }
     },
     {
@@ -3162,7 +3162,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "openclaw/openclaw",
         "installs": 8,
-        "downloads": 1683
+        "downloads": 1685
       }
     },
     {
@@ -3196,7 +3196,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": true,
         "source_repo": "openclaw/kitchen-sink",
         "installs": 13,
-        "downloads": 2343
+        "downloads": 2345
       }
     },
     {
@@ -3226,7 +3226,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "yuanpf/openclaw-feishu-hono",
         "installs": 0,
-        "downloads": 191
+        "downloads": 193
       }
     },
     {
@@ -3258,7 +3258,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Prismer-AI/PrismerCloud",
         "installs": 0,
-        "downloads": 138
+        "downloads": 140
       }
     },
     {
@@ -3292,7 +3292,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "topcheer/PrivateClaw",
         "installs": 0,
-        "downloads": 153
+        "downloads": 155
       }
     },
     {
@@ -3322,7 +3322,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "nudgeandroid/qingtui-openclaw-plugin",
         "installs": 0,
-        "downloads": 103
+        "downloads": 105
       }
     },
     {
@@ -3352,7 +3352,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "misschengxi-crypto/pufferfish-openclaw-channel",
         "installs": 0,
-        "downloads": 133
+        "downloads": 135
       }
     },
     {
@@ -3382,7 +3382,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "@sider-ai/sider",
         "installs": 0,
-        "downloads": 90
+        "downloads": 92
       }
     },
     {
@@ -3416,7 +3416,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "soimy/openclaw-channel-dingtalk",
         "installs": 0,
-        "downloads": 4858
+        "downloads": 4860
       }
     },
     {
@@ -3450,7 +3450,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "sprintberlin/openclaw-cliq",
         "installs": 3,
-        "downloads": 482
+        "downloads": 484
       }
     },
     {
@@ -3481,7 +3481,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "srinathh/openclaw-channel-twilio-whatsapp",
         "installs": 0,
-        "downloads": 283
+        "downloads": 285
       }
     },
     {
@@ -3514,7 +3514,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "sunnoy/openclaw-plugin-wecom",
         "installs": 0,
-        "downloads": 3075
+        "downloads": 3076
       }
     },
     {
@@ -3546,7 +3546,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "synthetic-sociality/synthetic-sociality-openclaw-room",
         "installs": 1,
-        "downloads": 24
+        "downloads": 26
       }
     },
     {
@@ -3576,7 +3576,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "nada/channel",
         "installs": 0,
-        "downloads": 106
+        "downloads": 108
       }
     },
     {
@@ -3606,7 +3606,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "jeanbai0818-cloud/yach-im",
         "installs": 9,
-        "downloads": 114
+        "downloads": 116
       }
     },
     {
@@ -3640,7 +3640,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "teyou/openclaw-googlechatpubsub-plugin",
         "installs": 0,
-        "downloads": 75
+        "downloads": 78
       }
     },
     {
@@ -3673,7 +3673,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "tkhumush/openclaw-marmot",
         "installs": 7,
-        "downloads": 113
+        "downloads": 115
       }
     },
     {
@@ -3703,7 +3703,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "unayung/openclaw-plugin-lineworks",
         "installs": 0,
-        "downloads": 52
+        "downloads": 53
       }
     },
     {
@@ -3733,7 +3733,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "VamaSingapore/openclaw",
         "installs": 7,
-        "downloads": 61
+        "downloads": 63
       }
     },
     {
@@ -3766,7 +3766,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "worktable/worktable-dev",
         "installs": 4,
-        "downloads": 22
+        "downloads": 24
       }
     },
     {
@@ -3800,7 +3800,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Zhengyi003/openclaw-agent-team",
         "installs": 7,
-        "downloads": 78
+        "downloads": 79
       }
     },
     {
@@ -3834,7 +3834,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "zytrux-tech/openclaw-daoyu",
         "installs": 0,
-        "downloads": 98
+        "downloads": 100
       }
     },
     {
@@ -3864,7 +3864,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://github.com/test.git",
         "installs": 0,
-        "downloads": 42
+        "downloads": 43
       }
     },
     {
@@ -3897,7 +3897,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "UncleK/agentschat",
         "installs": 0,
-        "downloads": 108
+        "downloads": 109
       }
     },
     {
@@ -3927,7 +3927,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://github.com/TS-Sunshine/AJSecurityBaseUtility",
         "installs": 0,
-        "downloads": 51
+        "downloads": 52
       }
     },
     {
@@ -3961,7 +3961,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "T-R3x3r/openclaw-azothex",
         "installs": 0,
-        "downloads": 214
+        "downloads": 216
       }
     },
     {
@@ -3991,7 +3991,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Monadix-AI/cabinet-plugin",
         "installs": 0,
-        "downloads": 46
+        "downloads": 47
       }
     },
     {
@@ -4021,7 +4021,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Sider-ai/openclaw-sider-plugin",
         "installs": 0,
-        "downloads": 19504
+        "downloads": 19506
       }
     },
     {
@@ -4052,7 +4052,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "claw-switchboard",
         "installs": 0,
-        "downloads": 56
+        "downloads": 57
       }
     },
     {
@@ -4082,7 +4082,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "windfollowingheart/claw-zotero",
         "installs": 0,
-        "downloads": 71
+        "downloads": 73
       }
     },
     {
@@ -4113,7 +4113,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "skalenetwork/clawbits",
         "installs": 9,
-        "downloads": 608
+        "downloads": 610
       }
     },
     {
@@ -4143,7 +4143,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://github.com/openclaw/clawhub.git",
         "installs": 0,
-        "downloads": 43
+        "downloads": 44
       }
     },
     {
@@ -4174,7 +4174,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://github.com/kladkostan/freeclaws",
         "installs": 0,
-        "downloads": 247
+        "downloads": 249
       }
     },
     {
@@ -4208,7 +4208,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "marsorange/openclaw-imclaw-ext",
         "installs": 8,
-        "downloads": 629
+        "downloads": 631
       }
     },
     {
@@ -4238,7 +4238,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "kudosity/openclaw-sms",
         "installs": 0,
-        "downloads": 93
+        "downloads": 95
       }
     },
     {
@@ -4270,7 +4270,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "1",
         "installs": 1,
-        "downloads": 181
+        "downloads": 183
       }
     },
     {
@@ -4302,7 +4302,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "1",
         "installs": 1,
-        "downloads": 118
+        "downloads": 120
       }
     },
     {
@@ -4332,7 +4332,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "maicenter/maicenter-channel-plugin",
         "installs": 7,
-        "downloads": 174
+        "downloads": 176
       }
     },
     {
@@ -4364,7 +4364,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "nescafe2009/nexus-channel",
         "installs": 0,
-        "downloads": 95
+        "downloads": 96
       }
     },
     {
@@ -4397,7 +4397,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Ink-North/nostr-nip17-plugin",
         "installs": 0,
-        "downloads": 77
+        "downloads": 78
       }
     },
     {
@@ -4427,7 +4427,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Mininglamp-OSS/openclaw-channel-octo",
         "installs": 11,
-        "downloads": 4064
+        "downloads": 4066
       }
     },
     {
@@ -4455,7 +4455,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "openclaw-baiduapp",
         "installs": 0,
-        "downloads": 104
+        "downloads": 106
       }
     },
     {
@@ -4483,7 +4483,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "tdack/openclaw-bluesky-channel",
         "installs": 2,
-        "downloads": 20
+        "downloads": 22
       }
     },
     {
@@ -4515,7 +4515,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "pigeonai-org/DatingApp",
         "installs": 0,
-        "downloads": 36
+        "downloads": 37
       }
     },
     {
@@ -4549,7 +4549,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "avedelphina/openclaw-channel-deltachat",
         "installs": 7,
-        "downloads": 147
+        "downloads": 149
       }
     },
     {
@@ -4580,7 +4580,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "dearken1031/openclaw-whatsapp-plugin",
         "installs": 0,
-        "downloads": 122
+        "downloads": 123
       }
     },
     {
@@ -4612,7 +4612,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "mondaymerch/openclaw-channel-odoo",
         "installs": 0,
-        "downloads": 105
+        "downloads": 107
       }
     },
     {
@@ -4646,7 +4646,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "fibbersha-hub/openclaw-vk-plugin",
         "installs": 0,
-        "downloads": 229
+        "downloads": 231
       }
     },
     {
@@ -4677,7 +4677,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "dearken10/openclaw-whatsapp-plugin",
         "installs": 0,
-        "downloads": 442
+        "downloads": 443
       }
     },
     {
@@ -4708,7 +4708,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "lgezyxr/openclaw-clawglassos",
         "installs": 7,
-        "downloads": 172
+        "downloads": 174
       }
     },
     {
@@ -4740,7 +4740,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "tuanminhhole/openclaw-fb-messenger",
         "installs": 3,
-        "downloads": 101
+        "downloads": 105
       }
     },
     {
@@ -4772,7 +4772,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "oddrationale/openclaw-groupme",
         "installs": 7,
-        "downloads": 122
+        "downloads": 123
       }
     },
     {
@@ -4802,7 +4802,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "skrashevich/openclaw-meshtastic",
         "installs": 8,
-        "downloads": 152
+        "downloads": 154
       }
     },
     {
@@ -4833,7 +4833,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "freedom20200918/hermes-openclaw",
         "installs": 40,
-        "downloads": 378
+        "downloads": 380
       }
     },
     {
@@ -4867,7 +4867,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "ssh://git@g.hz.netease.com:22222/yunxin/im/moltbot-nim",
         "installs": 0,
-        "downloads": 116
+        "downloads": 117
       }
     },
     {
@@ -4901,7 +4901,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "now4real/openclaw-now4real",
         "installs": 0,
-        "downloads": 156
+        "downloads": 158
       }
     },
     {
@@ -4932,7 +4932,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "github.com/DaviesHuang/ClawWorld-skill",
         "installs": 0,
-        "downloads": 193
+        "downloads": 194
       }
     },
     {
@@ -4962,7 +4962,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "jiulongw/openclaw-plugin-dot-demo",
         "installs": 0,
-        "downloads": 47
+        "downloads": 48
       }
     },
     {
@@ -4996,7 +4996,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "Primeta-AI/openclaw-plugin-primeta",
         "installs": 0,
-        "downloads": 184
+        "downloads": 185
       }
     },
     {
@@ -5027,7 +5027,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "ringclaw/openclaw-ringcentral",
         "installs": 2,
-        "downloads": 63
+        "downloads": 65
       }
     },
     {
@@ -5061,7 +5061,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "lf4096/openclaw-seatalk",
         "installs": 10,
-        "downloads": 879
+        "downloads": 881
       }
     },
     {
@@ -5091,7 +5091,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://github.com/Sagleft/openclaw-utopia-channel",
         "installs": 0,
-        "downloads": 55
+        "downloads": 56
       }
     },
     {
@@ -5122,7 +5122,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "jiulongw/openclaw-vibe-dot-demo",
         "installs": 0,
-        "downloads": 130
+        "downloads": 131
       }
     },
     {
@@ -5152,7 +5152,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "openclaw-space/openclaw-vkbots-plugin",
         "installs": 0,
-        "downloads": 70
+        "downloads": 71
       }
     },
     {
@@ -5184,7 +5184,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "NewFuture/openclaw-weixin",
         "installs": 2,
-        "downloads": 106
+        "downloads": 108
       }
     },
     {
@@ -5214,7 +5214,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "tans/openclaw-wework",
         "installs": 0,
-        "downloads": 79
+        "downloads": 80
       }
     },
     {
@@ -5247,7 +5247,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "tuanminhhole/openclaw-zalo-connect",
         "installs": 3,
-        "downloads": 157
+        "downloads": 159
       }
     },
     {
@@ -5275,7 +5275,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "windfollowingheart/zotero-channel-for-openclaw",
         "installs": 0,
-        "downloads": 64
+        "downloads": 65
       }
     },
     {
@@ -5305,7 +5305,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://github.com/yananli199307-dev/p2p-channel-plugin",
         "installs": 0,
-        "downloads": 87
+        "downloads": 88
       }
     },
     {
@@ -5337,7 +5337,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "ericshang98/pinclaw-plugin",
         "installs": 8,
-        "downloads": 116
+        "downloads": 118
       }
     },
     {
@@ -5368,7 +5368,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://github.com/dodid/r2-relay-channel",
         "installs": 0,
-        "downloads": 88
+        "downloads": 89
       }
     },
     {
@@ -5399,7 +5399,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "https://gitlab.com/doctorclaw/rocketchat-openclaw",
         "installs": 0,
-        "downloads": 490
+        "downloads": 491
       }
     },
     {
@@ -5433,7 +5433,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "soundchainio/openclaw-soundchain-plugin",
         "installs": 0,
-        "downloads": 83
+        "downloads": 84
       }
     },
     {
@@ -5465,7 +5465,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "eldaruma/telegram-userbot",
         "installs": 9,
-        "downloads": 674
+        "downloads": 676
       }
     },
     {
@@ -5499,7 +5499,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "team-telnyx/telnyx-openclaw-sms-channel",
         "installs": 0,
-        "downloads": 123
+        "downloads": 125
       }
     },
     {
@@ -5533,7 +5533,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "azrael-solution/openclaw-threema",
         "installs": 0,
-        "downloads": 98
+        "downloads": 99
       }
     },
     {
@@ -5563,7 +5563,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "vibeus/vibe-bridge-sdk",
         "installs": 7,
-        "downloads": 133
+        "downloads": 135
       }
     },
     {
@@ -5593,7 +5593,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "perevalov/openclaw-vkbots-plugin",
         "installs": 0,
-        "downloads": 181
+        "downloads": 182
       }
     },
     {
@@ -5623,7 +5623,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "ERRORIGHT-AI/watcher-channel",
         "installs": 0,
-        "downloads": 57
+        "downloads": 58
       }
     },
     {
@@ -5657,7 +5657,7 @@ export const GENERATED_OPENCLAW_MANIFEST: GeneratedOpenClawManifest = {
         "trusted_openclaw_plugin": false,
         "source_repo": "monas-team/zaloclaw",
         "installs": 8,
-        "downloads": 241
+        "downloads": 242
       }
     }
   ]

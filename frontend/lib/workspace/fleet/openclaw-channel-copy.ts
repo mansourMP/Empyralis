@@ -62,7 +62,18 @@ export type OpenClawChannelCatalogEntry = {
   setup_wizard?: ChannelSetupWizard | null;
 };
 
-export type OpenClawObservedField = { name: string; secret: boolean; type: string; set: boolean };
+export type OpenClawObservedField = {
+  name: string;
+  secret: boolean;
+  type: string;
+  set: boolean;
+  /** Carried by the box since it started deriving a live shape. Absent from an
+   *  older gateway's reply, and absent means PRIMARY — the same default
+   *  `splitCredentialFields` already takes for a manifest that predates the
+   *  axis. */
+  advanced?: boolean;
+  file_alternative?: string | null;
+};
 
 /** How a channel that takes no pasted credential is LINKED — read off the box,
  *  not off a list here.
@@ -99,7 +110,60 @@ export type OpenClawObservedChannel = {
   fields: OpenClawObservedField[];
   accounts: string[];
   link?: OpenClawChannelLink | null;
+  /** How the BOX says this channel connects. Normally the same answer the
+   *  catalog gives; different only for a channel the manifest calls
+   *  `plugin_absent`, whose plugin is now installed on this computer and has
+   *  contributed its own `channels.<id>` schema node. Optional because a
+   *  gateway predating that derivation does not send it. */
+  connect_method?: string;
 };
+
+/**
+ * The shape actually in force for a channel: the catalog's, unless the catalog
+ * admits it does not know and the box does.
+ *
+ * The generated manifest is a property of the PINNED OpenClaw version, and
+ * four channels contribute their config node only once their plugin is
+ * installed — so the manifest carries `connect_method: "plugin_absent"` and no
+ * fields for them. That is right on a fresh box and wrong the moment the
+ * plugin lands, which is exactly what a successful "Set up" does. Before this
+ * function existed, all four dead-ended after a successful install: pill
+ * "Unknown", detail "Setup fields aren't known for this one yet", forever, on
+ * a computer that knew.
+ *
+ *     catalog   the PRE-INSTALL BELIEF   ─┐
+ *     box       the OBSERVATION          ─┴─▶ the observation wins,
+ *                                             and ONLY where the belief is
+ *                                             `plugin_absent`
+ *
+ * Narrow on purpose: a channel the pinned build declares a node for is
+ * answered by the catalog exactly as before, so this cannot re-shape the
+ * twenty-three channels that already work. And a box that answers
+ * `plugin_absent` too — plugin installed, still contributing nothing — keeps
+ * today's honest unknown rather than being smoothed into a guess.
+ */
+export function effectiveChannelShape(
+  entry: OpenClawChannelCatalogEntry,
+  observed: OpenClawObservedChannel | undefined,
+): { connect_method: "credential" | "pairing" | "plugin_absent"; fields: OpenClawCredentialField[] } {
+  if (entry.connect_method !== "plugin_absent") {
+    return { connect_method: entry.connect_method, fields: entry.fields };
+  }
+  const method = observed?.connect_method;
+  if (method !== "credential" && method !== "pairing") {
+    return { connect_method: "plugin_absent", fields: [] };
+  }
+  return {
+    connect_method: method,
+    fields: (observed?.fields ?? []).map((field) => ({
+      name: field.name,
+      secret: field.secret,
+      type: field.type,
+      file_alternative: field.file_alternative ?? null,
+      advanced: Boolean(field.advanced),
+    })),
+  };
+}
 
 /** STEP 2 OF THE SETUP FLOW: how this channel is connected.
  *
@@ -130,8 +194,10 @@ export function connectMethodFor(
   entry: OpenClawChannelCatalogEntry,
   observed: OpenClawObservedChannel | undefined,
 ): ChannelConnectMethod {
-  if (entry.connect_method === "plugin_absent") return "unknown";
-  if (entry.connect_method === "credential") return "paste";
+  // The box's answer where the catalog has none — see effectiveChannelShape.
+  const shape = effectiveChannelShape(entry, observed);
+  if (shape.connect_method === "plugin_absent") return "unknown";
+  if (shape.connect_method === "credential") return "paste";
   // `pairing` splits on what the BOX says, because that is the only place the
   // answer exists — but "the box has not said yet" is a THIRD state, and
   // collapsing it into "device" produced a dead end nobody could escape.
@@ -310,7 +376,12 @@ export function remediationFor(
       detail: "",
     };
   }
-  if (entry.connect_method === "plugin_absent") {
+  // The catalog is the pre-install belief and the box is the observation. A
+  // channel whose plugin the manifest never saw is describable the moment that
+  // plugin is on THIS computer, and reading the catalog's `plugin_absent`
+  // here is what dead-ended all four of them after a successful install.
+  const shape = effectiveChannelShape(entry, observed);
+  if (shape.connect_method === "plugin_absent") {
     return {
       kind: "unknown",
       // No mechanism: what the customer needs is that there is nothing for
@@ -318,7 +389,7 @@ export function remediationFor(
       detail: "Setup fields aren't known for this one yet.",
     };
   }
-  if (entry.connect_method === "pairing") {
+  if (shape.connect_method === "pairing") {
     // Two different situations used to share one dead-end sentence. They are
     // not the same: one of them now has a real flow behind it.
     const method = connectMethodFor(entry, observed);
@@ -359,7 +430,7 @@ export function remediationFor(
   // field the catalog does not mention at all counts as required rather than
   // being silently dropped from the sentence.
   const advancedNames = new Set(
-    entry.fields.filter((field) => field.advanced).map((field) => field.name),
+    shape.fields.filter((field) => field.advanced).map((field) => field.name),
   );
   const required = observed.fields.filter((field) => !advancedNames.has(field.name));
   const missing = required.filter((field) => !field.set);

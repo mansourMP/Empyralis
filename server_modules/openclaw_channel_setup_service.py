@@ -90,7 +90,21 @@ def _validate_credential_values(channel_key: str, values: Any) -> Dict[str, str]
     """Narrow an untrusted body to the fields OpenClaw declares for the channel."""
     shape = credential_shape_for_channel_key(channel_key)
     fields = {field["name"]: field for field in shape.get("fields") or []}
-    if not fields:
+    # THREE STATES, and two of them used to share this one refusal.
+    #
+    #   pairing        the manifest's positive answer that there is nothing to
+    #                  paste. Refuse — a form here would be a dead control.
+    #   plugin_absent  the manifest ADMITS IT CANNOT KNOW: this channel's
+    #                  plugin contributes its `channels.<id>` node only once
+    #                  installed, and it was not installed on the machine the
+    #                  manifest was generated from. Refusing here would refuse
+    #                  a credential the owner is looking at a real, live-derived
+    #                  form for — the device reads its own schema and narrows
+    #                  the write against THAT (see openclaw-channel-setup.ts's
+    #                  parseCredentialWrite), which is the only side that can
+    #                  answer. The cloud's narrowing is a nicer error message;
+    #                  the device's is the boundary.
+    if not fields and shape.get("connect_method") != "plugin_absent":
         raise OpenClawProvisioningError(
             f"{channel_key} does not take a pasted credential: this channel has no credential "
             "field to set, so it connects another way (QR, local pairing, or an inbound webhook).",
@@ -101,7 +115,7 @@ def _validate_credential_values(channel_key: str, values: Any) -> Dict[str, str]
 
     cleaned: Dict[str, str] = {}
     for name, value in values.items():
-        if name not in fields:
+        if fields and name not in fields:
             # Named rather than dropped: a silently ignored field is a save that
             # reports success and changes nothing.
             raise OpenClawProvisioningError(

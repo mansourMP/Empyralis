@@ -78,6 +78,7 @@ import { buildCookieAuthHeaders } from "@/lib/auth/csrf";
 import { getErrorMessage } from "@/lib/ui/api-error";
 import { runMutationWithBestEffortRefresh } from "@/lib/workspace/mutation-outcome";
 import {
+  effectiveChannelShape,
   remediationFor,
   splitCredentialFields,
   type OpenClawChannelCatalogEntry,
@@ -485,7 +486,12 @@ export function CredentialForm({
     setSaving(false);
   };
 
-  const { primary, advanced } = splitCredentialFields(entry.fields);
+  // The box's own fields where the catalog has none — a channel whose plugin
+  // the manifest never saw is describable once that plugin is on THIS
+  // computer. See effectiveChannelShape.
+  const { primary, advanced } = splitCredentialFields(
+    effectiveChannelShape(entry, observed).fields,
+  );
 
   const renderField = (field: OpenClawCredentialField) => {
     const inputId = `openclaw-${entry.channel_id}-${field.name}`;
@@ -1687,7 +1693,8 @@ export function ChannelSettingsBody({
         channelKey={entry.channel_key}
         channelLabel={entry.label}
       />
-      {entry.connect_method === "credential" && entry.fields.length > 0 ? (
+      {effectiveChannelShape(entry, observed).fields.length > 0 &&
+      effectiveChannelShape(entry, observed).connect_method === "credential" ? (
         <details className="openclaw-form-advanced openclaw-replace-disclosure">
           <summary>Replace credential</summary>
           <CredentialForm

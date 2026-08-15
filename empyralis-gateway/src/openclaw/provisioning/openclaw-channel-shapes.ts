@@ -169,7 +169,10 @@ function sortedUnique(values: readonly unknown[]): string[] {
   return [...new Set(values.map((value) => String(value)))].sort();
 }
 
-function schemaProperties(node: unknown): Record<string, unknown> {
+/** The one JSON-Schema walker in this tree. Exported so the credential-shape
+ *  derivation (./openclaw-channel-credential-shape.ts) reads the same document
+ *  the same way rather than growing a second one beside it. */
+export function schemaProperties(node: unknown): Record<string, unknown> {
   if (!node || typeof node !== "object") return {};
   const props = (node as Record<string, unknown>).properties;
   return props && typeof props === "object" ? (props as Record<string, unknown>) : {};

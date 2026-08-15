@@ -2022,6 +2022,55 @@ plugin_absent the plugin contributes `channels.<id>` only once installed, so
               its fields are unknowable. Say so; never guess.
 ```
 
+**`plugin_absent` is a claim with an EXPIRY DATE, and reading it after the
+install is what dead-ended four channels.** The manifest is a property of the
+PINNED version; four carried channels (`openclaw-weixin`,
+`openclaw-zaloclawbot`, `wecom`, `yuanbao`) contributed no `channels.<id>`
+node on the machine it was generated from. Correct on a fresh box. Wrong the
+moment provisioning installs the plugin — from then on the BOX's own
+`openclaw config schema` carries the node and can say exactly what the fields
+are, and nothing asked. Mechanically swept: 16 dead ends, all four platforms
+× every post-install state, pill "Unknown", detail "Setup fields aren't known
+for this one yet", forever, on a computer that knew.
+
+```
+manifest  the PRE-INSTALL BELIEF   ─┐
+this box  the OBSERVATION          ─┴─▶ the observation WINS, and only
+                                        where the belief is `plugin_absent`
+```
+
+Fixed 2026-08-15 (`openclaw-channel-credential-shape.ts`, derived live in
+`projectChannels`; `effectiveChannelShape` on the frontend). Four rules it
+leaves behind. **The live read may only answer where the manifest ADMITS it
+cannot** — a `pairing` channel's empty field list is a positive answer that
+there is nothing to paste, and letting a box turn that into a form would be a
+guess; the write allowlist is gated the same way, so a live read decides WHICH
+fields, never THAT anything goes. **`config schema` is ~2.5MB, so it is read
+at most once per call and only when a channel actually needs it** — on every
+box today that is zero CLI calls. **Plugin installed and STILL no node keeps
+the honest unknown**, never a guessed form. And **the fix is only real if the
+write path moves with the read**: the cloud's `_validate_credential_values`
+and the device's `parseCredentialWrite` both narrowed against the manifest, so
+without them a form the panel now renders could never be submitted — a dead
+control with extra steps.
+
+The classification is a CROSS-LANGUAGE PORT of the manifest generator's
+(`_credential_fields`/`_split_primary_and_advanced`), held to it by
+`openclaw-channel-credential-shape.test.ts`: the expected set is the
+checked-in manifest (Python), the actual set is the TS derivation over the
+same schema. Two things that cost time and are not obvious. **The
+primary/advanced split walks a channel node's properties in DECLARATION
+ORDER**, so a schema fixture written with sorted keys silently moves which
+fields the form calls primary — measured, seven channels' splits changed;
+`refresh-openclaw-schema-fixture.mjs` writes the unpruned fixture unsorted for
+exactly this reason. And **the generator's `_mode_gated_secrets` axis is
+deliberately not ported** (it scans 98MB/4566 `dist/*.js` files, not a trade
+worth making per panel poll) — it makes three channels' splits differ, and the
+gap is proven inert rather than assumed: OpenClaw ships bundled secret
+contracts for nine channels, all nine already have config nodes, so for every
+channel this code is ever ASKED about both implementations see an empty gated
+set. There is a test asserting that overlap stays empty.
+
 **`openclaw config get --json` REDACTS every secret at the source**
 (`"appSecret": "__OPENCLAW_REDACTED__"`). That is what makes "the credential
 never comes back out" structural rather than a rule to remember: the cloud
