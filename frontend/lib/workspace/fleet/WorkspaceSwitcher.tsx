@@ -84,7 +84,17 @@ export function WorkspaceSwitcher({
         <div className="fleet-rail-workspace-popover" role="menu" aria-label="Switch workspace">
           {memberships.map((membership) => {
             const active = membership.workspace.id === workspaceId;
-            const label = membership.workspace.label || membership.workspace.id;
+            // A workspace can exist with no name at all (observed live: one
+            // created by an agent on 2026-08-09 whose stored name IS its own
+            // id), and the previous `label || id` fallback printed that raw
+            // "ws_b5c1fa225ae6" at the owner, who read it as a breach of his
+            // account rather than a missing name. An id is an address, never
+            // a label — if we don't have a name, say so in words.
+            const rawLabel = String(membership.workspace.label || "").trim();
+            const label =
+              rawLabel && rawLabel !== membership.workspace.id
+                ? rawLabel
+                : "Untitled workspace";
             return (
               <button
                 key={membership.workspace.id}

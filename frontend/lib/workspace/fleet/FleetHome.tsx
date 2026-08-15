@@ -205,15 +205,26 @@ function StatusStrip({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="fleet-status-strip">
+      {/* No catalog denominators. "0/76 connectors" told every owner they had
+          76 broken things — the denominator was the CATALOG SIZE, a number
+          that grows when we ship integrations and that no customer chose as a
+          target. "5 channels connected" is a fact about their workspace;
+          "5/12" is homework we assigned them. Computers keeps its fraction
+          because there the total IS theirs (their own paired machines, and
+          offline-vs-online is the fact that matters). */}
       <a href={`${base}/channels`} className="fleet-status-strip-item">
         <Radio size={16} strokeWidth={1.75} />
-        <span className="fleet-status-strip-value">{status.channelsConnected}/{status.channelsTotal}</span>
-        <span className="fleet-status-strip-label">Channels connected</span>
+        <span className="fleet-status-strip-value">{status.channelsConnected}</span>
+        <span className="fleet-status-strip-label">
+          {status.channelsConnected === 1 ? "Channel connected" : "Channels connected"}
+        </span>
       </a>
       <a href={`${base}/integrations`} className="fleet-status-strip-item">
         <Plug size={16} strokeWidth={1.75} />
-        <span className="fleet-status-strip-value">{status.connectorsConnected}/{status.connectorsTotal}</span>
-        <span className="fleet-status-strip-label">Connectors connected</span>
+        <span className="fleet-status-strip-value">{status.connectorsConnected}</span>
+        <span className="fleet-status-strip-label">
+          {status.connectorsConnected === 1 ? "Connector connected" : "Connectors connected"}
+        </span>
       </a>
       <a href={`${base}/hardware`} className="fleet-status-strip-item">
         <Cpu size={16} strokeWidth={1.75} />
@@ -237,15 +248,35 @@ function ActivityFeed({ workspaceId }: { workspaceId: string }) {
     return null;
   }
 
+  // Collapse consecutive rows with the same title into one carrying a count.
+  // Eight literal "Agent chat completed" rows in a column (observed on the
+  // founder's own home) is a log file, not a feed — the eighth adds nothing
+  // the first didn't. Consecutive-only on purpose: A,B,A stays three rows,
+  // because the interleaving IS information.
+  const collapsed: Array<{ event: (typeof events)[number]; count: number }> = [];
+  for (const event of events) {
+    const title = event.title || event.action || "Event";
+    const prev = collapsed[collapsed.length - 1];
+    const prevTitle = prev ? prev.event.title || prev.event.action || "Event" : null;
+    if (prev && prevTitle === title && prev.event.status === event.status) {
+      prev.count += 1;
+    } else {
+      collapsed.push({ event, count: 1 });
+    }
+  }
+
   return (
     <div className="fleet-home-activity">
       <div className="fleet-detail-section-title">Recent activity</div>
       <div className="fleet-activity">
-        {events.map((event) => (
+        {collapsed.map(({ event, count }) => (
           <div key={event.id || event.created_at} className="fleet-activity-item">
             <div className={`fleet-activity-dot${event.status === "logged" ? "" : " is-warn"}`} />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="fleet-activity-title">{event.title || event.action || "Event"}</div>
+              <div className="fleet-activity-title">
+                {event.title || event.action || "Event"}
+                {count > 1 ? ` · ×${count}` : ""}
+              </div>
               {/* `event_class` and `action` are the ledger's OWN identifiers —
                   "sage_activity", "sage_chat.completed". They were rendered
                   verbatim under every row, so the workspace home read as a
