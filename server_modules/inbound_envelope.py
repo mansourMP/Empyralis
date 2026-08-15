@@ -19,6 +19,7 @@ every channel service can import it without cycles.
 
 from __future__ import annotations
 
+import logging as _logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -79,6 +80,49 @@ _PLATFORM_LABELS: Dict[str, str] = {
     "acp": "API",
     "api": "API",
 }
+
+# The OpenClaw-transported channels, DERIVED from the pinned manifest rather
+# than typed into the map above — 2026-08-15.
+#
+# The 2026-08-14 cutover moved the entire personal-messaging family onto
+# `openclaw_*` keys, and this map had no entry for any of them, so
+# platform_label() fell through to its raw-token default and the one-line
+# header every model sees opened with "[openclaw_whatsapp ...]" instead of
+# "[WhatsApp ...]" — on every inbound message, on every cut-over channel. Not
+# a crash, which is why nothing caught it: the header rendered, it just named
+# a transport internal at the human it was describing.
+#
+# Derived, never transcribed, for the reason this codebase has already learned
+# twice on this exact channel set: a hand-written second copy of a channel list
+# stops covering the channel OpenClaw adds tomorrow, and its going stale is
+# silent. The labels are OpenClaw's own display names, the same source the
+# channel cards read. openclaw_channel_registry imports nothing but stdlib, so
+# this keeps the module docstring's "imports nothing from the runtime" promise.
+#
+# setdefault, not update: an explicit entry above always wins, so a future
+# hand-set label is never quietly overwritten by a regeneration.
+try:  # pragma: no cover - the registry is always present in a real install
+    from server_modules import openclaw_channel_registry as _openclaw_channel_registry
+
+    for _openclaw_channel in _openclaw_channel_registry.CHANNELS:
+        _openclaw_label = str(getattr(_openclaw_channel, "label", "") or "").strip()
+        if _openclaw_label:
+            _PLATFORM_LABELS.setdefault(
+                str(_openclaw_channel.channel_key).strip().lower(), _openclaw_label
+            )
+except Exception:  # pragma: no cover
+    # A missing/unreadable manifest must never stop a turn: the header still
+    # renders, just with the raw token, which is exactly today's behaviour.
+    # Logged rather than swallowed silently — the degraded state ("every
+    # transported channel is named by its raw key at the model") is invisible
+    # otherwise, and this module is imported by every channel service, so a
+    # broken manifest would present as a cosmetic oddity in a dozen places
+    # with nothing tying them together.
+    _logging.getLogger(__name__).warning(
+        "OpenClaw channel labels unavailable — transported channels will render "
+        "their raw channel_key in the inbound header",
+        exc_info=True,
+    )
 
 
 @dataclass(frozen=True)

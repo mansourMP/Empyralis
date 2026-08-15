@@ -62,7 +62,14 @@ from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import AsyncMock, patch
 
-from server_modules import personal_channels_service
+from server_modules import channel_lane_contract_service, personal_channels_service
+
+# The one channel in DM_POLICY_CHANNEL_KEYS that is NOT on the OpenClaw
+# transport — i.e. what "the first-party lane" means after the 2026-08-14
+# cutover. Taken from the lane contract's own constant rather than typed, so
+# it cannot go on naming a key the gate no longer reads (which is exactly what
+# whatsapp_personal, the name these tests used to carry, had become).
+_FIRST_PARTY_CHANNEL_KEY = channel_lane_contract_service.CLOUD_SESSION_TELEGRAM_CHANNEL_KEY
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -309,6 +316,15 @@ class DmPolicyWriteWrapperTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(issubclass(personal_channels_service.UnsupportedDmPolicyModeError, ValueError))
 
     async def test_first_party_channel_still_accepts_every_mode(self) -> None:
+        """RETARGETED 2026-08-15 from WHATSAPP_PERSONAL_CHANNEL_KEY. Its
+        subject is "the NON-OpenClaw lane still accepts every mode", and
+        whatsapp_personal stopped being a lane that day: the OpenClaw cutover
+        deleted its runtime, and DM_POLICY_CHANNEL_KEYS dropped it so the
+        route stops persisting policy no gate will ever read. The
+        cloud-session lane (cloud-session-manager, gramjs Telegram) is the
+        one non-OpenClaw personal channel a real message still crosses
+        _enforce_dm_policy on, so it is what this assertion is actually
+        about."""
         store = _FakeAgentInstallStore()
         store.installs["ainstall_x"] = {}
         for mode in sorted(personal_channels_service.DM_POLICY_MODES):
@@ -318,7 +334,7 @@ class DmPolicyWriteWrapperTests(unittest.IsolatedAsyncioTestCase):
                         tenant_id="tenant-1",
                         workspace_id="ws-1",
                         agent_id="ainstall_x",
-                        channel_key=personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY,
+                        channel_key=_FIRST_PARTY_CHANNEL_KEY,
                         mode=mode,
                         allowlist=["  15551234567 ", "", "15551234567"],
                     )
@@ -333,7 +349,7 @@ class DmPolicyWriteWrapperTests(unittest.IsolatedAsyncioTestCase):
         not re-message" contract _enforce_dm_policy's repeat branch exists to
         keep."""
         store = _FakeAgentInstallStore()
-        channel_key = personal_channels_service.WHATSAPP_PERSONAL_CHANNEL_KEY
+        channel_key = _FIRST_PARTY_CHANNEL_KEY
         store.installs["ainstall_x"] = {
             "dm_policy": {
                 channel_key: {

@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
+from server_modules import channel_lane_contract_service, openclaw_channel_registry
 from server_modules import personal_channel_sage_bridge_service
 from server_modules import personal_channels_service, personal_channels_repository, platform_event
 from server_modules.inbound_envelope import SurfaceKind
@@ -19,6 +20,40 @@ from server_modules.sage_agent_runtime_contract import SageTurnResult
 # accept `envelope=`). Every mocked return value below is therefore a
 # SageTurnResult now, not a plain dict — execute_sage_turn's real return
 # type, which _execute_channel_turn_with_envelope calls .as_dict() on.
+
+
+# RETARGETED 2026-08-15. Six tests below drove build_whatsapp_personal_reply /
+# build_whatsapp_personal_reply_async, both deleted that day: they hardcoded
+# `whatsapp_personal`, a key the 2026-08-14 OpenClaw cutover removed from the
+# lane contract and which nothing anywhere can produce any more, so every one
+# of those assertions was being made about a channel no real message can
+# reach. They now drive build_personal_channel_reply_async — the builder
+# personal_channels_service actually calls — with WhatsApp's live key resolved
+# from the registry rather than typed, so a rename fails here instead of
+# silently testing nothing. The assertions themselves are unchanged.
+_WHATSAPP_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}whatsapp"
+
+# The rest of the cut-over family, same derivation, same reason. These tests
+# named `signal_personal` / `imessage_personal` / `wechat_personal` — all three
+# deleted by the 2026-08-14 cutover, so every one of them was raising in the
+# lane contract instead of asserting anything about a failed turn. The
+# transport provider replaces the per-bridge provider strings (`signal_local_
+# bridge`, `bluebubbles_local_bridge`, `wechat_local_bridge`) for the same
+# reason: assert_personal_gateway_channel validates provider against the spec.
+_SIGNAL_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal"
+_IMESSAGE_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}imessage"
+_WECHAT_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}openclaw-weixin"
+_TRANSPORT_PROVIDER = channel_lane_contract_service.OPENCLAW_TRANSPORT_PROVIDER
+
+
+def _build_whatsapp_reply(**kwargs):
+    """The deleted sync builder's shape, on the live async one."""
+    kwargs.setdefault("fallback_label", "WhatsApp")
+    return asyncio.run(
+        personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+            surface_channel=_WHATSAPP_CHANNEL_KEY, **kwargs
+        )
+    )
 
 
 class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
@@ -88,12 +123,14 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
                 "server_modules.sage_turn_adapter.execute_sage_turn",
                 new=AsyncMock(side_effect=RuntimeError("HTTP 429 rate limit")),
             ):
-                return await personal_channel_sage_bridge_service.build_whatsapp_personal_reply_async(
+                return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+                    surface_channel=_WHATSAPP_CHANNEL_KEY,
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="15551234567",
                     text="hey Sage",
                     push_name="Mansur",
+                    fallback_label="WhatsApp",
                 )
 
         result = asyncio.run(run_case())
@@ -135,7 +172,7 @@ class PersonalChannelSageBridgeServiceTests(unittest.TestCase):
                 new=AsyncMock(side_effect=ConnectionError("timeout unreachable")),
             ):
                 return await personal_channel_sage_bridge_service.build_personal_channel_reply_async(
-                    surface_channel="wechat_personal",
+                    surface_channel=_WECHAT_CHANNEL_KEY,
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="wechat-user-1",
@@ -171,7 +208,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
             "server_modules.sage_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="Here's the fox.", media=[self._MEDIA_ITEM])),
         ):
-            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+            result = _build_whatsapp_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="15551234567",
@@ -229,7 +266,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
         """
         turn_mock = AsyncMock(return_value=SageTurnResult(message=""))
         with patch("server_modules.sage_turn_adapter.execute_sage_turn", new=turn_mock):
-            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+            result = _build_whatsapp_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="15551234567",
@@ -274,7 +311,7 @@ class OutboundMediaPropagationTests(unittest.TestCase):
             "server_modules.sage_turn_adapter.execute_sage_turn",
             new=AsyncMock(return_value=SageTurnResult(message="just chatting, no attachments")),
         ):
-            result = personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+            result = _build_whatsapp_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="15551234567",
@@ -381,7 +418,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 new=AsyncMock(return_value=SageTurnResult(message="ok")),
             ) as turn_mock,
         ):
-            personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+            _build_whatsapp_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="15551234567",
@@ -553,7 +590,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
     # risk that one of the OTHER thin wrappers has a typo'd/omitted kwarg
     # that silently drops the signal before it ever reaches the shared
     # function. These three prove the actual rendered text/envelope per
-    # remaining channel family: WhatsApp (build_whatsapp_personal_reply),
+    # remaining channel family: WhatsApp (build_personal_channel_reply_async),
     # Telegram-cloud (build_telegram_personal_reply_async — the exact async
     # entry handle_cloud_channel_inbound calls), and local-bridge
     # (build_personal_channel_reply_async — shared by Signal/iMessage/WeChat).
@@ -567,7 +604,7 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
                 new=AsyncMock(return_value=SageTurnResult(message="sure thing")),
             ) as turn_mock,
         ):
-            personal_channel_sage_bridge_service.build_whatsapp_personal_reply(
+            _build_whatsapp_reply(
                 workspace_id="workspace-1",
                 gateway_id="gateway-1",
                 remote_jid="120363-group@g.us",
@@ -632,9 +669,9 @@ class OwnerAwareProvenanceTests(unittest.TestCase):
         to prove the rendering doesn't silently depend on which one is
         passed."""
         for surface_channel, fallback_label in (
-            ("signal_personal", "Signal"),
-            ("imessage_personal", "iMessage"),
-            ("wechat_personal", "WeChat"),
+            (_SIGNAL_CHANNEL_KEY, "Signal"),
+            (_IMESSAGE_CHANNEL_KEY, "iMessage"),
+            (_WECHAT_CHANNEL_KEY, "WeChat"),
         ):
             with self.subTest(surface_channel=surface_channel):
                 async def run_case():
@@ -790,7 +827,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             ) as turn_mock:
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="whatsapp_personal",
+                        surface_channel=_WHATSAPP_CHANNEL_KEY,
                         workspace_id="ws-cross-channel",
                         gateway_id="gateway-2",
                         remote_jid="owner-wa-3",
@@ -895,7 +932,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="whatsapp_personal",
+                        surface_channel=_WHATSAPP_CHANNEL_KEY,
                         workspace_id="ws-group-test",
                         gateway_id="gateway-1",
                         remote_jid="group-a@g.us",
@@ -915,7 +952,7 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
             ):
                 asyncio.run(
                     personal_channel_sage_bridge_service._build_unified_sage_personal_reply_async(
-                        surface_channel="whatsapp_personal",
+                        surface_channel=_WHATSAPP_CHANNEL_KEY,
                         workspace_id="ws-group-test",
                         gateway_id="gateway-1",
                         remote_jid="group-b@g.us",
@@ -930,11 +967,11 @@ class OwnerUnifiedMemoryTests(unittest.TestCase):
 
             group_a_turns = agent_conversation_memory.load_recent_turns(
                 workspace_id="ws-group-test", agent_id="",
-                conversation_key="whatsapp_personal:group-a@g.us",
+                conversation_key=f"{_WHATSAPP_CHANNEL_KEY}:group-a@g.us",
             )
             group_b_turns = agent_conversation_memory.load_recent_turns(
                 workspace_id="ws-group-test", agent_id="",
-                conversation_key="whatsapp_personal:group-b@g.us",
+                conversation_key=f"{_WHATSAPP_CHANNEL_KEY}:group-b@g.us",
             )
             unified_turns = agent_conversation_memory.load_recent_turns(
                 workspace_id="ws-group-test", agent_id="",
@@ -1126,19 +1163,19 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
 
     def test_signal_execute_sage_turn_failure_never_reaches_the_channel(self) -> None:
         self._assert_never_reaches_the_channel(
-            channel_key="signal_personal", provider="signal_local_bridge", label="Signal",
+            channel_key=_SIGNAL_CHANNEL_KEY, provider=_TRANSPORT_PROVIDER, label="Signal",
             external_message_id="sig-err-1", exc=RuntimeError("HTTP 429 rate limit"),
         )
 
     def test_signal_execute_sage_turn_failure_is_classified(self) -> None:
         self._assert_classified_error_text(
-            channel_key="signal_personal", external_message_id="sig-err-2",
+            channel_key=_SIGNAL_CHANNEL_KEY, external_message_id="sig-err-2",
             exc=RuntimeError("HTTP 429 rate limit"), expect_substring="rate limited",
         )
 
     def test_wechat_execute_sage_turn_failure_never_reaches_the_channel(self) -> None:
         self._assert_never_reaches_the_channel(
-            channel_key="wechat_personal", provider="wechat_local_bridge", label="WeChat",
+            channel_key=_WECHAT_CHANNEL_KEY, provider=_TRANSPORT_PROVIDER, label="WeChat",
             external_message_id="wc-err-1", exc=RuntimeError("provider HTTP 401 unauthorized"),
         )
 
@@ -1149,7 +1186,7 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
         _handle_local_bridge_gateway_channel_inbound), so dropping it makes
         this a non-owner turn."""
         self._assert_never_reaches_the_channel(
-            channel_key="signal_personal", provider="signal_local_bridge", label="Signal",
+            channel_key=_SIGNAL_CHANNEL_KEY, provider=_TRANSPORT_PROVIDER, label="Signal",
             external_message_id="sig-err-nonowner", exc=RuntimeError("HTTP 429 rate limit"),
             is_self_chat=False,
         )
@@ -1162,19 +1199,19 @@ class PersonalChannelLocalBridgeErrorSurfacingTests(unittest.TestCase):
         # branch) — this assertion reflects the actual current text rather
         # than the pre-existing test's stale substring.
         self._assert_classified_error_text(
-            channel_key="wechat_personal", external_message_id="wc-err-2",
+            channel_key=_WECHAT_CHANNEL_KEY, external_message_id="wc-err-2",
             exc=RuntimeError("provider HTTP 401 unauthorized"), expect_substring="needs attention",
         )
 
     def test_imessage_execute_sage_turn_failure_never_reaches_the_channel(self) -> None:
         self._assert_never_reaches_the_channel(
-            channel_key="imessage_personal", provider="bluebubbles_local_bridge", label="iMessage",
+            channel_key=_IMESSAGE_CHANNEL_KEY, provider=_TRANSPORT_PROVIDER, label="iMessage",
             external_message_id="im-err-1", exc=ConnectionError("unreachable"),
         )
 
     def test_imessage_execute_sage_turn_failure_is_classified(self) -> None:
         self._assert_classified_error_text(
-            channel_key="imessage_personal", external_message_id="im-err-2",
+            channel_key=_IMESSAGE_CHANNEL_KEY, external_message_id="im-err-2",
             exc=ConnectionError("unreachable"), expect_substring="unreachable",
         )
 

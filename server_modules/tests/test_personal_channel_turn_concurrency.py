@@ -8,11 +8,11 @@ _execute_channel_turn_with_envelope called execute_sage_turn directly, with
 no lock anywhere in the file.
 
 _execute_channel_turn_with_envelope is the one chokepoint every personal-
-channel reply crosses before calling execute_sage_turn (build_whatsapp_
-personal_reply(_async), build_telegram_personal_reply(_async), build_
-discord_personal_reply_async, and build_personal_channel_reply_async all
-funnel through _build_unified_sage_personal_reply_async into it), so these
-tests prove the fix at that one seam rather than per public entry point.
+channel reply crosses before calling execute_sage_turn (build_telegram_
+personal_reply(_async), build_discord_personal_reply_async, and build_
+personal_channel_reply_async all funnel through
+_build_unified_sage_personal_reply_async into it), so these tests prove the
+fix at that one seam rather than per public entry point.
 
 Deliberately per-thread, not global: MAN-318 measured 8 fully concurrent
 turns running cleanly on a 1vCPU box, and the founder's own instruction on
@@ -25,8 +25,15 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import personal_channel_sage_bridge_service
+from server_modules import openclaw_channel_registry, personal_channel_sage_bridge_service
 from server_modules.sage_agent_runtime_contract import SageTurnResult
+
+# RETARGETED 2026-08-15 from build_whatsapp_personal_reply_async, deleted that
+# day: it hardcoded `whatsapp_personal`, a key the OpenClaw cutover removed and
+# nothing can produce. WhatsApp's live key comes from the registry, so a
+# rename fails here instead of leaving this serialization proof pointed at a
+# channel nothing routes.
+_WHATSAPP_CHANNEL_KEY = f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}whatsapp"
 
 
 class PersonalChannelTurnSerializationTests(unittest.TestCase):
@@ -121,15 +128,16 @@ class PersonalChannelTurnSerializationTests(unittest.TestCase):
             max_observed_concurrency, 2, "different threads must NOT be serialized against each other"
         )
 
-    def test_whatsapp_and_telegram_share_the_serialization_seam(self) -> None:
+    def test_two_entry_points_share_the_serialization_seam(self) -> None:
         # Proves the fix is at the shared chokepoint, not duplicated
-        # per-channel: two DIFFERENT public entry points (WhatsApp,
-        # Telegram) for the same workspace+remote_jid+surface pairing would
-        # only collide if surface_channel is part of the lock key (it is —
-        # "whatsapp_personal" vs "telegram_personal" differ), so this
-        # instead proves the SAME channel's two async/sync entry points
-        # (build_whatsapp_personal_reply vs build_whatsapp_personal_reply_
-        # async) both funnel through the identical lock.
+        # per-channel. surface_channel IS part of the lock key, so two
+        # different channels could never collide here anyway — what has to
+        # be shown is that two turns on the SAME channel + workspace +
+        # remote_jid funnel through one lock no matter which entry point
+        # started them. It used to show that by driving WhatsApp's own sync
+        # and async builders; both were deleted 2026-08-15 (see
+        # _WHATSAPP_CHANNEL_KEY above), so it drives the generic builder
+        # twice instead — the entry point production actually uses.
         in_flight = 0
         max_observed_concurrency = 0
 
@@ -143,19 +151,23 @@ class PersonalChannelTurnSerializationTests(unittest.TestCase):
 
         async def run_case():
             await asyncio.gather(
-                personal_channel_sage_bridge_service.build_whatsapp_personal_reply_async(
+                personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+                    surface_channel=_WHATSAPP_CHANNEL_KEY,
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="15551234567",
                     text="a",
                     push_name="User",
+                    fallback_label="WhatsApp",
                 ),
-                personal_channel_sage_bridge_service.build_whatsapp_personal_reply_async(
+                personal_channel_sage_bridge_service.build_personal_channel_reply_async(
+                    surface_channel=_WHATSAPP_CHANNEL_KEY,
                     workspace_id="workspace-1",
                     gateway_id="gateway-1",
                     remote_jid="15551234567",
                     text="b",
                     push_name="User",
+                    fallback_label="WhatsApp",
                 ),
             )
 

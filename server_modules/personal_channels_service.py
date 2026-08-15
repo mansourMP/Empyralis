@@ -170,6 +170,26 @@ if set(OPENCLAW_PERSONAL_CHANNELS) != set(channel_lane_contract_service.OPENCLAW
 
 LOCAL_BRIDGE_PERSONAL_CHANNELS.update(OPENCLAW_PERSONAL_CHANNELS)
 
+# ── The cloud-session lane ───────────────────────────────────────────────
+#
+# The one channel key that arrives over HTTP from `cloud-session-manager/`
+# (a cloud-hosted gramjs Telegram account) rather than from a gateway on the
+# owner's own machine. It is NOT a local-bridge channel and NOT an OpenClaw
+# one: handle_cloud_channel_inbound is its only inbound handler and
+# dispatch_cloud_channel_outbound its only delivery, both HTTP.
+#
+# It is a SET, not a bare string, so every policy set below reads as "the
+# cloud-session lane" instead of naming a channel — the moment that lane
+# carries a second channel (or is deleted, which is the founder's open
+# decision), one line here moves and nothing else does. Imported from the
+# lane contract rather than reusing TELEGRAM_PERSONAL_CHANNEL_KEY above,
+# which is a deliberately VESTIGIAL literal for ~15 unreachable legacy
+# branches: reusing it would make a live lane indistinguishable from dead
+# code that merely compiles.
+CLOUD_SESSION_CHANNEL_KEYS = frozenset(
+    {channel_lane_contract_service.CLOUD_SESSION_TELEGRAM_CHANNEL_KEY}
+)
+
 
 def _enforce_personal_gateway_config_decision(
     *,
@@ -1199,8 +1219,19 @@ async def approve_dm_policy_pairing_request(
 # already folds every OpenClaw-transported channel into) — a message on any
 # of them crosses _enforce_dm_policy, so a channel the gate reads and the
 # owner cannot write is exactly the deadlock this build exists to close.
+#
+# WHATSAPP_PERSONAL_CHANNEL_KEY DROPPED 2026-08-15. It is the mirror image of
+# the deadlock this set exists to close: a channel the OWNER can write and the
+# GATE never reads. The 2026-08-14 cutover deleted the Baileys runtime, every
+# WhatsApp inbound handler, and the lane spec, and cloud-session-manager has
+# no whatsapp producer at all (`cloud-session-manager/src/` is telegram-only),
+# so no message can ever carry this key into _enforce_dm_policy again — while
+# the route went on accepting the write and persisting a policy with no
+# reader. A write that silently goes nowhere is worse than a 400: the owner
+# believes they configured something. See CLOUD_SESSION_CHANNEL_KEYS below for
+# why telegram_personal is NOT in the same position.
 DM_POLICY_CHANNEL_KEYS = frozenset(
-    {WHATSAPP_PERSONAL_CHANNEL_KEY, TELEGRAM_PERSONAL_CHANNEL_KEY, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
+    {*CLOUD_SESSION_CHANNEL_KEYS, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
 )
 
 
@@ -1900,8 +1931,15 @@ async def _persist_agent_group_policy_config(
 # configured here was persisted correctly but never actually consulted for
 # a real incoming message (see _resolve_local_bridge_agent_id, which closes
 # that gap).
+#
+# WHATSAPP_PERSONAL_CHANNEL_KEY DROPPED 2026-08-15 — see DM_POLICY_CHANNEL_KEYS
+# above for the full reason. Same defect, mirrored: the owner could write a
+# group policy for a channel that no longer has a handler, a catalog entry or
+# a lane spec, and the write persisted. telegram_personal stays because
+# handle_cloud_channel_inbound genuinely runs _enforce_group_policy with it on
+# every cloud-session message.
 GROUP_POLICY_CHANNEL_KEYS = frozenset(
-    {WHATSAPP_PERSONAL_CHANNEL_KEY, TELEGRAM_PERSONAL_CHANNEL_KEY, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
+    {*CLOUD_SESSION_CHANNEL_KEYS, *LOCAL_BRIDGE_PERSONAL_CHANNELS.keys()}
 )
 
 
@@ -3917,11 +3955,17 @@ async def handle_cloud_channel_inbound(
 
     Args:
         session_id: cloud session manager session ID
-        channel_key: "telegram_personal" or "whatsapp_personal" (accepted but
-            not yet branched on below — every reply is built via the
-            Telegram-specific bridge call regardless of this value, and
-            cloud-session-manager/src/ has no whatsapp/ producer at all
-            today, so whatsapp_personal never actually arrives here)
+        channel_key: must be a CLOUD_SESSION_CHANNEL_KEYS member — today
+            exactly "telegram_personal", which is what
+            cloud-session-manager/src/telegram/hmac.js::buildSignedInbound
+            hardcodes on the wire. This used to document "or whatsapp_personal
+            (accepted but not branched on)", and that was a real hole rather
+            than a harmless leniency: the two gates below read the named
+            channel's OWN dm/group policy, while the reply is ALWAYS built as
+            Telegram, so any other key made this handler enforce one channel's
+            policy and answer as another. cloud-session-manager/src/ is
+            telegram-only, so nothing legitimate ever sent anything else;
+            the check below now says so instead of trusting it.
         message: {external_message_id, sender_id, sender_name,
             linked_username, text, received_at, is_group, is_mentioned,
             is_reply_to_sage} on the live wire today (see the group gate
@@ -3935,6 +3979,22 @@ async def handle_cloud_channel_inbound(
     """
     if not _CLOUD_SESSION_MANAGER_ENABLED:
         return {"status": "disabled", "reason": "CLOUD_SESSION_MANAGER_ENABLED is false"}
+
+    # A structured refusal, not a raise: this is an HMAC-authed system-to-
+    # system webhook, and a 500 tells the caller nothing it can act on while
+    # looking like our own crash. Refusing here rather than deeper is the
+    # point — the gates below would otherwise read the NAMED channel's policy
+    # and the reply would still be built as Telegram.
+    normalized_channel_key = str(channel_key or "").strip().lower()
+    if normalized_channel_key not in CLOUD_SESSION_CHANNEL_KEYS:
+        return {
+            "status": "unsupported_channel",
+            "reason": "channel_key is not served by the cloud-session lane",
+            "channel_key": normalized_channel_key or None,
+            "session_id": session_id,
+            "supported": sorted(CLOUD_SESSION_CHANNEL_KEYS),
+        }
+    channel_key = normalized_channel_key
 
     resolved_workspace_id = str(workspace_id or "default").strip() or "default"
 

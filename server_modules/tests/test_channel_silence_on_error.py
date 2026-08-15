@@ -35,7 +35,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from server_modules import channel_adapter, openclaw_channel_registry, platform_event
+from server_modules import channel_adapter, channel_lane_contract_service, inbound_envelope
+from server_modules import openclaw_channel_registry, personal_channels_service, platform_event
 from server_modules import sage_reply_dispatcher as srd
 from server_modules import personal_channel_sage_bridge_service as bridge
 from server_modules.sage_agent_runtime_contract import SageTurnResult
@@ -281,28 +282,22 @@ class BridgeServiceNeverReturnsSendableErrorTextTests(unittest.TestCase):
         bypass is gone: the classified error stays under error_text, "text"
         is empty, and nothing was dispatched straight to the channel.
 
-        LEFT RED DELIBERATELY, 2026-08-15 — it is catching a live production
-        regression, not cutover test-rot, and must NOT be weakened or deleted
-        to make the suite green.
+        WAS RED 2026-08-15, FIXED THE SAME DAY — kept here as the regression
+        witness for the cloud-session lane, so do not fold it into the
+        openclaw cases below. It caught two independent live bugs at once:
 
-        `build_telegram_personal_reply_async` hardcodes the channel key
-        `telegram_personal` and passes it to
-        channel_lane_contract_service.guard_personal_gateway_inbound_message
-        (personal_channel_sage_bridge_service.py:485). Commit 6b2baf97e (the
-        full OpenClaw cutover, 2026-08-14) removed `telegram_personal` from
-        PERSONAL_CHANNEL_SPECS, so that guard now raises
-        "Channel lane contract rejected non-personal channel: telegram_personal"
-        on EVERY call. That function is the only reply builder
-        personal_channels_service.handle_cloud_channel_inbound calls
-        (personal_channels_service.py:4163), so every cloud-session-manager
-        Telegram message now fails its turn, is suppressed to an empty reply,
-        and the person gets silence — with nothing anywhere saying why.
-
-        The test goes red on `assertIsNotNone(result)`; its own subject
-        (`cloud_dispatch.assert_not_called()`) still holds. Fixing it is a
-        one-line production change in personal_channel_sage_bridge_service.py
-        (the cloud lane needs a key the lane contract still carries, or an
-        explicit cloud-lane exemption) and is outside a tests-only pass.
+          1. the OpenClaw cutover deleted `telegram_personal` from
+             PERSONAL_CHANNEL_SPECS while `cloud-session-manager/` went on
+             sending exactly that key, so guard_personal_gateway_inbound_
+             message raised on EVERY cloud Telegram message and the person
+             got silence. Fixed by declaring the cloud lane in the lane
+             contract — see PERSONAL_CHANNEL_SPECS's own comment.
+          2. this builder's except branch BUILT the failed reply dict and
+             then `return None`d it, and resolve_channel_reply_outcome(None)
+             can only classify None as SILENT. So a crashed turn was recorded
+             as "the agent chose not to answer". `assertIsNotNone(result)`
+             below is that assertion, and it is the whole point of the test —
+             never weaken it to `assertIsNone`.
         """
 
         async def run_case():
@@ -329,7 +324,14 @@ class BridgeServiceNeverReturnsSendableErrorTextTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["text"], "")
 
-    def test_whatsapp_async_exception_never_bypasses_via_direct_cloud_dispatch(self) -> None:
+    def test_generic_builder_exception_never_bypasses_via_direct_cloud_dispatch(self) -> None:
+        """RETARGETED 2026-08-15 from build_whatsapp_personal_reply_async,
+        deleted that day for hardcoding `whatsapp_personal` — a key the
+        OpenClaw cutover removed and nothing can produce, so this assertion
+        was being made against a channel no message can reach. It now runs on
+        build_personal_channel_reply_async with WhatsApp's live registry key,
+        which is the builder personal_channels_service actually calls."""
+
         async def run_case():
             with (
                 patch(
@@ -341,11 +343,15 @@ class BridgeServiceNeverReturnsSendableErrorTextTests(unittest.TestCase):
                     new=AsyncMock(side_effect=AssertionError("must never dispatch directly to the channel")),
                 ) as cloud_dispatch,
             ):
-                result = await bridge.build_whatsapp_personal_reply_async(
+                result = await bridge.build_personal_channel_reply_async(
+                    surface_channel=(
+                        f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}whatsapp"
+                    ),
                     workspace_id="ws-1",
-                    gateway_id="cloud:sess-1",
+                    gateway_id="gw-1",
                     remote_jid="15551234567",
                     text="hey",
+                    fallback_label="WhatsApp",
                 )
                 cloud_dispatch.assert_not_called()
                 return result
@@ -461,6 +467,195 @@ class PersonalChannelsServiceDeliveryBackstopTests(unittest.TestCase):
 
                 result = asyncio.run(run_case())
                 self.assertIsNone(result["outbound"])
+
+
+
+# ─── 6. the cloud-session lane (cloud-session-manager, gramjs Telegram) ──
+
+
+class CloudSessionLaneFailureIsUndeliveredNotSilenceTests(unittest.TestCase):
+    """The 2026-08-15 regression, proven end to end through the real handler.
+
+    Two independent bugs made every failed cloud Telegram turn indistinguish-
+    able from a turn the agent deliberately stayed quiet on, and the second
+    one survives the first: even with the lane contract fixed, an ordinary
+    provider crash still has to come back as `undelivered` (retriable, audited
+    as failed) rather than `no_reply` (the durable "it was asked and chose not
+    to answer" record).
+    """
+
+    def test_the_cloud_lane_key_is_a_declared_personal_channel(self) -> None:
+        """The structural half: the key `cloud-session-manager/src/telegram/
+        hmac.js::buildSignedInbound` puts on the wire must be one the lane
+        contract carries, or every inbound message raises before it can be
+        answered. Read from the contract's own constant, not typed here, so
+        this cannot pass while pointing at a different key than production."""
+        key = channel_lane_contract_service.CLOUD_SESSION_TELEGRAM_CHANNEL_KEY
+        self.assertIn(key, personal_channels_service.CLOUD_SESSION_CHANNEL_KEYS)
+        self.assertTrue(channel_lane_contract_service.is_personal_channel_key(key))
+        # The guard the non-owner branch of every cloud turn crosses.
+        guarded = channel_lane_contract_service.guard_personal_gateway_inbound_message(
+            surface_channel=key, text="hello", sender="a-stranger",
+        )
+        self.assertIn("hello", guarded.text)
+        # The gates handle_cloud_channel_inbound actually runs on this key
+        # must be gates the owner can also write, or the lever is missing.
+        self.assertIn(key, personal_channels_service.DM_POLICY_CHANNEL_KEYS)
+        self.assertIn(key, personal_channels_service.GROUP_POLICY_CHANNEL_KEYS)
+
+    def test_a_crashed_cloud_turn_reports_undelivered_and_sends_nothing(self) -> None:
+        allow = {"allowed": True, "is_owner": False, "was_addressed": None, "reason": None}
+
+        async def run_case():
+            with (
+                patch(
+                    "server_modules.personal_channels_service._enforce_group_policy",
+                    new=AsyncMock(return_value=dict(allow)),
+                ),
+                patch(
+                    "server_modules.personal_channels_service._enforce_dm_policy",
+                    new=AsyncMock(return_value=dict(allow)),
+                ),
+                patch(
+                    "server_modules.personal_channels_repository.get_telegram_state",
+                    return_value={},
+                ),
+                patch(
+                    "server_modules.sage_command_dispatcher.dispatch_command",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "server_modules.sage_turn_adapter.execute_sage_turn",
+                    new=AsyncMock(side_effect=RuntimeError("provider exploded")),
+                ),
+                patch(
+                    "server_modules.personal_channels_service.dispatch_cloud_channel_outbound",
+                    new=AsyncMock(side_effect=AssertionError("a failed turn must send nothing")),
+                ) as dispatch,
+            ):
+                result = await personal_channels_service.handle_cloud_channel_inbound(
+                    session_id="sess-1",
+                    channel_key=channel_lane_contract_service.CLOUD_SESSION_TELEGRAM_CHANNEL_KEY,
+                    message={
+                        "external_message_id": "cloud-msg-1",
+                        "sender_id": "tg-stranger-1",
+                        "sender_name": "Someone",
+                        "text": "hey",
+                    },
+                )
+                dispatch.assert_not_called()
+                return result
+
+        result = asyncio.run(run_case())
+        self.assertEqual(
+            result["status"], "undelivered",
+            "a turn that COULD NOT run must never be recorded as one that chose silence",
+        )
+        self.assertEqual(result["status_code"], platform_event.CHANNEL_EXECUTION_FAILED.code)
+
+    def test_a_genuinely_silent_cloud_turn_still_reports_no_reply(self) -> None:
+        """The positive control, and the reason the assertion above is not
+        just "never say no_reply": real silence must still be reportable as
+        silence, or the two facts are collapsed in the other direction."""
+        allow = {"allowed": True, "is_owner": False, "was_addressed": None, "reason": None}
+
+        async def run_case():
+            with (
+                patch(
+                    "server_modules.personal_channels_service._enforce_group_policy",
+                    new=AsyncMock(return_value=dict(allow)),
+                ),
+                patch(
+                    "server_modules.personal_channels_service._enforce_dm_policy",
+                    new=AsyncMock(return_value=dict(allow)),
+                ),
+                patch(
+                    "server_modules.personal_channels_repository.get_telegram_state",
+                    return_value={},
+                ),
+                patch(
+                    "server_modules.sage_command_dispatcher.dispatch_command",
+                    new=AsyncMock(return_value=None),
+                ),
+                patch(
+                    "server_modules.sage_turn_adapter.execute_sage_turn",
+                    new=AsyncMock(return_value=SageTurnResult(message="")),
+                ),
+                patch(
+                    "server_modules.personal_channels_service.dispatch_cloud_channel_outbound",
+                    new=AsyncMock(side_effect=AssertionError("a silent turn must send nothing")),
+                ),
+            ):
+                return await personal_channels_service.handle_cloud_channel_inbound(
+                    session_id="sess-1",
+                    channel_key=channel_lane_contract_service.CLOUD_SESSION_TELEGRAM_CHANNEL_KEY,
+                    message={
+                        "external_message_id": "cloud-msg-2",
+                        "sender_id": "tg-stranger-1",
+                        "sender_name": "Someone",
+                        "text": "hey",
+                    },
+                )
+
+        result = asyncio.run(run_case())
+        self.assertEqual(result["status"], "no_reply")
+
+
+class CloudSessionLaneRefusesAChannelItDoesNotServeTests(unittest.TestCase):
+    """`channel_key` on this webhook is caller-supplied, and the handler reads
+    the NAMED channel's dm/group policy while always building the reply as
+    Telegram — so any other key enforced one channel's policy and answered as
+    another. Refused with a structured status rather than a raise: a 500 tells
+    an HMAC-authed system caller nothing it can act on and reads as our crash.
+    """
+
+    def test_a_channel_the_lane_does_not_serve_is_refused_and_runs_no_turn(self) -> None:
+        async def run_case():
+            with (
+                patch(
+                    "server_modules.personal_channels_service._enforce_group_policy",
+                    new=AsyncMock(side_effect=AssertionError("no gate may run for an unserved channel")),
+                ),
+                patch(
+                    "server_modules.sage_turn_adapter.execute_sage_turn",
+                    new=AsyncMock(side_effect=AssertionError("no turn may run for an unserved channel")),
+                ),
+            ):
+                return await personal_channels_service.handle_cloud_channel_inbound(
+                    session_id="sess-1",
+                    channel_key=f"{openclaw_channel_registry.CHANNEL_KEY_PREFIX}signal",
+                    message={
+                        "external_message_id": "cloud-msg-3",
+                        "sender_id": "someone",
+                        "text": "hey",
+                    },
+                )
+
+        result = asyncio.run(run_case())
+        self.assertEqual(result["status"], "unsupported_channel")
+        self.assertEqual(
+            result["supported"], sorted(personal_channels_service.CLOUD_SESSION_CHANNEL_KEYS)
+        )
+
+
+class OpenClawChannelsRenderAHumanPlatformLabelTests(unittest.TestCase):
+    """The cutover moved the whole personal family onto `openclaw_*` keys and
+    inbound_envelope._PLATFORM_LABELS had an entry for none of them, so the
+    one-line header every model reads opened with "[openclaw_whatsapp ...]".
+    Driven off the live registry, so a channel OpenClaw adds tomorrow is
+    covered without an edit here — the expected set and the actual set come
+    from different places."""
+
+    def test_every_openclaw_channel_has_a_human_label(self) -> None:
+        self.assertTrue(openclaw_channel_registry.CHANNELS)
+        for channel in openclaw_channel_registry.CHANNELS:
+            with self.subTest(channel_key=channel.channel_key):
+                label = inbound_envelope.platform_label(channel.channel_key)
+                self.assertNotEqual(
+                    label, channel.channel_key,
+                    "the raw transport key must never be what the model is shown",
+                )
+                self.assertEqual(label, channel.label)
 
 
 if __name__ == "__main__":

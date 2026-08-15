@@ -282,29 +282,26 @@ class _EnvelopeEndToEndTestCase(unittest.TestCase):
         self._tmpdir.cleanup()
 
 
-_CLOUD_TELEGRAM_LANE_REGRESSION = """LEFT RED DELIBERATELY, 2026-08-15 — a live production regression, not
-cutover test-rot. Do not weaken or delete these to make the suite green.
+_CLOUD_TELEGRAM_LANE_REGRESSION = """WAS RED 2026-08-15, FIXED THE SAME DAY. These two are the cloud-session
+lane's only regression witnesses on the NON-OWNER branch — keep them
+distinguishable from the owner-branch cases beside them.
 
 `personal_channel_sage_bridge_service.build_telegram_personal_reply_async`
-hardcodes the channel key `telegram_personal` and, on its NON-OWNER branch
-only, hands it to
-channel_lane_contract_service.guard_personal_gateway_inbound_message
-(personal_channel_sage_bridge_service.py:485). Commit 6b2baf97e (the full
-OpenClaw cutover, 2026-08-14) removed `telegram_personal` from
-PERSONAL_CHANNEL_SPECS, so that guard now raises "Channel lane contract
-rejected non-personal channel: telegram_personal".
+hands its hardcoded `telegram_personal` to
+channel_lane_contract_service.guard_personal_gateway_inbound_message on its
+non-owner branch only. The 2026-08-14 OpenClaw cutover removed that key from
+PERSONAL_CHANNEL_SPECS while `cloud-session-manager/` went on sending it, so
+the guard raised on every call. That builder is the only one
+personal_channels_service.handle_cloud_channel_inbound calls, and that
+handler's own comment records that is_owner "still always evaluates to False
+today" on the cloud wire — so the broken branch was the one EVERY cloud
+Telegram message took: turn failed, reply suppressed to empty, person got
+silence with nothing anywhere saying why.
 
-That function is the ONLY reply builder
-personal_channels_service.handle_cloud_channel_inbound calls
-(personal_channels_service.py:4163), and that handler's own comment records
-that is_owner "still always evaluates to False today" on the cloud wire — so
-the guarded branch is the one EVERY cloud-session-manager Telegram message
-takes. Every one of them now fails its turn, is suppressed to an empty reply,
-and the person gets silence with nothing anywhere saying why.
-
-Owner-branch tests in this file still pass, which is exactly why this was
-invisible: the break is on the external-sender branch only. Fixing it is a
-production change outside a tests-only pass.
+The owner-branch tests in this file passed throughout, which is exactly why
+it was invisible. Fixed by declaring the cloud-session lane in the lane
+contract (it is served by a live runtime, just not the deleted on-box one) —
+see PERSONAL_CHANNEL_SPECS's own comment for why NOT `openclaw_telegram`.
 """
 
 
