@@ -87,6 +87,14 @@ import {
 } from "./openclaw-channel-copy";
 
 import { QR_NO_CODE_TEXT, resolveQrPanelView } from "./channel-qr-phase";
+import {
+  channelAccountLine,
+  channelSummaryRows,
+  setupInstructionsFor,
+  setupQuestionFor,
+  type ChannelSetupHelp,
+  type ChannelSetupWizard,
+} from "./channel-setup-flow";
 import "./openclaw-channels.css";
 
 export type {
@@ -339,12 +347,66 @@ export function useOpenClawChannelSetup(gatewayId: string | null, agentId: strin
  *  only what goes inside it. Two stacked dialogs (a card's detail panel, then
  *  a second modal on top of it for the credential) is the "two components
  *  stacked is not one interface" defect one level down. */
+/** THE INSTRUCTIONS ARE NOT OURS TO WRITE — see channel-setup-flow.ts.
+ *
+ *  Rendered above the one field they explain, so the connect screen asks one
+ *  question and answers "where do I get this?" in the same breath.
+ *
+ *  The NUMBERING is ours and their ordinals are stripped in the generator, for
+ *  one specific reason: a line a customer here cannot act on is dropped (their
+ *  own docs URLs, an env-var tip), and keeping their text's ordinals then left
+ *  a list that visibly started at "2)". A block that was not a numbered
+ *  sequence upstream stays unnumbered rather than being forced into one. */
+export function ChannelHelpLines({ block }: { block: ChannelSetupHelp }) {
+  return block.ordered ? (
+    <ol className="openclaw-steps-list">
+      {block.lines.map((line) => (
+        <li key={line}>{line}</li>
+      ))}
+    </ol>
+  ) : (
+    <>
+      {block.lines.map((line) => (
+        <p key={line} className="openclaw-steps-line">
+          {line}
+        </p>
+      ))}
+    </>
+  );
+}
+
+export function SetupInstructions({ wizard }: { wizard: ChannelSetupWizard | null | undefined }) {
+  const blocks = setupInstructionsFor(wizard);
+  if (blocks.length === 0) return null;
+  return (
+    <div className="openclaw-steps">
+      {blocks.map((block, index) => (
+        <div key={`${block.title ?? "help"}-${index}`} className="openclaw-steps-block">
+          <ChannelHelpLines block={block} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function CredentialForm({
   gatewayId,
   entry,
   observed,
   onCancel,
   onSaved,
+  /** "Connect" while connecting, "Save" when replacing a credential that
+   *  already works. Same form, two different things it is being asked to do,
+   *  and a button that says the wrong one of them is a small lie on the only
+   *  control that matters. */
+  submitLabel = "Connect",
+  cancelLabel = "Cancel",
+  /** False inside the connected screen's Replace disclosure, where the
+   *  instructions were already read once and are now noise. */
+  showInstructions = true,
+  /** False where closing the disclosure IS the cancel — a second control that
+   *  does the same thing as collapsing the section is a dead control. */
+  showCancel = true,
 }: {
   gatewayId: string;
   entry: OpenClawChannelCatalogEntry;
@@ -353,6 +415,10 @@ export function CredentialForm({
    *  owns closing itself; this only says "not now". */
   onCancel: () => void;
   onSaved: () => void | Promise<void>;
+  submitLabel?: string;
+  cancelLabel?: string;
+  showInstructions?: boolean;
+  showCancel?: boolean;
 }) {
   const [values, setValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -467,6 +533,8 @@ export function CredentialForm({
         </div>
       ) : null}
 
+      {showInstructions ? <SetupInstructions wizard={entry.setup_wizard} /> : null}
+
       <div className="openclaw-form">{primary.map(renderField)}</div>
 
       {/* Collapsed by default and rendered only when there is something in it —
@@ -486,9 +554,11 @@ export function CredentialForm({
       </p>
 
       <div className="openclaw-dialog-actions">
-        <button type="button" className="fleet-btn" onClick={onCancel} disabled={saving}>
-          Cancel
-        </button>
+        {showCancel ? (
+          <button type="button" className="fleet-btn" onClick={onCancel} disabled={saving}>
+            {cancelLabel}
+          </button>
+        ) : null}
         <button
           type="button"
           className="fleet-btn fleet-btn--accent-fill"
@@ -496,7 +566,7 @@ export function CredentialForm({
           disabled={saving || filled === 0}
         >
           {saving ? <Loader2 size={14} className="openclaw-spin" /> : null}
-          {saving ? "Saving…" : "Save credential"}
+          {saving ? "Saving…" : submitLabel}
         </button>
       </div>
     </>
@@ -771,11 +841,17 @@ export function DmAllowlistForm({
   agentId,
   channelKey,
   channelLabel,
+  /** OpenClaw's own answer to "where do I find that id?" — the hardest part
+   *  of this control and the one this product previously answered with an
+   *  empty text box. Their words, generated, never authored per channel; see
+   *  channel-setup-flow.ts. */
+  senderIdHelp,
 }: {
   gatewayId: string;
   agentId: string;
   channelKey: string;
   channelLabel: string;
+  senderIdHelp?: (ChannelSetupHelp & { placeholder: string | null }) | null;
 }) {
   const [policy, setPolicy] = useState<DmPolicyState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -918,13 +994,22 @@ export function DmAllowlistForm({
         </div>
       ) : null}
 
+      {senderIdHelp && senderIdHelp.lines.length > 0 ? (
+        <details className="openclaw-form-advanced openclaw-help-disclosure">
+          <summary>{senderIdHelp.title ? `Where to find a ${senderIdHelp.title}` : "Where to find this"}</summary>
+          <div className="openclaw-steps">
+            <ChannelHelpLines block={senderIdHelp} />
+          </div>
+        </details>
+      ) : null}
+
       <div className="openclaw-group-add">
         <input
           className="fleet-wizard-input"
           type="text"
           autoComplete="off"
           spellCheck={false}
-          placeholder={`${channelLabel} ID`}
+          placeholder={senderIdHelp?.placeholder || `${channelLabel} ID`}
           aria-label={`${channelLabel} ID`}
           value={newSenderId}
           disabled={saving}
@@ -1397,5 +1482,238 @@ export function GroupAllowlistForm({
         </label>
       ) : null}
     </div>
+  );
+}
+
+// ── THE CONNECTED SCREEN ────────────────────────────────────────────────────
+//
+// "if a channel is already connected it should look different — genuinely
+// different, not just everything editable." Founder, 2026-08-15.
+//
+// A working channel gets a READ-ONLY summary and one Edit. Nothing on it is a
+// control except that button, so opening a channel that already works is a
+// glance rather than a form to be careful around. What the summary states is
+// read from the same three routes the settings screen writes to, so it can
+// never describe a configuration that is not the live one.
+//
+// A FACT THAT COULD NOT BE READ IS ITS OWN STATE. Three independent reads back
+// three independent facts, and any of them can fail on its own; a failed read
+// rendering as "Nobody yet" would tell an owner their allowlist is empty when
+// it is not. channelSummaryRows takes `null` for exactly this and renders it
+// as unknown — the same "empty and could-not-load are different facts" law the
+// rest of this codebase is held to.
+
+export type ChannelPolicySummary = {
+  dmAllowlistCount: number | null;
+  groupAllowlistCount: number | null;
+  ownerLinked: boolean | null;
+  loading: boolean;
+  reload: () => void;
+};
+
+export function useChannelPolicySummary(
+  gatewayId: string | null,
+  agentId: string,
+  /** null while no channel's panel is open. A hook must be called
+   *  unconditionally, so "there is nothing to read" is a value here rather
+   *  than a reason not to call it. */
+  channelKey: string | null,
+): ChannelPolicySummary {
+  const [state, setState] = useState<{
+    dm: number | null;
+    group: number | null;
+    owner: boolean | null;
+    loading: boolean;
+  }>({ dm: null, group: null, owner: null, loading: true });
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    if (!gatewayId || !channelKey) {
+      setState({ dm: null, group: null, owner: null, loading: false });
+      return;
+    }
+    let cancelled = false;
+    setState((current) => ({ ...current, loading: true }));
+    const base = `/api/personal-channels/${encodeURIComponent(channelKey)}/gateways/${encodeURIComponent(gatewayId)}`;
+    const query = `?agent_id=${encodeURIComponent(agentId)}`;
+    const read = async (path: string) => {
+      try {
+        const res = await fleetAuthorizedFetch(`${base}${path}${query}`, {
+          credentials: "include",
+          headers: buildCookieAuthHeaders("GET"),
+        });
+        const body = await res.json().catch(() => ({}));
+        return res.ok ? body : null;
+      } catch {
+        return null;
+      }
+    };
+    void (async () => {
+      const [dm, group, owner] = await Promise.all([
+        read("/dm-policy"),
+        read("/group-policy"),
+        read("/owner-identity"),
+      ]);
+      if (cancelled) return;
+      const count = (value: unknown) => (Array.isArray(value) ? value.length : null);
+      setState({
+        dm: dm ? count(dm?.dm_policy?.allowlist) : null,
+        group: group ? count(group?.group_policy?.allowlist) : null,
+        // `owner` present and `sender_id` absent is a real answer ("nobody is
+        // the owner", a legitimate configuration for an audience-facing
+        // agent); a failed read is not, and stays null.
+        owner: owner ? Boolean(owner?.sender_id) : null,
+        loading: false,
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [gatewayId, agentId, channelKey, nonce]);
+
+  return {
+    dmAllowlistCount: state.dm,
+    groupAllowlistCount: state.group,
+    ownerLinked: state.owner,
+    loading: state.loading,
+    reload: () => setNonce((value) => value + 1),
+  };
+}
+
+export function ConnectedChannelSummary({
+  entry,
+  observed,
+  summary,
+  onEdit,
+}: {
+  entry: OpenClawChannelCatalogEntry;
+  observed: OpenClawObservedChannel | undefined;
+  summary: ChannelPolicySummary;
+  onEdit: () => void;
+}) {
+  const account = channelAccountLine(observed?.accounts);
+  const rows = channelSummaryRows({
+    accounts: observed?.accounts ?? [],
+    dmAllowlistCount: summary.dmAllowlistCount,
+    groupAllowlistCount: summary.groupAllowlistCount,
+    ownerLinked: summary.ownerLinked,
+  });
+  return (
+    <div className="openclaw-summary">
+      <p className="openclaw-summary-state">
+        <span className="openclaw-summary-dot" aria-hidden />
+        {/* "Ready", never "Connected" — a connection is proven by a real
+            message arriving and nothing on this screen has seen one. The
+            three state facts (present / credential set / switched on) are
+            all true here simultaneously, which is what lets one honest line
+            stand in for three chips; the moment any is false this screen is
+            not the one being rendered. */}
+        Ready — set up and switched on
+      </p>
+      {account ? <p className="openclaw-summary-account">{account}</p> : null}
+
+      <dl className="openclaw-summary-rows">
+        {rows.map((row) => (
+          <div key={row.label} className="openclaw-summary-row">
+            <dt>{row.label}</dt>
+            <dd className={row.value == null ? "openclaw-summary-unknown" : undefined}>
+              {row.value == null ? (summary.loading ? "Reading…" : "Couldn’t read") : row.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+
+      <div className="openclaw-dialog-actions">
+        <button type="button" className="fleet-btn" onClick={onEdit}>
+          Edit
+        </button>
+      </div>
+      <p className="openclaw-form-note">
+        A message arriving on {entry.label} is what proves it works.
+      </p>
+    </div>
+  );
+}
+
+/** Behind Edit, and only ever reachable from a channel that already works
+ *  (planChannelSetupFlow enforces that structurally, not by convention).
+ *
+ *  The credential itself sits in a COLLAPSED disclosure rather than on the
+ *  screen: replacing a working credential is rare, and a token field open
+ *  beside two allowlists is exactly the "everything editable at once" this
+ *  rework exists to end. Nothing is lost — it was reachable before and it is
+ *  reachable now, one deliberate click further from an accident. */
+export function ChannelSettingsBody({
+  gatewayId,
+  agentId,
+  entry,
+  observed,
+  onSaved,
+}: {
+  gatewayId: string;
+  agentId: string;
+  entry: OpenClawChannelCatalogEntry;
+  observed: OpenClawObservedChannel | undefined;
+  onSaved: () => void | Promise<void>;
+}) {
+  return (
+    <div className="openclaw-settings">
+      {/* Direct messages first, groups second — that is the order the gates
+          themselves run in, and the DM list is the one an owner has to fill
+          before the channel answers anybody at all (including them). */}
+      <DmAllowlistForm
+        gatewayId={gatewayId}
+        agentId={agentId}
+        channelKey={entry.channel_key}
+        channelLabel={entry.label}
+        senderIdHelp={entry.setup_wizard?.sender_id_help ?? null}
+      />
+      <GroupAllowlistForm
+        gatewayId={gatewayId}
+        agentId={agentId}
+        channelKey={entry.channel_key}
+        channelLabel={entry.label}
+      />
+      {/* Last, because it is the only one of the three that changes what an
+          admitted message is ALLOWED TO DO rather than who gets admitted —
+          and because it only becomes actionable once the owner has admitted
+          themselves above. Deliberately not folded into the DM list it sits
+          under: "may message this agent" and "IS the owner" are different
+          facts, and one control for both would promote every allowed sender
+          to shell and hardware authority. */}
+      <OwnerIdentityForm
+        gatewayId={gatewayId}
+        agentId={agentId}
+        channelKey={entry.channel_key}
+        channelLabel={entry.label}
+      />
+      {entry.connect_method === "credential" && entry.fields.length > 0 ? (
+        <details className="openclaw-form-advanced openclaw-replace-disclosure">
+          <summary>Replace credential</summary>
+          <CredentialForm
+            gatewayId={gatewayId}
+            entry={entry}
+            observed={observed}
+            showInstructions={false}
+            showCancel={false}
+            submitLabel="Save"
+            onCancel={() => undefined}
+            onSaved={onSaved}
+          />
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+/** The back affordance every screen past the first carries. A LINK-shaped
+ *  control at the top of the body, never a second close button in the header
+ *  — the header's X still means "leave this channel", and the two must not
+ *  read as the same action. */
+export function PanelBackBar({ label, onBack }: { label: string; onBack: () => void }) {
+  return (
+    <button type="button" className="openclaw-back" onClick={onBack}>
+      <span aria-hidden>←</span> {label}
+    </button>
   );
 }

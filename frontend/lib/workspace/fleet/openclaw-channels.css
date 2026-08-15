@@ -324,3 +324,174 @@
     animation: none;
   }
 }
+
+/* ── ONE QUESTION PER SCREEN ──────────────────────────────────────────── */
+/* The panel used to do two jobs at once — connecting and configuring, both
+   open, whether or not the channel was connected. It is now a sequence of
+   screens (channel-setup-flow.ts decides which), and these are the three
+   things a screen needs that the shared shell does not already provide: a
+   heading that states the screen's single question, a back affordance, and
+   the read-only summary a WORKING channel opens into.
+
+   A professional tool labels; it does not lecture. So the question is one
+   short line, in the transport's own words where they have said them, and it
+   is never a paragraph explaining what the screen is for. */
+
+.openclaw-question {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-3);
+  line-height: 1.4;
+}
+
+/* A LINK-shaped control at the top of the body, never a second close button
+   in the header — the header's X still means "leave this channel", and the
+   two must not read as the same action. */
+.openclaw-back {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.openclaw-back:hover {
+  color: var(--text-primary);
+}
+
+/* THEIR instructions, not ours (see channel-setup-flow.ts). Their lines
+   already carry their own numbering, so this adds none — two numbering
+   systems on one list is worse than none at all. */
+.openclaw-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+}
+
+.openclaw-steps-block + .openclaw-steps-block {
+  margin-top: var(--space-2);
+}
+
+.openclaw-steps-line {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.openclaw-help-disclosure {
+  margin-top: var(--space-2);
+}
+
+.openclaw-help-disclosure .openclaw-steps {
+  margin-bottom: 0;
+}
+
+.openclaw-title-door {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+/* ── The connected screen ─────────────────────────────────────────────── */
+/* Genuinely different from the connect screen, which is the whole point:
+   nothing here is a control except Edit. */
+
+.openclaw-summary-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.openclaw-summary-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--online-text);
+  flex: 0 0 auto;
+}
+
+.openclaw-summary-account {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.openclaw-summary-rows {
+  margin: 0 0 var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+
+.openclaw-summary-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.openclaw-summary-row dt {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.openclaw-summary-row dd {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  text-align: right;
+}
+
+/* "Couldn't read" is not "nothing is configured" — a failed read renders as
+   its own state rather than as a confident zero. */
+.openclaw-summary-row dd.openclaw-summary-unknown {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ── Behind Edit ──────────────────────────────────────────────────────── */
+/* The first policy form supplies its own top border, so the settings body
+   only needs to stop the stack from hugging the back bar. */
+.openclaw-settings > :first-child {
+  margin-top: 0;
+}
+
+.openclaw-replace-disclosure {
+  margin-top: var(--space-4);
+}
+
+/* Their steps, our numbering — see ChannelHelpLines. */
+.openclaw-steps-list {
+  margin: 0;
+  padding-left: 1.35em;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.openclaw-steps-list li {
+  overflow-wrap: anywhere;
+}

@@ -7,6 +7,8 @@
  * this file rather than redefining it.
  */
 
+import type { ChannelSetupWizard } from "./channel-setup-flow";
+
 export type OpenClawCredentialField = {
   name: string;
   secret: boolean;
@@ -53,6 +55,11 @@ export type OpenClawChannelCatalogEntry = {
   fields: OpenClawCredentialField[];
   requires_plugin: boolean;
   plugin_id: string | null;
+  /** HOW a person obtains what `fields` asks them to type, in the transport's
+   *  own words — generated in the same manifest pass as the fields themselves.
+   *  Optional because a backend predating it must still render the bare form
+   *  it always did; see channel-setup-flow.ts. */
+  setup_wizard?: ChannelSetupWizard | null;
 };
 
 export type OpenClawObservedField = { name: string; secret: boolean; type: string; set: boolean };

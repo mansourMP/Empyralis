@@ -169,7 +169,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYTHON_MANIFEST_PATH = REPO_ROOT / "server_modules" / "openclaw_channel_manifest.json"
@@ -276,6 +276,10 @@ def _run_openclaw(args: List[str], *, home: Path) -> str:
         env=env,
         timeout=180,
         check=False,
+        # Never inherit a terminal. `channels capabilities` opens an interactive
+        # "Install <X> plugin?" prompt for a channel whose plugin is absent; with
+        # an inherited stdin that hangs a generation run on a human keypress.
+        stdin=subprocess.DEVNULL,
     )
     if completed.returncode != 0:
         raise GenerationError(
@@ -925,6 +929,223 @@ def _credential_shapes(
     return shapes
 
 
+# ── Source 7: the SETUP INSTRUCTIONS, in OpenClaw's own words ───────────────
+#
+# The credential shape above says WHICH fields a channel takes. It cannot say
+# how a person obtains one — "open Telegram, chat with @BotFather, run /newbot"
+# is knowledge about somebody else's product, and writing it ourselves would be
+# twenty-four hand-authored screens that go stale the day upstream changes a
+# command. OpenClaw already ships that text per channel, as the declarative
+# wizard their own interactive setup renders:
+#
+#     openclaw channels capabilities --channel <id> --json
+#       -> channels[].plugin.setupWizard.credentials[].helpTitle / .helpLines
+#       -> channels[].plugin.setupWizard.textInputs[].message / .placeholder
+#       -> channels[].plugin.setupWizard.allowFrom.helpTitle / .helpLines
+#
+# Type contract: <pkg>/dist/setup-wizard-types-*.d.ts (ChannelSetupWizard).
+#
+# ONLY BUNDLED CHANNELS ARE ASKED, AND THAT IS DELIBERATE
+# -------------------------------------------------------
+# `channels capabilities` loads the channel's PLUGIN, so for the twenty
+# installable channels it opens an interactive "Install <X> plugin?" prompt and
+# answers no JSON at all. Feeding it a plugin the generating machine happens to
+# have installed would make this manifest depend on the operator's own box —
+# two people regenerating would produce two different checked-in artifacts,
+# which is the same non-determinism CLAUDE.md already records as a hazard for
+# compiled artifacts. So the query is restricted to the channels that ship
+# INSIDE the pinned bundle, which is a property of the pin and reproducible
+# anywhere. Everything else records `resolved: false` — an honest "we could not
+# ask", never an invented instruction.
+_ENV_VAR_TOKEN = re.compile(r"\b[A-Z][A-Z0-9]{2,}(?:_[A-Z0-9]+)+\b")
+# Their own config namespace. A customer here never edits that file — the
+# config is a DERIVED ARTIFACT of Empyralis policy (see CLAUDE.md), written by
+# provisioning — so a line telling them to set `channels.signal.cliPath` is
+# mechanism they cannot act on, exactly like the env-var tip below it.
+_CONFIG_PATH_TOKEN = re.compile(r"\bchannels\.[a-z0-9-]+\.[a-zA-Z]")
+
+
+def _customer_safe_lines(lines: Any) -> List[str]:
+    """Their instruction lines, minus the ones a customer cannot act on.
+
+    Two DERIVED exclusions, never a per-channel edit list:
+
+      the transport's own name   Standing product law: the word "OpenClaw"
+                                 never reaches a customer's screen, and it is
+                                 asserted by openclaw-channel-copy.test.ts.
+                                 This drops their "Docs: https://docs.openclaw
+                                 .ai/telegram" / "read from.id in `openclaw
+                                 logs --follow`" lines.
+      an environment variable    "Tip: you can also set TELEGRAM_BOT_TOKEN in
+                                 your env." is true of their CLI and false of
+                                 this product — a browser form has no env to
+                                 set, so the line is not censored, it is
+                                 INAPPLICABLE. A tip nobody can follow is the
+                                 same dead control a button that submits
+                                 nothing would be.
+      their config namespace     "…or set channels.signal.cliPath." Same
+                                 reason: that file is a derived artifact this
+                                 product regenerates, so a customer editing it
+                                 would have their edit overwritten. It also
+                                 happens to be where the one MACHINE-DERIVED
+                                 line lives ("signal-cli not found"), which is
+                                 worth knowing: their wizard text is not purely
+                                 static, so a line that reads like a diagnostic
+                                 rather than an instruction deserves a look
+                                 whenever this is regenerated.
+
+    Everything else is passed through verbatim. We do not rewrite their words.
+    """
+    if not isinstance(lines, (list, tuple)):
+        return []
+    kept: List[str] = []
+    for raw in lines:
+        line = str(raw or "").strip()
+        if not line:
+            continue
+        if "openclaw" in line.lower():
+            continue
+        if _ENV_VAR_TOKEN.search(line):
+            continue
+        if _CONFIG_PATH_TOKEN.search(line):
+            continue
+        kept.append(line)
+    return kept
+
+
+def _customer_safe_text(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text or "openclaw" in text.lower():
+        return None
+    return text
+
+
+_ORDINAL_PREFIX = re.compile(r"^\s*\d+\s*[).]\s+")
+
+
+def _wizard_help(node: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Their instruction block, with THEIR ordinals removed and the fact that
+    it WAS a numbered sequence recorded instead.
+
+    Their lines carry their own numbering ("1) Open Telegram…"). Dropping a
+    line the customer cannot act on then leaves a list that starts at "2)",
+    which is a visible artifact of our own filtering and reads as a bug. The
+    honest fix is not to renumber their text — it is to keep their words and
+    let the renderer number the list, which it can only do safely when the
+    block genuinely IS a sequence. So `ordered` is true only when EVERY
+    surviving line carried an ordinal; a block mixing steps and prose keeps
+    its lines exactly as written and is rendered unnumbered.
+    """
+    lines = _customer_safe_lines(node.get("helpLines"))
+    title = _customer_safe_text(node.get("helpTitle"))
+    if not lines and not title:
+        return None
+    ordered = bool(lines) and all(_ORDINAL_PREFIX.match(line) for line in lines)
+    if ordered:
+        lines = [_ORDINAL_PREFIX.sub("", line, count=1) for line in lines]
+    return {"title": title, "lines": lines, "ordered": ordered}
+
+
+def _setup_wizard_for(document: Any) -> Dict[str, Any]:
+    """One channel's `setupWizard`, reduced to what a browser form can render."""
+    channels = (document or {}).get("channels") if isinstance(document, dict) else None
+    plugin = (channels or [{}])[0].get("plugin") if channels else None
+    wizard = (plugin or {}).get("setupWizard") if isinstance(plugin, dict) else None
+    if not isinstance(wizard, dict):
+        # We asked and they answered: this channel declares no wizard at all
+        # (sms, clickclack). Distinct from `resolved: false`, which is "we
+        # could not ask" — same rendering, different fact.
+        return {"resolved": True, "steps": [], "sender_id_help": None}
+
+    steps: List[Dict[str, Any]] = []
+    for credential in wizard.get("credentials") or []:
+        if not isinstance(credential, dict):
+            continue
+        help_block = _wizard_help(credential)
+        steps.append(
+            {
+                "kind": "credential",
+                "input_key": str(credential.get("inputKey") or ""),
+                "label": _customer_safe_text(credential.get("credentialLabel")),
+                "prompt": _customer_safe_text(credential.get("inputPrompt")),
+                "placeholder": None,
+                # A credential is always a secret in their model — that is what
+                # separates `credentials` from `textInputs`.
+                "secret": True,
+                "required": True,
+                "help": help_block,
+            }
+        )
+    for text_input in wizard.get("textInputs") or []:
+        if not isinstance(text_input, dict):
+            continue
+        steps.append(
+            {
+                "kind": "text",
+                "input_key": str(text_input.get("inputKey") or ""),
+                "label": _customer_safe_text(text_input.get("message")),
+                "prompt": _customer_safe_text(text_input.get("message")),
+                "placeholder": _customer_safe_text(text_input.get("placeholder")),
+                "secret": False,
+                # Their own default is "required unless it says otherwise" —
+                # `required: false` is written explicitly on the optional ones.
+                "required": text_input.get("required") is not False,
+                "help": _wizard_help(text_input),
+            }
+        )
+
+    allow_from = wizard.get("allowFrom")
+    sender_help: Optional[Dict[str, Any]] = None
+    if isinstance(allow_from, dict):
+        block = _wizard_help(allow_from)
+        placeholder = _customer_safe_text(allow_from.get("placeholder"))
+        message = _customer_safe_text(allow_from.get("message"))
+        if block or placeholder or message:
+            sender_help = {
+                "title": (block or {}).get("title") or message,
+                "lines": (block or {}).get("lines") or [],
+                "ordered": bool((block or {}).get("ordered")),
+                "placeholder": placeholder,
+            }
+
+    return {"resolved": True, "steps": steps, "sender_id_help": sender_help}
+
+
+def _setup_wizards(
+    ids: List[str],
+    plugin_installs: Mapping[str, Optional[Dict[str, Any]]],
+    *,
+    home: Path,
+) -> Dict[str, Dict[str, Any]]:
+    wizards: Dict[str, Dict[str, Any]] = {}
+    for channel_id in ids:
+        if plugin_installs.get(channel_id):
+            # Installable, i.e. not in the pinned bundle. See the block comment
+            # above: asking would make this artifact depend on the generating
+            # machine's own plugin set.
+            wizards[channel_id] = {
+                "resolved": False,
+                "reason": "plugin_not_bundled",
+                "steps": [],
+                "sender_id_help": None,
+            }
+            continue
+        raw = _run_openclaw(
+            ["channels", "capabilities", "--channel", channel_id, "--json"], home=home
+        )
+        try:
+            document = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise GenerationError(
+                f"`openclaw channels capabilities --channel {channel_id} --json` did not "
+                f"return JSON ({exc}). {channel_id} ships inside the pinned bundle, so this "
+                "is a broken read rather than an absent plugin — fix the reader before "
+                "regenerating."
+            ) from exc
+        wizards[channel_id] = _setup_wizard_for(document)
+    return wizards
+
+
 def build_manifest() -> Dict[str, Any]:
     package_root = _openclaw_package_root()
     with tempfile.TemporaryDirectory(prefix="empyralis-openclaw-manifest-") as tmp:
@@ -934,13 +1155,16 @@ def build_manifest() -> Dict[str, Any]:
         origins = _catalog_origins(home)
         channel_nodes = _channel_schema_nodes(home)
         shapes = _policy_shapes(channel_nodes)
+        # Needs the same throwaway HOME (their CLI writes state into it), so it
+        # runs inside this block rather than beside the on-disk readers below.
+        plugin_installs = _plugin_installs(package_root, ids)
+        setup_wizards = _setup_wizards(ids, plugin_installs, home=home)
 
     channel_meta = _disk_channel_meta(package_root)
     labels = {
         channel_id: str(meta.get("label") or channel_id)
         for channel_id, meta in channel_meta.items()
     }
-    plugin_installs = _plugin_installs(package_root, ids)
     credential_shapes = _credential_shapes(
         channel_nodes, channel_meta, ids, _mode_gated_secrets(package_root)
     )
@@ -996,6 +1220,11 @@ def build_manifest() -> Dict[str, Any]:
                 # "plugin_absent"`), because "we cannot know yet" is a state
                 # the owner has to be shown, not an absence to render blank.
                 "credential_shape": credential_shapes[channel_id],
+                # Source 7 — HOW a person obtains what the shape above asks
+                # for, in OpenClaw's own words. `resolved: false` where we
+                # could not ask (see _setup_wizards): an honest absence, never
+                # an instruction we made up.
+                "setup_wizard": setup_wizards[channel_id],
             }
         )
 
@@ -1127,6 +1356,46 @@ export interface GeneratedOpenClawCredentialShape {{
   readonly file_alternatives: readonly string[];
 }}
 
+/** One step of OpenClaw's own declarative setup wizard, reduced to what a
+ *  browser form can render. Their words, filtered only for lines a customer
+ *  here cannot act on — see `_customer_safe_lines` in the generator. */
+export interface GeneratedOpenClawSetupStep {{
+  readonly kind: "credential" | "text";
+  readonly input_key: string;
+  readonly label: string | null;
+  readonly prompt: string | null;
+  readonly placeholder: string | null;
+  readonly secret: boolean;
+  readonly required: boolean;
+  readonly help: {{
+    readonly title: string | null;
+    readonly lines: readonly string[];
+    /** True when every line was a numbered step upstream — the renderer
+     *  numbers the list itself, so a filtered line can never leave a list
+     *  starting at "2)". */
+    readonly ordered: boolean;
+  }} | null;
+}}
+
+/** How a person OBTAINS what `credential_shape` asks them to type.
+ *
+ *  `resolved: false` means the query could not be made for this channel (its
+ *  plugin is not in the pinned bundle) — an honest absence, never an
+ *  instruction invented on our side. `resolved: true` with no steps means they
+ *  answered and declare none. */
+export interface GeneratedOpenClawSetupWizard {{
+  readonly resolved: boolean;
+  readonly reason?: string;
+  readonly steps: readonly GeneratedOpenClawSetupStep[];
+  /** Their own instructions for finding the id an allowlist takes. */
+  readonly sender_id_help: {{
+    readonly title: string | null;
+    readonly lines: readonly string[];
+    readonly ordered: boolean;
+    readonly placeholder: string | null;
+  }} | null;
+}}
+
 export interface GeneratedOpenClawChannel {{
   readonly id: string;
   readonly channel_key: string;
@@ -1136,6 +1405,7 @@ export interface GeneratedOpenClawChannel {{
   readonly policy_shape: GeneratedOpenClawPolicyShape | null;
   readonly plugin_install: GeneratedOpenClawPluginInstall | null;
   readonly credential_shape: GeneratedOpenClawCredentialShape;
+  readonly setup_wizard: GeneratedOpenClawSetupWizard;
 }}
 
 export interface GeneratedOpenClawManifest {{

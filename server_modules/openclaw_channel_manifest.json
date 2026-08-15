@@ -77,6 +77,11 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": true,
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -163,6 +168,12 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -241,6 +252,12 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -317,6 +334,12 @@
         "file_alternatives": [
           "serviceAccountFile"
         ]
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -351,6 +374,28 @@
         "docs_path": "/channels/imessage",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": true,
+        "steps": [
+          {
+            "kind": "text",
+            "input_key": "cliPath",
+            "label": "imsg CLI path",
+            "prompt": "imsg CLI path",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": {
+              "title": "iMessage",
+              "lines": [
+                "imsg CLI path required to enable iMessage."
+              ],
+              "ordered": false
+            }
+          }
+        ],
+        "sender_id_help": null
       }
     },
     {
@@ -423,6 +468,83 @@
         "file_alternatives": [
           "passwordFile"
         ]
+      },
+      "setup_wizard": {
+        "resolved": true,
+        "steps": [
+          {
+            "kind": "text",
+            "input_key": "httpHost",
+            "label": "IRC server host",
+            "prompt": "IRC server host",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": null
+          },
+          {
+            "kind": "text",
+            "input_key": "httpPort",
+            "label": "IRC server port",
+            "prompt": "IRC server port",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": null
+          },
+          {
+            "kind": "text",
+            "input_key": "token",
+            "label": "IRC nick",
+            "prompt": "IRC nick",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": null
+          },
+          {
+            "kind": "text",
+            "input_key": "userId",
+            "label": "IRC username",
+            "prompt": "IRC username",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": null
+          },
+          {
+            "kind": "text",
+            "input_key": "deviceName",
+            "label": "IRC real name",
+            "prompt": "IRC real name",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": null
+          },
+          {
+            "kind": "text",
+            "input_key": "groupChannels",
+            "label": "Auto-join IRC channels (optional, comma-separated)",
+            "prompt": "Auto-join IRC channels (optional, comma-separated)",
+            "placeholder": null,
+            "secret": false,
+            "required": false,
+            "help": null
+          }
+        ],
+        "sender_id_help": {
+          "title": "IRC allowlist",
+          "lines": [
+            "Allowlist IRC DMs by sender.",
+            "Examples:",
+            "- alice",
+            "- alice!ident@example.org",
+            "Multiple entries: comma-separated."
+          ],
+          "ordered": false,
+          "placeholder": "alice, bob!ident@example.org"
+        }
       }
     },
     {
@@ -481,6 +603,12 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -583,6 +711,12 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -632,6 +766,32 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": true,
+        "steps": [
+          {
+            "kind": "credential",
+            "input_key": "botToken",
+            "label": "bot token",
+            "prompt": "Enter Mattermost bot token",
+            "placeholder": null,
+            "secret": true,
+            "required": true,
+            "help": null
+          },
+          {
+            "kind": "text",
+            "input_key": "httpUrl",
+            "label": "Enter Mattermost base URL",
+            "prompt": "Enter Mattermost base URL",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": null
+          }
+        ],
+        "sender_id_help": null
       }
     },
     {
@@ -725,6 +885,12 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -814,6 +980,12 @@
           "apiPasswordFile",
           "botSecretFile"
         ]
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -861,6 +1033,12 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -886,6 +1064,12 @@
         "docs_path": "/channels/wechat",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -911,6 +1095,12 @@
         "docs_path": "/channels/zaloclawbot",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -984,6 +1174,12 @@
         "file_alternatives": [
           "clientSecretFile"
         ]
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1018,6 +1214,36 @@
         "docs_path": "/channels/signal",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": true,
+        "steps": [
+          {
+            "kind": "text",
+            "input_key": "cliPath",
+            "label": "signal-cli path",
+            "prompt": "signal-cli path",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": {
+              "title": "Signal",
+              "lines": [],
+              "ordered": false
+            }
+          },
+          {
+            "kind": "text",
+            "input_key": "signalNumber",
+            "label": "Signal bot number (E.164)",
+            "prompt": "Signal bot number (E.164)",
+            "placeholder": null,
+            "secret": false,
+            "required": true,
+            "help": null
+          }
+        ],
+        "sender_id_help": null
       }
     },
     {
@@ -1104,6 +1330,12 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1170,6 +1402,11 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": true,
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1204,6 +1441,12 @@
         "docs_path": "/channels/synology-chat",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1288,6 +1531,38 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": true,
+        "steps": [
+          {
+            "kind": "credential",
+            "input_key": "token",
+            "label": "Telegram bot token",
+            "prompt": "Enter Telegram bot token",
+            "placeholder": null,
+            "secret": true,
+            "required": true,
+            "help": {
+              "title": "Telegram bot token",
+              "lines": [
+                "Open Telegram and chat with @BotFather",
+                "Run /newbot (or /mybots)",
+                "Copy the token (looks like 123456:ABC...)"
+              ],
+              "ordered": true
+            }
+          }
+        ],
+        "sender_id_help": {
+          "title": "Telegram user id",
+          "lines": [
+            "Or call https://api.telegram.org/bot<bot_token>/getUpdates and read message.from.id",
+            "Third-party: DM @userinfobot or @getidsbot"
+          ],
+          "ordered": true,
+          "placeholder": "123456789"
+        }
       }
     },
     {
@@ -1322,6 +1597,12 @@
         "docs_path": "/channels/tlon",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1356,6 +1637,12 @@
         "docs_path": "/channels/twitch",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1381,6 +1668,12 @@
         "docs_path": "/plugins/community#wecom",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1426,6 +1719,12 @@
         "docs_path": "/channels/whatsapp",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1451,6 +1750,12 @@
         "docs_path": "/plugins/community#yuanbao",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1523,6 +1828,12 @@
           }
         ],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     },
     {
@@ -1566,6 +1877,12 @@
         "docs_path": "/channels/zalouser",
         "fields": [],
         "file_alternatives": []
+      },
+      "setup_wizard": {
+        "resolved": false,
+        "reason": "plugin_not_bundled",
+        "steps": [],
+        "sender_id_help": null
       }
     }
   ]

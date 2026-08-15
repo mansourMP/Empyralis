@@ -4098,7 +4098,15 @@ a.fleet-breadcrumb:hover {
   flex-shrink: 0;
 }
 
-.fleet-detail-close--inline { position: static; }
+/* Compound on purpose. The base `.fleet-detail-close` below declares
+   `position: absolute` and is defined LATER in this file, so a single-class
+   modifier here loses the cascade at equal specificity and the modifier reads
+   as applied while doing nothing. The absolute fallback then resolves against
+   the fixed backdrop rather than the panel, which parks the panel's own close
+   button in the TOP-RIGHT CORNER OF THE SCREEN — invisible at small widths,
+   where the panel fills the viewport anyway, and obvious at 1680px, where it
+   sits a thousand pixels from the panel it closes. */
+.fleet-detail-close.fleet-detail-close--inline { position: static; }
 
 @keyframes fleet-fade {
   from { opacity: 0; }

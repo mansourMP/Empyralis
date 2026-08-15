@@ -282,6 +282,11 @@ def openclaw_channel_setup_catalog() -> List[Dict[str, Any]]:
                 "fields": list(shape.get("fields") or []),
                 "requires_plugin": bool((channel.plugin_install or {}).get("required")),
                 "plugin_id": (channel.plugin_install or {}).get("plugin_id"),
+                # The instructions for OBTAINING what `fields` asks for, in the
+                # transport's own words. Served with the form rather than looked
+                # up separately: they are two halves of one screen, and a second
+                # round trip would let a form render before its own instructions.
+                "setup_wizard": channel.setup_wizard,
             }
         )
     catalog.sort(key=lambda entry: entry["label"].lower())

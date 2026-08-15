@@ -1722,14 +1722,20 @@ function ChatTab({
 
 import {
   ChannelLinkForm,
+  ChannelSettingsBody,
+  ConnectedChannelSummary,
   CredentialForm,
-  DmAllowlistForm,
-  GroupAllowlistForm,
-  OwnerIdentityForm,
-  StateChip,
+  PanelBackBar,
+  useChannelPolicySummary,
   useOpenClawChannelSetup,
 } from "./OpenClawChannelsPanel";
-import { channelCardPill, formatChannelList, openclawObservedErrorBanner } from "./openclaw-channel-copy";
+import {
+  channelCardPill,
+  connectMethodFor,
+  formatChannelList,
+  openclawObservedErrorBanner,
+} from "./openclaw-channel-copy";
+import { planChannelSetupFlow, setupQuestionFor } from "./channel-setup-flow";
 import {
   CHANNEL_GRID_PLATFORMS,
   channelDoorChoiceNote,
@@ -1886,6 +1892,28 @@ export function ChannelsTab({
   // Which VARIANT of that platform is being set up — the transported half of
   // the same door pick the first-party panel makes with `selectedDoor`.
   const [openclawDoorKey, setOpenclawDoorKey] = useState<string | null>(null);
+  // Whether the connected screen's Edit has been pressed. An INPUT to
+  // planChannelSetupFlow, never a branch here: that function only honours it
+  // from `ready`, so this cannot open the policy forms on a channel that does
+  // not work yet. Cleared whenever the panel or the door changes, so opening a
+  // channel always lands on its summary rather than on whatever was last
+  // being edited.
+  const [openclawEditing, setOpenclawEditing] = useState(false);
+  // One shared read of the three policy facts the connected summary states.
+  // MUST SIT WITH THE OTHER HOOKS, ABOVE THIS COMPONENT'S OWN LOADING EARLY
+  // RETURN — a hook after a conditional return is a hook-count change between
+  // renders, which React refuses at runtime (#300) with a blank screen and no
+  // clue which hook moved. Keyed off state rather than off the resolved row
+  // for the same reason: the row is computed far below that return.
+  //
+  // `openclawDoorKey ?? openclawDetailKey` is the chosen variant when there was
+  // a choice, and the platform's base channel otherwise — which is exactly the
+  // channel a single-door card opens into.
+  const openclawSummary = useChannelPolicySummary(
+    agentGatewayId,
+    agentId,
+    openclawDoorKey ?? openclawDetailKey,
+  );
 
   // Which door is picked inside the open banner. Only channels with more than
   // one door need an explicit pick — a single-door channel auto-selects its
@@ -2392,6 +2420,9 @@ export function ChannelsTab({
       open: () => {
         setOpenclawDetailKey(platform.key);
         setOpenclawDoorKey(null);
+        // Opening a channel always lands on the first screen its own state
+        // implies — never on whatever was last being edited inside it.
+        setOpenclawEditing(false);
       },
     };
   });
@@ -2421,6 +2452,24 @@ export function ChannelsTab({
         ? openclawDoorPlan.doors.find((door) => door.key === openclawDoorKey) || null
         : null;
   const openclawDetail = openclawActiveDoor ? openclawRowByKey.get(openclawActiveDoor.key) || null : null;
+
+  // ONE QUESTION PER SCREEN. Which screen this panel is on is decided in one
+  // pure function (channel-setup-flow.ts) rather than by a stack of ternaries
+  // in the JSX — that stack is what let a credential field, two allowlists and
+  // an owner-identity field all render at once whether or not the channel was
+  // connected. The three rules it encodes (one question, settings only after
+  // it works, a back affordance past the first step) are asserted in
+  // channel-setup-flow.test.ts against the REAL door plan and the REAL
+  // remediations, which no amount of reading this JSX could give us.
+  const openclawFlow = planChannelSetupFlow({
+    doorPlan: openclawDoorPlan,
+    doorChosen: Boolean(openclawActiveDoor),
+    remediation: openclawDetail?.remediation ?? null,
+    connectMethod: openclawDetail
+      ? connectMethodFor(openclawDetail.entry, openclawDetail.observed)
+      : null,
+    editingSettings: openclawEditing,
+  });
 
   // OpenClaw's own catalog carries every channel that overlaps a first-party
   // platform too (channel_lane_contract_service.OPENCLAW_SUPERSEDED_CHANNELS)
@@ -2563,8 +2612,15 @@ export function ChannelsTab({
                   ? <img src={channelIconSrc(openclawPlatform.iconKey)} alt="" width={24} height={24} />
                   : openclawPlatform.label.charAt(0)}
               </span>
+              {/* The platform, plus which way in — but only once a CHOICE was
+                  actually made. A single-door channel names itself and
+                  nothing else; appending its one door's label would dress a
+                  non-decision up as one. */}
               <span className="fleet-channel-banner-title" id="channel-detail-heading">
                 {openclawPlatform.label}
+                {openclawDoorPlan.mode === "picker" && openclawActiveDoor ? (
+                  <span className="openclaw-title-door"> · {openclawActiveDoor.label}</span>
+                ) : null}
               </span>
               <button
                 type="button"
@@ -2577,211 +2633,205 @@ export function ChannelsTab({
             </div>
 
             <div className="fleet-channel-banner-body">
-              {/* The SAME picker a first-party card opens, on the SAME rule:
-                   a platform reachable one way opens straight into it, a
-                   platform reachable several ways asks first. Nothing here
-                   names a channel — the door count is the whole input. */}
-              {openclawDoorPlan.mode === "picker" && !openclawActiveDoor ? (
-                <div className="fleet-wizard-options">
-                  {openclawDoorPlan.doors.map((door) => {
-                    const row = openclawRowByKey.get(door.key);
-                    const connected = row?.remediation.kind === "ready";
-                    const hardware = channelDoorHardwareState(door, {
-                      hasHardware: !!agentGatewayId,
-                      doorConnected: connected,
-                    });
-                    const hardwareNote = channelDoorHardwareNote(hardware);
-                    return (
-                      <button
-                        key={door.key}
-                        type="button"
-                        className="fleet-wizard-option"
-                        onClick={() => setOpenclawDoorKey(door.key)}
-                      >
-                        <span className="fleet-wizard-option-label">
-                          {door.label}
-                          {connected ? (
-                            <span className="fleet-wizard-option-connected">
-                              <span className="fleet-channel-card-dot" /> Ready
+              {/* STEP 1 — WHICH WAY IN, and only when there is a choice. The
+                   door COUNT is the whole input (planDoors), so a platform
+                   reachable one way opens straight into its setup: an
+                   intermediate screen offering one option is a dead click. */}
+              {openclawFlow.screen === "pick_door" ? (
+                <>
+                  <p className="openclaw-question">How do you want to connect?</p>
+                  <div className="fleet-wizard-options">
+                    {openclawDoorPlan.doors.map((door) => {
+                      const row = openclawRowByKey.get(door.key);
+                      const connected = row?.remediation.kind === "ready";
+                      const hardware = channelDoorHardwareState(door, {
+                        hasHardware: !!agentGatewayId,
+                        doorConnected: connected,
+                      });
+                      const hardwareNote = channelDoorHardwareNote(hardware);
+                      return (
+                        <button
+                          key={door.key}
+                          type="button"
+                          className="fleet-wizard-option"
+                          onClick={() => {
+                            setOpenclawDoorKey(door.key);
+                            setOpenclawEditing(false);
+                          }}
+                        >
+                          <span className="fleet-wizard-option-label">
+                            {door.label}
+                            {connected ? (
+                              <span className="fleet-wizard-option-connected">
+                                <span className="fleet-channel-card-dot" /> Ready
+                              </span>
+                            ) : null}
+                          </span>
+                          <span className="fleet-wizard-option-body">{door.body}</span>
+                          {/* The door's CONSEQUENCE, on its face, BEFORE it is
+                              chosen — never a warning after a code has been
+                              sent. Only ever present where the difference
+                              between two doors is a real, specific risk. */}
+                          {door.consequence ? (
+                            <span className={`fleet-door-consequence fleet-door-consequence--${door.consequence.tone}`}>
+                              {door.consequence.text}
                             </span>
                           ) : null}
-                        </span>
-                        <span className="fleet-wizard-option-body">{door.body}</span>
-                        {hardwareNote ? (
-                          <span className="fleet-wizard-option-note">
-                            <Cpu size={11} strokeWidth={2} aria-hidden /> {hardwareNote}
-                          </span>
-                        ) : null}
-                      </button>
-                    );
-                  })}
-                </div>
+                          {hardwareNote ? (
+                            <span className="fleet-wizard-option-note">
+                              <Cpu size={11} strokeWidth={2} aria-hidden /> {hardwareNote}
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
               ) : null}
 
-              {openclawActiveDoor && openclawDoorPlan.mode === "picker" ? (
-                <ChosenDoorBar
-                  door={openclawActiveDoor}
-                  compact
-                  onChange={() => setOpenclawDoorKey(null)}
+              {/* A back affordance on any step past the first, and never on
+                  the first — `back` is null exactly when this screen IS the
+                  first one, so no arrow ever points at nothing. */}
+              {openclawFlow.back === "doors" ? (
+                <PanelBackBar
+                  label={openclawPlatform.label}
+                  onBack={() => {
+                    setOpenclawDoorKey(null);
+                    setOpenclawEditing(false);
+                  }}
                 />
               ) : null}
+              {openclawFlow.back === "connected" ? (
+                <PanelBackBar label="Done" onBack={() => setOpenclawEditing(false)} />
+              ) : null}
 
-              {openclawDetail ? (
+              {openclawDetail && openclawFlow.screen !== "pick_door" ? (
                 <>
-                  {openclawDoorPlan.mode === "direct" ? (
-                    <p className="fleet-subtitle" style={{ marginTop: 0 }}>
-                      {openclawDetail.entry.selection_label}
-                    </p>
+                  {/* STEP 2 — CONNECT. Instructions in the transport's own
+                      words (generated: see channel-setup-flow.ts), then ONE
+                      form. Never a credential field beside two allowlists and
+                      an owner-identity field, which is what this whole screen
+                      used to be. */}
+                  {openclawFlow.screen === "connect" && agentGatewayId ? (
+                    <>
+                      <p className="openclaw-question">
+                        {openclawFlow.connect === "paste"
+                          ? setupQuestionFor(openclawDetail.entry.setup_wizard) ||
+                            openclawDetail.entry.selection_label
+                          : openclawDetail.entry.selection_label}
+                      </p>
+                      {openclawFlow.connect === "paste" ? (
+                        <CredentialForm
+                          gatewayId={agentGatewayId}
+                          entry={openclawDetail.entry}
+                          observed={openclawDetail.observed}
+                          submitLabel="Connect"
+                          onCancel={() => setOpenclawDetailKey(null)}
+                          onSaved={async () => {
+                            await openclaw.refresh({ silent: true });
+                          }}
+                        />
+                      ) : (
+                        /* A form BODY inside this same panel, exactly like
+                           CredentialForm — never a second dialog stacked on
+                           the one the card opened. `unknown_link` reaches
+                           here too, deliberately: a pairing channel whose box
+                           has not reported a link shape yet must still OFFER
+                           a control, because starting the link is what
+                           resolves the unknown. */
+                        <ChannelLinkForm
+                          gatewayId={agentGatewayId}
+                          entry={openclawDetail.entry}
+                          onCancel={() => setOpenclawDetailKey(null)}
+                          onLinked={async () => {
+                            await openclaw.refresh({ silent: true });
+                          }}
+                        />
+                      )}
+                    </>
                   ) : null}
 
-                  {/* No computer bound to this agent at all — never a form
-                      the customer could not possibly complete. The generated
-                      chips/detail/button below all read a live device's state
-                      (`openclawDetail.observed`), which does not exist yet
-                      when there is no gateway; showing them here would print
-                      invented facts ("not installed", "off") about a box that
-                      was never asked. This is the SAME interaction the
-                      first-party gateway-less cards already use
-                      (LocalBridgeChannelStatus's no-gateway hint below) —
-                      one honest sentence pointing at the Hardware tab, no
-                      dead control. */}
-                  {agentGatewayId ? (
+                  {/* STEP 2, the two states whose whole remedy is one button.
+                      The control DOES the work and says nothing about
+                      mechanism; it verify-polls the box until its own state
+                      catches up, then this screen becomes a different one. */}
+                  {(openclawFlow.screen === "install" || openclawFlow.screen === "enable") && agentGatewayId ? (
                     <>
-                      <div className="openclaw-chips">
-                        {openclawDetail.entry.requires_plugin ? (
-                          <StateChip ok={Boolean(openclawDetail.observed?.installed)} on="installed" off="not installed" />
-                        ) : (
-                          <span className="fleet-badge openclaw-chip openclaw-chip--ok" style={{ marginLeft: 0 }}>
-                            bundled
-                          </span>
-                        )}
-                        {openclawDetail.entry.connect_method === "credential" ? (
-                          <StateChip ok={Boolean(openclawDetail.observed?.configured)} on="credential set" off="no credential" />
-                        ) : null}
-                        <StateChip ok={Boolean(openclawDetail.observed?.enabled)} on="on" off="off" />
-                      </div>
-
-                      {/* Only when there is something to say the chips and the
-                          button cannot already say — see Remediation's own doc
-                          comment. An empty detail renders nothing at all rather
-                          than an empty paragraph holding space open. */}
-                      {openclawDetail.remediation.detail ? (
-                        <p className="openclaw-channel-detail">{openclawDetail.remediation.detail}</p>
-                      ) : null}
-
-                      {/* One control, and only the one this state actually needs. A
-                          credential state renders the generated form inline (never a
-                          second stacked modal); install/enable render a control that
-                          DOES the work and verify-polls the box until its own state
-                          catches up, then disappears; the two states with no browser
-                          action say so instead of rendering a control that submits
-                          nothing. */}
-                      {openclawDetail.remediation.kind === "credential" || openclawDetail.remediation.kind === "ready" ? (
-                        <div style={{ marginTop: "var(--space-4)" }}>
-                          <CredentialForm
-                            gatewayId={agentGatewayId}
-                            entry={openclawDetail.entry}
-                            observed={openclawDetail.observed}
-                            onCancel={() => setOpenclawDetailKey(null)}
-                            onSaved={async () => {
-                              await openclaw.refresh({ silent: true });
-                            }}
-                          />
-                          {/* Only once the channel itself works — configuring
-                              which groups may receive replies before there is a
-                              working identity to reply WITH has nothing to act
-                              on yet. */}
-                          {openclawDetail.remediation.kind === "ready" ? (
-                            <>
-                              {/* Direct messages first, groups second — that
-                                  is the order the gates themselves run in,
-                                  and the DM list is the one an owner has to
-                                  fill before the channel answers anybody at
-                                  all (including them). */}
-                              <DmAllowlistForm
-                                gatewayId={agentGatewayId}
-                                agentId={agentId}
-                                channelKey={openclawDetail.entry.channel_key}
-                                channelLabel={openclawDetail.entry.label}
-                              />
-                              <GroupAllowlistForm
-                                gatewayId={agentGatewayId}
-                                agentId={agentId}
-                                channelKey={openclawDetail.entry.channel_key}
-                                channelLabel={openclawDetail.entry.label}
-                              />
-                              {/* Last, because it is the only one of the
-                                  three that changes what an admitted message
-                                  is ALLOWED TO DO rather than who gets
-                                  admitted — and because it only becomes
-                                  actionable once the owner has admitted
-                                  themselves above. Deliberately not folded
-                                  into the DM list it sits under: "may
-                                  message this agent" and "IS the owner" are
-                                  different facts, and one control for both
-                                  would promote every allowed sender to shell
-                                  and hardware authority. */}
-                              <OwnerIdentityForm
-                                gatewayId={agentGatewayId}
-                                agentId={agentId}
-                                channelKey={openclawDetail.entry.channel_key}
-                                channelLabel={openclawDetail.entry.label}
-                              />
-                            </>
-                          ) : null}
-                        </div>
-                      ) : openclawDetail.remediation.kind === "install" || openclawDetail.remediation.kind === "enable" ? (
-                        <div style={{ marginTop: "var(--space-4)" }}>
-                          {(() => {
-                            const channelKey = openclawDetail.entry.channel_key;
-                            const setupState = openclaw.setupStateFor(channelKey);
-                            // "Queued" is not busy — nothing is running on the box
-                            // for this one yet, it is only waiting its turn.
-                            const working = setupState === "working";
-                            return (
-                              <button
-                                type="button"
-                                className="fleet-btn fleet-btn--accent-fill"
-                                onClick={() => openclaw.requestSetup(channelKey)}
-                                disabled={setupState !== "idle"}
-                              >
-                                {working ? <Loader2 size={14} className="openclaw-spin" /> : null}
-                                {setupState === "queued"
-                                  ? "Queued"
-                                  : working
-                                    ? "Setting up…"
-                                    : openclawDetail.remediation.label}
-                              </button>
-                            );
-                          })()}
-                        </div>
-                      ) : openclawDetail.remediation.kind === "link" ? (
-                        /* Step 2 for a channel with nothing to paste whose
-                           plugin owns OpenClaw's QR seam. A form BODY inside
-                           this same panel, exactly like CredentialForm — never
-                           a second dialog stacked on the one the card opened. */
-                        <div style={{ marginTop: "var(--space-4)" }}>
-                          <ChannelLinkForm
-                            gatewayId={agentGatewayId}
-                            entry={openclawDetail.entry}
-                            onCancel={() => setOpenclawDetailKey(null)}
-                            onLinked={async () => {
-                              await openclaw.refresh({ silent: true });
-                            }}
-                          />
-                        </div>
-                      ) : openclawDetail.remediation.kind === "elsewhere" ? (
-                        <p className="openclaw-ready openclaw-ready--muted" style={{ marginTop: "var(--space-4)" }}>
-                          <Smartphone size={14} aria-hidden /> Link this one directly on the computer — there is nothing to
-                          paste here.
-                        </p>
-                      ) : null}
+                      <p className="openclaw-question">
+                        {openclawFlow.screen === "install"
+                          ? `Set ${openclawDetail.entry.label} up on this computer`
+                          : `Switch ${openclawDetail.entry.label} on`}
+                      </p>
+                      {(() => {
+                        const channelKey = openclawDetail.entry.channel_key;
+                        const setupState = openclaw.setupStateFor(channelKey);
+                        // "Queued" is not busy — nothing is running on the box
+                        // for this one yet, it is only waiting its turn.
+                        const working = setupState === "working";
+                        return (
+                          <button
+                            type="button"
+                            className="fleet-btn fleet-btn--accent-fill"
+                            onClick={() => openclaw.requestSetup(channelKey)}
+                            disabled={setupState !== "idle"}
+                          >
+                            {working ? <Loader2 size={14} className="openclaw-spin" /> : null}
+                            {setupState === "queued"
+                              ? "Queued"
+                              : working
+                                ? "Setting up…"
+                                : openclawDetail.remediation.kind === "install" ||
+                                    openclawDetail.remediation.kind === "enable"
+                                  ? openclawDetail.remediation.label
+                                  : "Set up"}
+                          </button>
+                        );
+                      })()}
                     </>
-                  ) : (
+                  ) : null}
+
+                  {/* STEP 3 — IT WORKS. A read-only summary, genuinely
+                      different from the connect screen, with ONE Edit. */}
+                  {openclawFlow.screen === "connected" && agentGatewayId ? (
+                    <ConnectedChannelSummary
+                      entry={openclawDetail.entry}
+                      observed={openclawDetail.observed}
+                      summary={openclawSummary}
+                      onEdit={() => setOpenclawEditing(true)}
+                    />
+                  ) : null}
+
+                  {/* STEP 4 — behind Edit, and structurally unreachable from
+                      any state but `connected` (planChannelSetupFlow ignores
+                      `editingSettings` everywhere else). */}
+                  {openclawFlow.screen === "settings" && agentGatewayId ? (
+                    <ChannelSettingsBody
+                      gatewayId={agentGatewayId}
+                      agentId={agentId}
+                      entry={openclawDetail.entry}
+                      observed={openclawDetail.observed}
+                      onSaved={async () => {
+                        await openclaw.refresh({ silent: true });
+                        openclawSummary.reload();
+                      }}
+                    />
+                  ) : null}
+
+                  {/* The states with NO browser action at all. A control that
+                      cannot work is not rendered — it is replaced by the one
+                      sentence that says why, and each of these three says a
+                      different thing rather than sharing one message. */}
+                  {openclawFlow.screen === "elsewhere" ? (
+                    <p className="openclaw-ready openclaw-ready--muted">
+                      <Smartphone size={14} aria-hidden /> Link this one directly on the computer — there is nothing to
+                      paste here.
+                    </p>
+                  ) : null}
+                  {openclawFlow.screen === "needs_hardware" || openclawFlow.screen === "unknown" || !agentGatewayId ? (
                     <p className="fleet-channel-expand-hint" style={{ marginTop: 0 }}>
                       {openclawDetail.remediation.detail}
                     </p>
-                  )}
+                  ) : null}
                 </>
               ) : null}
             </div>

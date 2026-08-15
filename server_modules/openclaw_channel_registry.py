@@ -113,6 +113,7 @@ class OpenClawChannel:
         "policy_shape",
         "plugin_install",
         "credential_shape",
+        "setup_wizard",
     )
 
     def __init__(self, record: Mapping[str, Any]) -> None:
@@ -167,6 +168,22 @@ class OpenClawChannel:
                 "scripts/generate_openclaw_channel_manifest.py."
             )
         self.credential_shape: Dict[str, Any] = dict(credential)
+        # HOW an owner obtains what `credential_shape` asks them to type —
+        # OpenClaw's own setup-wizard text, derived in the same generation pass
+        # (`openclaw channels capabilities --channel <id> --json`). The credential
+        # shape says a Telegram bot needs a `botToken`; this is the part that says
+        # "chat with @BotFather, run /newbot". Writing that ourselves would be
+        # twenty-four hand-authored screens carrying knowledge about somebody
+        # else's product, which is exactly what the derived channel list already
+        # refuses to be.
+        #
+        # Tolerant of absence ON PURPOSE: unlike credential_shape this is not
+        # load-bearing for connecting anything, and a manifest predating it must
+        # still boot — the panel then renders the same bare form it always did.
+        # `resolved: False` is the same honest absence for a channel whose plugin
+        # is not in the pinned bundle and therefore could not be asked.
+        wizard = record.get("setup_wizard")
+        self.setup_wizard: Optional[Dict[str, Any]] = dict(wizard) if isinstance(wizard, dict) else None
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<OpenClawChannel {self.channel_key} {self.label!r}>"
