@@ -55,15 +55,31 @@ provides a door. Never merge these into one number again.
 
 ### P1 — every platform has an honest path
 
-4. Sweep all 27 platform panels. Each must land on exactly one of:
-   a real setup step · a QR · an honest "we cannot know until it is installed"
-   · "could not reach this computer". **No dead ends, no mechanism words**
-   (plugin / npm / package / binary) in customer copy.
-5. `Weixin`, `WeCom`, `Yuanbao` currently show **"Unknown"**. Their plugin is
-   not installed, and installing is possible — the pill should offer the
-   action, not describe a void.
-6. `Discord` and `Slack` show **"Not configured here"**. True (they are
-   cloud connectors elsewhere) but it reads as broken. Say where.
+4. **Swept — mechanically, not by clicking.** All 24 carried platforms x 5
+   states a real box can report = 120 outcomes, driven through the REAL
+   `remediationFor`/`channelCardPill`.
+
+   **A fresh box has ZERO dead ends.** Every platform offers "Set up" or
+   "Needs credential". Nothing says "Unknown", nothing is inert.
+
+5. **The one real dead end is AFTER a success, and it is 4 platforms.**
+   `openclaw-weixin`, `openclaw-zaloclawbot`, `wecom`, `yuanbao`:
+
+   ```
+   press "Set up" ─▶ plugin installs ─▶ card goes "Unknown", permanently
+   ```
+
+   These four are the only carried channels whose plugin was absent when the
+   manifest was generated, so their form was never derivable. That is honest
+   BEFORE install and false after it — once the plugin is on the box, the
+   box's own config schema knows the fields and nothing ever asks it.
+   Fix in flight: ask the box.
+
+6. ~~`Discord`/`Slack` show "Not configured here"~~ — **my claim was wrong.**
+   Both carry `runtime_usable=True`, `setup_available=True`,
+   `launch_status=live_when_configured`, and nothing overrides them, so
+   `_next_action` returns `connect` and their pill is "Set up". Established
+   from the catalog source, not confirmed on screen.
 
 ### P2 — the founder's own hands (5 minutes, cannot be delegated)
 
