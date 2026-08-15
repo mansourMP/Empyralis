@@ -246,10 +246,15 @@ function ActivityFeed({ workspaceId }: { workspaceId: string }) {
             <div className={`fleet-activity-dot${event.status === "logged" ? "" : " is-warn"}`} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div className="fleet-activity-title">{event.title || event.action || "Event"}</div>
+              {/* `event_class` and `action` are the ledger's OWN identifiers —
+                  "sage_activity", "sage_chat.completed". They were rendered
+                  verbatim under every row, so the workspace home read as a
+                  debug console: eight identical lines of internal event names
+                  under eight identical titles. A professional tool labels; it
+                  does not print its own event taxonomy at the customer. The
+                  title already says what happened, so the only thing left
+                  worth showing is WHEN. */}
               <div className="fleet-activity-meta">
-                <span>{event.event_class}</span>
-                {event.action && <><span>·</span><span>{event.action}</span></>}
-                <span>·</span>
                 <span className="fleet-activity-time">
                   {event.created_at ? formatDateTime(event.created_at) : ""}
                 </span>

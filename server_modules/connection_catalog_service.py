@@ -2799,9 +2799,56 @@ async def workspace_connection_summary(
         1 for item in catalog_items(surface="sage")
         if _token(item.get("lane")) in {LANE_SAGE_PERSONAL_CHANNEL, LANE_STUDIO_BUSINESS_CHANNEL}
     )
+    # The binding count alone is STRUCTURALLY BLIND to the OpenClaw lane, and
+    # printed "0 channels connected" on the workspace home while a real
+    # Telegram conversation was working (observed 2026-08-15). Nothing writes
+    # `agent_channel_bindings` for the transported channels — see
+    # openclaw_provisioning_service.channels_in_use, which exists precisely
+    # because that row is not the earliest honest signal — so this counter
+    # could only ever report zero for them, forever.
+    #
+    # A number that cannot go up is worse than no number: it tells the owner
+    # their working channel is not connected. Counted with the same two-signal
+    # union provisioning already trusts (an enabled binding OR a stored policy
+    # key), so "connected" means one thing in both places.
+    openclaw_channels: set = set()
+    try:
+        from server_modules import agent_registry_repository
+        from server_modules import openclaw_provisioning_service
+
+        installs = await agent_registry_repository.list_workspace_agent_installs(
+            tenant_id=resolved_tenant, workspace_id=workspace_id
+        )
+        for install in installs or []:
+            agent_id = str((install or {}).get("agent_id") or (install or {}).get("id") or "").strip()
+            if not agent_id:
+                continue
+            openclaw_channels |= await openclaw_provisioning_service.channels_in_use(
+                tenant_id=resolved_tenant, workspace_id=workspace_id, agent_id=agent_id
+            )
+    except Exception:
+        # Never let this cost the strip the counts it CAN produce. A missing
+        # OpenClaw contribution understates; raising would blank the screen.
+        _logger = __import__("logging").getLogger(__name__)
+        _logger.warning(
+            "could not read OpenClaw channels in use for workspace=%s; "
+            "the channel count will omit the transported lane",
+            workspace_id,
+            exc_info=True,
+        )
+
+    # A binding row and an OpenClaw key can describe the SAME channel, so the
+    # two signals are unioned by channel_key rather than added.
+    bound_keys = {
+        str((row or {}).get("channel_key") or (row or {}).get("channel") or "").strip()
+        for row in (channel_bindings or [])
+    }
+    bound_keys.discard("")
+    channels_connected = len(bound_keys | openclaw_channels) or len(channel_bindings)
+
     return {
         "connectors": {"connected": len(connector_bindings), "total": connector_total},
-        "channels": {"connected": len(channel_bindings), "total": channel_total},
+        "channels": {"connected": channels_connected, "total": channel_total},
     }
 
 
