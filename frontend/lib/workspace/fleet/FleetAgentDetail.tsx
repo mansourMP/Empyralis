@@ -1721,6 +1721,7 @@ function ChatTab({
 // ── Channels ────────────────────────────────────────────────────────────────
 
 import {
+  ChannelLinkForm,
   CredentialForm,
   DmAllowlistForm,
   GroupAllowlistForm,
@@ -2753,6 +2754,21 @@ export function ChannelsTab({
                               </button>
                             );
                           })()}
+                        </div>
+                      ) : openclawDetail.remediation.kind === "link" ? (
+                        /* Step 2 for a channel with nothing to paste whose
+                           plugin owns OpenClaw's QR seam. A form BODY inside
+                           this same panel, exactly like CredentialForm — never
+                           a second dialog stacked on the one the card opened. */
+                        <div style={{ marginTop: "var(--space-4)" }}>
+                          <ChannelLinkForm
+                            gatewayId={agentGatewayId}
+                            entry={openclawDetail.entry}
+                            onCancel={() => setOpenclawDetailKey(null)}
+                            onLinked={async () => {
+                              await openclaw.refresh({ silent: true });
+                            }}
+                          />
                         </div>
                       ) : openclawDetail.remediation.kind === "elsewhere" ? (
                         <p className="openclaw-ready openclaw-ready--muted" style={{ marginTop: "var(--space-4)" }}>

@@ -43,6 +43,21 @@ async function main() {
     `the bare workspace route must not be redirected (found: ${JSON.stringify(bareWorkspaceRedirect)})`,
   );
 
+  // Every rail destination must be reachable, for the same reason: a
+  // redirect resolves ahead of the router, so a rule pointing AT one of
+  // these would make a linked page unreachable with nothing in React ever
+  // saying so. Derived from the REAL rail list rather than a hand-typed
+  // copy, so a destination added there is covered the day it lands.
+  const { RAIL_ITEMS } = await import('./lib/workspace/fleet/primary-rail-nav');
+  for (const item of RAIL_ITEMS) {
+    const source = `/w/:workspaceId/${item.segment}`;
+    const clash = redirects.find((r) => r.source === source);
+    assert(
+      clash === undefined,
+      `rail destination "${item.label}" (${source}) must not be a redirect source (found: ${JSON.stringify(clash)})`,
+    );
+  }
+
   // Sanity: prove this test would actually catch the regression, not just
   // pass vacuously because the list is empty or malformed.
   assert(redirects.length > 5, 'LEGACY_REDIRECTS still has its other, intentional entries');

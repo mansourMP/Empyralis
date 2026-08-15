@@ -1260,3 +1260,101 @@ async def put_openclaw_channel_credential(
         },
     )
     return {"gateway_id": gateway_id, "channel_key": normalized_key, "openclaw_channel_setup": result}
+
+
+class OpenClawChannelLinkRequest(BaseModel):
+    """One step of a channel link running on the owner's own computer.
+
+    `action` is `link_start` (ask for a code) or `link_wait` (block until that
+    code is scanned or rotates). `current_qr_data_url` is the code the browser
+    is showing right now — sent so OpenClaw can tell "still valid, keep
+    waiting" from "it rotated, here is the new one". It is relayed and never
+    stored; see openclaw_channel_setup_service.link_channel.
+    """
+
+    action: str
+    current_qr_data_url: Optional[str] = None
+    force: bool = False
+
+
+@router.post("/personal-channels/openclaw/gateways/{gateway_id}/channels/{channel_key}/link")
+async def post_openclaw_channel_link(
+    request: Request,
+    gateway_id: str,
+    channel_key: str,
+    payload: OpenClawChannelLinkRequest,
+    current_user=Depends(require_api_key),
+):
+    """Link a channel that has no credential to paste — the QR flow.
+
+    "member", matching the credential route: this drives a login running in a
+    process on the customer's own computer.
+
+    The audit row records that a link was attempted and how it ended. It never
+    records the code — a pairing code in a durable row is a credential someone
+    else could use, and this is the one path a code passes through.
+    """
+    channel_lane_contract_service.assert_personal_route_path(str(request.url.path))
+    registration = _require_accessible_gateway_registration(
+        gateway_id,
+        current_user,
+        minimum_role="member",
+    )
+    normalized_key = str(channel_key or "").strip().lower()
+    if not openclaw_channel_registry.is_openclaw_channel_key(normalized_key):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{channel_key!r} is not a channel this transport carries.",
+        )
+    try:
+        result = await openclaw_channel_setup_service.link_channel(
+            gateway_id=gateway_id,
+            workspace_id=str(registration.get("workspace_id") or "default"),
+            channel_key=normalized_key,
+            action=payload.action,
+            current_qr_data_url=payload.current_qr_data_url,
+            force=bool(payload.force),
+            actor_id=str(current_user.get("id") or "") or None,
+        )
+    except openclaw_channel_setup_service.OpenClawProvisioningError as exc:
+        _emit_personal_channel_audit(
+            action="personal_channel.openclaw.link",
+            status="denied",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_key,
+            detail=str(exc),
+            metadata={"link_action": str(payload.action or "")},
+        )
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    link = result.get("link") if isinstance(result.get("link"), dict) else {}
+    refused = str(result.get("status") or "") == "refused" or str(link.get("status") or "") == "refused"
+    linked = link.get("linked") is True
+    # Only a COMPLETED link is worth an audit row on the success path; a poll
+    # that came back with a refreshed code is not an event, and one row per
+    # twenty seconds would bury the one row that matters.
+    if refused or linked:
+        _emit_personal_channel_audit(
+            action="personal_channel.openclaw.link",
+            status="denied" if refused else "success",
+            registration=registration,
+            current_user=current_user,
+            gateway_id=gateway_id,
+            channel_key=normalized_key,
+            detail=(
+                "The computer refused to link this channel."
+                if refused
+                else "This channel was linked on this computer."
+            ),
+            metadata={
+                "link_action": str(payload.action or ""),
+                "refusal_code": (
+                    (result.get("refusal") or {}).get("code")
+                    if isinstance(result.get("refusal"), dict)
+                    else None
+                )
+                or (link.get("refusal") or {}).get("code"),
+            },
+        )
+    return {"gateway_id": gateway_id, "channel_key": normalized_key, "openclaw_channel_setup": result}

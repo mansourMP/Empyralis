@@ -86,6 +86,7 @@ import {
   type Remediation,
 } from "./openclaw-channel-copy";
 
+import { QR_NO_CODE_TEXT, resolveQrPanelView } from "./channel-qr-phase";
 import "./openclaw-channels.css";
 
 export type {
@@ -497,6 +498,242 @@ export function CredentialForm({
           {saving ? <Loader2 size={14} className="openclaw-spin" /> : null}
           {saving ? "Saving…" : "Save credential"}
         </button>
+      </div>
+    </>
+  );
+}
+
+/** Step 2, for a channel whose plugin owns OpenClaw's QR seam: a code to scan.
+ *
+ *  A FORM BODY, NOT A SECOND DIALOG — same rule as CredentialForm above. The
+ *  panel the card opened owns the shell; this is only what goes inside it.
+ *
+ *  THE STATE MACHINE, AND WHY IT CANNOT SHOW A STALE SQUARE
+ *  --------------------------------------------------------
+ *      idle ──"Show code"──▶ starting ──▶ showing(code) ──┐
+ *                                             │           │ poll: link_wait,
+ *                                             │           │ carrying the code
+ *                                             │           │ on screen RIGHT NOW
+ *                                             ├◀──────────┘
+ *                                             │  a DIFFERENT code came back
+ *                                             │  -> swap it in, keep waiting
+ *                                             ▼
+ *                                          linked   (or) failed
+ *
+ *  The poll is not a timer guessing at an expiry. `link_wait` hands OpenClaw
+ *  the exact code being displayed and blocks; OpenClaw answers only when that
+ *  code is scanned or ROTATES, and a rotation comes back as new bytes. So the
+ *  square on screen is the live one by construction. Measured against real
+ *  WhatsApp on the rig: a rotation arrived after 20.2s carrying OpenClaw's own
+ *  message "QR refreshed."
+ *
+ *  A code is a credential in flight: whoever scans it links THEIR account. It
+ *  lives in this component's state for as long as it is on screen and is
+ *  written nowhere else — no storage, no URL, no log. */
+export function ChannelLinkForm({
+  gatewayId,
+  entry,
+  onCancel,
+  onLinked,
+}: {
+  gatewayId: string;
+  entry: OpenClawChannelCatalogEntry;
+  onCancel: () => void;
+  onLinked: () => void | Promise<void>;
+}) {
+  const [qr, setQr] = useState<string | null>(null);
+  const [requestInFlight, setRequestInFlight] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [linked, setLinked] = useState(false);
+  const [message, setMessage] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
+  // Survives a re-render without causing one, and is what a pending poll reads
+  // to decide whether it still has a reason to exist.
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, []);
+
+  // WHAT IS DRAWN IS NOT DECIDED HERE. `resolveQrPanelView` (channel-qr-phase.ts)
+  // owns it, and it already exists: it was written for the first-party WhatsApp
+  // panel, kept its test, and lost its only caller when that panel was deleted
+  // in the 2026-08-14 cutover — "built, tested, and never wired", the shape
+  // CLAUDE.md warns about, sitting one directory away. Reusing it rather than
+  // re-deriving the same five states is what keeps the invariant it exists to
+  // enforce: a spinner and a "start this" control are never on screen together,
+  // in either direction, and that is proven by a test that drives every
+  // combination of these six inputs rather than by anyone remembering it here.
+  const view = resolveQrPanelView({
+    qrImageReady: qr !== null,
+    requestInFlight,
+    errorText: error,
+    codeIssued: qr !== null,
+    accepted,
+    // Our wait is a BLOCKING server call that returns on a scan or a rotation,
+    // not a client-side timer hoping something arrives — so there is no local
+    // deadline that can quietly run out. A failed hop surfaces as `errorText`.
+    waitExpired: false,
+  });
+
+  const call = async (body: Record<string, unknown>) => {
+    let res: Response;
+    try {
+      res = await fleetAuthorizedFetch(
+        `/api/personal-channels/openclaw/gateways/${encodeURIComponent(gatewayId)}/channels/${encodeURIComponent(entry.channel_key)}/link`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: buildCookieAuthHeaders("POST", { "Content-Type": "application/json" }),
+          body: JSON.stringify(body),
+        },
+      );
+    } catch {
+      throw new Error("Could not reach this computer.");
+    }
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(getErrorMessage(payload, `Link failed (${res.status}).`));
+    const setup = payload?.openclaw_channel_setup ?? {};
+    const refusal = setup?.refusal ?? setup?.link?.refusal;
+    if (refusal) throw new Error(String(refusal.detail || refusal.code));
+    return setup?.link ?? {};
+  };
+
+  /** One `link_wait` hop. Recurses only while the code it was given is still
+   *  the code on screen, so a Cancel — or a newer start — ends the chain
+   *  instead of racing it. */
+  const waitFor = async (code: string) => {
+    if (cancelledRef.current) return;
+    let link: { linked?: boolean; qr_data_url?: string | null; message?: string };
+    try {
+      link = await call({ action: "link_wait", current_qr_data_url: code });
+    } catch (e) {
+      if (cancelledRef.current) return;
+      setError(e instanceof Error ? e.message : "Could not reach this computer.");
+      setQr(null);
+      return;
+    }
+    if (cancelledRef.current) return;
+    if (link.linked) {
+      setQr(null);
+      setLinked(true);
+      setMessage(link.message || "");
+      await onLinked();
+      return;
+    }
+    if (link.qr_data_url && link.qr_data_url !== code) {
+      // Rotated. Swapping the bytes IS the expiry handling — there is never a
+      // moment where the square on screen is one the platform has retired.
+      setQr(link.qr_data_url);
+      setMessage(link.message || "");
+      void waitFor(link.qr_data_url);
+      return;
+    }
+    // Same code still valid, or a poll that answered with nothing new: keep
+    // waiting on the code already displayed.
+    void waitFor(code);
+  };
+
+  const start = async (force: boolean) => {
+    cancelledRef.current = false;
+    setError(null);
+    setRequestInFlight(true);
+    try {
+      const link = await call({ action: "link_start", force });
+      if (cancelledRef.current) return;
+      setAccepted(true);
+      if (link.linked) {
+        setLinked(true);
+        setMessage(link.message || "");
+        await onLinked();
+        return;
+      }
+      if (!link.qr_data_url) {
+        // "The box accepted the request and produced no code" is its own
+        // outcome, and channel-qr-phase already owns the sentence for it
+        // (QR_NO_CODE_TEXT) — reached by leaving `accepted` true with no code
+        // rather than by writing a second sentence here.
+        setError(link.message || QR_NO_CODE_TEXT);
+        return;
+      }
+      setQr(link.qr_data_url);
+      setMessage(link.message || "");
+      void waitFor(link.qr_data_url);
+    } catch (e) {
+      if (cancelledRef.current) return;
+      setError(e instanceof Error ? e.message : "Could not reach this computer.");
+    } finally {
+      if (!cancelledRef.current) setRequestInFlight(false);
+    }
+  };
+
+  return (
+    <>
+      {error ? (
+        <div className="openclaw-banner" role="alert">
+          <AlertTriangle size={14} aria-hidden />
+          <span>{error}</span>
+        </div>
+      ) : null}
+
+      {linked ? (
+        <p className="openclaw-form-note" role="status">
+          {message || "This channel is linked."}
+        </p>
+      ) : (
+        <div className="openclaw-link-body">
+          {/* The instruction line. The box's own message wins when it has one —
+              OpenClaw names where to scan for the channel it is actually
+              linking ("Scan this QR in WhatsApp → Linked Devices."), and its
+              product, not ours, is the thing that knows. The shared hint is the
+              fallback for the phases where the box has said nothing yet. */}
+          <p className="openclaw-form-note" aria-live="polite">
+            {view.showQrImage && message ? message : view.hint}
+          </p>
+
+          {view.showQrImage && qr ? (
+            /* eslint-disable-next-line @next/next/no-img-element -- a data: URL
+               held in memory only while it is on screen; next/image wants a
+               real URL and a loader, for bytes that must never be cached. */
+            <img className="openclaw-link-qr" src={qr} alt="" width={232} height={232} />
+          ) : null}
+
+          {view.showSpinner ? <Loader2 size={16} className="openclaw-spin" aria-hidden /> : null}
+
+          {view.failureText ? (
+            <p className="openclaw-channel-detail" role="alert">
+              {view.failureText}
+            </p>
+          ) : null}
+        </div>
+      )}
+
+      <div className="openclaw-dialog-actions">
+        <button
+          type="button"
+          className="fleet-btn"
+          onClick={() => {
+            cancelledRef.current = true;
+            onCancel();
+          }}
+        >
+          {linked ? "Done" : "Cancel"}
+        </button>
+        {/* NO CONTROL AT ALL while something is running — `startControlLabel` is
+            null in exactly those phases, which is the invariant channel-qr-phase
+            exists to hold. Not a disabled button: a control that cannot be used
+            is not rendered (product law). */}
+        {!linked && view.startControlLabel ? (
+          <button
+            type="button"
+            className="fleet-btn fleet-btn--accent-fill"
+            onClick={() => void start(view.phase === "failed")}
+          >
+            {view.startControlLabel}
+          </button>
+        ) : null}
       </div>
     </>
   );

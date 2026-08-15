@@ -574,6 +574,14 @@ async function main(): Promise<void> {
     profile: config.openclawProfile,
     binaryPath: config.openclawBinaryPath,
     record: (messageType, payload) => journal.append("system", messageType, payload),
+    // Linking a channel (QR and friends) goes over OpenClaw's own loopback
+    // HTTP, to the route the Empyralis bridge plugin registers inside their
+    // process — see openclaw-bridge-plugin/src/channel-login.ts for why that
+    // is their required shape and what it does and does not change. The origin
+    // is derived from the WS url already configured for this box so there is
+    // one address for OpenClaw here, never two that can disagree.
+    openclawHttpUrl: config.openclawGatewayUrl.replace(/^ws/, "http"),
+    openclawGatewayToken: openclawGatewayToken ?? undefined,
   });
   const capabilityRouter = new GatewayCapabilityRouter(
     browserRuntime,

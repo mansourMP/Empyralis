@@ -39,6 +39,7 @@ import { mapInboundEvent } from "./src/inbound-mapping.js";
 import { isSuppressedCredentiallessTurnReply, CANCEL_REASON } from "./src/cancel-predicate.js";
 import { BoundedRetryQueue } from "./src/queue.js";
 import { forwardInboundEvent } from "./src/forward.js";
+import { registerChannelLoginRoute } from "./src/channel-login.js";
 import type { EmpyralisInboundPayload } from "./src/inbound-mapping.js";
 
 const PLUGIN_ID = "empyralis-bridge";
@@ -106,6 +107,12 @@ export default definePluginEntry({
   description:
     "Forwards inbound channel messages to Empyralis and suppresses OpenClaw's own (intentionally credential-less) agent replies.",
   register(api) {
+    // Linking a channel by QR, from the browser. See src/channel-login.ts for
+    // why this is a gateway-authenticated HTTP route (OpenClaw's own required
+    // shape for in-process method dispatch) rather than a WS method, and for
+    // exactly what it does and does not change about the trust boundary.
+    registerChannelLoginRoute(api, log);
+
     api.on(
       "gateway_start",
       async (_event, ctx: PluginHookGatewayContext) => {

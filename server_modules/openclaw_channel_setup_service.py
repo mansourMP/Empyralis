@@ -204,6 +204,56 @@ async def write_channel_credential(
     )
 
 
+async def link_channel(
+    *,
+    gateway_id: str,
+    workspace_id: str,
+    channel_key: str,
+    action: str,
+    current_qr_data_url: Optional[str] = None,
+    force: bool = False,
+    actor_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Start, or keep waiting on, a channel link running on the owner's box.
+
+    THE CODE IS A PASS-THROUGH AND IS NEVER STORED HERE
+    ---------------------------------------------------
+    A pairing code is a credential in flight: it decodes to a pairing
+    reference plus key material, and whoever scans it links THEIR account.
+    So it takes the same posture the channel credential already takes — it
+    exists in this process only as a value being relayed, and reaches no
+    table, no log line and no audit row. `current_qr_data_url` travels the
+    other way for the same reason it exists at all: OpenClaw compares it to
+    decide "still the same code" from "it rotated, here is the new one",
+    which is what makes showing an expired square impossible rather than
+    merely unlikely.
+
+    Two actions, because they are two different questions:
+      link_start  ask for a code (and enable the channel, on the box, first)
+      link_wait   block until that code is scanned OR rotates
+    """
+    normalized_action = str(action or "").strip()
+    if normalized_action not in {"link_start", "link_wait"}:
+        raise OpenClawProvisioningError(
+            f"{action!r} is not a link action (link_start, link_wait).",
+            status_code=400,
+        )
+    channel_id = openclaw_channel_registry.openclaw_channel_id(channel_key)
+    arguments: Dict[str, Any] = {"action": normalized_action, "channel_id": channel_id}
+    if normalized_action == "link_start":
+        if force:
+            arguments["force"] = True
+    elif isinstance(current_qr_data_url, str) and current_qr_data_url.strip():
+        arguments["current_qr_data_url"] = current_qr_data_url
+    return await _invoke(
+        gateway_id=gateway_id,
+        workspace_id=workspace_id,
+        actor_id=actor_id,
+        arguments=arguments,
+        run_id=f"openclaw-channel-link-{uuid4().hex[:12]}",
+    )
+
+
 def openclaw_channel_setup_catalog() -> List[Dict[str, Any]]:
     """Every channel the transport carries, with its GENERATED setup form.
 

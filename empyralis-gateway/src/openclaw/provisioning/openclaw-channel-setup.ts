@@ -59,8 +59,27 @@ import { GENERATED_OPENCLAW_MANIFEST } from "../generated-openclaw-channels";
 import type { GeneratedOpenClawCredentialField } from "../generated-openclaw-channels";
 import { OPENCLAW_TRANSPORT_CHANNEL_IDS } from "../capabilities";
 import { OpenClawCli, openClawProfileStateDir } from "./openclaw-cli";
+import {
+  readChannelLinkShapes,
+  projectLinkResponse,
+  type ChannelLoginHttpRequest,
+  type OpenClawChannelLinkOutcome,
+  type OpenClawChannelLinkShape,
+} from "./openclaw-channel-link";
 
 export const OPENCLAW_CHANNEL_SETUP_CAPABILITY = "openclaw.channel_setup";
+
+/** The bridge plugin's own loopback route. Declared here as a constant rather
+ *  than built from a caller-supplied string: this capability already accepts a
+ *  channel id from the cloud, and a caller-chosen URL would be a far larger
+ *  door than a caller-chosen field name. */
+const CHANNEL_LOGIN_ROUTE_PATH = "/api/v1/empyralis/channel-login";
+
+/** Ceiling on one in-band link call. `wait` blocks until the scan lands or the
+ *  code rotates — measured at ~20s per rotation against real WhatsApp — so this
+ *  has to outlast a rotation while staying inside the cloud's own capability
+ *  timeout. */
+const LINK_TIMEOUT_MS = 55_000;
 
 /** OpenClaw's own placeholder for a redacted secret in `config get --json`.
  *  Treated as "a value is present", never as a value. */
@@ -68,7 +87,11 @@ const OPENCLAW_REDACTED = "__OPENCLAW_REDACTED__";
 
 const READ_TIMEOUT_MS = 30_000;
 
-export type OpenClawChannelSetupAction = "read" | "write_credential";
+export type OpenClawChannelSetupAction =
+  | "read"
+  | "write_credential"
+  | "link_start"
+  | "link_wait";
 
 export interface OpenClawCredentialFieldState {
   readonly name: string;
@@ -102,6 +125,12 @@ export interface OpenClawChannelSetupState {
    *  and could resolve one. Empty is not an error — it is what a channel with
    *  no plugin or no credential looks like. */
   readonly accounts: readonly string[];
+  /** How this channel is LINKED, when it takes no pasted credential — derived
+   *  live from the box's own plugin metadata, never from a list here. `null`
+   *  means OpenClaw did not report on this channel at all (normally: it is not
+   *  enabled yet), which is a different fact from "it has no link flow" and is
+   *  reported as its own value rather than as `supports_qr_login: false`. */
+  readonly link: OpenClawChannelLinkShape | null;
 }
 
 export interface OpenClawChannelSetupResult {
@@ -113,6 +142,10 @@ export interface OpenClawChannelSetupResult {
    *  Carries names, never values. */
   readonly written_fields: readonly string[];
   readonly restart_required: boolean;
+  /** Set only by `link_start`/`link_wait`. Absent on every other action rather
+   *  than present-and-empty, so a caller cannot mistake "this action does not
+   *  link" for "the link produced nothing". */
+  readonly link?: OpenClawChannelLinkOutcome & { channel_id: string };
 }
 
 interface ChannelListEntry {
@@ -128,6 +161,21 @@ export interface OpenClawChannelSetupRuntimeOptions {
   homeDir?: string;
   cli?: OpenClawCli;
   record?: (messageType: string, payload: Record<string, unknown>) => Promise<unknown>;
+  /** OpenClaw's own gateway HTTP origin, e.g. `http://127.0.0.1:18789`.
+   *  Derived from the WebSocket URL the outbound client already uses, so there
+   *  is one configured address for OpenClaw on this box, not two. */
+  openclawHttpUrl?: string;
+  /** The gateway shared secret. The SAME token the outbound WS client already
+   *  presents — minted locally by openclaw-local-secrets.ts and written into
+   *  OpenClaw's own config by provisioning, so both ends are ours and there is
+   *  nothing here for a person to supply. */
+  openclawGatewayToken?: string;
+  /** Seam for tests. Production passes nothing and `fetch` is used. */
+  linkFetch?: (url: string, init: {
+    method: string;
+    headers: Record<string, string>;
+    body: string;
+  }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 }
 
 /** The manifest's derived credential fields for a channel, or `undefined` when
@@ -254,22 +302,197 @@ export class OpenClawChannelSetupRuntime {
     const action = String(args.action ?? "read").trim();
     if (action === "read") return { ...(await this.read()) };
     if (action === "write_credential") return { ...(await this.writeCredential(args)) };
+    if (action === "link_start" || action === "link_wait") {
+      return { ...(await this.link(action, args)) };
+    }
     return {
       ...this.refuse(
         "openclaw_channel_setup_action_unknown",
-        `"${action}" is not an action of ${OPENCLAW_CHANNEL_SETUP_CAPABILITY} (read, write_credential).`,
+        `"${action}" is not an action of ${OPENCLAW_CHANNEL_SETUP_CAPABILITY} ` +
+          `(read, write_credential, link_start, link_wait).`,
       ),
     };
   }
 
-  /** The three states, each from its own read. */
-  async read(): Promise<OpenClawChannelSetupResult> {
-    const [listed, effective] = await Promise.all([this.readChannelList(), this.readChannelConfig()]);
+  /** Start, or continue waiting on, a channel link.
+   *
+   *  `link_start` asks for a code; `link_wait` blocks until that code is
+   *  scanned or ROTATES. The caller passes the code it is currently showing
+   *  and gets back either `linked: true` or a DIFFERENT code — which is what
+   *  makes an expired square impossible rather than merely unlikely. Measured
+   *  live against real WhatsApp: `wait` returned a new code after 20.2s with
+   *  OpenClaw's own message "QR refreshed."
+   *
+   *  A code is a credential in flight. It is never journaled, never logged and
+   *  never written to disk anywhere on this path. */
+  async link(
+    action: "link_start" | "link_wait",
+    args: Record<string, unknown>,
+  ): Promise<OpenClawChannelSetupResult> {
+    const channelId = String(args.channel_id ?? "").trim().toLowerCase();
+    if (!OPENCLAW_TRANSPORT_CHANNEL_IDS.includes(channelId)) {
+      return this.refuse(
+        "openclaw_channel_link_channel_unknown",
+        `"${channelId || "(missing)"}" is not a channel this gateway transports.`,
+      );
+    }
+    if (!this.options.openclawGatewayToken) {
+      return this.refuse(
+        "openclaw_channel_link_unconfigured",
+        "This computer has no OpenClaw gateway secret yet, so a channel cannot be linked from here.",
+      );
+    }
+
+    // A channel plugin only registers its login provider once its channel is
+    // ENABLED, so an unenabled channel answers `web login provider is not
+    // available` — a sentence that reads like a broken feature and is in fact
+    // a missing switch. Flip it first, and say so in the journal. This is also
+    // the honest moment to enable: the owner is, right now, setting the
+    // channel up (CLAUDE.md: only enable channels the owner actually set up).
+    if (action === "link_start") {
+      const enabled = await this.ensureChannelEnabled(channelId);
+      if (enabled.status === "refused") return enabled;
+    }
+
+    const request: ChannelLoginHttpRequest = {
+      action: action === "link_start" ? "start" : "wait",
+      timeoutMs: LINK_TIMEOUT_MS,
+      ...(args.force === true ? { force: true } : {}),
+      ...(typeof args.account_id === "string" && args.account_id.trim()
+        ? { accountId: args.account_id.trim() }
+        : {}),
+      ...(action === "link_wait" && typeof args.current_qr_data_url === "string"
+        ? { currentQrDataUrl: args.current_qr_data_url }
+        : {}),
+    };
+
+    let outcome: OpenClawChannelLinkOutcome;
+    try {
+      outcome = projectLinkResponse(await this.callChannelLogin(request));
+    } catch (error) {
+      return this.refuse(
+        "openclaw_channel_link_unreachable",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+
+    await this.options.record?.("openclaw.channel_setup.link_attempted", {
+      profile: this.options.profile,
+      channel_id: channelId,
+      action,
+      // Whether a code exists, never the code. A journal is durable, and a
+      // pairing code in a durable record is a credential someone else can use.
+      produced_code: outcome.qr_data_url !== null,
+      linked: outcome.linked,
+      status: outcome.status,
+    });
+
+    const [listed, effective] = await Promise.all([
+      this.readChannelList(),
+      this.readChannelConfig(),
+    ]);
+    const links = await this.readLinkShapes();
     return {
       capability_id: OPENCLAW_CHANNEL_SETUP_CAPABILITY,
       status: "ok",
       refusal: null,
-      channels: this.projectChannels(listed, effective),
+      channels: this.projectChannels(listed, effective, links),
+      written_fields: [],
+      // A completed link writes its own auth state inside OpenClaw and the
+      // channel is started by the login handler itself, so nothing here needs
+      // a restart to take effect.
+      restart_required: false,
+      link: { ...outcome, channel_id: channelId },
+    };
+  }
+
+  private async callChannelLogin(request: ChannelLoginHttpRequest): Promise<unknown> {
+    const origin = (this.options.openclawHttpUrl || "http://127.0.0.1:18789").replace(/\/+$/, "");
+    const doFetch = this.options.linkFetch ?? ((url, init) => fetch(url, init));
+    const response = await doFetch(`${origin}${CHANNEL_LOGIN_ROUTE_PATH}`, {
+      method: "POST",
+      headers: {
+        // The same shared secret the outbound WS client already presents.
+        authorization: `Bearer ${this.options.openclawGatewayToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+    return await response.json();
+  }
+
+  /** `channels.<id>.enabled = true`, if it is not already.
+   *
+   *  Reads first so the common case writes nothing: a config patch per poll
+   *  would rewrite the owner's config on a timer for no reason. */
+  private async ensureChannelEnabled(channelId: string): Promise<OpenClawChannelSetupResult> {
+    const effective = await this.readChannelConfig();
+    if ((effective[channelId] ?? {}).enabled === true) {
+      return { ...this.emptyOk() };
+    }
+    const stateDir = openClawProfileStateDir(this.options.profile, this.options.homeDir);
+    const patchPath = path.join(stateDir, `empyralis-enable-${channelId}.json`);
+    let code = -1;
+    let detail = "";
+    try {
+      await fsp.mkdir(path.dirname(patchPath), { recursive: true });
+      await fsp.writeFile(
+        patchPath,
+        JSON.stringify({ channels: { [channelId]: { enabled: true } } }, null, 2),
+        { mode: 0o600 },
+      );
+      const patch = await this.cli.configPatch(patchPath);
+      code = patch.code;
+      detail = patch.stderr.trim() || patch.stdout.trim() || `exit ${patch.code}`;
+    } finally {
+      await fsp.rm(patchPath, { force: true }).catch(() => undefined);
+    }
+    if (code !== 0) {
+      return this.refuse("openclaw_channel_enable_failed", detail);
+    }
+    await this.options.record?.("openclaw.channel_setup.channel_enabled", {
+      profile: this.options.profile,
+      channel_id: channelId,
+    });
+    return { ...this.emptyOk() };
+  }
+
+  private emptyOk(): OpenClawChannelSetupResult {
+    return {
+      capability_id: OPENCLAW_CHANNEL_SETUP_CAPABILITY,
+      status: "ok",
+      refusal: null,
+      channels: [],
+      written_fields: [],
+      restart_required: false,
+    };
+  }
+
+  private async readLinkShapes(): Promise<Record<string, OpenClawChannelLinkShape>> {
+    try {
+      return await readChannelLinkShapes(this.cli);
+    } catch {
+      // A capabilities read that fails is "we do not know how this channel is
+      // linked", which every consumer already handles as `link: null`. It is
+      // never a reason to fail a read that otherwise succeeded.
+      return {};
+    }
+  }
+
+  /** The three states, each from its own read — plus HOW an uncredentialed
+   *  channel is linked, which is a fourth independent read and a fourth
+   *  independent fact. */
+  async read(): Promise<OpenClawChannelSetupResult> {
+    const [listed, effective, links] = await Promise.all([
+      this.readChannelList(),
+      this.readChannelConfig(),
+      this.readLinkShapes(),
+    ]);
+    return {
+      capability_id: OPENCLAW_CHANNEL_SETUP_CAPABILITY,
+      status: "ok",
+      refusal: null,
+      channels: this.projectChannels(listed, effective, links),
       written_fields: [],
       restart_required: false,
     };
@@ -322,12 +545,16 @@ export class OpenClawChannelSetupRuntime {
     // Read back rather than report intent — the same posture provisioning
     // takes. If OpenClaw accepted the patch but resolved the value to nothing,
     // the caller sees `set: false` and knows the save did not take.
-    const [listed, effective] = await Promise.all([this.readChannelList(), this.readChannelConfig()]);
+    const [listed, effective, links] = await Promise.all([
+      this.readChannelList(),
+      this.readChannelConfig(),
+      this.readLinkShapes(),
+    ]);
     return {
       capability_id: OPENCLAW_CHANNEL_SETUP_CAPABILITY,
       status: "ok",
       refusal: null,
-      channels: this.projectChannels(listed, effective),
+      channels: this.projectChannels(listed, effective, links),
       written_fields: Object.keys(parsed.values).sort(),
       // A credential change is picked up when the supervised unit restarts;
       // this capability, like provisioning, never restarts OpenClaw itself
@@ -383,6 +610,7 @@ export class OpenClawChannelSetupRuntime {
   private projectChannels(
     listed: Record<string, ChannelListEntry>,
     effective: Record<string, Record<string, unknown>>,
+    links: Record<string, OpenClawChannelLinkShape> = {},
   ): OpenClawChannelSetupState[] {
     const states: OpenClawChannelSetupState[] = [];
     for (const channel of GENERATED_OPENCLAW_MANIFEST.channels) {
@@ -414,6 +642,7 @@ export class OpenClawChannelSetupRuntime {
         accounts: Array.isArray(entry.accounts)
           ? entry.accounts.map((account) => String(account)).filter((account) => account.length > 0)
           : [],
+        link: links[channel.id] ?? null,
       });
     }
     return states;

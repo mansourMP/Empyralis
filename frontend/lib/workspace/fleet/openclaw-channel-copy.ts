@@ -57,6 +57,31 @@ export type OpenClawChannelCatalogEntry = {
 
 export type OpenClawObservedField = { name: string; secret: boolean; type: string; set: boolean };
 
+/** How a channel that takes no pasted credential is LINKED — read off the box,
+ *  not off a list here.
+ *
+ *  The generated manifest can say a channel has nothing to paste
+ *  (`connect_method: "pairing"`, seven channels today) but not how it is linked
+ *  instead, because that is a property of the plugin installed on THIS
+ *  computer. OpenClaw answers it per channel:
+ *
+ *      openclaw channels capabilities --channel all --json
+ *        -> channels[].plugin.gatewayMethodDescriptors[].name
+ *
+ *  A plugin declaring `web.login.start` AND `web.login.wait` owns OpenClaw's
+ *  QR-login seam — the same test their own `resolveWebLoginProvider` makes.
+ *  Measured on openclaw@2026.6.10: WhatsApp declares both, Telegram declares
+ *  none. Nothing here names either channel, so the day a plugin grows that seam
+ *  its flow appears on its own.
+ *
+ *  `null` (the field absent) is a THIRD value and not a synonym for "no QR": it
+ *  means the box did not report on this channel at all, which normally means
+ *  the channel is not switched on yet. */
+export type OpenClawChannelLink = {
+  gateway_methods: string[];
+  supports_qr_login: boolean;
+};
+
 export type OpenClawObservedChannel = {
   channel_id: string;
   channel_key: string;
@@ -66,7 +91,39 @@ export type OpenClawObservedChannel = {
   configured: boolean;
   fields: OpenClawObservedField[];
   accounts: string[];
+  link?: OpenClawChannelLink | null;
 };
+
+/** STEP 2 OF THE SETUP FLOW: how this channel is connected.
+ *
+ *  Step 1 (which variant of the platform — full account vs bot) is
+ *  channel-doors.ts's job and is unchanged: one real door opens straight into
+ *  setup, two or more show a picker with each door's consequence on its face.
+ *  This is the step AFTER that pick, and like the doors it is DERIVED — from
+ *  the manifest's credential shape and the box's own link metadata, never from
+ *  a per-channel table.
+ *
+ *      paste     the channel declares credential fields    -> a form
+ *      scan      its plugin declares OpenClaw's QR seam    -> a code to scan
+ *      device    neither: linked physically on the computer -> say so, no form
+ *      unknown   the plugin is not there, so its fields are genuinely unknown
+ *
+ *  There is deliberately no "phone number + login code" member yet: no channel
+ *  in the pinned build's manifest declares that shape, and inventing a member
+ *  nothing produces is how a UI grows a branch that has never once rendered.
+ *  See the report for `telegram-userbot`, which would be its first producer. */
+export type ChannelConnectMethod = "paste" | "scan" | "device" | "unknown";
+
+export function connectMethodFor(
+  entry: OpenClawChannelCatalogEntry,
+  observed: OpenClawObservedChannel | undefined,
+): ChannelConnectMethod {
+  if (entry.connect_method === "plugin_absent") return "unknown";
+  if (entry.connect_method === "credential") return "paste";
+  // `pairing` splits on what the BOX says, because that is the only place the
+  // answer exists.
+  return observed?.link?.supports_qr_login ? "scan" : "device";
+}
 
 /** "A, B, and C" — the one place this pairing joins a channel-label list, so
  *  the wording stays in sync no matter how many labels the backend sends. */
@@ -98,6 +155,11 @@ export type Remediation =
   | { kind: "install"; label: string; detail: string }
   | { kind: "credential"; label: string; detail: string }
   | { kind: "enable"; label: string; detail: string }
+  /** A channel with nothing to paste whose plugin DOES own OpenClaw's QR seam:
+   *  a real control, because there is now a real flow behind it. Distinct from
+   *  `elsewhere`, which is the honest no-control state for a channel that
+   *  genuinely can only be linked by hand on the computer. */
+  | { kind: "link"; label: string; detail: string }
   | { kind: "elsewhere"; detail: string }
   | { kind: "unknown"; detail: string }
   | { kind: "needs_hardware"; detail: string }
@@ -140,6 +202,11 @@ export function channelCardPill(remediation: Remediation): ChannelCardPill {
       return { label: "Needs credential", tone: "setup" };
     case "enable":
       return { label: "Switched off", tone: "setup" };
+    case "link":
+      // "Scan a code" and not "Link on the device": on this card the linking
+      // happens HERE, and the face has to say which of the two it is or the
+      // pill is telling the customer to go somewhere they do not need to go.
+      return { label: "Scan a code", tone: "setup" };
     case "elsewhere":
       return { label: "Link on the device", tone: "locked" };
     case "needs_hardware":
@@ -197,6 +264,18 @@ export function remediationFor(
     };
   }
   if (entry.connect_method === "pairing") {
+    // Two different situations used to share one dead-end sentence. They are
+    // not the same: one of them now has a real flow behind it.
+    if (connectMethodFor(entry, observed) === "scan") {
+      return {
+        kind: "link",
+        // The control does the work and says nothing about mechanism — same
+        // rule as "Set up" above. Where the code has to be scanned is the
+        // channel's own instruction and arrives with the code itself.
+        label: observed?.accounts.length ? "Link again" : "Show code",
+        detail: "",
+      };
+    }
     return {
       kind: "elsewhere",
       // The honest version of a dead control. Their own selection label says

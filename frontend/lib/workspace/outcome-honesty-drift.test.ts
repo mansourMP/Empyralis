@@ -132,6 +132,8 @@ const ALLOWLIST: Record<string, string> = {
     "handleAssign's `assignFleetTask` / `assignFleetTaskToUser` are mutually EXCLUSIVE if/else branches (agent vs human assignee) — exactly one ever runs per call, never both in sequence — so whichever one throws IS the accurate cause and 'Could not assign this task.' is not a collapse of two different facts. This scanner's 'awaits 2+ distinct calls' heuristic can't see that they're alternatives rather than sequential steps.",
   "app/(account)/w/[workspaceId]/projects/[projectId]/tasks/[taskId]/page.tsx":
     "Same shape and same reasoning as the projects/[projectId]/page.tsx entry above — handleAssign's assignFleetTask/assignFleetTaskToUser are mutually exclusive branches, not sequential steps.",
+  "app/(account)/w/[workspaceId]/my-work/page.tsx":
+    "Third instance of the same shape, same reasoning — My work reassigns a task through the identical mutually exclusive assignFleetTask/assignFleetTaskToUser if/else, copied deliberately from the project board's own handleAssign rather than invented (including the part that matters here: the refresh() is OUTSIDE the try, so a failed GET can neither overwrite a real wake-status notice nor report 'could not assign' over an assignment that already committed).",
 };
 
 let passed = 0;

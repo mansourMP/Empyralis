@@ -54,6 +54,7 @@ import { join } from "node:path";
 
 import {
   channelCardPill,
+  connectMethodFor,
   formatChannelList,
   splitCredentialFields,
   openclawObservedErrorBanner,
@@ -1216,6 +1217,117 @@ for (const channel of manifest.channels as unknown as ManifestChannelFields[]) {
     { name: "legacyToken", secret: true, type: "string" },
   ] as never);
   assert(primary.length === 1 && advanced.length === 0, "an unflagged field defaults to primary");
+}
+
+// ── STEP 2: how a channel is connected, DERIVED ──────────────────────────
+//
+// Step 1 (which variant of the platform) is the door rule above. This is the
+// step after it, and the property under test is that no channel is named
+// anywhere in the decision: it is a function of the manifest's credential
+// shape and of what the BOX reports its plugin can do.
+//
+// The one fact that cannot be derived from the checked-in manifest — whether a
+// plugin owns OpenClaw's QR seam — comes from the box as
+// `observed.link.supports_qr_login`, which the gateway computes from
+// `channels capabilities --channel all --json` ->
+// plugin.gatewayMethodDescriptors. Measured against openclaw@2026.6.10 on a
+// live rig: whatsapp declares ['web.login.start','web.login.wait'], telegram
+// declares []. These assertions pin the RULE, not those two channels.
+
+{
+  const credentialEntry = entry({ connect_method: "credential" });
+  const pairingEntry = entry({ connect_method: "pairing" });
+  const absentEntry = entry({ connect_method: "plugin_absent" });
+
+  assert(
+    connectMethodFor(credentialEntry, observed()) === "paste",
+    "a channel with credential fields is connected by pasting, whatever the box says about links",
+  );
+  assert(
+    connectMethodFor(absentEntry, observed()) === "unknown",
+    "a channel whose plugin is absent has an unknown connect method, never a guessed one",
+  );
+  assert(
+    connectMethodFor(pairingEntry, observed({ link: null })) === "device",
+    "a pairing channel the box reported no link shape for stays a link-on-the-device channel",
+  );
+  assert(
+    connectMethodFor(pairingEntry, undefined) === "device",
+    "a pairing channel on an unreachable box degrades to link-on-the-device, never to a QR control",
+  );
+  assert(
+    connectMethodFor(
+      pairingEntry,
+      observed({ link: { gateway_methods: [], supports_qr_login: false } }),
+    ) === "device",
+    "a pairing channel whose plugin declares no gateway methods is not a QR channel",
+  );
+  assert(
+    connectMethodFor(
+      pairingEntry,
+      observed({
+        link: {
+          gateway_methods: ["web.login.start", "web.login.wait"],
+          supports_qr_login: true,
+        },
+      }),
+    ) === "scan",
+    "a pairing channel whose plugin owns OpenClaw's QR seam is connected by scanning",
+  );
+
+  // The remediation and the card pill must both follow that split, or the
+  // grid face and the panel disagree about whether there is anything to do
+  // here — the exact drift channelCardPill exists to make impossible.
+  const qrObserved = observed({
+    link: { gateway_methods: ["web.login.start", "web.login.wait"], supports_qr_login: true },
+  });
+  const qrRemediation = remediationFor(pairingEntry, qrObserved, true, true);
+  assert(qrRemediation.kind === "link", "a QR-capable pairing channel offers a real link control");
+  assert(
+    qrRemediation.kind === "link" && qrRemediation.label.length > 0,
+    "the link control is labelled",
+  );
+  assert(
+    channelCardPill(qrRemediation).label === "Scan a code",
+    "a QR-capable channel's card face says the linking happens here, not on the device",
+  );
+
+  const deviceRemediation = remediationFor(pairingEntry, observed({ link: null }), true, true);
+  assert(
+    deviceRemediation.kind === "elsewhere",
+    "a pairing channel with no QR seam keeps the honest no-control state",
+  );
+  assert(
+    channelCardPill(deviceRemediation).label === "Link on the device",
+    "a genuinely device-linked channel still says so on its face",
+  );
+
+  // A control that cannot work must never render. The whole point of routing
+  // the QR body through resolveQrPanelView is that this holds in EVERY phase,
+  // not just the ones someone remembered — the loop below is the proof.
+  for (const qrImageReady of [true, false]) {
+    for (const requestInFlight of [true, false]) {
+      for (const codeIssued of [true, false]) {
+        for (const accepted of [true, false]) {
+          for (const errorText of [null, "boom"]) {
+            const inputs: QrPanelInputs = {
+              qrImageReady,
+              requestInFlight,
+              codeIssued,
+              accepted,
+              errorText,
+              waitExpired: false,
+            };
+            const view = resolveQrPanelView(inputs);
+            assert(
+              !(view.showSpinner && view.startControlLabel !== null),
+              `no spinner beside a start control (${JSON.stringify(inputs)})`,
+            );
+          }
+        }
+      }
+    }
+  }
 }
 
 // --- Summary ---

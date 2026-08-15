@@ -143,6 +143,44 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
     ): void;
   }
 
+  /** Normalized options handed to a registered gateway method handler.
+   *
+   *  Transcribed from the installed package's own declarations, audited
+   *  2026-08-15 against openclaw@2026.6.10:
+   *    dist/plugin-sdk/types-B2lbWzCt.d.ts   `GatewayRequestHandlerOptions`
+   *                                          `GatewayRequestHandler`
+   *  Only the two members this plugin actually reads are declared; the real
+   *  type also carries `req`, `client`, `isWebchatConnect` and `context`. */
+  export interface PluginGatewayRequestHandlerOptions {
+    params: Record<string, unknown>;
+    respond: (ok: boolean, payload?: unknown, error?: unknown) => void;
+  }
+
+  export interface PluginHookApi {
+    /** Register a plugin-owned HTTP route on the gateway's own HTTP server.
+     *
+     *  Transcribed from `OpenClawPluginApi` / `OpenClawPluginHttpRouteParams`
+     *  in dist/plugin-sdk/types-B70zVumi.d.ts, audited 2026-08-15 against
+     *  openclaw@2026.6.10:
+     *    registerHttpRoute: (params: OpenClawPluginHttpRouteParams) => void;
+     *    type OpenClawPluginHttpRouteAuth  = "gateway" | "plugin";
+     *    type OpenClawPluginHttpRouteMatch = "exact" | "prefix";
+     *
+     *  Only the members this plugin sets are declared; the real type also
+     *  carries `handleUpgrade`, `gatewayRuntimeScopeSurface`, `nodeCapability`
+     *  and `replaceExisting`. */
+    registerHttpRoute(params: {
+      path: string;
+      handler: (
+        req: import("node:http").IncomingMessage,
+        res: import("node:http").ServerResponse,
+      ) => Promise<boolean | void> | boolean | void;
+      auth: "gateway" | "plugin";
+      match?: "exact" | "prefix";
+      gatewayRuntimeScopeSurface?: "write-default" | "trusted-operator";
+    }): void;
+  }
+
   export interface PluginEntryDefinition {
     id: string;
     name?: string;
@@ -151,4 +189,38 @@ declare module "openclaw/plugin-sdk/plugin-entry" {
   }
 
   export function definePluginEntry(def: PluginEntryDefinition): PluginEntryDefinition;
+}
+
+/**
+ * In-process gateway method dispatch, available to a plugin running inside the
+ * OpenClaw gateway. Transcribed verbatim from the installed package's own
+ * declaration, audited 2026-08-15 against openclaw@2026.6.10:
+ *   /opt/homebrew/lib/node_modules/openclaw/dist/plugin-sdk/gateway-method-runtime.d.ts
+ */
+declare module "openclaw/plugin-sdk/gateway-method-runtime" {
+  export interface GatewayMethodDispatchError {
+    code: string;
+    message: string;
+    details?: unknown;
+    retryable?: boolean;
+    retryAfterMs?: number;
+  }
+
+  export interface GatewayMethodDispatchResponse {
+    ok: boolean;
+    payload?: unknown;
+    error?: GatewayMethodDispatchError;
+    meta?: Record<string, unknown>;
+  }
+
+  export interface GatewayMethodDispatchOptions {
+    expectFinal?: boolean;
+    timeoutMs?: number;
+  }
+
+  export function dispatchGatewayMethod(
+    method: string,
+    params?: unknown,
+    options?: GatewayMethodDispatchOptions,
+  ): Promise<GatewayMethodDispatchResponse>;
 }

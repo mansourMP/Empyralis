@@ -216,6 +216,44 @@
   gap: var(--space-2);
 }
 
+/* ── Linking by scanning a code ───────────────────────────────────────── */
+/* A FORM BODY inside the panel the card already opened, not a second dialog —
+   so it borrows .openclaw-form-note / .openclaw-dialog-actions above and adds
+   only the frame the code is drawn in. */
+
+.openclaw-link-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  /* Holds its height across the phase changes, so swapping a rotated code in
+     (or a spinner out) never makes the panel jump under the customer's hands
+     while they are pointing a phone at it. */
+  min-height: 264px;
+  justify-content: center;
+}
+
+.openclaw-link-body .openclaw-form-note {
+  margin-bottom: 0;
+  text-align: center;
+}
+
+/* Always drawn on white, in BOTH themes, and deliberately not themed: a
+   scanner reads dark-on-light, and a code inverted to suit a dark UI is a
+   code that will not scan. The padding is the QR quiet zone, which is part of
+   the spec rather than styling. */
+.openclaw-link-qr {
+  width: 232px;
+  height: 232px;
+  display: block;
+  background: #fff;
+  padding: var(--space-3);
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--border-subtle);
+  image-rendering: pixelated;
+}
+
 /* ── Group allowlist (the require_mention gate) ──────────────────────── */
 /* Reuses .openclaw-form-note / .fleet-wizard-input / .fleet-btn — this is
    not a second form system, only a second USE of the one above. The only
